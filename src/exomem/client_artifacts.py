@@ -30,6 +30,7 @@ from .preserve import (
 )
 from .vault import (
     FrontmatterError,
+    PathGuard,
     PathGuardError,
     kb_root,
     parse_frontmatter,
@@ -106,6 +107,14 @@ class AdoptionEnvelope:
             "lane": lane,
             "destination": destination,
         }
+
+
+@dataclass(frozen=True)
+class AdoptionReceiptSnapshot:
+    """One parsed portable receipt bound to the exact page bytes read."""
+
+    receipt: dict[str, object]
+    page_guard: PathGuard
 
 
 def remaining_retrieval_timeout(
@@ -482,6 +491,10 @@ def _validate_adoption(value: object) -> AdoptionEnvelope:
         or any(ord(char) < 32 for char in key)
     ):
         raise SafeFetchError("INVALID_ADOPTION", "adoption key is invalid")
+    try:
+        encoded_key = key.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise SafeFetchError("INVALID_ADOPTION", "adoption key is invalid") from error
     if (
         not isinstance(trigger, str)
         or not trigger.strip()
@@ -494,7 +507,7 @@ def _validate_adoption(value: object) -> AdoptionEnvelope:
     except SafeFetchError as error:
         raise SafeFetchError("INVALID_ADOPTION", "selected_file_id is invalid") from error
     return AdoptionEnvelope(
-        key_digest=hashlib.sha256(key.encode("utf-8")).hexdigest(),
+        key_digest=hashlib.sha256(encoded_key).hexdigest(),
         trigger=trigger.strip(),
         selected_file_id=selected,
     )
@@ -644,6 +657,7 @@ def _validate_receipt(
     if (
         type(receipt["size"]) is not int
         or receipt["size"] < 0
+        or receipt["size"] > MAX_FILE_BYTES
         or re.fullmatch(r"[0-9a-f]{64}", str(receipt["key_digest"])) is None
         or re.fullmatch(r"[0-9a-f]{64}", str(receipt["hash"])) is None
         or receipt["hash_algorithm"] != "sha256"
@@ -708,14 +722,14 @@ def _verify_canonical_artifact(
 
 def _find_adoption_receipt(
     vault_root: Path, key_digest: str
-) -> dict[str, object] | None:
+) -> AdoptionReceiptSnapshot | None:
     """Locate portable receipt truth from canonical vault-owned pages."""
-    matches: list[dict[str, object]] = []
+    matches: list[AdoptionReceiptSnapshot] = []
     for page in walk_vault_md(vault_root):
         if _canonical_page_lane(vault_root, page) is None:
             continue
         try:
-            source, _guard = read_guarded_text(vault_root, page)
+            source, page_guard = read_guarded_text(vault_root, page)
         except (FileNotFoundError, OSError, PathGuardError, UnicodeDecodeError):
             continue
         _loose, _body, raw_frontmatter = parse_frontmatter(source)
@@ -737,8 +751,7 @@ def _find_adoption_receipt(
         if not isinstance(value, Mapping) or value.get("key_digest") != key_digest:
             continue
         receipt = _validate_receipt(value, page_path=page, vault_root=vault_root)
-        _verify_canonical_artifact(vault_root, receipt)
-        matches.append(receipt)
+        matches.append(AdoptionReceiptSnapshot(receipt, page_guard))
     if len(matches) > 1:
         raise _receipt_error("ADOPTION_KEY_REUSED", "adoption key has multiple stored receipts")
     return matches[0] if matches else None
@@ -750,10 +763,11 @@ def _existing_receipt(
     *,
     lane: str,
     destination: str,
-) -> dict[str, object] | None:
-    receipt = _find_adoption_receipt(vault_root, envelope.key_digest)
-    if receipt is None:
+) -> AdoptionReceiptSnapshot | None:
+    snapshot = _find_adoption_receipt(vault_root, envelope.key_digest)
+    if snapshot is None:
         return None
+    receipt = snapshot.receipt
     expected = {
         "trigger": envelope.trigger,
         "selected_file_id": envelope.selected_file_id,
@@ -762,7 +776,8 @@ def _existing_receipt(
     }
     if any(receipt[field] != value for field, value in expected.items()):
         raise _receipt_error("ADOPTION_KEY_REUSED", "adoption key was reused for another identity")
-    return receipt
+    _verify_canonical_artifact(vault_root, receipt)
+    return snapshot
 
 
 def _effective_content_type(artifact: StagedArtifact, *, lane: str) -> str | None:
@@ -788,11 +803,12 @@ def _validate_staged_adoption(
 
 def _assert_replay_identity(
     vault_root: Path,
-    receipt: Mapping[str, object],
+    snapshot: AdoptionReceiptSnapshot,
     artifact: StagedArtifact,
     *,
     lane: str,
 ) -> None:
+    receipt = snapshot.receipt
     identity = {
         "hash_algorithm": "sha256",
         "hash": artifact.sha256,
@@ -803,6 +819,13 @@ def _assert_replay_identity(
     if any(receipt[field] != value for field, value in identity.items()):
         raise _receipt_error("ADOPTION_KEY_REUSED", "adoption key was reused for different bytes")
     _verify_canonical_artifact(vault_root, receipt)
+    try:
+        snapshot.page_guard.recheck(vault_root)
+    except PathGuardError as error:
+        raise _receipt_error(
+            "ADOPTION_REPLAY_UNVERIFIABLE",
+            "stored adoption receipt changed during replay",
+        ) from error
 
 
 def _replayed_outcome(receipt: Mapping[str, object]) -> dict[str, object]:
@@ -931,7 +954,7 @@ def _capture_source_adoption(
             except SafeFetchError as error:
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
-            outcomes[selected_index] = _replayed_outcome(receipt)
+            outcomes[selected_index] = _replayed_outcome(receipt.receipt)
             return _finish_adoption(outcomes)
 
         manager = active_manager()
@@ -966,7 +989,7 @@ def _capture_source_adoption(
                     )
                     payload = result.as_dict()
             if raced is not None:
-                outcomes[selected_index] = _replayed_outcome(raced)
+                outcomes[selected_index] = _replayed_outcome(raced.receipt)
             else:
                 mark_active_mutation_committed()
                 outcomes[selected_index] = _stored_outcome(
@@ -1054,7 +1077,7 @@ def _preserve_evidence_adoption(
             except SafeFetchError as error:
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
-            outcomes[selected_index] = _replayed_outcome(receipt)
+            outcomes[selected_index] = _replayed_outcome(receipt.receipt)
             return _finish_adoption(outcomes)
 
         manager = active_manager()
@@ -1087,7 +1110,7 @@ def _preserve_evidence_adoption(
                         )
                     payload = result.as_dict()
             if raced is not None:
-                outcomes[selected_index] = _replayed_outcome(raced)
+                outcomes[selected_index] = _replayed_outcome(raced.receipt)
                 return _finish_adoption(outcomes)
 
             mark_active_mutation_committed()

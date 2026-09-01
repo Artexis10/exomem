@@ -74,7 +74,7 @@ def _receipt_from_result(result: dict, selected: str = "file-b") -> dict:
     return row["adoption"]
 
 
-def _replace_receipt_scalar(page: Path, field: str, before: str, after: str) -> None:
+def _replace_receipt_scalar(page: Path, field: str, before: object, after: object) -> None:
     source = page.read_text(encoding="utf-8")
     frontmatter, _body, _marker = parse_frontmatter(source, strict=True)
     assert frontmatter["artifact_adoption"][field] == before
@@ -236,6 +236,202 @@ def test_durable_replay_restages_exact_bytes_and_never_rewrites(
     assert first["files"][0]["outcome"] == "stored"
     assert replay["files"][0]["outcome"] == "replayed"
     assert replay["files"][0]["adoption"] == first["files"][0]["adoption"]
+
+
+@pytest.mark.parametrize("lane", ("source", "evidence"))
+@pytest.mark.parametrize("mutation", ("deleted", "substituted"))
+def test_durable_replay_rechecks_the_original_receipt_page_snapshot_after_restaging(
+    vault: Path,
+    source_schema,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lane: str,
+    mutation: str,
+) -> None:
+    from exomem import client_artifacts, media_processing
+
+    data = b"receipt page remains the replay authority"
+    payloads = {"file-b": ("selected.bin", "application/octet-stream", data)}
+    calls: list[str] = []
+    first_stage = _stage_factory(tmp_path, payloads, calls)
+    monkeypatch.setattr(client_artifacts, "stage_artifact", first_stage)
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    common = {
+        "files": [_handle("file-b", "selected.bin", "application/octet-stream")],
+        "adoption": _adoption(f"receipt-restage-race-{lane}-{mutation}"),
+    }
+    if lane == "source":
+        invoke = lambda: client_artifacts.capture_source_artifacts(  # noqa: E731
+            vault,
+            source_schema=source_schema,
+            title="Selected reasoning input",
+            **common,
+        )
+    else:
+        invoke = lambda: client_artifacts.preserve_artifacts(  # noqa: E731
+            vault,
+            scope="case",
+            category="outputs",
+            **common,
+        )
+    committed = invoke()
+    page = vault / _receipt_from_result(committed)["page_path"]
+
+    replay_stage = _stage_factory(tmp_path, payloads, calls)
+
+    def mutate_receipt_while_restaging(*args, **kwargs):
+        artifact = replay_stage(*args, **kwargs)
+        if mutation == "deleted":
+            page.unlink()
+        else:
+            replacement = tmp_path / f"replacement-{lane}.md"
+            replacement.write_bytes(page.read_bytes())
+            replacement.replace(page)
+        return artifact
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", mutate_receipt_while_restaging)
+
+    replay = invoke()
+
+    assert replay["files"][0]["outcome"] == "failed"
+    assert replay["files"][0]["code"] == "ADOPTION_REPLAY_UNVERIFIABLE"
+    assert calls == ["file-b", "file-b"]
+
+
+@pytest.mark.parametrize(
+    "changed_semantic",
+    ("trigger", "selected_file_id", "destination", "lane"),
+)
+def test_changed_request_semantics_beat_missing_canonical_bytes(
+    vault: Path,
+    source_schema,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_semantic: str,
+) -> None:
+    from exomem import client_artifacts, media_processing
+
+    data = b"the original committed variant"
+    payloads = {"file-b": ("selected.bin", "application/octet-stream", data)}
+    calls: list[str] = []
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, calls))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    handle = _handle("file-b", "selected.bin", "application/octet-stream")
+    committed = client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="outputs",
+        files=[handle],
+        adoption=_adoption(f"semantic-before-custody-{changed_semantic}"),
+    )
+    receipt = _receipt_from_result(committed)
+    (vault / receipt["stored_path"]).unlink()
+    calls.clear()
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda *_args, **_kwargs: pytest.fail("known semantic mismatch must not restage"),
+    )
+
+    if changed_semantic == "trigger":
+        result = client_artifacts.preserve_artifacts(
+            vault,
+            scope="case",
+            category="outputs",
+            files=[handle],
+            adoption=_adoption(
+                f"semantic-before-custody-{changed_semantic}", trigger="published"
+            ),
+        )
+    elif changed_semantic == "selected_file_id":
+        result = client_artifacts.preserve_artifacts(
+            vault,
+            scope="case",
+            category="outputs",
+            files=[_handle("file-c", "sibling.bin", "application/octet-stream")],
+            adoption=_adoption(
+                f"semantic-before-custody-{changed_semantic}", selected="file-c"
+            ),
+        )
+    elif changed_semantic == "destination":
+        result = client_artifacts.preserve_artifacts(
+            vault,
+            scope="another-case",
+            category="outputs",
+            files=[handle],
+            adoption=_adoption(f"semantic-before-custody-{changed_semantic}"),
+        )
+    else:
+        result = client_artifacts.capture_source_artifacts(
+            vault,
+            source_schema=source_schema,
+            title="Wrong semantic lane",
+            files=[handle],
+            adoption=_adoption(f"semantic-before-custody-{changed_semantic}"),
+        )
+
+    assert result["files"][0]["outcome"] == "failed"
+    assert result["files"][0]["code"] == "ADOPTION_KEY_REUSED"
+    assert calls == []
+
+
+def test_oversized_receipt_is_rejected_before_canonical_artifact_read(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts, media_processing
+
+    data = b"small canonical bytes"
+    payloads = {"file-b": ("selected.bin", "application/octet-stream", data)}
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, []))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    kwargs = {
+        "scope": "case",
+        "category": "outputs",
+        "files": [_handle("file-b", "selected.bin", "application/octet-stream")],
+        "adoption": _adoption("oversized-receipt"),
+    }
+    committed = client_artifacts.preserve_artifacts(vault, **kwargs)
+    receipt = _receipt_from_result(committed)
+    page = vault / receipt["page_path"]
+    _replace_receipt_scalar(page, "size", len(data), client_artifacts.MAX_FILE_BYTES + 1)
+    monkeypatch.setattr(
+        client_artifacts,
+        "read_bounded_guarded_bytes",
+        lambda *_args, **_kwargs: pytest.fail("oversized receipt must fail before artifact read"),
+    )
+
+    replay = client_artifacts.preserve_artifacts(vault, **kwargs)
+
+    assert replay["files"][0]["outcome"] == "failed"
+    assert replay["files"][0]["code"] == "ADOPTION_KEY_REUSED"
+
+
+@pytest.mark.parametrize("key", ("invalid-\ud800-key", "invalid-\udfff-key"))
+def test_non_utf8_adoption_key_is_a_bounded_validation_failure(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+) -> None:
+    from exomem import client_artifacts
+
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda *_args, **_kwargs: pytest.fail("invalid adoption key must not fetch"),
+    )
+
+    result = client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="outputs",
+        files=[_handle("file-b", "selected.bin", "application/octet-stream")],
+        adoption=_adoption(key),
+    )
+
+    assert result["files"][0]["outcome"] == "failed"
+    assert result["files"][0]["code"] == "INVALID_ADOPTION"
 
 
 def test_source_durable_replay_restages_and_returns_its_original_page_receipt(
