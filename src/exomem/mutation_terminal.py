@@ -7,6 +7,8 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
+from . import curation as curation_module
+
 log = logging.getLogger(__name__)
 
 ResponseDetail = Literal["compact", "full", "legacy"]
@@ -111,6 +113,11 @@ def _operation_id(result: Any) -> str | None:
             nested_id = nested.get("draft_id")
             if isinstance(nested_id, str) and nested_id:
                 return nested_id
+    step = result.get("step")
+    if isinstance(step, Mapping):
+        operation_id = step.get("operation_id")
+        if isinstance(operation_id, str) and operation_id:
+            return operation_id
     return None
 
 
@@ -199,6 +206,9 @@ def _path_projection(result: Any) -> dict[str, Any]:
     path = result.get("path")
     if isinstance(path, str):
         return {"path": path}
+    step = result.get("step")
+    if isinstance(step, Mapping) and isinstance(step.get("path"), str):
+        return {"path": step["path"]}
     affected_paths = result.get("affected_paths")
     if (
         valid_collection_receipt(result)
@@ -635,7 +645,9 @@ def replayed_terminal(
         and leaf_result.get("outcome") == "committed"
     )
     if not (
-        valid_collection_receipt(leaf_result) or valid_structured_files_receipt(leaf_result)
+        valid_collection_receipt(leaf_result)
+        or valid_structured_files_receipt(leaf_result)
+        or curation_module.valid_replay_result(leaf_result)
     ) or (leaf_result.get("outcome") != "replayed" and not lifecycle_replay):
         raise ValueError("replayed terminal requires a valid governed mutation receipt")
 
@@ -754,6 +766,32 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
     elif valid_planning_receipt(leaf):
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
+    elif (
+        isinstance(leaf, Mapping)
+        and isinstance(leaf.get("run_id"), str)
+        and str(leaf["run_id"]).startswith("cur-")
+        and isinstance(leaf.get("plan_id"), str)
+    ):
+        compact.update(
+            {
+                key: leaf[key]
+                for key in (
+                    "action",
+                    "run_id",
+                    "plan_id",
+                    "plan_fingerprint",
+                    "phase",
+                    "active_step",
+                    "committed_steps",
+                    "failed_step",
+                    "retryable",
+                    "next_action",
+                    "outcome",
+                    "recovery",
+                )
+                if key in leaf
+            }
+        )
     artifact_receipt = _artifact_receipt_projection(leaf)
     compact.update(artifact_receipt)
     # `pending` (#576) is the fourth outcome: canonical bytes committed, the

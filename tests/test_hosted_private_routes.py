@@ -1567,6 +1567,55 @@ def test_hosted_http_surfaces_refuse_write_maintenance_before_manager_dispatch(
     }
 
 
+def test_frozen_hosted_v4_neither_advertises_nor_admits_curation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = commands_module.HOSTED_ALPHA_AGENT_V4_PROFILE
+    monkeypatch.setattr(
+        HostedCellConfig,
+        "active_agent_profile",
+        property(lambda _config: profile),
+    )
+    client, config, _lifecycle, invoker = _cell(
+        tmp_path,
+        cell_id="cell-frozen-v4-curation",
+        credential="frozen-v4-curation-service-credential-0001",
+    )
+    headers = _headers(config)
+    route = f"/private/exomem/v1/agent/{profile}"
+
+    contract_response = client.get(f"{route}/contract", headers=headers)
+    assert contract_response.status_code == 200, contract_response.text
+    command = next(
+        item
+        for item in contract_response.json()["commands"]
+        if item["name"] == "maintain_memory"
+    )
+    curation_fields = {
+        "curation_action",
+        "run_id",
+        "plan",
+        "refs",
+        "paths",
+        "expected_plan_fingerprint",
+    }
+    assert curation_fields.isdisjoint(item["name"] for item in command["params"])
+    assert curation_fields.isdisjoint(command["mcp_tool"]["inputSchema"]["properties"])
+    assert "curation" not in command["mcp_tool"]["inputSchema"]["properties"]["mode"].get(
+        "enum", []
+    )
+
+    refused = client.post(
+        f"{route}/command/maintain_memory",
+        headers=headers,
+        json={"mode": "curation", "curation_action": "status", "run_id": "cur-probe"},
+    )
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["error"]["code"] == "UNKNOWN_PARAM"
+    assert invoker.calls == []
+
+
 def test_hosted_pending_error_omits_absent_public_idempotency_key(
     tmp_path: Path,
 ) -> None:

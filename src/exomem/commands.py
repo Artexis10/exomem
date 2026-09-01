@@ -27,6 +27,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import MappingProxyType
@@ -6934,7 +6935,9 @@ def op_adoption_studio(
 
 def op_maintain_memory(
     vault_root: Path,
-    mode: str = "audit",
+    mode: Literal[
+        "audit", "fix", "reconcile", "backfill-ids", "structured-files", "curation"
+    ] = "audit",
     categories: list[str] | None = None,
     dry_run: bool | None = None,
     rebuild_embeddings: bool = False,
@@ -6946,6 +6949,22 @@ def op_maintain_memory(
     plan_id: str | None = None,
     source_snapshot: str | None = None,
     why: str | None = None,
+    curation_action: Literal[
+        "work-item",
+        "propose",
+        "preview",
+        "status",
+        "apply",
+        "resume",
+        "propose-compensation",
+        "apply-compensation",
+    ]
+    | None = None,
+    run_id: str | None = None,
+    plan: dict[str, Any] | None = None,
+    refs: list[str] | None = None,
+    paths: list[str] | None = None,
+    expected_plan_fingerprint: str | None = None,
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
 
@@ -6967,6 +6986,14 @@ def op_maintain_memory(
     apply requires its exact plan and source snapshot and commits atomically.
     Durable identity and mutable state stay in frontmatter, not filenames.
 
+    `mode="curation"` is the governed multi-step exception. The active agent
+    authors a closed typed plan from explicit context; Exomem validates and
+    fingerprints it, records one exact-plan approval, and executes at most one
+    content step per apply or resume request. Work-item, preview, and status are
+    read-only. Proposal, execution, and separately reviewed compensation use the
+    shared mutation terminal. Curation cannot target raw Sources or Evidence,
+    Planning, Records, workflow contracts, schema/admin state, or trash internals.
+
     `mode="fix"` also collapses media sidecars that accumulated nested copies of
     themselves (audit category `duplicated_sidecar`, reportable on its own via
     `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest
@@ -6977,7 +7004,7 @@ def op_maintain_memory(
     recovered text is only the fallback.
 
     Args:
-        mode: audit, fix, reconcile, backfill-ids, or structured-files.
+        mode: audit, fix, reconcile, backfill-ids, structured-files, or curation.
         categories: Optional audit category filter.
         dry_run: Report without writing when true. Defaults to true for
             fix/backfill-ids (safety net) and false for reconcile (matches
@@ -6992,9 +7019,129 @@ def op_maintain_memory(
         plan_id: Exact structured-files preview identity required for apply.
         source_snapshot: Exact structured-files preview snapshot required for apply.
         why: Bounded audit reason required for structured-files apply.
+        curation_action: Closed curation action when mode is curation.
+        run_id: Governed curation run identity.
+        plan: Agent-authored closed forward plan for curation propose.
+        refs: Explicit memory refs for curation work-item.
+        paths: Explicit vault-relative paths for curation work-item.
+        expected_plan_fingerprint: Exact reviewed plan fingerprint for approval.
     """
     if rebuild_graph and mode != "reconcile":
         raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
+    if mode == "curation":
+        from . import curation as curation_module
+        from . import due_state as due_state_module
+
+        if curation_action not in curation_module.CURATION_ACTIONS:
+            raise ValueError(
+                "INVALID_CURATION_ACTION: curation_action must be one of the closed v1 actions"
+            )
+        if (
+            categories is not None
+            or dry_run is not None
+            or rebuild_embeddings
+            or rebuild_graph
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or apply is not None
+            or source_snapshot is not None
+        ):
+            raise ValueError(
+                "INVALID_ARGUMENTS: curation does not accept another maintenance mode's arguments"
+            )
+
+        supplied = {
+            "run_id": run_id,
+            "plan_id": plan_id,
+            "plan": plan,
+            "refs": refs,
+            "paths": paths,
+            "expected_plan_fingerprint": expected_plan_fingerprint,
+            "why": why,
+        }
+        allowed_by_action = {
+            "work-item": {"refs", "paths"},
+            "propose": {"plan"},
+            "preview": {"run_id"},
+            "status": {"run_id"},
+            "apply": {"run_id", "plan_id", "expected_plan_fingerprint", "why"},
+            "resume": {"run_id", "plan_id"},
+            "propose-compensation": {"run_id"},
+            "apply-compensation": {
+                "run_id",
+                "plan_id",
+                "expected_plan_fingerprint",
+                "why",
+            },
+        }
+        allowed = allowed_by_action[curation_action]
+        if any(value is not None and name not in allowed for name, value in supplied.items()):
+            raise ValueError(
+                f"INVALID_ARGUMENTS: curation {curation_action} received unrelated arguments"
+            )
+        required_by_action = {
+            "work-item": set(),
+            "propose": {"plan"},
+            "preview": {"run_id"},
+            "status": {"run_id"},
+            "apply": {"run_id", "plan_id", "expected_plan_fingerprint", "why"},
+            "resume": {"run_id", "plan_id"},
+            "propose-compensation": {"run_id"},
+            "apply-compensation": {
+                "run_id",
+                "plan_id",
+                "expected_plan_fingerprint",
+                "why",
+            },
+        }
+        if any(supplied[name] is None for name in required_by_action[curation_action]):
+            raise ValueError(
+                f"INVALID_ARGUMENTS: curation {curation_action} is missing required arguments"
+            )
+
+        def invoke_curation() -> dict[str, Any]:
+            if curation_action == "work-item":
+                return curation_module.work_item(vault_root, refs=refs, paths=paths)
+            if curation_action == "propose":
+                assert plan is not None
+                return curation_module.propose(vault_root, plan)
+            if curation_action == "preview":
+                assert run_id is not None
+                return curation_module.preview(vault_root, run_id=run_id)
+            if curation_action == "status":
+                assert run_id is not None
+                return curation_module.status(vault_root, run_id=run_id)
+            if curation_action == "apply":
+                assert None not in (run_id, plan_id, expected_plan_fingerprint, why)
+                return curation_module.apply(
+                    vault_root,
+                    run_id=run_id,
+                    plan_id=plan_id,
+                    expected_plan_fingerprint=expected_plan_fingerprint,
+                    why=why,
+                )
+            if curation_action == "resume":
+                assert run_id is not None and plan_id is not None
+                return curation_module.resume(vault_root, run_id=run_id, plan_id=plan_id)
+            if curation_action == "propose-compensation":
+                assert run_id is not None
+                return curation_module.propose_compensation(vault_root, run_id=run_id)
+            assert curation_action == "apply-compensation"
+            assert None not in (run_id, plan_id, expected_plan_fingerprint, why)
+            return curation_module.apply_compensation(
+                vault_root,
+                run_id=run_id,
+                plan_id=plan_id,
+                expected_plan_fingerprint=expected_plan_fingerprint,
+                why=why,
+            )
+
+        if curation_action in curation_module.READ_ONLY_ACTIONS:
+            return invoke_curation()
+        with due_state_module.batch_scope(vault_root):
+            curated = invoke_curation()
+        return _carrying_due_state(vault_root, curated)
     if mode == "structured-files":
         if (
             not isinstance(collection, str)
@@ -7076,7 +7223,85 @@ def op_maintain_memory(
         return _carrying_due_state(vault_root, report)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, or structured-files"
+        "backfill-ids, structured-files, or curation"
+    )
+
+
+def _hosted_v4_maintain_memory(
+    vault_root: Path,
+    mode: str = "audit",
+    categories: list[str] | None = None,
+    dry_run: bool | None = None,
+    rebuild_embeddings: bool = False,
+    rebuild_graph: bool = False,
+    detail: Literal["actionable", "full"] = "actionable",
+    legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
+    collection: str | None = None,
+    apply: bool | None = None,
+    plan_id: str | None = None,
+    source_snapshot: str | None = None,
+    why: str | None = None,
+) -> dict:
+    """Maintain vault health with explicit write-capable modes.
+
+    Default mode is read-only audit. `mode="fix"` and `mode="backfill-ids"`
+    rewrite content (wikilinks, frontmatter, stable IDs) and default to
+    dry-run here as a safety net. `mode="reconcile"` only heals index-count
+    and sidecar drift from out-of-band edits — the same canonical default as
+    `op_reconcile` itself (idempotent, non-destructive) — so it defaults to
+    writing; pass `dry_run=true` to preview instead.
+
+    MCP, REST, and hosted callers may audit or preview with `dry_run=true`, but
+    write-mode maintenance is operator-only: run `exomem maintain --fix` or
+    `exomem maintain --reconcile` on the host. Remote write attempts return
+    `MAINTENANCE_REQUIRES_CLI` before acquiring the mutation boundary.
+
+    `mode="structured-files"` is the exception: it previews one Planning or
+    Records collection's manifest-declared human filenames and managed readable
+    bodies, including governed inbound-link rewrites. Preview is read-only;
+    apply requires its exact plan and source snapshot and commits atomically.
+    Durable identity and mutable state stay in frontmatter, not filenames.
+
+    `mode="fix"` also collapses media sidecars that accumulated nested copies of
+    themselves (audit category `duplicated_sidecar`, reportable on its own via
+    `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest
+    surviving `## Extracted text` — for a sidecar whose top-level block was
+    blanked by a re-render, that is the one buried in a nested copy — and refuses
+    any rewrite that would leave less transcript than it found. Frontmatter is
+    untouched, so a still-`pending` sidecar is re-extracted normally and the
+    recovered text is only the fallback.
+
+    Args:
+        mode: audit, fix, reconcile, backfill-ids, or structured-files.
+        categories: Optional audit category filter.
+        dry_run: Report without writing when true. Defaults to true for
+            fix/backfill-ids (safety net) and false for reconcile (matches
+            `op_reconcile`'s own default). Pass explicitly to override either way.
+        rebuild_embeddings: For fix mode, rebuild embeddings when explicitly requested.
+        rebuild_graph: For reconcile only, quarantine unavailable derived graph
+            lineage and rebuild it from canonical Markdown. Default false.
+        detail: Audit output detail: actionable (default) or full.
+        legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
+        collection: One Planning or Records collection for structured-files.
+        apply: Omit for preview; true applies the exact reviewed plan.
+        plan_id: Exact structured-files preview identity required for apply.
+        source_snapshot: Exact structured-files preview snapshot required for apply.
+        why: Bounded audit reason required for structured-files apply.
+    """
+    return op_maintain_memory(
+        vault_root,
+        mode=mode,
+        categories=categories,
+        dry_run=dry_run,
+        rebuild_embeddings=rebuild_embeddings,
+        rebuild_graph=rebuild_graph,
+        detail=detail,
+        legacy_sample_limit=legacy_sample_limit,
+        collection=collection,
+        apply=apply,
+        plan_id=plan_id,
+        source_snapshot=source_snapshot,
+        why=why,
     )
 
 
@@ -8211,6 +8436,11 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     """
     if command.read_only:
         return True
+    if command.name == "maintain_memory" and kwargs.get("mode") == "curation":
+        from . import curation as curation_module
+
+        action = kwargs.get("curation_action")
+        return isinstance(action, str) and action in curation_module.READ_ONLY_ACTIONS
     if command.name == "govern_memory":
         operation = _resolved_invocation_selector(command, kwargs, "operation")
         if not isinstance(operation, str) or operation not in governance_operations.OPERATION_SPECS:
@@ -9267,6 +9497,16 @@ def product_commands_for_profile(
         if (command.tier != 1 and not definition.expose_tier2) or (surface not in command.surfaces):
             raise RuntimeError(
                 f"product surface profile {profile!r} cannot expose {name!r} on {surface!r}"
+            )
+        if profile == HOSTED_ALPHA_AGENT_V4_PROFILE and name == "maintain_memory":
+            response_detail = next(
+                param for param in command.params if param.name == "response_detail"
+            )
+            command = dataclass_replace(
+                command,
+                leaf=_hosted_v4_maintain_memory,
+                params=(*_derive_params(_hosted_v4_maintain_memory, skip=1), response_detail),
+                description=_hosted_v4_maintain_memory.__doc__ or "",
             )
         selected.append(command)
     return tuple(selected)

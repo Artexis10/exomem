@@ -45,6 +45,29 @@ filename. Existing UUID-named collections move only through
 read-only preview, resolve every collision or immutable/withheld inbound-link
 blocker, then apply the exact `plan_id` and `source_snapshot` with a reason.
 
+## Governed curation
+
+Use `maintain_memory(mode="curation")` when one reviewed structural improvement
+spans multiple compiled notes or combines typed creation, relation acceptance,
+edit, supersession, move, delete, or recovery. The active agent remains the
+semantic author: `curation_action="work-item"` assembles only explicit refs and
+paths, and `curation_action="propose"` validates the agent-authored typed plan.
+
+Call `curation_action="preview"` once for the immutable plan and show its exact
+actions, blockers, fingerprint, and compensation classes. That review is
+advisory. Execution is confirm-required: obtain one explicit confirmation bound
+to the returned plan id and fingerprint, then call `curation_action="apply"`.
+Each apply or `curation_action="resume"` request executes at most one content
+step. Continue resume automatically only while the durable phase is executing;
+stop and report `partial` or `blocked` truth.
+
+Compensation is a separate history-preserving plan. Derive it with
+`curation_action="propose-compensation"`, preview it, and obtain a fresh exact
+confirmation before `curation_action="apply-compensation"`. Never treat
+compensation as rollback, reuse a forward approval, grant standing approval, or
+route Planning, Records, Sources, Evidence, workflow contracts, schema/admin
+paths, or trash internals through curation.
+
 ## Records
 
 `record_memory` is the one public product command for human-owned observed

@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from . import capabilities as capabilities_module
+from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
 from .mutation_lock import (
     VaultMutationCoordinator,
@@ -3051,6 +3052,9 @@ class LeaseManager:
                     or command.name == "maintain_memory"
                     and kwargs.get("mode") == "structured-files"
                     and valid_structured_files_receipt(leaf_result)
+                    or command.name == "maintain_memory"
+                    and kwargs.get("mode") == "curation"
+                    and curation_module.valid_replay_result(leaf_result)
                 ) and leaf_result.get("outcome") == "replayed":
                     return replayed_terminal(
                         leaf_result,

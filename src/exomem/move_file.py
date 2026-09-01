@@ -15,12 +15,14 @@ the new location. Returns the count of touched files.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import logging
 import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import reserved_paths, semantic_index, semantic_writes
 from .governance import catalog_publication, graph_producer
@@ -74,6 +76,17 @@ class MoveFileError(Exception):
 
     def as_dict(self) -> dict:
         return {"code": self.code, "reason": self.reason}
+
+
+@dataclass(frozen=True)
+class MoveFileValidation:
+    """Private exact content manifest returned by the canonical move preflight."""
+
+    result: MoveFileResult
+    before: tuple[dict[str, Any], ...]
+    after: tuple[dict[str, Any], ...]
+    rename_after: tuple[dict[str, Any], ...]
+    atomic_supported: bool
 
 
 def _held_rename(vault_root: Path, old_rel: str, new_rel: str) -> None:
@@ -166,7 +179,8 @@ def move_file(
     promotion_reason: str | None = None,
     content_transform: Callable[[str], str] | None = None,
     extra_writes: tuple[PlannedWrite, ...] = (),
-) -> MoveFileResult:
+    validate_only: bool = False,
+) -> MoveFileResult | MoveFileValidation:
     """Relocate a file, optionally rewriting wikilinks that point at it.
 
     `content_transform` lets a caller that owns a *declared* content change —
@@ -431,6 +445,43 @@ def move_file(
                 files_touched.append(rel)
                 wikilinks_updated += n_changed
 
+    def validation_result(
+        *, source_hash: str, destination_hash: str
+    ) -> MoveFileValidation:
+        before = [{"path": old_rel, "content_hash": source_hash}]
+        after = [
+            {"path": old_rel, "absent": True},
+            {"path": new_rel, "content_hash": destination_hash},
+        ]
+        for write in writes:
+            relative = write.path.relative_to(vault_root).as_posix()
+            guard_hash = getattr(write.guard, "expected_content_hash", None)
+            if not isinstance(guard_hash, str):
+                raise MoveFileError(
+                    "MOVE_FAILED", "canonical inbound rewrite lacks an exact source guard"
+                )
+            before.append({"path": relative, "content_hash": guard_hash})
+            after.append({"path": relative, "content_hash": content_hash(write.content)})
+        return MoveFileValidation(
+            MoveFileResult(
+                old_path=old_rel,
+                new_path=new_rel,
+                wikilinks_updated=wikilinks_updated,
+                files_touched=list(files_touched),
+                warnings=list(warnings),
+            ),
+            tuple(before),
+            tuple(after),
+            (
+                {"path": old_rel, "absent": True},
+                {"path": new_rel, "content_hash": source_hash},
+                *tuple(before[1:]),
+            ),
+            paired_binary is None
+            and old_rel.lower().endswith(".md")
+            and new_rel.lower().endswith(".md"),
+        )
+
     today = today or dt.date.today()
 
     def plan_activity_log() -> tuple[str, str, LogWritePlan]:
@@ -507,6 +558,11 @@ def move_file(
                 item.after.path: semantic_index.from_semantic_page_state(item.after)
                 for item in preflight.evaluations
             }
+            if validate_only:
+                return validation_result(
+                    source_hash=content_hash(source),
+                    destination_hash=content_hash(moved_source),
+                )
 
             def mutate(
                 lifecycle_writes: tuple[PlannedWrite, ...],
@@ -567,6 +623,19 @@ def move_file(
                         code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                         reason=str(error),
                     ) from error
+                destination_writes = (
+                    [PlannedWrite(path=new_abs, content=moved_source)]
+                    if moved_source != source
+                    else []
+                )
+                combined = [
+                    *lifecycle_writes,
+                    *destination_writes,
+                    *writes,
+                    *extra_writes,
+                ]
+                if catalog_target is not None:
+                    combined.extend(log_plan.writes)
                 _held_rename(vault_root, old_rel, new_rel)
                 # The bytes follow the page inside the same transaction. A
                 # rollback below undoes both, so a failure can never leave an
@@ -578,19 +647,6 @@ def move_file(
                         _held_rename(vault_root, new_rel, old_rel)
                         raise
                 try:
-                    destination_writes = (
-                        [PlannedWrite(path=new_abs, content=moved_source)]
-                        if moved_source != source
-                        else []
-                    )
-                    combined = [
-                        *lifecycle_writes,
-                        *destination_writes,
-                        *writes,
-                        *extra_writes,
-                    ]
-                    if catalog_target is not None:
-                        combined.extend(log_plan.writes)
                     if combined:
                         batch_fanout_paths[:] = [write.path for write in combined]
                         batch_atomic_write(
@@ -645,6 +701,18 @@ def move_file(
                 ) from error
     else:
         log_rel_no_ext, log_body, log_plan = plan_activity_log()
+        if validate_only:
+            try:
+                raw_source = reserved_paths.read_generic_bytes(vault_root, old_rel).data
+            except reserved_paths.ReservedPathLeafError as error:
+                raise MoveFileError(
+                    "MOVE_FAILED", "move source changed during canonical validation"
+                ) from error
+            source_hash = hashlib.sha256(raw_source).hexdigest()
+            return validation_result(
+                source_hash=source_hash,
+                destination_hash=source_hash,
+            )
         unsupported_rel = (
             old_rel if not old_rel.lower().endswith(".md") else new_rel
         )

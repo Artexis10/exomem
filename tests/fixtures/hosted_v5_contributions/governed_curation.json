@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "family": "governed-curation",
+  "command": "maintain_memory",
+  "selector": {
+    "name": "mode",
+    "value": "curation"
+  },
+  "actions": [
+    "work-item",
+    "propose",
+    "preview",
+    "status",
+    "apply",
+    "resume",
+    "propose-compensation",
+    "apply-compensation"
+  ],
+  "read_only_actions": [
+    "work-item",
+    "preview",
+    "status"
+  ],
+  "confirmation_required_actions": [
+    "propose",
+    "apply",
+    "resume",
+    "propose-compensation",
+    "apply-compensation"
+  ],
+  "mutation_class": "restructure_execution",
+  "cases": [
+    {
+      "id": "explicit-work-item-read",
+      "arguments": {
+        "mode": "curation",
+        "curation_action": "work-item",
+        "paths": [
+          "Knowledge Base/Notes/Insights/compiled-example.md"
+        ]
+      },
+      "classification": "read_only",
+      "admission": "allow"
+    },
+    {
+      "id": "sealed-plan-preview",
+      "arguments": {
+        "mode": "curation",
+        "curation_action": "preview",
+        "run_id": "cur-11111111111111111111"
+      },
+      "classification": "read_only",
+      "admission": "allow"
+    },
+    {
+      "id": "reviewed-one-step-apply",
+      "arguments": {
+        "mode": "curation",
+        "curation_action": "apply",
+        "run_id": "cur-11111111111111111111",
+        "plan_id": "1111111111111111111111111111111111111111111111111111111111111111",
+        "expected_plan_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222",
+        "why": "Apply the exact reviewed synthetic plan."
+      },
+      "classification": "restructure_execution",
+      "admission": "confirm_required",
+      "maximum_content_steps": 1
+    },
+    {
+      "id": "unknown-action-fails-closed",
+      "arguments": {
+        "mode": "curation",
+        "curation_action": "future-action"
+      },
+      "classification": "restructure_execution",
+      "admission": "refuse"
+    },
+    {
+      "id": "omitted-action-fails-closed",
+      "arguments": {
+        "mode": "curation"
+      },
+      "classification": "restructure_execution",
+      "admission": "refuse"
+    }
+  ],
+  "compatibility": {
+    "hosted_v1_v4": "frozen-neither-advertise-nor-admit",
+    "hosted_v5": "candidate-owner-composes-this-contribution"
+  }
+}
