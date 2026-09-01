@@ -516,6 +516,7 @@ extensions:
     )
     pages = {
         "old-core.md": "---\ncreated: 2020-01-10\ntype: insight\n---\n- supports [[Target]]\n",
+        "old-canonical-extension.md": "---\ncreated: 2020-02-01\ntype: procedure\n---\n- vault.applies_to [[Target]]\n",
         "old-extension.md": "---\ncaptured: 2020-02-10\ntype: procedure\n---\n- applies_to [[Target]]\n",
         "old-deprecated.md": "---\ncreated: 2020-03-10\ntype: insight\n---\n- vault.legacy_applies [[Target]]\n",
         "old-generic.md": "---\ncreated: 2020-04-10\ntype: insight\n---\n- relates_to [[Target]]\n",
@@ -546,7 +547,7 @@ extensions:
     assert census == {
         "relation_counts": {
             "core": 1,
-            "extension": 1,
+            "extension": 2,
             "deprecated": 1,
             "generic": 1,
             "unregistered": 1,
@@ -556,8 +557,8 @@ extensions:
             "zero_body_connections": 1,
         },
         "denominators": {
-            "sampled": 7,
-            "included": 6,
+            "sampled": 8,
+            "included": 7,
             "undated": 1,
             "excluded": 0,
         },
