@@ -210,6 +210,9 @@ commits only a plan that was previewed. Supersession and entity creation have no
 server-side gate today; that is named future work, not an implied gate, so the
 confirmation is yours to obtain.
 
+Governed curation maps `work-item`, `propose`, `preview`, `status`, and `propose-compensation` to `structural_suggestions`; `off` still permits an explicit user request.
+`apply`, `resume`, and `apply-compensation` use `restructure_execution`: preview and confirm one immutable plan fingerprint, execute at most one step per request, let resume continue that approval, and confirm compensation separately.
+
 **Standing delegation does not exist in v1.** "Always allow this" or "do this
 kind of thing from now on" for restructure execution is refused by name: it
 would be an envelope cell above the current ceiling, and only a deliberate
