@@ -80,10 +80,14 @@ creating a second scheduler or queue database. New normalized tables carry:
 - `derived_batch_components`: closed component enum, CAS revision, state,
   claim owner/expiry, attempt count, next-attempt time, and bounded outcome;
 - `pending_recall_rows`: the bounded identity/search projection needed for the
-  current generation until persistent catalogues prove publication;
+  current generation until persistent catalogues prove publication, plus an
+  opaque store-generation fence advanced by every insert, update, or delete;
 - `write_advisory_results`: stable opaque result id, batch/component revision,
-  target and counterpart fingerprints, closed status/code, bounded existing
-  advisory identities, retention deadline, and CAS publication state.
+  exact target path/fingerprint, closed status/code, retention deadline, and
+  CAS publication state;
+- `write_advisory_result_candidates`: an ordered, bounded child set carrying
+  counterpart identity/fingerprint, warning, advisory ref, review ref, and
+  triage fingerprint without packing multiple candidates into one column.
 
 The closed component vocabulary for the first release is `freshness`,
 `memory_refs`, `resolver`, `semantic_purge`, `lexstore`, `graph`, `embeddings`,
@@ -205,6 +209,16 @@ warming/unavailable outcome while a background pass rebuilds the overlay. It
 never silently serves a stale last-published catalogue. Offline callers retain
 their existing source-walk fallback.
 
+The receipt store exposes this restart path through bounded typed operations,
+not private SQLite access: a snapshot returns every non-retired pending batch
+with its exact receipt, path generation/revision, state, and an opaque store
+generation; a fence operation proves that generation is still current; and an
+exact CAS retirement operation clears only rows from that same batch,
+generation, and revision. Snapshot outcomes are closed as `complete`,
+`overflow`, or `unprovable`. Only a complete snapshot whose generation remains
+current can authorize managed recall readiness. Any concurrent pending-row
+mutation invalidates the fence and forces another bounded hydration attempt.
+
 **Alternative rejected — rely on watcher echo.** Watchers are optional, delayed,
 and deliberately suppress self-authored echoes. They remain a backstop, not the
 read-your-write handoff.
@@ -257,6 +271,16 @@ Every lookup rechecks target/counterpart fingerprints and the current release
 plane; withheld candidates are indistinguishable from absence. Failure stays
 visible in exact result status, derived diagnostics, and retry telemetry; it
 cannot change `status=committed`.
+
+The receipt store owns additive typed publication and exact-read operations for
+these results. Publication requires the exact claimed `write_advisory`
+component revision, lease owner, lease expiry, target path, and target
+fingerprint; it atomically CAS-publishes either a bounded ordered candidate set
+or a closed failure code. Identical replay is idempotent and conflicting or
+stale replay is refused. A crash after result publication can therefore reuse
+the stored result and complete the component without recomputation. Old rows
+without the additive target identity remain resolvable by their stable ref but
+fail closed with a fixed compatibility code and no candidate payload.
 
 `suggestions=true` remains synchronous because it is an explicit request for
 the enriched related-link result in the current response. It is not silently
@@ -322,20 +346,34 @@ once at the delivery boundary; focused deterministic gates run in each lane.
 
 ### 9. Freeze lane interfaces before parallel work
 
-Lane 1 owns the only cross-lane protocol module. Its typed seams are
-`prepare_batch`, `prove_committed`, `publish_pending_visibility`,
-`signal_components`, `component_status`, and `advisory_result_ref`; its tests
-provide fakes for the last four. Lane 2 implements the pending-visibility
-publisher and recall consumer. Lane 3 calls only the frozen protocol and tests
-all writer routes with the Lane 1 fakes, so it does not depend on Lane 2 or Lane
-4 source. Lane 4 implements advisory component execution and exact result
-resolution without editing writer/terminal files. Cross-lane production wiring
-and public write→read/result tests belong only to Lane 5.
+Lane 1 owns the only cross-lane protocol module. The writer/terminal handoff
+subset is `prepare_batch`, `prove_committed`, `publish_pending_visibility`,
+`signal_components`, `component_status`, and `advisory_result_ref`. The store
+consumer subset additionally exposes bounded pending-visibility
+snapshot/fence/exact-retirement and advisory-result publish/exact-read seams.
+Their production types and fakes are part of the frozen foundation; child lanes
+must not infer them through private SQLite access or invent a second store.
+
+Lane 2 implements the pending-visibility publisher and recall consumer using
+the bounded snapshot/fence/retirement subset. Lane 3 calls only the frozen
+writer/terminal handoff, supplies an advisory target path when custody applies,
+and tests all writer routes with the Lane 1 fakes, so it does not depend on Lane
+2 or Lane 4 source. Lane 4 implements advisory component execution and exact
+result resolution using the frozen publish/read subset without editing
+writer/terminal or receipt-store files. Cross-lane production wiring and public
+write→read/result tests belong only to Lane 5.
+
+The first accepted Lane 1 lifecycle commit is followed by one additive,
+independently reviewed foundation-extension commit before any child lane is
+accepted. That extension is restricted to `deferred_index.py`,
+`derived_receipts.py`, `test_derived_batch_receipts.py`, and
+`derived_receipt_fakes.py`; it preserves the accepted lifecycle commit and adds
+the missing store-consumer contracts and mixed-version migration.
 
 The executable DAG is therefore:
 
-1. Lane 1 receipt lifecycle and frozen protocols;
-2. Lanes 2, 3, and 4 in parallel from the accepted Lane 1 SHA;
+1. Lane 1 receipt lifecycle, then the accepted additive foundation extension;
+2. Lanes 2, 3, and 4 in parallel from the accepted extended Lane 1 SHA;
 3. Lane 5 integration, instrumentation, benchmarks, and rollout evidence from
    the three accepted author-lane commits.
 
