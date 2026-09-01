@@ -199,11 +199,14 @@ server-side gate today; that is named future work, not an implied gate, so the
 confirmation is yours to obtain.
 
 Governed curation follows the same hookless carrier. Curation `work-item`,
-`propose`, and `preview` belong to `structural_suggestions`; when that class is
-off, an explicit request from the user is never blocked. Curation `apply`,
-`resume`, and compensation belong to `restructure_execution`. Preview once,
-obtain confirmation for one immutable plan fingerprint, and let each request
-execute at most one step. A compensation plan needs its own confirmation.
+`propose`, `preview`, `status`, and `propose-compensation` belong to
+`structural_suggestions`; when that class is off, an explicit request from the user is never blocked.
+Curation `apply`, `resume`, and `apply-compensation`
+belong to `restructure_execution`. Preview once, obtain confirmation for one immutable plan fingerprint,
+and let each request execute at most one step.
+Resume continues that already-approved immutable plan and does not need a fresh
+confirmation per step. A compensation plan needs its own confirmation before
+`apply-compensation`.
 
 **Standing delegation does not exist in v1.** "Always allow this" or "do this
 kind of thing from now on" for restructure execution is refused by name: it

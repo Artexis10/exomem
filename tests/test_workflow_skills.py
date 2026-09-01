@@ -195,6 +195,8 @@ def test_curate_skill_routes_reviewed_plans_through_the_delegation_envelope() ->
     assert "preview the immutable plan once" in text
     assert "one explicit confirmation for that exact plan fingerprint" in text
     assert "resume automatically one step per request" in text
+    assert 'propose-compensation"` is `structural_suggestions`' in text
+    assert "does not need a fresh confirmation" in text
     assert "stop on `partial` or `blocked`" in text
     assert "standing approval" in text
 
@@ -203,8 +205,8 @@ def test_hookless_core_carrier_keeps_explicit_curation_available_when_suggestion
     text = (workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md").read_text(encoding="utf-8")
     compact = " ".join(text.lower().split())
     assert "an explicit request from the user is never blocked" in text
-    assert "curation `work-item`, `propose`, and `preview`" in compact
-    assert "curation `apply`, `resume`, and compensation" in compact
+    assert "curation `work-item`, `propose`, `preview`, `status`, and `propose-compensation`" in compact
+    assert "curation `apply`, `resume`, and `apply-compensation`" in compact
     assert "one immutable plan fingerprint" in text
 
 

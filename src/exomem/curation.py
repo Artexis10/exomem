@@ -10,12 +10,14 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Final, NoReturn
 
+from . import held_fs
 from .kbdir import kb_dirname
 from .vault import (
     BatchWriteError,
@@ -229,7 +231,10 @@ def run_id(plan: Mapping[str, Any], *, today: dt.date | None = None) -> str:
 def operation_id(plan_identity: str, ordinal: int, step_id: str) -> str:
     if not _HEX64.fullmatch(str(plan_identity)) or type(ordinal) is not int or ordinal < 0:
         raise _error("INVALID_OPERATION_ID", "operation identity inputs are invalid")
-    return hashlib.sha256(f"{plan_identity}{ordinal}{step_id}".encode()).hexdigest()
+    encoded = canonical_json_bytes(
+        ["exomem-curation-operation-v1", plan_identity, ordinal, step_id]
+    )
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _require_relocation_history_capability(_vault_root: Path) -> NoReturn:
@@ -1525,6 +1530,73 @@ def _next_attempt(store: CurationStore, run_identity: str, step_id: str) -> int:
     return max(attempts, default=0) + 1
 
 
+def _validated_operation_witness(
+    store: CurationStore,
+    run_identity: str,
+    *,
+    plan_identity: str,
+    ordinal: int,
+    step: Mapping[str, Any],
+    binding: Mapping[str, Any],
+    operation_identity: str,
+    compensation: bool,
+) -> dict[str, Any] | None:
+    """Load one exact immutable witness, distinguishing absence from corruption."""
+    try:
+        raw = store._read_json(_evidence_path(store, run_identity, operation_identity))
+    except CurationError as error:
+        if error.code == "CURATION_RUN_NOT_FOUND":
+            return None
+        raise
+    witness = _validate_witness(
+        raw,
+        run_identity=run_identity,
+        plan_identity=plan_identity,
+        ordinal=ordinal,
+        step=step,
+        operation_identity=operation_identity,
+        binding=binding,
+        parent_compensation_plan_id=plan_identity if compensation else None,
+    )
+    _verify_live_postcondition(store.vault_root, witness)
+    return witness
+
+
+def _recover_committed_witness(
+    store: CurationStore,
+    run_identity: str,
+    *,
+    ordinal: int,
+    step: Mapping[str, Any],
+    operation_identity: str,
+    witness: Mapping[str, Any],
+    effect: Mapping[str, Any],
+    compensation: bool,
+) -> dict[str, Any]:
+    """Publish the receipt required by a valid same-batch content witness."""
+    receipt = {
+        "version": 1,
+        "attempt": _next_attempt(store, run_identity, str(step["step_id"])),
+        "ordinal": ordinal,
+        "step_id": step["step_id"],
+        "operation_id": operation_identity,
+        "outcome": "recovered-committed",
+        "result_digest": witness["result_digest"],
+        "effect": dict(effect),
+    }
+    store.create_receipt(run_identity, ordinal, str(step["step_id"]), receipt)
+    final = store.reconstruct(run_identity)
+    store.write_state(run_identity, final)
+    return _compensation_phase(
+        {
+            **final,
+            "mutated": True,
+            "step": {**receipt, "path": witness["after"][0]["path"]},
+        },
+        compensation=compensation,
+    )
+
+
 def _record_failed_attempt(
     store: CurationStore,
     run_identity: str,
@@ -1607,49 +1679,34 @@ def _execute_next(
         if preparation is not None
         else _effect_projection(str(step["kind"]), {}, execution_binding)
     )
-    if evidence_path.exists():
-        try:
-            witness = _validate_witness(
-                store._read_json(evidence_path),
-                run_identity=run_identity,
-                plan_identity=plan_identity,
-                ordinal=ordinal,
-                step=step,
-                operation_identity=operation_identity,
-                binding=execution_binding,
-                parent_compensation_plan_id=plan_identity if compensation else None,
-            )
-            _verify_live_postcondition(vault_root, witness)
-        except CurationError:
-            _record_blocked_state(
-                store,
-                run_identity,
-                operation_identity=operation_identity,
-                step_id=step["step_id"],
-            )
-            raise
-        receipt = {
-            "version": 1,
-            "attempt": _next_attempt(store, run_identity, step["step_id"]),
-            "ordinal": ordinal,
-            "step_id": step["step_id"],
-            "operation_id": operation_identity,
-            "outcome": "recovered-committed",
-            "result_digest": witness["result_digest"],
-            "effect": recovered_effect,
-        }
-        store.create_receipt(run_identity, ordinal, step["step_id"], receipt)
-        final = store.reconstruct(run_identity)
-        store.write_state(run_identity, final)
-        return _compensation_phase(
-            {
-                **final,
-                "mutated": True,
-                "step": {
-                    **receipt,
-                    "path": witness["after"][0]["path"],
-                },
-            },
+    try:
+        committed_witness = _validated_operation_witness(
+            store,
+            run_identity,
+            plan_identity=plan_identity,
+            ordinal=ordinal,
+            step=step,
+            binding=execution_binding,
+            operation_identity=operation_identity,
+            compensation=compensation,
+        )
+    except CurationError:
+        _record_blocked_state(
+            store,
+            run_identity,
+            operation_identity=operation_identity,
+            step_id=step["step_id"],
+        )
+        raise
+    if committed_witness is not None:
+        return _recover_committed_witness(
+            store,
+            run_identity,
+            ordinal=ordinal,
+            step=step,
+            operation_identity=operation_identity,
+            witness=committed_witness,
+            effect=recovered_effect,
             compensation=compensation,
         )
 
@@ -1769,6 +1826,36 @@ def _execute_next(
         )
         _verify_live_postcondition(vault_root, witness)
     except CurationError as error:
+        try:
+            committed_witness = _validated_operation_witness(
+                store,
+                run_identity,
+                plan_identity=plan_identity,
+                ordinal=ordinal,
+                step=step,
+                binding=execution_binding,
+                operation_identity=operation_identity,
+                compensation=compensation,
+            )
+        except CurationError:
+            _record_blocked_state(
+                store,
+                run_identity,
+                operation_identity=operation_identity,
+                step_id=step["step_id"],
+            )
+            raise
+        if committed_witness is not None:
+            return _recover_committed_witness(
+                store,
+                run_identity,
+                ordinal=ordinal,
+                step=step,
+                operation_identity=operation_identity,
+                witness=committed_witness,
+                effect=_effect_projection(str(step["kind"]), {}, execution_binding),
+                compensation=compensation,
+            )
         if error.code == "CURATION_OUTCOME_UNCERTAIN":
             _record_blocked_state(
                 store,
@@ -1788,6 +1875,36 @@ def _execute_next(
         )
         raise
     except Exception as error:
+        try:
+            committed_witness = _validated_operation_witness(
+                store,
+                run_identity,
+                plan_identity=plan_identity,
+                ordinal=ordinal,
+                step=step,
+                binding=execution_binding,
+                operation_identity=operation_identity,
+                compensation=compensation,
+            )
+        except CurationError:
+            _record_blocked_state(
+                store,
+                run_identity,
+                operation_identity=operation_identity,
+                step_id=step["step_id"],
+            )
+            raise
+        if committed_witness is not None:
+            return _recover_committed_witness(
+                store,
+                run_identity,
+                ordinal=ordinal,
+                step=step,
+                operation_identity=operation_identity,
+                witness=committed_witness,
+                effect=_effect_projection(str(step["kind"]), {}, execution_binding),
+                compensation=compensation,
+            )
         stable_code = getattr(error, "code", None)
         if not isinstance(stable_code, str) and ":" in str(error):
             candidate = str(error).split(":", 1)[0]
@@ -1898,13 +2015,13 @@ def status(vault_root: Path, *, run_id: str) -> dict[str, Any]:
     store: CurationStore = forward_store
     compensation = False
     compensation_root = forward_store.compensation_root(run_id)
-    forward_store._assert_safe(compensation_root)
-    if compensation_root.exists():
-        candidates = [
-            path.name
-            for path in sorted(compensation_root.iterdir())
-            if path.is_dir() and not path.is_symlink() and _HEX64.fullmatch(path.name)
-        ]
+    candidates = [
+        record.relative_path
+        for record in forward_store._artifact_records(compensation_root, recursive=False)
+        if record.identity.kind == "directory"
+        and _HEX64.fullmatch(record.relative_path)
+    ]
+    if candidates:
         if len(candidates) > 1:
             return {
                 "action": "status",
@@ -1914,9 +2031,8 @@ def status(vault_root: Path, *, run_id: str) -> dict[str, Any]:
                 "error_code": "CURATION_OUTCOME_UNCERTAIN",
                 "recovery": "blocked",
             }
-        if candidates:
-            store = CompensationStore(root, run_id, candidates[0])
-            compensation = True
+        store = CompensationStore(root, run_id, candidates[0])
+        compensation = True
     plan = store.load_plan(run_id)
     identity, _fingerprint = store.identities(run_id)
     reconstructed = store.reconstruct(run_id)
@@ -1944,6 +2060,40 @@ def status(vault_root: Path, *, run_id: str) -> dict[str, Any]:
             "recovery": "blocked" if reconstructed["phase"] == "blocked" else None,
         }
         return _compensation_phase(result, compensation=compensation)
+    next_item = _next_step(plan, reconstructed)
+    if next_item is not None:
+        ordinal, step, binding = next_item
+        operation_identity = operation_id(identity, ordinal, step["step_id"])
+        try:
+            committed_witness = _validated_operation_witness(
+                store,
+                run_id,
+                plan_identity=identity,
+                ordinal=ordinal,
+                step=step,
+                binding=binding,
+                operation_identity=operation_identity,
+                compensation=compensation,
+            )
+        except CurationError:
+            return {
+                **reconstructed,
+                "action": "status",
+                "mutated": False,
+                "phase": "blocked",
+                "error_code": "CURATION_OUTCOME_UNCERTAIN",
+                "recovery": "blocked",
+            }
+        if committed_witness is not None:
+            result = {
+                **reconstructed,
+                "action": "status",
+                "mutated": False,
+                "phase": "executing",
+                "recovery": "receipt-required",
+                "active_step": step["step_id"],
+            }
+            return _compensation_phase(result, compensation=compensation)
     prepared = projection.get("prepared")
     if isinstance(prepared, Mapping):
         ordinal = prepared.get("ordinal")
@@ -1951,7 +2101,6 @@ def status(vault_root: Path, *, run_id: str) -> dict[str, Any]:
             step = plan["steps"][ordinal]
             binding = plan["binding_manifest"][ordinal]
             operation_identity = operation_id(identity, ordinal, step["step_id"])
-            evidence_path = _evidence_path(store, run_id, operation_identity)
             preparation: dict[str, Any] | None = None
             try:
                 preparation = _load_rename_preparation(
@@ -1973,31 +2122,7 @@ def status(vault_root: Path, *, run_id: str) -> dict[str, Any]:
                     "error_code": error.code,
                     "recovery": "blocked",
                 }
-            execution_binding = binding
-            if evidence_path.exists():
-                try:
-                    witness = _validate_witness(
-                        store._read_json(evidence_path),
-                        run_identity=run_id,
-                        plan_identity=identity,
-                        ordinal=ordinal,
-                        step=step,
-                        operation_identity=operation_identity,
-                        binding=execution_binding,
-                        parent_compensation_plan_id=identity if compensation else None,
-                    )
-                    _verify_live_postcondition(root, witness)
-                except CurationError:
-                    return {
-                        **reconstructed,
-                        "action": "status",
-                        "mutated": False,
-                        "phase": "blocked",
-                        "error_code": "CURATION_OUTCOME_UNCERTAIN",
-                        "recovery": "blocked",
-                    }
-                recovery = "receipt-required"
-            elif preparation is not None:
+            if preparation is not None:
                 placement = _prepared_placement(root, preparation)
                 recovery = {
                     "prior": "retry-uncommitted",
@@ -2025,7 +2150,17 @@ def status(vault_root: Path, *, run_id: str) -> dict[str, Any]:
                 "active_step": step["step_id"],
             }
             return _compensation_phase(result, compensation=compensation)
-    result = {**reconstructed, "action": "status", "mutated": False, "recovery": None}
+    result = {
+        **reconstructed,
+        "action": "status",
+        "mutated": False,
+        "recovery": None,
+        **(
+            {"active_step": next_item[1]["step_id"]}
+            if next_item is not None
+            else {}
+        ),
+    }
     return _compensation_phase(result, compensation=compensation)
 
 
@@ -2065,6 +2200,50 @@ class CurationStore:
                     "CURATION_PATH_UNSAFE", "curation path could not be inspected"
                 ) from error
 
+    def _vault_relative(self, target: Path) -> PurePosixPath:
+        try:
+            relative = target.absolute().relative_to(self.vault_root.absolute())
+        except ValueError as error:
+            raise _error("CURATION_PATH_UNSAFE", "curation artifact escapes the vault") from error
+        lexical = PurePosixPath(relative.as_posix())
+        if not lexical.parts or any(part in {"", ".", ".."} for part in lexical.parts):
+            raise _error("CURATION_PATH_UNSAFE", "curation artifact path is invalid")
+        return lexical
+
+    @staticmethod
+    def _held_error(error: held_fs.HeldFsError | None) -> NoReturn:
+        code = error.code if error is not None else "IO_REFUSED"
+        if code in {"UNSAFE_PATH", "IDENTITY_CHANGED", "CROSS_DEVICE"}:
+            raise _error("CURATION_PATH_UNSAFE", "curation artifact crosses an unsafe path")
+        if code == "MISSING":
+            raise _error("CURATION_RUN_NOT_FOUND", "curation artifact does not exist")
+        raise _error("CURATION_ARTIFACT_CORRUPT", "curation artifact is unreadable")
+
+    def _artifact_records(
+        self, directory: Path, *, recursive: bool
+    ) -> tuple[held_fs.SagaRecord, ...]:
+        """Enumerate one governed directory through retained no-follow handles."""
+        self._assert_safe(directory)
+        relative = self._vault_relative(directory).as_posix()
+        acquired = held_fs.acquire(self.vault_root)
+        if not acquired.ok:
+            self._held_error(acquired.error)
+        with acquired.require() as filesystem:
+            opened = filesystem.parent(relative)
+            if not opened.ok:
+                if opened.error is not None and opened.error.code == "MISSING":
+                    return ()
+                self._held_error(opened.error)
+            with opened.require() as parent:
+                observed = (
+                    filesystem.enumerate(parent)
+                    if recursive
+                    else filesystem.children(parent)
+                )
+                if not observed.ok:
+                    self._held_error(observed.error)
+                return observed.require()
+
     def run_dir(self, run_identity: str) -> Path:
         if not re.fullmatch(r"cur-[0-9]{8}-[0-9a-f]{12}", str(run_identity)):
             raise _error("INVALID_RUN_ID", "run id has an invalid shape")
@@ -2096,16 +2275,44 @@ class CurationStore:
 
     def _read_json(self, path: Path) -> Any:
         self._assert_safe(path)
+        relative = self._vault_relative(path)
+        parent_relative = PurePosixPath(*relative.parts[:-1]).as_posix()
+        acquired = held_fs.acquire(self.vault_root)
+        if not acquired.ok:
+            self._held_error(acquired.error)
         try:
-            stat = path.lstat()
-            if not path.is_file() or stat.st_size > MAX_PLAN_BYTES * 4:
-                raise _error("CURATION_ARTIFACT_CORRUPT", "curation artifact is not a bounded file")
-            with path.open("r", encoding="utf-8") as handle:
-                return json.load(handle)
+            with acquired.require() as filesystem:
+                opened_parent = filesystem.parent(parent_relative)
+                if not opened_parent.ok:
+                    self._held_error(opened_parent.error)
+                with opened_parent.require() as parent:
+                    opened_file = filesystem.file(parent, relative.name)
+                    if not opened_file.ok:
+                        self._held_error(opened_file.error)
+                    with opened_file.require() as file:
+                        descriptor = getattr(file, "descriptor", None)
+                        if not isinstance(descriptor, int):
+                            raise _error(
+                                "CURATION_ARTIFACT_CORRUPT",
+                                "curation artifact has no retained descriptor",
+                            )
+                        if os.fstat(descriptor).st_size > MAX_PLAN_BYTES * 4:
+                            raise _error(
+                                "CURATION_ARTIFACT_CORRUPT",
+                                "curation artifact is not a bounded file",
+                            )
+                        read = filesystem.read(file)
+                        if not read.ok:
+                            self._held_error(read.error)
+                        raw = read.require()
+                        if len(raw) > MAX_PLAN_BYTES * 4:
+                            raise _error(
+                                "CURATION_ARTIFACT_CORRUPT",
+                                "curation artifact is not a bounded file",
+                            )
+                        return json.loads(raw.decode("utf-8"))
         except CurationError:
             raise
-        except FileNotFoundError as error:
-            raise _error("CURATION_RUN_NOT_FOUND", "curation artifact does not exist") from error
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
             raise _error("CURATION_ARTIFACT_CORRUPT", "curation artifact is unreadable") from error
 
@@ -2122,6 +2329,7 @@ class CurationStore:
             raise _error(code, "curation artifact write was refused") from error
 
     def _create_plan_at(self, path: Path, plan: Mapping[str, Any]) -> None:
+        _require_plan_relocation_history(self.vault_root, plan)
         identity = plan_id(plan)
         base = {
             key: value
@@ -2172,6 +2380,7 @@ class CurationStore:
         today: dt.date | None = None,
     ) -> dict[str, Any]:
         validated = validate_forward_plan(plan)
+        _require_plan_relocation_history(self.vault_root, validated)
         sealed = {
             **validated,
             "binding_manifest": json.loads(canonical_json(list(binding_manifest))),
@@ -2335,11 +2544,20 @@ class CurationStore:
 
     def _receipt_records(self, run_identity: str) -> list[dict[str, Any]]:
         root = self.receipts_dir(run_identity)
-        self._assert_safe(root)
-        if not root.exists():
-            return []
         records: list[dict[str, Any]] = []
-        for path in sorted(root.glob("*/*.json")):
+        paths: list[Path] = []
+        for record in self._artifact_records(root, recursive=True):
+            relative = PurePosixPath(record.relative_path)
+            if (
+                record.identity.kind == "file"
+                and len(relative.parts) == 2
+                and re.fullmatch(
+                    r"[0-9]{3}-[A-Za-z0-9][A-Za-z0-9._-]{0,79}", relative.parts[0]
+                )
+                and re.fullmatch(r"[0-9]{4}\.json", relative.parts[1])
+            ):
+                paths.append(root / Path(*relative.parts))
+        for path in sorted(paths):
             value = self._read_json(path)
             if not isinstance(value, Mapping):
                 raise _error("CURATION_ARTIFACT_CORRUPT", "receipt is not an object")

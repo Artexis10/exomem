@@ -21,14 +21,23 @@
     "preview",
     "status"
   ],
+  "action_authority": {
+    "work-item": "structural_suggestions",
+    "propose": "structural_suggestions",
+    "preview": "structural_suggestions",
+    "status": "structural_suggestions",
+    "propose-compensation": "structural_suggestions",
+    "apply": "restructure_execution",
+    "resume": "restructure_execution",
+    "apply-compensation": "restructure_execution"
+  },
   "confirmation_required_actions": [
-    "propose",
     "apply",
-    "resume",
-    "propose-compensation",
     "apply-compensation"
   ],
-  "mutation_class": "restructure_execution",
+  "approved_plan_resume_actions": [
+    "resume"
+  ],
   "cases": [
     {
       "id": "explicit-work-item-read",
@@ -47,9 +56,32 @@
       "arguments": {
         "mode": "curation",
         "curation_action": "preview",
-        "run_id": "cur-11111111111111111111"
+        "run_id": "cur-20300101-111111111111"
       },
       "classification": "read_only",
+      "admission": "allow"
+    },
+    {
+      "id": "agent-authored-plan-proposal",
+      "arguments": {
+        "mode": "curation",
+        "curation_action": "propose",
+        "plan": {
+          "version": 1,
+          "title": "Synthetic curation plan",
+          "steps": [
+            {
+              "step_id": "synthetic-note",
+              "kind": "create-note",
+              "args": {
+                "title": "Synthetic conclusion",
+                "content": "Synthetic durable content."
+              }
+            }
+          ]
+        }
+      },
+      "classification": "structural_suggestions",
       "admission": "allow"
     },
     {
@@ -57,7 +89,7 @@
       "arguments": {
         "mode": "curation",
         "curation_action": "apply",
-        "run_id": "cur-11111111111111111111",
+        "run_id": "cur-20300101-111111111111",
         "plan_id": "1111111111111111111111111111111111111111111111111111111111111111",
         "expected_plan_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222",
         "why": "Apply the exact reviewed synthetic plan."
@@ -65,6 +97,29 @@
       "classification": "restructure_execution",
       "admission": "confirm_required",
       "maximum_content_steps": 1
+    },
+    {
+      "id": "approved-plan-resume",
+      "arguments": {
+        "mode": "curation",
+        "curation_action": "resume",
+        "run_id": "cur-20300101-111111111111",
+        "plan_id": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "classification": "restructure_execution",
+      "admission": "approved_plan_only",
+      "fresh_confirmation_required": false,
+      "maximum_content_steps": 1
+    },
+    {
+      "id": "compensation-plan-proposal",
+      "arguments": {
+        "mode": "curation",
+        "curation_action": "propose-compensation",
+        "run_id": "cur-20300101-111111111111"
+      },
+      "classification": "structural_suggestions",
+      "admission": "allow"
     },
     {
       "id": "unknown-action-fails-closed",

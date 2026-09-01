@@ -58,10 +58,26 @@ def test_canonical_plan_json_preserves_unicode_and_derives_exact_identities() ->
     assert curation.run_id(validated, today=dt.date(2026, 9, 1)) == (
         f"cur-20260901-{expected_plan_id[:12]}"
     )
-    assert (
-        curation.operation_id(expected_plan_id, 0, "fix-finnish")
-        == hashlib.sha256(f"{expected_plan_id}0fix-finnish".encode()).hexdigest()
+    operation_bytes = curation.canonical_json_bytes(
+        ["exomem-curation-operation-v1", expected_plan_id, 0, "fix-finnish"]
     )
+    assert curation.operation_id(expected_plan_id, 0, "fix-finnish") == hashlib.sha256(
+        operation_bytes
+    ).hexdigest()
+
+
+def test_operation_identity_uses_an_unambiguous_domain_separated_tuple() -> None:
+    from exomem import curation
+
+    plan_identity = "a" * 64
+    assert curation.operation_id(plan_identity, 1, "23") != curation.operation_id(
+        plan_identity, 12, "3"
+    )
+    operations = {
+        curation.operation_id(plan_identity, ordinal, step_id)
+        for ordinal, step_id in enumerate(("first", "second", "third"))
+    }
+    assert len(operations) == 3
 
 
 @pytest.mark.parametrize(

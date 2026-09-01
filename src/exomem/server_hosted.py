@@ -1165,6 +1165,15 @@ def register_hosted_routes(
                 tool=command.name,
             )
             if (
+                command.name == "maintain_memory"
+                and kwargs.get("mode") == "curation"
+                and not any(param.name == "curation_action" for param in command.params)
+            ):
+                raise cli_ops.OpError(
+                    "INVALID_MODE",
+                    "the pinned Hosted profile does not admit curation",
+                )
+            if (
                 command.name == "record_memory"
                 and kwargs.get("action") in {"revise", "rebaseline"}
                 and not config.lifecycle_actions_enabled

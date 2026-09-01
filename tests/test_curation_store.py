@@ -66,6 +66,72 @@ def test_store_refuses_symlinked_run_ancestors(vault: Path, tmp_path: Path) -> N
     assert list(external.iterdir()) == []
 
 
+def test_store_read_holds_ancestors_when_run_is_swapped_to_external_symlink(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import curation
+
+    store = curation.CurationStore(vault)
+    stored = store.create_forward(_stored_plan(), binding_manifest=[], registry_ids={})
+    run_dir = store.run_dir(stored["run_id"])
+    parked = run_dir.with_name(f"{run_dir.name}-parked")
+    external = tmp_path / "external-run"
+    external.mkdir()
+    (external / "plan.json").write_text('{"outside":"must-not-be-read"}', encoding="utf-8")
+
+    real_assert = curation.CurationStore._assert_safe
+    swapped = False
+
+    def swap_after_path_check(self, target: Path) -> None:  # noqa: ANN001
+        nonlocal swapped
+        real_assert(self, target)
+        if not swapped and target == store.plan_path(stored["run_id"]):
+            run_dir.rename(parked)
+            os.symlink(external, run_dir, target_is_directory=True)
+            swapped = True
+
+    monkeypatch.setattr(curation.CurationStore, "_assert_safe", swap_after_path_check)
+
+    with pytest.raises(curation.CurationError, match="CURATION_PATH_UNSAFE"):
+        store._read_json(store.plan_path(stored["run_id"]))
+    assert swapped
+
+
+def test_store_publication_boundary_refuses_relocation_before_any_run_artifact(
+    vault: Path,
+) -> None:
+    from exomem import curation
+
+    plan = {
+        "version": 1,
+        "title": "Unsupported relocation",
+        "steps": [
+            {
+                "step_id": "move",
+                "kind": "move",
+                "args": {
+                    "old_path": "Knowledge Base/Notes/Insights/old.md",
+                    "new_path": "Knowledge Base/Notes/Insights/new.md",
+                },
+            }
+        ],
+    }
+    store = curation.CurationStore(vault)
+    with pytest.raises(curation.CurationError, match="CURATION_RENAME_HISTORY_UNPROVABLE"):
+        store.create_forward(plan, binding_manifest=[], registry_ids={})
+    assert not store.root.exists()
+
+    sealed = {
+        **curation.validate_forward_plan(plan),
+        "binding_manifest": [],
+        "registry_ids": {},
+    }
+    direct_run_id = "cur-20260901-111111111111"
+    with pytest.raises(curation.CurationError, match="CURATION_RENAME_HISTORY_UNPROVABLE"):
+        store._create_plan_at(store.plan_path(direct_run_id), sealed)
+    assert not store.root.exists()
+
+
 def test_state_reconstructs_from_immutable_approval_witness_and_receipt(vault: Path) -> None:
     from exomem import curation
 

@@ -1615,6 +1615,15 @@ def test_frozen_hosted_v4_neither_advertises_nor_admits_curation(
     assert refused.json()["error"]["code"] == "UNKNOWN_PARAM"
     assert invoker.calls == []
 
+    mode_only = client.post(
+        f"{route}/command/maintain_memory",
+        headers=headers,
+        json={"mode": "curation"},
+    )
+    assert mode_only.status_code == 400, mode_only.text
+    assert mode_only.json()["error"]["code"] == "INVALID_MODE"
+    assert invoker.calls == []
+
 
 def test_hosted_pending_error_omits_absent_public_idempotency_key(
     tmp_path: Path,

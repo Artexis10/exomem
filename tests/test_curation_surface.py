@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,39 @@ from exomem.writer_lease import LeaseConfig, LeaseManager
 def _command():  # noqa: ANN202
     return next(
         command for command in product_commands_for("mcp") if command.name == "maintain_memory"
+    )
+
+
+def test_hosted_v5_contribution_separates_proposal_and_execution_authority() -> None:
+    fixture = Path("tests/fixtures/hosted_v5_contributions/governed_curation.json")
+    value = json.loads(fixture.read_text(encoding="utf-8"))
+
+    assert value["action_authority"] == {
+        "work-item": "structural_suggestions",
+        "propose": "structural_suggestions",
+        "preview": "structural_suggestions",
+        "status": "structural_suggestions",
+        "propose-compensation": "structural_suggestions",
+        "apply": "restructure_execution",
+        "resume": "restructure_execution",
+        "apply-compensation": "restructure_execution",
+    }
+    assert value["confirmation_required_actions"] == ["apply", "apply-compensation"]
+    assert value["approved_plan_resume_actions"] == ["resume"]
+
+    cases = {case["id"]: case for case in value["cases"]}
+    assert cases["agent-authored-plan-proposal"]["classification"] == (
+        "structural_suggestions"
+    )
+    assert cases["compensation-plan-proposal"]["classification"] == (
+        "structural_suggestions"
+    )
+    assert cases["approved-plan-resume"]["admission"] == "approved_plan_only"
+    run_shape = re.compile(r"^cur-[0-9]{8}-[0-9a-f]{12}$")
+    assert all(
+        run_shape.fullmatch(case["arguments"]["run_id"])
+        for case in value["cases"]
+        if "run_id" in case["arguments"]
     )
 
 

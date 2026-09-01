@@ -267,6 +267,71 @@ def test_after_leaf_crash_status_does_not_repair_and_resume_never_reexecutes_lea
     assert calls == 1
 
 
+def test_leaf_witness_dominates_a_post_commit_catalog_delivery_error(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import curation
+
+    proposed = _propose(vault, _create_step("catalog", "curation-catalog-uncertain"))
+    real = commands.op_remember
+
+    def commit_then_raise(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        real(*args, **kwargs)
+        raise ValueError(
+            "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN: canonical bytes committed"
+        )
+
+    monkeypatch.setattr(commands, "op_remember", commit_then_raise)
+
+    recovered = _apply(vault, proposed)
+
+    assert recovered["phase"] == "completed"
+    assert recovered["step"]["outcome"] == "recovered-committed"
+    assert all(
+        receipt["outcome"] != "failed"
+        for receipt in curation.CurationStore(vault).reconstruct(proposed["run_id"])["receipts"]
+    )
+
+
+def test_status_and_resume_recover_leaf_witness_after_projection_state_loss(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import curation
+
+    proposed = _propose(vault, _create_step("state-loss", "curation-state-loss"))
+    calls = 0
+    real = commands.op_remember
+
+    def counted(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal calls
+        calls += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(commands, "op_remember", counted)
+
+    def fault(name: str) -> None:
+        if name == "after-leaf-witness":
+            raise curation.CurationFault(name)
+
+    monkeypatch.setattr(curation, "_fault_barrier", fault)
+    with pytest.raises(curation.CurationFault, match="after-leaf-witness"):
+        _apply(vault, proposed)
+
+    store = curation.CurationStore(vault)
+    store.state_path(proposed["run_id"]).unlink()
+    inspected = curation.status(vault, run_id=proposed["run_id"])
+    assert inspected["phase"] == "executing"
+    assert inspected["active_step"] == "state-loss"
+    assert inspected["recovery"] == "receipt-required"
+    assert not store.state_path(proposed["run_id"]).exists()
+
+    monkeypatch.setattr(curation, "_fault_barrier", lambda _name: None)
+    recovered = curation.resume(vault, run_id=proposed["run_id"], plan_id=proposed["plan_id"])
+    assert recovered["phase"] == "completed"
+    assert recovered["step"]["outcome"] == "recovered-committed"
+    assert calls == 1
+
+
 def test_delete_proposal_uses_canonical_inbound_guard(vault: Path) -> None:
     from exomem import curation
 
@@ -393,26 +458,19 @@ def test_relocation_steps_refuse_before_transition_publication_or_rename(
         "title": "Direct sealed relocation",
         "steps": [plans[0]],
     }
-    direct = curation.CurationStore(vault).create_forward(
-        direct_plan,
-        binding_manifest=[curation._prepare_step(vault, plans[0], 0)],
-        registry_ids=curation.registry_identities(vault),
-    )
+    store = curation.CurationStore(vault)
     with pytest.raises(
         curation.CurationError, match="CURATION_RENAME_HISTORY_UNPROVABLE"
     ):
-        curation.apply(
-            vault,
-            run_id=direct["run_id"],
-            plan_id=direct["plan_id"],
-            expected_plan_fingerprint=direct["plan_fingerprint"],
-            why="This must refuse before relocation authorization.",
+        store.create_forward(
+            direct_plan,
+            binding_manifest=[curation._prepare_step(vault, plans[0], 0)],
+            registry_ids=curation.registry_identities(vault),
         )
 
     assert rename_calls == []
-    assert not curation.CurationStore(vault).approval_path(direct["run_id"]).exists()
     runs = vault / "Knowledge Base/_Governance/curation/runs"
-    assert not runs.exists() or list(runs.rglob("transitions")) == []
+    assert not runs.exists()
 
 
 def test_matching_relocation_hashes_cannot_authorize_placement_recovery(vault: Path) -> None:
