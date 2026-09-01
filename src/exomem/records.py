@@ -710,12 +710,17 @@ def create_collection(
             ),
         )
         try:
+            source_is_written = any(write.path == source for write in writes)
             vault.batch_atomic_write(
                 [*writes, *log_plan.writes],
                 vault_root=root,
                 required_guards=(
                     *_portable_absence_guards(root, path, source),
-                    *((source_guard,) if source_guard is not None else ()),
+                    *(
+                        (source_guard,)
+                        if source_guard is not None and not source_is_written
+                        else ()
+                    ),
                 ),
             )
         except vault.BatchWriteError:
