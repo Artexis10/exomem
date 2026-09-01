@@ -487,35 +487,61 @@ def _fenced_block_after(path: Path, anchor: str) -> str:
     return tail[opening.end() :].split("```", 1)[0]
 
 
+def _fenced_blocks_after(path: Path, anchor: str) -> list[str]:
+    """Return every complete copyable fence after an exact section anchor."""
+    tail = path.read_text(encoding="utf-8").split(anchor, 1)[1]
+    return [
+        match.group(1)
+        for match in re.finditer(r"```[^\n]*\n(.*?)```", tail, re.DOTALL)
+    ]
+
+
 def test_every_actual_copyable_instruction_fits_the_web_byte_budget() -> None:
     prominence_doc = ROOT / "docs" / "prominence.md"
-    quickstart = _fenced_block_after(
-        ROOT / "QUICKSTART.md",
-        "### Make the KB proactive in the Claude app (custom instructions)",
+    blocks = [
+        (
+            "prominence maximal",
+            _fenced_block_after(
+                prominence_doc, "### Maximal — recommended for web and hosted"
+            ),
+        ),
+        (
+            "prominence balanced",
+            _fenced_block_after(
+                prominence_doc, "### Balanced — the default where hooks exist"
+            ),
+        ),
+        (
+            "prominence light",
+            _fenced_block_after(
+                prominence_doc, "### Light — when it is getting in the way"
+            ),
+        ),
+        (
+            "prominence off",
+            _fenced_block_after(
+                prominence_doc, "### Off — explicit invocation only"
+            ),
+        ),
+        (
+            "assistant guide",
+            _fenced_block_after(
+                ROOT / "docs" / "ai-assistant-guide.md",
+                "## Copyable instruction block",
+            ),
+        ),
+    ]
+    blocks.extend(
+        (f"quickstart fence {index}", block)
+        for index, block in enumerate(
+            _fenced_blocks_after(
+                ROOT / "QUICKSTART.md",
+                "### Make the KB proactive in the Claude app (custom instructions)",
+            ),
+            start=1,
+        )
     )
-    # QUICKSTART explicitly calls its first paragraph optional tone guidance;
-    # the Exomem paragraph is the standing instruction users paste into the
-    # separately capped custom-instructions field.
-    quickstart_exomem = "I keep" + quickstart.split("I keep", 1)[1]
-    blocks = {
-        "prominence maximal": _fenced_block_after(
-            prominence_doc, "### Maximal — recommended for web and hosted"
-        ),
-        "prominence balanced": _fenced_block_after(
-            prominence_doc, "### Balanced — the default where hooks exist"
-        ),
-        "prominence light": _fenced_block_after(
-            prominence_doc, "### Light — when it is getting in the way"
-        ),
-        "prominence off": _fenced_block_after(
-            prominence_doc, "### Off — explicit invocation only"
-        ),
-        "assistant guide": _fenced_block_after(
-            ROOT / "docs" / "ai-assistant-guide.md", "## Copyable instruction block"
-        ),
-        "quickstart": quickstart_exomem,
-    }
-    for name, block in blocks.items():
+    for name, block in blocks:
         size = len(block.rstrip().encode("utf-8"))
         assert size <= 1_500, f"{name} is {size} bytes, over the 1,500-byte web cap"
 
