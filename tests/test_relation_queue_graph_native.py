@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from exomem import (
     find,
     freshness,
     graph_sync,
+    memory_refs,
     relation_queue,
     semantic_contract,
     vault,
@@ -284,6 +286,340 @@ def test_hinted_triage_revalidates_only_one_source(
     assert result["state"] == "dismissed"
     assert result["path"] == source
     assert page_reads == [source]
+
+
+def test_hinted_decisions_do_not_rebuild_cold_reference_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "vault"
+    source = f"{KB}/source.md"
+    target = f"{KB}/target.md"
+    source_file = root / source
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text(
+        "---\ntype: insight\nstatus: active\n"
+        "exomem_id: 11111111-1111-4111-8111-111111111111\n"
+        "---\n# Source\n\n"
+        f"See [[{target.removesuffix('.md')}]].\n",
+        encoding="utf-8",
+    )
+    target_file = root / target
+    target_file.write_text(
+        "---\ntype: insight\nstatus: active\n"
+        "exomem_id: 22222222-2222-4222-8222-222222222222\n"
+        "---\n# Target\n\nA target.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    _build_current(root)
+    semantic_contract.build_corpus_context(root)
+    assert semantic_contract.current_reference_identity_snapshot(root) is not None
+    assert not memory_refs.sidecar_path(root).exists()
+    item = _items(relation_queue.build_queue(root))[0]
+
+    monkeypatch.setattr(
+        memory_refs.ReferenceIndex,
+        "rebuild_all",
+        lambda *_args, **_kwargs: pytest.fail("hinted decision rebuilt refs corpus"),
+    )
+    monkeypatch.setattr(
+        memory_refs,
+        "_scan_pages",
+        lambda *_args, **_kwargs: pytest.fail("hinted decision scanned refs corpus"),
+    )
+    monkeypatch.setattr(
+        find,
+        "_walk_md",
+        lambda *_args, **_kwargs: pytest.fail("hinted decision walked Markdown"),
+    )
+
+    resolved = relation_queue.resolve_candidate(
+        root, item["ref"], source_path=item["source_path"]
+    )
+    assert resolved.fingerprint == item["fingerprint"]
+    accepted = relation_queue.accept(
+        root,
+        ref=item["ref"],
+        source_path=item["source_path"],
+        expected_hash=item["source_content_hash"],
+        expected_fingerprint=item["fingerprint"],
+        why="Accept with cached identity authority.",
+        edit_memory=lambda *_args, **_kwargs: {"mutated": True},
+    )
+    triaged = relation_queue.triage(
+        root,
+        ref=item["ref"],
+        source_path=item["source_path"],
+        action="dismiss",
+        expected_fingerprint=item["fingerprint"],
+        why="Triage with cached identity authority.",
+    )
+    assert accepted["fingerprint"] == item["fingerprint"]
+    assert triaged["state"] == "dismissed"
+
+
+def _current_title_authored_case(
+    root: Path,
+) -> tuple[Path, dict[str, Any]]:
+    source = f"{KB}/source.md"
+    target = f"{KB}/opaque-target.md"
+    source_file = _write(root, source, f"See [[{target.removesuffix('.md')}]].")
+    target_file = root / target
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text(
+        "---\ntype: insight\nstatus: active\ntitle: Readable Target\n---\n"
+        "# Opaque target\n\nA target.\n",
+        encoding="utf-8",
+    )
+    _build_current(root)
+    item = next(
+        queued
+        for queued in _items(relation_queue.build_queue(root))
+        if queued["from"] == source and queued["to"] == target
+    )
+    source_file.write_text(
+        source_file.read_text(encoding="utf-8")
+        + "\n## Relations\n\n- links_to [[Readable Target]]\n",
+        encoding="utf-8",
+    )
+    current = relation_queue.resolve_candidate(
+        root, item["ref"], source_path=item["source_path"]
+    )
+    return source_file, {**item, "fingerprint": current.fingerprint}
+
+
+def test_hinted_accept_refreshes_when_authored_title_query_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "vault"
+    source_file, item = _current_title_authored_case(root)
+    original_open = epistemic_graph.EpistemicGraphIndex._open_read_snapshot
+
+    class ErroringTitleConnection:
+        def __init__(self, connection: Any):
+            self.connection = connection
+
+        def execute(self, sql: str, *args: Any, **kwargs: Any):
+            if "SELECT title FROM graph_nodes" in sql:
+                raise sqlite3.OperationalError("synthetic title read failure")
+            return self.connection.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.connection, name)
+
+    def open_erroring(self: Any, *args: Any, **kwargs: Any):
+        connection = original_open(self, *args, **kwargs)
+        return ErroringTitleConnection(connection) if connection is not None else None
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "_open_read_snapshot",
+        open_erroring,
+    )
+    edits: list[dict[str, Any]] = []
+    with pytest.raises(ValueError, match="REVIEW_REFRESH_REQUIRED"):
+        relation_queue.accept(
+            root,
+            ref=item["ref"],
+            source_path=item["source_path"],
+            expected_hash=vault.content_hash(source_file.read_text(encoding="utf-8")),
+            expected_fingerprint=item["fingerprint"],
+            why="Fail closed when title authority errors.",
+            edit_memory=lambda *_args, **kwargs: edits.append(kwargs)
+            or {"mutated": True},
+        )
+    assert edits == []
+
+
+def test_hinted_accept_refreshes_when_authored_snapshot_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "vault"
+    source_file, item = _current_title_authored_case(root)
+    original_guard = relation_queue._current_candidate_is_authored
+    original_open = epistemic_graph.EpistemicGraphIndex._open_read_snapshot
+    inside_guard = False
+
+    def guarded(*args: Any, **kwargs: Any):
+        nonlocal inside_guard
+        inside_guard = True
+        try:
+            return original_guard(*args, **kwargs)
+        finally:
+            inside_guard = False
+
+    def unavailable_in_guard(self: Any, *args: Any, **kwargs: Any):
+        if inside_guard:
+            return None
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(relation_queue, "_current_candidate_is_authored", guarded)
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "_open_read_snapshot",
+        unavailable_in_guard,
+    )
+    edits: list[dict[str, Any]] = []
+    with pytest.raises(ValueError, match="REVIEW_REFRESH_REQUIRED"):
+        relation_queue.accept(
+            root,
+            ref=item["ref"],
+            source_path=item["source_path"],
+            expected_hash=vault.content_hash(source_file.read_text(encoding="utf-8")),
+            expected_fingerprint=item["fingerprint"],
+            why="Fail closed when title authority is unavailable.",
+            edit_memory=lambda *_args, **kwargs: edits.append(kwargs)
+            or {"mutated": True},
+        )
+    assert edits == []
+
+
+def test_live_authored_guard_preserves_ambiguous_same_stem_relation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "vault"
+    source = f"{KB}/source.md"
+    target_a = f"{KB}/Area-A/same.md"
+    target_b = f"{KB}/Area-B/same.md"
+    source_file = _write(root, source, f"See [[{target_a.removesuffix('.md')}]].")
+    _write(root, target_a, "Area A target.")
+    _write(root, target_b, "Area B target.")
+    _build_current(root)
+    item = next(
+        queued
+        for queued in _items(relation_queue.build_queue(root))
+        if queued["from"] == source and queued["to"] == target_a
+    )
+    source_file.write_text(
+        source_file.read_text(encoding="utf-8")
+        + "\n## Relations\n\n- links_to [[same]]\n",
+        encoding="utf-8",
+    )
+    current = relation_queue.resolve_candidate(
+        root, item["ref"], source_path=item["source_path"]
+    )
+    edits: list[dict[str, Any]] = []
+    accepted = relation_queue.accept(
+        root,
+        ref=item["ref"],
+        source_path=item["source_path"],
+        expected_hash=vault.content_hash(source_file.read_text(encoding="utf-8")),
+        expected_fingerprint=current.fingerprint,
+        why="Do not retarget an ambiguous bare relation.",
+        edit_memory=lambda *_args, **kwargs: edits.append(kwargs) or {"mutated": True},
+    )
+    assert accepted["accepted"] is True
+    assert len(edits) == 1
+
+
+def test_live_authored_guard_preserves_stem_title_collision(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "vault"
+    source = f"{KB}/source.md"
+    target = f"{KB}/Area-A/same.md"
+    titled_other = f"{KB}/Area-B/opaque.md"
+    source_file = _write(root, source, f"See [[{target.removesuffix('.md')}]].")
+    _write(root, target, "The stem match.")
+    titled_file = root / titled_other
+    titled_file.parent.mkdir(parents=True, exist_ok=True)
+    titled_file.write_text(
+        "---\ntype: insight\nstatus: active\ntitle: same\n---\n"
+        "# Opaque\n\nThe title match.\n",
+        encoding="utf-8",
+    )
+    _build_current(root)
+    item = next(
+        queued
+        for queued in _items(relation_queue.build_queue(root))
+        if queued["from"] == source and queued["to"] == target
+    )
+    source_file.write_text(
+        source_file.read_text(encoding="utf-8")
+        + "\n## Relations\n\n- links_to [[same]]\n",
+        encoding="utf-8",
+    )
+    current = relation_queue.resolve_candidate(
+        root, item["ref"], source_path=item["source_path"]
+    )
+    edits: list[dict[str, Any]] = []
+    accepted = relation_queue.accept(
+        root,
+        ref=item["ref"],
+        source_path=item["source_path"],
+        expected_hash=vault.content_hash(source_file.read_text(encoding="utf-8")),
+        expected_fingerprint=current.fingerprint,
+        why="Do not choose between a stem and title collision.",
+        edit_memory=lambda *_args, **kwargs: edits.append(kwargs) or {"mutated": True},
+    )
+    assert accepted["accepted"] is True
+    assert len(edits) == 1
+
+
+@pytest.mark.parametrize(
+    ("case", "target", "target_text", "authored_target"),
+    [
+        (
+            "exact-path",
+            f"{KB}/Area-A/same.md",
+            "A target.",
+            f"{KB}/Area-A/same",
+        ),
+        ("unique-stem", f"{KB}/Area-A/same.md", "A target.", "same"),
+        (
+            "unique-title",
+            f"{KB}/Area-A/opaque.md",
+            "---\ntype: insight\nstatus: active\ntitle: Readable Target\n---\n"
+            "# Opaque\n\nA target.\n",
+            "Readable Target",
+        ),
+    ],
+)
+def test_live_authored_guard_blocks_exact_and_unique_targets(
+    tmp_path: Path,
+    case: str,
+    target: str,
+    target_text: str,
+    authored_target: str,
+) -> None:
+    root = tmp_path / case
+    source = f"{KB}/source.md"
+    source_file = _write(root, source, f"See [[{target.removesuffix('.md')}]].")
+    if case == "unique-title":
+        target_file = root / target
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        target_file.write_text(target_text, encoding="utf-8")
+    else:
+        _write(root, target, target_text)
+    _build_current(root)
+    item = next(
+        queued
+        for queued in _items(relation_queue.build_queue(root))
+        if queued["from"] == source and queued["to"] == target
+    )
+    source_file.write_text(
+        source_file.read_text(encoding="utf-8")
+        + f"\n## Relations\n\n- links_to [[{authored_target}]]\n",
+        encoding="utf-8",
+    )
+    current = relation_queue.resolve_candidate(
+        root, item["ref"], source_path=item["source_path"]
+    )
+    with pytest.raises(ValueError, match=r"REVIEW_ITEM_CHANGED.*authored_edge"):
+        relation_queue.accept(
+            root,
+            ref=item["ref"],
+            source_path=item["source_path"],
+            expected_hash=vault.content_hash(source_file.read_text(encoding="utf-8")),
+            expected_fingerprint=current.fingerprint,
+            why="Block an exactly resolved current relation.",
+            edit_memory=lambda *_args, **_kwargs: pytest.fail(
+                "authored candidate reached edit"
+            ),
+        )
 
 
 @pytest.mark.parametrize("decision", ("accept", "triage"))

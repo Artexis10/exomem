@@ -22,12 +22,14 @@ from pathlib import Path
 from typing import Any
 
 from . import activation as activation_module
+from . import context_refs, relation_registry, semantic_language_registry, semantic_units
 from . import epistemic_graph as epistemic_graph_module
 from . import find as find_module
 from . import graph_sync as graph_sync_module
-from . import relation_registry, semantic_language_registry, semantic_units
 from . import review_state as review_state_module
+from . import semantic_contract as semantic_contract_module
 from . import vault as vault_module
+from .kbdir import kb_dirname
 from .vault import kb_root
 
 RELATION_REVIEW_PREFIX = "exomem://review/relation/"
@@ -43,6 +45,7 @@ class ResolvedCandidate:
     candidate: dict[str, Any]
     target_ref: str
     source_page: Any | None = None
+    identity_refs: tuple[str, str] | None = None
 
 
 def is_relation_ref(value: str) -> bool:
@@ -170,46 +173,78 @@ def _current_candidate_is_authored(
     vault_root: Path,
     page: Any,
     candidate: dict[str, Any],
-) -> bool:
-    """Check one candidate against canonical relations on the current page."""
+) -> bool | None:
+    """Check current Markdown using bounded graph title/ambiguity authority.
+
+    ``None`` means the graph authority needed to make the decision was not
+    available.  Accept treats that as refresh-required rather than guessing.
+    """
     relation_type = str(candidate.get("relation_type") or "")
     target = epistemic_graph_module._with_md(str(candidate.get("to") or ""))
     if not relation_type or not target:
         return False
     index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
     connection = index._open_read_snapshot()
-    title: str | None = None
-    if connection is not None:
-        try:
-            row = connection.execute(
-                "SELECT title FROM graph_nodes WHERE kind = 'file' AND path = ?",
-                (target,),
-            ).fetchone()
-            if row is not None and row[0] is not None and str(row[0]).strip():
-                title = str(row[0])
-        except sqlite3.Error:
-            pass
-        finally:
-            connection.close()
-    resolver = vault_module.WikilinkResolver.from_entries(
-        vault_root,
-        [(target, title)],
-    )
-    for relation in _relation_document(page, vault_root).canonical_note_relations:
-        if relation.kind != relation_type:
-            continue
-        try:
-            canonical, warning = vault_module.normalize_wikilink(
-                relation.target,
+    if connection is None:
+        return None
+    try:
+        target_row = connection.execute(
+            "SELECT title FROM graph_nodes WHERE kind = 'file' AND path = ?",
+            (target,),
+        ).fetchone()
+        if target_row is None:
+            return None
+        target_title = (
+            str(target_row[0])
+            if target_row[0] is not None and str(target_row[0]).strip()
+            else None
+        )
+        for relation in _relation_document(page, vault_root).canonical_note_relations:
+            if relation.kind != relation_type:
+                continue
+            raw_target = str(relation.target or "").strip()
+            cleaned = raw_target
+            if cleaned.startswith("[[") and cleaned.endswith("]]"):
+                cleaned = cleaned[2:-2].strip()
+            cleaned = cleaned.split("|", 1)[0].split("#", 1)[0]
+            cleaned = cleaned.removesuffix(".md").strip().strip("/")
+            if "/" in cleaned:
+                entries = [(target, target_title)]
+            else:
+                suffix = f"/{cleaned}.md"
+                rows = connection.execute(
+                    "SELECT path, title FROM graph_nodes WHERE kind = 'file' "
+                    "AND (path = ? OR substr(path, -length(?)) = ? "
+                    "OR lower(title) = lower(?)) "
+                    "ORDER BY path LIMIT 3",
+                    (f"{cleaned}.md", suffix, suffix, cleaned),
+                ).fetchall()
+                if len(rows) > 1:
+                    continue
+                entries = [
+                    (str(path), str(title) if title and str(title).strip() else None)
+                    for path, title in rows
+                ]
+            resolver = vault_module.WikilinkResolver.from_entries(
                 vault_root,
-                resolver=resolver,
-                strict=False,
+                entries,
             )
-        except Exception:  # noqa: BLE001 - malformed authored links are ignored
-            continue
-        if not warning and epistemic_graph_module._with_md(canonical) == target:
-            return True
-    return False
+            try:
+                canonical, warning = vault_module.normalize_wikilink(
+                    relation.target,
+                    vault_root,
+                    resolver=resolver,
+                    strict=False,
+                )
+            except Exception:  # noqa: BLE001 - malformed authored links are ignored
+                continue
+            if not warning and epistemic_graph_module._with_md(canonical) == target:
+                return True
+        return False
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
 
 
 def _eligible_pages(vault_root: Path) -> list[Any]:
@@ -454,15 +489,82 @@ def _page_for(vault_root: Path, rel_path: str) -> Any | None:
     return find_module._parse_page(path, mtime, Path(vault_root))
 
 
-def _enrich(vault_root: Path, page: Any, candidate: dict[str, Any]) -> dict[str, Any]:
+def _fallback_ref(rel_path: str) -> str:
+    if rel_path.startswith(f"{kb_dirname()}/Sources/"):
+        return context_refs.source_ref(rel_path)
+    return context_refs.vault_ref(rel_path)
+
+
+def _hinted_candidate_refs(
+    vault_root: Path,
+    candidate: dict[str, Any],
+) -> tuple[str, str] | None:
+    """Derive Lane B's exact refs without opening or repairing the refs sidecar."""
+    from_path = epistemic_graph_module._with_md(str(candidate.get("from") or ""))
+    to_path = epistemic_graph_module._with_md(str(candidate.get("to") or ""))
+    paths = tuple(dict.fromkeys((from_path, to_path)))
+    if not all(paths):
+        return None
+    identity_snapshot = semantic_contract_module.current_reference_identity_snapshot(
+        vault_root
+    )
+    index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
+    connection = index._open_read_snapshot()
+    if connection is None:
+        return None
+    try:
+        placeholders = ",".join("?" for _ in paths)
+        rows = connection.execute(
+            "SELECT path, exomem_id FROM graph_nodes "
+            f"WHERE kind = 'file' AND path IN ({placeholders}) ORDER BY path",
+            paths,
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    identities = {str(path): exomem_id for path, exomem_id in rows}
+    if set(identities) != set(paths):
+        return None
+    if any(exomem_id is not None for exomem_id in identities.values()):
+        if identity_snapshot is None or not set(paths).issubset(
+            identity_snapshot.reference_paths
+        ):
+            return None
+        refs = {
+            path: identity_snapshot.canonical_refs_by_path[path]
+            or _fallback_ref(path)
+            for path in paths
+        }
+        if not semantic_contract_module.reference_identity_snapshot_is_current(
+            vault_root, identity_snapshot
+        ):
+            return None
+    else:
+        refs = {path: _fallback_ref(path) for path in paths}
+    return refs[from_path], refs[to_path]
+
+
+def _enrich(
+    vault_root: Path,
+    page: Any,
+    candidate: dict[str, Any],
+    *,
+    exact_refs: tuple[str, str] | None = None,
+) -> dict[str, Any]:
     from_path = str(candidate.get("from") or page.rel_path)
     to_path = str(candidate.get("to") or "")
-    refs = review_state_module.refs_for_paths(vault_root, [from_path, to_path])
+    if exact_refs is None:
+        refs = review_state_module.refs_for_paths(vault_root, [from_path, to_path])
+        from_ref = refs.get(from_path, from_path)
+        to_ref = refs.get(to_path, to_path)
+    else:
+        from_ref, to_ref = exact_refs
     review_id = _candidate_identity(candidate)
     fingerprint = _candidate_fingerprint(
         candidate,
-        from_ref=refs.get(from_path, from_path),
-        to_ref=refs.get(to_path, to_path),
+        from_ref=from_ref,
+        to_ref=to_ref,
         signal_version=_evidence_signal_version(page, candidate),
     )
     return {
@@ -475,7 +577,7 @@ def _enrich(vault_root: Path, page: Any, candidate: dict[str, Any]) -> dict[str,
         "method": candidate.get("method"),
         "evidence": candidate.get("evidence") or {},
         "bullet": _bullet(candidate),
-        "target_ref": refs.get(from_path, from_path),
+        "target_ref": from_ref,
         "state": "open",
     }
 
@@ -488,6 +590,7 @@ def _classify_candidate(
     store: review_state_module.ReviewStateStore,
     state_payload: dict[str, Any],
     authored: set[tuple[str, str]] | None = None,
+    exact_refs: tuple[str, str] | None = None,
     today=None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Apply the three read-time eligibility filters to one candidate.
@@ -510,7 +613,7 @@ def _classify_candidate(
         return "authored_edge", None
     if _is_placeholder_target(vault_root, to_path):
         return "placeholder_target", None
-    enriched = _enrich(vault_root, page, candidate)
+    enriched = _enrich(vault_root, page, candidate, exact_refs=exact_refs)
     effective, _decision = store.effective_state(
         enriched["review_id"],
         enriched["fingerprint"],
@@ -651,7 +754,15 @@ def resolve_candidate(
             continue
         if _candidate_identity(candidate) != wanted:
             continue
-        enriched = _enrich(vault_root, page, candidate)
+        identity_refs = _hinted_candidate_refs(vault_root, candidate)
+        if identity_refs is None:
+            raise _refresh_required(ref)
+        enriched = _enrich(
+            vault_root,
+            page,
+            candidate,
+            exact_refs=identity_refs,
+        )
         return ResolvedCandidate(
             review_id=enriched["review_id"],
             ref=enriched["ref"],
@@ -659,6 +770,7 @@ def resolve_candidate(
             candidate=candidate,
             target_ref=enriched["target_ref"],
             source_page=page,
+            identity_refs=identity_refs,
         )
     raise _refresh_required(ref)
 
@@ -742,6 +854,9 @@ def accept(
             "REVIEW_ITEM_CHANGED: the relation candidate's source page no longer "
             f"exists; refresh the queue and inspect {ref} again"
         )
+    authored_now = _current_candidate_is_authored(vault_root, page, candidate)
+    if authored_now is None:
+        raise _refresh_required(ref)
     store = review_state_module.ReviewStateStore(vault_root)
     reason, _enriched = _classify_candidate(
         vault_root,
@@ -749,6 +864,7 @@ def accept(
         candidate,
         store=store,
         state_payload=store.load(),
+        exact_refs=resolved.identity_refs,
         authored=(
             {
                 (
@@ -758,7 +874,7 @@ def accept(
                     ),
                 )
             }
-            if _current_candidate_is_authored(vault_root, page, candidate)
+            if authored_now
             else set()
         ),
     )
