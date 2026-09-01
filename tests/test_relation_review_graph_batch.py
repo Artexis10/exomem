@@ -28,6 +28,84 @@ def _write(root: Path, rel: str, content: str) -> Path:
     return path
 
 
+def _legacy_relation_queue(
+    root: Path,
+    *,
+    limit_pages: int,
+    limit_per_page: int,
+) -> dict[str, Any]:
+    """Test-local pre-C Markdown oracle for graph-batch parity assertions.
+
+    Production must return typed warming when the graph/identity snapshot is
+    unavailable.  These Lane B tests still need the retired implementation as
+    an independent oracle, so they compose its surviving private generation,
+    classification, and enrichment leaves here without restoring a fallback.
+    """
+    scan = relation_queue.activation_module.scan(root)
+    store = review_state.ReviewStateStore(root)
+    state_payload = store.load()
+    cap = max(0, int(limit_pages))
+    filtered = {"authored_edge": 0, "placeholder_target": 0, "decided": 0}
+    groups: list[dict[str, Any]] = []
+    pages_scanned = 0
+    scan_complete = True
+
+    for page in relation_queue._ordered_pages(root, scan):
+        if len(groups) >= cap:
+            scan_complete = False
+            break
+        pages_scanned += 1
+        authored = relation_queue._authored_targets(page, root)
+        items: list[dict[str, Any]] = []
+        for candidate in relation_queue._page_candidates(
+            root, page, limit_per_page=limit_per_page
+        ):
+            reason, enriched = relation_queue._classify_candidate(
+                root,
+                page,
+                candidate,
+                store=store,
+                state_payload=state_payload,
+                authored=authored,
+            )
+            if reason is not None:
+                filtered[reason] += 1
+                continue
+            assert enriched is not None
+            items.append(enriched)
+            if len(items) >= max(0, int(limit_per_page)):
+                break
+        if items:
+            groups.append(
+                {
+                    "path": page.rel_path,
+                    "title": page.title,
+                    "content_hash": relation_queue._page_content_hash(page),
+                    "items": items,
+                }
+            )
+
+    eligible_pages_total = int(scan.coverage.get("eligible_pages", 0))
+    shown_items = sum(len(group["items"]) for group in groups)
+    coverage = dict(scan.coverage)
+    coverage["relation_pages_scanned"] = pages_scanned
+    coverage["relation_candidate_pages_found"] = len(groups)
+    coverage["relation_candidates_found"] = shown_items
+    coverage["relation_scan_complete"] = scan_complete
+    return {
+        "mode": "relation-queue",
+        "mutated": False,
+        "groups": groups,
+        "shown": shown_items,
+        "pages_shown": len(groups),
+        "pages_scanned": pages_scanned,
+        "pages_truncated": not scan_complete,
+        "pages_unscanned": max(0, eligible_pages_total - pages_scanned),
+        "filtered": filtered,
+        "coverage": coverage,
+    }
+
+
 def _warm_identity_authority(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> semantic_contract.ReferenceIdentitySnapshot:
@@ -246,7 +324,7 @@ def test_relation_review_batch_preserves_authored_wikilink_order_and_display_pre
     epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
     monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", lambda *_args, **_kwargs: {})
 
-    legacy = relation_queue.build_queue(root, limit_pages=10, limit_per_page=2)
+    legacy = _legacy_relation_queue(root, limit_pages=10, limit_per_page=2)
     native = epistemic_graph.EpistemicGraphIndex(root).relation_review_batch(
         limit_pages=10, limit_per_page=2
     )
@@ -261,7 +339,7 @@ def test_relation_review_batch_preserves_authored_wikilink_order_and_display_pre
         item["to"] for item in legacy_items
     ] == [first_target, second_target]
 
-    legacy_prefix = relation_queue.build_queue(root, limit_pages=10, limit_per_page=1)
+    legacy_prefix = _legacy_relation_queue(root, limit_pages=10, limit_per_page=1)
     native_prefix = epistemic_graph.EpistemicGraphIndex(root).relation_review_batch(
         limit_pages=10, limit_per_page=1
     )
@@ -300,7 +378,7 @@ def test_relation_review_batch_preserves_frontmatter_source_order_and_display_pr
     epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
     monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", lambda *_args, **_kwargs: {})
 
-    legacy = relation_queue.build_queue(root, limit_pages=10, limit_per_page=2)
+    legacy = _legacy_relation_queue(root, limit_pages=10, limit_per_page=2)
     native = epistemic_graph.EpistemicGraphIndex(root).relation_review_batch(
         limit_pages=10, limit_per_page=2
     )
@@ -318,7 +396,7 @@ def test_relation_review_batch_preserves_frontmatter_source_order_and_display_pr
         item["evidence"] for item in legacy_items
     ] == [{"source_path": source_rel, "field": "sources"}] * 2
 
-    legacy_prefix = relation_queue.build_queue(root, limit_pages=10, limit_per_page=1)
+    legacy_prefix = _legacy_relation_queue(root, limit_pages=10, limit_per_page=1)
     native_prefix = epistemic_graph.EpistemicGraphIndex(root).relation_review_batch(
         limit_pages=10, limit_per_page=1
     )
@@ -355,7 +433,7 @@ def test_relation_review_batch_uses_current_identity_census_for_excluded_duplica
     source_rel, _target_rel = _excluded_duplicate_case(root)
     monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", lambda *_args, **_kwargs: {})
 
-    legacy = relation_queue.build_queue(root, limit_pages=10, limit_per_page=10)
+    legacy = _legacy_relation_queue(root, limit_pages=10, limit_per_page=10)
     _warm_identity_authority(root, monkeypatch)
     legacy_item = next(
         item
@@ -414,7 +492,7 @@ def test_relation_review_batch_honors_dismissal_with_excluded_duplicate_owner(
     source_rel, _target_rel = _excluded_duplicate_case(root)
     monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", lambda *_args, **_kwargs: {})
 
-    legacy = relation_queue.build_queue(root, limit_pages=10, limit_per_page=10)
+    legacy = _legacy_relation_queue(root, limit_pages=10, limit_per_page=10)
     _warm_identity_authority(root, monkeypatch)
     legacy_item = next(
         item
@@ -528,7 +606,7 @@ def test_relation_review_batch_ignores_stale_refs_for_excluded_duplicate_changes
     epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
     refs.rebuild_all()
     monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", lambda *_args, **_kwargs: {})
-    legacy = relation_queue.build_queue(root, limit_pages=10, limit_per_page=10)
+    legacy = _legacy_relation_queue(root, limit_pages=10, limit_per_page=10)
     legacy_item = _wikilink_item(legacy, source_rel)
     memory_refs.sidecar_path(root).write_bytes(stale_sidecar)
     _warm_identity_authority(root, monkeypatch)
@@ -594,7 +672,7 @@ def test_relation_review_batch_keeps_canonical_dismissal_when_refs_are_stale(
     epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
     refs.rebuild_all()
     monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", lambda *_args, **_kwargs: {})
-    legacy = relation_queue.build_queue(root, limit_pages=10, limit_per_page=10)
+    legacy = _legacy_relation_queue(root, limit_pages=10, limit_per_page=10)
     legacy_item = _wikilink_item(legacy, source_rel)
     review_state.ReviewStateStore(root).apply(
         legacy_item["review_id"],
@@ -763,7 +841,7 @@ def test_relation_review_batch_matches_all_graph_native_legacy_candidates(
     epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
     monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", lambda *_args, **_kwargs: {})
 
-    legacy = relation_queue.build_queue(root, limit_pages=50, limit_per_page=50)
+    legacy = _legacy_relation_queue(root, limit_pages=50, limit_per_page=50)
     _warm_identity_authority(root, monkeypatch)
     native = epistemic_graph.EpistemicGraphIndex(root).relation_review_batch(
         limit_pages=50, limit_per_page=50
@@ -907,7 +985,7 @@ def test_relation_review_batch_suppresses_authored_membership_across_opposing_ca
     epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
     monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", lambda *_args, **_kwargs: {})
 
-    legacy = relation_queue.build_queue(root, limit_pages=50, limit_per_page=64)
+    legacy = _legacy_relation_queue(root, limit_pages=50, limit_per_page=64)
     native = epistemic_graph.EpistemicGraphIndex(root).relation_review_batch(
         limit_pages=50, limit_per_page=64
     )
@@ -950,7 +1028,7 @@ def test_relation_review_batch_matches_placeholder_and_authored_filter_counts(
     epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
     monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", lambda *_args, **_kwargs: {})
 
-    legacy = relation_queue.build_queue(root, limit_pages=50, limit_per_page=50)
+    legacy = _legacy_relation_queue(root, limit_pages=50, limit_per_page=50)
     _warm_identity_authority(root, monkeypatch)
     native = epistemic_graph.EpistemicGraphIndex(root).relation_review_batch(
         limit_pages=50, limit_per_page=50
@@ -990,7 +1068,7 @@ def test_relation_review_batch_identity_source_keeps_placeholder_path_and_filter
     memory_refs.ReferenceIndex(root).rebuild_all()
     monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", lambda *_args, **_kwargs: {})
 
-    legacy = relation_queue.build_queue(root, limit_pages=50, limit_per_page=50)
+    legacy = _legacy_relation_queue(root, limit_pages=50, limit_per_page=50)
     _warm_identity_authority(root, monkeypatch)
     native = epistemic_graph.EpistemicGraphIndex(root).relation_review_batch(
         limit_pages=50, limit_per_page=50
