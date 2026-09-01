@@ -79,6 +79,15 @@ def _profile_system_fields(manifest: collections.CollectionManifest) -> frozense
     )
 
 
+def _profile_compatibility_envelope_fields(
+    manifest: collections.CollectionManifest,
+) -> frozenset[str]:
+    """Return legacy frontmatter the adapter owns rather than the item schema."""
+    if manifest.semantic_profile == "planning" and "updated" not in manifest.schema.fields:
+        return frozenset({"updated"})
+    return frozenset()
+
+
 @dataclass(frozen=True, slots=True)
 class SourceSpan:
     start: int
@@ -504,10 +513,18 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 raise collections.CollectionError(
                     "UNSUPPORTED_ITEM_SCHEMA_VERSION", "item schema version differs"
                 )
+            compatibility_envelope = _profile_compatibility_envelope_fields(self.manifest)
             values = {
                 name: _json_value(value)
                 for name, value in frontmatter.items()
-                if name not in {"type", "collection_id", profile.item_id_property, "schema_version"}
+                if name
+                not in {
+                    "type",
+                    "collection_id",
+                    profile.item_id_property,
+                    "schema_version",
+                    *compatibility_envelope,
+                }
             }
             self._validate_values(values)
             identity = collections.ItemIdentity(collection_id, item_id)
