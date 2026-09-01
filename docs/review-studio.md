@@ -91,11 +91,13 @@ not empty queue results. `warming`, `pending`, and `unavailable` are retryable
 and show no fabricated fallback candidates. `truncated` and coverage fields
 remain visible whenever a bounded response omitted work.
 
-An accept or triage action uses the queue item's `source_path`,
-`source_content_hash`, and `fingerprint` as source hints and drift guards. A
-changed signal produces `REVIEW_ITEM_CHANGED`; a legacy reference outside the
-bounded current prefix produces `REVIEW_REFRESH_REQUIRED`. The Studio refreshes
-instead of widening a search or re-ranking candidates client-side.
+An accept action sends the queue item's `source_path`, maps its
+`source_content_hash` to `expected_hash`, and maps its `fingerprint` to
+`expected_fingerprint`. A triage action sends `source_path` and
+`expected_fingerprint`; triage has no content-hash input. A changed signal
+produces `REVIEW_ITEM_CHANGED`; a legacy reference outside the bounded current
+prefix produces `REVIEW_REFRESH_REQUIRED`. The Studio refreshes instead of
+widening a search or re-ranking candidates client-side.
 
 ## Recorded evolution, not generated narrative
 

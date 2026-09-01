@@ -52,9 +52,11 @@ shared `exomem.log`.
 Graph status is typed: `current`, `recovery_required`, or `unavailable`.
 Relation-queue reads project that state as `available`, `warming`, `pending`, or
 `unavailable`, rather than serving an old graph as current. A registry-only
-change may complete through the exported diagnostic code
-`registry_rebind_completed` when the sidecar and source proof remain valid; if
-that proof is absent, the same durable recovery path uses a rebuild.
+change may complete by rebinding the existing sidecar when its source proof
+remains valid; if that proof is absent, the same durable recovery path uses a
+rebuild. The public write terminal reports successful convergence as
+`graph_sync="completed"`; graph status reports whether the derived graph is
+current.
 
 Use `maintain_memory(mode="reconcile", rebuild_graph=true)` for an unavailable
 derived graph lineage. This recovery concerns rebuildable sidecar state only;
