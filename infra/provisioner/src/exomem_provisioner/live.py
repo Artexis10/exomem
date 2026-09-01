@@ -47,7 +47,7 @@ from .provider_identity import (
     authenticate_cell_provider_recovery_envelopes,
     provider_operation_resource_name,
 )
-from .repository import OperationRepository
+from .repository import OperationRepository, canonical_request_sha256
 from .wire_protocol import runtime_identity
 
 
@@ -1254,8 +1254,11 @@ class LiveLifecyclePlane:
         )
         values["workloadMode"] = "migrate"
         values["routes"]["enabled"] = False
-        values["initOperationId"] = operation_id
-        values["initRequestId"] = _deterministic_uuid4(operation_id + ":runtime-migration")
+        migration_operation_id = (
+            f"{operation_id}:runtime-migration:{canonical_request_sha256(request)}"
+        )
+        values["initOperationId"] = migration_operation_id
+        values["initRequestId"] = _deterministic_uuid4(migration_operation_id)
         await self._helm.transition_release(
             self._owner(metadata),
             values,
