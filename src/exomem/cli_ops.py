@@ -115,6 +115,10 @@ _REMEDIATION: dict[str, str] = {
     "PLAN_RESPONSE_TOO_LARGE": "Narrow the Planning query or request fewer rows.",
     "STALE_RECORD": "Re-read the record and retry with its current versions.",
     "STALE_RECORD_SNAPSHOT": "Re-run the query against the current collection snapshot.",
+    "RECORD_RECOVERY_REQUIRED": (
+        "Have the cell operator inspect and quarantine stale private transaction residue, "
+        "then retry the unchanged request."
+    ),
     "RECORD_ID_CONFLICT": "Use a new record ID or re-read the existing record before retrying.",
     "RECORD_NATURAL_KEY_CONFLICT": (
         "Update the named existing item instead of appending a second one for the same key. "
@@ -136,6 +140,7 @@ _SERVICE_UNAVAILABLE_CODES = frozenset(
         "WRITER_COORDINATOR_UNAVAILABLE",
         "WRITER_COORDINATOR_CONTRACT_ABSENT",
         "MUTATION_LOCK_UNAVAILABLE",
+        "RECORD_RECOVERY_REQUIRED",
         "MODEL_BUSY",
         # Retrieval-index-reliability (restore-indexed-category-recall): a safe
         # exact category/kind plan whose maintained semantic catalog cannot yet
