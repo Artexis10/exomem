@@ -174,12 +174,13 @@ authorize one forward retarget to the reviewed upgrade target. The signed provis
 accepts only the same operation that already carries the one-way init-retry recovery receipt,
 is at `PENDING|CLAIMED / volume-owned` with no live claim, result, route, or admitted runtime,
 and still owns the exact authenticated namespace, Helm release, PVC, provider volume, tenant
-fence, and unreleased reservation. It decrypts and verifies the existing v1 request against the
-expand lock's retained catalog, changes only `releaseVersion` and `protocolVersion`, and commits
+fence, and unreleased reservation. It decrypts and verifies the existing request against the
+separately supplied signed source lock, replaces only the v1 release/protocol pair or the complete
+v2 `runtimeTarget` with the separately supplied signed target lock's selection, and commits
 the new ciphertext, canonical hash, pending state, and a content-free one-way retarget receipt
 in one compare-and-swap transaction. It never changes or replaces the operation, tenant, cell,
 fence, reservation, resource, PVC, PV, provider-volume, service credential, worker policy, or
-caller checkpoint. The target remains cataloged for this persisted v1 operation until its
+caller checkpoint. A persisted v1 target remains cataloged until its
 unfinished and desired-state evidence no longer requires that compatibility path.
 
 ## Risks / Trade-offs

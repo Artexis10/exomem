@@ -210,12 +210,14 @@ Rollback SHALL choose the last safe action from the execution phase. Before any 
 
 ### Requirement: Stranded private-alpha provisions may retarget forward in place
 
-An explicitly authorized recovery MAY retarget a never-routed unfinished v1 provision from a
-reviewed legacy runtime to the selected forward runtime only after the signed helper proves the
+An explicitly authorized recovery MAY retarget a never-routed unfinished provision from a
+reviewed source runtime to the selected forward runtime only after the signed helper proves both
+the source and target deployment locks and
 existing init-retry receipt, exact request and request hash, tenant fence, operation and provider
 identity, four authenticated durable resources, one unreleased reservation, no result, no route,
 no admitted runtime, two stable live observations, and no unexpired worker claim. The transaction
-SHALL change only the request's release/protocol pair, encrypted request, canonical request hash,
+SHALL change only a v1 request's release/protocol pair or a v2 request's complete `runtimeTarget`,
+encrypted request, canonical request hash,
 claim fields, availability timestamp, and append-only content-free retarget receipt while
 preserving every operation, tenant, cell, fence, resource, volume, credential, policy, and caller
 checkpoint identity. Repetition SHALL verify the existing receipt without a second mutation.
