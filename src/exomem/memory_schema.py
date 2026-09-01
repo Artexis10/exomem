@@ -16,6 +16,7 @@ import yaml
 from . import (
     epistemic_graph,
     relation_registry,
+    relation_vocabulary,
     semantic_language_registry,
     semantic_units,
     traversal_profiles,
@@ -617,17 +618,23 @@ def indexed_relation_observations(
     raw_relations: Iterable[str] | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
-) -> list[dict[str, Any]] | None:
+    limit: int = 20,
+    offset: int = 0,
+) -> dict[str, Any] | None:
     """Read recurrence from one current graph snapshot, or report unavailable.
 
     This is the hot-path counterpart to :func:`relation_observations`: it never
     builds an index, scans Markdown, or invokes embeddings. Callers may pass a
-    bounded set of just-parsed raw labels for a point lookup. ``None`` means a
-    current projection was unavailable; an available projection with no rows
-    returns ``[]``.
+    bounded set of just-parsed raw labels for a point lookup. Counts and paging
+    happen inside SQLite; Python sees only one bounded group page and at most
+    five distinct examples per returned group. ``None`` means a current
+    projection was unavailable.
     """
     from .epistemic_graph import EpistemicGraphIndex
 
+    relation_vocabulary.validate_candidate_limit(limit)
+    if type(offset) is not int or offset < 0:
+        raise ValueError("RELATION_CONTINUATION_INVALID: invalid observation offset")
     try:
         start = dt.date.fromisoformat(date_from) if date_from is not None else None
         end = dt.date.fromisoformat(date_to) if date_to is not None else None
@@ -644,6 +651,11 @@ def indexed_relation_observations(
             }
         )
     )
+    normalized_relation_sql = (
+        "replace(replace(replace(replace("
+        "lower(trim(rtrim(raw_relation, ':'))), '-', '_'), ' ', '_'), "
+        "'__', '_'), '__', '_')"
+    )
     try:
         snapshot = EpistemicGraphIndex(vault_root)._open_read_snapshot()
         if snapshot is None:
@@ -653,9 +665,15 @@ def indexed_relation_observations(
             parameters: tuple[Any, ...] = ()
             if raw_relations is not None:
                 if not requested:
-                    return []
+                    return {
+                        "items": [],
+                        "total": 0,
+                        "returned": 0,
+                        "omitted": 0,
+                        "offset": offset,
+                    }
                 predicate += (
-                    " AND lower(replace(replace(trim(raw_relation), '-', '_'), ' ', '_')) IN ("
+                    f" AND {normalized_relation_sql} IN ("
                     + ",".join("?" for _ in requested)
                     + ")"
                 )
@@ -674,45 +692,85 @@ def indexed_relation_observations(
                     "AND source.origin_date <= ?)"
                 )
                 parameters = (*parameters, end.isoformat())
-            rows = snapshot.execute(
+            total_row = snapshot.execute(
                 f"""
-                WITH occurrences AS (
-                    SELECT raw_relation, source_path, source_anchor,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY raw_relation
-                               ORDER BY source_path, COALESCE(source_anchor, '')
-                           ) AS occurrence_rank,
-                           COUNT(*) OVER (PARTITION BY raw_relation) AS occurrence_count
+                SELECT COUNT(*)
+                FROM (
+                    SELECT {normalized_relation_sql} AS normalized_relation
                     FROM graph_edges
                     WHERE {predicate}
+                    GROUP BY normalized_relation
                 )
-                SELECT raw_relation, source_path, source_anchor, occurrence_count
-                FROM occurrences
-                WHERE occurrence_rank <= 5
-                ORDER BY occurrence_count DESC, raw_relation, source_path,
-                         COALESCE(source_anchor, '')
                 """,
                 parameters,
+            ).fetchone()
+            total = int(total_row[0]) if total_row is not None else 0
+            group_rows = snapshot.execute(
+                f"""
+                SELECT {normalized_relation_sql} AS normalized_relation,
+                       COUNT(*) AS occurrence_count
+                FROM graph_edges
+                WHERE {predicate}
+                GROUP BY normalized_relation
+                ORDER BY occurrence_count DESC, normalized_relation
+                LIMIT ? OFFSET ?
+                """,
+                (*parameters, limit, offset),
             ).fetchall()
+            items = [
+                {
+                    "raw_relation": str(raw_relation),
+                    "registry_status": "unregistered",
+                    "count": int(count),
+                    "examples": [],
+                }
+                for raw_relation, count in group_rows
+            ]
+            if items:
+                page_relations = tuple(item["raw_relation"] for item in items)
+                example_rows = snapshot.execute(
+                    f"""
+                    WITH distinct_examples AS (
+                        SELECT DISTINCT
+                               {normalized_relation_sql} AS normalized_relation,
+                               source_path,
+                               source_anchor
+                        FROM graph_edges
+                        WHERE {predicate}
+                          AND {normalized_relation_sql} IN (
+                              {",".join("?" for _ in page_relations)}
+                          )
+                    ), ranked_examples AS (
+                        SELECT normalized_relation, source_path, source_anchor,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY normalized_relation
+                                   ORDER BY source_path, COALESCE(source_anchor, '')
+                               ) AS example_rank
+                        FROM distinct_examples
+                    )
+                    SELECT normalized_relation, source_path, source_anchor
+                    FROM ranked_examples
+                    WHERE example_rank <= 5
+                    ORDER BY normalized_relation, example_rank
+                    """,
+                    (*parameters, *page_relations),
+                ).fetchall()
+                by_relation = {item["raw_relation"]: item for item in items}
+                for raw_relation, source_path, source_anchor in example_rows:
+                    by_relation[str(raw_relation)]["examples"].append(
+                        {"path": str(source_path), "anchor": source_anchor}
+                    )
         finally:
             snapshot.close()
     except Exception:  # noqa: BLE001 - optional recurrence must never break a caller
         return None
-    grouped: dict[str, dict[str, Any]] = {}
-    for raw_relation, source_path, source_anchor, count in rows:
-        item = grouped.setdefault(
-            str(raw_relation),
-            {
-                "raw_relation": str(raw_relation),
-                "registry_status": "unregistered",
-                "count": int(count),
-                "examples": [],
-            },
-        )
-        item["examples"].append(
-            {"path": str(source_path), "anchor": source_anchor}
-        )
-    return list(grouped.values())
+    return {
+        "items": items,
+        "total": total,
+        "returned": len(items),
+        "omitted": max(total - len(items), 0),
+        "offset": offset,
+    }
 
 
 def _scan_relation_observations(

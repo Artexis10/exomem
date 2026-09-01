@@ -7,6 +7,8 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
+from . import relation_registry
+
 log = logging.getLogger(__name__)
 
 ResponseDetail = Literal["compact", "full", "legacy"]
@@ -617,7 +619,7 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
             raw = fact.get("raw_relation")
             if not isinstance(raw, str):
                 continue
-            normalized = raw.strip().lower().replace("-", "_").replace(" ", "_")
+            normalized = relation_registry.normalize_relation(raw)
             if (
                 normalized
                 and normalized != "relates_to"
@@ -638,25 +640,46 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
             from . import memory_schema
 
             indexed = memory_schema.indexed_relation_observations(
-                Path(vault_hint), raw_relations=retained
+                Path(vault_hint),
+                raw_relations=retained,
+                limit=len(retained),
+                offset=0,
             )
             recurrence_available = indexed is not None
-            for row in indexed or ():
+            rows = indexed.get("items", ()) if isinstance(indexed, Mapping) else ()
+            aggregated: dict[str, dict[str, Any]] = {}
+            example_keys: dict[str, set[tuple[str, str | None]]] = {}
+            for row in rows:
                 if not isinstance(row, Mapping):
                     continue
                 label = row.get("raw_relation")
                 count = row.get("count")
                 examples = row.get("examples")
+                normalized_label = (
+                    relation_registry.normalize_relation(label)
+                    if isinstance(label, str)
+                    else ""
+                )
                 if (
-                    not isinstance(label, str)
-                    or label not in retained
+                    normalized_label not in retained
                     or type(count) is not int
                     or count < 0
                     or not isinstance(examples, (list, tuple))
                 ):
                     continue
-                safe_examples: list[dict[str, str | None]] = []
-                for example in examples[:_MAX_RELATION_ADVISORY_EXAMPLES]:
+                occurrence = aggregated.setdefault(
+                    normalized_label,
+                    {
+                        "raw_relation": normalized_label,
+                        "count": 0,
+                        "examples": [],
+                    },
+                )
+                occurrence["count"] += count
+                seen = example_keys.setdefault(normalized_label, set())
+                for example in examples:
+                    if len(occurrence["examples"]) >= _MAX_RELATION_ADVISORY_EXAMPLES:
+                        break
                     if not isinstance(example, Mapping):
                         continue
                     path = example.get("path")
@@ -665,14 +688,14 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
                         anchor is None or isinstance(anchor, str)
                     ):
                         continue
-                    safe_examples.append({"path": path, "anchor": anchor})
-                occurrences.append(
-                    {
-                        "raw_relation": label,
-                        "count": count,
-                        "examples": safe_examples,
-                    }
-                )
+                    example_key = (path, anchor)
+                    if example_key in seen:
+                        continue
+                    seen.add(example_key)
+                    occurrence["examples"].append(
+                        {"path": path, "anchor": anchor}
+                    )
+            occurrences = list(aggregated.values())
             occurrences.sort(key=lambda item: (-item["count"], item["raw_relation"]))
         except Exception:  # noqa: BLE001 - advisory evidence never breaks a commit
             recurrence_available = False

@@ -1164,6 +1164,8 @@
         },
         "limit": {
           "default": 8,
+          "maximum": 64,
+          "minimum": 1,
           "type": "integer",
           "description": "Candidate cap for suggestion and relation-resolution modes."
         },
@@ -5843,6 +5845,8 @@
         },
         "limit": {
           "default": 20,
+          "maximum": 64,
+          "minimum": 1,
           "type": "integer",
           "description": "Relation extension and observation candidate budget."
         },

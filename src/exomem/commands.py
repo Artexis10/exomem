@@ -189,7 +189,13 @@ _OptionalRelationProposal = Annotated[
 ]
 _RelationCandidateLimit = Annotated[
     int,
-    WithJsonSchema({"type": "integer"}),
+    WithJsonSchema(
+        {
+            "type": "integer",
+            "minimum": relation_vocabulary_module.RELATION_CANDIDATE_LIMIT_MIN,
+            "maximum": relation_vocabulary_module.RELATION_CANDIDATE_LIMIT_MAX,
+        }
+    ),
 ]
 # Keep commands.py as the public command-surface facade for server, CLI, docs,
 # and tests while the implementation lives in command_surface.py.
@@ -6639,14 +6645,70 @@ def op_connect_memory(
             the queue read and this call also refuses.
     """
     if operation == "resolve-relation":
+        supplied = locals()
+        unrelated_defaults = {
+            "unit_ref": None,
+            "categories": None,
+            "kinds": None,
+            "draft_title": None,
+            "draft_body": None,
+            "scope": "kb",
+            "include_model_suggestions": False,
+            "depth": 1,
+            "relation_types": None,
+            "node_types": None,
+            "max_nodes": 40,
+            "max_edges": 80,
+            "traversal_profile": None,
+            "max_body_chars": 3000,
+            "entity_type": None,
+            "name": None,
+            "slug": None,
+            "summary": None,
+            "why_in_kb": None,
+            "tags": None,
+            "connections": None,
+            "affiliation": None,
+            "relationship": None,
+            "domain": None,
+            "language": None,
+            "repo": None,
+            "license": None,
+            "used_in": None,
+            "decided": None,
+            "project": None,
+            "decision_status": None,
+            "ref": None,
+            "expected_hash": None,
+            "why": None,
+            "expected_fingerprint": None,
+        }
+        invalid = sorted(
+            name
+            for name, default in unrelated_defaults.items()
+            if supplied[name] != default
+        )
+        if invalid:
+            raise ValueError(
+                "INVALID_RELATION_ARGUMENT: resolve-relation does not accept "
+                + ", ".join(invalid)
+            )
+        relation_vocabulary_module.validate_candidate_limit(limit)
+        _, observation_offset = relation_vocabulary_module.continuation_offsets(
+            continuation
+        )
         registry = relation_registry_module.load_registry(vault_root)
-        observations = memory_schema_module.indexed_relation_observations(vault_root)
+        observations = memory_schema_module.indexed_relation_observations(
+            vault_root,
+            limit=limit,
+            offset=observation_offset,
+        )
         result = relation_vocabulary_module.resolve_relation(
             registry,
             query=query,
             requested_relation=requested_relation,
             limit=limit,
-            observations=observations or (),
+            observations=observations if observations is not None else (),
             continuation=continuation,
         )
         result["recurrence_available"] = observations is not None
@@ -7344,6 +7406,7 @@ def op_schema_memory(
         raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
     if subject == "relations":
         if operation == "propose-relation":
+            relation_vocabulary_module.validate_candidate_limit(limit)
             if proposal is None or not isinstance(proposal, dict):
                 raise ValueError(
                     "INCOMPLETE_RELATION_PROPOSAL: propose-relation requires a reviewed proposal"
@@ -7424,10 +7487,15 @@ def op_schema_memory(
                 raise ValueError(
                     "INVALID_RELATION_ARGUMENT: propose-relation is read-only"
                 )
+            _, observation_offset = relation_vocabulary_module.continuation_offsets(
+                continuation
+            )
             observations = memory_schema_module.indexed_relation_observations(
                 vault_root,
                 date_from=date_from,
                 date_to=date_to,
+                limit=limit,
+                offset=observation_offset,
             )
             registry = relation_registry_module.load_registry(vault_root)
             result = relation_vocabulary_module.propose_relation(
@@ -7446,7 +7514,7 @@ def op_schema_memory(
                 page_types=proposal.get("page_types"),
                 query=proposal.get("query"),
                 limit=limit,
-                observations=observations or (),
+                observations=observations if observations is not None else (),
                 continuation=continuation,
             )
             return {

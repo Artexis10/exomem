@@ -128,18 +128,24 @@ def test_advisory_projects_bounded_indexed_recurrence_and_hides_lookup_context(
 
     calls: list[tuple[object, object]] = []
 
-    def indexed(root, *, raw_relations):  # noqa: ANN001
-        calls.append((root, raw_relations))
-        return [
-            {
-                "raw_relation": "applies_to",
-                "registry_status": "unregistered",
-                "count": 7,
-                "examples": [
-                    {"path": "Knowledge Base/Notes/example.md", "anchor": "point"}
-                ],
-            }
-        ]
+    def indexed(root, *, raw_relations, limit, offset):  # noqa: ANN001
+        calls.append((root, raw_relations, limit, offset))
+        return {
+            "items": [
+                {
+                    "raw_relation": "applies_to",
+                    "registry_status": "unregistered",
+                    "count": 7,
+                    "examples": [
+                        {"path": "Knowledge Base/Notes/example.md", "anchor": "point"}
+                    ],
+                }
+            ],
+            "total": 1,
+            "returned": 1,
+            "omitted": 0,
+            "offset": 0,
+        }
 
     monkeypatch.setattr(schema, "indexed_relation_observations", indexed)
     raw = {
@@ -160,7 +166,7 @@ def test_advisory_projects_bounded_indexed_recurrence_and_hides_lookup_context(
     full = mutation_terminal.project_terminal(terminal, "full")
     legacy = mutation_terminal.project_terminal(terminal, "legacy")
 
-    assert calls == [(tmp_path, ["applies_to"])] * 3
+    assert calls == [(tmp_path, ["applies_to"], 1, 0)] * 3
     assert compact["relation_advisory"] == full["relation_advisory"]
     assert compact["relation_advisory"]["recurrence_available"] is True
     assert compact["relation_advisory"]["occurrences"] == [
@@ -174,6 +180,66 @@ def test_advisory_projects_bounded_indexed_recurrence_and_hides_lookup_context(
     ]
     assert "_relation_advisory_context" not in full["diagnostics"]
     assert "_relation_advisory_context" not in legacy
+
+
+def test_advisory_normalizes_and_aggregates_indexed_spelling_variants(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import exomem.memory_schema as schema
+
+    def indexed(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return {
+            "items": [
+                {
+                    "raw_relation": "Applies-To",
+                    "count": 3,
+                    "examples": [
+                        {"path": "a.md", "anchor": None},
+                        {"path": "shared.md", "anchor": "same"},
+                    ],
+                },
+                {
+                    "raw_relation": "applies to",
+                    "count": 4,
+                    "examples": [
+                        {"path": "b.md", "anchor": None},
+                        {"path": "shared.md", "anchor": "same"},
+                    ],
+                },
+                {
+                    "raw_relation": "applies_to",
+                    "count": 5,
+                    "examples": [{"path": "c.md", "anchor": None}],
+                },
+            ],
+            "total": 3,
+            "returned": 3,
+            "omitted": 0,
+            "offset": 0,
+        }
+
+    monkeypatch.setattr(schema, "indexed_relation_observations", indexed)
+    raw = {
+        **_leaf("semantic", [_fact("Applies-To")]),
+        "_relation_advisory_context": {"vault": str(tmp_path)},
+    }
+
+    advisory = _compact(raw)["relation_advisory"]
+
+    assert advisory["raw_relations"] == ["applies_to"]
+    assert advisory["recurrence_available"] is True
+    assert advisory["occurrences"] == [
+        {
+            "raw_relation": "applies_to",
+            "count": 12,
+            "examples": [
+                {"path": "a.md", "anchor": None},
+                {"path": "shared.md", "anchor": "same"},
+                {"path": "b.md", "anchor": None},
+                {"path": "c.md", "anchor": None},
+            ],
+        }
+    ]
 
 
 @pytest.mark.parametrize("outcome", [None, RuntimeError("graph unavailable")])
@@ -307,10 +373,74 @@ def test_advisory_can_read_point_recurrence_from_one_current_graph_snapshot(
     advisory = _compact(raw)["relation_advisory"]
 
     assert rows is not None
-    assert rows[0]["raw_relation"] == "applies_to"
-    assert rows[0]["count"] >= 1
+    assert rows["items"][0]["raw_relation"] == "applies_to"
+    assert rows["items"][0]["count"] >= 1
     assert advisory["recurrence_available"] is True
     assert advisory["occurrences"][0]["count"] >= 1
+
+
+def test_real_graph_spelling_variants_form_one_advisory_occurrence(vault) -> None:
+    from exomem import epistemic_graph, memory_schema
+
+    committed = _invoke_public(
+        vault,
+        "remember",
+        {
+            "title": "Indexed relation spelling variants",
+            "slug": "indexed-relation-spelling-variants",
+            "content": (
+                "# Indexed relation spelling variants\n\n"
+                "## Observations\n\n"
+                "- [constraint] Keep spelling evidence normalized.\n\n"
+                "## Relations\n"
+                f"- relates_to [[{_TARGET}]]\n"
+                f"- applies_to [[{_TARGET}]]\n"
+                f"- applies_to [[{_TARGET}-second]]\n"
+                f"- applies_to [[{_TARGET}-third]]\n"
+            ),
+        },
+    )
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    with index._connect() as connection:
+        rows = connection.execute(
+            "SELECT edge_key FROM graph_edges "
+            "WHERE source_path = ? AND registry_status = 'unregistered' "
+            "ORDER BY edge_key",
+            (committed["path"],),
+        ).fetchall()
+        assert len(rows) == 3
+        for (edge_key,), spelling in zip(
+            rows, ("Applies-To", "applies to", "applies_to"), strict=True
+        ):
+            connection.execute(
+                "UPDATE graph_edges SET raw_relation = ? WHERE edge_key = ?",
+                (spelling, edge_key),
+            )
+        connection.commit()
+
+    page = memory_schema.indexed_relation_observations(
+        vault, raw_relations=["applies_to"], limit=8, offset=0
+    )
+    raw = {
+        **_leaf("semantic", [_fact("Applies-To")]),
+        "_relation_advisory_context": {"vault": str(vault)},
+    }
+    advisory = _compact(raw)["relation_advisory"]
+
+    assert page is not None
+    assert page["total"] == 1
+    assert page["items"][0]["raw_relation"] == "applies_to"
+    assert page["items"][0]["count"] == 3
+    assert len(
+        {
+            (item["path"], item["anchor"])
+            for item in page["items"][0]["examples"]
+        }
+    ) == len(page["items"][0]["examples"])
+    assert advisory["recurrence_available"] is True
+    assert advisory["occurrences"][0]["raw_relation"] == "applies_to"
+    assert advisory["occurrences"][0]["count"] == 3
 
 
 def test_real_observe_public_terminal_projects_committed_unknown_relation(vault) -> None:

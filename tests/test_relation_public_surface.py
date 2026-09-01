@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from fastmcp.exceptions import ToolError
 from starlette.testclient import TestClient
 
 from exomem import commands, hosted_gateway, relation_queue, server, writer_lease
@@ -52,6 +53,7 @@ def test_connect_relation_resolution_reaches_the_shared_vocabulary_leaf(
     [
         ({}, "RELATION_QUERY_REQUIRED"),
         ({"query": "intent", "limit": 0}, "RELATION_LIMIT_INVALID"),
+        ({"query": "intent", "limit": 65}, "RELATION_LIMIT_INVALID"),
         (
             {"query": "intent", "continuation": "not-a-continuation"},
             "RELATION_CONTINUATION_INVALID",
@@ -144,6 +146,94 @@ def test_new_relation_parameters_are_generated_from_the_product_signatures() -> 
     assert {"requested_relation", "continuation"} <= connect
     assert {"date_from", "date_to", "continuation", "limit"} <= schema
     assert "source_path" in triage
+
+
+@pytest.mark.parametrize(
+    "arguments, cli_arguments, code",
+    [
+        (
+            {"query": "intent", "limit": 1_000_000},
+            ["--query", "intent", "--limit", "1000000"],
+            "RELATION_LIMIT_INVALID",
+        ),
+        (
+            {"query": "intent", "include_model_suggestions": True},
+            ["--query", "intent", "--include-model-suggestions"],
+            "INVALID_RELATION_ARGUMENT",
+        ),
+        (
+            {"query": "intent", "scope": "all"},
+            ["--query", "intent", "--scope", "all"],
+            "INVALID_RELATION_ARGUMENT",
+        ),
+        (
+            {"query": "intent", "depth": 999},
+            ["--query", "intent", "--depth", "999"],
+            "INVALID_RELATION_ARGUMENT",
+        ),
+        (
+            {"query": "intent", "name": "Unrelated entity"},
+            ["--query", "intent", "--name", "Unrelated entity"],
+            "INVALID_RELATION_ARGUMENT",
+        ),
+        (
+            {"query": "intent", "ref": "exomem://review/relation/example"},
+            ["--query", "intent", "--ref", "exomem://review/relation/example"],
+            "INVALID_RELATION_ARGUMENT",
+        ),
+        (
+            {"query": "intent", "why": "write-only reason"},
+            ["--query", "intent", "--why", "write-only reason"],
+            "INVALID_RELATION_ARGUMENT",
+        ),
+    ],
+)
+def test_real_mcp_rest_cli_resolver_rejects_unbounded_and_cross_mode_inputs(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    arguments: dict[str, object],
+    cli_arguments: list[str],
+    code: str,
+) -> None:
+    monkeypatch.setattr(server, "load_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_DISABLE_FILE_WATCHER", "1")
+    mcp = server.build_server(require_auth=False)
+    request = {"operation": "resolve-relation", **arguments}
+
+    try:
+        mcp_result = asyncio.run(
+            mcp.call_tool("connect_memory", request, run_middleware=True)
+        )
+    except ToolError as exc:  # FastMCP may raise or return an error result.
+        mcp_error = str(exc)
+    else:
+        assert mcp_result.is_error is True
+        mcp_error = repr(mcp_result)
+    assert code in mcp_error
+
+    rest_response = TestClient(mcp.http_app()).post(
+        "/api/connect_memory",
+        json=request,
+        headers={"Authorization": "Bearer sekret"},
+    )
+    assert rest_response.status_code == 400, rest_response.text
+    assert rest_response.json()["error"]["code"] == code
+
+    exit_code = main(
+        [
+            "connect_memory",
+            "--operation",
+            "resolve-relation",
+            *cli_arguments,
+            "--json",
+        ]
+    )
+    cli_result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert exit_code == 1
+    assert cli_result["error"]["code"] == code
 
 
 def test_relation_review_source_hints_are_dispatched_to_lane_c_interface(
@@ -343,7 +433,7 @@ def test_mcp_openapi_and_hosted_contracts_share_relation_parameter_schemas(
         )["commands"]
     }
     selected = {
-        "connect_memory": {"requested_relation", "continuation"},
+        "connect_memory": {"requested_relation", "continuation", "limit"},
         "schema_memory": {"date_from", "date_to", "continuation", "limit"},
         "triage_memory": {"source_path"},
     }
@@ -361,6 +451,10 @@ def test_mcp_openapi_and_hosted_contracts_share_relation_parameter_schemas(
             assert hosted[name]["annotations"][annotation] == live_tools[name][
                 "annotations"
             ][annotation]
+    for name in ("connect_memory", "schema_memory"):
+        relation_limit = live_tools[name]["inputSchema"]["properties"]["limit"]
+        assert relation_limit["minimum"] == 1
+        assert relation_limit["maximum"] == 64
 
 
 def test_only_relation_delta_save_uses_the_invocation_specific_narrow_boundary(

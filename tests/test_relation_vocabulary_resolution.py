@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -54,10 +55,86 @@ def test_resolver_refuses_missing_intent() -> None:
 
 
 def test_resolver_refuses_invalid_limit() -> None:
-    with pytest.raises(ValueError, match="RELATION_LIMIT_INVALID"):
-        relation_vocabulary.resolve_relation(
-            relation_registry.core_registry(), query="intent", limit=0
-        )
+    for limit in (0, 65, 1_000_000):
+        with pytest.raises(ValueError, match="RELATION_LIMIT_INVALID"):
+            relation_vocabulary.resolve_relation(
+                relation_registry.core_registry(), query="intent", limit=limit
+            )
+
+
+def test_indexed_observations_page_in_sql_with_exact_offset_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import epistemic_graph
+
+    connection = sqlite3.connect(":memory:")
+    connection.execute(
+        "CREATE TABLE graph_edges ("
+        "registry_status TEXT, raw_relation TEXT, source_path TEXT, source_anchor TEXT)"
+    )
+    connection.executemany(
+        "INSERT INTO graph_edges VALUES ('unregistered', ?, ?, NULL)",
+        [
+            (f"relation_{index:03d}", f"Knowledge Base/Notes/{index:03d}.md")
+            for index in range(257)
+        ],
+    )
+    fetched_row_counts: list[int] = []
+    statements: list[str] = []
+
+    class Cursor:
+        def __init__(self, inner: sqlite3.Cursor) -> None:
+            self.inner = inner
+
+        def fetchone(self):  # noqa: ANN201
+            return self.inner.fetchone()
+
+        def fetchall(self):  # noqa: ANN201
+            rows = self.inner.fetchall()
+            fetched_row_counts.append(len(rows))
+            return rows
+
+    class Snapshot:
+        def execute(self, sql: str, parameters=()):  # noqa: ANN001, ANN201
+            statements.append(sql)
+            return Cursor(connection.execute(sql, parameters))
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "_open_read_snapshot",
+        lambda _self: Snapshot(),
+    )
+
+    page = memory_schema.indexed_relation_observations(
+        tmp_path, limit=3, offset=2
+    )
+
+    assert page == {
+        "items": [
+            {
+                "raw_relation": f"relation_{index:03d}",
+                "registry_status": "unregistered",
+                "count": 1,
+                "examples": [
+                    {
+                        "path": f"Knowledge Base/Notes/{index:03d}.md",
+                        "anchor": None,
+                    }
+                ],
+            }
+            for index in range(2, 5)
+        ],
+        "total": 257,
+        "returned": 3,
+        "omitted": 254,
+        "offset": 2,
+    }
+    assert fetched_row_counts
+    assert max(fetched_row_counts) <= 15
+    assert any("LIMIT" in statement.upper() for statement in statements)
 
 
 def test_resolver_refuses_bad_continuation() -> None:
@@ -87,6 +164,7 @@ def test_exact_aliases_survive_bounded_extension_pages() -> None:
     assert result["extensions"] == {
         "total": 3,
         "returned": 1,
+        "omitted": 2,
         "truncated": True,
         "continuation": "extensions:1",
     }
@@ -148,13 +226,20 @@ def test_resolver_continuations_page_extensions_and_observations_independently()
     assert second_extension["extensions"] == {
         "total": 3,
         "returned": 1,
+        "omitted": 2,
         "truncated": True,
         "continuation": "extensions:2",
     }
     assert second_observation["unregistered_pressure"] == [
         {"raw_relation": "second_unknown", "count": 2}
     ]
-    assert second_observation["observations"]["continuation"] is None
+    assert second_observation["observations"] == {
+        "total": 2,
+        "returned": 1,
+        "omitted": 1,
+        "truncated": False,
+        "continuation": None,
+    }
 
 
 def test_survivor_and_deprecated_exact_matches_expose_directed_history() -> None:
@@ -203,6 +288,7 @@ def test_resolver_reports_bounded_unregistered_pressure_without_selecting_specif
     assert result["observations"] == {
         "total": 2,
         "returned": 1,
+        "omitted": 1,
         "truncated": True,
         "continuation": "observations:1",
     }
@@ -340,12 +426,14 @@ def test_relation_proposal_carries_complete_bounded_duplicate_evidence() -> None
     assert evidence["extensions"] == {
         "total": 3,
         "returned": 1,
+        "omitted": 2,
         "truncated": True,
         "continuation": "extensions:1",
     }
     assert evidence["observations"] == {
         "total": 1,
         "returned": 1,
+        "omitted": 0,
         "truncated": False,
         "continuation": None,
     }

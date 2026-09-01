@@ -8,6 +8,22 @@ from typing import Any
 
 from . import relation_registry
 
+RELATION_CANDIDATE_LIMIT_MIN = 1
+RELATION_CANDIDATE_LIMIT_MAX = 64
+
+
+def validate_candidate_limit(limit: int) -> None:
+    """Enforce the one public relation-evidence page budget."""
+    if (
+        type(limit) is not int
+        or limit < RELATION_CANDIDATE_LIMIT_MIN
+        or limit > RELATION_CANDIDATE_LIMIT_MAX
+    ):
+        raise ValueError(
+            "RELATION_LIMIT_INVALID: limit must be an integer between "
+            f"{RELATION_CANDIDATE_LIMIT_MIN} and {RELATION_CANDIDATE_LIMIT_MAX}"
+        )
+
 
 def resolve_relation(
     registry: relation_registry.RelationRegistry,
@@ -15,16 +31,15 @@ def resolve_relation(
     query: str | None = None,
     requested_relation: str | None = None,
     limit: int = 20,
-    observations: Iterable[Mapping[str, Any]] = (),
+    observations: Iterable[Mapping[str, Any]] | Mapping[str, Any] = (),
     continuation: str | None = None,
 ) -> dict[str, Any]:
     """Return bounded vocabulary evidence without choosing a relation for a caller."""
     if not query and not requested_relation:
         raise ValueError("RELATION_QUERY_REQUIRED: query or requested_relation is required")
-    if limit < 1:
-        raise ValueError("RELATION_LIMIT_INVALID: limit must be at least 1")
+    validate_candidate_limit(limit)
 
-    extension_offset, observation_offset = _continuation_offsets(continuation)
+    extension_offset, observation_offset = continuation_offsets(continuation)
     requested = relation_registry.normalize_relation(requested_relation or "")
     exact_matches = _exact_matches(registry, requested) if requested_relation else []
     extensions = [
@@ -37,14 +52,12 @@ def resolve_relation(
         for _, definition in sorted(registry.extensions.items())
     ]
     extensions.sort(key=_candidate_sort_key)
-    observation_rows = sorted(
-        (dict(item) for item in observations),
-        key=lambda item: (-int(item.get("count", 0)), str(item.get("raw_relation", ""))),
-    )
     extension_page = extensions[extension_offset : extension_offset + limit]
-    observation_page = observation_rows[
-        observation_offset : observation_offset + limit
-    ]
+    observation_page, observation_total = _observation_page(
+        observations,
+        limit=limit,
+        offset=observation_offset,
+    )
     return {
         "core_vocabulary": [
             _definition(registry, definition)
@@ -58,7 +71,7 @@ def resolve_relation(
         "unregistered_pressure": observation_page,
         "observations": _page_metadata(
             "observations",
-            len(observation_rows),
+            observation_total,
             len(observation_page),
             limit,
             observation_offset,
@@ -93,10 +106,11 @@ def propose_relation(
     page_types: Iterable[str] | None = None,
     query: str | None = None,
     limit: int = 20,
-    observations: Iterable[Mapping[str, Any]] = (),
+    observations: Iterable[Mapping[str, Any]] | Mapping[str, Any] = (),
     continuation: str | None = None,
 ) -> dict[str, Any]:
     """Compose a reviewed delta with the resolver's complete duplicate evidence."""
+    validate_candidate_limit(limit)
     proposal = relation_registry.propose_extension(
         registry,
         requested_label=requested_label,
@@ -222,12 +236,14 @@ def _page_metadata(
     return {
         "total": total,
         "returned": returned,
+        "omitted": max(total - returned, 0),
         "truncated": total > next_offset,
         "continuation": f"{prefix}:{next_offset}" if total > next_offset else None,
     }
 
 
-def _continuation_offsets(continuation: str | None) -> tuple[int, int]:
+def continuation_offsets(continuation: str | None) -> tuple[int, int]:
+    """Decode the opaque resolver token for bounded indexed reads."""
     if continuation is None:
         return 0, 0
     try:
@@ -238,6 +254,38 @@ def _continuation_offsets(continuation: str | None) -> tuple[int, int]:
     if prefix not in {"extensions", "observations"} or offset < 0:
         raise ValueError("RELATION_CONTINUATION_INVALID: invalid continuation")
     return (offset, 0) if prefix == "extensions" else (0, offset)
+
+
+def _observation_page(
+    observations: Iterable[Mapping[str, Any]] | Mapping[str, Any],
+    *,
+    limit: int,
+    offset: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Accept either injected evidence or one already-paged indexed result."""
+    if isinstance(observations, Mapping) and "items" in observations:
+        raw_items = observations.get("items")
+        total = observations.get("total")
+        page_offset = observations.get("offset")
+        if (
+            not isinstance(raw_items, (list, tuple))
+            or type(total) is not int
+            or total < 0
+            or type(page_offset) is not int
+            or page_offset != offset
+            or len(raw_items) > limit
+        ):
+            raise ValueError(
+                "RELATION_CONTINUATION_INVALID: indexed observation page does not "
+                "match the requested continuation"
+            )
+        return [dict(item) for item in raw_items if isinstance(item, Mapping)], total
+
+    rows = sorted(
+        (dict(item) for item in observations if isinstance(item, Mapping)),
+        key=lambda item: (-int(item.get("count", 0)), str(item.get("raw_relation", ""))),
+    )
+    return rows[offset : offset + limit], len(rows)
 
 
 def _terms(value: str | None) -> list[str]:
