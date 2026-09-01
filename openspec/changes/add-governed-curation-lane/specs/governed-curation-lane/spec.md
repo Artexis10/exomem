@@ -113,7 +113,11 @@ approved forward or compensation plan.
 ### Requirement: Every committed step has exact reconstructible commit evidence
 
 Before invoking a governed leaf, the executor SHALL persist a prepared step with
-a deterministic operation id derived from plan id, ordinal, and step id.
+a deterministic operation id equal to the SHA-256 digest of canonical JSON for
+the domain-separated tuple `["exomem-curation-operation-v1", plan_id, ordinal,
+step_id]`. The encoding SHALL preserve the ordinal as a number and MUST NOT use
+ambiguous field concatenation.
+
 Content-write leaves SHALL commit one content-free curation witness in the same
 atomic batch as their canonical effect.
 

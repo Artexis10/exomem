@@ -198,8 +198,10 @@ intent from prose.
 ### 6. Every leaf produces exact, reconstructible commit evidence
 
 For a step, the executor first persists a `prepared` state containing the
-deterministic `operation_id = sha256(plan_id + ordinal + step_id)`. It then
-dispatches the existing governed leaf through a narrow internal adapter.
+deterministic `operation_id = sha256(canonical_json(["exomem-curation-operation-v1", plan_id, ordinal, step_id]))`.
+The domain-separated canonical tuple, including the ordinal as a JSON number,
+prevents concatenation collisions such as `(1, "23")` versus `(12, "3")`. It
+then dispatches the existing governed leaf through a narrow internal adapter.
 
 For content-write leaves (`create-note`, `create-entity`, `edit`, `supersede`,
 and `accept-relation`), the adapter supplies one content-free curation witness
