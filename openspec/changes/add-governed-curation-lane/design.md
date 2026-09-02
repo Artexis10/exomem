@@ -109,8 +109,6 @@ Knowledge Base/_Governance/curation/runs/<run_id>/
   state.json
   receipts/<ordinal>-<step_id>/<attempt>.json
   evidence/<operation_id>.json
-  transitions/<operation_id>/prepared.json
-  transitions/<operation_id>/authorized.json
   compensation/<compensation_plan_id>/plan.json
   compensation/<compensation_plan_id>/approval.json
 ```
@@ -121,11 +119,10 @@ bytes. Reusing a plan id with different bytes is a hard collision. `state.json`
 contains phase, active step, and receipt index; it never changes plan meaning.
 Approval and per-attempt step receipts are create-only terminal records, and at
 most one committed or recovered-committed receipt may exist for a step. State
-can be rebuilt from immutable plans, approvals, relocation candidates,
-relocation authorizations, witnesses, and receipts, so a stale state projection
-is repairable rather than authoritative. Each operation has exactly one
-canonical `prepared.json` candidate and one canonical `authorized.json`; digest-
-named preparation aliases and competing candidates are refused.
+can be rebuilt from immutable plans, approvals, witnesses, and receipts, so
+a stale state projection is repairable rather than authoritative. V1 publishes
+no relocation artifacts; the `transitions/` subtree and its candidate and
+authorization records belong to `add-curation-relocation-protocol`.
 
 Plans are governed content because they may contain agent-authored note bodies
 and exact pre-images needed for compensation. `_Governance` disclosure rules
@@ -266,9 +263,9 @@ After each step, phase derives from immutable receipts:
 
 A clean leaf refusal before any effect records a failed attempt without a commit
 witness. A retryable pre-effect operational failure may be retried by `resume`
-with the same operation id after guards are rechecked. A placement failure after
-relocation preparation is classified from its verified candidate, authorization,
-namespace lineage, and exact placement before retry, roll-forward, or refusal.
+with the same operation id after guards are rechecked. A relocation step is
+refused before any placement state exists, so there is no placement failure to
+classify.
 Stale content, changed registries, or invalidated semantics require a new
 forward plan; immutable plan bytes are never edited in place.
 
@@ -289,8 +286,8 @@ committed steps in descending order:
 
 The derived plan includes fresh live bindings and refuses collisions or drift.
 It is immutable, has its own fingerprint and approval rationale, uses the same
-one-step content-witness or prepared-relocation evidence protocol and terminal
-receipts, and links every result to the forward plan.
+one-step content-witness evidence protocol and terminal receipts, and links
+every result to the forward plan.
 The original plan, successor chain, trash entries, witnesses, and receipts are
 never removed. This is compensation, not time travel.
 
@@ -323,32 +320,20 @@ render, lock, archive, promote, or roll back any v5 file.
 Standalone mode stores all canonical run material inside the vault and uses
 only the existing local mutation/runtime state; it requires no Hosted service,
 control plane, or network coordinator. A process or cell replacement on the
-same retained filesystem epoch reconstructs from those vault artifacts. If a
-placement transition's filesystem epoch or parent tokens become incomparable,
-the same portable evidence still powers status but recovery blocks with
-`CURATION_RENAME_HISTORY_UNPROVABLE`; portability does not manufacture rename
-history on a different filesystem.
+same retained filesystem epoch reconstructs from those vault artifacts.
+Relocation steps are refused with `CURATION_RENAME_HISTORY_UNPROVABLE` on every
+filesystem, so portability never has to manufacture rename history.
 
 ### 10. Fault injection is part of acceptance
 
-The curation executor exposes test-only barriers after prepared-state commit;
-for placement leaves, after each retained-parent preflight flush, candidate-file
-flush, each newly created governed-run ancestor-entry flush, candidate containing-
-parent flush, authorization-file flush, authorization-parent flush, rename before
-any parent flush, each distinct parent flush, each bound auxiliary-write prefix,
-graph/lifecycle finalisation, final-witness file flush, and witness-parent flush;
-for content leaves,
-after leaf+witness commit; after terminal-receipt commit; and after each
-equivalent compensation cut. Tests terminate/recreate the executor with an
+The curation executor exposes test-only barriers after prepared-state commit,
+after content leaf+witness commit, after terminal-receipt commit, and after
+each equivalent compensation cut. Tests terminate/recreate the executor with an
 abrupt `BaseException` at every barrier, then call read-only `status` and exact
-replay. Acceptance requires zero or one durable/adopted semantic effect, at most
-one durable/adopted placement and no recovery-issued rename from an exact target,
-one terminal receipt, correct next-step selection, and byte-
-identical plan identity at every cut. A changed
-plan id/fingerprint, altered target, substituted stable identity, advanced or
-unavailable prior-state generation, unchanged target-state generation,
-cross-epoch lineage, or ambiguous placement must refuse, not recover
-optimistically.
+replay. Acceptance requires zero or one durable semantic effect, one terminal
+receipt, correct next-step selection, and byte-identical plan identity at every
+cut. A changed plan id/fingerprint, altered target, or substituted stable
+identity must refuse, not recover optimistically.
 
 ## Risks / Trade-offs
 
@@ -357,11 +342,10 @@ optimistically.
   normal backup/disclosure policy, and never expose them through broad review
   listings.
 - **[Risk] Commit evidence touches several mature writers.** → Keep the content
-  witness seam private and additive; use ordered durable operation-bound
-  candidate and authorization records for rename leaves; test every allowed
-  adapter against its ordinary leaf; and reject a step kind whose effect is
-  neither same-batch witnessed nor exactly reconstructible at every transition
-  cut.
+  witness seam private and additive; test every allowed adapter against its
+  ordinary leaf; and reject a step kind whose effect is not same-batch
+  witnessed, which is why v1 refuses relocation (see
+  `add-curation-relocation-protocol`).
 - **[Risk] One-step requests require several tool calls for a long plan.** →
   The skill loops automatically after one approval; bounded calls are safer for
   Hosted edge timeouts and make progress observable.
@@ -383,9 +367,9 @@ optimistically.
 1. Add the curation plan/store and read-only work-item/preview/status paths
    behind the new mode; no existing invocation changes.
 2. Add strict step schemas and validate-only plan preparation.
-3. Add the private content-leaf commit-witness seam and the placement-leaf
-   prepared-relocation seam, one adapter at a time with crash tests before
-   enabling its step kind.
+3. Add the private content-leaf commit-witness seam, one adapter at a time with
+   crash tests before enabling its step kind; the placement-leaf
+   prepared-relocation seam belongs to `add-curation-relocation-protocol`.
 4. Add forward apply/resume, then compensation derivation/execution.
 5. Update standalone read/write classification, schema fixtures, capability
    docs, and scaffold workflow skill; provide the generic curation contribution

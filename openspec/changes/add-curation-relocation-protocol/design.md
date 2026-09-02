@@ -133,3 +133,83 @@ verbatim from the v1 design's five-cut list, where it was cut 3:
    generations; an authorized exact-target placement is adopted and rolls
    forward with no recovery-issued rename; and any other state blocks as
    uncertain;
+
+## Residual v1 design text moved here
+
+Removed from `add-governed-curation-lane`'s design when the relocation protocol
+was carved out of that change, so that design agrees with its own spec and
+tasks. Every block below is verbatim, labelled by the v1 design section it came
+from. It describes target behavior for this change, not shipped behavior.
+
+### From decision 2, canonical run layout
+
+Two entries in the run-layout tree:
+
+```
+  transitions/<operation_id>/prepared.json
+  transitions/<operation_id>/authorized.json
+```
+
+and the state-reconstruction sentences:
+
+can be rebuilt from immutable plans, approvals, relocation candidates,
+relocation authorizations, witnesses, and receipts, so a stale state projection
+is repairable rather than authoritative. Each operation has exactly one
+canonical `prepared.json` candidate and one canonical `authorized.json`; digest-
+named preparation aliases and competing candidates are refused.
+
+### From decision 7, partial failure
+
+with the same operation id after guards are rechecked. A placement failure after
+relocation preparation is classified from its verified candidate, authorization,
+namespace lineage, and exact placement before retry, roll-forward, or refusal.
+
+### From decision 8, compensation
+
+It is immutable, has its own fingerprint and approval rationale, uses the same
+one-step content-witness or prepared-relocation evidence protocol and terminal
+receipts, and links every result to the forward plan.
+
+### From decision 9, hosted and standalone
+
+same retained filesystem epoch reconstructs from those vault artifacts. If a
+placement transition's filesystem epoch or parent tokens become incomparable,
+the same portable evidence still powers status but recovery blocks with
+`CURATION_RENAME_HISTORY_UNPROVABLE`; portability does not manufacture rename
+history on a different filesystem.
+
+### Relocation fault-injection barriers, from decision 10
+
+The curation executor exposes test-only barriers after prepared-state commit;
+for placement leaves, after each retained-parent preflight flush, candidate-file
+flush, each newly created governed-run ancestor-entry flush, candidate containing-
+parent flush, authorization-file flush, authorization-parent flush, rename before
+any parent flush, each distinct parent flush, each bound auxiliary-write prefix,
+graph/lifecycle finalisation, final-witness file flush, and witness-parent flush;
+for content leaves,
+after leaf+witness commit; after terminal-receipt commit; and after each
+equivalent compensation cut. Tests terminate/recreate the executor with an
+abrupt `BaseException` at every barrier, then call read-only `status` and exact
+replay. Acceptance requires zero or one durable/adopted semantic effect, at most
+one durable/adopted placement and no recovery-issued rename from an exact target,
+one terminal receipt, correct next-step selection, and byte-
+identical plan identity at every cut. A changed
+plan id/fingerprint, altered target, substituted stable identity, advanced or
+unavailable prior-state generation, unchanged target-state generation,
+cross-epoch lineage, or ambiguous placement must refuse, not recover
+optimistically.
+
+### From Risks / Trade-offs
+
+- **[Risk] Commit evidence touches several mature writers.** → Keep the content
+  witness seam private and additive; use ordered durable operation-bound
+  candidate and authorization records for rename leaves; test every allowed
+  adapter against its ordinary leaf; and reject a step kind whose effect is
+  neither same-batch witnessed nor exactly reconstructible at every transition
+  cut.
+
+### From the Migration Plan
+
+3. Add the private content-leaf commit-witness seam and the placement-leaf
+   prepared-relocation seam, one adapter at a time with crash tests before
+   enabling its step kind.
