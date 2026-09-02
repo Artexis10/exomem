@@ -29,6 +29,7 @@ silently dropped.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 from collections.abc import Iterable, Mapping
@@ -255,6 +256,26 @@ UNPROJECTABLE_SURFACES: Mapping[str, str] = {
     "proposal_queue": "relation/compile proposals are computed server-side, not stored as files",
 }
 
+#: ``audit/attention category -> the neutral signal class it belongs to``.
+#: `entity_recurrence` is the only registered category that proposes an
+#: *identity* rather than a page defect, and the neutral schema's
+#: entity-candidate class is the one f21 is answerable for. Everything else the
+#: sweep produces is still projected, carrying its own category, so absence is
+#: proven over the whole sweep rather than over a filtered view of it.
+CATEGORY_SIGNAL_CLASSES: Mapping[str, str] = MappingProxyType(
+    {"entity_recurrence": "entity_candidate"}
+)
+
+#: The product read paths `runtime_surfaces` adds. Declared, because a verdict
+#: reached through a documented read endpoint must never be mistaken for one the
+#: file surface produced.
+RUNTIME_ENDPOINTS: tuple[str, ...] = (
+    "exomem.audit.audit(vault)",
+    "exomem.attention.attention(vault, state=all, record_surfacing=False)",
+    "exomem.curation.work_item(vault, review_ref)",
+    "exomem.due_state.recompute(vault)",
+)
+
 #: Why the due-state counters surface reports nothing on a vault that has none.
 NO_DUE_STATE_LEDGER = (
     f"{DUE_STATE_FILE} carries no emission ledger; nothing has been counted or emitted"
@@ -390,6 +411,165 @@ def _as_text(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+def _date_of(taken_at: str) -> dt.date:
+    """The snapshot's own date. A projection never reads a clock of its own."""
+
+    return dt.date.fromisoformat(taken_at[:10])
+
+
+def _entity_candidate_identity(item: Any) -> str | None:
+    """The recurring identity one attention row is about, or ``None``.
+
+    Read from the row's own `entity_recurrence` reason rather than from its
+    anchor path: the anchor is whichever page sorts smallest, and two identities
+    routinely share one.
+    """
+
+    for reason in item.reasons or ():
+        if reason.get("category") != "entity_recurrence":
+            continue
+        identity = str((reason.get("meta") or {}).get("identity") or "").strip()
+        if identity:
+            return identity
+    return None
+
+
+def _audit_finding_items(report: Any) -> tuple[StateItem, ...]:
+    """One sweep of every registered audit category, projected whole.
+
+    Every finding is projected, not only the signal-bearing ones: absence is
+    proven over what the sweep produced rather than over a filtered view of it,
+    and a reader can see which categories ran.
+    """
+
+    findings = sorted(report.findings, key=lambda row: (row.category, row.path, row.detail))
+    projected: list[StateItem] = [
+        StateItem(
+            id="surface-audit_findings",
+            kind="container",
+            title="audit_findings",
+            text="one read-only audit sweep over every registered category",
+            raw={
+                "surface": "audit_findings",
+                "projection": "complete",
+                "findings": str(len(findings)),
+                "categories": ",".join(sorted(report.summary)),
+            },
+        )
+    ]
+    for index, finding in enumerate(findings):
+        meta = finding.meta or {}
+        identity = str(meta.get("identity") or "").strip()
+        raw = {
+            "surface": "audit_findings",
+            "category": finding.category,
+            "targets": identity or finding.path,
+        }
+        signal_class = CATEGORY_SIGNAL_CLASSES.get(finding.category)
+        if signal_class is not None and identity:
+            raw["signal_class"] = signal_class
+            raw["identity"] = identity
+            raw["candidate_state"] = str(meta.get("candidate_state") or "")
+            projected.append(_identity_item(identity, finding))
+        projected.append(
+            StateItem(
+                id=f"audit-{index:03d}-{finding.category}",
+                kind="container",
+                title=finding.category,
+                text=finding.detail,
+                raw=raw,
+            )
+        )
+    return tuple(projected)
+
+
+def _identity_item(identity: str, finding: Any) -> StateItem:
+    """The recurring identity itself, carrying the counts the runtime measured.
+
+    The distinct-*origin* count is what rides `source_count`, never the page or
+    occurrence count: f21's acceptance predicate says "distinct sources, never
+    occurrence counts", and a corpus that repeats one name on one page is the
+    case the whole family exists to keep quiet.
+
+    An identity reaches the snapshot only once the audit has produced a finding
+    for it, because that is the only place the runtime names one. A subject with
+    no finding therefore evaluates `unsupported` rather than `pass` — not a
+    silence anything is credited with, and not the twin's proof either: the
+    twin's silence is established by the absence meta-predicate over four
+    completely projected surfaces, which needs no item at all.
+    """
+
+    meta = finding.meta or {}
+    facets = int(meta.get("facet_count") or 0)
+    return StateItem(
+        id=identity,
+        kind="container",
+        title=str(meta.get("candidate") or identity),
+        text=finding.detail,
+        current="yes",
+        raw={
+            "source_count": str(int(meta.get("origin_count") or 0)),
+            "page_count": str(int(meta.get("page_count") or 0)),
+            "facet_count": str(facets),
+            "reusable_facts": "yes" if facets else "no",
+            "candidate_state": str(meta.get("candidate_state") or ""),
+        },
+    )
+
+
+def _review_queue_items(report: Any) -> tuple[StateItem, ...]:
+    """Every registered review queue at ``state="all"``, default union included.
+
+    `entity_recurrence` is registered but deliberately outside the default
+    union until f21's own acknowledgment gate admits it, so a projection that
+    read only the default surface would report a candidate as absent while the
+    agent's explicit read returns it. Both are read, and each row records which
+    of the two carried it.
+    """
+
+    from exomem.attention import DEFAULT_ATTENTION_CATEGORIES
+
+    default = frozenset(DEFAULT_ATTENTION_CATEGORIES)
+    rows = sorted(report.items, key=lambda row: (str(row.item_id), row.path))
+    projected: list[StateItem] = [
+        StateItem(
+            id="surface-review_queue",
+            kind="container",
+            title="review_queue",
+            text="every registered attention category, read at state=all",
+            raw={
+                "surface": "review_queue",
+                "projection": "complete",
+                "items": str(len(rows)),
+            },
+        )
+    ]
+    for row in rows:
+        identity = _entity_candidate_identity(row)
+        raw = {
+            "surface": "review_queue",
+            "categories": " ".join(row.categories),
+            "targets": identity or row.path,
+            "delivery": (
+                "default" if default.intersection(row.categories) else "explicit_only"
+            ),
+        }
+        if identity is not None:
+            raw["signal_class"] = CATEGORY_SIGNAL_CLASSES["entity_recurrence"]
+            raw["identity"] = identity
+        projected.append(
+            StateItem(
+                id=f"review-{row.item_id}",
+                kind="container",
+                title=row.path,
+                text=row.reasons[0]["detail"] if row.reasons else "",
+                review_state=row.state or None,
+                raw=raw,
+            )
+        )
+    return tuple(projected)
+
+
 class VaultProjector(Projector):
     """Project one exomem vault directory into a neutral state snapshot."""
 
@@ -400,12 +580,21 @@ class VaultProjector(Projector):
     #: read from the manifest's own `storage.source`. Also additive and
     #: default-empty, but the output schema moved, and a snapshot's provenance is
     #: only worth anything if the version tracks what the projector can emit.
-    version = "0.3.0"
+    #: 0.4.0 adds the opt-in `runtime_surfaces` projection, which emits signal
+    #: and surface items the file-only build cannot produce at all.
+    version = "0.4.0"
     author = "benchmark-harness"
     endpoints_used = ("filesystem:walk(vault)", "filesystem:read_text(*.md)")
 
-    def __init__(self, vault_root: Path | str) -> None:
+    def __init__(self, vault_root: Path | str, *, runtime_surfaces: bool = False) -> None:
         self.vault_root = Path(vault_root)
+        #: Read the four absence surfaces through the product's documented read
+        #: paths instead of from files. Off by default, and the default is the
+        #: fair-comparison build: from files alone three of the four surfaces
+        #: cannot be projected at all, so every quiet assertion is blocked.
+        self.runtime_surfaces = runtime_surfaces
+        if runtime_surfaces:
+            self.endpoints_used = (*type(self).endpoints_used, *RUNTIME_ENDPOINTS)
 
     # -- reading -----------------------------------------------------------
 
@@ -546,7 +735,7 @@ class VaultProjector(Projector):
                 )
 
         self._apply_revision_chains(items, successor_of)
-        for marker in self._project_surfaces():
+        for marker in self._project_surfaces(taken_at):
             items[marker.id] = marker
 
         collections = self._project_collections(pages)
@@ -570,7 +759,7 @@ class VaultProjector(Projector):
             completeness_notes=COMPLETENESS_NOTES,
         )
 
-    def _project_surfaces(self) -> tuple[StateItem, ...]:
+    def _project_surfaces(self, taken_at: str) -> tuple[StateItem, ...]:
         """Project the four absence surfaces, and the triage store's dismissals.
 
         The honest answer for three of the four is "cannot be projected from
@@ -579,7 +768,13 @@ class VaultProjector(Projector):
         assertion evaluated against a real vault is blocked rather than passing.
         A projector that quietly emitted ``complete`` here would manufacture
         silence the vault never demonstrated.
+
+        ``runtime_surfaces`` does not widen the file surface — it swaps to a
+        different, declared one. See :meth:`_project_runtime_surfaces`.
         """
+
+        if self.runtime_surfaces:
+            return self._project_runtime_surfaces(taken_at)
 
         projected: list[StateItem] = []
         for surface, reason in sorted(UNPROJECTABLE_SURFACES.items()):
@@ -594,6 +789,22 @@ class VaultProjector(Projector):
             )
 
         projected.append(self._project_due_state_counters())
+
+        projection, decisions = self._triage_decisions()
+        projected.append(
+            StateItem(
+                id="surface-review_queue",
+                kind="container",
+                title="review_queue",
+                text=f"{REVIEW_STATE_FILE} triage store",
+                raw={"surface": "review_queue", "projection": projection},
+            )
+        )
+        projected.extend(self._dismissal_items(decisions))
+        return tuple(projected)
+
+    def _triage_decisions(self) -> tuple[str, dict[str, Any]]:
+        """``(projection status, stored decisions)`` from the documented store."""
 
         triage_path = self._state_file(REVIEW_STATE_FILE)
         decisions: dict[str, Any] = {}
@@ -610,15 +821,11 @@ class VaultProjector(Projector):
                         decisions = raw_decisions
                         break
                 projection = "complete"
-        projected.append(
-            StateItem(
-                id="surface-review_queue",
-                kind="container",
-                title="review_queue",
-                text=f"{REVIEW_STATE_FILE} triage store",
-                raw={"surface": "review_queue", "projection": projection},
-            )
-        )
+        return projection, decisions
+
+    @staticmethod
+    def _dismissal_items(decisions: Mapping[str, Any]) -> tuple[StateItem, ...]:
+        projected: list[StateItem] = []
         for target, decision in sorted(decisions.items()):
             if not isinstance(decision, dict):
                 continue
@@ -641,6 +848,185 @@ class VaultProjector(Projector):
                 )
             )
         return tuple(projected)
+
+    # -- the same four surfaces, read from the product's own read paths -----
+
+    def _project_runtime_surfaces(self, taken_at: str) -> tuple[StateItem, ...]:
+        """All four absence surfaces, each one actually enumerated.
+
+        The file projection above is the fair-comparison build and it stays the
+        default: it blocks every quiet assertion, which is the honest verdict
+        for a surface nobody can read from files. This mode reads the *other*
+        representation the acceptance predicate already admits — "a documented
+        list/read endpoint" (PREREGISTRATION.md §4) — and names each endpoint in
+        ``endpoints_used`` so a verdict can never be mistaken for one the file
+        surface produced.
+
+        Nothing here writes. The audit sweep and the due-state recomputation are
+        read-only by contract, the attention read passes
+        ``record_surfacing=False`` so projecting a queue never counts as having
+        shown it to anybody, and the curation read assembles a work item without
+        authoring a plan. ``taken_at`` supplies the date, so the projection has
+        no clock of its own.
+        """
+
+        from exomem import attention as attention_module
+        from exomem import audit as audit_module
+
+        today = _date_of(taken_at)
+        audit_report = audit_module.audit(self.vault_root, today=today)
+        review_report = attention_module.attention(
+            self.vault_root,
+            categories=list(attention_module.ATTENTION_CATEGORIES),
+            limit=0,
+            state="all",
+            today=today,
+            record_surfacing=False,
+        )
+        return (
+            *_audit_finding_items(audit_report),
+            *_review_queue_items(review_report),
+            *self._project_proposal_queue(review_report),
+            *self._project_runtime_due_state(today),
+            *self._dismissal_items(self._triage_decisions()[1]),
+        )
+
+    def _project_proposal_queue(self, review_report: Any) -> tuple[StateItem, ...]:
+        """Stored governed curation plans, plus every candidate that can become one.
+
+        A proposal queue that only listed already-authored plans would report
+        silence on a vault where the agent has not run yet, which is exactly the
+        silence a quiet assertion must not be credited with. So both halves are
+        enumerated: the plans on disk, and the work item each open entity
+        candidate resolves to through the governed curation lane. A candidate
+        whose work item refuses to bind is not projected as absent — the refusal
+        propagates, because an unreadable surface is an error and never silence.
+        """
+
+        from exomem import curation as curation_module
+
+        stored = sorted(self.vault_root.rglob("_Governance/curation/runs/*/plan.json"))
+        projected: list[StateItem] = [
+            StateItem(
+                id=f"proposal-plan-{path.parent.name}",
+                kind="container",
+                title=path.parent.name,
+                text="stored governed curation plan",
+                raw={"surface": "proposal_queue", "run_id": path.parent.name},
+            )
+            for path in stored
+        ]
+        for item in sorted(review_report.items, key=lambda row: str(row.item_id)):
+            identity = _entity_candidate_identity(item)
+            if identity is None or not item.ref:
+                continue
+            work = curation_module.work_item(self.vault_root, review_ref=item.ref)
+            binding = work.get("entity_candidate") or {}
+            projected.append(
+                StateItem(
+                    id=f"proposal-{item.item_id}",
+                    kind="container",
+                    title=str(binding.get("candidate_state") or ""),
+                    text=(
+                        "governed curation work item for one recurring identity; "
+                        f"allowed step kinds: {work.get('allowed_candidate_step_kinds')}"
+                    ),
+                    review_state=item.state or None,
+                    raw={
+                        "surface": "proposal_queue",
+                        "signal_class": CATEGORY_SIGNAL_CLASSES["entity_recurrence"],
+                        "targets": identity,
+                        "identity": identity,
+                        "candidate_state": str(binding.get("candidate_state") or ""),
+                        "signal_version": str(binding.get("signal_version") or ""),
+                    },
+                )
+            )
+        projected.insert(
+            0,
+            StateItem(
+                id="surface-proposal_queue",
+                kind="container",
+                title="proposal_queue",
+                text="stored curation plans and the work item each open candidate binds",
+                raw={
+                    "surface": "proposal_queue",
+                    "projection": "complete",
+                    "stored_plans": str(len(stored)),
+                    "candidate_work_items": str(len(projected) - len(stored)),
+                },
+            ),
+        )
+        return tuple(projected)
+
+    def _project_runtime_due_state(self, today: Any) -> tuple[StateItem, ...]:
+        """The due-state projection itself, recomputed from canonical state.
+
+        Projected rather than asserted. ``entity_recurrence`` is not one of the
+        due-state projection categories, so a recurring identity cannot reach
+        this surface — but reading that fact off a constant would be a claim
+        about the code, and what a quiet assertion needs is the surface's own
+        answer. So the marker names the categories the projection actually
+        carried and every entry is projected with the page it is about.
+        """
+
+        from exomem import due_state as due_state_module
+
+        projection = due_state_module.recompute(self.vault_root, today=today)
+        categories = projection.get("categories") or {}
+        projected: list[StateItem] = []
+        for category in sorted(categories):
+            for path, buckets in sorted((categories[category] or {}).items()):
+                for bucket in sorted(buckets or {}):
+                    for index, entry in enumerate(buckets[bucket] or []):
+                        projected.append(
+                            StateItem(
+                                id=f"due-{category}-{path}-{bucket}-{index}",
+                                kind="container",
+                                title=category,
+                                text=str(entry.get("detail") or ""),
+                                raw={
+                                    "surface": "due_state_counters",
+                                    "category": category,
+                                    "bucket": bucket,
+                                    "targets": path,
+                                },
+                            )
+                        )
+        marker = {
+            "surface": "due_state_counters",
+            "projection": "complete",
+            "categories": ",".join(sorted(categories)),
+            "entries": str(len(projected)),
+        }
+        ledger = self._due_state_ledger()
+        if ledger is not None:
+            marker.update(ledger)
+        projected.insert(
+            0,
+            StateItem(
+                id="surface-due_state_counters",
+                kind="container",
+                title="due_state_counters",
+                text="due-state projection recomputed from canonical state",
+                raw=marker,
+            ),
+        )
+        return tuple(projected)
+
+    def _due_state_ledger(self) -> dict[str, str] | None:
+        """The persisted emission ledger, when the vault has one."""
+
+        path = self._state_file(DUE_STATE_FILE)
+        payload = _read_json(path) if path is not None else None
+        ledger = payload.get("emission") if isinstance(payload, dict) else None
+        if not isinstance(ledger, dict):
+            return None
+        return {
+            "writes": str(int(ledger.get("writes") or 0)),
+            "emissions": str(int(ledger.get("emissions") or 0)),
+            "due_total": str(int(ledger.get("due_total") or 0)),
+        }
 
     def _project_collections(
         self, pages: tuple[tuple[str, dict[str, Any], str], ...]

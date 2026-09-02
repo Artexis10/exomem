@@ -270,6 +270,182 @@ def test_the_real_vault_projector_blocks_quiet_assertions_rather_than_passing_th
 
 
 # --------------------------------------------------------------------------
+# f21 on the runtime that exists, not on a snapshot of it.
+# `complete-recurring-entity-lifecycle`, tasks 6.1 and 6.2.
+# --------------------------------------------------------------------------
+
+
+def _f21_runtime_snapshot(vault: Path):
+    """Project one real synthetic f21 vault through the real product surfaces."""
+
+    from epistemic.projectors.exomem_vault import VaultProjector
+
+    return VaultProjector(vault, runtime_surfaces=True).project(
+        phase="p1-recurrence", taken_at="2026-08-16T00:00:00Z"
+    )
+
+
+def _f21_signals(snapshot, subject: str) -> dict[str, str]:
+    """``surface -> signal id`` for every entity-candidate signal naming ``subject``."""
+
+    from epistemic import assertions as assertions_module
+
+    return {
+        assertions_module._signal_surface(item) or "unnamed": item.id
+        for item, _token in assertions_module._signals_targeting(
+            snapshot, subject, assertions_module.ENTITY_SIGNAL_CLASSES
+        )
+    }
+
+
+@pytest.fixture
+def f21_vault(tmp_path: Path) -> Path:
+    """The f21 corpus as real vault bytes, written once per test."""
+
+    from exomem import find as find_module
+
+    vault = corpus.f21_runtime_vault(tmp_path / "vault")
+    find_module.clear_cache()
+    return vault
+
+
+def test_the_real_runtime_projects_every_f21_absence_surface(f21_vault: Path) -> None:
+    """(a) All four declared surfaces are real projections, not stubs.
+
+    Until they are, every quiet assertion over a real vault is *blocked* rather
+    than passing, which is the anti-vacuity meta-predicate doing its job (see
+    ``test_the_real_vault_projector_blocks_quiet_assertions_rather_than_passing_them``).
+    A projection that reports ``complete`` here is claiming the surface was
+    actually enumerated, so each one is read from the product's own documented
+    read path.
+    """
+
+    from epistemic import assertions as assertions_module
+
+    snapshot = _f21_runtime_snapshot(f21_vault)
+
+    projected = {
+        surface: assertions_module._surface_projection(snapshot, surface)
+        for surface in corpus.ABSENCE_SURFACES
+    }
+    assert projected == dict.fromkeys(corpus.ABSENCE_SURFACES, "complete"), projected
+
+
+def test_both_f21_positives_surface_from_the_real_runtime(f21_vault: Path) -> None:
+    """(b) 6.2's positive half, measured on this tree.
+
+    Both positives carry structurally different reusable facets — a typed-copula
+    witness with a work relation, and a typed-label witness with an attendance
+    relation — across three independent origins, and both must reach the audit,
+    the explicit review read and the proposal/work-item projection. The count is
+    asserted too: exactly two candidates, so a projection that surfaced the twin
+    as well would fail here rather than only in the twin's own test.
+    """
+
+    snapshot = _f21_runtime_snapshot(f21_vault)
+
+    for label in ("f21-subject-lower", "f21-subject-cyrillic"):
+        identity = corpus.F21_RUNTIME_REFERENTS[label]
+        result = resolve("entity_candidate_surfaced_from_recurrence")(
+            AssertionContext(snapshot=snapshot, subject=identity)
+        )
+        assert result.outcome == "pass", f"{label}: {result.evidence}"
+        assert set(_f21_signals(snapshot, identity)) == {
+            "audit_findings",
+            "review_queue",
+            "proposal_queue",
+        }, label
+
+    surfaced = {
+        item.raw["identity"]
+        for item in snapshot.items
+        if item.raw.get("signal_class") == "entity_candidate"
+    }
+    assert surfaced == {
+        corpus.F21_RUNTIME_REFERENTS["f21-subject-lower"],
+        corpus.F21_RUNTIME_REFERENTS["f21-subject-cyrillic"],
+    }, surfaced
+
+
+def test_the_f21_twin_is_absent_on_every_real_f21_surface(f21_vault: Path) -> None:
+    """(c) 6.2's quiet half, as a real pass rather than a block.
+
+    The twin rides the same three notes and the same three origins as both
+    positives; only its reusable facets are missing. Its silence must therefore
+    be established on all four surfaces — including due-state, which
+    ``entity_recurrence`` deliberately never enters — and it must be a *pass*,
+    which the meta-predicate only grants once every surface projected
+    completely.
+    """
+
+    snapshot = _f21_runtime_snapshot(f21_vault)
+    twin = corpus.F21_RUNTIME_REFERENTS["f21-twin-incidental"]
+
+    result = resolve("signal_absence_checked_across_all_surfaces")(
+        AssertionContext(snapshot=snapshot, subject=twin)
+    )
+
+    assert result.outcome == "pass", result.evidence
+    for surface in corpus.ABSENCE_SURFACES:
+        assert surface in result.evidence, result.evidence
+    assert _f21_signals(snapshot, twin) == {}
+
+
+def test_the_f21_runtime_twin_is_frequency_matched_to_both_positives(
+    f21_vault: Path,
+) -> None:
+    """The twin's silence is about reusable facts, never about rarity.
+
+    Measured from the corpus rather than asserted in prose, exactly as
+    ``test_f20_twins_are_frequency_and_length_matched`` does: equal mentioning
+    pages, equal independent origins and equal mention counts leave the frame
+    structure as the only discriminator.
+    """
+
+    report = corpus.f21_runtime_matching_report()
+
+    assert len(report) == len(corpus.F21_RUNTIME_REFERENTS)
+    assert len(set(report.values())) == 1, report
+    assert report[corpus.F21_RUNTIME_REFERENTS["f21-twin-incidental"]][1] == 3, report
+
+
+def test_the_real_runtime_f21_positives_go_red_when_the_ordinary_text_lane_is_disabled(
+    f21_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(d) The two-sided proof this falsification target needs.
+
+    f21 is a pre-registered falsification target, and a family that only ever
+    goes green proves as little as one that only ever goes red. Disabling the
+    recurrence substrate's ordinary-text lane at its own seam — no source edit,
+    no corpus edit — must take both positives out of the real projection, while
+    the synthetic ``surfaced=True`` snapshot, which models a runtime rather than
+    running one, is untouched.
+    """
+
+    from exomem import entity_recurrence
+
+    monkeypatch.setattr(
+        entity_recurrence, "extract_identity_frames", lambda *a, **k: ()
+    )
+    snapshot = _f21_runtime_snapshot(f21_vault)
+
+    for label in ("f21-subject-lower", "f21-subject-cyrillic"):
+        identity = corpus.F21_RUNTIME_REFERENTS[label]
+        result = resolve("entity_candidate_surfaced_from_recurrence")(
+            AssertionContext(snapshot=snapshot, subject=identity)
+        )
+        assert result.outcome != "pass", f"{label}: {result.evidence}"
+        assert _f21_signals(snapshot, identity) == {}, label
+
+    synthetic = resolve("entity_candidate_surfaced_from_recurrence")(
+        AssertionContext(
+            snapshot=corpus.f21_corpus(surfaced=True), subject="f21-subject-lower"
+        )
+    )
+    assert synthetic.outcome == "pass", synthetic.evidence
+
+
+# --------------------------------------------------------------------------
 # The families execute end to end.
 # --------------------------------------------------------------------------
 
