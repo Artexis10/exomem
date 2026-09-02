@@ -4,7 +4,7 @@ import json
 import re
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -268,6 +268,16 @@ def test_retarget_request_changes_only_the_v1_legacy_runtime_pair() -> None:
     )
 
     assert target == {**source, "releaseVersion": "0.68.1", "protocolVersion": "1"}
+    assert recovery.request_targets_selected_runtime(
+        target,
+        wire_protocol="exomem-cell-provisioner.v1",
+        runtime_target={"releaseVersion": "0.68.1", "protocolVersion": "1"},
+    )
+    assert not recovery.request_targets_selected_runtime(
+        source,
+        wire_protocol="exomem-cell-provisioner.v1",
+        runtime_target={"releaseVersion": "0.68.1", "protocolVersion": "1"},
+    )
     assert source["releaseVersion"] == "0.66.0"
     with pytest.raises(recovery.RecoveryRefusal):
         recovery.retarget_provision_request(
@@ -327,6 +337,16 @@ def test_retarget_request_changes_only_the_complete_v2_runtime_target() -> None:
     )
 
     assert target == {**source, "runtimeTarget": selected}
+    assert recovery.request_targets_selected_runtime(
+        target,
+        wire_protocol="exomem-cell-provisioner.v2",
+        runtime_target=selected,
+    )
+    assert not recovery.request_targets_selected_runtime(
+        source,
+        wire_protocol="exomem-cell-provisioner.v2",
+        runtime_target=selected,
+    )
     assert source["runtimeTarget"] is source_target
     with pytest.raises(recovery.RecoveryRefusal):
         recovery.retarget_provision_request(
@@ -629,11 +649,14 @@ def test_successor_retarget_marker_binds_prior_chain_and_both_requests() -> None
 def test_successor_retarget_prior_chain_refuses_reordered_or_unbound_receipts() -> None:
     recovery = _module()
     now = datetime(2030, 1, 4, tzinfo=UTC)
+    recovered_at = now - timedelta(minutes=3)
+    retargeted_at = now - timedelta(minutes=2)
+    resumed_at = now - timedelta(minutes=1)
     recovered = recovery.recovery_marker(
         preflight_sha256="1" * 64,
         helper_source_sha256="2" * 64,
         claim_generation=4,
-        committed_at=now,
+        committed_at=recovered_at,
     )
     retargeted = recovery.retarget_marker(
         preflight_sha256="3" * 64,
@@ -642,14 +665,14 @@ def test_successor_retarget_prior_chain_refuses_reordered_or_unbound_receipts() 
         target_runtime_sha256="6" * 64,
         helper_source_sha256="7" * 64,
         claim_generation=4,
-        committed_at=now,
+        committed_at=retargeted_at,
     )
     resumed = recovery.retarget_resume_marker(
         retarget_marker_sha256=recovery.canonical_sha256(retargeted),
         preflight_sha256="8" * 64,
         helper_source_sha256="9" * 64,
         claim_generation=5,
-        committed_at=now,
+        committed_at=resumed_at,
     )
     retried = recovery.retarget_retry_marker(
         retarget_marker_sha256=recovery.canonical_sha256(retargeted),
@@ -664,6 +687,11 @@ def test_successor_retarget_prior_chain_refuses_reordered_or_unbound_receipts() 
         (),
         {
             "canonical_request_sha256": "5" * 64,
+            "state": recovery.OperationState.PENDING,
+            "checkpoint": "capacity-live-observation-mismatch",
+            "finalized_at": None,
+            "claim_generation": 7,
+            "updated_at": now,
             "progress": {
                 "_init_retry_recovery_v1": recovered,
                 "_runtime_retarget_recovery_v1": retargeted,
@@ -679,6 +707,31 @@ def test_successor_retarget_prior_chain_refuses_reordered_or_unbound_receipts() 
         **retried,
         "resume_marker_sha256": "c" * 64,
     }
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.RecoveryService._prior_retarget_receipts_sha256(operation)
+    operation.progress["_runtime_retarget_retry_v1"] = retried
+    operation.claim_generation = 5
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.RecoveryService._prior_retarget_receipts_sha256(operation)
+    operation.claim_generation = 6
+    operation.progress["_runtime_retarget_retry_v1"] = {
+        **retried,
+        "claim_generation": 4,
+    }
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.RecoveryService._prior_retarget_receipts_sha256(operation)
+    operation.progress["_runtime_retarget_retry_v1"] = {
+        **retried,
+        "committed_at": (resumed_at - timedelta(seconds=1)).isoformat(),
+    }
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.RecoveryService._prior_retarget_receipts_sha256(operation)
+    operation.progress["_runtime_retarget_retry_v1"] = retried
+    operation.updated_at = now - timedelta(seconds=1)
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.RecoveryService._prior_retarget_receipts_sha256(operation)
+    operation.updated_at = now
+    operation.claim_generation = 6
     with pytest.raises(recovery.RecoveryRefusal):
         recovery.RecoveryService._prior_retarget_receipts_sha256(operation)
 

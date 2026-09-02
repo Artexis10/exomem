@@ -516,6 +516,24 @@ def retarget_provision_request(
     raise RecoveryRefusal("retarget request is invalid")
 
 
+def request_targets_selected_runtime(
+    request: dict[str, object], *, wire_protocol: str, runtime_target: dict[str, object]
+) -> bool:
+    if wire_protocol == "exomem-cell-provisioner.v1":
+        return (
+            "runtimeTarget" not in request
+            and request.get("releaseVersion") == runtime_target.get("releaseVersion")
+            and request.get("protocolVersion") == runtime_target.get("protocolVersion")
+        )
+    if wire_protocol == "exomem-cell-provisioner.v2":
+        return (
+            "releaseVersion" not in request
+            and "protocolVersion" not in request
+            and request.get("runtimeTarget") == runtime_target
+        )
+    return False
+
+
 def recovery_marker(
     *,
     preflight_sha256: str,
@@ -2089,11 +2107,13 @@ class RecoveryService:
         retry_value = operation.progress.get(_RETARGET_RETRY_MARKER)
         resume_sha256 = ""
         retry_sha256 = ""
+        ordered_receipts = [recovery, retarget]
         if resume_value is not None:
             resume = parse_retarget_resume_marker(resume_value)
             if resume["retarget_marker_sha256"] != canonical_sha256(retarget):
                 raise RecoveryRefusal("successor retarget preflight failed")
             resume_sha256 = canonical_sha256(resume)
+            ordered_receipts.append(resume)
         if retry_value is not None:
             if resume_value is None:
                 raise RecoveryRefusal("successor retarget preflight failed")
@@ -2104,6 +2124,41 @@ class RecoveryService:
             ):
                 raise RecoveryRefusal("successor retarget preflight failed")
             retry_sha256 = canonical_sha256(retry)
+            ordered_receipts.append(retry)
+        claim_generations = [int(receipt["claim_generation"]) for receipt in ordered_receipts]
+        committed_at = [
+            RecoveryService._receipt_committed_at(receipt) for receipt in ordered_receipts
+        ]
+        retry_generation = int(retry["claim_generation"]) if retry_value is not None else None
+        retry_committed_at = (
+            RecoveryService._receipt_committed_at(retry) if retry_value is not None else None
+        )
+        after_retry_terminal = (
+            retry_generation is not None
+            and (
+                operation.state is OperationState.ERROR
+                or operation.checkpoint == "capacity-live-observation-mismatch"
+            )
+        )
+        if (
+            claim_generations != sorted(claim_generations)
+            or claim_generations[-1] > operation.claim_generation
+            or committed_at != sorted(committed_at)
+            or committed_at[-1] > operation.updated_at
+            or (
+                after_retry_terminal
+                and operation.claim_generation <= retry_generation
+            )
+            or (
+                operation.state is OperationState.ERROR
+                and (
+                    operation.finalized_at is None
+                    or retry_committed_at is None
+                    or operation.finalized_at < retry_committed_at
+                )
+            )
+        ):
+            raise RecoveryRefusal("successor retarget preflight failed")
         return canonical_sha256(
             {
                 "recovery": canonical_sha256(recovery),
@@ -2112,6 +2167,13 @@ class RecoveryService:
                 "retry": retry_sha256,
             }
         )
+
+    @staticmethod
+    def _receipt_committed_at(receipt: dict[str, object]) -> datetime:
+        value = datetime.fromisoformat(str(receipt["committed_at"]).replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            raise RecoveryRefusal("successor retarget preflight failed")
+        return value
 
     @staticmethod
     def _preflight_evidence_digest(
@@ -2371,15 +2433,38 @@ class RecoveryService:
             "recovery_digest": canonical_sha256(marker),
         }
 
-    @staticmethod
     def _retarget_successor_result(
-        operation: Operation, marker_value: object, status: str
+        self, operation: Operation, marker_value: object, status: str
     ) -> dict[str, object]:
         marker = parse_retarget_successor_marker(marker_value)
+        purpose = f"operation-request:{operation.action.value}:{operation.idempotency_key}"
+        request = self._codec.decrypt_json(operation.request_ciphertext, purpose=purpose)
+        selected = self._deployment_lock.selected_runtime(self._runtime_selection)
+        target_runtime = selected.runtimeTarget.model_dump(mode="json")
+        if selected.compatibilityDigest is not None:
+            target_runtime["compatibilityDigest"] = selected.compatibilityDigest
         if (
             operation.canonical_request_sha256 != marker["target_request_sha256"]
+            or canonical_request_sha256(request) != operation.canonical_request_sha256
+            or request.get("tenantId") != operation.tenant_id
+            or request.get("cellId") != operation.cell_id
+            or request.get("operationId") != operation.external_operation_id
+            or request.get("fenceGeneration") != operation.fence_generation
+            or request.get("checkpoint") != operation.caller_checkpoint
+            or request.get("provisionMode") != "serve"
+            or operation.external_operation_id != operation.provider_operation_id
+            or operation.fence_generation != operation.provider_fence_generation
+            or not request_targets_selected_runtime(
+                request,
+                wire_protocol=operation.wire_protocol.value,
+                runtime_target=target_runtime,
+            )
+            or marker["target_runtime_sha256"] != canonical_sha256(target_runtime)
+            or marker["helper_source_sha256"] != self._helper_source_sha256
+            or int(marker["claim_generation"]) > operation.claim_generation
+            or self._receipt_committed_at(marker) > operation.updated_at
             or marker["prior_receipts_sha256"]
-            != RecoveryService._prior_retarget_receipts_sha256(
+            != self._prior_retarget_receipts_sha256(
                 operation, request_sha256=str(marker["source_request_sha256"])
             )
         ):

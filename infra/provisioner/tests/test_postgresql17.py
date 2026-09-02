@@ -477,6 +477,43 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
 
             return type("Selected", (), {"runtimeTarget": Target(), "compatibilityDigest": None})()
 
+    class SuccessorSourceLock:
+        def matches_runtime_request(
+            self,
+            request: dict[str, object],
+            *,
+            wire_protocol: str,
+            selection: str | None = None,
+        ) -> bool:
+            assert selection is None
+            return (
+                wire_protocol == "exomem-cell-provisioner.v1"
+                and request["provisionMode"] == "serve"
+                and request["releaseVersion"] == "0.68.1"
+                and request["protocolVersion"] == "1"
+            )
+
+        def selected_runtime(self, selection: str | None):
+            assert selection is None
+
+            class Target:
+                releaseVersion = "0.68.1"
+                protocolVersion = "1"
+
+                @staticmethod
+                def model_dump(*, mode: str) -> dict[str, str]:
+                    assert mode == "json"
+                    return {
+                        "releaseVersion": "0.68.1",
+                        "protocolVersion": "1",
+                        "agentProfile": "hosted-alpha-agent-v4",
+                        "gatewayContractDigest": "a" * 64,
+                        "commandFingerprint": "b" * 64,
+                        "schemaDigest": "c" * 64,
+                    }
+
+            return type("Selected", (), {"runtimeTarget": Target(), "compatibilityDigest": None})()
+
     class Observer:
         async def observe(
             self, operation: Operation, resources: tuple[Resource, ...]
@@ -822,6 +859,35 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
                 "status": "retarget-verified",
             }
             prior_retarget_progress = dict(operation.progress)
+        prior_receipt_time = datetime.now(UTC)
+        retarget_receipt = prior_retarget_progress["_runtime_retarget_recovery_v1"]
+        resume_receipt = retarget_resume_marker(
+            retarget_marker_sha256=canonical_sha256(retarget_receipt),
+            preflight_sha256="a" * 64,
+            helper_source_sha256="b" * 64,
+            claim_generation=1,
+            committed_at=prior_receipt_time,
+        )
+        retry_receipt = retarget_retry_marker(
+            retarget_marker_sha256=canonical_sha256(retarget_receipt),
+            resume_marker_sha256=canonical_sha256(resume_receipt),
+            preflight_sha256="c" * 64,
+            helper_source_sha256="d" * 64,
+            claim_generation=2,
+            committed_at=prior_receipt_time,
+        )
+        prior_full_progress = {
+            **prior_retarget_progress,
+            "_runtime_retarget_resume_v1": resume_receipt,
+            "_runtime_retarget_retry_v1": retry_receipt,
+        }
+        async with database.session_factory.begin() as session:
+            operation = await session.get(Operation, operation_id, with_for_update=True)
+            assert operation is not None
+            operation.state = OperationState.PENDING
+            operation.checkpoint = "capacity-live-observation-mismatch"
+            operation.claim_generation = 3
+            operation.progress = prior_full_progress
         successor_service = RecoveryService(
             sessions=database.session_factory,
             codec=codec,
@@ -830,9 +896,60 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
             database_schema=target.schema,
             database_lock_timeout_seconds=1,
             deployment_lock=SuccessorLock(),  # type: ignore[arg-type]
-            source_deployment_lock=SuccessorLock(),  # type: ignore[arg-type]
+            source_deployment_lock=SuccessorSourceLock(),  # type: ignore[arg-type]
             observer=Observer(),
         )
+
+        async def preserved_successor_state() -> dict[str, object]:
+            async with database.session_factory() as session:
+                operation = await session.get(Operation, operation_id)
+                assert operation is not None
+                resources = tuple(
+                    (
+                        await session.scalars(
+                            select(Resource)
+                            .where(Resource.operation_id == operation_id)
+                            .order_by(Resource.id)
+                        )
+                    ).all()
+                )
+                reservation = await session.scalar(
+                    select(CapacityReservation).where(
+                        CapacityReservation.reserving_operation_id == operation_id
+                    )
+                )
+                tenant_fence = await session.get(TenantFence, operation.tenant_id)
+                cell_lock = await session.get(CellOperationLock, operation.cell_id)
+                assert reservation is not None and tenant_fence is not None
+                assert cell_lock is not None
+                return {
+                    "operation": tuple(
+                        (column.name, getattr(operation, column.name))
+                        for column in operation.__table__.columns
+                        if column.name not in RecoveryService._CHANGED_COLUMNS
+                    ),
+                    "resources": tuple(
+                        tuple(
+                            (column.name, getattr(resource, column.name))
+                            for column in resource.__table__.columns
+                        )
+                        for resource in resources
+                    ),
+                    "reservation": tuple(
+                        (column.name, getattr(reservation, column.name))
+                        for column in reservation.__table__.columns
+                    ),
+                    "tenant_fence": tuple(
+                        (column.name, getattr(tenant_fence, column.name))
+                        for column in tenant_fence.__table__.columns
+                    ),
+                    "cell_lock": tuple(
+                        (column.name, getattr(cell_lock, column.name))
+                        for column in cell_lock.__table__.columns
+                    ),
+                }
+
+        pending_preserved = await preserved_successor_state()
         successor, successor_replay = await asyncio.gather(
             successor_service.successor_retarget(operation_id),
             successor_service.successor_retarget(operation_id),
@@ -866,28 +983,72 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
                 **successor_result,
                 "status": "successor-retarget-verified",
             }
-        now = datetime.now(UTC)
-        retarget_receipt = prior_retarget_progress["_runtime_retarget_recovery_v1"]
-        resume_receipt = retarget_resume_marker(
-            retarget_marker_sha256=canonical_sha256(retarget_receipt),
-            preflight_sha256="a" * 64,
-            helper_source_sha256="b" * 64,
-            claim_generation=5,
-            committed_at=now,
-        )
-        retry_receipt = retarget_retry_marker(
-            retarget_marker_sha256=canonical_sha256(retarget_receipt),
-            resume_marker_sha256=canonical_sha256(resume_receipt),
-            preflight_sha256="c" * 64,
-            helper_source_sha256="d" * 64,
-            claim_generation=6,
-            committed_at=now,
-        )
+        assert await preserved_successor_state() == pending_preserved
         source_request = {
             **request,
             "releaseVersion": "0.68.1",
             "protocolVersion": "1",
         }
+        wrong_target_service = RecoveryService(
+            sessions=database.session_factory,
+            codec=codec,
+            database_name=target.name,
+            database_role=target.role,
+            database_schema=target.schema,
+            database_lock_timeout_seconds=1,
+            deployment_lock=Lock(),  # type: ignore[arg-type]
+            observer=Observer(),
+        )
+        with pytest.raises(RecoveryRefusal):
+            await wrong_target_service.verify_successor_retarget(operation_id)
+        async with database.session_factory.begin() as session:
+            operation = await session.get(Operation, operation_id, with_for_update=True)
+            assert operation is not None
+            target_ciphertext = operation.request_ciphertext
+            operation.request_ciphertext = codec.encrypt_json(
+                source_request,
+                purpose="operation-request:provision:recovery-postgresql-key",
+            )
+        with pytest.raises(RecoveryRefusal):
+            await successor_service.verify_successor_retarget(operation_id)
+        async with database.session_factory.begin() as session:
+            operation = await session.get(Operation, operation_id, with_for_update=True)
+            assert operation is not None
+            operation.request_ciphertext = target_ciphertext
+        async with database.session_factory.begin() as session:
+            operation = await session.get(Operation, operation_id, with_for_update=True)
+            assert operation is not None
+            provider_operation_id = operation.provider_operation_id
+            operation.provider_operation_id = "provider-substitution"
+        with pytest.raises(RecoveryRefusal):
+            await successor_service.verify_successor_retarget(operation_id)
+        async with database.session_factory.begin() as session:
+            operation = await session.get(Operation, operation_id, with_for_update=True)
+            assert operation is not None
+            operation.provider_operation_id = provider_operation_id
+            provider_fence_generation = operation.provider_fence_generation
+            operation.provider_fence_generation = 8
+        with pytest.raises(RecoveryRefusal):
+            await successor_service.verify_successor_retarget(operation_id)
+        async with database.session_factory.begin() as session:
+            operation = await session.get(Operation, operation_id, with_for_update=True)
+            assert operation is not None
+            operation.provider_fence_generation = provider_fence_generation
+            successor_progress = dict(operation.progress)
+            operation.progress = {
+                **successor_progress,
+                "_runtime_retarget_successor_v1": {
+                    **successor_progress["_runtime_retarget_successor_v1"],
+                    "helper_source_sha256": "f" * 64,
+                },
+            }
+        with pytest.raises(RecoveryRefusal):
+            await successor_service.verify_successor_retarget(operation_id)
+        async with database.session_factory.begin() as session:
+            operation = await session.get(Operation, operation_id, with_for_update=True)
+            assert operation is not None
+            operation.progress = successor_progress
+        now = datetime.now(UTC)
         async with database.session_factory.begin() as session:
             operation = await session.get(Operation, operation_id, with_for_update=True)
             assert operation is not None
@@ -903,10 +1064,9 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
                 purpose="operation-request:provision:recovery-postgresql-key",
             )
             operation.progress = {
-                **prior_retarget_progress,
-                "_runtime_retarget_resume_v1": resume_receipt,
-                "_runtime_retarget_retry_v1": retry_receipt,
+                **prior_full_progress,
             }
+        exhausted_preserved = await preserved_successor_state()
         exhausted, exhausted_replay = await asyncio.gather(
             successor_service.successor_retarget(operation_id),
             successor_service.successor_retarget(operation_id),
@@ -928,6 +1088,7 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
             assert operation.error_code is None
             assert operation.finalized_at is None
             assert "_runtime_retarget_successor_v1" in operation.progress
+        assert await preserved_successor_state() == exhausted_preserved
         for role, schema in (("wrong-role", target.schema), (target.role, "wrong_schema")):
             wrong_identity = RecoveryService(
                 sessions=database.session_factory,
