@@ -112,4 +112,5 @@ tests/test_records_recall_reconcile.py
 tests/test_report_offline.py
 tests/test_reviewer_bootstrap_cli.py
 tests/test_service_installers.py
+tests/test_suites_registry.py
 tests/test_transactional_writes.py
