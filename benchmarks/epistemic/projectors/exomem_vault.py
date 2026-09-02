@@ -466,7 +466,16 @@ def _audit_finding_items(report: Any) -> tuple[StateItem, ...]:
             "targets": identity or finding.path,
         }
         signal_class = CATEGORY_SIGNAL_CLASSES.get(finding.category)
-        if signal_class is not None and identity:
+        if signal_class is not None:
+            if not identity:
+                # Never silence. A signal-bearing finding that carries no
+                # identity would otherwise project as an ordinary page defect,
+                # and a quiet assertion would then pass over a candidate the
+                # runtime really did raise.
+                raise ValueError(
+                    f"{finding.category} finding on {finding.path} carries no identity; "
+                    "a signal-bearing finding cannot be projected without its subject"
+                )
             raw["signal_class"] = signal_class
             raw["identity"] = identity
             raw["candidate_state"] = str(meta.get("candidate_state") or "")
@@ -546,13 +555,24 @@ def _review_queue_items(report: Any) -> tuple[StateItem, ...]:
     ]
     for row in rows:
         identity = _entity_candidate_identity(row)
+        # Delivery describes the REASON the row's signal came from, never the
+        # fused row. The runtime fuses every finding that shares an anchor page
+        # into one item, so an `entity_recurrence` reason routinely rides a row
+        # whose other reason IS in the default union — and reading the label off
+        # the fused row's categories reported the candidate as delivered by the
+        # unfiltered daily read, which design D9 says it is not, and which the
+        # default read demonstrably does not do.
+        categories = (
+            ("entity_recurrence",)
+            if identity is not None
+            else tuple(str(reason.get("category") or "") for reason in row.reasons or ())
+        )
         raw = {
             "surface": "review_queue",
             "categories": " ".join(row.categories),
+            "signal_categories": " ".join(categories),
             "targets": identity or row.path,
-            "delivery": (
-                "default" if default.intersection(row.categories) else "explicit_only"
-            ),
+            "delivery": "default" if default.intersection(categories) else "explicit_only",
         }
         if identity is not None:
             raw["signal_class"] = CATEGORY_SIGNAL_CLASSES["entity_recurrence"]
@@ -862,12 +882,19 @@ class VaultProjector(Projector):
         ``endpoints_used`` so a verdict can never be mistaken for one the file
         surface produced.
 
-        Nothing here writes. The audit sweep and the due-state recomputation are
-        read-only by contract, the attention read passes
-        ``record_surfacing=False`` so projecting a queue never counts as having
-        shown it to anybody, and the curation read assembles a work item without
-        authoring a plan. ``taken_at`` supplies the date, so the projection has
-        no clock of its own.
+        Nothing here writes *vault* state. The audit sweep and the due-state
+        recomputation are read-only over the Knowledge Base, the attention read
+        passes ``record_surfacing=False`` so projecting a queue never counts as
+        having shown it to anybody, and the curation read assembles a work item
+        without authoring a plan. ``taken_at`` supplies the date, so the
+        projection has no clock of its own.
+
+        It is not inert on disk, and saying otherwise would be a claim the
+        filesystem contradicts: reading through the product materialises its
+        derived caches — ``.refs.sqlite`` and its siblings — under
+        ``EXOMEM_STATE_ROOT``. That is machine-local derived state outside the
+        vault, it changes no projected value, and a caller must still point
+        ``EXOMEM_STATE_ROOT`` somewhere disposable before projecting.
         """
 
         from exomem import attention as attention_module
@@ -898,9 +925,15 @@ class VaultProjector(Projector):
         silence on a vault where the agent has not run yet, which is exactly the
         silence a quiet assertion must not be credited with. So both halves are
         enumerated: the plans on disk, and the work item each open entity
-        candidate resolves to through the governed curation lane. A candidate
-        whose work item refuses to bind is not projected as absent — the refusal
-        propagates, because an unreadable surface is an error and never silence.
+        candidate resolves to through the governed curation lane.
+
+        A candidate whose work item refuses to bind is never projected as
+        absent. The refusal is recorded and the surface stops reporting
+        ``complete``, so the anti-vacuity meta-predicate blocks every quiet
+        assertion over the snapshot instead of passing one on a queue nobody
+        could read. Swallowing the refusal and continuing would leave the marker
+        saying ``complete`` over a queue that lost its entries — the exact cheat
+        this predicate exists to catch, one level up.
         """
 
         from exomem import curation as curation_module
@@ -916,11 +949,16 @@ class VaultProjector(Projector):
             )
             for path in stored
         ]
+        refusals: list[str] = []
         for item in sorted(review_report.items, key=lambda row: str(row.item_id)):
             identity = _entity_candidate_identity(item)
             if identity is None or not item.ref:
                 continue
-            work = curation_module.work_item(self.vault_root, review_ref=item.ref)
+            try:
+                work = curation_module.work_item(self.vault_root, review_ref=item.ref)
+            except Exception as error:  # noqa: BLE001 - recorded, never swallowed
+                refusals.append(f"{item.item_id} ({type(error).__name__}: {error})")
+                continue
             binding = work.get("entity_candidate") or {}
             projected.append(
                 StateItem(
@@ -951,9 +989,11 @@ class VaultProjector(Projector):
                 text="stored curation plans and the work item each open candidate binds",
                 raw={
                     "surface": "proposal_queue",
-                    "projection": "complete",
+                    "projection": "complete" if not refusals else "refused",
                     "stored_plans": str(len(stored)),
                     "candidate_work_items": str(len(projected) - len(stored)),
+                    "refusals": str(len(refusals)),
+                    "reason": "; ".join(sorted(refusals)[:8]),
                 },
             ),
         )

@@ -46,7 +46,7 @@
 - [x] 6.2 Prove positives appear in audit, explicit review, and proposal or work-item projections while the twin is absent across audit, review, proposal, and due-state projections.
 - [x] 6.3 Kill mutants for string frequency only, page count instead of origins, accepting an unlisted frame/predicate/cue, nulling or swapping a copula/label/body-field predicate ID, widening a span boundary, capitalization or Latin restriction, removing the promotion-witness or facet gate, dropping facet-only rows after a witness, refusing resolved relation-only hydration, unbounding top-level or nested taxonomy evidence, weakening cluster incompatibility, resolved-Entity suppression, duplicate-create routing, ignored parent, identity-only or batch-only fingerprint, background model, write-on-detect, second ordinary session scan, and mutation without the mapped confirmation.
 - [ ] 6.4 Preserve provisional constants, acknowledgment withholding, false-positive dual, and no-aggregate-score rules from the active no-nudge benchmark amendment.
-- [ ] 6.5 Report f21 implementation evidence separately from any still-withheld comparative claim.
+- [ ] 6.5 Report f21 implementation evidence separately from any still-withheld comparative claim. Carry forward the open gap from 6.1/6.2: the real-runtime projection names an identity only once the audit raises a finding for it, so a positive that stops surfacing evaluates `unsupported` (neutral to scoring) rather than `fail`. Closing it means projecting the pre-gate page/origin counts for every declared subject so a miss scores as a miss; not implemented in this tranche.
 
 ## 7. Verification and closure
 
