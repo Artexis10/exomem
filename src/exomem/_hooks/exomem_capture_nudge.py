@@ -61,23 +61,26 @@ _KB_WRITE = re.compile(
 
 REMINDER = (
     "[Exomem capture check] After substantial work the active agent checks for a durable "
-    "conclusion, recurring entity, or personal baseline. Stable preference/recurring routine/"
-    "historical baseline/durable affiliation needs stability or recurrence plus reusable "
-    "comparison/decision value. One-off/incidental/trivial/tentative stays quiet. Unspent "
-    "entity check at balanced/maximal: after primary work, before the final response, "
+    "conclusion, recurring entity or baseline. "
+    "Stable preference/recurring routine/historical baseline/durable affiliation needs "
+    "stability or recurrence plus reusable comparison. "
+    "Fleeting/one-off/incidental/trivial/tentative stays quiet. "
+    "After primary work, before the final response, "
     'review_memory(mode="attention", categories=["entity_recurrence"], limit=3) once per session; '
-    'no local scan, no model. Resolve: connect_memory(operation="resolve-entity", name=...); stop '
-    "on ambiguity. Uniquely resolved Entity: narrow Entity facet/proactive_capture; affiliation "
-    "relation/link_acceptance; else compiled observation. Hydrate that match (edit_memory) before "
-    "any duplicate; Entity creation/substantial curation for a stable recurring one needs "
-    "confirmed restructure_execution. Recheck that review ref only after a confirmed batch "
-    "terminal receipt; stop at the closure-only eighth recheck. Distilled notes, not transcripts; "
-    "replace_memory supersedes a contradicted conclusion, not a correction beside it. Stated "
-    "intent -> Planning/plan_memory; observed outcome -> Records/record_memory. Generated draft "
-    "stays ephemeral; selected is not write consent: proactive_capture preserves exact bytes as "
-    "Source/Evidence by role, never MIME. No handle: non-committing handoff. Delivery needs "
-    "Evidence receipt/Record; no remote byte inference. Missing schema: structural_suggestions/"
-    "restructure_execution; relations: link_acceptance. Else/no Knowledge Base: do nothing."
+    "no local scan, no model. Resolve in the active entity registry/selected knowledge packs: "
+    'connect_memory(operation="resolve-entity"); stop on ambiguity; single incidental mention '
+    "stays in context. Uniquely resolved Entity: narrow Entity facet/proactive_capture; "
+    "affiliation relation/link_acceptance; else compiled observation. Hydrate with "
+    "edit_memory an active match before duplicating; else "
+    'connect_memory(operation="create-entity"). Entity creation/substantial curation: confirmed '
+    "restructure_execution. Recheck that review ref only after a confirmed batch terminal receipt; "
+    "stop at the closure-only eighth recheck. replace_memory supersedes a contradicted conclusion, "
+    "not a correction beside it. Stated intent -> Planning/plan_memory; observed outcome -> "
+    "Records/record_memory. Generated draft stays ephemeral; selected is not write consent: "
+    "proactive_capture keeps exact bytes as Source/Evidence by role, not MIME. No handle: "
+    "non-committing handoff; delivery needs Evidence receipt/Record; no remote byte inference. "
+    "Missing schema: structural_suggestions/restructure_execution; relations: link_acceptance. "
+    "Else/no Knowledge Base: stop."
 )
 
 

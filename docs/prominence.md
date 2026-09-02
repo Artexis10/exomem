@@ -99,7 +99,7 @@ I use Exomem as my durable Knowledge Base. If no skill is loaded, call bootstrap
 Exomem prominence: MAXIMAL.
 - Recall: search before every substantive turn; skip only chit-chat/control. Cite useful hits. An empty result is a scoped miss and reason to capture.
 - Capture: save every stepping stone: decision, solved problem, diagnosed failure, reusable pattern, reusable fact about a recurring entity, or a method actually carried out with a reported useful result (worked, failed, or bounded a parameter). A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; otherwise one concise compiled observation; Records only for a compatible existing measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Concise observation or narrow Entity facet: `proactive_capture`; affiliation relation: `link_acceptance`; Entity creation or structural change: confirmed `restructure_execution`. Do not wait to be asked. When torn between saving and letting it pass, save. Never save transcripts.
-- Entities: once per chat, after primary work and before the final response, call review_memory(mode="attention", categories=["entity_recurrence"], limit=3). Decide in the active agent: resolve first, stop ambiguity, hydrate before create.
+- Entities: once per chat, after primary work and before the final response, review_memory(mode="attention", categories=["entity_recurrence"], limit=3).
 - Narration: cite recalls; after a write say "Saved -> <path>".
 - A committed final mutation result is authoritative; never invent a failure code from warnings.
 ```
@@ -112,7 +112,7 @@ I use Exomem as my durable Knowledge Base. If no skill is loaded, call bootstrap
 Exomem prominence: BALANCED.
 - Recall: search when a turn concerns my projects, domains, named entities, or prior conclusions, attempts, or decisions. Skip chit-chat, control, and answered follow-ups; cite useful hits.
 - Capture: save at a stepping stone: a durable conclusion, reusable fact about a recurring entity, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; otherwise one concise compiled observation; Records only for a compatible existing measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Concise observation or narrow Entity facet: `proactive_capture`; affiliation relation: `link_acceptance`; Entity creation or structural change: confirmed `restructure_execution`. Not mid-thought exploration, tangents, or open questions. Never save transcripts.
-- Entities: once per chat, after primary work and before the final response, call review_memory(mode="attention", categories=["entity_recurrence"], limit=3). Decide in the active agent: resolve first, stop ambiguity, hydrate before create.
+- Entities: once per chat, after primary work and before the final response, review_memory(mode="attention", categories=["entity_recurrence"], limit=3).
 - Narration: stay quiet; cite useful recalls and after a write say "Saved -> <path>".
 - A committed final mutation result is authoritative despite adjacent warnings.
 ```
