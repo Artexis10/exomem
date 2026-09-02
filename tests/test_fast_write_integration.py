@@ -1250,3 +1250,87 @@ def test_relocation_auxiliary_batch_takes_no_advisory_custody(
             == "not_required"
         )
         assert derived_receipts.advisory_result_ref(vault, receipt) is None
+
+
+# --------------------------------------------------------------------------- #
+# Task 5.3 — the phases and diagnostics on a real governed write
+# --------------------------------------------------------------------------- #
+
+
+def test_a_real_governed_write_records_every_derived_phase(
+    vault: Path, tmp_path: Path
+) -> None:
+    """The phases must fire on the production path, not merely be declared.
+
+    A closed vocabulary in one module and timers in another is two halves of a
+    measurement. This drives one real governed write inside an MCP call token
+    and asserts the phases that write actually reaches -- which is what makes
+    the ledger able to say where a slow acknowledgement spent its time.
+    """
+    from exomem import call_ledger, call_spans
+
+    call_spans.reset()
+    token = call_spans.MCP_CALL_TOKEN.set("lane5-phase-token")
+    try:
+        _governed_write(
+            _manager(tmp_path),
+            vault,
+            rel_path="Knowledge Base/Notes/Insights/lane5-phases.md",
+            source=_compiled_page("Lane5 phases", "lane5phasesmarker"),
+        )
+        spans = {span["name"]: span for span in call_spans.pop_call_spans(
+            "lane5-phase-token"
+        )}
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(token)
+
+    for phase in (
+        "derived.receipt_prepare",
+        "derived.canonical_commit",
+        "derived.acknowledgement",
+        "derived.receipt_proof",
+        "derived.pending_visibility",
+    ):
+        assert phase in spans, sorted(spans)
+        assert spans[phase]["count"] >= 1
+        assert spans[phase]["ms"] >= 0.0
+    assert set(spans) <= (
+        call_ledger.DERIVED_PHASES | {name for name in spans if not
+                                      name.startswith("derived.")}
+    )
+
+
+def test_the_drain_records_its_pass_and_the_diagnostics_report_it(
+    vault: Path, tmp_path: Path
+) -> None:
+    """Depth, age and completion are readable without touching the store."""
+    from exomem import call_ledger
+
+    derived_drain.reset_pass_observations()
+    call_ledger.reset_derived_counters()
+
+    _governed_write(
+        _manager(tmp_path),
+        vault,
+        rel_path="Knowledge Base/Notes/Insights/lane5-diagnostics.md",
+        source=_compiled_page("Lane5 diagnostics", "lane5diagnosticsmarker"),
+    )
+
+    before = call_ledger.derived_diagnostics(vault)
+    assert before["fast_durable_ack"] == "active"
+    assert before["due_components"] >= 1
+    assert before["counters"]["receipt_prepared"] >= 1
+    assert before["last_drain_pass"]["at_age_seconds"] is None
+
+    _drain(vault)
+
+    after = call_ledger.derived_diagnostics(vault)
+    assert after["due_components"] == 0, after
+    assert after["counters"]["component_completed"] >= 1
+    assert after["last_drain_pass"]["at_age_seconds"] is not None
+    assert after["last_drain_pass"]["completed"] >= 0
+    assert after["unavailable"] == []
+
+    rendered = repr(after)
+    for token in ("lane5-diagnostics", "Knowledge Base", "Lane5 diagnostics"):
+        assert token not in rendered, (token, rendered)

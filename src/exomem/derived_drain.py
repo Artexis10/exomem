@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from . import derived_receipts, mode
+from . import call_ledger, call_spans, derived_receipts, mode
 from .derived_receipts import DerivedComponentStatus
 
 log = logging.getLogger(__name__)
@@ -40,6 +40,67 @@ PendingVisibilityPublisher = Callable[
 
 _LOCK = threading.Lock()
 _ACTIVE: dict[str, DerivedDrain] = {}
+
+#: What the most recent pass observed, per cell. Content-free by construction:
+#: counts, an attempt count, and ages in seconds. This exists because component
+#: depth and age are the two numbers the rollout's pause triggers are written
+#: against, and the receipt protocol exposes depth but not age -- a worker that
+#: has already claimed a status can report the age it observed without any
+#: caller reaching into the store to ask.
+_PASS_OBSERVATION_LIMIT = 64
+_PASS_LOCK = threading.Lock()
+_PASS_OBSERVATIONS: dict[str, dict[str, float | int]] = {}
+
+
+def _note_pass_observation(
+    vault_root: Path,
+    *,
+    claimed: int,
+    completed: int,
+    max_attempt_count: int,
+    oldest_due_at: float | None,
+    at: float,
+) -> None:
+    key = _key(vault_root)
+    with _PASS_LOCK:
+        if key not in _PASS_OBSERVATIONS and len(_PASS_OBSERVATIONS) >= _PASS_OBSERVATION_LIMIT:
+            _PASS_OBSERVATIONS.pop(next(iter(_PASS_OBSERVATIONS)), None)
+        _PASS_OBSERVATIONS[key] = {
+            "at": at,
+            "claimed": claimed,
+            "completed": completed,
+            "max_attempt_count": max_attempt_count,
+            "oldest_due_age_seconds": (
+                0.0 if oldest_due_at is None else round(max(0.0, at - oldest_due_at), 3)
+            ),
+        }
+
+
+def last_pass_observation(vault_root: Path) -> dict[str, float | int | None]:
+    """The most recent pass's content-free observation for this cell."""
+    with _PASS_LOCK:
+        entry = _PASS_OBSERVATIONS.get(_key(vault_root))
+    if entry is None:
+        return {
+            "at_age_seconds": None,
+            "claimed": 0,
+            "completed": 0,
+            "max_attempt_count": 0,
+            "oldest_due_age_seconds": None,
+        }
+    return {
+        "at_age_seconds": round(max(0.0, time.time() - float(entry["at"])), 3),
+        "claimed": int(entry["claimed"]),
+        "completed": int(entry["completed"]),
+        "max_attempt_count": int(entry["max_attempt_count"]),
+        "oldest_due_age_seconds": float(entry["oldest_due_age_seconds"]),
+    }
+
+
+def reset_pass_observations() -> None:
+    """Drop every cell's last-pass observation. Durable custody is untouched."""
+    with _PASS_LOCK:
+        _PASS_OBSERVATIONS.clear()
 
 
 def _key(vault_root: Path) -> str:
@@ -108,11 +169,27 @@ def component_dispatcher() -> ComponentDispatcher:
         if status.component is derived_receipts.DerivedComponent.WRITE_ADVISORY:
             from . import deferred_write_advisory
 
-            execution = deferred_write_advisory.execute_write_advisory(
-                vault_root,
-                status,
-                observe_current_generation=canonical_generation_observer(),
+            with call_spans.span("derived.advisory_execute"):
+                execution = deferred_write_advisory.execute_write_advisory(
+                    vault_root,
+                    status,
+                    observe_current_generation=canonical_generation_observer(),
+                )
+            call_ledger.note_derived_event(
+                "advisory_vectors_reused"
+                if execution.reused_vectors
+                else "advisory_vectors_encoded"
             )
+            if execution.outcome == "published":
+                call_ledger.note_derived_event(
+                    "advisory_failed"
+                    if execution.state == "failed"
+                    else "advisory_published"
+                )
+            elif execution.outcome == "already_published":
+                call_ledger.note_derived_event("advisory_replayed")
+            elif execution.outcome == "superseded":
+                call_ledger.note_derived_event("receipt_superseded")
             return execution.outcome in {
                 "published",
                 "already_published",
@@ -158,6 +235,8 @@ def drain_once(
         now=started_at,
     )
     completed = 0
+    max_attempt_count = max((status.attempt_count for status in claims), default=0)
+    oldest_due_at = min((status.next_attempt_at for status in claims), default=None)
     for status in claims:
         failure_code = "component_unhandled"
         if observe_current_generation is not None:
@@ -190,7 +269,10 @@ def drain_once(
         else:
             failure_code = "component_unhandled"
             try:
-                handled = False if dispatch is None else bool(dispatch(vault_root, status))
+                with call_spans.span("derived.component_dispatch"):
+                    handled = (
+                        False if dispatch is None else bool(dispatch(vault_root, status))
+                    )
                 if dispatch is not None:
                     failure_code = "dispatch_failed"
             except Exception:  # noqa: BLE001 - exact custody remains retryable
@@ -204,12 +286,13 @@ def drain_once(
         completion_failed = False
         if handled:
             try:
-                completed_current = derived_receipts.complete_component(
-                    vault_root,
-                    status,
-                    observe_current_generation=observe_current_generation,
-                    now=started_at,
-                )
+                with call_spans.span("derived.component_completion"):
+                    completed_current = derived_receipts.complete_component(
+                        vault_root,
+                        status,
+                        observe_current_generation=observe_current_generation,
+                        now=started_at,
+                    )
             except Exception:  # noqa: BLE001 - callback/pass failure stays retryable
                 completed_current = False
                 completion_failed = True
@@ -221,6 +304,7 @@ def drain_once(
                 )
             if completed_current:
                 completed += 1
+                call_ledger.note_derived_event("component_completed")
                 continue
             if not completion_failed:
                 failure_code = "generation_changed"
@@ -233,12 +317,21 @@ def drain_once(
                 base_backoff_seconds=RETRY_SECONDS,
                 max_backoff_seconds=MAX_RETRY_SECONDS,
             )
+            call_ledger.note_derived_event("component_retried")
         except RuntimeError:
             # A newer claim/revision or proof transition already owns the row.
             log.debug(
                 "derived component retry lost current custody component=%s",
                 status.component.value,
             )
+    _note_pass_observation(
+        vault_root,
+        claimed=len(claims),
+        completed=completed,
+        max_attempt_count=max_attempt_count,
+        oldest_due_at=oldest_due_at,
+        at=started_at,
+    )
     return completed
 
 

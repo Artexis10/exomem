@@ -30,7 +30,7 @@ from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
 import yaml
 from slugify import slugify as _slugify
 
-from . import freshness, held_fs, privacy_log, reserved_paths
+from . import call_ledger, call_spans, freshness, held_fs, privacy_log, reserved_paths
 from .kbdir import kb_dirname, kb_prefix
 
 if TYPE_CHECKING:
@@ -4880,26 +4880,29 @@ def _batch_atomic_write_locked(
                 ordered_paths = tuple(
                     sorted(receipt_paths, key=lambda item: item.rel_path)
                 )
-                fast_receipt = prepare_active_derived_batch(
-                    root,
-                    ordered_paths,
-                    canonical_generation=(
-                        str(selected_checkpoint.generation)
-                        if selected_checkpoint is not None
-                        else None
-                    ),
-                    checkpoint_id=(
-                        selected_checkpoint.checkpoint_sha256
-                        if selected_checkpoint is not None
-                        else None
-                    ),
-                    advisory_target_rel_path=_governed_advisory_target(
+                with call_spans.span("derived.receipt_prepare"):
+                    fast_receipt = prepare_active_derived_batch(
                         root,
                         ordered_paths,
-                        semantic_states,
-                        page_types=_planned_page_types(root, writes),
-                    ),
-                )
+                        canonical_generation=(
+                            str(selected_checkpoint.generation)
+                            if selected_checkpoint is not None
+                            else None
+                        ),
+                        checkpoint_id=(
+                            selected_checkpoint.checkpoint_sha256
+                            if selected_checkpoint is not None
+                            else None
+                        ),
+                        advisory_target_rel_path=_governed_advisory_target(
+                            root,
+                            ordered_paths,
+                            semantic_states,
+                            page_types=_planned_page_types(root, writes),
+                        ),
+                    )
+                if fast_receipt is not None:
+                    call_ledger.note_derived_event("receipt_prepared")
     except BaseException as stage_error:
         if not isinstance(stage_error, Exception):
             _cleanup_batch_workspaces(workspace_by_parent.values())
@@ -4935,6 +4938,11 @@ def _batch_atomic_write_locked(
     )
     replaced: list[Path] = []
     final_guards: dict[Path, _BatchArtifactGuard] = {}
+    # The canonical transaction's own clock. Recorded as a span rather than
+    # wrapped in a `with`, so timing this region does not reindent it: the
+    # measurement that matters is how long the caller holds authority, and a
+    # diff about whitespace hides that.
+    canonical_started_monotonic = _fast_ack_monotonic()
     try:
         from .writer_lease import (
             log_active_mutation_phase,
@@ -5029,6 +5037,10 @@ def _batch_atomic_write_locked(
         for guard in final_guards.values():
             guard.recheck()
         log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))
+        call_spans.record_span(
+            "derived.canonical_commit",
+            (_fast_ack_monotonic() - canonical_started_monotonic) * 1000.0,
+        )
         if fast_receipt is not None:
             canonical_commit_monotonic = _fast_ack_monotonic()
         if replaced and commit_point:

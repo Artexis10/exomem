@@ -488,3 +488,128 @@ def verify_lines(lines: list[str], *, anchored: bool = False) -> list[str]:
         previous_sequence = sequence if isinstance(sequence, int) else previous_sequence
         previous_hash = record.get("row_hash")
     return problems
+
+
+# --------------------------------------------------------------------------- #
+# Derived-work phases and diagnostics
+#
+# The change moves the expensive half of a governed write behind durable
+# custody, so the two boundary clocks above can now prove a call got faster
+# while saying nothing about whether the work it deferred ever converged. These
+# are the measurements that answer that, and they are content-free by
+# construction rather than by a downstream filter: closed phase names, closed
+# counter names, and counts, ages and depths -- never a path, title, excerpt or
+# exception text.
+# --------------------------------------------------------------------------- #
+
+#: Closed phase vocabulary. A producer cannot name a phase this set does not
+#: contain, which is what makes a phase name incapable of carrying a path.
+DERIVED_PHASES: frozenset[str] = frozenset(
+    {
+        "derived.receipt_prepare",
+        "derived.receipt_proof",
+        "derived.canonical_commit",
+        "derived.pending_visibility",
+        "derived.acknowledgement",
+        "derived.component_dispatch",
+        "derived.component_completion",
+        "derived.advisory_execute",
+        # Not a disjoint phase but the interval the fixed budget governs: from
+        # the canonical commit to the end of the acknowledgement. Named because
+        # it is the number the SLO is written against, and a benchmark forced
+        # to infer it by subtracting other spans would be approximating the one
+        # measurement that must not be approximate.
+        "derived.post_canonical",
+    }
+)
+
+#: Closed counter vocabulary, for the same reason.
+DERIVED_COUNTERS: frozenset[str] = frozenset(
+    {
+        "advisory_vectors_reused",
+        "advisory_vectors_encoded",
+        "advisory_published",
+        "advisory_replayed",
+        "advisory_failed",
+        "component_completed",
+        "component_retried",
+        "receipt_prepared",
+        "receipt_superseded",
+    }
+)
+
+_derived_lock = threading.Lock()
+_derived_counts: dict[str, int] = dict.fromkeys(DERIVED_COUNTERS, 0)
+
+
+def note_derived_event(name: str) -> None:
+    """Count one closed derived-work event. Never raises into a worker."""
+    if name not in DERIVED_COUNTERS:
+        raise ValueError("unknown derived counter")
+    with _derived_lock:
+        _derived_counts[name] += 1
+
+
+def derived_counters() -> dict[str, int]:
+    with _derived_lock:
+        return dict(_derived_counts)
+
+
+def reset_derived_counters() -> None:
+    with _derived_lock:
+        _derived_counts.update(dict.fromkeys(DERIVED_COUNTERS, 0))
+
+
+def derived_diagnostics(vault_root: Any) -> dict[str, Any]:
+    """One content-free view of exact derived custody for this cell.
+
+    Every field is a count, an age in seconds, a closed code or a closed state
+    name. Nothing here reads or reports canonical content, and every store
+    question goes through the receipt protocol's own public seams rather than
+    through its SQLite, so a diagnostic can never see more than a consumer can.
+
+    Never raises: a diagnostic that breaks the call it describes is worse than
+    an absent one, so an unreadable section reports itself as unavailable.
+    """
+    from pathlib import Path as _Path
+
+    root = _Path(vault_root)
+    diagnostics: dict[str, Any] = {
+        "fast_durable_ack": "inactive",
+        "due_components": 0,
+        "recoverable_batches": 0,
+        "counters": derived_counters(),
+        "pending_visibility": {},
+        "last_drain_pass": {},
+        "unavailable": [],
+    }
+    try:
+        from .writer_lease import fast_durable_ack_active
+
+        diagnostics["fast_durable_ack"] = (
+            "active" if fast_durable_ack_active() else "inactive"
+        )
+    except Exception:  # noqa: BLE001 - a diagnostic never breaks its caller
+        diagnostics["unavailable"].append("fast_durable_ack")
+    try:
+        from . import derived_receipts
+
+        diagnostics["due_components"] = derived_receipts.due_component_count(root)
+        diagnostics["recoverable_batches"] = derived_receipts.recoverable_batch_count(
+            root
+        )
+    except Exception:  # noqa: BLE001
+        diagnostics["unavailable"].append("custody_depth")
+    try:
+        from . import pending_recall
+
+        diagnostics["pending_visibility"] = pending_recall.status(root)
+    except Exception:  # noqa: BLE001
+        diagnostics["unavailable"].append("pending_visibility")
+    try:
+        from . import derived_drain
+
+        diagnostics["last_drain_pass"] = derived_drain.last_pass_observation(root)
+    except Exception:  # noqa: BLE001
+        diagnostics["unavailable"].append("last_drain_pass")
+    return diagnostics

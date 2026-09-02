@@ -575,3 +575,111 @@ def test_the_ledger_writes_outside_the_vault(tmp_path: Path, monkeypatch) -> Non
     resolved = call_ledger.ledger_path()
     assert resolved.parent == (tmp_path / "hostlogs")
     assert resolved.name == "ledger.jsonl"
+
+
+# ------------------------------------------------- derived-work phases (Lane 5)
+#
+# The change moves the expensive half of a governed write behind durable
+# custody. Two boundary clocks can prove the call got faster and cannot say
+# whether the work converged, so the ledger has to carry the phases and the
+# diagnostics that answer that -- and carry them content-free, because this
+# file is operator-readable and lives outside the vault.
+
+
+def test_derived_phase_vocabulary_is_closed_and_content_free() -> None:
+    """Phase names are a closed set, so no producer can name a path."""
+    names = call_ledger.DERIVED_PHASES
+    assert isinstance(names, frozenset)
+    assert names == {
+        "derived.acknowledgement",
+        "derived.advisory_execute",
+        "derived.canonical_commit",
+        "derived.component_completion",
+        "derived.component_dispatch",
+        "derived.pending_visibility",
+        "derived.post_canonical",
+        "derived.receipt_prepare",
+        "derived.receipt_proof",
+    }
+    for name in names:
+        assert name.startswith("derived.")
+        assert "/" not in name and " " not in name
+
+
+def test_a_derived_phase_is_recorded_on_the_calls_ledger_row(
+    ledger_dir: Path,
+) -> None:
+    """A phase reported during a call reaches that call's row as a span."""
+    from exomem import call_spans
+
+    async def leaf(_context):
+        with call_spans.span("derived.acknowledgement"):
+            pass
+        return {"ok": True}
+
+    _drive("remember", {"content": "x"}, leaf)
+    row = _rows(ledger_dir)[-1]
+    spans = {span["name"]: span for span in row["spans"]}
+    assert "derived.acknowledgement" in spans, row["spans"]
+    assert spans["derived.acknowledgement"]["count"] == 1
+    assert isinstance(spans["derived.acknowledgement"]["ms"], float)
+
+
+def test_derived_counters_are_closed_named_and_reset_able() -> None:
+    call_ledger.reset_derived_counters()
+    assert call_ledger.derived_counters() == dict.fromkeys(
+        call_ledger.DERIVED_COUNTERS, 0
+    )
+    call_ledger.note_derived_event("advisory_vectors_reused")
+    call_ledger.note_derived_event("advisory_vectors_reused")
+    call_ledger.note_derived_event("component_completed")
+    counters = call_ledger.derived_counters()
+    assert counters["advisory_vectors_reused"] == 2
+    assert counters["component_completed"] == 1
+
+    # An unknown counter is refused rather than silently creating a field.
+    with pytest.raises(ValueError):
+        call_ledger.note_derived_event("Knowledge Base/Notes/leak.md")
+    call_ledger.reset_derived_counters()
+
+
+def test_derived_diagnostics_are_content_free(tmp_path: Path, monkeypatch) -> None:
+    """Counts, ages, depths and closed codes only -- never a path or a title."""
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    vault_root = tmp_path / "vault"
+    (vault_root / "Knowledge Base" / "Notes").mkdir(parents=True)
+    secret = "Knowledge Base/Notes/confidential-title.md"
+    (vault_root / secret).write_text("---\ntitle: Secret\n---\n", encoding="utf-8")
+
+    diagnostics = call_ledger.derived_diagnostics(vault_root)
+    rendered = json.dumps(diagnostics, sort_keys=True, default=str)
+    for token in ("confidential-title", "Knowledge Base", "Secret", str(vault_root)):
+        assert token not in rendered, (token, rendered)
+
+    assert diagnostics["fast_durable_ack"] in {"active", "inactive"}
+    assert diagnostics["due_components"] == 0
+    assert diagnostics["recoverable_batches"] == 0
+    assert isinstance(diagnostics["counters"], dict)
+    assert isinstance(diagnostics["pending_visibility"], dict)
+    assert set(diagnostics["last_drain_pass"]) == {
+        "at_age_seconds",
+        "claimed",
+        "completed",
+        "max_attempt_count",
+        "oldest_due_age_seconds",
+    }
+
+
+def test_derived_diagnostics_report_the_capability_flag_both_ways(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    vault_root = tmp_path / "vault"
+    (vault_root / "Knowledge Base").mkdir(parents=True)
+
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
+    assert call_ledger.derived_diagnostics(vault_root)["fast_durable_ack"] == "active"
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "0")
+    assert (
+        call_ledger.derived_diagnostics(vault_root)["fast_durable_ack"] == "inactive"
+    )

@@ -33,6 +33,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
+from . import call_spans
 from . import capabilities as capabilities_module
 from .cli_ops import OpError, leaf_contract_code
 from .mutation_lock import (
@@ -465,6 +466,14 @@ def _acknowledge_derived_batches(
     """Prove, publish, signal and freeze one post-canonical status snapshot."""
     if not session.batches:
         return result
+    with call_spans.span("derived.acknowledgement"):
+        return _acknowledge_derived_batches_timed(result, session)
+
+
+def _acknowledge_derived_batches_timed(
+    result: Any,
+    session: _FastAcknowledgementSession,
+) -> Any:
     try:
         from . import derived_receipts, index_sync
 
@@ -489,11 +498,12 @@ def _acknowledge_derived_batches(
                 _current_canonical_generation(session.vault_root)
                 or receipt.canonical_generation
             )
-            proof = derived_receipts.prove_committed(
-                session.vault_root,
-                receipt,
-                current_generation=observed_generation,
-            )
+            with call_spans.span("derived.receipt_proof"):
+                proof = derived_receipts.prove_committed(
+                    session.vault_root,
+                    receipt,
+                    current_generation=observed_generation,
+                )
             if proof.batch_id != receipt.batch_id or proof.canonical_replay_authorized:
                 raise RuntimeError("derived receipt proof does not match this batch")
             if proof.outcome == "superseded":
@@ -507,11 +517,13 @@ def _acknowledge_derived_batches(
                 raise RuntimeError(
                     "derived receipt did not prove the committed generation"
                 )
-            if not derived_receipts.publish_pending_visibility(
-                session.vault_root,
-                receipt,
-                publisher=_PENDING_VISIBILITY_PUBLISHER,
-            ):
+            with call_spans.span("derived.pending_visibility"):
+                published = derived_receipts.publish_pending_visibility(
+                    session.vault_root,
+                    receipt,
+                    publisher=_PENDING_VISIBILITY_PUBLISHER,
+                )
+            if not published:
                 raise RuntimeError("pending visibility publication was not proven")
             derived_receipts.signal_components(session.vault_root, receipt)
 
@@ -576,6 +588,14 @@ def _acknowledge_derived_batches(
             for snapshot in snapshots
             for component, state, code in snapshot.diagnostics
         ]
+        call_spans.record_span(
+            "derived.post_canonical",
+            (
+                _fast_ack_monotonic()
+                - min(batch.canonical_commit_monotonic for batch in session.batches)
+            )
+            * 1000.0,
+        )
         return with_fast_acknowledgement(
             result,
             derived_sync=derived_sync,
