@@ -1,18 +1,18 @@
 ## 1. Freeze lifecycle behavior with red tests
 
-- [ ] 1.1 Replace the plain-text blanket-exclusion test with paired red fixtures for three-origin reusable-facet positives and a frequency-matched incidental twin that stays quiet.
-- [ ] 1.2 Add red coverage for every exact `identity-frames-v1` frame, every copula/label/relation/body-field predicate ID and canonical encoding, the promotion-witness versus resolved-Entity warrant distinction, the exact four date/time shape regular expressions, frozen predicate/cue source, lowercase and non-Latin identities, one witness in origin A composing with distinct relation facets in B/C, relation-only quiet without an Entity versus hydration with one exact Entity, origin deduplication across derivatives of one Source, duplicate-facet suppression, insertion-order invariance, and bounded evidence including top-level and nested open-taxonomy cues/families with full/returned/omitted counts.
-- [ ] 1.3 Add red state-machine tests for promotion, exactly-one-match hydration, connected-Entity silence, exact or alias ambiguity, the exact compatibility-graph cluster rule, and promotion-to-hydration transition without duplicate rows.
-- [ ] 1.4 Add red fingerprint tests proving grammar/table/registry identity and every disconnected-context hash are bound, while redundant mentions do not reopen and a distinct material facet, completed batch, target deletion, resolution transition, or registry change does.
-- [ ] 1.5 Add red authority tests that fail on any model or embedding call, write, confidence float, inferred merge, selected ambiguity target, or Entity creation during audit, attention, or work-item reads.
+- [x] 1.1 Replace the plain-text blanket-exclusion test with paired red fixtures for three-origin reusable-facet positives and a frequency-matched incidental twin that stays quiet.
+- [x] 1.2 Add red coverage for every exact `identity-frames-v1` frame, every copula/label/relation/body-field predicate ID and canonical encoding, the promotion-witness versus resolved-Entity warrant distinction, the exact four date/time shape regular expressions, frozen predicate/cue source, lowercase and non-Latin identities, one witness in origin A composing with distinct relation facets in B/C, relation-only quiet without an Entity versus hydration with one exact Entity, origin deduplication across derivatives of one Source, duplicate-facet suppression, insertion-order invariance, and bounded evidence including top-level and nested open-taxonomy cues/families with full/returned/omitted counts.
+- [x] 1.3 Add red state-machine tests for promotion, exactly-one-match hydration, connected-Entity silence, exact or alias ambiguity, the exact compatibility-graph cluster rule, and promotion-to-hydration transition without duplicate rows.
+- [x] 1.4 Add red fingerprint tests proving grammar/table/registry identity and every disconnected-context hash are bound, while redundant mentions do not reopen and a distinct material facet, completed batch, target deletion, resolution transition, or registry change does.
+- [x] 1.5 Add red authority tests that fail on any model or embedding call, write, confidence float, inferred merge, selected ambiguity target, or Entity creation during audit, attention, or work-item reads.
 
 ## 2. Implement deterministic evidence and lifecycle projection
 
-- [ ] 2.1 Refactor entity recurrence into identity, origin, context, facet, and resolution value objects while preserving the unresolved-wikilink collector.
-- [ ] 2.2 Add the closed `identity-frames-v1` collector, frozen predicate table and digest, exact span parser, registry-cue snapshot, compatibility graph, independent-origin accounting, material-facet normalization, the direct promotion-witness or existing-Entity warrant gate, Unicode normalization, and duplicate or boilerplate rejection; unresolved relation-only evidence MUST remain quiet without a natural-language phrase blacklist while resolved relation-only evidence remains eligible for hydration or ambiguity.
-- [ ] 2.3 Resolve each identity categorically to promotion, hydration, ambiguity, or quiet using one registry snapshot and the existing exact or alias Entity index.
-- [ ] 2.4 Project bounded audit findings with material signal versions and identity partitions while preserving page, access, inactive-state, code, frontmatter, attachment, and Entity-subtree exclusions.
-- [ ] 2.5 Reuse the audit page walk and add an attributable cold latency gate at the established scale without loosening existing thresholds.
+- [x] 2.1 Refactor entity recurrence into identity, origin, context, facet, and resolution value objects while preserving the unresolved-wikilink collector.
+- [x] 2.2 Add the closed `identity-frames-v1` collector, frozen predicate table and digest, exact span parser, registry-cue snapshot, compatibility graph, independent-origin accounting, material-facet normalization, the direct promotion-witness or existing-Entity warrant gate, Unicode normalization, and duplicate or boilerplate rejection; unresolved relation-only evidence MUST remain quiet without a natural-language phrase blacklist while resolved relation-only evidence remains eligible for hydration or ambiguity.
+- [x] 2.3 Resolve each identity categorically to promotion, hydration, ambiguity, or quiet using one registry snapshot and the existing exact or alias Entity index.
+- [x] 2.4 Project bounded audit findings with material signal versions and identity partitions while preserving page, access, inactive-state, code, frontmatter, attachment, and Entity-subtree exclusions.
+- [x] 2.5 Reuse the audit page walk and add an attributable cold latency gate at the established scale without loosening existing thresholds.
 
 ## 3. Integrate attention and governed curation
 
@@ -25,11 +25,11 @@
 
 ## 4. Operationalise entity-type families
 
-- [ ] 4.1 Add red registry tests for core self-family, parentless-extension self-family compatibility, a synthetic `community` child of `organization` with `Communities` projection, other child roll-ups, deprecated-child exclusion, deterministic member order, and cache invalidation.
-- [ ] 4.2 Add red compatibility tests proving leaf frontmatter, folders, and exact leaf filters remain unchanged.
-- [ ] 4.3 Implement registry family helpers, derived `page.entity_family`, explicit `entity_type_families` traversal, and leaf-plus-family response metadata.
-- [ ] 4.4 Add red referent and candidate tests proving parent cues admit child leaves while exact identity ambiguity still refuses selection.
-- [ ] 4.5 Add an Entity-family query and traversal latency gate over the established large synthetic fixture.
+- [x] 4.1 Add red registry tests for core self-family, parentless-extension self-family compatibility, a synthetic `community` child of `organization` with `Communities` projection, other child roll-ups, deprecated-child exclusion, deterministic member order, and cache invalidation.
+- [x] 4.2 Add red compatibility tests proving leaf frontmatter, folders, and exact leaf filters remain unchanged.
+- [x] 4.3 Implement registry family helpers, derived `page.entity_family`, explicit `entity_type_families` traversal, and leaf-plus-family response metadata.
+- [x] 4.4 Add red referent and candidate tests proving parent cues admit child leaves while exact identity ambiguity still refuses selection.
+- [x] 4.5 Add an Entity-family query and traversal latency gate over the established large synthetic fixture.
 
 ## 5. Update active-agent guidance
 
@@ -44,7 +44,7 @@
 
 - [ ] 6.1 Add a real-runtime f21 projection with structurally different reusable-facet positives and a frequency-matched mention-only twin without changing preregistered assertion semantics.
 - [ ] 6.2 Prove positives appear in audit, explicit review, and proposal or work-item projections while the twin is absent across audit, review, proposal, and due-state projections.
-- [ ] 6.3 Kill mutants for string frequency only, page count instead of origins, accepting an unlisted frame/predicate/cue, nulling or swapping a copula/label/body-field predicate ID, widening a span boundary, capitalization or Latin restriction, removing the promotion-witness or facet gate, dropping facet-only rows after a witness, refusing resolved relation-only hydration, unbounding top-level or nested taxonomy evidence, weakening cluster incompatibility, resolved-Entity suppression, duplicate-create routing, ignored parent, identity-only or batch-only fingerprint, background model, write-on-detect, second ordinary session scan, and mutation without the mapped confirmation.
+- [x] 6.3 Kill mutants for string frequency only, page count instead of origins, accepting an unlisted frame/predicate/cue, nulling or swapping a copula/label/body-field predicate ID, widening a span boundary, capitalization or Latin restriction, removing the promotion-witness or facet gate, dropping facet-only rows after a witness, refusing resolved relation-only hydration, unbounding top-level or nested taxonomy evidence, weakening cluster incompatibility, resolved-Entity suppression, duplicate-create routing, ignored parent, identity-only or batch-only fingerprint, background model, write-on-detect, second ordinary session scan, and mutation without the mapped confirmation.
 - [ ] 6.4 Preserve provisional constants, acknowledgment withholding, false-positive dual, and no-aggregate-score rules from the active no-nudge benchmark amendment.
 - [ ] 6.5 Report f21 implementation evidence separately from any still-withheld comparative claim.
 
@@ -52,6 +52,6 @@
 
 - [ ] 7.1 Run focused entity recurrence, registry, referent, attention, curation, bootstrap, scaffold, f21, privacy, and latency suites red-first and then green.
 - [ ] 7.2 Run Ruff, targeted type checks, package and import gates, generated-contract gates, and the full lean suite.
-- [ ] 7.3 Run `openspec validate --all --strict`.
+- [x] 7.3 Run `openspec validate --all --strict`.
 - [ ] 7.4 Reconcile stale fixed-registry and prose-inference claims in `harden-write-and-entity-capture` before implementation delegation.
 - [ ] 7.5 After shared v5 delivery and all merge/review evidence are complete, archive only through the owner-controlled order defined by `capture-durable-personal-baselines`, with strict validation before and after this change's archive.
