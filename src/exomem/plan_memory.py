@@ -7,7 +7,7 @@ from typing import Any, Literal, Never
 
 from . import planning
 from .cli_ops import OpError
-from .structured_collections import CollectionError
+from .structured_collections import CollectionError, collection_remediation
 
 ACTIONS = frozenset(
     {
@@ -324,7 +324,13 @@ def plan_memory(
         raise CollectionError("INVALID_PLAN_ARGUMENTS", "Planning action is not available")
     except CollectionError as error:
         code = _public_error_code(error)
-        raise OpError(code, _public_error_message(code, error.reason)) from error
+        # The parser knows which manifest the caller should have named; this
+        # surface drops the rest of `details` but must not drop that.
+        raise OpError(
+            code,
+            _public_error_message(code, error.reason),
+            collection_remediation(error),
+        ) from error
 
 
 def _validate_arguments(action: object, values: dict[str, Any]) -> None:

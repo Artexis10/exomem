@@ -830,6 +830,20 @@ class LegacyCollection:
 
 
 @dataclass(frozen=True, slots=True)
+class UnreadableManifest:
+    """One manifest a sweep could not evaluate, carried instead of dropped.
+
+    A manifest the walk could not read is neither a pass nor absent. Reporting
+    it as its own row is what lets a caller tell "there is nothing here" apart
+    from "there is something here nobody could read".
+    """
+
+    path: str
+    code: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class SavedView:
     """A manifest-owned, canonical query definition and its provenance binding."""
 
@@ -934,6 +948,38 @@ def discover_collections(
     reject_duplicates: bool = True,
 ) -> tuple[CollectionManifest, ...]:
     """Discover releasable manifests, authorizing each candidate before parsing it."""
+    manifests, _unreadable = discover_collections_with_errors(
+        vault_root,
+        authorize_path=authorize_path,
+        max_candidates=max_candidates,
+        max_raw_candidates=max_raw_candidates,
+        reject_duplicates=reject_duplicates,
+    )
+    return manifests
+
+
+def discover_collections_with_errors(
+    vault_root: Path,
+    *,
+    authorize_path: Callable[[str], bool] | None = None,
+    max_candidates: int = _MAX_DISCOVERY_CANDIDATES,
+    max_raw_candidates: int = _MAX_DISCOVERY_CANDIDATES,
+    reject_duplicates: bool = True,
+) -> tuple[tuple[CollectionManifest, ...], tuple[UnreadableManifest, ...]]:
+    """Discover releasable manifests AND the ones this sweep could not read.
+
+    A sweep that aborts on the first bad manifest answers "what is here?" with
+    an error about one file and hides every collection behind it -- one
+    mislocated `_collection.md` anywhere under the tree blanked the whole
+    inventory. A sweep that skips it silently is worse: it hands back a clean
+    list for a tree nobody fully read. So an unreadable manifest becomes its own
+    row and the walk continues.
+
+    Only the sweep is tolerant. A caller that names a manifest directly still
+    fails closed: `load_manifest` and `resolve_collection`'s path branch raise
+    exactly as before. The discovery bounds also still raise -- a limit is a
+    refusal to look further, not a manifest that was looked at and failed.
+    """
     if (
         type(max_candidates) is not int
         or max_candidates < 1
@@ -953,9 +999,10 @@ def discover_collections(
     root = Path(vault_root)
     kb = vault.kb_root(root)
     if not kb.is_dir():
-        return ()
+        return (), ()
     authorize = authorize_path or (lambda _path: True)
     manifests: list[CollectionManifest] = []
+    unreadable: list[UnreadableManifest] = []
     candidates = []
     for candidate in kb.rglob("_collection.md"):
         safe = _safe_candidate_rel(root, candidate)
@@ -971,14 +1018,19 @@ def discover_collections(
         if safe is None:
             continue
         _candidate_path, rel = safe
-        if len(manifests) >= max_candidates:
+        # Unreadable rows count against the same budget as readable ones: a tree
+        # full of broken manifests must not buy an unbounded report.
+        if len(manifests) + len(unreadable) >= max_candidates:
             raise CollectionError(
                 "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
             )
-        manifests.append(load_manifest(root, candidate))
+        try:
+            manifests.append(load_manifest(root, candidate))
+        except CollectionError as error:
+            unreadable.append(UnreadableManifest(rel, error.code, error.reason))
     if reject_duplicates:
         _raise_duplicate_ids(manifests)
-    return tuple(manifests)
+    return tuple(manifests), tuple(unreadable)
 
 
 def discover_legacy_trackers(
@@ -1053,7 +1105,7 @@ def resolve_collection(
     except CollectionError as error:
         if _genuinely_absent_collection_path(root, raw):
             raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found") from error
-        raise
+        raise _collection_reference_error(root, raw, error, authorize) from error
     if not authorize(rel):
         raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     return load_manifest(root, path)
@@ -2572,17 +2624,69 @@ def _safe_existing_path(root: Path, path: Path | str) -> tuple[Path, str]:
     return safe
 
 
-def _genuinely_absent_collection_path(root: Path, raw: str) -> bool:
-    """Recognize only a safe, missing leaf as an absent collection selector."""
+def _normalized_vault_reference(root: Path, raw: str) -> str | None:
+    """The vault-relative form of a collection reference, or None when it escapes."""
     candidate = Path(raw)
     if candidate.is_absolute():
         try:
             normalized = candidate.relative_to(root).as_posix()
         except ValueError:
-            return False
+            return None
     else:
         normalized = raw.replace("\\", "/")
     if not normalized.startswith(f"{vault.kb_dirname()}/") or _unsafe_relative(normalized):
+        return None
+    return normalized
+
+
+def _collection_reference_error(
+    root: Path,
+    raw: str,
+    error: CollectionError,
+    authorize: Callable[[str], bool],
+) -> CollectionError:
+    """Say which refusal this is: escaped the vault, or named the wrong file.
+
+    "outside the governed vault" is a true statement about a `../` escape and a
+    false one about `Knowledge Base/Planning/<collection>`, which is squarely
+    inside it. A caller who names the collection's directory was sent hunting
+    for a path problem that does not exist; what they need is the manifest in
+    it. The judgement is made on the reference as given -- a name that is not
+    `_collection.md` cannot be a manifest path whatever is on disk -- so it
+    discloses nothing. Only the remediation touches the filesystem, and it names
+    a manifest only when that manifest is authorized for this caller and safe to
+    open; otherwise it states the requirement without confirming anything.
+    """
+    normalized = _normalized_vault_reference(root, raw)
+    if normalized is None or Path(normalized).name == "_collection.md":
+        return error
+    manifest_rel = f"{normalized}/_collection.md"
+    names_manifest = (
+        authorize(manifest_rel) and _safe_candidate_rel(root, root / manifest_rel) is not None
+    )
+    return CollectionError(
+        "INVALID_COLLECTION_PATH",
+        "collection reference must be the collection's `_collection.md` manifest path",
+        {
+            "remediation": (
+                manifest_rel
+                if names_manifest
+                else "pass the collection's `_collection.md` manifest path"
+            )
+        },
+    )
+
+
+def collection_remediation(error: CollectionError) -> str | None:
+    """The parser-owned remediation fact an error carries, for public envelopes."""
+    value = error.details.get("remediation")
+    return value if type(value) is str and value else None
+
+
+def _genuinely_absent_collection_path(root: Path, raw: str) -> bool:
+    """Recognize only a safe, missing leaf as an absent collection selector."""
+    normalized = _normalized_vault_reference(root, raw)
+    if normalized is None:
         return False
     current = root
     parts = Path(normalized).parts
