@@ -4784,6 +4784,14 @@ def _batch_atomic_write_locked(
                     # Anything it refuses carries no derived custody and must
                     # be skipped rather than allowed to fail a canonical write
                     # that is otherwise sound.
+                    #
+                    # This also swallows two refusals that are not path
+                    # judgements: a malformed digest, and a path absent both
+                    # before and after. Neither is reachable from here --
+                    # ``vault.content_hash`` always yields a valid sha256 and
+                    # ``after_hash`` is always set for a staged write -- so
+                    # narrowing the guard would need a public path predicate on
+                    # the frozen receipt module, which this lane may not add.
                     try:
                         receipt_paths.append(
                             derived_receipts.DerivedBatchPath(

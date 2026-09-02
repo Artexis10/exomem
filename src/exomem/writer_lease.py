@@ -232,7 +232,13 @@ def _current_canonical_generation(vault_root: Path) -> str | None:
         from . import graph_sync
 
         checkpoint = graph_sync.read_checkpoint(Path(vault_root))
-    except Exception:  # noqa: BLE001 - proof falls back to the receipt's generation
+    except Exception as error:  # noqa: BLE001 - fall back to the receipt
+        # Name the class only. Silence here would reinstate the tautology this
+        # function exists to remove, with nothing to show it happened.
+        logger.debug(
+            "canonical generation probe failed; proof falls back to the receipt (%s)",
+            type(error).__name__,
+        )
         return None
     return None if checkpoint is None else str(checkpoint.generation)
 
@@ -410,12 +416,11 @@ def _acknowledge_derived_batches(
                 raise RuntimeError("derived receipt proof does not match this batch")
             superseded = proof.outcome == "superseded"
             if not superseded:
-                # The proof answers about the generation it was handed, so
-                # that is the generation its answer must be bound to.
-                if (
-                    proof.outcome != "ready"
-                    or proof.canonical_generation != observed_generation
-                ):
+                # No generation comparison here: the store echoes
+                # ``current_generation`` straight back into the proof, and its
+                # ``ready`` outcome is what already enforces that the stored
+                # generation matches the observed one.
+                if proof.outcome != "ready":
                     raise RuntimeError(
                         "derived receipt did not prove the committed generation"
                     )
@@ -429,22 +434,16 @@ def _acknowledge_derived_batches(
 
             statuses = []
             for component in derived_receipts.DerivedComponent:
-                if superseded:
-                    # Newer exact custody covers these paths and components.
-                    # Republishing this generation is forbidden, so the batch
-                    # hands nothing off and reports its own demand as still
-                    # unfinished rather than claiming work it cannot prove.
-                    statuses.append(
-                        next(
-                            item
-                            for item in receipt.components
-                            if item.component is component
-                        )
-                    )
-                    continue
                 status = derived_receipts.component_status(
                     session.vault_root, receipt, component
                 )
+                if superseded:
+                    # Read the store, never the as-prepared memory state: the
+                    # store has already closed these components as superseded,
+                    # and a terminal built from memory would advertise pending
+                    # work that no longer belongs to this batch.
+                    statuses.append(status)
+                    continue
                 if status.state == "claimed":
                     status = _wait_for_derived_component(
                         session.vault_root,
@@ -453,6 +452,14 @@ def _acknowledge_derived_batches(
                         deadline_monotonic=deadline,
                     )
                 statuses.append(status)
+            if superseded:
+                # The newer batch that superseded this one owns both the
+                # convergence and the applicable advisory job, so no advisory
+                # ref is resolved or carried here.
+                snapshots.append(
+                    index_sync.superseded_acknowledgement_snapshot(statuses)
+                )
+                continue
             snapshots.append(index_sync.derived_acknowledgement_snapshot(statuses))
             advisory_status = next(
                 status

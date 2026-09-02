@@ -159,6 +159,32 @@ def derived_acknowledgement_snapshot(
     )
 
 
+
+def superseded_acknowledgement_snapshot(
+    statuses: Iterable[DerivedComponentStatus],
+) -> DerivedAcknowledgementSnapshot:
+    """The bounded view of a batch a newer receipt superseded at proof time.
+
+    Convergence for these paths belongs to the newer batch that covers them, so
+    this batch names no unfinished component of its own, and the applicable
+    advisory job travels with that newer write's terminal rather than this one.
+    Reporting the as-prepared demand here would advertise pending work behind a
+    reference that already resolves to ``superseded``. The closed per-component
+    state read from the store stays visible in the diagnostics.
+    """
+    return DerivedAcknowledgementSnapshot(
+        derived_sync="pending",
+        derived_sync_components=(),
+        advisory_sync="not_required",
+        diagnostics=tuple(
+            sorted(
+                (status.component.value, status.state, status.failure_code)
+                for status in statuses
+            )
+        ),
+    )
+
+
 def _note_deferral(reason: str) -> None:
     """Count one stable deferral-accounting outcome (never content).
 

@@ -1011,3 +1011,54 @@ def test_public_replace_leaf_is_a_governed_multi_write(
 
     assert terminal["status"] == "committed"
     _assert_one_handoff_per_batch(fake)
+
+
+def test_superseded_batch_reports_store_state_without_an_advisory_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A superseded batch reads the store and carries no advisory ref of its own.
+
+    Convergence for these paths belongs to the newer batch that superseded them,
+    and so does the applicable advisory job. Reporting this batch's as-prepared
+    memory state would advertise pending work under a ref that already resolves
+    to ``superseded``.
+    """
+    fake = DerivedReceiptProtocolFake()
+    _install_protocol(monkeypatch, fake)
+    _inject_statuses(
+        fake,
+        {component: "superseded" for component in derived_receipts.DerivedComponent},
+    )
+    newer = "99999999"
+    monkeypatch.setattr(
+        writer_lease, "_current_canonical_generation", lambda _root: newer
+    )
+
+    def proof(_root, receipt, **kwargs):  # noqa: ANN001
+        return derived_receipts.DerivedBatchProof(
+            batch_id=receipt.batch_id,
+            outcome="superseded",
+            canonical_generation=kwargs["current_generation"],
+            path_states=("after",) * len(receipt.paths),
+            ready_components=(),
+            canonical_replay_authorized=False,
+        )
+
+    fake.inject("prove_committed", proof)
+
+    terminal, _target = _invoke_batch(tmp_path, response_detail="full")
+
+    assert terminal["status"] == "committed"
+    assert terminal["derived_sync"] == "pending"
+    assert terminal["advisory_sync"] == "not_required"
+    assert "advisory_result_ref" not in terminal
+    assert fake.call_count("advisory_result_ref") == 0
+    # The store was read for every closed component rather than memory.
+    assert fake.call_count("component_status") == len(
+        tuple(derived_receipts.DerivedComponent)
+    )
+    diagnostics = terminal["diagnostics"]["derived_components"]
+    assert {item["component"] for item in diagnostics} == {
+        component.value for component in derived_receipts.DerivedComponent
+    }
+    assert {item["state"] for item in diagnostics} == {"superseded"}
