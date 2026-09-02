@@ -1103,9 +1103,18 @@ def resolve_collection(
     try:
         path, rel = _safe_existing_path(root, raw)
     except CollectionError as error:
+        # Classify the SPELLING before asking the filesystem anything. Consulting
+        # the absence helper first answered an excluded directory with
+        # INVALID_COLLECTION_PATH and an absent one with COLLECTION_NOT_FOUND,
+        # which hands back one bit of existence per guess. A reference that does
+        # not name a manifest file is answered the same way either way, and the
+        # remediation's own gates keep it from naming anything it should not.
+        normalized = _normalized_vault_reference(root, raw)
+        if normalized is None or Path(normalized).name != "_collection.md":
+            raise _collection_reference_error(root, raw, error, authorize) from error
         if _genuinely_absent_collection_path(root, raw):
             raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found") from error
-        raise _collection_reference_error(root, raw, error, authorize) from error
+        raise
     if not authorize(rel):
         raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     return load_manifest(root, path)
@@ -2686,12 +2695,16 @@ def _non_path_reference_error(raw: str) -> CollectionError | None:
     the governed vault describes a path they never wrote, and sends them
     checking a boundary that was never in question. A single segment that is
     not the manifest filename is a name, not a route: say what a reference is,
-    and name the other spelling that works. Anything carrying a separator is
-    still judged as a path, so a genuine `../` escape keeps the boundary
-    message.
+    and name the other spelling that works.
+
+    A traversal spelled as one segment is still a traversal, though. `..`, `.`,
+    a drive prefix and a NUL-bearing segment carry no separator but are not
+    names either, so they stay on the path side and keep the boundary message
+    -- judged by the same `_unsafe_relative` the vault-relative form uses, so
+    the two spellings cannot drift apart.
     """
     spelled = raw.replace("\\", "/")
-    if "/" in spelled or spelled == "_collection.md":
+    if "/" in spelled or spelled == "_collection.md" or _unsafe_relative(spelled):
         return None
     return CollectionError(
         "INVALID_COLLECTION_PATH",
