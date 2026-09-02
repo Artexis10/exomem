@@ -10,18 +10,20 @@ exact source-walk fallback by design, so every assertion here is taken against
 a warm managed cell — the registry seeded, the catalogue published, admission
 ready — which is the configuration the live cell runs in.
 
-Three shapes, one of them deliberately still failing:
+Four shapes, one of them deliberately still failing:
 
 * the unfiltered `scope="kb-only"` hybrid recall, which already answers from
   the maintained indexes — a *pin*, so a later change that reintroduces a walk
   under it turns this red;
-* the same recall carrying a supported page filter, which is Lane 2's contract
-  (index-backed eligibility) and today falls through to the canonical
-  full-scan oracle — `xfail(strict=True)`, so it turns green exactly when
-  Lane 2 lands and fails loudly if it turns green for any other reason;
+* the same recall carrying a supported page filter, which Lane 2 moved onto
+  the page catalogue. It was `xfail(strict=True)` while the plan fell through
+  to the canonical full-scan oracle; it is a plain assertion now, so a change
+  that puts the filtered read path back on the walk turns this red;
 * the sentinel's own non-vacuity, proven by driving the scan oracle directly.
   A sentinel that cannot count a walk it is pointed at proves nothing about
-  the two above.
+  the two above;
+* the cold reference sidecar, which still rebuilds inline from a corpus scan —
+  `xfail(strict=True)` until Lane 3's read-side exact custody lands.
 """
 
 from __future__ import annotations
@@ -73,11 +75,10 @@ def test_unfiltered_kb_only_hybrid_recall_enumerates_no_pages(
     assert sentinel.count == 0, sentinel.report()
 
 
-@pytest.mark.xfail(strict=True, reason="lane 2: index-backed eligibility")
 def test_filtered_hybrid_recall_enumerates_no_pages(
     vault: Path, warm_managed_cell, walk_sentinel
 ) -> None:
-    """Lane 2's contract: a supported page filter must resolve from an index."""
+    """Lane 2's contract: a supported page filter resolves from an index."""
     warm_managed_cell(vault)
     sentinel = walk_sentinel(*_scope_roots(vault))
 

@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, find_types, structured_filters
+from exomem import commands, find_types, readiness, structured_filters
 from exomem import find as find_module
 from exomem.find_types import FindTimings
 
@@ -190,25 +190,32 @@ def _eligibility_source(vault: Path, plan: structured_filters.FilterPlan) -> str
 
 
 def test_a_stage_that_walked_reports_that_it_computed(
-    vault: Path, warm_managed_cell
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The source vocabulary is only worth anything if it cannot flatter a walk.
 
-    `filter_eligibility` is the one stage whose source is decided at runtime
-    today: page clauses (`projects`, `tags`) are unsupported by
-    `plan_index_candidates` and fall to the canonical full-scan oracle, while a
-    `unit.category` clause seeds from the maintained sidecar. A walking branch
-    that reported `index` is precisely the mislabel that would let the cost
-    this change exists to expose hide behind a reassuring diagnostic, so both
-    directions are pinned rather than only the reassuring one.
+    `filter_eligibility` is the one stage whose source is decided at runtime.
+    Lane 2 moved the MANAGED reader's page clauses (`projects`, `tags`) onto
+    the page catalogue, so they report `index` there — but the walking branch
+    did not disappear, it moved: an offline/CLI caller keeps the canonical
+    full-scan oracle by design, and that branch must still say `computed`.
+    A walking branch that reported `index` is precisely the mislabel that would
+    let the cost this change exists to expose hide behind a reassuring
+    diagnostic, so both directions stay pinned rather than only the
+    reassuring one.
     """
     warm_managed_cell(vault)
 
+    assert _eligibility_source(vault, _plan(projects=("project-alpha",))) == "index"
+    assert _eligibility_source(vault, _plan(tags=("metabolism",))) == "index"
+    # A `unit.category` clause seeds from the maintained sidecar and says so.
+    assert _eligibility_source(vault, _plan(categories=("rule",))) == "index"
+
+    # The counter-case, so this is a mapping and not a constant: the same plan
+    # on the same corpus, resolved by the branch that really does walk.
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: False)
     assert _eligibility_source(vault, _plan(projects=("project-alpha",))) == "computed"
     assert _eligibility_source(vault, _plan(tags=("metabolism",))) == "computed"
-    # The counter-case, so this is a mapping and not a constant: a `unit.category`
-    # clause IS seeded from the maintained sidecar and says so.
-    assert _eligibility_source(vault, _plan(categories=("rule",))) == "index"
 
 
 def test_a_hot_cache_hit_reports_itself_as_a_cache(
@@ -265,7 +272,10 @@ def test_the_query_log_summary_carries_a_source_for_every_stage_it_lists(
     assert set(summary["stage_source"]) == set(summary["stage_ms"])
     assert set(summary["stage_source"].values()) <= SOURCE_VOCABULARY
     # The stage this change exists to expose, carried all the way to the log.
-    assert summary["stage_source"]["filter_eligibility"] == "computed"
+    # `index` since Lane 2 moved managed page filters onto the catalogue; the
+    # value that matters is that the log carries one at all, and that a walk
+    # would have to publish `computed` here to be served.
+    assert summary["stage_source"]["filter_eligibility"] == "index"
 
 
 _DEPTH_SHAPES = (

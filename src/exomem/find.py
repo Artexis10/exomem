@@ -1258,6 +1258,15 @@ def find(
         resolve_category=lambda value: _resolve_language_value(value, namespace="category"),
         resolve_kind=lambda value: _resolve_language_value(value, namespace="kind"),
     )
+    if filter_plan.root is not None and managed_runtime:
+        # A managed reader refuses a field no index can evaluate, and refuses it
+        # HERE — before the freshness key, the hot cache, any catalogue query or
+        # any lane. The alternative is to discover it at the eligibility seam
+        # and answer it with the scan, which is how the whole corpus gets read
+        # on the request thread without anything in the response saying so.
+        unsupported_fields = _unsupported_filter_fields(filter_plan)
+        if unsupported_fields:
+            raise _unsupported_filter_field_error(unsupported_fields)
     filter_key = json.dumps(
         filter_plan.to_dict(),
         ensure_ascii=False,
@@ -3057,17 +3066,34 @@ def _resolve_eligible_filter_paths(
     timings: FindTimings | None = None,
     pending: Any | None = None,
 ) -> set[str]:
-    """Resolve eligible parents, preferring the maintained semantic index.
+    """Resolve eligible parents, preferring the maintained catalogues.
 
-    A ``complete`` category/kind plan (per ``plan_index_candidates``) seeds its
-    candidate parents from the sidecar's semantic-unit metadata and evaluates
-    only those, never walking the Markdown scope. A ``complete`` plan whose
-    positive seeds intersect to nothing is finitely empty. A ``complete`` plan
-    with no live index to seed from raises the typed ``RetrievalIndexWarming``
-    outcome (the lower lexical path already scheduled the single-flight repair)
-    rather than regressing to the scan oracle. Only an unsupported plan keeps
-    the canonical full-scan oracle.
+    A MANAGED reader never reaches the scan oracle. Its eligibility comes from
+    `plan_index_eligibility`: every field is index-answerable or the request is
+    refused by field, and the candidate set comes from the catalogue's own page
+    rows — narrowed where a column can narrow, whole-scope where it cannot.
+    Either way nothing enumerates the Markdown scope, which is the contract
+    ("Structured Filter Eligibility Resolves From Indexes") and the 18.1 s
+    stage the proposal measured.
+
+    An OFFLINE (unmanaged) caller keeps exactly today's behaviour by design: a
+    ``complete`` category/kind plan (per ``plan_index_candidates``) seeds from
+    the semantic-unit sidecar, a ``complete`` plan with no live index raises
+    the typed warming outcome, and an unsupported plan keeps the canonical
+    full-scan oracle. A CLI user with a cold catalogue must still get an
+    answer, including for the fields no index can evaluate.
     """
+    from . import readiness
+
+    if readiness.runtime_managed():
+        return _managed_eligible_filter_paths(
+            vault_root,
+            scope=scope,
+            plan=plan,
+            snapshot=snapshot,
+            timings=timings,
+            pending=pending,
+        )
     algebra = structured_filters.plan_index_candidates(plan)
     if algebra.status != "complete":
         # The canonical full-scan oracle. It reads every page's frontmatter on
@@ -3111,6 +3137,110 @@ def _resolve_eligible_filter_paths(
         candidate_parent_paths=candidate_parents,
         pending=pending,
     )
+
+
+def _unsupported_filter_fields(plan: structured_filters.FilterPlan) -> tuple[str, ...]:
+    """Fields in ``plan`` that no maintained index can evaluate."""
+    return structured_filters.plan_index_eligibility(plan).unsupported_fields
+
+
+def _unsupported_filter_field_error(fields: tuple[str, ...]) -> structured_filters.FilterError:
+    """The refusal a managed reader gives instead of silently walking.
+
+    `page.frontmatter:/<pointer>` is open-ended by construction, and
+    `unit.verdict` / `unit.check_by` are read off the parsed unit with no column
+    anywhere. A scan fallback for them would reintroduce, for one field, exactly
+    the whole-corpus cost this stage exists to remove — and would do it
+    invisibly, because the result would still be correct.
+    """
+    named = ", ".join(fields)
+    return structured_filters.FilterError(
+        "UNSUPPORTED_FILTER_FIELD",
+        f"$.{fields[0]}" if fields else "$",
+        f"no maintained index can evaluate {named}",
+        expected="a filter field resolvable from the maintained catalogues",
+        remediation=(
+            "Filter on an indexed field, or run the query offline where the "
+            "exact source-walk fallback is available."
+        ),
+    )
+
+
+def _managed_eligible_filter_paths(
+    vault_root: Path,
+    *,
+    scope: str,
+    plan: structured_filters.FilterPlan,
+    snapshot: FreshnessSnapshot,
+    timings: FindTimings | None = None,
+    pending: Any | None = None,
+) -> set[str]:
+    """Index-backed eligibility for a managed reader — never a scope walk."""
+    eligibility = structured_filters.plan_index_eligibility(plan)
+    if not eligibility.resolvable:
+        _mark_source(timings, "filter_eligibility", find_types.SOURCE_DECLINED)
+        raise _unsupported_filter_field_error(eligibility.unsupported_fields)
+    try:
+        candidate_parents = _eligibility_candidate_paths(
+            vault_root,
+            scope=scope,
+            clauses=eligibility.clauses,
+            freshness=snapshot.for_scope(scope),
+            timings=timings,
+        )
+    except RetrievalIndexWarming:
+        # A catalogue behind the live projection is the one case where the
+        # honest answers are "retry" and "wrong". Walking instead would be
+        # correct and would cost the request the whole corpus, which is the
+        # regression this stage is measured against.
+        _mark_source(timings, "filter_eligibility", find_types.SOURCE_DECLINED)
+        raise
+    if pending is not None and not pending.empty:
+        # The catalogue names the PREVIOUS generation for every identity
+        # pending custody owns. Withdraw those rows and re-offer the proven
+        # committed ones, so the plan is evaluated against the exact current
+        # page rather than a stale row (Decision 2's overlay clause).
+        candidate_parents = set(pending.shadow(candidate_parents)) | {
+            row.rel_path for row in pending.current_pages()
+        }
+    _mark_source(timings, "filter_eligibility", find_types.SOURCE_INDEX)
+    return _indexed_eligible_filter_paths(
+        vault_root,
+        plan=plan,
+        candidate_parent_paths=candidate_parents,
+        pending=pending,
+    )
+
+
+def _eligibility_candidate_paths(
+    vault_root: Path,
+    *,
+    scope: str,
+    clauses: tuple | None,
+    freshness: tuple[int, int, str] | None,
+    timings: FindTimings | None = None,
+) -> set[str]:
+    """Candidate parents for a resolvable plan, from the page catalogue.
+
+    Narrowing is an optimization here, not the contract: `clauses` of ``None``
+    asks for every in-scope page, which is still an index answer and still
+    costs no enumeration. What is NOT optional is the generation binding — an
+    incomplete readiness proof raises rather than returning a partial set,
+    because a subset of the catalogue is indistinguishable from a correct
+    answer at this seam.
+    """
+    from . import lexstore
+
+    result = lexstore.search_eligible_parent_paths_result(
+        vault_root,
+        clauses,
+        scope=scope,
+        freshness=freshness,
+    )
+    _set_catalog_timing_profile(timings, result.readiness)
+    if not result.readiness.complete:
+        _raise_catalog_outcome(result.readiness)
+    return set(result.value or [])
 
 
 def _indexed_candidate_parent_paths(

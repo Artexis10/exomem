@@ -13,7 +13,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Literal, TypeAlias, cast
+from typing import Any, Final, Literal, TypeAlias, cast
 
 from . import semantic_language_registry, semantic_units, temporal
 
@@ -582,6 +582,299 @@ def _union_axis(axes: Sequence[frozenset[str] | None]) -> frozenset[str] | None:
             return None
         result = result | axis
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Index-backed eligibility
+#
+# `plan_index_candidates` above answers a different question: which candidates
+# can the semantic-unit sidecar seed for the UNIT lane. This section answers the
+# eligibility question — can the maintained catalogue resolve this plan's
+# eligible page set at all, and how far can it narrow before the plan is
+# evaluated. They are deliberately separate: widening the candidate algebra
+# would change what the unit lane's bounded prefix trusts, and this classifier
+# has to accept plans (a top-level NOT, a page-only expression) that carry no
+# positive candidate seed but are still fully answerable from columns.
+# --------------------------------------------------------------------------- #
+
+#: Page axes stored as one canonicalized scalar column.
+INDEX_PAGE_SCALAR_AXES: Final = frozenset(
+    {"page.status", "page.type", "page.file_type", "page.source_kind", "page.domain"}
+)
+#: Page axes stored as a JSON array of canonicalized members.
+INDEX_PAGE_LIST_AXES: Final = frozenset({"page.project", "page.tags", "page.speakers"})
+#: The one page axis compared as a real date.
+INDEX_PAGE_DATE_AXES: Final = frozenset({"page.updated"})
+#: Unit axes whose existing catalogue column already holds exactly the value
+#: `_canonicalize_string` produces, so a column comparison equals the
+#: evaluator's. `unit.tags` is deliberately absent: the evaluator casefolds tag
+#: members while `semantic_units.tags_json` stores them as authored, so a
+#: column seed could drop a page the oracle keeps.
+INDEX_UNIT_SCALAR_AXES: Final = frozenset(
+    {"unit.category", "unit.category_key", "unit.kind", "unit.context", "unit.form"}
+)
+#: Every field an index can evaluate. A plan naming anything else cannot be
+#: answered without reading pages, so a managed reader refuses it outright
+#: instead of silently becoming the scan.
+INDEX_ANSWERABLE_FIELDS: Final = (
+    _PAGE_FIELDS | frozenset({"unit.category", "unit.category_key", "unit.kind", "unit.tags", "unit.context", "unit.form"})
+)
+
+#: Bound on the disjunction a plan may expand to before narrowing is abandoned
+#: for the universal page seed. A cross-product of ORs is exponential; past
+#: this the query costs more than the candidates it saves.
+_MAX_ELIGIBILITY_CLAUSES = 64
+
+
+@dataclass(frozen=True, slots=True)
+class EligibilitySeed:
+    """One positive constraint on a catalogue column.
+
+    ``values`` is a membership set (any-of); with ``require_all`` every value
+    must be present, which is how ``$all`` narrows a list axis. ``lower`` and
+    ``upper`` are inclusive ISO-day bounds for the date axis. An EMPTY
+    ``values`` with no bounds is a proven always-false constraint (``$in []``),
+    not an unconstrained one.
+    """
+
+    axis: str
+    values: tuple[str, ...] = ()
+    require_all: bool = False
+    lower: str | None = None
+    upper: str | None = None
+
+    @property
+    def is_range(self) -> bool:
+        return self.lower is not None or self.upper is not None
+
+
+@dataclass(frozen=True, slots=True)
+class EligibilityClause:
+    """One conjunction of column constraints a candidate page must satisfy."""
+
+    seeds: tuple[EligibilitySeed, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class EligibilityPlan:
+    """Whether the catalogue can resolve a plan, and how far it narrows.
+
+    ``status`` is ``resolvable`` when every field the plan names has an
+    index-backed evaluation, and ``unsupported`` otherwise — in which case
+    ``unsupported_fields`` names them, because a managed reader refuses by
+    field rather than by silently walking.
+
+    ``clauses`` is the disjunction of conjunctive column constraints; ``None``
+    means "every in-scope page is a candidate". None is not a failure: the plan
+    is still resolved without a walk, because the candidate set comes from the
+    catalogue's own page rows. Narrowing is an optimization; the answer's
+    correctness rests on the caller evaluating the plan over the candidates.
+    """
+
+    status: Literal["resolvable", "unsupported"]
+    unsupported_fields: tuple[str, ...] = ()
+    clauses: tuple[EligibilityClause, ...] | None = None
+
+    @property
+    def resolvable(self) -> bool:
+        return self.status == "resolvable"
+
+
+def canonicalize_axis_value(field: str, value: str) -> str | None:
+    """The exact spelling `_runtime_scalar` compares for ``field``, or None.
+
+    The maintained columns are written through this, so a column comparison in
+    SQL and the in-memory evaluator settle on the same string. None means the
+    value is not a legal member of that axis and can never match an operand.
+    """
+    try:
+        return _canonicalize_string(field, value)
+    except FilterError:
+        return None
+    except ValueError:
+        return None
+
+
+def plan_index_eligibility(plan: FilterPlan) -> EligibilityPlan:
+    """Classify a compiled plan for index-backed eligibility resolution.
+
+    Every constraint this returns is a SUPERSET of the pages the plan can
+    match, never a narrower one: the caller evaluates the full plan over the
+    candidates, so a missed narrowing costs candidates while a wrong one costs
+    correctness. Operators whose column comparison would not be a superset
+    (``$ne``, ``$exists``, substring ``$contains``) contribute no constraint and
+    are settled in that evaluation, exactly as they are today.
+    """
+    unsupported: list[str] = []
+    clauses = _eligibility_node(plan.root, unsupported)
+    if unsupported:
+        return EligibilityPlan("unsupported", tuple(sorted(set(unsupported))), None)
+    return EligibilityPlan("resolvable", (), clauses)
+
+
+def _eligibility_node(
+    node: FilterNode | None, unsupported: list[str]
+) -> tuple[EligibilityClause, ...] | None:
+    """Clause disjunction for one subtree, or None for "no narrowing"."""
+    if node is None:
+        return None
+    if isinstance(node, Predicate):
+        return _eligibility_predicate(node, unsupported)
+    if isinstance(node, AllOf):
+        merged: tuple[EligibilityClause, ...] | None = None
+        for child in node.children:
+            # Recursed unconditionally: an unsupported field anywhere in the
+            # tree still has to be evaluated, so it still has to be reported.
+            child_clauses = _eligibility_node(child, unsupported)
+            if child_clauses is None:
+                continue
+            merged = child_clauses if merged is None else _merge_eligibility(merged, child_clauses)
+            if merged is None:
+                # Past the expansion bound: keep collecting unsupported fields,
+                # but stop trying to narrow.
+                for remaining in node.children[node.children.index(child) + 1 :]:
+                    _eligibility_node(remaining, unsupported)
+                return None
+        return merged
+    if isinstance(node, AnyOf):
+        collected: list[EligibilityClause] = []
+        universal = False
+        for child in node.children:
+            child_clauses = _eligibility_node(child, unsupported)
+            if child_clauses is None:
+                # One unnarrowed branch admits every page, so the union does.
+                universal = True
+                continue
+            collected.extend(child_clauses)
+        if universal or len(collected) > _MAX_ELIGIBILITY_CLAUSES:
+            return None
+        return tuple(collected)
+    # NOT: a negation admits pages that carry no row-level evidence at all, so
+    # it narrows nothing. Its subtree is still walked for unsupported fields.
+    _eligibility_node(node.child, unsupported)
+    return None
+
+
+def _merge_eligibility(
+    left: tuple[EligibilityClause, ...], right: tuple[EligibilityClause, ...]
+) -> tuple[EligibilityClause, ...] | None:
+    if len(left) * len(right) > _MAX_ELIGIBILITY_CLAUSES:
+        return None
+    return tuple(
+        EligibilityClause(first.seeds + second.seeds) for first in left for second in right
+    )
+
+
+def _eligibility_predicate(
+    predicate: Predicate, unsupported: list[str]
+) -> tuple[EligibilityClause, ...] | None:
+    field = predicate.field.name
+    if predicate.field.pointer is not None or field not in INDEX_ANSWERABLE_FIELDS:
+        # `page.frontmatter:/<pointer>` is open-ended by construction, and
+        # `unit.verdict` / `unit.check_by` are read off the parsed unit with no
+        # column anywhere. Neither has an index answer to give.
+        unsupported.append(field)
+        return None
+    seeds = [
+        seed
+        for operator, operand in predicate.operators
+        if (seed := _axis_seed(field, operator, operand)) is not None
+    ]
+    return (EligibilityClause(tuple(seeds)),) if seeds else None
+
+
+def _axis_seed(
+    field: str, operator: str, operand: TypedScalar | tuple[TypedScalar, ...] | bool
+) -> EligibilitySeed | None:
+    """One column constraint for one operator, or None when it cannot narrow.
+
+    ``$exists`` never seeds: a column holds a value, and "present but not a
+    string" and "absent" are the same NULL, so a presence constraint could drop
+    a page whose declaration the evaluator sees. ``$ne`` and string
+    ``$contains`` never seed for the same reason they do not today.
+    """
+    if field in INDEX_PAGE_DATE_AXES:
+        return _date_axis_seed(field, operator, operand)
+    if field in INDEX_PAGE_LIST_AXES:
+        if operator in {"$in", "$all"} and isinstance(operand, tuple):
+            return EligibilitySeed(
+                field, _string_values(operand), require_all=operator == "$all"
+            )
+        if operator == "$contains" and isinstance(operand, TypedScalar):
+            # Membership, not substring: `_evaluate_operator` treats $contains
+            # on a list runtime as "one member equals this".
+            return _single_value_seed(field, operand)
+        return None
+    if field in INDEX_PAGE_SCALAR_AXES or field in INDEX_UNIT_SCALAR_AXES:
+        if operator == "$eq" and isinstance(operand, TypedScalar):
+            return _single_value_seed(field, operand)
+        if operator == "$in" and isinstance(operand, tuple):
+            return EligibilitySeed(field, _string_values(operand))
+        return None
+    return None
+
+
+def _single_value_seed(field: str, operand: TypedScalar) -> EligibilitySeed | None:
+    if operand.kind != "string" or not isinstance(operand.value, str):
+        return None
+    return EligibilitySeed(field, (operand.value,))
+
+
+def _string_values(operand: tuple[TypedScalar, ...]) -> tuple[str, ...]:
+    """Only the string members narrow; a non-string operand matches no column.
+
+    Dropping non-strings is safe for ``$in`` (a value that cannot equal any
+    stored string cannot add pages) and for ``$all``, where the whole predicate
+    is unsatisfiable once one required member cannot be stored — so requiring
+    the remainder is still a superset.
+    """
+    return tuple(
+        item.value
+        for item in operand
+        if isinstance(item, TypedScalar) and item.kind == "string" and isinstance(item.value, str)
+    )
+
+
+def _operand_day(operand: object) -> str | None:
+    if not isinstance(operand, TypedScalar):
+        return None
+    if operand.kind == "datetime" and isinstance(operand.value, datetime):
+        return operand.value.date().isoformat()
+    if operand.kind == "date" and isinstance(operand.value, date):
+        return operand.value.isoformat()
+    return None
+
+
+def _date_axis_seed(
+    field: str, operator: str, operand: TypedScalar | tuple[TypedScalar, ...] | bool
+) -> EligibilitySeed | None:
+    """Day-granular bounds, deliberately one day wider than the question.
+
+    The stored column is a day; the evaluated value may be an instant. Bounding
+    on the day therefore admits every page whose instant falls inside it and
+    lets `_temporal_match` settle the hour — a superset, which is the only
+    direction a seed may err in.
+    """
+    if operator in {"$gt", "$gte"}:
+        day = _operand_day(operand)
+        return None if day is None else EligibilitySeed(field, lower=day)
+    if operator in {"$lt", "$lte"}:
+        day = _operand_day(operand)
+        return None if day is None else EligibilitySeed(field, upper=day)
+    if operator == "$between" and isinstance(operand, tuple) and len(operand) == 2:
+        lower, upper = _operand_day(operand[0]), _operand_day(operand[1])
+        if lower is None or upper is None:
+            return None
+        return EligibilitySeed(field, lower=lower, upper=upper)
+    if operator == "$eq":
+        day = _operand_day(operand)
+        return None if day is None else EligibilitySeed(field, lower=day, upper=day)
+    if operator == "$in" and isinstance(operand, tuple):
+        days = tuple(day for item in operand if (day := _operand_day(item)) is not None)
+        # A single unparseable member would make the membership set narrower
+        # than the question, so narrow only when every member converted.
+        return EligibilitySeed(field, days) if len(days) == len(operand) else None
+    return None
 
 
 def matching_units(
