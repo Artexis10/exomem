@@ -276,15 +276,26 @@ def execute_write_advisory(
     vault_root: Path,
     claimed_status: DerivedComponentStatus,
     *,
-    observe_current_generation: CanonicalGenerationObserver,
     now: float | None = None,
 ) -> AdvisoryExecution:
-    """Run one claimed `write_advisory` component against its exact generation.
+    """Run one claimed `write_advisory` component against its exact target.
 
-    The claim is the only authority: no foreground writer has to be present,
-    and the current canonical generation is re-proved before the target is
-    read, encoded, scored or published. An older worker may still be running,
-    but it cannot publish current output.
+    The claim is the only authority: no foreground writer has to be present.
+    What is re-proved before the target is read, encoded, scored or published
+    is the target's own content fingerprint, and a mismatch publishes
+    `failed`/`generation_changed` so the stale result is superseded rather
+    than silently dropped. An older worker may still be running, but it cannot
+    publish current output.
+
+    This deliberately does not also compare the batch's recorded canonical
+    generation against the vault's current one (orchestrator rulings R1, R3).
+    That value is a single vault-global graph checkpoint which advances on
+    every write to any page, so as a per-page freshness test it fails closed on
+    writes that were entirely sound: in a burst, every batch but the
+    last-written one refused with `generation_changed` and rotated until its
+    attempts ran out. The fingerprint below is the substantive guard, and it
+    asks the question the generation could not -- is *this* target still the
+    bytes this result was computed for.
     """
     if claimed_status.component is not DerivedComponent.WRITE_ADVISORY:
         raise ValueError("this executor owns only the write_advisory component")
@@ -301,15 +312,6 @@ def execute_write_advisory(
         # identity: it stays exactly resolvable and fails closed in the store.
         return AdvisoryExecution(
             batch_id=batch_id, outcome="stale_claim", failure_code="target_unreadable"
-        )
-
-    current_generation = observe_current_generation(vault_root)
-    if (
-        current_generation is None
-        or current_generation != claimed_status.canonical_generation
-    ):
-        return AdvisoryExecution(
-            batch_id=batch_id, outcome="unprovable", failure_code="generation_changed"
         )
 
     if stored.state != "pending":
@@ -447,12 +449,7 @@ def run_pending_write_advisories(
             _release(vault_root, status, failure_code="component_unhandled", now=now)
             continue
         try:
-            execution = execute_write_advisory(
-                vault_root,
-                status,
-                observe_current_generation=observe_current_generation,
-                now=now,
-            )
+            execution = execute_write_advisory(vault_root, status, now=now)
         except Exception:  # noqa: BLE001 - exact custody stays retryable
             log.warning(
                 "advisory dispatch failed batch=%s", status.batch_id, exc_info=True

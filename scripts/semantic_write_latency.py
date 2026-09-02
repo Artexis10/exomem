@@ -14,7 +14,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Final
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -272,10 +272,35 @@ def _lexical_backend(name: str):
             os.environ["EXOMEM_LEXICAL_BACKEND"] = previous
 
 
-def _wait_for_lexical_repair_idle(vault_root: Path, timeout: float = 60.0) -> None:
-    """Wait for the repair-flight condition; timeout is only a deadlock valve."""
+#: How long a measured phase may wait for the lexical catalogue to go quiet.
+#:
+#: This is a *setup* budget, not a gate threshold: no measured row is compared
+#: against it and no ceiling depends on it. What it bounds is warm-up, and
+#: exceeding it fails the run as a setup failure rather than letting a
+#: half-built catalogue be timed as though it were the product.
+#:
+#: It replaces an unnamed 60-second value described as "only a deadlock valve".
+#: That framing was wrong in a way that cost a run: on a box at load 7 the
+#: catalogue legitimately needed longer than 60 s, the valve tripped in the
+#: FTS5 report phase, and the failure named neither a budget nor a cause. A
+#: wait that can fail a run is a budget whatever it is called, so it is named,
+#: stated, and sized for a loaded box here.
+LEXICAL_WARMUP_BUDGET_SECONDS: Final = 300.0
+
+
+def _wait_for_lexical_repair_idle(
+    vault_root: Path, timeout: float = LEXICAL_WARMUP_BUDGET_SECONDS
+) -> None:
+    """Wait, within a stated budget, for the lexical repair flight to finish.
+
+    Failing here is deliberate and must stay failing: proceeding with repairs
+    still in flight would measure a catalogue that is still being built, and
+    the reads this gate bounds would be timed against something no served
+    reader ever sees.
+    """
     key = vault_root.resolve()
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
     wake = threading.Event()
     while True:
         with lexstore._REPAIRS_LOCK:
@@ -283,8 +308,29 @@ def _wait_for_lexical_repair_idle(vault_root: Path, timeout: float = 60.0) -> No
                 return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise RuntimeError("lexical repair worker did not become idle")
+            raise RuntimeError(
+                "lexical repair worker did not become idle within the "
+                f"{timeout:.0f}s warm-up budget "
+                f"(waited {time.monotonic() - started:.1f}s); this is a setup "
+                "failure, not a measured row"
+            )
         wake.wait(min(0.01, remaining))
+
+
+@contextmanager
+def _production_read_backend(vault_root: Path):
+    """Scope a phase to the backend a served reader actually gets.
+
+    `auto` is the product's own selection -- FTS5 where the SQLite build has
+    it, the Python rung where it does not -- so a row measured in here is a row
+    about the shipped read path. The catalogue is built and allowed to go quiet
+    first, because an unbuilt or still-repairing catalogue turns the first
+    sample into a build cost and the rest into something else entirely.
+    """
+    with _lexical_backend("auto"):
+        lexstore.ensure_fresh(vault_root)
+        _wait_for_lexical_repair_idle(vault_root)
+        yield
 
 
 def _measure_fts5_visibility(
@@ -510,8 +556,15 @@ def measure(
     *,
     fts5_visibility: bool = False,
 ) -> dict[str, float | int]:
-    # Keep the historical deterministic baseline pinned to the Python rung.
-    # The focused FTS5 phase below overrides this scope only for its own reads.
+    # Keep the historical deterministic baseline pinned to the Python rung:
+    # `validate`, `commit`, `read_after_write` and the cold rows are a stable
+    # cross-release series and their comparability depends on the instrument
+    # not changing under them.
+    #
+    # Two phases override this scope for their own reads, and both are about
+    # the shipped read path rather than the baseline: the focused FTS5
+    # visibility measurement, and the fast-acknowledgement rows, which run
+    # under the production `auto` selection (ruling R4).
     with _lexical_backend("python"):
         return _measure(vault_root, size, samples, fts5_visibility=fts5_visibility)
 
@@ -595,40 +648,57 @@ def _measure(
     # -- for exactly this phase, and hands admission back afterwards. Without
     # the warm and the proof, managed recall answers `warming` by contract and
     # the rows below would measure a refusal.
-    _enter_managed_recall(vault_root)
-    try:
-        first_public = samples + 2
-        for version in range(first_public, first_public + samples):
-            public_ms, post_ms = _public_transition(
-                vault_root, target_rel, version, manager
-            )
-            keyword_ms, hybrid_ms, ref_ms = _immediate_reads(
-                vault_root, target_rel, version
-            )
-            public_writes.append(public_ms)
-            post_canonical.append(post_ms)
-            keyword_reads.append(keyword_ms)
-            hybrid_reads.append(hybrid_ms)
-            if ref_ms is not None:
-                stable_ref_reads.append(ref_ms)
-            # The pair is one caller's complete experience: acknowledge, then
-            # immediately verify. Measured together because a change that
-            # shortens one by lengthening the other is exactly what the paired
-            # bound exists to catch.
-            paired.append(public_ms + max(keyword_ms, hybrid_ms))
-    finally:
-        readiness.unmanage_runtime()
-        # Converge the custody this phase created before anything else is
-        # measured. The cold rows below read through the persistent catalogues,
-        # and leaving a burst of exact receipts outstanding would charge their
-        # convergence to a row that is not about it.
-        _drain_derived_custody(vault_root)
-        pending_recall.reset(vault_root)
-        find.clear_cache()
-        if previous_flag is None:
-            os.environ.pop("EXOMEM_FAST_DURABLE_ACK", None)
-        else:
-            os.environ["EXOMEM_FAST_DURABLE_ACK"] = previous_flag
+    # Ruling R4: these rows run on the *production* backend selection, not the
+    # Python rung the historical boundary rows are pinned to.
+    #
+    # The rung above is deliberately O(N) even when warm, which is exactly what
+    # makes it a stable baseline for the boundary rows -- and exactly what makes
+    # it the wrong instrument here. The design's 1.5 s immediate-read and 5.0 s
+    # paired contracts are promises about what a served reader waits for, and a
+    # served reader gets `auto`. Measured on the slow rung these rows reported
+    # 6.2 s keyword and 11.6 s hybrid at 8k pages while the write side passed
+    # with two orders of magnitude of headroom, and the immediate keyword read
+    # came out equal to `read_after_write` at both sizes -- the overlay adding
+    # nothing measurable, the rung supplying all of it. That is a measurement of
+    # the instrument, not of the product.
+    #
+    # No ceiling changes. The rows are simply pointed at the path they are
+    # about.
+    with _production_read_backend(vault_root):
+        _enter_managed_recall(vault_root)
+        try:
+            first_public = samples + 2
+            for version in range(first_public, first_public + samples):
+                public_ms, post_ms = _public_transition(
+                    vault_root, target_rel, version, manager
+                )
+                keyword_ms, hybrid_ms, ref_ms = _immediate_reads(
+                    vault_root, target_rel, version
+                )
+                public_writes.append(public_ms)
+                post_canonical.append(post_ms)
+                keyword_reads.append(keyword_ms)
+                hybrid_reads.append(hybrid_ms)
+                if ref_ms is not None:
+                    stable_ref_reads.append(ref_ms)
+                # The pair is one caller's complete experience: acknowledge,
+                # then immediately verify. Measured together because a change
+                # that shortens one by lengthening the other is exactly what
+                # the paired bound exists to catch.
+                paired.append(public_ms + max(keyword_ms, hybrid_ms))
+        finally:
+            readiness.unmanage_runtime()
+            # Converge the custody this phase created before anything else is
+            # measured. The cold rows below read through the persistent
+            # catalogues, and leaving a burst of exact receipts outstanding
+            # would charge their convergence to a row that is not about it.
+            _drain_derived_custody(vault_root)
+            pending_recall.reset(vault_root)
+            find.clear_cache()
+            if previous_flag is None:
+                os.environ.pop("EXOMEM_FAST_DURABLE_ACK", None)
+            else:
+                os.environ["EXOMEM_FAST_DURABLE_ACK"] = previous_flag
 
     cold_write_version = samples + 2 + samples
     cold_probe_version = cold_write_version + 1

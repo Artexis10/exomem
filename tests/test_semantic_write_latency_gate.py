@@ -55,6 +55,7 @@ it.
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -570,3 +571,83 @@ def test_the_post_canonical_bound_is_a_maximum_not_a_percentile() -> None:
     module = load_module()
     with pytest.raises(SystemExit, match="post_canonical_max_ms"):
         module.check([fast_ack_result(2_000, post_canonical_max=2_500.0)])
+
+
+# ------------------------------------------------------------------ Ruling R4
+#
+# Which rung a row is measured on is part of what the row means. The historical
+# boundary series is pinned to the deliberately-O(N) Python backend because its
+# value is comparability across releases; the fast-acknowledgement rows are
+# promises about what a served reader waits for, so they have to run on the
+# backend a served reader gets.
+
+
+def test_the_historical_baseline_stays_pinned_to_the_python_rung(monkeypatch) -> None:
+    """`measure` still hands `_measure` the deterministic rung."""
+    module = load_module()
+    seen: list[str | None] = []
+
+    monkeypatch.setattr(
+        module,
+        "_measure",
+        lambda *_a, **_k: seen.append(os.environ.get("EXOMEM_LEXICAL_BACKEND")) or {},
+    )
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "sentinel")
+
+    module.measure(Path("/synthetic-vault"), 2_000, 5)
+
+    assert seen == ["python"]
+    # And the caller's own selection is handed back untouched.
+    assert os.environ.get("EXOMEM_LEXICAL_BACKEND") == "sentinel"
+
+
+def test_the_fast_ack_rows_run_on_the_production_backend_selection(monkeypatch) -> None:
+    """`auto` inside, warmed and quiet before any sample, restored after."""
+    module = load_module()
+    events: list[object] = []
+
+    monkeypatch.setattr(
+        module.lexstore,
+        "ensure_fresh",
+        lambda root: events.append(("ensure_fresh", os.environ.get("EXOMEM_LEXICAL_BACKEND"))),
+    )
+    monkeypatch.setattr(
+        module,
+        "_wait_for_lexical_repair_idle",
+        lambda root: events.append(("wait", os.environ.get("EXOMEM_LEXICAL_BACKEND"))),
+    )
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+
+    with module._production_read_backend(Path("/synthetic-vault")):
+        events.append(("sample", os.environ.get("EXOMEM_LEXICAL_BACKEND")))
+
+    # Built and quiet BEFORE the first sample, all three on `auto`.
+    assert events == [
+        ("ensure_fresh", "auto"),
+        ("wait", "auto"),
+        ("sample", "auto"),
+    ]
+    # The surrounding baseline scope is unchanged by the excursion.
+    assert os.environ.get("EXOMEM_LEXICAL_BACKEND") == "python"
+
+
+def test_the_warmup_wait_is_a_named_budget_and_still_fails_the_run() -> None:
+    """A wait that can fail a run is a budget, so it names itself when it ends.
+
+    It must keep failing: proceeding with repairs in flight would time a
+    catalogue that is still being built.
+    """
+    module = load_module()
+    assert isinstance(module.LEXICAL_WARMUP_BUDGET_SECONDS, float)
+    assert module.LEXICAL_WARMUP_BUDGET_SECONDS >= 60.0
+
+    root = Path("/synthetic-vault-never-idle")
+    key = root.resolve()
+    with module.lexstore._REPAIRS_LOCK:
+        module.lexstore._REPAIRS_IN_FLIGHT.add(key)
+    try:
+        with pytest.raises(RuntimeError, match=r"warm-up budget"):
+            module._wait_for_lexical_repair_idle(root, timeout=0.01)
+    finally:
+        with module.lexstore._REPAIRS_LOCK:
+            module.lexstore._REPAIRS_IN_FLIGHT.discard(key)

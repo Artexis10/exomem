@@ -457,40 +457,80 @@ def test_advisory_result_material_target_change_is_superseded(
     assert _resolve(vault, second_ref)["status"] == "superseded"
 
 
-def test_advisory_worker_revalidates_current_generation_before_publish(
+def test_advisory_worker_revalidates_the_target_fingerprint_before_publish(
     vault: Path, encoder: _DeterministicEncoder
 ) -> None:
-    module = _advisory()
-    target = _seed_page(vault, "lane4-generation", "Generation proof body.")
-    receipt, _ = _prepare_custody(vault, batch_id="b-gen", target_rel=target)
-    ref = derived_receipts.advisory_result_ref(vault, receipt)
+    """What proves an advisory current is its target's bytes, not a counter.
 
-    # The live canonical generation moved: the worker must not publish.
+    This node used to pin a refusal on the vault-global canonical generation.
+    Rulings R1 and R3 removed that comparison: the generation is a single graph
+    checkpoint that advances on every write to *any* page, so as a per-page
+    freshness test it refused writes that were entirely sound -- in a burst,
+    every batch but the last-written one, until its attempts ran out. The
+    fingerprint asks the question the counter could not, and it is what this
+    node pins now. The claim CAS below is unchanged and still refuses a stale
+    worker outright.
+    """
+    module = _advisory()
+
+    # 1. The target's bytes moved after custody was prepared. Whatever this
+    #    result would have said is about content the vault no longer holds, so
+    #    it must publish its own supersession rather than current-looking output.
+    moved = _seed_page(vault, "lane4-fingerprint", "Fingerprint proof body.")
+    moved_receipt, _ = _prepare_custody(
+        vault, batch_id="b-fingerprint", target_rel=moved
+    )
+    moved_ref = derived_receipts.advisory_result_ref(vault, moved_receipt)
+    _seed_page(vault, "lane4-fingerprint", "Rewritten body this result never saw.")
+
+    executions = module.run_pending_write_advisories(
+        vault,
+        observe_current_generation=_observer("generation-1"),
+        owner="fingerprint-worker",
+        now=20.0,
+    )
+    assert [execution.outcome for execution in executions] == ["superseded"], executions
+    assert [execution.state for execution in executions] == [None], executions
+    assert [execution.candidate_count for execution in executions] == [0], executions
+    # The stale result is retired as superseded -- never surfaced as an
+    # advisory about bytes the vault no longer holds.
+    assert _resolve(vault, moved_ref)["status"] == "superseded"
+
+    # 2. The vault-global generation moving is no longer a refusal on its own.
+    #    This batch's target is untouched, so its result is still about the
+    #    bytes on disk and publishing it is correct.
+    intact = _seed_page(vault, "lane4-generation", "Generation proof body.")
+    intact_receipt, _ = _prepare_custody(
+        vault, batch_id="b-gen", target_rel=intact
+    )
+    intact_ref = derived_receipts.advisory_result_ref(vault, intact_receipt)
+
     executions = module.run_pending_write_advisories(
         vault,
         observe_current_generation=_observer("generation-9"),
-        owner="stale-worker",
-        now=20.0,
+        owner="later-worker",
+        now=40.0,
     )
-    assert all(execution.outcome != "published" for execution in executions)
-    assert _resolve(vault, ref)["status"] == "pending"
-    assert (
-        derived_receipts.component_status(
-            vault, receipt, derived_receipts.DerivedComponent.WRITE_ADVISORY
-        ).state
-        != "completed"
-    )
+    by_batch = {execution.batch_id: execution for execution in executions}
+    assert by_batch["b-gen"].outcome == "published", executions
+    assert by_batch["b-gen"].state == "ready", executions
+    assert _resolve(vault, intact_ref)["status"] == "ready"
 
-    # An older claim revision cannot publish current output either.
+    # 3. An older claim revision still cannot publish current output. This is
+    #    the guard that actually stops a stale worker, and it is untouched.
+    stale_target = _seed_page(vault, "lane4-stale", "Stale claim body.")
+    stale_receipt, _ = _prepare_custody(
+        vault, batch_id="b-stale", target_rel=stale_target
+    )
+    stale_ref = derived_receipts.advisory_result_ref(vault, stale_receipt)
     claimed = _claim(vault, owner="older-worker", now=200.0)
     stale = module.execute_write_advisory(
         vault,
         replace(claimed, revision=claimed.revision + 1),
-        observe_current_generation=_observer("generation-1"),
         now=201.0,
     )
     assert stale.outcome == "stale_claim"
-    assert _resolve(vault, ref)["status"] == "pending"
+    assert _resolve(vault, stale_ref)["status"] == "pending"
 
 
 # ---------------------------------------------------------------------------
@@ -1030,7 +1070,6 @@ def test_crash_after_publication_completes_without_recomputation(
     published = module.execute_write_advisory(
         vault,
         worker_a,
-        observe_current_generation=_observer("generation-1"),
         now=21.0,
     )
     assert published.outcome == "published"
@@ -1088,7 +1127,6 @@ def test_crash_after_publication_completes_without_recomputation(
         module.execute_write_advisory(
             vault,
             control_claim,
-            observe_current_generation=_observer("generation-2"),
             now=211.0,
         ).outcome
         == "published"
@@ -1126,7 +1164,6 @@ def test_retryable_publication_burns_no_once_only_review_state(
     refused = module.execute_write_advisory(
         vault,
         expired,
-        observe_current_generation=_observer("generation-1"),
         now=500.0,
     )
 

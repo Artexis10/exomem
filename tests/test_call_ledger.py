@@ -637,9 +637,15 @@ def test_derived_counters_are_closed_named_and_reset_able() -> None:
     assert counters["advisory_vectors_reused"] == 2
     assert counters["component_completed"] == 1
 
-    # An unknown counter is refused rather than silently creating a field.
-    with pytest.raises(ValueError):
-        call_ledger.note_derived_event("Knowledge Base/Notes/leak.md")
+    # An unknown counter creates no field and counts nothing. It is dropped
+    # rather than raised: every caller is a worker holding exact custody, and
+    # an exception there would cost a claim rotation for a miscounted event.
+    before = call_ledger.derived_counters()
+    call_ledger.note_derived_event("Knowledge Base/Notes/leak.md")
+    after = call_ledger.derived_counters()
+    assert after == before
+    assert set(after) == set(call_ledger.DERIVED_COUNTERS)
+    assert "Knowledge Base/Notes/leak.md" not in after
     call_ledger.reset_derived_counters()
 
 

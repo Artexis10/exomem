@@ -543,9 +543,17 @@ _derived_counts: dict[str, int] = dict.fromkeys(DERIVED_COUNTERS, 0)
 
 
 def note_derived_event(name: str) -> None:
-    """Count one closed derived-work event. Never raises into a worker."""
+    """Count one closed derived-work event. Never raises into a worker.
+
+    The vocabulary is closed, so an unrecognised name is a caller defect --
+    but every caller is a background worker holding exact custody, and raising
+    there would turn a miscounted event into a rotated claim and a stranded
+    batch. The name is dropped instead: nothing is counted, and no field is
+    created, so an unknown name can neither be observed nor leak into the
+    content-free diagnostics as a new key.
+    """
     if name not in DERIVED_COUNTERS:
-        raise ValueError("unknown derived counter")
+        return
     with _derived_lock:
         _derived_counts[name] += 1
 

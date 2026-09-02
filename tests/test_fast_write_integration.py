@@ -1060,7 +1060,6 @@ def test_crash_cut_worker_death_after_publication_never_recomputes(
                 "claim_owner": "replay-worker",
             }
         ),
-        observe_current_generation=lambda _root: receipt.canonical_generation,
     )
     assert replay.outcome == "already_published", replay
     assert replay.reused_vectors is True
@@ -1769,3 +1768,205 @@ def test_an_older_published_batch_never_retires_a_newer_unlanded_batch(
         derived_receipts.publish_pending_visibility(
             vault, newer, publisher=pending_recall.publish
         )
+
+
+# --------------------------------------------------------------------------- #
+# The R2 convergence path: what a fan-out report is allowed to prove
+# --------------------------------------------------------------------------- #
+
+
+def _fanout_report(*rows: tuple[str, str]):
+    """One bounded fan-out report with exactly the component rows given."""
+    from exomem import index_sync
+
+    return index_sync.IndexSyncReport(
+        operation="upsert",
+        requested_paths=("Knowledge Base/Notes/convergence.md",),
+        eligible_paths=("Knowledge Base/Notes/convergence.md",),
+        components=tuple(
+            index_sync.IndexComponentOutcome(
+                component=component, outcome=outcome, code="test"
+            )
+            for component, outcome in rows
+        ),
+    )
+
+
+def test_a_degraded_fanout_is_rerun_and_never_replayed_from_the_memo(
+    vault: Path,
+) -> None:
+    """A degraded report proves nothing, so it must not be cached as proof.
+
+    One successful fan-out proves every component it reported, which is why the
+    batch is memoized rather than re-fanned once per claimed component. That
+    shortcut is only sound for a *clean* report. A degraded one has to run
+    again under the store's own backoff, and -- the part that is easy to lose --
+    the batch's other components must not complete off the convergent rows a
+    degraded report happens to carry. Half a fan-out is not a fan-out.
+    """
+    from exomem import index_sync
+
+    index_sync.reset_derived_fanout_memo()
+    rel = "Knowledge Base/Notes/convergence-degraded.md"
+    _put(vault, rel, _compiled_page("Convergence degraded", "convergencedegraded"))
+    receipt = _prepare_store_batch(
+        vault,
+        batch_id="converge-degraded",
+        generation="generation-1",
+        changes=((rel, None, _compiled_page("Convergence degraded", "convergencedegraded")),),
+        required={DerivedComponent.LEXSTORE, DerivedComponent.MEMORY_REFS},
+    )
+
+    calls: list[int] = []
+
+    def degraded(*_args, **_kwargs):
+        calls.append(1)
+        # `memory_refs` is convergent in this very report, so a memo that kept
+        # it would let the second component complete off a fan-out that failed.
+        return _fanout_report(
+            ("lexstore", "degraded"), ("memory_refs", "completed")
+        )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(index_sync, "upsert_after_write", degraded)
+
+        assert (
+            index_sync.converge_derived_component(
+                vault, receipt, DerivedComponent.LEXSTORE
+            )
+            is False
+        )
+        assert len(calls) == 1
+
+        # The degraded report is not proof of anything, including for the
+        # component it did report as complete.
+        assert (
+            index_sync.converge_derived_component(
+                vault, receipt, DerivedComponent.MEMORY_REFS
+            )
+            is False
+        )
+        assert len(calls) == 2, "a degraded report was replayed from the memo"
+
+    # A clean run afterwards is memoized, and only then does one fan-out prove
+    # the batch's remaining components. This is the behaviour being protected,
+    # not merely the absence of the wrong one.
+    clean: list[int] = []
+
+    def healthy(*_args, **_kwargs):
+        clean.append(1)
+        return _fanout_report(
+            ("lexstore", "completed"), ("memory_refs", "completed")
+        )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(index_sync, "upsert_after_write", healthy)
+        assert index_sync.converge_derived_component(
+            vault, receipt, DerivedComponent.LEXSTORE
+        )
+        assert index_sync.converge_derived_component(
+            vault, receipt, DerivedComponent.MEMORY_REFS
+        )
+    assert len(clean) == 1, "a clean report should prove the whole batch once"
+    index_sync.reset_derived_fanout_memo()
+
+
+def test_a_required_component_the_fanout_never_reached_does_not_converge(
+    vault: Path, tmp_path: Path
+) -> None:
+    """An absent row means 'switched off' for an optional component only.
+
+    For a required one it is a real absence of proof, and treating it as
+    convergence would retire the pending overlay over content no index holds --
+    the reader would be told the write is live in a lane that never saw it.
+    """
+    from exomem import index_sync
+
+    index_sync.reset_derived_fanout_memo()
+    rel = "Knowledge Base/Notes/convergence-absent.md"
+    source = _compiled_page("Convergence absent", "convergenceabsent")
+    _put(vault, rel, source)
+    receipt = _prepare_store_batch(
+        vault,
+        batch_id="converge-absent",
+        generation="generation-1",
+        changes=((rel, None, source),),
+        required={
+            DerivedComponent.RESOLVER,
+            DerivedComponent.EMBEDDINGS,
+            DerivedComponent.LEXSTORE,
+        },
+    )
+
+    assert (
+        derived_receipts.prove_committed(
+            vault, receipt, current_generation="generation-1"
+        ).outcome
+        == "ready"
+    )
+
+    def partial(*_args, **_kwargs):
+        # A clean report that simply never reached `resolver` or `embeddings`.
+        return _fanout_report(("lexstore", "completed"))
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(index_sync, "upsert_after_write", partial)
+
+        assert index_sync.converge_derived_component(
+            vault, receipt, DerivedComponent.LEXSTORE
+        ), "a reported component converges"
+
+        assert (
+            index_sync.converge_derived_component(
+                vault, receipt, DerivedComponent.RESOLVER
+            )
+            is False
+        ), "a required component the fan-out never reached is unproven"
+
+        assert index_sync.converge_derived_component(
+            vault, receipt, DerivedComponent.EMBEDDINGS
+        ), "an optional component's absence is the configuration, not a gap"
+
+    # And the overlay must still be shadowing: an unproven required component
+    # may not retire the pending row that stands in for it.
+    assert derived_receipts.publish_pending_visibility(
+        vault, receipt, publisher=pending_recall.publish
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(index_sync, "upsert_after_write", partial)
+        _drain(vault)
+    assert (
+        derived_receipts.component_status(
+            vault, receipt, DerivedComponent.RESOLVER
+        ).state
+        != "completed"
+    )
+    assert "live" in _pending_row_states(vault), _pending_row_states(vault)
+    index_sync.reset_derived_fanout_memo()
+
+
+def test_the_fast_path_never_warms_the_embedding_model_inline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fast acknowledgement means the request thread loads no model at all.
+
+    The warm-up exists to keep a cold model load out of the mutation boundary.
+    Under fast acknowledgement there is no long boundary to protect and the
+    encode has moved to a background component, so paying for the load on the
+    request thread would buy the caller nothing and cost it seconds.
+    """
+    from exomem import embeddings, readiness, semantic_writes
+
+    loads: list[int] = []
+    monkeypatch.setattr(embeddings, "get_model", lambda *a, **k: loads.append(1))
+    monkeypatch.setattr(readiness, "should_defer", lambda *_a, **_k: False)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
+    semantic_writes._prewarm_embeddings()
+    assert loads == [], "the fast path must not load the model inline"
+
+    # The control: with the flag off, the warm-up is exactly what it was.
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "0")
+    semantic_writes._prewarm_embeddings()
+    assert loads == [1], "the prior synchronous path still warms the model"
