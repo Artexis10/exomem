@@ -42,8 +42,8 @@
 
 ## 6. Prove f21 and kill shortcuts
 
-- [ ] 6.1 Add a real-runtime f21 projection with structurally different reusable-facet positives and a frequency-matched mention-only twin without changing preregistered assertion semantics.
-- [ ] 6.2 Prove positives appear in audit, explicit review, and proposal or work-item projections while the twin is absent across audit, review, proposal, and due-state projections.
+- [x] 6.1 Add a real-runtime f21 projection with structurally different reusable-facet positives and a frequency-matched mention-only twin without changing preregistered assertion semantics.
+- [x] 6.2 Prove positives appear in audit, explicit review, and proposal or work-item projections while the twin is absent across audit, review, proposal, and due-state projections.
 - [x] 6.3 Kill mutants for string frequency only, page count instead of origins, accepting an unlisted frame/predicate/cue, nulling or swapping a copula/label/body-field predicate ID, widening a span boundary, capitalization or Latin restriction, removing the promotion-witness or facet gate, dropping facet-only rows after a witness, refusing resolved relation-only hydration, unbounding top-level or nested taxonomy evidence, weakening cluster incompatibility, resolved-Entity suppression, duplicate-create routing, ignored parent, identity-only or batch-only fingerprint, background model, write-on-detect, second ordinary session scan, and mutation without the mapped confirmation.
 - [ ] 6.4 Preserve provisional constants, acknowledgment withholding, false-positive dual, and no-aggregate-score rules from the active no-nudge benchmark amendment.
 - [ ] 6.5 Report f21 implementation evidence separately from any still-withheld comparative claim.
