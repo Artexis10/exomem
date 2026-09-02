@@ -1357,8 +1357,23 @@ def test_malformed_review_ref_is_invalid_rather_than_stale(tmp_path: Path) -> No
     assert raised.value.code == "CURATION_ENTITY_REVIEW_REF_INVALID"
 
 
-@pytest.mark.parametrize("missing", ["candidate_state", "grammar_version"])
-def test_candidate_meta_without_state_or_grammar_fails_closed(missing: str) -> None:
+@pytest.mark.parametrize(
+    "missing,reasons",
+    [
+        ("candidate_state", ["ordinary_identity_recurs"]),
+        ("grammar_version", ["ordinary_identity_recurs"]),
+        # Both lanes qualified. The ordinary-text grammar DID match, so a None
+        # grammar is a broken signal even though the wikilink reason is also
+        # present, and the wikilink lane must not be taken as a fallback.
+        (
+            "grammar_version",
+            ["unresolved_identity_recurs", "ordinary_identity_recurs"],
+        ),
+    ],
+)
+def test_candidate_meta_without_state_or_grammar_fails_closed(
+    missing: str, reasons: list[str]
+) -> None:
     """A silent default turns a signal we could not read into an executable route.
 
     Defaulting `candidate_state` to "promotion" means a candidate whose state is
@@ -1369,7 +1384,7 @@ def test_candidate_meta_without_state_or_grammar_fails_closed(missing: str) -> N
         # The ordinary-text lane: this candidate DID match the text grammar, so
         # a missing grammar_version here is a broken signal rather than the
         # wikilink lane, and must still fail closed.
-        "reasons": ["ordinary_identity_recurs"],
+        "reasons": reasons,
         "candidate_state": "hydration",
         "identity": "cobalt workshop",
         "signal_version": "c" * 64,
