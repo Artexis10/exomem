@@ -57,6 +57,7 @@ _WINDOWS_DEFAULT_SHARE = 0x00000001 | 0x00000002 | 0x00000004
 _WINDOWS_FILE_LIST_DIRECTORY = 0x00000001
 
 log = logging.getLogger(__name__)
+_fast_ack_monotonic = time.monotonic
 
 
 SLUG_MAX_LENGTH = 100
@@ -4399,6 +4400,45 @@ def _enqueue_graph_debt(vault_root: Path, checkpoint_write: PlannedWrite) -> Non
         log.warning("graph dirty-path enqueue failed; reconcile will repair", exc_info=True)
 
 
+def _governed_advisory_target(
+    root: Path,
+    paths: Iterable[Any],
+    semantic_states: Mapping[str, Any] | None,
+) -> str | None:
+    """Name the one governed note this canonical batch is about, or nothing.
+
+    Write-advisory custody is about a single compiled page, so it needs one
+    exact target rather than a whole-batch digest. The batch already declares
+    which of its paths are governed semantic parents, through the two shapes
+    the semantic writers actually emit: the ``semantic_states`` argument the
+    existing-page commit passes here, and the coordinator-owned parent-state
+    binding the creation commit sets around the batch. A note that survives
+    the batch with an after-hash is a candidate.
+
+    Exactly one candidate is the advisory target. Zero or several -- an
+    auxiliary-only batch, or a governed multi-write touching more than one
+    page -- cannot name one, so advisory custody does not apply to that batch
+    and the terminal reports it as ``not_required`` rather than binding the
+    result to an arbitrary page.
+    """
+    from . import semantic_index
+
+    declared = set(semantic_states or ())
+    targets = [
+        path.rel_path
+        for path in paths
+        if path.after_hash is not None
+        and (
+            path.rel_path in declared
+            or semantic_index.parent_state_for_path(root, root / path.rel_path)
+            is not None
+        )
+    ]
+    if len(targets) != 1:
+        return None
+    return targets[0]
+
+
 def batch_atomic_write(
     writes: Iterable[PlannedWrite],
     *,
@@ -4639,6 +4679,8 @@ def _batch_atomic_write_locked(
     staged: list[tuple[Path, _BatchWorkspace, _WorkspaceArtifact]] = []
     snapshots: list[_BatchSnapshot | None] = []
     source_guards: list[_BatchArtifactGuard | None] = []
+    fast_receipt: Any | None = None
+    canonical_commit_monotonic: float | None = None
     try:
         for write in writes:
             state_target = vault_root is not None and _batch_state_target(
@@ -4720,6 +4762,79 @@ def _batch_atomic_write_locked(
                     or actual_hash != write.expected_hash
                 ):
                     raise ContentHashMismatchError(final, write.expected_hash, actual_hash)
+        if vault_root is not None:
+            from . import derived_receipts
+            from .writer_lease import (
+                active_derived_batch_custody,
+                prepare_active_derived_batch,
+            )
+
+            root = Path(os.path.abspath(vault_root))
+            if active_derived_batch_custody(root):
+                receipt_paths = []
+                for (final, _workspace, artifact), snapshot in zip(
+                    staged, snapshots, strict=True
+                ):
+                    try:
+                        relative = Path(os.path.abspath(final)).relative_to(root)
+                    except ValueError:
+                        continue
+                    # The receipt store's own constructor is the single
+                    # predicate for a governed canonical Markdown identity.
+                    # Anything it refuses carries no derived custody and must
+                    # be skipped rather than allowed to fail a canonical write
+                    # that is otherwise sound.
+                    #
+                    # This also swallows two refusals that are not path
+                    # judgements: a malformed digest, and a path absent both
+                    # before and after. Neither is reachable from here --
+                    # ``vault.content_hash`` always yields a valid sha256 and
+                    # ``after_hash`` is always set for a staged write -- so
+                    # narrowing the guard would need a public path predicate on
+                    # the frozen receipt module, which this lane may not add.
+                    try:
+                        receipt_paths.append(
+                            derived_receipts.DerivedBatchPath(
+                                rel_path=relative.as_posix(),
+                                before_hash=(
+                                    snapshot.content_hash
+                                    if snapshot is not None
+                                    else None
+                                ),
+                                after_hash=artifact.content_hash,
+                            )
+                        )
+                    except ValueError:
+                        continue
+                selected_checkpoint = deferred_checkpoint
+                if (
+                    selected_checkpoint is None
+                    and graph_debt_checkpoint is not None
+                    and isinstance(graph_debt_checkpoint.content, str)
+                ):
+                    selected_checkpoint = graph_sync.GraphSyncCheckpoint.parse(
+                        graph_debt_checkpoint.content
+                    )
+                ordered_paths = tuple(
+                    sorted(receipt_paths, key=lambda item: item.rel_path)
+                )
+                fast_receipt = prepare_active_derived_batch(
+                    root,
+                    ordered_paths,
+                    canonical_generation=(
+                        str(selected_checkpoint.generation)
+                        if selected_checkpoint is not None
+                        else None
+                    ),
+                    checkpoint_id=(
+                        selected_checkpoint.checkpoint_sha256
+                        if selected_checkpoint is not None
+                        else None
+                    ),
+                    advisory_target_rel_path=_governed_advisory_target(
+                        root, ordered_paths, semantic_states
+                    ),
+                )
     except BaseException as stage_error:
         if not isinstance(stage_error, Exception):
             _cleanup_batch_workspaces(workspace_by_parent.values())
@@ -4849,6 +4964,8 @@ def _batch_atomic_write_locked(
         for guard in final_guards.values():
             guard.recheck()
         log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))
+        if fast_receipt is not None:
+            canonical_commit_monotonic = _fast_ack_monotonic()
         if replaced and commit_point:
             mark_active_mutation_committed()
     except Exception as commit_error:
@@ -4927,7 +5044,17 @@ def _batch_atomic_write_locked(
     else:
         cleanup_retained = _cleanup_batch_workspaces(workspace_by_parent.values())
 
-    if post_commit_fanout:
+    if fast_receipt is not None:
+        if canonical_commit_monotonic is None:  # pragma: no cover - receipt implies a batch
+            raise RuntimeError("derived receipt has no canonical commit timestamp")
+        from .writer_lease import complete_active_derived_batch
+
+        complete_active_derived_batch(
+            fast_receipt,
+            canonical_commit_monotonic=canonical_commit_monotonic,
+        )
+
+    if post_commit_fanout and fast_receipt is None:
         created_paths = [
             final
             for (final, _workspace, _artifact), snapshot in zip(
