@@ -44,10 +44,10 @@ filter-only lookup. Set `explain=true` only to inspect ranking: BM25, cosine,
 RRF contributions, reranker values, and final rank are different labelled
 metrics, never confidence. See [first-class semantic language](semantic-language.md).
 
-Save durable conclusions when the conversation lands on one: a decision, solved
-problem, diagnosed failure, reusable pattern, stable project fact, or conclusion
-that future agents should find. Save a concise compiled note, not a transcript.
-Capture raw material separately when provenance matters.
+Save when the conversation reaches a stepping stone: a durable conclusion lands,
+a recurring entity gains reusable facts, or a method the user actually carried
+out reaches a result worth repeating or avoiding. Save a concise compiled note,
+not a transcript. Capture raw material separately when provenance matters.
 
 ## Simple actions for agents
 
@@ -304,11 +304,13 @@ already contains the needed KB evidence. Cite relevant hits. Treat an empty
 search as a scoped miss, not proof of absence; retry with better terms or
 scope="vault" when absence matters.
 
-Save durable conclusions on your own: decisions, solved problems, diagnosed
-failures, reusable patterns, and stable project context. Save concise compiled
-notes, not transcripts. Preserve raw sources or proof-bearing records separately
-when provenance matters. Use `edit_memory` for small corrections and
-`replace_memory` when a newer conclusion supersedes an older one.
+Save on your own when the conversation reaches a stepping stone: a durable
+conclusion lands, a recurring entity gains reusable facts, or a method the user
+carried out reaches a result worth repeating or avoiding. Do not wait to be
+asked. Save concise compiled notes, not transcripts. Preserve raw sources or
+proof-bearing records separately when provenance matters. Use `edit_memory` for
+small corrections and `replace_memory` when a newer conclusion supersedes an
+older one.
 ```
 
 ## Codex CLI

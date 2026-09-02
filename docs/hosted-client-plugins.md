@@ -36,11 +36,15 @@ conclusions where the client supports them. Users should not need a vault path,
 manual MCP JSON, copied API token, or repeated `use Exomem` instruction.
 
 Global custom instructions are only a fallback for a chat surface that connects
-the MCP server but does not activate bundled skills. Keep that fallback concise:
-tell the assistant to retrieve relevant material from the user's governed
-Exomem store, cite retrieved material, and capture only durable conclusions or
-explicitly requested facts. It must not claim access to native assistant memory,
-arbitrary conversation history, or data outside the authorized Hosted store.
+the MCP server but does not activate bundled skills. Keep that fallback concise.
+Tell the assistant to call `bootstrap(profile="compact")` once per chat and follow
+the returned contract; retrieve relevant material from the user's governed
+Exomem store and cite what it uses; and capture when a stepping stone lands — a
+durable conclusion, reusable facts about a recurring entity, or the result of a
+method the user actually carried out (worked, failed, or bounded a parameter).
+Skipping unrelated chit-chat applies to recall, not capture. The fallback must
+not claim access to native assistant memory, arbitrary conversation history, or
+data outside the authorized Hosted store.
 
 ## Public-directory release materials
 

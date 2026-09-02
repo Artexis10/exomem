@@ -353,6 +353,31 @@ def test_reading_the_contract_exposes_no_vault_content(vault: Path) -> None:
 # ------------------------------------------------------- executed-method outcomes
 
 
+def _fenced_block_after(path: Path, marker: str) -> str:
+    remainder = path.read_text(encoding="utf-8").split(marker, maxsplit=1)[1]
+    return remainder.split("```", maxsplit=2)[1]
+
+
+def _public_hookless_instructions() -> dict[str, str]:
+    repo = Path(__file__).resolve().parents[1]
+    assistant_guide = (repo / "docs/ai-assistant-guide.md").read_text(encoding="utf-8")
+    hosted = (repo / "docs/hosted-client-plugins.md").read_text(encoding="utf-8")
+    return {
+        "quickstart_balanced": _fenced_block_after(
+            repo / "QUICKSTART.md", "The block below is the **balanced** wording"
+        ),
+        "assistant_guide_copyable": _fenced_block_after(
+            repo / "docs/ai-assistant-guide.md", "## Copyable instruction block"
+        ),
+        "assistant_guide_rule": assistant_guide.split("## The rule", maxsplit=1)[
+            1
+        ].split("## Simple actions for agents", maxsplit=1)[0],
+        "hosted_fallback": hosted.split(
+            "Global custom instructions are only a fallback", maxsplit=1
+        )[1].split("## Public-directory release materials", maxsplit=1)[0],
+    }
+
+
 #: Every carrier that teaches capture. Different clients read different ones -- a
 #: hosted client sees only the payload, a web client only the pasted block, a
 #: skill-capable client the scaffold -- so a class present in one and missing from
@@ -361,6 +386,10 @@ def _capture_carriers(vault: Path) -> dict[str, str]:
     from exomem import prominence
 
     repo = Path(__file__).resolve().parents[1]
+    hosted_v4_skill = (
+        repo
+        / "plugins/hosted/candidates/hosted-alpha-agent-v4/skills/exomem/SKILL.md"
+    )
     return {
         "bootstrap_payload": json.dumps(_contract(vault)),
         "prominence_balanced": prominence.CONTRACTS["balanced"].capture,
@@ -368,7 +397,20 @@ def _capture_carriers(vault: Path) -> dict[str, str]:
         "scaffold_skill": (
             repo / "src/exomem/_scaffold/_Schema/SKILL.md"
         ).read_text(encoding="utf-8"),
-        "pasted_instructions": (repo / "docs/prominence.md").read_text(encoding="utf-8"),
+        "prominence_maximal_paste": _fenced_block_after(
+            repo / "docs/prominence.md",
+            "### Maximal — recommended for web and hosted",
+        ),
+        "prominence_balanced_paste": _fenced_block_after(
+            repo / "docs/prominence.md",
+            "### Balanced — the default where hooks exist",
+        ),
+        "hosted_v4_core_skill": (
+            hosted_v4_skill.read_text(encoding="utf-8")
+            if hosted_v4_skill.is_file()
+            else ""
+        ),
+        **_public_hookless_instructions(),
     }
 
 
@@ -391,6 +433,22 @@ def test_every_capture_carrier_covers_an_executed_method(vault: Path) -> None:
             phrase in lowered
             for phrase in ("turned out", "how it went", "reports the result", "result")
         ), f"{name} does not say the outcome is reported"
+
+
+def test_public_hookless_instructions_cover_recurring_entities() -> None:
+    for name, text in _public_hookless_instructions().items():
+        lowered = text.lower()
+        assert "recurring" in lowered, name
+        assert any(
+            noun in lowered for noun in ("entity", "person", "project", "organisation")
+        ), f"{name} does not name the recurring thing"
+
+
+def test_quickstart_scopes_chit_chat_suppression_to_recall() -> None:
+    quickstart = _public_hookless_instructions()["quickstart_balanced"].lower()
+
+    assert "do not search on unrelated chit-chat" in quickstart
+    assert "stay quiet on chit-chat" not in quickstart
 
 
 def test_the_contract_routes_the_outcome_rather_than_dumping_it(vault: Path) -> None:
