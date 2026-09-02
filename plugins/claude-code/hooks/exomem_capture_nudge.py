@@ -69,18 +69,19 @@ REMINDER = (
     'review_memory(mode="attention", categories=["entity_recurrence"], limit=3) once per session; '
     "no local scan, no model. Resolve in the active entity registry/selected knowledge packs: "
     'connect_memory(operation="resolve-entity"); stop on ambiguity; single incidental mention '
-    "stays in context. Uniquely resolved Entity: narrow Entity facet/proactive_capture; "
-    "affiliation relation/link_acceptance; else compiled observation. Hydrate with "
-    "edit_memory an active match before duplicating; else "
-    'connect_memory(operation="create-entity"). Entity creation/substantial curation: confirmed '
-    "restructure_execution. Recheck that review ref only after a confirmed batch terminal receipt; "
-    "stop at the closure-only eighth recheck. replace_memory supersedes a contradicted conclusion, "
-    "not a correction beside it. Stated intent -> Planning/plan_memory; observed outcome -> "
-    "Records/record_memory. Generated draft stays ephemeral; selected is not write consent: "
-    "proactive_capture keeps exact bytes as Source/Evidence by role, not MIME. No handle: "
-    "non-committing handoff; delivery needs Evidence receipt/Record; no remote byte inference. "
-    "Missing schema: structural_suggestions/restructure_execution; relations: link_acceptance. "
-    "Else/no Knowledge Base: stop."
+    "stays in context. Uniquely resolved Entity: "
+    "narrow Entity facet, else compiled observation/proactive_capture; "
+    "affiliation relation/link_acceptance. Hydrate with edit_memory an active match before "
+    'duplicating; else connect_memory(operation="create-entity"). '
+    "Entity creation/substantial curation: confirmed restructure_execution. Recheck that review "
+    "ref only after a confirmed batch terminal receipt; stop at the closure-only eighth recheck. "
+    "replace_memory supersedes a contradicted conclusion, not a correction beside it. "
+    "Stated intent -> Planning/plan_memory; observed outcome -> Records/record_memory. "
+    "Generated draft stays ephemeral; selected is not write consent: proactive_capture keeps "
+    "exact bytes as Source/Evidence by role, not MIME. No handle: non-committing handoff; delivery "
+    "needs Evidence receipt/Record; no remote byte inference. Missing schema: "
+    "structural_suggestions/restructure_execution; relations: link_acceptance. Else/no "
+    "Knowledge Base: stop."
 )
 
 
