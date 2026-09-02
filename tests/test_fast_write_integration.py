@@ -15,6 +15,7 @@ for a sibling lane's implementation.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -1334,3 +1335,165 @@ def test_the_drain_records_its_pass_and_the_diagnostics_report_it(
     rendered = repr(after)
     for token in ("lane5-diagnostics", "Knowledge Base", "Lane5 diagnostics"):
         assert token not in rendered, (token, rendered)
+
+
+# --------------------------------------------------------------------------- #
+# Task 5.7 — the live-acceptance script (written and unit-tested here; the
+# native Windows runs against a live cell are the operator's)
+# --------------------------------------------------------------------------- #
+
+
+def _acceptance():
+    import importlib.util
+
+    script = Path(__file__).parents[1] / "scripts" / "live_write_acceptance.py"
+    spec = importlib.util.spec_from_file_location("live_write_acceptance", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _report(
+    *,
+    remember_p50: float = 900.0,
+    remember_p90: float = 1_800.0,
+    edit_p50: float = 800.0,
+    edit_p90: float = 1_500.0,
+    samples: int = 30,
+    exact: int = 60,
+    warming: int = 0,
+    stale: int = 0,
+    uncovered_full_receipts: int = 0,
+    converged: bool = True,
+    convergence_seconds: float = 12.0,
+    reconciliation_demanded: int = 0,
+) -> dict:
+    return {
+        "transport": "direct",
+        "samples_per_operation": samples,
+        "fast_durable_ack": "active",
+        "operations": {
+            "remember": {
+                "samples": samples,
+                "p50_ms": remember_p50,
+                "p90_ms": remember_p90,
+                "max_ms": remember_p90,
+            },
+            "edit": {
+                "samples": samples,
+                "p50_ms": edit_p50,
+                "p90_ms": edit_p90,
+                "max_ms": edit_p90,
+            },
+        },
+        "read_your_write": {"exact": exact, "warming": warming, "stale": stale},
+        "uncovered_full_receipts": uncovered_full_receipts,
+        "post_burst_convergence_seconds": convergence_seconds,
+        "post_burst_converged": converged,
+        "reconciliation_demanded": reconciliation_demanded,
+    }
+
+
+def test_live_acceptance_thresholds_are_the_designs_numbers() -> None:
+    module = _acceptance()
+    assert module.P50_MS == 3_000.0
+    assert module.P90_MS == 5_000.0
+    assert module.MIN_SAMPLES_PER_OPERATION == 30
+    assert module.OPERATIONS == ("remember", "edit")
+
+
+def test_live_acceptance_accepts_a_healthy_report() -> None:
+    _acceptance().check(_report())
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"remember_p50": 3_100.0}, "remember p50"),
+        ({"remember_p90": 5_100.0}, "remember p90"),
+        ({"edit_p50": 3_000.1}, "edit p50"),
+        ({"edit_p90": 5_000.1}, "edit p90"),
+        ({"samples": 29}, "samples"),
+        ({"stale": 1}, "stale read"),
+        ({"uncovered_full_receipts": 1}, "uncovered full receipt"),
+        ({"converged": False}, "did not converge"),
+        ({"reconciliation_demanded": 1}, "reconciliation demand"),
+    ],
+)
+def test_live_acceptance_each_threshold_is_load_bearing(
+    kwargs: dict, expected: str
+) -> None:
+    """Every acceptance condition must be able to fail the run on its own."""
+    with pytest.raises(SystemExit, match=expected):
+        _acceptance().check(_report(**kwargs))
+
+
+def test_live_acceptance_warming_is_acceptable_but_stale_is_not() -> None:
+    """Explicit warming is a truthful answer; a stale answer never is."""
+    module = _acceptance()
+    module.check(_report(exact=40, warming=20))
+    with pytest.raises(SystemExit, match="stale read"):
+        module.check(_report(exact=59, stale=1))
+
+
+def test_live_acceptance_output_is_content_free(vault: Path, tmp_path: Path) -> None:
+    """Closed codes, counts and percentiles -- never a path, title or excerpt."""
+    module = _acceptance()
+    report = module.measure(
+        vault,
+        transport="direct",
+        samples_per_operation=2,
+        state_dir=tmp_path / "st",
+        convergence_bound_seconds=30.0,
+    )
+    rendered = json.dumps(report, sort_keys=True, default=str)
+    for token in ("Knowledge Base", str(vault), "acceptance-target", ".md"):
+        assert token not in rendered, (token, rendered)
+    assert report["operations"]["remember"]["samples"] == 2
+    assert report["operations"]["edit"]["samples"] == 2
+    # Never stale. `exact` versus `warming` depends on whether this harness's
+    # catalogue proof was admitted, which the report states rather than
+    # assumes -- the contract accepts either, and only a stale answer is a
+    # failure.
+    assert report["read_your_write"]["stale"] == 0
+    assert (
+        report["read_your_write"]["exact"] + report["read_your_write"]["warming"] == 4
+    )
+    assert report["recall_admission"] in {"ready", "warming", "unavailable"}
+    assert report["uncovered_full_receipts"] == 0
+    assert report["post_burst_converged"] is True
+    assert isinstance(report["reconciliation_demanded"], int)
+
+
+def test_live_acceptance_refuses_a_vault_it_was_not_given(tmp_path: Path) -> None:
+    """It runs against a disposable vault it is handed, and nothing else.
+
+    The one way this script could do harm is by being pointed at a live cell,
+    so resolving a vault from the ambient environment is refused outright
+    rather than merely discouraged.
+    """
+    module = _acceptance()
+    with pytest.raises(SystemExit, match="requires an explicit --vault"):
+        module.main(["--transport", "direct", "--samples-per-operation", "1"])
+
+
+def test_live_acceptance_connector_transport_requires_an_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A connector run that cannot reach a connector must say so, not fall back."""
+    module = _acceptance()
+    monkeypatch.delenv("EXOMEM_CONNECTOR_URL", raising=False)
+    vault_root = tmp_path / "vault"
+    (vault_root / "Knowledge Base").mkdir(parents=True)
+    with pytest.raises(SystemExit, match="connector transport requires"):
+        module.main(
+            [
+                "--transport",
+                "connector",
+                "--vault",
+                str(vault_root),
+                "--samples-per-operation",
+                "1",
+            ]
+        )

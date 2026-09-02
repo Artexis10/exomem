@@ -1715,6 +1715,19 @@ _DERIVED_CONVERGENT_OUTCOMES: Final[frozenset[str]] = frozenset(
     {"completed", "accepted", "not_required", "registered", "deferred"}
 )
 
+#: Components the existing fan-out omits from its report entirely when their
+#: capability is switched off. For these, and only these, an absent row means
+#: the work is not required in this configuration rather than unproven -- the
+#: same soft-fail rule the synchronous path has always applied. Holding receipt
+#: custody open for a disabled model would keep the pending overlay shadowing
+#: for ever, which is a worse answer than the disclosed one.
+_DERIVED_OPTIONAL_COMPONENTS: Final[frozenset[str]] = frozenset(
+    {
+        DerivedComponent.EMBEDDINGS.value,
+        DerivedComponent.CLAIMS.value,
+    }
+)
+
 #: One successful fan-out proves every component it reported, so the batch is
 #: memoized rather than refanned once per claimed component. Bounded, and only
 #: successful reports are kept: a degraded fan-out must be retried, never
@@ -1814,7 +1827,8 @@ def converge_derived_component(
         (item for item in report.components if item.component == report_key), None
     )
     if outcome is None:
-        # The fan-out did not reach this component at all, which is a real
-        # absence of proof rather than a completion.
-        return False
+        # A required component the fan-out never reached is a real absence of
+        # proof. An optional one is simply switched off, and its absence is the
+        # configuration, not a gap.
+        return key in _DERIVED_OPTIONAL_COMPONENTS
     return outcome.outcome in _DERIVED_CONVERGENT_OUTCOMES

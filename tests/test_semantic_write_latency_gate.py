@@ -91,6 +91,21 @@ def result(
         "read_after_write_p95_ms": read_after_write * 1.4,
         "cold_read_after_write_ms": cold_read_after_write,
         "cold_preflight_ms": cold_preflight,
+        # Healthy defaults for the fast-acknowledgement rows, so every
+        # historical sample set above still exercises the row it was recorded
+        # for. `check()` hard-indexes every key by design, and a sample missing
+        # one must fail loudly rather than skip -- which is what
+        # `test_a_missing_fast_ack_key_fails_loudly` deletes them to prove.
+        "public_write_median_ms": 900.0,
+        "public_write_p95_ms": 1_080.0,
+        "immediate_keyword_read_median_ms": 300.0,
+        "immediate_keyword_read_p95_ms": 360.0,
+        "immediate_hybrid_read_median_ms": 400.0,
+        "immediate_hybrid_read_p95_ms": 480.0,
+        "immediate_stable_ref_read_median_ms": 10.0,
+        "immediate_stable_ref_read_p95_ms": 14.0,
+        "paired_write_read_p95_ms": 1_400.0,
+        "post_canonical_max_ms": 120.0,
     }
 
 
@@ -466,3 +481,92 @@ def test_activation_warmup_refuses_to_sample_an_unsettled_graph(monkeypatch) -> 
 
     with pytest.raises(RuntimeError, match="initial graph rebuild did not finish"):
         module._warm_activation_boundary(Path("/synthetic-vault"), "Knowledge Base/target.md")
+
+
+# ------------------------------------------------------------------ Lane 5
+#
+# The rows above bound the mutation boundary and the read that follows it. They
+# cannot see the acknowledgement the caller actually waits for, which is the
+# whole quantity this change moves: a boundary-only measurement would report a
+# pure improvement for work relocated onto the public leaf. These rows close
+# that, and their thresholds are the ones the design fixes rather than any this
+# gate may tune.
+
+
+def fast_ack_result(
+    pages: int,
+    *,
+    public_write: float = 900.0,
+    keyword_read: float = 300.0,
+    hybrid_read: float = 400.0,
+    paired: float = 1_400.0,
+    post_canonical_max: float = 120.0,
+) -> dict[str, float | int]:
+    measured = result(pages, commit=51.5)
+    measured.update(
+        {
+            "public_write_median_ms": public_write,
+            "public_write_p95_ms": public_write * 1.2,
+            "immediate_keyword_read_median_ms": keyword_read,
+            "immediate_keyword_read_p95_ms": keyword_read * 1.2,
+            "immediate_hybrid_read_median_ms": hybrid_read,
+            "immediate_hybrid_read_p95_ms": hybrid_read * 1.2,
+            "paired_write_read_p95_ms": paired,
+            "post_canonical_max_ms": post_canonical_max,
+        }
+    )
+    return measured
+
+
+def test_the_fixed_fast_ack_thresholds_are_the_designs_numbers() -> None:
+    module = load_module()
+    assert module.PUBLIC_WRITE_P95_MS == 4_000.0
+    assert module.IMMEDIATE_READ_P95_MS == 1_500.0
+    assert module.PAIRED_WRITE_READ_P95_MS == 5_000.0
+    assert module.POST_CANONICAL_BOUND_MS == 2_000.0
+
+
+def test_healthy_fast_ack_rows_pass() -> None:
+    load_module().check([fast_ack_result(2_000), fast_ack_result(8_000)])
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"public_write": 3_400.0}, "public_write_p95_ms"),
+        ({"keyword_read": 1_300.0}, "immediate_keyword_read_p95_ms"),
+        ({"hybrid_read": 1_300.0}, "immediate_hybrid_read_p95_ms"),
+        ({"paired": 5_100.0}, "paired_write_read_p95_ms"),
+        ({"post_canonical_max": 2_000.0}, "post_canonical_max_ms"),
+    ],
+)
+def test_each_fast_ack_ceiling_is_load_bearing(kwargs: dict, expected: str) -> None:
+    """Every new row must be able to fail the build on its own."""
+    with pytest.raises(SystemExit, match=expected):
+        load_module().check([fast_ack_result(2_000, **kwargs), fast_ack_result(8_000)])
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "public_write_p95_ms",
+        "immediate_keyword_read_p95_ms",
+        "immediate_hybrid_read_p95_ms",
+        "paired_write_read_p95_ms",
+        "post_canonical_max_ms",
+    ],
+)
+def test_a_missing_fast_ack_key_fails_loudly(key: str) -> None:
+    """A relocated cost that lands on no row must not pass by a silent skip."""
+    module = load_module()
+    incomplete = fast_ack_result(2_000)
+    del incomplete[key]
+    with pytest.raises(KeyError, match=key):
+        module.check([incomplete])
+
+
+def test_the_post_canonical_bound_is_a_maximum_not_a_percentile() -> None:
+    """One sample outside the shared budget fails; the design says every one."""
+    module = load_module()
+    with pytest.raises(SystemExit, match="post_canonical_max_ms"):
+        module.check([fast_ack_result(2_000, post_canonical_max=2_500.0)])
