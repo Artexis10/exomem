@@ -34,6 +34,8 @@ from protocol.models import LaneReadiness
 from protocol.offline import offline_guard
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .guards import refuse_aggregate
+
 #: ``(published label, attribute)`` for the fairness-matrix row of
 #: ``docs/benchmark-fairness-contract.md``. The labels are copied from the
 #: document, not paraphrased, and :class:`FairnessRow` declares the attributes in
@@ -343,7 +345,7 @@ def render_fairness_matrix(
                 for _, attribute in FAIRNESS_MATRIX_FIELDS
             ]
             lines.append("| " + " | ".join([row.lane, row.provider, row.variant, *cells]) + " |")
-        return "\n".join(lines) + "\n"
+        return refuse_aggregate("\n".join(lines) + "\n")
 
 
 __all__ = [

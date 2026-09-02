@@ -336,3 +336,30 @@ def test_rendered_matrix_publishes_every_contract_field_and_one_row_per_key() ->
     assert len(body) == 2
     assert "exomem-native" in rendered
     assert "basic-memory-native-git" in rendered
+
+
+@pytest.mark.parametrize("word", ["aggregate", "Aggregate", "AGGREGATE"])
+def test_rendering_refuses_free_text_that_carries_an_aggregate(word: str) -> None:
+    """Integration fold: the no-aggregate rule is a property of every renderer.
+
+    Lane 2's ``render_all`` refuses an aggregate at the consolidation layer, but
+    a row's own free text reaches the page through this renderer without passing
+    through it — so the refusal belongs here too. Capitalisation is covered
+    because the shared guard lowercases before matching, and a refusal that only
+    caught one casing would be trivially evaded by a sentence-initial word.
+    """
+
+    from benchmarks.reports.fairness import Asymmetry, render_fairness_matrix
+    from benchmarks.reports.guards import ReportRefused
+
+    row = _row(
+        asymmetries=(
+            Asymmetry(
+                description=f"the {word} MemScore favours the incumbent harness",
+                favours="basic-memory",
+                evidence="benchmarks/epistemic/PREREGISTRATION.md:16",
+            ),
+        )
+    )
+    with pytest.raises(ReportRefused, match="never publish an aggregate"):
+        render_fairness_matrix((row,), expected_keys=(row.key,))

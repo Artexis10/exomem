@@ -18,6 +18,10 @@ does not by itself re-label the run.
 Building from a non-VALID manifest stays allowed, because a diagnostic read of a
 failed run is exactly what a reviewer needs; the rendered matrix carries the
 status and its reason so it can never be mistaken for a publishable result.
+That this accepts a manifest ``consolidate`` refuses at load time is intended and
+not a gap to close: publication is gated by ``consolidate``'s load-time refusal,
+while this layer stays readable for diagnosis and withholds publishability
+through :meth:`CompatMatrix.invalidates` instead.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ from protocol.offline import offline_guard
 from pydantic import Field
 
 from .fairness import ReportModel, require_relative_path
+from .guards import refuse_aggregate
 
 #: The registered provider variants of the programme design, grouped by the
 #: provider each belongs to. Hosted and local variants of one product are
@@ -287,7 +292,7 @@ def render_compat_matrix(matrix: CompatMatrix) -> str:
             ]
         else:
             lines.append("- none")
-        return "\n".join(lines) + "\n"
+        return refuse_aggregate("\n".join(lines) + "\n")
 
 
 __all__ = [

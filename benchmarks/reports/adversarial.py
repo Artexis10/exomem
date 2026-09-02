@@ -35,6 +35,7 @@ from protocol.offline import offline_guard
 from pydantic import Field, field_validator
 
 from .fairness import ReportModel, require_relative_path
+from .guards import refuse_aggregate
 
 #: The one accepted shape of a reviewer handle. This is an *allowlist of form*,
 #: not a name detector — nothing in this repository can tell whether a string is
@@ -492,7 +493,7 @@ def render_adversarial_packet(packet: AdversarialPacket) -> str:
             f"- {bound.question} → `{bound.artifact_path}`"
             for bound in packet.challenge_paths
         ]
-        return "\n".join(lines) + "\n"
+        return refuse_aggregate("\n".join(lines) + "\n")
 
 
 __all__ = [
