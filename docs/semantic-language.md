@@ -74,6 +74,13 @@ or `abandoned` — and is filterable as `unit.verdict`. Both appear on unit hits
 when present and are omitted when absent, so an unjudged unit is distinguishable
 from a judged one.
 
+Both are answered from the maintained catalogue rather than by reading pages, so
+a due-date query costs an index read on a served cell. The one filter field with
+no index answer is `page.frontmatter:/<pointer>`, which is open-ended by
+construction; a served request naming it is refused with `UNSUPPORTED_FILTER_FIELD`
+rather than silently falling back to a corpus scan, while an offline CLI caller
+keeps the exact scan.
+
 `verdict` is state, not supersession, and not a score. A refuted unit keeps its
 page's active standing and its ordinary rank: nothing replaced it, the question
 simply got an answer, and the negative result stays retrievable with the

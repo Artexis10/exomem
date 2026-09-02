@@ -86,42 +86,67 @@ def _sqlite_connect_owned(
 
 _NAV_BASENAMES = frozenset({"index.md", "log.md"})
 
-#: The `pages` eligibility columns, in INSERT order. One tuple so the writer,
-#: the empty row and the query builder cannot drift apart by an edit to one.
+#: Structured-filter eligibility columns on `pages`, in INSERT order. One tuple
+#: so the writer, the empty row and the schema cannot drift apart by an edit to
+#: one of them.
+#:
+#: Two columns per scalar axis, and that is the contract, not redundancy. The
+#: scalar column holds the value only when the page declares a comparable
+#: string, which is exactly when `$eq` can match; the members array is NULL
+#: only when the page does not declare the key at all, which is exactly what
+#: `$exists` asks, and it holds every comparable member, which is how the
+#: evaluator answers `$in` against a LIST-valued declaration on a scalar axis
+#: (`type: [insight, pattern]` matches `types=["insight"]`).
 _ELIGIBILITY_COLUMNS: tuple[str, ...] = (
     "page_type",
+    "page_type_json",
     "status",
+    "status_json",
     "file_type",
+    "file_type_json",
     "source_kind",
+    "source_kind_json",
     "domain",
+    "domain_json",
     "projects_json",
     "tags_json",
     "speakers_json",
     "updated_day",
+    "updated_json",
 )
 _EMPTY_ELIGIBILITY: tuple[None, ...] = (None,) * len(_ELIGIBILITY_COLUMNS)
 
-#: Column per filter axis. The page-level half of the structured-filter
-#: contract lives here: an axis with no entry has no index answer.
-_SCALAR_AXIS_COLUMNS: dict[str, str] = {
-    "page.type": "page_type",
-    "page.status": "status",
-    "page.file_type": "file_type",
-    "page.source_kind": "source_kind",
-    "page.domain": "domain",
+#: axis -> (scalar column or None, members column). The page-level half of the
+#: structured-filter contract lives here: an axis with no entry has no index
+#: answer.
+_PAGE_AXIS_COLUMNS: dict[str, tuple[str | None, str]] = {
+    "page.type": ("page_type", "page_type_json"),
+    "page.status": ("status", "status_json"),
+    "page.file_type": ("file_type", "file_type_json"),
+    "page.source_kind": ("source_kind", "source_kind_json"),
+    "page.domain": ("domain", "domain_json"),
+    "page.project": (None, "projects_json"),
+    "page.tags": (None, "tags_json"),
+    "page.speakers": (None, "speakers_json"),
+    "page.updated": ("updated_day", "updated_json"),
 }
-_LIST_AXIS_COLUMNS: dict[str, str] = {
-    "page.project": "projects_json",
-    "page.tags": "tags_json",
-    "page.speakers": "speakers_json",
-}
-_DATE_AXIS_COLUMNS: dict[str, str] = {"page.updated": "updated_day"}
-_UNIT_AXIS_COLUMNS: dict[str, str] = {
-    "unit.category": "category",
-    "unit.category_key": "category_key",
-    "unit.kind": "kind",
-    "unit.context": "context",
-    "unit.form": "form",
+#: The same, over `semantic_units`. The five governed scalar axes are
+#: single-valued by construction (the parser produces one string or None), so
+#: they need no members array; `unit.tags` and the two date/verdict axes do.
+#: Unit axes `unit_view` always names, so once a unit row exists the key does
+#: too. Mirrors `structured_filters._ALWAYS_PRESENT_UNIT_AXES`.
+_ALWAYS_PRESENT_UNIT_AXES: frozenset[str] = frozenset(
+    {"unit.category", "unit.category_key", "unit.kind", "unit.context", "unit.form", "unit.tags"}
+)
+_UNIT_AXIS_COLUMNS: dict[str, tuple[str | None, str | None]] = {
+    "unit.category": ("category", None),
+    "unit.category_key": ("category_key", None),
+    "unit.kind": ("kind", None),
+    "unit.context": ("context", None),
+    "unit.form": ("form", None),
+    "unit.verdict": ("verdict", None),
+    "unit.tags": (None, "tags_canonical_json"),
+    "unit.check_by": ("check_by_day", "check_by_json"),
 }
 
 
@@ -129,9 +154,10 @@ def _canonical_scalar(field: str, value: object) -> str | None:
     """The stored spelling for a scalar axis, or None when nothing can match.
 
     A non-string declaration is stored as NULL on purpose. `_runtime_scalar`
-    types it as something other than a string, and a string operand can never
-    equal it, so excluding the row from every positive constraint is the same
-    answer the evaluator gives — never a narrower one.
+    types it as something other than a string, so `$eq` with a string operand
+    can never equal it, and excluding the row from the scalar column is the
+    same answer the evaluator gives. `$in` does NOT read this column — a list
+    declaration is answered from the members array below.
     """
     from . import structured_filters
 
@@ -140,150 +166,275 @@ def _canonical_scalar(field: str, value: object) -> str | None:
     return structured_filters.canonicalize_axis_value(field, value)
 
 
-def _canonical_members(field: str, value: object) -> str | None:
-    """JSON array of the storable members of a list axis, or None.
+def _canonical_members(
+    field: str, value: object, *, present: bool, list_axis: bool = False
+) -> str | None:
+    """JSON array of the comparable members of one axis, or None when absent.
 
-    None for a non-list declaration, because `_evaluate_operator` refuses every
-    array operator on a runtime that is not a list. An empty JSON array is a
-    different, meaningful state: the page declares the axis and matches no
-    member.
+    NULL means the page does not declare the key; that is the only thing
+    `$exists` asks, so it must not be conflated with "declares something this
+    axis cannot compare". A list yields its storable members. A bare string
+    yields a one-member array on a SCALAR axis — `type: insight` and
+    `type: [insight]` answer `$in` identically — but an empty one on a terminal
+    collection axis, because `_evaluate_operator` refuses every array operator
+    on a runtime that is not a list.
     """
-    if not isinstance(value, (list, tuple)):
+    if not present:
         return None
-    members = [
-        canonical
-        for item in value
-        if isinstance(item, str) and (canonical := _canonical_scalar(field, item)) is not None
-    ]
-    return json.dumps(members, ensure_ascii=False)
+    if isinstance(value, str):
+        if list_axis:
+            return "[]"
+        canonical = _canonical_scalar(field, value)
+        return json.dumps([] if canonical is None else [canonical], ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        members = [
+            canonical
+            for item in value
+            if isinstance(item, str) and (canonical := _canonical_scalar(field, item)) is not None
+        ]
+        return json.dumps(members, ensure_ascii=False)
+    return "[]"
 
 
-def _membership(column: str, values: tuple[str, ...]) -> tuple[str, list[object]]:
-    """`column IN (...)`, or a proven-false predicate for an empty value set.
+def _iso_day(value: object) -> str | None:
+    """The recorded day of a settled temporal value, else None."""
+    from datetime import date as _date
+    from datetime import datetime as _datetime
 
-    An empty set comes from `$in []`, which the evaluator answers False for
-    every page. Dropping the constraint instead would admit the whole scope.
-    """
-    if not values:
-        return "0", []
-    placeholders = ",".join("?" for _ in values)
-    return f"{column} IN ({placeholders})", list(values)
+    if isinstance(value, _datetime):
+        return value.date().isoformat()
+    if isinstance(value, _date):
+        return value.isoformat()
+    return None
 
 
-def _eligibility_predicate(clauses: tuple | None, scope_column: str) -> tuple[str, list[object]]:
-    """SQL for one `EligibilityClause` disjunction over `pages` aliased `p`.
-
-    Each clause is a same-page conjunction. Its unit-axis constraints collapse
-    into ONE `EXISTS` over `semantic_units`, because `page_matches` groups unit
-    predicates existentially over a single unit — two unit constraints in one
-    conjunction must hold on the same unit, not on two different ones.
-
-    `None` clauses mean the plan narrows nothing, which is a full-scope
-    candidate set rather than a failure.
-    """
-    if clauses is None or not clauses:
-        # No narrowing, and an empty disjunction is treated the same way: a
-        # seed may only ever be wider than the question it stands for.
-        return "1", []
-    clause_sql: list[str] = []
-    params: list[object] = []
-    for clause in clauses:
-        parts: list[str] = []
-        clause_params: list[object] = []
-        unit_parts: list[str] = []
-        unit_params: list[object] = []
-        for seed in clause.seeds:
-            axis = seed.axis
-            if axis in _SCALAR_AXIS_COLUMNS:
-                sql, values = _membership(f"p.{_SCALAR_AXIS_COLUMNS[axis]}", seed.values)
-                parts.append(sql)
-                clause_params.extend(values)
-            elif axis in _LIST_AXIS_COLUMNS:
-                column = f"p.{_LIST_AXIS_COLUMNS[axis]}"
-                if not seed.values:
-                    parts.append("0")
-                elif seed.require_all:
-                    # $all: every member must be present, so one containment
-                    # test per value rather than one IN over all of them.
-                    for value in seed.values:
-                        parts.append(
-                            f"EXISTS(SELECT 1 FROM json_each({column}) je WHERE je.value = ?)"
-                        )
-                        clause_params.append(value)
-                else:
-                    placeholders = ",".join("?" for _ in seed.values)
-                    parts.append(
-                        f"EXISTS(SELECT 1 FROM json_each({column}) je "
-                        f"WHERE je.value IN ({placeholders}))"
-                    )
-                    clause_params.extend(seed.values)
-            elif axis in _DATE_AXIS_COLUMNS:
-                column = f"p.{_DATE_AXIS_COLUMNS[axis]}"
-                if seed.is_range:
-                    parts.append(f"{column} IS NOT NULL")
-                    if seed.lower is not None:
-                        parts.append(f"{column} >= ?")
-                        clause_params.append(seed.lower)
-                    if seed.upper is not None:
-                        parts.append(f"{column} <= ?")
-                        clause_params.append(seed.upper)
-                else:
-                    sql, values = _membership(column, seed.values)
-                    parts.append(sql)
-                    clause_params.extend(values)
-            elif axis in _UNIT_AXIS_COLUMNS:
-                sql, values = _membership(f"u.{_UNIT_AXIS_COLUMNS[axis]}", seed.values)
-                unit_parts.append(sql)
-                unit_params.extend(values)
-            # An axis with no column narrows nothing and is settled by the
-            # caller's evaluation; silently widening is the safe direction.
-        if unit_parts:
-            parts.append(
-                "EXISTS(SELECT 1 FROM semantic_units u WHERE u.parent_path = p.path "
-                f"AND u.{scope_column} = 1 AND " + " AND ".join(unit_parts) + ")"
-            )
-            clause_params.extend(unit_params)
-        clause_sql.append("(" + " AND ".join(parts) + ")" if parts else "1")
-        params.extend(clause_params)
-    return " OR ".join(clause_sql), params
+def _day_members(value: object, *, present: bool) -> str | None:
+    """JSON array of the recorded days a temporal axis declares."""
+    if not present:
+        return None
+    day = _iso_day(value)
+    if day is not None:
+        return json.dumps([day], ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        days = [d for item in value if (d := _iso_day(item)) is not None]
+        return json.dumps(days, ensure_ascii=False)
+    # An unparseable recorded value is present and matches no date operand.
+    return "[]"
 
 
 def _eligibility_columns(page: object) -> tuple[str | None, ...]:
     """The eligibility row for one parsed page, in `_ELIGIBILITY_COLUMNS` order.
 
     Derived from `structured_filters.page_view` rather than from raw
-    frontmatter, so the union of `project`/`projects`, the `source_type` naming
-    and the settled `updated` value are the writer's problem exactly once —
-    where the reader already solves them.
+    frontmatter, so the union of `project`/`projects`, the `source_type`
+    naming and the settled `updated` value are solved once — where the reader
+    already solves them — and key presence is read off the same view the
+    evaluator reads it off.
     """
-    from datetime import date as _date
-    from datetime import datetime as _datetime
-
     from . import structured_filters
 
     view = structured_filters.page_view(page)
     recorded = view.get("updated")
-    if isinstance(recorded, _datetime):
-        updated_day: str | None = recorded.date().isoformat()
-    elif isinstance(recorded, _date):
-        updated_day = recorded.isoformat()
-    else:
-        # An unparseable recorded value stays NULL: it fails every date filter
-        # in the evaluator too, rather than acquiring an invented day.
-        updated_day = None
+    row: list[str | None] = []
+    for axis, key in (
+        ("page.type", "type"),
+        ("page.status", "status"),
+        ("page.file_type", "file_type"),
+        ("page.source_kind", "source_kind"),
+        ("page.domain", "domain"),
+    ):
+        row.append(_canonical_scalar(axis, view.get(key)))
+        row.append(_canonical_members(axis, view.get(key), present=key in view))
+    for axis, key in (
+        ("page.project", "project"),
+        ("page.tags", "tags"),
+        ("page.speakers", "speakers"),
+    ):
+        row.append(
+            _canonical_members(axis, view.get(key), present=key in view, list_axis=True)
+        )
+    row.append(_iso_day(recorded))
+    row.append(_day_members(recorded, present="updated" in view))
+    return tuple(row)
+
+
+def _unit_eligibility_columns(unit: object) -> tuple[str | None, ...]:
+    """`(verdict, check_by_day, check_by_json, tags_canonical_json)` for one unit.
+
+    Read off `structured_filters.unit_view`, the same adapter the evaluator
+    uses, so the settled `check_by` date and the casefolded tag members are
+    the values a predicate actually compares. `verdict` and `check_by` are
+    omitted from the view when absent — absence is the meaningful state for
+    both — so NULL here means absent, which is what `$exists` asks.
+    """
+    from . import structured_filters
+
+    view = structured_filters.unit_view(unit)
+    check_by = view.get("check_by")
     return (
-        _canonical_scalar("page.type", view.get("type")),
-        _canonical_scalar("page.status", view.get("status")),
-        _canonical_scalar("page.file_type", view.get("file_type")),
-        _canonical_scalar("page.source_kind", view.get("source_kind")),
-        _canonical_scalar("page.domain", view.get("domain")),
-        _canonical_members("page.project", view.get("project")),
-        _canonical_members("page.tags", view.get("tags")),
-        _canonical_members("page.speakers", view.get("speakers")),
-        updated_day,
+        _canonical_scalar("unit.verdict", view.get("verdict")),
+        _iso_day(check_by),
+        _day_members(check_by, present="check_by" in view),
+        _canonical_members(
+            "unit.tags", view.get("tags"), present="tags" in view, list_axis=True
+        ),
     )
 
-SCHEMA_VERSION = 8
+
+def _members_sql(column: str, values: tuple[str, ...]) -> tuple[str, list[object]]:
+    """`one member of <column> is in <values>`; proven-false for an empty set."""
+    if not values:
+        # `$in []` matches nothing in the evaluator; dropping the constraint
+        # would admit the whole scope instead.
+        return "0", []
+    placeholders = ",".join("?" for _ in values)
+    return (
+        f"EXISTS(SELECT 1 FROM json_each({column}) je WHERE je.value IN ({placeholders}))",
+        list(values),
+    )
+
+
+def _axis_test_sql(
+    test: Any, columns: tuple[str | None, str | None], alias: str
+) -> tuple[str, list[object]]:
+    """SQL for one `AxisTest` against its columns, aliased to `alias`.
+
+    Each branch mirrors one branch of `structured_filters._evaluate_operator`,
+    which is why they are written out rather than folded together: `$eq` reads
+    the scalar column because the evaluator refuses to equate a list with a
+    string, while `$in` reads the members array because the evaluator matches a
+    list member-wise. Collapsing them is precisely the defect this replaces.
+    """
+    scalar, members = columns
+    scalar_col = None if scalar is None else f"{alias}.{scalar}"
+    members_col = None if members is None else f"{alias}.{members}"
+    if test.op == "exists":
+        if test.axis in _ALWAYS_PRESENT_UNIT_AXES:
+            # `unit_view` always names these keys, so once a unit row exists
+            # the key does too. (With no unit at all the caller has already
+            # rendered the MISSING arm, where the answer is the opposite.)
+            return ("1" if test.present else "0"), []
+        if members_col is not None:
+            return (f"{members_col} IS {'NOT ' if test.present else ''}NULL", [])
+        assert scalar_col is not None
+        return (f"{scalar_col} IS {'NOT ' if test.present else ''}NULL", [])
+    if test.op == "nullish":
+        # Declared, but not as a value the axis can compare.
+        assert scalar_col is not None
+        if members_col is None:
+            return f"{scalar_col} IS NULL", []
+        return f"({scalar_col} IS NULL AND {members_col} IS NOT NULL)", []
+    if test.op == "in":
+        if members_col is not None:
+            return _members_sql(members_col, test.values)
+        assert scalar_col is not None
+        if not test.values:
+            return "0", []
+        placeholders = ",".join("?" for _ in test.values)
+        return f"{scalar_col} IN ({placeholders})", list(test.values)
+    if test.op == "all":
+        assert members_col is not None
+        if not test.values:
+            return "1", []
+        parts: list[str] = []
+        params: list[object] = []
+        for value in test.values:
+            sql, bound = _members_sql(members_col, (value,))
+            parts.append(sql)
+            params.extend(bound)
+        return "(" + " AND ".join(parts) + ")", params
+    if test.op in {"eq", "ne"}:
+        assert scalar_col is not None
+        value = test.values[0]
+        if test.op == "eq":
+            # Guarded, not bare. `NULL = ?` is NULL and `NOT NULL` is NULL, so
+            # a bare comparison inside a complement drops every page that does
+            # not declare the axis — the rows the evaluator keeps.
+            return f"({scalar_col} IS NOT NULL AND {scalar_col} = ?)", [value]
+        # `$ne` needs a comparable value of the SAME kind that differs, so an
+        # absent or non-string declaration is False, not True.
+        return f"({scalar_col} IS NOT NULL AND {scalar_col} <> ?)", [value]
+    if test.op == "contains":
+        value = test.values[0]
+        branches: list[str] = []
+        params = []
+        if scalar_col is not None:
+            branches.append(f"({scalar_col} IS NOT NULL AND instr({scalar_col}, ?) > 0)")
+            params.append(value)
+        if members_col is not None:
+            sql, bound = _members_sql(members_col, (value,))
+            branches.append(sql)
+            params.extend(bound)
+        return "(" + " OR ".join(branches) + ")", params
+    # range
+    assert scalar_col is not None
+    parts = [f"{scalar_col} IS NOT NULL"]
+    params = []
+    if test.lower is not None:
+        parts.append(f"{scalar_col} {test.lower_op} ?")
+        params.append(test.lower)
+    if test.upper is not None:
+        parts.append(f"{scalar_col} {test.upper_op} ?")
+        params.append(test.upper)
+    return "(" + " AND ".join(parts) + ")", params
+
+
+def _eligibility_sql(expr: Any, *, unit_missing: bool) -> tuple[str, list[object]]:
+    """Render one eligibility expression over `pages p` (and `semantic_units u`).
+
+    ``unit_missing`` renders the arm `page_matches` evaluates with no unit at
+    all: every unit axis reads as MISSING there, so only `$exists false`
+    survives and every other unit test is false. The caller ORs that arm with
+    one `EXISTS` over the unit rows, which is exactly the existential grouping
+    `page_matches` performs — and it puts the EXISTS at the top, so two unit
+    predicates in one conjunction are required of the SAME unit.
+    """
+    from . import structured_filters as sf
+
+    if isinstance(expr, sf.EligibilityConst):
+        return ("1" if expr.value else "0"), []
+    if isinstance(expr, sf.EligibilityNot):
+        sql, params = _eligibility_sql(expr.child, unit_missing=unit_missing)
+        return f"NOT ({sql})", params
+    if isinstance(expr, (sf.EligibilityAll, sf.EligibilityAny)):
+        joiner = " AND " if isinstance(expr, sf.EligibilityAll) else " OR "
+        parts: list[str] = []
+        params: list[object] = []
+        for child in expr.children:
+            sql, bound = _eligibility_sql(child, unit_missing=unit_missing)
+            parts.append(sql)
+            params.extend(bound)
+        return "(" + joiner.join(parts) + ")", params
+    axis = expr.axis
+    if axis.startswith("unit."):
+        if unit_missing:
+            # MISSING: `$exists false` is the only test a vanished unit passes.
+            return ("1" if expr.op == "exists" and not expr.present else "0"), []
+        return _axis_test_sql(expr, _UNIT_AXIS_COLUMNS[axis], "u")
+    return _axis_test_sql(expr, _PAGE_AXIS_COLUMNS[axis], "p")
+
+
+def _eligibility_predicate(eligibility: Any, scope_column: str) -> tuple[str, list[object]]:
+    """The whole page predicate for one `EligibilityPlan`, over `pages p`.
+
+    `page_matches` is `evaluate(plan, page, unit=None) OR any(evaluate(plan,
+    page, unit))`. That is rendered literally: the first arm with every unit
+    axis MISSING, the second as one `EXISTS` over the parent's in-scope units.
+    A plan with no unit predicate has only the first arm, exactly as the
+    evaluator short-circuits to `evaluate_filter(plan, page=page)`.
+    """
+    sql, params = _eligibility_sql(eligibility.expr, unit_missing=True)
+    if not eligibility.has_unit_axis:
+        return sql, params
+    unit_sql, unit_params = _eligibility_sql(eligibility.expr, unit_missing=False)
+    return (
+        f"({sql}) OR EXISTS(SELECT 1 FROM semantic_units u "
+        f"WHERE u.parent_path = p.path AND u.{scope_column} = 1 AND ({unit_sql}))",
+        params + unit_params,
+    )
+
+
+SCHEMA_VERSION = 9
 CATALOG_FOREGROUND_DELTA_CAP = 32
 
 # Publication-barrier timeouts. Every LIVE-sidecar mutation and journal-mode
@@ -1858,7 +2009,7 @@ def search_semantic_parent_paths_result(
 
 def search_eligible_parent_paths_result(
     vault_root: Path,
-    clauses: tuple | None,
+    eligibility: Any,
     *,
     scope: str = "kb",
     freshness: tuple | None = None,
@@ -1869,7 +2020,7 @@ def search_eligible_parent_paths_result(
             None, CatalogReadiness("unsupported", False, backend())
         )
     return get_store(vault_root).search_eligible_parent_paths_result(
-        clauses, scope, freshness
+        eligibility, scope, freshness
     )
 
 
@@ -2683,31 +2834,26 @@ class LexicalStore:
 
     # The current normal-table shape sentinels. An older `pages` table lacks
     # one or more of these, so it must be rebuilt before a new-column INSERT.
-    _CURRENT_PAGES_COLUMNS = frozenset(
-        {
-            "emitted_parent_path",
-            "title",
-            # The structured-filter eligibility columns. A catalog missing any
-            # of them cannot answer a page filter, so it is a legacy shape.
-            "page_type",
-            "status",
-            "file_type",
-            "source_kind",
-            "domain",
-            "projects_json",
-            "tags_json",
-            "speakers_json",
-            "updated_day",
-            "content_hash",
-        }
+    _CURRENT_PAGES_COLUMNS = frozenset({"emitted_parent_path", "title", "content_hash"}) | frozenset(
+        _ELIGIBILITY_COLUMNS
+    )
+    #: The eligibility sentinels on `semantic_units`. A catalog missing any of
+    #: them cannot answer a governed unit filter, so it is a legacy shape.
+    _CURRENT_UNIT_COLUMNS = frozenset(
+        {"verdict", "check_by_day", "check_by_json", "tags_canonical_json"}
     )
 
     @staticmethod
     def _pages_has_current_columns(conn: sqlite3.Connection) -> bool:
-        """Read-only: does `pages` carry every current schema sentinel?"""
-        return LexicalStore._CURRENT_PAGES_COLUMNS <= {
-            row[1] for row in conn.execute("PRAGMA table_info(pages)")
-        }
+        """Read-only: do `pages` and `semantic_units` carry every sentinel?"""
+        try:
+            return LexicalStore._CURRENT_PAGES_COLUMNS <= {
+                row[1] for row in conn.execute("PRAGMA table_info(pages)")
+            } and LexicalStore._CURRENT_UNIT_COLUMNS <= {
+                row[1] for row in conn.execute("PRAGMA table_info(semantic_units)")
+            }
+        except sqlite3.OperationalError:
+            return False
 
     def _schema_is_current(self, conn: sqlite3.Connection) -> bool:
         """Read-only probe: is the catalog schema at the current version AND the
@@ -2740,27 +2886,37 @@ class LexicalStore:
             # NULL for ordinary pages — lets a matched semantic parent expand to
             # its in-scope frame children without a Markdown walk.
             " emitted_parent_path TEXT,"
-            # Structured-filter eligibility. Every column below holds the exact
+            # Structured-filter eligibility. Every column holds the exact
             # spelling `structured_filters` compares — canonicalized at write
             # time through `canonicalize_axis_value` — so a SQL comparison and
             # the in-memory evaluator settle on one answer instead of two.
-            # NULL means "no value this axis can match", which covers both an
-            # absent key and a declaration of a shape the axis cannot compare;
-            # $exists is therefore never answered here, only by evaluation.
+            #
+            # Two columns per scalar axis, deliberately. The bare column holds
+            # a value only when the page declares a comparable string, which is
+            # exactly when `$eq` can match. The `_json` array is NULL only when
+            # the page does not declare the key at all, which is exactly what
+            # `$exists` asks, and it carries every comparable member, which is
+            # how a LIST-valued declaration on a scalar axis (`type: [insight,
+            # pattern]`) answers `$in` the way the evaluator does.
             " page_type TEXT,"
+            " page_type_json TEXT,"
             " status TEXT,"
+            " status_json TEXT,"
             " file_type TEXT,"
+            " file_type_json TEXT,"
             " source_kind TEXT,"
+            " source_kind_json TEXT,"
             " domain TEXT,"
-            # JSON arrays of canonicalized members for the terminal collection
-            # axes, NULL when the page declares no list at all.
+            " domain_json TEXT,"
+            # Terminal collection axes: members only, same NULL-means-absent rule.
             " projects_json TEXT,"
             " tags_json TEXT,"
             " speakers_json TEXT,"
             # The recorded day, settled through the same parse `page_view` uses.
             # Ordered date filters bound on this and let the evaluator settle
-            # any finer granularity.
+            # any finer granularity; `updated_json` answers presence and `$in`.
             " updated_day TEXT,"
+            " updated_json TEXT,"
             " content_hash TEXT)"
         )
         # Per-scope walk triples this sidecar was last VERIFIED against
@@ -2793,6 +2949,15 @@ class LexicalStore:
             " updated TEXT NOT NULL DEFAULT '0000-00-00',"
             " in_kb INTEGER NOT NULL DEFAULT 0,"
             " in_vault INTEGER NOT NULL DEFAULT 0,"
+            # Governed unit metadata, written from `unit_view` so a filter
+            # compares the settled `check_by` date and the casefolded tag
+            # members rather than the authored spelling. NULL means the unit
+            # declares nothing there, which is what `$exists` asks: for these
+            # two axes absence is the meaningful state ("no verdict yet").
+            " verdict TEXT,"
+            " check_by_day TEXT,"
+            " check_by_json TEXT,"
+            " tags_canonical_json TEXT,"
             " UNIQUE(parent_path, unit_ref))"
         )
 
@@ -2820,6 +2985,10 @@ class LexicalStore:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS pages_updated_day "
             "ON pages(updated_day, in_kb, in_vault)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS semantic_units_verdict "
+            "ON semantic_units(verdict, in_kb, in_vault)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS semantic_units_parent "
@@ -3473,9 +3642,8 @@ class LexicalStore:
         is_nav = path.name.lower() in _NAV_BASENAMES
         cur = conn.execute(
             "INSERT INTO pages(path, title, mtime_ns, updated, in_kb, in_vault, is_nav, "
-            "emitted_parent_path, page_type, status, file_type, source_kind, domain, "
-            "projects_json, tags_json, speakers_json, updated_day, content_hash) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "emitted_parent_path, " + ", ".join(_ELIGIBILITY_COLUMNS) + ", content_hash) "
+            "VALUES(" + ", ".join("?" * (9 + len(_ELIGIBILITY_COLUMNS))) + ")",
             (
                 rel,
                 title,
@@ -3529,9 +3697,10 @@ class LexicalStore:
                 "record_type, unit_ref, parent_path, parent_ref, parent_generation, "
                 "parent_source_hash, parser_version, form, category_raw, category_key, "
                 "category, kind, content, tags_json, context, unit_source_hash, anchor, "
-                "line, end_line, fingerprint, source_order, updated, in_kb, in_vault) "
+                "line, end_line, fingerprint, source_order, updated, in_kb, in_vault, "
+                "verdict, check_by_day, check_by_json, tags_canonical_json) "
                 "VALUES('semantic_unit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?, ?, ?, ?, ?)",
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     unit.unit_ref,
                     state.path,
@@ -3556,6 +3725,7 @@ class LexicalStore:
                     updated,
                     int(in_kb),
                     int(in_vault),
+                    *_unit_eligibility_columns(unit),
                 ),
             )
             if fts5_available():
@@ -5580,7 +5750,7 @@ class LexicalStore:
 
     def search_eligible_parent_paths_result(
         self,
-        clauses: tuple | None,
+        eligibility: Any,
         scope: str,
         freshness: tuple | None,
     ) -> CatalogQueryResult[list[str]]:
@@ -5590,38 +5760,38 @@ class LexicalStore:
         and answers a different question: not "which parents carry a matching
         semantic unit" but "which pages could satisfy this whole plan". It is
         anchored on `pages` rather than `semantic_units` because a plan may
-        constrain only page axes, or nothing the columns can narrow at all —
-        and in that last case every in-scope page is a legitimate candidate.
-        Returning the whole scope is what keeps the reader off the walk: the
-        caller still evaluates the plan, so a wide candidate set costs
-        hydration, while a walk costs the enumeration this change removes.
-
-        Every semantic unit row is written by `_insert_page` alongside its page
-        row, so no parent reachable through `semantic_units` is missing from
-        `pages`; anchoring here loses no candidate the unit query would find.
+        constrain only page axes, or negate a unit axis — and every semantic
+        unit row is written by `_insert_page` alongside its page row, so
+        anchoring here loses no candidate the unit query would find.
         """
         return self._serve_from_ready_catalog_result(
             scope,
             freshness,
-            lambda conn: self._eligible_parent_paths_query(conn, clauses, scope),
+            lambda conn: self._eligible_parent_paths_query(conn, eligibility, scope),
             "lexical eligibility catalog query failed (%s); filter eligibility declines",
         )
 
     def _eligible_parent_paths_query(
         self,
         conn: sqlite3.Connection,
-        clauses: tuple | None,
+        eligibility: Any,
         scope: str,
     ) -> list[str]:
         """Sorted candidate parents, plus the frame children they emit into.
 
+        The predicate is the two arms `page_matches` evaluates: the plan with
+        every unit axis MISSING, ORed with one `EXISTS` over the parent's units
+        carrying the plan again. Putting the `EXISTS` at the top rather than per
+        subtree is what makes two unit predicates in one conjunction require the
+        SAME unit, which is the existential grouping the evaluator performs.
+
         The scene-frame arm mirrors `_semantic_parent_paths_query` exactly: a
-        matched video parent expands to its in-scope frame children, because
-        the candidate lanes address the child while the final hit addresses the
+        matched video parent expands to its in-scope frame children, because the
+        candidate lanes address the child while the final hit addresses the
         emitted parent, and both identities belong to one eligibility set.
         """
         col = "in_vault" if scope == "vault" else "in_kb"
-        predicate, params = _eligibility_predicate(clauses, col)
+        predicate, params = _eligibility_predicate(eligibility, col)
         rows = conn.execute(
             "WITH matched AS ("
             f" SELECT p.path AS parent_path FROM pages p WHERE p.{col} = 1 AND (" + predicate + ")"

@@ -2880,6 +2880,7 @@ RETRIEVAL_WARMING_SITES = (
     "pending_visibility_incomplete",
     "semantic_unit_index",
     "semantic_unit_seed",
+    "filter_eligibility_unnarrowed",
     "catalog_outcome",
     "relation_graph",
     "relation_graph_rebuilding",
@@ -3127,9 +3128,9 @@ def _resolve_eligible_filter_paths(
         # previous generation for every identity pending custody owns. Withdraw
         # those seeds and re-offer the committed ones, so the plan is evaluated
         # against the exact current page rather than a stale or removed row.
-        candidate_parents = set(pending.shadow(candidate_parents)) | {
-            row.rel_path for row in pending.current_pages()
-        }
+        candidate_parents = _merge_pending_candidates(
+            candidate_parents, pending=pending, scope=scope
+        )
     _mark_source(timings, "filter_eligibility", find_types.SOURCE_INDEX)
     return _indexed_eligible_filter_paths(
         vault_root,
@@ -3180,11 +3181,20 @@ def _managed_eligible_filter_paths(
     if not eligibility.resolvable:
         _mark_source(timings, "filter_eligibility", find_types.SOURCE_DECLINED)
         raise _unsupported_filter_field_error(eligibility.unsupported_fields)
+    if not eligibility.narrows:
+        # A tautology over the columns. Answering it would mean hydrating the
+        # whole scope on the request thread, which is the cost this stage
+        # exists to remove — the same cost, reached by a different road, and
+        # invisible because the answer would still be correct. The spec's
+        # sentence is unconditional: a filter plan the index cannot answer
+        # yields the retryable warming outcome.
+        _mark_source(timings, "filter_eligibility", find_types.SOURCE_DECLINED)
+        raise RetrievalIndexWarming(site="filter_eligibility_unnarrowed")
     try:
         candidate_parents = _eligibility_candidate_paths(
             vault_root,
             scope=scope,
-            clauses=eligibility.clauses,
+            eligibility=eligibility,
             freshness=snapshot.for_scope(scope),
             timings=timings,
         )
@@ -3200,9 +3210,10 @@ def _managed_eligible_filter_paths(
         # pending custody owns. Withdraw those rows and re-offer the proven
         # committed ones, so the plan is evaluated against the exact current
         # page rather than a stale row (Decision 2's overlay clause).
-        candidate_parents = set(pending.shadow(candidate_parents)) | {
-            row.rel_path for row in pending.current_pages()
-        }
+        candidate_parents = _merge_pending_candidates(
+            candidate_parents, pending=pending, scope=scope
+        )
+    _set_eligibility_timing_profile(timings, candidates=len(candidate_parents))
     _mark_source(timings, "filter_eligibility", find_types.SOURCE_INDEX)
     return _indexed_eligible_filter_paths(
         vault_root,
@@ -3212,28 +3223,59 @@ def _managed_eligible_filter_paths(
     )
 
 
+def _merge_pending_candidates(
+    candidates: set[str], *, pending: Any, scope: str
+) -> set[str]:
+    """Withdraw shadowed rows and re-offer committed ones, within the scope.
+
+    The scope test is the oracle's (`_merge_pending_walk`): a pending identity
+    outside the knowledge base belongs to a vault-scoped request only. Without
+    it a governed write to `Reference/` becomes eligible for `scope="kb"` and
+    reaches the results through the empty-query filter-only lane — a page the
+    scope was asked to exclude.
+    """
+    prefix = kb_prefix()
+    return set(pending.shadow(candidates)) | {
+        row.rel_path
+        for row in pending.current_pages()
+        if scope == "vault" or row.rel_path.startswith(prefix)
+    }
+
+
+def _set_eligibility_timing_profile(
+    timings: FindTimings | None, *, candidates: int
+) -> None:
+    """Record how many candidates the index narrowed the scope to.
+
+    The source vocabulary says WHERE a stage's answer came from; this says how
+    much the index actually did. A stage reporting `index` over a candidate set
+    the size of the corpus has answered from an index and still paid for the
+    corpus, and only the count makes that visible.
+    """
+    if timings is None:
+        return
+    timings.profile["filter_eligibility"] = {"candidates": candidates}
+
+
 def _eligibility_candidate_paths(
     vault_root: Path,
     *,
     scope: str,
-    clauses: tuple | None,
+    eligibility: Any,
     freshness: tuple[int, int, str] | None,
     timings: FindTimings | None = None,
 ) -> set[str]:
     """Candidate parents for a resolvable plan, from the page catalogue.
 
-    Narrowing is an optimization here, not the contract: `clauses` of ``None``
-    asks for every in-scope page, which is still an index answer and still
-    costs no enumeration. What is NOT optional is the generation binding — an
-    incomplete readiness proof raises rather than returning a partial set,
-    because a subset of the catalogue is indistinguishable from a correct
-    answer at this seam.
+    The generation binding is not optional: an incomplete readiness proof
+    raises rather than returning a partial set, because at this seam a subset
+    of the catalogue is indistinguishable from a correct answer.
     """
     from . import lexstore
 
     result = lexstore.search_eligible_parent_paths_result(
         vault_root,
-        clauses,
+        eligibility,
         scope=scope,
         freshness=freshness,
     )

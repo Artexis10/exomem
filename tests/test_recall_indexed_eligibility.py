@@ -69,6 +69,18 @@ def _oracle(vault: Path, plan: structured_filters.FilterPlan, *, scope: str = "k
     return find_module._eligible_filter_paths(vault, scope=scope, plan=plan)
 
 
+def _candidates(
+    vault: Path, plan: structured_filters.FilterPlan, *, scope: str = "kb"
+) -> set[str]:
+    """The candidate set the catalogue query returns, before evaluation."""
+    return find_module._eligibility_candidate_paths(
+        vault,
+        scope=scope,
+        eligibility=structured_filters.plan_index_eligibility(plan),
+        freshness=find_module.FreshnessSnapshot(vault).for_scope(scope),
+    )
+
+
 def _indexed(vault: Path, plan: structured_filters.FilterPlan, *, scope: str = "kb") -> set[str]:
     """Eligibility as the managed read path resolves it."""
     return find_module._resolve_eligible_filter_paths(
@@ -221,110 +233,198 @@ def test_page_and_unit_clauses_compose_on_the_index(
 # Identity: the index answers exactly what the oracle answers
 # --------------------------------------------------------------------------- #
 
+#: Frontmatter shapes the shipped fixture vault does not carry. The identity
+#: assertion is only as strong as the corpus it runs on: a value that is
+#: already lower-cased cannot catch a writer that forgot to canonicalize, and a
+#: scalar-only corpus cannot catch a seed that drops `type: [insight, pattern]`
+#: — which is exactly the defect the first round shipped.
+_ADVERSARIAL: dict[str, str] = {
+    # list-valued declarations on the SCALAR axes: the evaluator matches these
+    # member-wise for `$in`, and refuses them for `$eq`.
+    "Notes/Adv/type-list.md": "type: [insight, pattern]\nstatus: active\nupdated: 2026-06-01\n",
+    "Notes/Adv/status-list.md": "type: insight\nstatus: [active, draft]\nupdated: 2026-06-02\n",
+    "Notes/Adv/source-list.md": "type: source\nsource_type: [article, book]\nstatus: active\nupdated: 2026-06-03\n",
+    "Notes/Adv/domain-list.md": "type: insight\nstatus: active\ndomain: [engineering, biology]\nupdated: 2026-06-04\n",
+    # mixed case and surrounding whitespace on every seeded axis.
+    "Notes/Adv/case-scalars.md": "type: Insight\nstatus: Active\nsource_type: Article\ndomain: Engineering\nupdated: 2026-06-05\n",
+    "Notes/Adv/spaced-scalars.md": "type: '  insight  '\nstatus: '  active  '\nsource_type: '  article  '\nupdated: 2026-06-06\n",
+    "Notes/Adv/case-lists.md": "type: pattern\nstatus: active\ntags: [Retrieval, FUSION]\nspeakers: [Ada Lovelace]\nproject: Alpha-One\nupdated: 2026-06-07\n",
+    "Notes/Adv/spaced-lists.md": "type: pattern\nstatus: active\ntags: ['  retrieval  ']\nspeakers: ['  Ada Lovelace  ']\nupdated: 2026-06-08\n",
+    # declaration shapes: null, empty, scalar-where-a-list-is-expected, absent.
+    "Notes/Adv/type-null.md": "type: null\nstatus: active\nupdated: 2026-06-09\n",
+    "Notes/Adv/type-int.md": "type: 7\nstatus: active\nupdated: 2026-06-10\n",
+    "Notes/Adv/tags-scalar.md": "type: insight\nstatus: active\ntags: retrieval\nupdated: 2026-06-11\n",
+    "Notes/Adv/tags-empty.md": "type: insight\nstatus: active\ntags: []\nupdated: 2026-06-12\n",
+    "Notes/Adv/proj-both-keys.md": "type: insight\nstatus: active\nproject: alpha-one\nprojects: [beta-two]\nupdated: 2026-06-13\n",
+    "Notes/Adv/proj-absent.md": "type: insight\nstatus: active\nupdated: 2026-06-14\n",
+    # temporal shapes: bare day, quoted day, instant, garbage, captured-only.
+    "Notes/Adv/upd-instant.md": "type: insight\nstatus: active\nupdated: 2026-06-15T23:30:00Z\n",
+    # Earlier in the SAME day than the precise bound below, so a day-granular
+    # column admits it while the evaluator does not. That gap is what makes an
+    # ordered comparison against a precise bound inexact — and inexactness is
+    # the whole reason a complement may not be taken.
+    "Notes/Adv/upd-instant-early.md": "type: insight\nstatus: active\nupdated: 2026-06-15T06:00:00Z\n",
+    "Notes/Adv/upd-garbage.md": "type: insight\nstatus: active\nupdated: not-a-date\n",
+    "Notes/Adv/upd-absent.md": "type: insight\nstatus: active\n",
+    "Notes/Adv/upd-captured.md": "type: insight\nstatus: active\ncaptured: 2026-06-16\n",
+}
+
+#: A governed unit carrying both axes the first round refused outright, plus a
+#: COMPACT unit whose tag is authored in mixed case. `_rich_tags` casefolds at
+#: parse, so a rich unit can never show whether the writer canonicalizes; the
+#: compact form keeps the authored spelling, and it is the only shape that can.
+_GOVERNED_UNIT = (
+    "---\ntype: insight\nstatus: active\nupdated: 2026-06-17\n---\n\n"
+    "## Prediction\n\n- id: p1\n- verdict: Supported\n- check_by: 2026-08-01\n\n"
+    "The catalogue answers the filter without reading the page.\n\n"
+    "## Observations\n\n- [constraint] Eligibility resolves from columns #Retrieval\n"
+)
+
+#: A scene-frame child and the video parent it collapses into. The parent
+#: carries the seeded clause; the child must come back with it through the
+#: catalogue's UNION arm, exactly as the walk oracle returns both identities.
+_VIDEO_PARENT = "Notes/Adv/Media/talk.md"
+_VIDEO_FRAME = "Notes/Adv/Media/talk-frame-0005.md"
+
+
+def _seed_adversarial(vault: Path) -> None:
+    kb = vault / kb_dirname()
+    body = "\n# Adversarial\n\nBody about metabolism, retrieval and postgres.\n"
+    for rel, front in _ADVERSARIAL.items():
+        target = kb / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"---\n{front}---\n{body}", encoding="utf-8")
+    governed = kb / "Notes/Adv/governed-unit.md"
+    governed.parent.mkdir(parents=True, exist_ok=True)
+    governed.write_text(_GOVERNED_UNIT, encoding="utf-8")
+    parent = kb / _VIDEO_PARENT
+    parent.parent.mkdir(parents=True, exist_ok=True)
+    parent.write_text(
+        "---\ntype: source\nsource_type: video\nstatus: active\nmedia_type: video\n"
+        "project: frame-project\nupdated: 2026-06-18\n---\n" + body,
+        encoding="utf-8",
+    )
+    (kb / _VIDEO_FRAME).write_text(
+        "---\ntype: source\nparent_media: "
+        + f"{kb_dirname()}/{_VIDEO_PARENT.removesuffix('.md')}\n"
+        "evidence_file: frame\nframe_ts: 5.0\nstatus: active\nupdated: 2026-06-18\n---\n"
+        + body,
+        encoding="utf-8",
+    )
+
+
 #: Every field the 0.2 inventory lists as index-answerable, with the operators
 #: this lane seeds. Model-free by construction: eligibility is metadata only,
 #: so no embedding, ranking or query text enters any of these.
 _IDENTITY_CASES: tuple[tuple[str, dict[str, Any] | None, dict[str, Any]], ...] = (
     ("page.project/$in", None, {"projects": ("project-alpha",)}),
+    ("page.project/$in case", None, {"projects": ("Alpha-One",)}),
     ("page.project/$in multi", None, {"projects": ("project-alpha", "infrastructure")}),
     ("page.project/$all", {"page.project": {"$all": ["project-alpha", "project-beta"]}}, {}),
-    ("page.project/$contains", {"page.project": {"$contains": "project-alpha"}}, {}),
+    ("page.project/$contains", {"page.project": {"$contains": "alpha-one"}}, {}),
     ("page.project/$exists", {"page.project": {"$exists": True}}, {}),
     ("page.project/$exists false", {"page.project": {"$exists": False}}, {}),
     ("page.tags/$in", None, {"tags": ("retrieval",)}),
+    ("page.tags/$in case", None, {"tags": ("RETRIEVAL",)}),
+    ("page.tags/$in spaced", None, {"tags": ("  retrieval  ",)}),
     ("page.tags/$all", {"page.tags": {"$all": ["retrieval", "fusion"]}}, {}),
-    ("page.tags/$contains", {"page.tags": {"$contains": "postgres"}}, {}),
+    ("page.tags/$contains", {"page.tags": {"$contains": "Retrieval"}}, {}),
     ("page.tags/$exists", {"page.tags": {"$exists": True}}, {}),
+    ("page.tags/$exists false", {"page.tags": {"$exists": False}}, {}),
     ("page.type/$eq", {"page.type": {"$eq": "insight"}}, {}),
-    ("page.type/$in", None, {"types": ("insight", "pattern")}),
+    ("page.type/$eq case", {"page.type": {"$eq": "Insight"}}, {}),
+    ("page.type/$eq spaced", {"page.type": {"$eq": "  insight  "}}, {}),
+    ("page.type/$eq null", {"page.type": {"$eq": None}}, {}),
+    ("page.type/$in list-valued", None, {"types": ("insight",)}),
+    ("page.type/$in multi", None, {"types": ("insight", "pattern")}),
     ("page.type/$ne", {"page.type": {"$ne": "insight"}}, {}),
+    ("page.type/$ne null", {"page.type": {"$ne": None}}, {}),
     ("page.type/$contains", {"page.type": {"$contains": "sight"}}, {}),
     ("page.type/$exists", {"page.type": {"$exists": True}}, {}),
+    ("page.type/$exists false", {"page.type": {"$exists": False}}, {}),
     ("page.status/$eq", {"page.status": {"$eq": "active"}}, {}),
-    ("page.status/$in", {"page.status": {"$in": ["active", "draft"]}}, {}),
+    ("page.status/$in list-valued", {"page.status": {"$in": ["active", "draft"]}}, {}),
+    ("page.status/$ne", {"page.status": {"$ne": "archived"}}, {}),
     ("page.speakers/$in", None, {"speakers": ("ada lovelace",)}),
+    ("page.speakers/$in case", None, {"speakers": ("Ada Lovelace",)}),
     ("page.speakers/$exists", {"page.speakers": {"$exists": True}}, {}),
     ("page.file_type/$eq", {"page.file_type": {"$eq": "note"}}, {}),
     ("page.file_type/$in", None, {"file_types": ("note",)}),
     ("page.file_type/$not $in", None, {"exclude_file_types": ("note",)}),
     ("page.source_kind/$eq", {"page.source_kind": {"$eq": "article"}}, {}),
-    ("page.source_kind/$in", None, {"source_kinds": ("article", "book")}),
+    ("page.source_kind/$eq case", {"page.source_kind": {"$eq": "Article"}}, {}),
+    ("page.source_kind/$in list-valued", None, {"source_kinds": ("article", "book")}),
     ("page.domain/$eq", {"page.domain": {"$eq": "engineering"}}, {}),
-    ("page.domain/$in", None, {"domains": ("engineering",)}),
+    ("page.domain/$eq case", {"page.domain": {"$eq": "Engineering"}}, {}),
+    ("page.domain/$in list-valued", None, {"domains": ("engineering",)}),
+    ("page.updated/$gt", {"page.updated": {"$gt": "2026-06-10"}}, {}),
     ("page.updated/$gte", {"page.updated": {"$gte": "2026-06-01"}}, {}),
-    ("page.updated/$lt", {"page.updated": {"$lt": "2026-06-01"}}, {}),
-    (
-        "page.updated/$between",
-        {"page.updated": {"$between": ["2026-05-01", "2026-06-30"]}},
-        {},
-    ),
+    ("page.updated/$lt", {"page.updated": {"$lt": "2026-06-10"}}, {}),
+    ("page.updated/$lte", {"page.updated": {"$lte": "2026-06-10"}}, {}),
+    ("page.updated/$gte instant", {"page.updated": {"$gte": "2026-06-15T12:00:00Z"}}, {}),
+    ("page.updated/$between", {"page.updated": {"$between": ["2026-05-01", "2026-06-30"]}}, {}),
+    ("page.updated/$eq", {"page.updated": {"$eq": "2026-06-14"}}, {}),
+    ("page.updated/$in", {"page.updated": {"$in": ["2026-06-14", "2026-06-16"]}}, {}),
+    ("page.updated/$ne", {"page.updated": {"$ne": "2026-06-14"}}, {}),
     ("page.updated/$exists", {"page.updated": {"$exists": True}}, {}),
+    ("page.updated/$exists false", {"page.updated": {"$exists": False}}, {}),
     ("page.updated/updated_after", None, {"updated_after": "2026-06-01"}),
+    ("page.updated/updated_before", None, {"updated_before": "2026-06-10"}),
+    ("page.updated/recency_days", None, {"recency_days": 3650}),
     ("unit.category/$eq", {"unit.category": {"$eq": "constraint"}}, {}),
     ("unit.category_key/$eq", {"unit.category_key": {"$eq": "constraint"}}, {}),
     ("unit.kind/$exists", {"unit.kind": {"$exists": True}}, {}),
-    ("unit.form/$eq", {"unit.form": {"$eq": "statement"}}, {}),
+    ("unit.kind/$exists false", {"unit.kind": {"$exists": False}}, {}),
+    ("unit.form/$eq", {"unit.form": {"$eq": "compact"}}, {}),
+    ("unit.form/$ne", {"unit.form": {"$ne": "compact"}}, {}),
     ("unit.tags/$in", {"unit.tags": {"$in": ["retrieval"]}}, {}),
+    ("unit.tags/$in case", {"unit.tags": {"$in": ["Retrieval"]}}, {}),
     ("unit.context/$exists", {"unit.context": {"$exists": True}}, {}),
+    ("unit.verdict/$eq", {"unit.verdict": {"$eq": "supported"}}, {}),
+    ("unit.verdict/$eq case", {"unit.verdict": {"$eq": "Supported"}}, {}),
+    ("unit.verdict/$in", {"unit.verdict": {"$in": ["supported", "refuted"]}}, {}),
+    ("unit.verdict/$exists", {"unit.verdict": {"$exists": True}}, {}),
+    ("unit.verdict/$exists false", {"unit.verdict": {"$exists": False}}, {}),
+    ("unit.check_by/$lt", {"unit.check_by": {"$lt": "2026-12-01"}}, {}),
+    ("unit.check_by/$gte", {"unit.check_by": {"$gte": "2026-01-01"}}, {}),
+    ("unit.check_by/$between", {"unit.check_by": {"$between": ["2026-01-01", "2026-12-31"]}}, {}),
+    ("unit.check_by/$exists", {"unit.check_by": {"$exists": True}}, {}),
     (
         "AND page+unit",
-        {
-            "$and": [
-                {"page.type": {"$eq": "insight"}},
-                {"unit.category": {"$exists": True}},
-            ]
-        },
+        {"$and": [{"page.type": {"$eq": "insight"}}, {"unit.category": {"$exists": True}}]},
         {},
     ),
     (
         "AND page+seeded unit",
-        {
-            "$and": [
-                {"page.status": {"$eq": "active"}},
-                {"unit.category": {"$eq": "constraint"}},
-            ]
-        },
+        {"$and": [{"page.status": {"$eq": "active"}}, {"unit.category": {"$eq": "constraint"}}]},
         {},
     ),
     (
         "AND two unit axes on one row",
-        {
-            "$and": [
-                {"unit.category": {"$eq": "constraint"}},
-                {"unit.form": {"$eq": "compact"}},
-            ]
-        },
+        {"$and": [{"unit.category": {"$eq": "constraint"}}, {"unit.form": {"$eq": "compact"}}]},
         {},
     ),
     (
         "OR page+page",
-        {
-            "$or": [
-                {"page.type": {"$eq": "insight"}},
-                {"page.tags": {"$in": ["postgres"]}},
-            ]
-        },
+        {"$or": [{"page.type": {"$eq": "insight"}}, {"page.tags": {"$in": ["postgres"]}}]},
         {},
     ),
     (
         "OR page+unit",
-        {
-            "$or": [
-                {"page.status": {"$eq": "active"}},
-                {"unit.category": {"$eq": "constraint"}},
-            ]
-        },
+        {"$or": [{"page.status": {"$eq": "active"}}, {"unit.category": {"$eq": "constraint"}}]},
         {},
     ),
     ("NOT page", {"$not": {"page.type": {"$eq": "insight"}}}, {}),
+    ("NOT page $in", {"$not": {"page.tags": {"$in": ["retrieval"]}}}, {}),
+    ("NOT unit", {"$not": {"unit.category": {"$eq": "constraint"}}}, {}),
+    (
+        "NOT of OR",
+        {"$not": {"$or": [{"page.type": {"$eq": "insight"}}, {"page.type": {"$eq": "pattern"}}]}},
+        {},
+    ),
     (
         "AND with NOT",
-        {
-            "$and": [
-                {"page.status": {"$eq": "active"}},
-                {"$not": {"page.tags": {"$in": ["retrieval"]}}},
-            ]
-        },
+        {"$and": [{"page.status": {"$eq": "active"}}, {"$not": {"page.tags": {"$in": ["retrieval"]}}}]},
         {},
     ),
     (
@@ -332,6 +432,7 @@ _IDENTITY_CASES: tuple[tuple[str, dict[str, Any] | None, dict[str, Any]], ...] =
         {"$and": [{"page.type": {"$eq": "insight"}}, {"page.type": {"$eq": "pattern"}}]},
         {},
     ),
+    ("scene-frame parent clause", None, {"projects": ("frame-project",)}),
 )
 
 
@@ -344,6 +445,7 @@ def test_index_result_equals_the_oracle_for_every_seeded_field(
     of identities decided by metadata alone, so this compares sets and nothing
     else. A field whose index answer diverges from the oracle names itself.
     """
+    _seed_adversarial(vault)
     warm_managed_cell(vault)
 
     plans = [(label, _plan(expr, **shortcuts)) for label, expr, shortcuts in _IDENTITY_CASES]
@@ -370,6 +472,9 @@ def test_index_result_equals_the_oracle_for_every_seeded_field(
 
     assert not divergences, "\n".join(divergences)
     assert narrowing and narrowing < everything
+    # The scene-frame child comes back with its parent, through the UNION arm.
+    frames = _indexed(vault, _plan(None, projects=("frame-project",)))
+    assert f"{kb_dirname()}/{_VIDEO_FRAME}" in frames, sorted(frames)
     # Every index-answerable field in the 0.2 inventory is exercised.
     assert covered >= {
         "page.project",
@@ -387,12 +492,101 @@ def test_index_result_equals_the_oracle_for_every_seeded_field(
         "unit.form",
         "unit.tags",
         "unit.context",
+        "unit.verdict",
+        "unit.check_by",
     }, sorted(covered)
 
 
 # --------------------------------------------------------------------------- #
 # Generation binding, custody, and the closed field vocabulary
 # --------------------------------------------------------------------------- #
+
+
+def test_candidate_hydration_is_bounded_by_the_answer(
+    vault: Path, warm_managed_cell
+) -> None:
+    """The managed arm reads the pages it returns, never the corpus.
+
+    The walk sentinel counts directory enumerations; this counts page
+    hydrations, which is what the spec sentence "SHALL NOT evaluate the plan by
+    reading page frontmatter on the reader thread" actually forbids. A seed
+    that narrows nothing satisfies the sentinel and still parses every page in
+    the scope — the same cost reached by a different road.
+
+    Every shape below is one the columns must decide in SQL: a negation, a
+    complement, a presence test, and a governed unit axis. The bound asserted
+    is `reads <= |answer|`, not a constant, so it stays meaningful as the
+    corpus grows.
+    """
+    for index in range(60):
+        target = vault / kb_dirname() / f"Notes/Bulk/bulk-{index:03d}.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            f"---\ntype: insight\nstatus: active\nproject: bulk-{index % 5}\n"
+            f"tags: [retrieval]\nupdated: 2026-07-{(index % 28) + 1:02d}\n---\n\n"
+            "# Bulk\n\nBody about metabolism.\n",
+            encoding="utf-8",
+        )
+    warm_managed_cell(vault)
+    corpus = find_module.FreshnessSnapshot(vault).for_scope("kb")[0]
+    assert corpus > 60, corpus
+
+    from exomem import semantic_index
+
+    shapes = (
+        ("narrowing $in", _plan(None, projects=("bulk-1",))),
+        ("$ne, no positive seed", _plan({"page.status": {"$ne": "archived"}})),
+        ("top-level $not", _plan({"$not": {"page.type": {"$eq": "insight"}}})),
+        ("$exists only", _plan({"page.tags": {"$exists": True}})),
+        ("unit.tags $in", _plan({"unit.tags": {"$in": ["retrieval"]}})),
+    )
+    report: list[str] = []
+    for label, plan in shapes:
+        reads = {"pages": 0, "units": 0}
+        real_resolve = find_module._resolve_page
+        real_state = semantic_index.current_parent_index_state
+
+        def _count_page(*args: Any, _real=real_resolve, _at=reads, **kwargs: Any):
+            _at["pages"] += 1
+            return _real(*args, **kwargs)
+
+        def _count_unit(*args: Any, _real=real_state, _at=reads, **kwargs: Any):
+            _at["units"] += 1
+            return _real(*args, **kwargs)
+
+        find_module.reset_page_and_result_caches()
+        find_module._resolve_page = _count_page  # type: ignore[assignment]
+        semantic_index.current_parent_index_state = _count_unit  # type: ignore[assignment]
+        try:
+            with _oracle_withdrawn():
+                answer = _indexed(vault, plan)
+        finally:
+            find_module._resolve_page = real_resolve  # type: ignore[assignment]
+            semantic_index.current_parent_index_state = real_state  # type: ignore[assignment]
+        report.append(f"{label}: reads={reads['pages']} units={reads['units']} n={len(answer)}")
+        assert reads["pages"] <= len(answer), report[-1]
+        assert reads["units"] <= len(answer), report[-1]
+    # Non-vacuity: one shape must really select a small slice of a big corpus.
+    assert report[0].endswith("n=12") or "reads=12" in report[0], report
+
+
+def test_the_eligibility_stage_reports_its_candidate_count(
+    vault: Path, warm_managed_cell
+) -> None:
+    """`index` says where the answer came from; the count says what it cost.
+
+    A stage reporting `index` over a candidate set the size of the corpus has
+    answered from an index and still paid for the corpus. Only the count makes
+    that visible in the diagnostics, and the durable query log is where a
+    returning whole-scope hydration would otherwise be invisible.
+    """
+    warm_managed_cell(vault)
+    with _oracle_withdrawn():
+        result = _filtered_recall(vault, projects=["project-alpha"])
+    profile = result["timings"]["profile"]["filter_eligibility"]
+    assert profile["candidates"] >= 1
+    assert profile["candidates"] < 46, profile
+    assert _eligibility_source(result) == "index"
 
 
 def test_stale_catalogue_generation_declines_with_warming(
@@ -427,6 +621,81 @@ def test_stale_catalogue_generation_declines_with_warming(
 
     assert caught.value.status in {"warming", "temporarily_unavailable"}
     assert caught.value.site in find_module.RETRIEVAL_WARMING_SITES
+    assert sentinel.count == 0, sentinel.report()
+
+
+def test_a_complement_over_an_inexact_bound_declines_rather_than_under_selecting(
+    vault: Path, warm_managed_cell
+) -> None:
+    """`$not` may only complement a set the columns describe EXACTLY.
+
+    A seed is allowed to be wider than the question, because the evaluation
+    settles the remainder. A complement inverts that licence: `NOT superset` is
+    a SUBSET of `NOT exact`, so it drops pages the evaluator keeps, and no
+    later evaluation can put them back — the candidate never arrives.
+
+    `page.updated` is where that bites. `_temporal_match` lets the BOUND decide
+    granularity, so a day-scoped bound is answered exactly by a day column, but
+    a PRECISE bound compares instants and a day column can only bracket it. The
+    page below is inside the day and before the instant: the seed admits it,
+    the evaluator refuses it, and the complement must therefore not be taken.
+    """
+    _seed_adversarial(vault)
+    warm_managed_cell(vault)
+    early = f"{kb_dirname()}/Notes/Adv/upd-instant-early.md"
+    bound = {"page.updated": {"$gte": "2026-06-15T12:00:00Z"}}
+
+    # The CANDIDATE set for the child is a superset: the SQL admits the early
+    # instant that the evaluator then excludes. (The resolved set is exact
+    # either way — post-evaluation corrects a superset. It cannot correct a
+    # complement, which is why the gap has to be measured here.)
+    assert early in _candidates(vault, _plan(bound))
+    assert early not in _oracle(vault, _plan(bound))
+    # So the complement's true answer contains it, and a complemented seed
+    # would not — which is why the classifier refuses to complement at all.
+    assert early in _oracle(vault, _plan({"$not": bound}))
+
+    negated = structured_filters.plan_index_eligibility(_plan({"$not": bound}))
+    assert not negated.narrows, negated.expr
+    with _oracle_withdrawn(), pytest.raises(find_module.RetrievalIndexWarming) as caught:
+        _indexed(vault, _plan({"$not": bound}))
+    assert caught.value.site == "filter_eligibility_unnarrowed"
+
+    # The day-scoped counter-case, so this is a rule about exactness and not a
+    # blanket refusal of `$not`: a whole-day bound IS exact, and complements.
+    day_bound = {"page.updated": {"$gte": "2026-06-15"}}
+    assert structured_filters.plan_index_eligibility(_plan({"$not": day_bound})).narrows
+    expected = _oracle(vault, _plan({"$not": day_bound}))
+    with _oracle_withdrawn():
+        assert _indexed(vault, _plan({"$not": day_bound})) == expected
+
+
+def test_a_plan_the_columns_cannot_narrow_declines_instead_of_hydrating(
+    vault: Path, warm_managed_cell, walk_sentinel
+) -> None:
+    """A tautology over the columns is refused, not answered by hydration.
+
+    The walk sentinel cannot see this failure: a seed that narrows nothing
+    enumerates no directory and still parses every page in the scope. That is
+    the same whole-corpus cost the stage exists to remove, reached by a
+    different road and invisible in the diagnostics, because the answer is
+    still correct.
+
+    Every compiled predicate this lane accepts does narrow, so the shape is
+    driven at the seam rather than through `find()` — which never passes an
+    empty plan here. The guard is the floor under the classifier, not a case
+    the request surface can reach today: if a later lane adds an operator with
+    no column, this is what stops it becoming a silent scan.
+    """
+    warm_managed_cell(vault)
+    empty = structured_filters.compile_filter(None)
+    assert not structured_filters.plan_index_eligibility(empty).narrows
+
+    sentinel = walk_sentinel(*_scope_roots(vault))
+    sentinel.reset()
+    with _oracle_withdrawn(), pytest.raises(find_module.RetrievalIndexWarming) as caught:
+        _indexed(vault, empty)
+    assert caught.value.site == "filter_eligibility_unnarrowed"
     assert sentinel.count == 0, sentinel.report()
 
 
@@ -507,28 +776,103 @@ def test_pending_write_is_filtered_against_its_committed_page(
     assert sentinel.count == 0, sentinel.report()
 
 
+def test_pending_custody_outside_the_kb_stays_out_of_a_kb_scoped_recall(
+    vault: Path, warm_managed_cell
+) -> None:
+    """Re-offering a committed pending page must respect the requested scope.
+
+    `_merge_pending_walk` drops an out-of-KB pending identity for every scope
+    but `vault`, because a `scope="kb"` request asked not to see it. The
+    indexed arm unions `current_pages()` into the candidate set, and without
+    the same gate a governed write to `Reference/` becomes eligible for a
+    KB-scoped recall — and reaches the caller through the empty-query
+    filter-only lane, where eligibility IS the result.
+    """
+    outside = vault / "Reference" / "outside-pending.md"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text(
+        "---\ntype: insight\nstatus: active\nproject: outside-omega\n"
+        "updated: 2026-07-09\n---\n\n# Outside\n\nA page about metabolism.\n",
+        encoding="utf-8",
+    )
+    warm_managed_cell(vault)
+
+    from exomem import find_corpus, pending_recall
+
+    rel = "Reference/outside-pending.md"
+    page = find_corpus.parse_page(outside, outside.stat().st_mtime, vault)
+    assert page is not None
+    overlay = pending_recall.PendingOverlay(
+        outcome="ready",
+        failure_code=None,
+        snapshot_generation=1,
+        rows={
+            rel: pending_recall.PendingRow(
+                rel_path=rel,
+                canonical_generation="gen-outside",
+                batch_id="batch-outside",
+                after_hash=None,
+                page=page,
+                stable_memory_ref=None,
+            )
+        },
+    )
+    plan = _plan(None, projects=("outside-omega",))
+
+    def _eligible(scope: str) -> set[str]:
+        with _oracle_withdrawn():
+            return find_module._resolve_eligible_filter_paths(
+                vault,
+                scope=scope,
+                plan=plan,
+                snapshot=find_module.FreshnessSnapshot(vault),
+                pending=overlay,
+            )
+
+    assert _eligible("kb") == find_module._eligible_filter_paths(
+        vault, scope="kb", plan=plan, pending=overlay
+    )
+    assert rel not in _eligible("kb"), "a KB-scoped recall must not see it"
+    assert rel in _eligible("vault"), "a vault-scoped recall must"
+
+    # And end to end, where an empty query makes eligibility the whole answer.
+    hits = _paths(_filtered_recall(vault, query="", projects=["outside-omega"]))
+    assert rel not in hits, sorted(hits)
+
+
 def test_unsupported_field_is_rejected_at_compile_time_not_scanned(
     vault: Path, warm_managed_cell, walk_sentinel, no_oracle
 ) -> None:
     """A field no index answers fails compilation; it never becomes a walk.
 
-    `page.frontmatter:/<pointer>` is open-ended by design and `unit.verdict` /
-    `unit.check_by` are read off the parsed unit with no column anywhere. For a
-    managed reader there is no honest way to answer them, and a scan fallback
-    would silently reintroduce the whole cost this lane removes.
+    `page.frontmatter:/<pointer>` is the whole of that set. It is open-ended by
+    construction — any key, any depth — so there is no column to hold it and no
+    honest managed answer, and a scan fallback for it would silently
+    reintroduce the whole cost this lane removes.
+
+    The governed unit axes are NOT in that set, and the counter-case below is
+    the point: `unit.verdict` and `unit.check_by` are documented filter fields
+    that "what is due" queries depend on, so they are carried in
+    `semantic_units` and answered rather than refused.
     """
+    _seed_adversarial(vault)
     warm_managed_cell(vault)
     sentinel = walk_sentinel(*_scope_roots(vault))
 
+    sentinel.reset()
+    with pytest.raises(structured_filters.FilterError) as caught:
+        _filtered_recall(vault, filters={"page.frontmatter:/custom_axis": {"$eq": "x"}})
+    assert caught.value.code == "UNSUPPORTED_FILTER_FIELD"
+    assert sentinel.count == 0, sentinel.report()
+
     for expr in (
-        {"page.frontmatter:/custom_axis": {"$eq": "x"}},
         {"unit.verdict": {"$eq": "supported"}},
-        {"unit.check_by": {"$lt": "2026-01-01"}},
+        {"unit.check_by": {"$lt": "2026-12-01"}},
     ):
         sentinel.reset()
-        with pytest.raises(structured_filters.FilterError) as caught:
-            _filtered_recall(vault, filters=expr)
-        assert caught.value.code == "UNSUPPORTED_FILTER_FIELD", expr
+        with _oracle_withdrawn():
+            result = _filtered_recall(vault, filters=expr, result_level="page")
+        assert _eligibility_source(result) == "index", expr
         assert sentinel.count == 0, f"{expr}: {sentinel.report()}"
 
 
