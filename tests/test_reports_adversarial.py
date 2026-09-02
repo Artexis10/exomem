@@ -433,3 +433,27 @@ def test_the_rendered_packet_publishes_the_preregistration_hash(tmp_path: Path) 
     assert packet.preregistration.sha256 in rendered
     for bound in packet.challenge_paths:
         assert bound.artifact_path in rendered
+
+
+def test_rendering_refuses_free_text_that_carries_an_aggregate(tmp_path: Path) -> None:
+    """Integration fold: a reviewer's objection text reaches the page verbatim."""
+
+    from benchmarks.reports.adversarial import Objection, render_adversarial_packet
+    from benchmarks.reports.guards import ReportRefused
+
+    packet = _packet(tmp_path)
+    reviewed = packet.model_copy(
+        update={
+            "review_disposition": _disposition(
+                packet,
+                objections=(
+                    Objection(
+                        text="the aggregate MemScore is quoted in the summary",
+                        status="documented",
+                    ),
+                ),
+            )
+        }
+    )
+    with pytest.raises(ReportRefused, match="never publish an aggregate"):
+        render_adversarial_packet(reviewed)

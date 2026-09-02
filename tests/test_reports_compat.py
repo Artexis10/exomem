@@ -293,3 +293,28 @@ def test_an_unregistered_observed_variant_discloses_that_provider_comparison_fai
     assert all(cell.observed_provider is None for cell in matrix.cells)
     assert [item for item in matrix.divergences if item.kind == "provider"] == []
     assert "provider comparison not possible" in render_compat_matrix(matrix)
+
+
+def test_rendering_refuses_free_text_that_carries_an_aggregate(
+    run_dir: Path, packet, tmp_path: Path
+) -> None:
+    """Integration fold: an invalid_reason is free text on its way to the page."""
+
+    from protocol.manifest import finalize_manifest, load_manifest
+
+    from benchmarks.reports.compat import render_compat_matrix
+    from benchmarks.reports.guards import ReportRefused
+
+    aggregate_dir = tmp_path / "aggregate"
+    shutil.copytree(run_dir, aggregate_dir)
+    finalize_manifest(
+        aggregate_dir,
+        status="INVALID",
+        finalized_at="2026-01-04T00:00:00Z",
+        invalid_reason="the aggregate MemScore was consumed as a result",
+    )
+    invalid = load_manifest(aggregate_dir)
+
+    matrix = _build(_redeclare_variant(packet, invalid.provider_variant), invalid)
+    with pytest.raises(ReportRefused, match="never publish an aggregate"):
+        render_compat_matrix(matrix)
