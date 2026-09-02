@@ -163,6 +163,23 @@ def _safe_rel_path(value: object, *, label: str) -> str:
     return rel
 
 
+def is_governed_receipt_path(value: object) -> bool:
+    """Whether this value is a canonical Markdown identity a receipt may carry.
+
+    A writer staging a batch has to know which of its destinations carry derived
+    custody. Before this existed the only way to ask was to construct a
+    :class:`DerivedBatchPath` and catch ``ValueError`` -- which also swallows a
+    malformed digest and a path absent both before and after, neither of which
+    is a path judgement and both of which would be real defects if they ever
+    became reachable. This answers exactly the path question and nothing else.
+    """
+    try:
+        _safe_rel_path(value, label="rel_path")
+    except ValueError:
+        return False
+    return True
+
+
 def _digest(value: object, *, label: str) -> str:
     text = _bounded(value, label=label, maximum=64).lower()
     if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
@@ -1111,6 +1128,19 @@ def _prove_committed_guarded(
                     "UPDATE derived_batch_components SET state = 'aborted', "
                     "claim_owner = NULL, claim_expires_at = NULL, updated_at = ? "
                     "WHERE batch_id = ? AND state != 'not_required'",
+                    (observed_at, current.batch_id),
+                )
+                # The abort transition is the only owner these rows can have.
+                # They were never published, and exact retirement deliberately
+                # refuses a never-published row because retiring one would
+                # strand its components behind a publication that can no longer
+                # happen -- so nothing else could ever clear them, and every
+                # rolled-back write would spend one more slot of the bounded
+                # hydration snapshot until an overflow failed managed recall
+                # closed over canonical bytes that no longer exist.
+                connection.execute(
+                    "UPDATE pending_recall_rows SET state = 'retired', "
+                    "updated_at = ? WHERE batch_id = ? AND state != 'retired'",
                     (observed_at, current.batch_id),
                 )
                 connection.execute(

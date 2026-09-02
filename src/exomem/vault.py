@@ -4400,10 +4400,65 @@ def _enqueue_graph_debt(vault_root: Path, checkpoint_write: PlannedWrite) -> Non
         log.warning("graph dirty-path enqueue failed; reconcile will repair", exc_info=True)
 
 
+def _advisory_applies_to_page_type(page_type: str | None) -> bool:
+    """Whether the default duplicate/overlap sweep can say anything about this page.
+
+    Design section 6 scopes the deferred advisory to an *applicable compiled
+    page*, and the sweep's own vocabulary is what makes a page applicable: it
+    compares a written page against active compiled conclusions, and the three
+    synchronous routes that own it pass exactly the compiled types and
+    ``source``. A page whose declared type is outside that vocabulary -- a
+    dataset, a plan, an index -- is one the advisory can never produce a
+    candidate for, so preparing custody for it would mint a component that is
+    guaranteed to converge to nothing.
+
+    An *undeclared* type is deliberately treated as applicable. The advisory is
+    noncanonical and fail-open with respect to the committed write, and a page
+    whose frontmatter cannot be read is not proven inapplicable -- only
+    unparsed. Refusing custody on a parse miss would make applicability depend
+    on frontmatter health rather than on the sweep's own rules.
+    """
+    if page_type is None:
+        return True
+    from .find_policy import COMPILED_TYPES, SOURCE_TYPES
+
+    return page_type in COMPILED_TYPES or page_type in SOURCE_TYPES
+
+
+def _planned_page_types(
+    root: Path, writes: Iterable[Any]
+) -> dict[str, str | None]:
+    """Declared ``type`` per staged governed path, from the bytes about to land.
+
+    Read from the planned content rather than from disk: the batch has not been
+    replaced yet, and for a creation the canonical path does not exist at all.
+    Frontmatter only, so this stays O(changed paths) and never parses a body.
+    """
+    types: dict[str, str | None] = {}
+    for write in writes:
+        content = getattr(write, "content", None)
+        if not isinstance(content, str):
+            continue
+        try:
+            relative = Path(os.path.abspath(write.path)).relative_to(root)
+        except (OSError, ValueError):
+            continue
+        try:
+            frontmatter, _body, _rest = parse_frontmatter(content)
+        except Exception:  # noqa: BLE001 - an unparsed page is simply undeclared
+            frontmatter = {}
+        declared = frontmatter.get("type") if isinstance(frontmatter, Mapping) else None
+        types[relative.as_posix()] = (
+            str(declared) if isinstance(declared, str) and declared else None
+        )
+    return types
+
+
 def _governed_advisory_target(
     root: Path,
     paths: Iterable[Any],
     semantic_states: Mapping[str, Any] | None,
+    page_types: Mapping[str, str | None] | None = None,
 ) -> str | None:
     """Name the one governed note this canonical batch is about, or nothing.
 
@@ -4436,7 +4491,16 @@ def _governed_advisory_target(
     ]
     if len(targets) != 1:
         return None
-    return targets[0]
+    target = targets[0]
+    # Applicability is decided last, on the one page that could be the target:
+    # a batch whose single governed page the sweep can never compare carries no
+    # advisory custody, and its terminal says `not_required` rather than
+    # promising a result that would only ever be empty.
+    if page_types is not None and not _advisory_applies_to_page_type(
+        page_types.get(target)
+    ):
+        return None
+    return target
 
 
 def batch_atomic_write(
@@ -4779,33 +4843,31 @@ def _batch_atomic_write_locked(
                         relative = Path(os.path.abspath(final)).relative_to(root)
                     except ValueError:
                         continue
-                    # The receipt store's own constructor is the single
-                    # predicate for a governed canonical Markdown identity.
-                    # Anything it refuses carries no derived custody and must
-                    # be skipped rather than allowed to fail a canonical write
+                    # The receipt store's own named predicate is the single
+                    # judgement of what is a governed canonical Markdown
+                    # identity. A path it refuses carries no derived custody and
+                    # is skipped rather than allowed to fail a canonical write
                     # that is otherwise sound.
                     #
-                    # This also swallows two refusals that are not path
-                    # judgements: a malformed digest, and a path absent both
-                    # before and after. Neither is reachable from here --
-                    # ``vault.content_hash`` always yields a valid sha256 and
-                    # ``after_hash`` is always set for a staged write -- so
-                    # narrowing the guard would need a public path predicate on
-                    # the frozen receipt module, which this lane may not add.
-                    try:
-                        receipt_paths.append(
-                            derived_receipts.DerivedBatchPath(
-                                rel_path=relative.as_posix(),
-                                before_hash=(
-                                    snapshot.content_hash
-                                    if snapshot is not None
-                                    else None
-                                ),
-                                after_hash=artifact.content_hash,
-                            )
-                        )
-                    except ValueError:
+                    # Asking the predicate rather than catching every
+                    # ``ValueError`` matters: the constructor also refuses a
+                    # malformed digest and a path absent both before and after,
+                    # neither of which is a path judgement. Swallowing those
+                    # would hide a real defect inside a skip.
+                    rel_path = relative.as_posix()
+                    if not derived_receipts.is_governed_receipt_path(rel_path):
                         continue
+                    receipt_paths.append(
+                        derived_receipts.DerivedBatchPath(
+                            rel_path=rel_path,
+                            before_hash=(
+                                snapshot.content_hash
+                                if snapshot is not None
+                                else None
+                            ),
+                            after_hash=artifact.content_hash,
+                        )
+                    )
                 selected_checkpoint = deferred_checkpoint
                 if (
                     selected_checkpoint is None
@@ -4832,7 +4894,10 @@ def _batch_atomic_write_locked(
                         else None
                     ),
                     advisory_target_rel_path=_governed_advisory_target(
-                        root, ordered_paths, semantic_states
+                        root,
+                        ordered_paths,
+                        semantic_states,
+                        page_types=_planned_page_types(root, writes),
                     ),
                 )
     except BaseException as stage_error:

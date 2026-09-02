@@ -3147,3 +3147,117 @@ def test_fake_refuses_retiring_an_unpublished_prepared_row() -> None:
     assert tuple(row.state for row in batch.rows) == ("prepared",)
 
     assert fake.retire_pending_visibility(Path("vault"), batch).outcome == "stale"
+
+
+# --------------------------------------------------------------------------- #
+# Lane 5 additions to the foundation's own guards (integration packet item 7)
+# --------------------------------------------------------------------------- #
+
+
+def _pending_states(vault: Path, batch_id: str) -> dict[str, str]:
+    connection = sqlite3.connect(deferred_index.store_path(vault))
+    try:
+        return {
+            str(row[0]): str(row[1])
+            for row in connection.execute(
+                "SELECT rel_path, state FROM pending_recall_rows WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+
+
+def test_newer_visibility_covers_a_batch_whose_rows_already_retired(
+    vault: Path,
+) -> None:
+    """Supersession accepts a newer batch that has already converged.
+
+    ``_newer_visibility_covers`` requires the newer batch's rows to be `live`
+    OR `retired`, and the `retired` half is the load-bearing one: a newer batch
+    that published and then converged is the strongest possible cover, and
+    demanding `live` would refuse exactly that case -- leaving the older batch
+    unprovable for ever instead of superseded, and holding its custody against
+    the bounded snapshot limit.
+    """
+    protocol = _protocol()
+    rel = "Knowledge Base/Notes/supersede-retired.md"
+    target = vault / rel
+    before, middle, after = b"before", b"middle", b"after"
+    _write(target, before)
+
+    older = _prepare(
+        vault,
+        batch_id="older-batch",
+        generation="generation-1",
+        paths=(_path(protocol, rel, before=before, after=middle),),
+        required=frozenset({protocol.DerivedComponent.LEXSTORE}),
+        now=10.0,
+    )
+    newer = _prepare(
+        vault,
+        batch_id="newer-batch",
+        generation="generation-1",
+        paths=(_path(protocol, rel, before=middle, after=after),),
+        required=frozenset({protocol.DerivedComponent.LEXSTORE}),
+        now=11.0,
+    )
+    _write(target, after)
+    newer_proof = protocol.prove_committed(
+        vault, newer, current_generation="generation-1"
+    )
+    assert newer_proof.outcome == "ready"
+    assert protocol.publish_pending_visibility(
+        vault, newer, publisher=lambda _root, _receipt: True
+    )
+
+    # The newer batch converges: its rows retire through the exact CAS.
+    snapshot = protocol.snapshot_pending_visibility(vault, limit=64)
+    newer_batch = next(
+        batch for batch in snapshot.batches if batch.receipt.batch_id == "newer-batch"
+    )
+    assert (
+        protocol.retire_pending_visibility(vault, newer_batch).outcome == "retired"
+    )
+    assert set(_pending_states(vault, "newer-batch").values()) == {"retired"}
+
+    older_proof = protocol.prove_committed(
+        vault, older, current_generation="generation-1"
+    )
+    assert older_proof.outcome == "superseded", older_proof.outcome
+
+
+def test_aborted_batch_stops_consuming_the_bounded_snapshot_limit(
+    vault: Path,
+) -> None:
+    """An aborted batch's `prepared` rows must not accumulate for ever.
+
+    The abort transition already closes every component, but its pending rows
+    were left `prepared`, and exact retirement deliberately refuses a
+    never-published row -- so nothing could ever clear them. They then counted
+    against the bounded hydration snapshot, and enough aborted writes would
+    overflow it and fail managed recall closed on custody for canonical bytes
+    that were rolled back and no longer exist.
+    """
+    protocol = _protocol()
+    receipt, target, before, _after = _prepare_one(
+        vault, batch_id="aborted-batch", before=b"before", after=b"after"
+    )
+    assert set(_pending_states(vault, "aborted-batch").values()) == {"prepared"}
+
+    # The canonical batch rolled back: the complete before-state is restored.
+    _write(target, before)
+    proof = protocol.prove_committed(
+        vault,
+        receipt,
+        current_generation=receipt.canonical_generation,
+        known_uncommitted=True,
+    )
+    assert proof.outcome == "aborted"
+
+    assert set(_pending_states(vault, "aborted-batch").values()) == {"retired"}
+    snapshot = protocol.snapshot_pending_visibility(vault, limit=64)
+    assert snapshot.outcome == "complete"
+    assert all(
+        batch.receipt.batch_id != "aborted-batch" for batch in snapshot.batches
+    ), [batch.receipt.batch_id for batch in snapshot.batches]

@@ -728,7 +728,14 @@ def _start_graph_drain(vault_root: Path) -> Any | None:
 
 
 def _start_derived_drain(vault_root: Path) -> Any | None:
-    """Start exact component convergence independently of the file watcher."""
+    """Start exact component convergence independently of the file watcher.
+
+    The three production callbacks the drain needs -- the component router, the
+    canonical-generation observer and Lane 2's pending publisher -- are the
+    drain module's own defaults, so the server keeps naming only the cell it is
+    starting and there is exactly one place that knows what production wiring
+    is.
+    """
     from . import derived_drain
 
     try:

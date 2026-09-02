@@ -162,7 +162,27 @@ _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = Conte
 )
 
 _FAST_ACK_DEADLINE_SECONDS = 2.0
-_PENDING_VISIBILITY_PUBLISHER: Callable[[Path, Any], bool] | None = None
+
+
+def _publish_pending_visibility(vault_root: Path, receipt: Any) -> bool:
+    """The production callee behind the frozen pending-visibility seam.
+
+    Lane 2 owns the projection; Lane 1 owns the durable custody transition;
+    this is the one place the two are joined. Imported lazily so the writer
+    module keeps its current import graph -- ``pending_recall`` reaches recall
+    and the lexical store, neither of which may be pulled in at writer import.
+    """
+    from . import pending_recall
+
+    return pending_recall.publish(vault_root, receipt)
+
+
+#: Overridable for tests that exercise the terminal boundary without a store.
+#: In production it is always Lane 2's publisher: a ``None`` here makes every
+#: governed fast-ack write fail closed into committed-uncertain.
+_PENDING_VISIBILITY_PUBLISHER: Callable[[Path, Any], bool] | None = (
+    _publish_pending_visibility
+)
 _fast_ack_monotonic = time.monotonic
 
 
@@ -200,6 +220,19 @@ def _fast_ack_enabled() -> bool:
     return os.environ.get("EXOMEM_FAST_DURABLE_ACK") == "1"
 
 
+def fast_durable_ack_active() -> bool:
+    """Whether the fast durable acknowledgement capability is currently active.
+
+    ``EXOMEM_FAST_DURABLE_ACK=1`` enables the fast path. Any other value --
+    including the shipped default of absent -- restores the prior wide
+    synchronous fanout and declares this capability, and its latency SLO,
+    inactive. It is deliberately not a knob that widens the enabled path's
+    fixed 2.0-second budget (design decision 3); it only chooses which of the
+    two behaviours is in force.
+    """
+    return _fast_ack_enabled()
+
+
 def _fast_ack_root_key(value: os.PathLike[str] | str) -> Path:
     """Normalize both sides of every fast-ack root comparison identically.
 
@@ -217,6 +250,16 @@ def active_derived_batch_custody(vault_root: Path) -> bool:
     return session is not None and _fast_ack_root_key(vault_root) == _fast_ack_root_key(
         session.vault_root
     )
+
+
+def current_canonical_generation(vault_root: Path) -> str | None:
+    """Public reader for the vault's current canonical generation.
+
+    The component drain needs exactly the observation the acknowledgement
+    makes, and a second implementation of it would be a second answer to the
+    question every proof is bound to.
+    """
+    return _current_canonical_generation(vault_root)
 
 
 def _current_canonical_generation(vault_root: Path) -> str | None:
@@ -241,6 +284,34 @@ def _current_canonical_generation(vault_root: Path) -> str | None:
         )
         return None
     return None if checkpoint is None else str(checkpoint.generation)
+
+
+def _release_superseded_advisory_claim(
+    session: _FastAcknowledgementSession,
+    paths: tuple[Any, ...],
+) -> None:
+    """Hand the session's one advisory job back when its holder is superseded.
+
+    A batch that took the claim and is then covered by a later batch of the
+    same mutation publishes nothing, carries no result reference, and has its
+    advisory work superseded in the store. Keeping the claim there would leave
+    the batch that actually survives with no advisory custody at all -- and
+    custody cannot be added after the receipt is durable, so the decision has
+    to be made here, while this batch is still being prepared.
+
+    The cover test is the store's own: the holder's paths must all appear in
+    this batch. Anything narrower would release a claim whose holder is going
+    to survive.
+    """
+    holder = next(
+        (batch for batch in reversed(session.batches) if batch.advisory_target),
+        None,
+    )
+    if holder is None:
+        return
+    covered = {path.rel_path for path in paths}
+    if {path.rel_path for path in holder.receipt.paths} <= covered:
+        session.advisory_claimed = False
 
 
 def prepare_active_derived_batch(
@@ -286,6 +357,8 @@ def prepare_active_derived_batch(
     batch_id = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()
     canonical_generation = canonical_generation or batch_id
     checkpoint_id = checkpoint_id or batch_id
+    if session.advisory_claimed:
+        _release_superseded_advisory_claim(session, paths)
     advisory_target: str | None = None
     advisory_fingerprint: str | None = None
     if (
@@ -401,7 +474,16 @@ def _acknowledge_derived_batches(
             min(batch.canonical_commit_monotonic for batch in session.batches)
             + _FAST_ACK_DEADLINE_SECONDS
         )
-        for batch in session.batches:
+        # Prove and publish newest first. An older batch is superseded only once
+        # the newer batch covering it holds live pending custody, and when both
+        # batches belong to one mutation the newer one is published by this same
+        # loop -- so proving in commit order would ask the store about a
+        # supersession it cannot yet see and fail closed into
+        # committed-uncertain on a write that is entirely sound. The projection
+        # below still runs in commit order, so terminal field order is
+        # unchanged.
+        superseded_batches: set[str] = set()
+        for batch in reversed(session.batches):
             receipt = batch.receipt
             observed_generation = (
                 _current_canonical_generation(session.vault_root)
@@ -414,24 +496,28 @@ def _acknowledge_derived_batches(
             )
             if proof.batch_id != receipt.batch_id or proof.canonical_replay_authorized:
                 raise RuntimeError("derived receipt proof does not match this batch")
-            superseded = proof.outcome == "superseded"
-            if not superseded:
-                # No generation comparison here: the store echoes
-                # ``current_generation`` straight back into the proof, and its
-                # ``ready`` outcome is what already enforces that the stored
-                # generation matches the observed one.
-                if proof.outcome != "ready":
-                    raise RuntimeError(
-                        "derived receipt did not prove the committed generation"
-                    )
-                if not derived_receipts.publish_pending_visibility(
-                    session.vault_root,
-                    receipt,
-                    publisher=_PENDING_VISIBILITY_PUBLISHER,
-                ):
-                    raise RuntimeError("pending visibility publication was not proven")
-                derived_receipts.signal_components(session.vault_root, receipt)
+            if proof.outcome == "superseded":
+                superseded_batches.add(receipt.batch_id)
+                continue
+            # No generation comparison here: the store echoes
+            # ``current_generation`` straight back into the proof, and its
+            # ``ready`` outcome is what already enforces that the stored
+            # generation matches the observed one.
+            if proof.outcome != "ready":
+                raise RuntimeError(
+                    "derived receipt did not prove the committed generation"
+                )
+            if not derived_receipts.publish_pending_visibility(
+                session.vault_root,
+                receipt,
+                publisher=_PENDING_VISIBILITY_PUBLISHER,
+            ):
+                raise RuntimeError("pending visibility publication was not proven")
+            derived_receipts.signal_components(session.vault_root, receipt)
 
+        for batch in session.batches:
+            receipt = batch.receipt
+            superseded = receipt.batch_id in superseded_batches
             statuses = []
             for component in derived_receipts.DerivedComponent:
                 status = derived_receipts.component_status(

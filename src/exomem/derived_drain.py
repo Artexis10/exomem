@@ -60,6 +60,74 @@ def progress_limit(*, mode_name: str | None = None, resource_limit: int | None =
     return max(1, min(policy_limit, max(0, int(resource_limit))))
 
 
+def canonical_generation_observer() -> CanonicalGenerationObserver:
+    """The one observation every proof in this cell is bound to.
+
+    Both the acknowledgement and the drain must ask the same question of the
+    vault, or a batch proved ready by one would be unprovable to the other.
+    Lazily bound because ``writer_lease`` imports this module.
+    """
+
+    def observe(vault_root: Path) -> str | None:
+        from .writer_lease import current_canonical_generation
+
+        return current_canonical_generation(vault_root)
+
+    return observe
+
+
+def pending_visibility_publisher() -> PendingVisibilityPublisher:
+    """Lane 2's publisher, bound lazily so the import graph is unchanged."""
+
+    def publish(
+        vault_root: Path, receipt: derived_receipts.DerivedBatchReceipt
+    ) -> bool:
+        from . import pending_recall
+
+        return pending_recall.publish(vault_root, receipt)
+
+    return publish
+
+
+def component_dispatcher() -> ComponentDispatcher:
+    """Route one already-claimed component to the lane that owns it.
+
+    Routing is BY COMPONENT and never by trial. Handing a claim to a lane that
+    does not own it is not free: that lane rotates it back with
+    ``component_unhandled``, which spends an attempt belonging to the lane that
+    does own it and pushes its next attempt out under backoff.
+
+    ``write_advisory`` goes to Lane 4's executor. Every other closed component
+    goes to the existing writer fan-out, now owned by the receipt instead of by
+    the request thread (design decision 5: reuse the current owner, add no
+    competing scheduler). Nothing is dispatched by trial, and no component is
+    executed by a lane that does not own it.
+    """
+
+    def dispatch(vault_root: Path, status: DerivedComponentStatus) -> bool:
+        if status.component is derived_receipts.DerivedComponent.WRITE_ADVISORY:
+            from . import deferred_write_advisory
+
+            execution = deferred_write_advisory.execute_write_advisory(
+                vault_root,
+                status,
+                observe_current_generation=canonical_generation_observer(),
+            )
+            return execution.outcome in {
+                "published",
+                "already_published",
+                "superseded",
+            }
+        from . import index_sync
+
+        receipt = derived_receipts._load_receipt(vault_root, status.batch_id)
+        return index_sync.converge_derived_component(
+            vault_root, receipt, status.component
+        )
+
+    return dispatch
+
+
 def drain_once(
     vault_root: Path,
     *,
@@ -187,9 +255,22 @@ class DerivedDrain:
         resource_limit: int | None = None,
     ) -> None:
         self.vault_root = Path(vault_root)
-        self.dispatch = dispatch
-        self.observe_current_generation = observe_current_generation
-        self.visibility_publisher = visibility_publisher
+        # An unsupplied callback means "use production", never "run headless".
+        # A drain with no router claims components it cannot dispatch, and one
+        # with no observer returns zero from restart recovery: custody stays
+        # durable and never converges, which is indistinguishable from a
+        # working cell until the backlog is noticed.
+        self.dispatch = component_dispatcher() if dispatch is None else dispatch
+        self.observe_current_generation = (
+            canonical_generation_observer()
+            if observe_current_generation is None
+            else observe_current_generation
+        )
+        self.visibility_publisher = (
+            pending_visibility_publisher()
+            if visibility_publisher is None
+            else visibility_publisher
+        )
         self.resource_limit = resource_limit
         self._stop = threading.Event()
         self._wake = threading.Event()

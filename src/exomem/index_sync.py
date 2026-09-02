@@ -26,9 +26,11 @@ from __future__ import annotations
 import gc
 import logging
 import threading
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any, Final
 
 from . import call_spans, deferred_index, semantic_index
 from .derived_receipts import DerivedComponent, DerivedComponentStatus
@@ -1683,3 +1685,136 @@ def delete_after_remove(
         paths_truncated,
     )
     return report
+
+
+# --------------------------------------------------------------------------- #
+# Receipt-owned convergence for the non-advisory derived components
+# --------------------------------------------------------------------------- #
+
+#: Which reported component proves each closed receipt component. ``freshness``
+#: maps to no report row because it is proven by the fan-out's own corpus-change
+#: publication rather than by a sidecar; ``write_advisory`` is absent because
+#: Lane 4 owns it and this seam must never claim to have converged it.
+_DERIVED_COMPONENT_REPORT_KEY: Final[dict[str, str | None]] = {
+    DerivedComponent.FRESHNESS.value: None,
+    DerivedComponent.MEMORY_REFS.value: "memory_refs",
+    DerivedComponent.RESOLVER.value: "resolver",
+    DerivedComponent.SEMANTIC_PURGE.value: "semantic_purge",
+    DerivedComponent.LEXSTORE.value: "lexstore",
+    DerivedComponent.GRAPH.value: "epistemic_graph",
+    DerivedComponent.EMBEDDINGS.value: "embeddings",
+    DerivedComponent.CLAIMS.value: "claims",
+}
+
+#: Outcomes that prove a component's own convergence for this batch. A graph
+#: handoff that is ``registered`` or ``deferred`` has reached the graph
+#: pipeline, which is that component's own scheduling owner and the sole author
+#: of ``graph_sync``; holding receipt custody open behind a rebuild this seam
+#: does not run would make one lane's queue depth another lane's pending state.
+_DERIVED_CONVERGENT_OUTCOMES: Final[frozenset[str]] = frozenset(
+    {"completed", "accepted", "not_required", "registered", "deferred"}
+)
+
+#: One successful fan-out proves every component it reported, so the batch is
+#: memoized rather than refanned once per claimed component. Bounded, and only
+#: successful reports are kept: a degraded fan-out must be retried, never
+#: replayed from a memo.
+_DERIVED_FANOUT_MEMO_LIMIT: Final = 64
+_DERIVED_FANOUT_MEMO_TTL_SECONDS: Final = 300.0
+_derived_fanout_memo: dict[tuple[str, str, str], tuple[float, IndexSyncReport]] = {}
+_derived_fanout_lock = threading.Lock()
+
+
+def _derived_memo_get(key: tuple[str, str, str]) -> IndexSyncReport | None:
+    now = time.time()
+    with _derived_fanout_lock:
+        stale = [
+            item
+            for item, (at, _report) in _derived_fanout_memo.items()
+            if now - at > _DERIVED_FANOUT_MEMO_TTL_SECONDS
+        ]
+        for item in stale:
+            _derived_fanout_memo.pop(item, None)
+        entry = _derived_fanout_memo.get(key)
+    return None if entry is None else entry[1]
+
+
+def _derived_memo_put(key: tuple[str, str, str], report: IndexSyncReport) -> None:
+    with _derived_fanout_lock:
+        if len(_derived_fanout_memo) >= _DERIVED_FANOUT_MEMO_LIMIT:
+            oldest = min(_derived_fanout_memo, key=lambda item: _derived_fanout_memo[item][0])
+            _derived_fanout_memo.pop(oldest, None)
+        _derived_fanout_memo[key] = (time.time(), report)
+
+
+def reset_derived_fanout_memo() -> None:
+    """Drop every memoized batch fan-out. Durable custody is untouched."""
+    with _derived_fanout_lock:
+        _derived_fanout_memo.clear()
+
+
+def converge_derived_component(
+    vault_root: Path,
+    receipt: Any,
+    component: DerivedComponent,
+) -> bool:
+    """Converge one non-advisory component of an exactly proven batch.
+
+    This is the existing writer fan-out, re-owned by the receipt rather than by
+    the request thread: the same ``upsert_after_write`` the synchronous path
+    called, over this batch's own paths only. No new scheduler and no second
+    implementation of any component -- the drain decides *when*, and the
+    existing owner still decides *how*.
+
+    One fan-out proves every component it reports, so a successful report is
+    memoized for the batch generation and the remaining components of that
+    batch complete from it. A degraded or failed report is never memoized; the
+    claim rotates and the fan-out runs again under the store's own backoff.
+    """
+    key = DerivedComponent(component).value
+    if key not in _DERIVED_COMPONENT_REPORT_KEY:
+        return False
+    root = Path(vault_root)
+    memo_key = (
+        str(root),
+        str(receipt.batch_id),
+        str(receipt.canonical_generation),
+    )
+    report = _derived_memo_get(memo_key)
+    if report is None:
+        written: list[Path] = []
+        created: list[Path] = []
+        for path in receipt.paths:
+            if path.after_hash is None:
+                # A tombstone is a removal, and removal has its own fan-out.
+                continue
+            target = root.joinpath(*path.rel_path.split("/"))
+            written.append(target)
+            if path.before_hash is None:
+                created.append(target)
+        if not written:
+            # Nothing this fan-out can publish: a tombstone-only batch is
+            # converged by the removal path the deleting writer already ran.
+            return True
+        report = upsert_after_write(
+            root,
+            written,
+            created_paths=created,
+            publish_corpus_change=True,
+        )
+        if report.reconcile_required:
+            return False
+        _derived_memo_put(memo_key, report)
+    report_key = _DERIVED_COMPONENT_REPORT_KEY[key]
+    if report_key is None:
+        # Freshness is proven by the corpus-change publication the fan-out
+        # performs, not by a sidecar row, so a non-degraded report is its proof.
+        return True
+    outcome = next(
+        (item for item in report.components if item.component == report_key), None
+    )
+    if outcome is None:
+        # The fan-out did not reach this component at all, which is a real
+        # absence of proof rather than a completion.
+        return False
+    return outcome.outcome in _DERIVED_CONVERGENT_OUTCOMES
