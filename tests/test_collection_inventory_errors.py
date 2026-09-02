@@ -376,3 +376,103 @@ def test_the_outcome_audit_reports_an_unreadable_manifest_as_unevaluated(
             "error_code": "INVALID_COLLECTION_PATH",
         }
     ]
+
+
+# --- withheld must be indistinguishable from absent for EVERY spelling shape,
+# --- not just the directory one. The answer has to be decided by the spelling
+# --- and the exclusion policy, before the filesystem is consulted at all.
+
+_PRIV = "Knowledge Base/Planning/PrivReg"
+_ABSENT = "Knowledge Base/Planning/AbsentReg"
+_PRIV_LINK = "Knowledge Base/Planning/PrivLink"
+_ABSENT_LINK = "Knowledge Base/Planning/AbsentLink"
+_PRIV_PARENT = "Knowledge Base/Planning/PrivParent"
+_ABSENT_PARENT = "Knowledge Base/Planning/AbsentParent"
+
+_WITHHELD_PAIRS = [
+    (f"{_PRIV}/Items/x.md", f"{_ABSENT}/Items/x.md", False),
+    (f"{_PRIV}/data.csv", f"{_ABSENT}/data.csv", False),
+    (f"{_PRIV}/plainfile", f"{_ABSENT}/plainfile", False),
+    (
+        _PRIV.replace("/", "\\") + "\\_collection.md",
+        _ABSENT.replace("/", "\\") + "\\_collection.md",
+        False,
+    ),
+    (f"{_PRIV_LINK}/_collection.md", f"{_ABSENT_LINK}/_collection.md", True),
+    (f"{_PRIV_PARENT}/_collection.md", f"{_ABSENT_PARENT}/_collection.md", True),
+    (f"{_PRIV}/_collection.md/", f"{_ABSENT}/_collection.md/", False),
+]
+_WITHHELD_IDS = [
+    "md_file",
+    "csv_file",
+    "extensionless",
+    "backslash_manifest",
+    "symlinked_manifest",
+    "symlinked_parent",
+    "trailing_slash",
+]
+
+
+def _seed_withheld_vault(vault: Path) -> bool:
+    """One released Planning collection, later excluded, plus symlinked spellings."""
+    _seed_records_collection(vault)
+    _seed_planning_collection(vault, f"{_PRIV}/_collection.md")
+    for relative, body in (
+        (f"{_PRIV}/Items/x.md", "# Item\n"),
+        (f"{_PRIV}/data.csv", "name,value\n"),
+        (f"{_PRIV}/plainfile", "plain\n"),
+    ):
+        target = vault / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    symlinked = True
+    try:
+        (vault / _PRIV_LINK).mkdir(parents=True)
+        (vault / _PRIV_LINK / "_collection.md").symlink_to(vault / _PRIV / "_collection.md")
+        (vault / _PRIV_PARENT).symlink_to(vault / _PRIV)
+    except OSError:
+        symlinked = False
+    (vault / "Knowledge Base" / "_access.yaml").write_text(
+        "excluded:\n  - Planning/PrivReg\n  - Planning/PrivLink\n  - Planning/PrivParent\n",
+        encoding="utf-8",
+    )
+    return symlinked
+
+
+@pytest.mark.parametrize("surface", ["plan_memory", "record_memory"])
+@pytest.mark.parametrize(
+    ("withheld", "absent", "needs_symlink"), _WITHHELD_PAIRS, ids=_WITHHELD_IDS
+)
+def test_a_withheld_reference_answers_exactly_what_an_absent_one_answers(
+    tmp_path: Path, surface: str, withheld: str, absent: str, needs_symlink: bool
+) -> None:
+    symlinked = _seed_withheld_vault(tmp_path)
+    if needs_symlink and not symlinked:
+        pytest.skip("symlinks unavailable")
+
+    assert _remediation_probe(tmp_path, surface, withheld) == _remediation_probe(
+        tmp_path, surface, absent
+    )
+
+
+@pytest.mark.parametrize("surface", ["plan_memory", "record_memory"])
+def test_a_directory_whose_manifest_alone_is_withheld_never_names_it(
+    tmp_path: Path, surface: str
+) -> None:
+    """The remediation's authorize gate, reached only when the two differ.
+
+    Excluding the directory refuses the reference outright and never consults
+    the gate, so the gate needs a case where the reference IS authorized and the
+    manifest inside it is not.
+    """
+    _seed_records_collection(tmp_path)
+    _seed_planning_collection(tmp_path, "Knowledge Base/Planning/Guarded/_collection.md")
+    (tmp_path / "Knowledge Base" / "_access.yaml").write_text(
+        "excluded:\n  - Planning/Guarded/_collection.md\n", encoding="utf-8"
+    )
+
+    envelope = _remediation_probe(tmp_path, surface, "Knowledge Base/Planning/Guarded")
+
+    assert envelope["code"] == "INVALID_COLLECTION_PATH"
+    assert envelope["remediation"] == _GENERIC_REMEDIATION
+    assert "Guarded/_collection.md" not in json.dumps(envelope)

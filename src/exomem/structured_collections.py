@@ -1100,20 +1100,30 @@ def resolve_collection(
         return matches[0]
 
     root = Path(vault_root)
+    # Order is the whole control here. Withheld-vs-absent is decided by the
+    # SPELLING and the exclusion policy, both known without touching the disk;
+    # any stat taken before that decision is a bit of existence handed back per
+    # guess, which is what a caller probing for a withheld collection wants.
+    key = _reference_key(root, raw)
+    if key is None:
+        raise _spelling_reference_error(raw)
+    if not authorize(key):
+        raise _unresolvable_reference_error(key)
     try:
         path, rel = _safe_existing_path(root, raw)
     except CollectionError as error:
-        # Classify the SPELLING before asking the filesystem anything. Consulting
-        # the absence helper first answered an excluded directory with
-        # INVALID_COLLECTION_PATH and an absent one with COLLECTION_NOT_FOUND,
-        # which hands back one bit of existence per guess. A reference that does
-        # not name a manifest file is answered the same way either way, and the
-        # remediation's own gates keep it from naming anything it should not.
-        normalized = _normalized_vault_reference(root, raw)
-        if normalized is None or Path(normalized).name != "_collection.md":
-            raise _collection_reference_error(root, raw, error, authorize) from error
-        if _genuinely_absent_collection_path(root, raw):
-            raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found") from error
+        if Path(key).name != "_collection.md":
+            # Not a manifest spelling at all. The shape decides, exactly as it
+            # did for the withheld caller above, and the remediation is allowed
+            # to look because this caller is authorized for the reference.
+            raise _unresolvable_reference_error(key, root=root, authorize=authorize) from error
+        if _absent_leaf(root, key):
+            raise _unresolvable_reference_error(key) from error
+        # A manifest spelling that names something present but not safe to open
+        # -- a directory, a FIFO, a symlinked ancestor. Deliberately its own
+        # refusal, kept distinct from absence: the caller is authorized here, so
+        # "that path is not safe" tells them nothing they may not know, and it
+        # is a different fact from "there is nothing there".
         raise
     if not authorize(rel):
         raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
@@ -1338,8 +1348,26 @@ def inspect_legacy_tracker(
 ) -> LegacyCollection:
     """Inspect a manifest-less tracker without making it queryable or mutable."""
     root = Path(vault_root)
-    tracker, rel = _safe_existing_path(root, path)
-    if authorize_path is not None and not authorize_path(rel):
+    authorize = authorize_path or (lambda _path: True)
+    # `record_memory` routes every non-manifest `.md` spelling here instead of
+    # to `resolve_collection`, so this route has to make the same
+    # withheld-before-stat decision or the two surfaces disagree about the same
+    # path -- and the pair of answers is itself the leak.
+    key = _reference_key(root, str(path))
+    if key is None:
+        raise _spelling_reference_error(str(path))
+    if not authorize(key):
+        # A tracker is not a manifest, so "pass the `_collection.md` path" would
+        # be wrong advice here; "no such tracker" is the honest refusal, and it
+        # is what an absent one answers below.
+        raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+    try:
+        tracker, rel = _safe_existing_path(root, path)
+    except CollectionError as error:
+        if _absent_leaf(root, key):
+            raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found") from error
+        raise
+    if not authorize(rel):
         raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     try:
         data, _guard = vault.read_bounded_guarded_bytes(root, rel, limit=_MAX_MANIFEST_BYTES)
@@ -2633,58 +2661,62 @@ def _safe_existing_path(root: Path, path: Path | str) -> tuple[Path, str]:
     return safe
 
 
-def _normalized_vault_reference(root: Path, raw: str) -> str | None:
-    """The vault-relative form of a collection reference, or None when it escapes."""
-    candidate = Path(raw)
+def _reference_key(root: Path, raw: str) -> str | None:
+    """The one vault-relative spelling a reference is judged by, before any stat.
+
+    Every decision that must not depend on what is on disk -- withheld against
+    absent, manifest against not -- reads this and nothing else. It folds the
+    same way the success path does, because `Path` collapses a trailing
+    separator, a doubled one and a bare `.`; the pre-check and the success path
+    disagreeing about what spelling was given is exactly how the trailing-slash
+    form came to answer one thing withheld and the opposite absent.
+    """
+    candidate = Path(str(raw).replace("\\", "/"))
     if candidate.is_absolute():
         try:
-            normalized = candidate.relative_to(root).as_posix()
+            candidate = Path(candidate.relative_to(root))
         except ValueError:
             return None
-    else:
-        normalized = raw.replace("\\", "/")
+    normalized = candidate.as_posix()
     if not normalized.startswith(f"{vault.kb_dirname()}/") or _unsafe_relative(normalized):
         return None
     return normalized
 
 
-def _collection_reference_error(
-    root: Path,
-    raw: str,
-    error: CollectionError,
-    authorize: Callable[[str], bool],
-) -> CollectionError:
-    """Say which refusal this is: escaped the vault, or named the wrong file.
-
-    "outside the governed vault" is a true statement about a `../` escape and a
-    false one about `Knowledge Base/Planning/<collection>`, which is squarely
-    inside it. A caller who names the collection's directory was sent hunting
-    for a path problem that does not exist; what they need is the manifest in
-    it. The judgement is made on the reference as given -- a name that is not
-    `_collection.md` cannot be a manifest path whatever is on disk -- so it
-    discloses nothing. Only the remediation touches the filesystem, and it names
-    a manifest only when that manifest is authorized for this caller and safe to
-    open; otherwise it states the requirement without confirming anything.
-    """
-    normalized = _normalized_vault_reference(root, raw)
-    if normalized is None:
-        return _non_path_reference_error(raw) or error
-    if Path(normalized).name == "_collection.md":
-        return error
-    manifest_rel = f"{normalized}/_collection.md"
-    names_manifest = (
-        authorize(manifest_rel) and _safe_candidate_rel(root, root / manifest_rel) is not None
+def _spelling_reference_error(raw: str) -> CollectionError:
+    """Judge a reference that never named a vault path, from its spelling alone."""
+    return _non_path_reference_error(raw) or CollectionError(
+        "INVALID_COLLECTION_PATH", "collection path is outside the governed vault"
     )
+
+
+def _unresolvable_reference_error(
+    key: str,
+    *,
+    root: Path | None = None,
+    authorize: Callable[[str], bool] | None = None,
+) -> CollectionError:
+    """What a reference of this SHAPE answers when it names nothing usable.
+
+    Withheld and absent both come through here, and the shape of the spelling is
+    the only thing that picks the code and the message, so neither can be told
+    from the other. `root`/`authorize` arrive only once the caller is known to
+    be authorized for the reference itself: they let the remediation NAME the
+    manifest, and then only when that manifest is authorized for this caller AND
+    safe to open. A withheld caller passes neither, so nothing is stat'd on
+    their behalf and the generic form is all they ever see.
+    """
+    if Path(key).name == "_collection.md":
+        return CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+    remediation = "pass the collection's `_collection.md` manifest path"
+    if root is not None and authorize is not None:
+        manifest_rel = f"{key}/_collection.md"
+        if authorize(manifest_rel) and _safe_candidate_rel(root, root / manifest_rel) is not None:
+            remediation = manifest_rel
     return CollectionError(
         "INVALID_COLLECTION_PATH",
         "collection reference must be the collection's `_collection.md` manifest path",
-        {
-            "remediation": (
-                manifest_rel
-                if names_manifest
-                else "pass the collection's `_collection.md` manifest path"
-            )
-        },
+        {"remediation": remediation},
     )
 
 
@@ -2720,13 +2752,16 @@ def collection_remediation(error: CollectionError) -> str | None:
     return value if type(value) is str and value else None
 
 
-def _genuinely_absent_collection_path(root: Path, raw: str) -> bool:
-    """Recognize only a safe, missing leaf as an absent collection selector."""
-    normalized = _normalized_vault_reference(root, raw)
-    if normalized is None:
-        return False
+def _absent_leaf(root: Path, key: str) -> bool:
+    """Whether this spelling names a safe, simply-missing leaf.
+
+    Only ever consulted AFTER the caller is authorized for the reference, so the
+    existence it reports is existence they may already learn. It exists because
+    "no such tracker" and "that path is not safe to open" are genuinely
+    different refusals, and the legacy-tracker route pins both.
+    """
     current = root
-    parts = Path(normalized).parts
+    parts = Path(key).parts
     for index, part in enumerate(parts):
         current /= part
         try:
