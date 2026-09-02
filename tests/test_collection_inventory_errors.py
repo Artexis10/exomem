@@ -336,3 +336,43 @@ def test_an_excluded_manifest_path_still_matches_an_absent_one(
     assert excluded == absent
     assert excluded["code"] in {"COLLECTION_NOT_FOUND", "PLAN_NOT_FOUND", "RECORD_NOT_FOUND"}
 
+
+# --- the sweep's consumers: a tolerant sweep that nobody counts is a silent
+# --- skip one layer further out. Both consumers used to catch the abort and
+# --- return empty; now that the sweep continues, they must carry the rows.
+
+
+def test_plan_progress_counts_an_unreadable_manifest_as_unavailable(tmp_path: Path) -> None:
+    from exomem import plan_progress
+
+    _seed_records_collection(tmp_path)
+    _seed_planning_collection(tmp_path)
+    _write_manifest(tmp_path, _MISLOCATED_PATH, _MISLOCATED_PLANNING_MANIFEST)
+
+    result = plan_progress.review(tmp_path)
+
+    assert result["collections_unavailable"] == 1
+    assert result["collections_scanned"] == 1
+    # A count, never a path: the review surface says how much it could not read
+    # without saying what.
+    assert _MISLOCATED_PATH not in json.dumps(result)
+
+
+def test_the_outcome_audit_reports_an_unreadable_manifest_as_unevaluated(
+    tmp_path: Path,
+) -> None:
+    from exomem import audit
+
+    _seed_records_collection(tmp_path)
+    _seed_planning_collection(tmp_path)
+    mislocated = _write_manifest(tmp_path, _MISLOCATED_PATH, _MISLOCATED_PLANNING_MANIFEST)
+
+    _findings, meta = audit._check_unreflected_outcomes(tmp_path)
+
+    assert meta["unevaluated"] == [
+        {
+            "collection": mislocated,
+            "reason": "unreadable_manifest",
+            "error_code": "INVALID_COLLECTION_PATH",
+        }
+    ]

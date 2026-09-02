@@ -3937,11 +3937,12 @@ def _outcome_bindings(
 
     authorize = authorize or _release_filter(vault_root)
     try:
-        manifests = list(
-            collections_module.discover_collections(vault_root, authorize_path=authorize)
+        discovered, unreadable = collections_module.discover_collections_with_errors(
+            vault_root, authorize_path=authorize
         )
     except collections_module.CollectionError:
         return [], []
+    manifests = list(discovered)
     planning_by_id = {
         manifest.collection_id: manifest
         for manifest in manifests
@@ -3951,7 +3952,16 @@ def _outcome_bindings(
         manifest.path: manifest for manifest in manifests if manifest.semantic_profile == "planning"
     }
     bindings: list[_OutcomeBinding] = []
-    unevaluated: list[dict[str, Any]] = []
+    # A manifest the sweep could not read may declare a binding nobody has
+    # looked at, which is the same state as an unresolvable reference: not a
+    # finding, and never silence. Now that the sweep continues past a bad
+    # manifest instead of aborting, dropping these rows would move the silent
+    # skip one layer out. The path is safe to name -- discovery authorizes
+    # every candidate before it parses it.
+    unevaluated: list[dict[str, Any]] = [
+        {"collection": row.path, "reason": "unreadable_manifest", "error_code": row.code}
+        for row in unreadable
+    ]
     for manifest in manifests:
         if manifest.semantic_profile != "records":
             continue
