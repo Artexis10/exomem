@@ -15,11 +15,13 @@ Two existing systems provide the pattern rather than a new architecture:
   governed trash, and supersession chain already provide the single-operation
   safety properties curation needs to compose.
 
-The current Hosted v4 agent profile exposes `maintain_memory`, but the common
+The current Hosted v4 agent profile exposes the legacy `maintain_memory`
+contract, but its historical command schema is immutable and the common
 invocation boundary refuses request-bound write maintenance except
-`structured-files`. Curation therefore needs one narrow remote exception for
-its exact reviewed-plan protocol; ordinary `fix`, `reconcile`, and ID backfill
-remain operator-only.
+`structured-files`. Curation therefore ships remotely only through the new v5
+profile: v1-v4 neither advertise nor admit the new arguments. V5 gains one
+narrow remote exception for its exact reviewed-plan protocol; ordinary `fix`,
+`reconcile`, and ID backfill remain operator-only.
 
 That refusal is the subject of the still-active `bound-remote-maintenance`
 OpenSpec change. S8 is a deliberate successor constraint, not a contradiction:
@@ -272,13 +274,24 @@ The registry-derived surfaces expose the curation schema everywhere.
 as reads. Every other action takes the common writer authority, process-safe
 vault boundary, terminal projection, and tenant-scoped retry path.
 
-The request-bound maintenance refusal changes from a single
-`structured-files` exception to the explicit set `{structured-files,
-curation}`. No other maintenance write is admitted remotely. Hosted v4 needs no
-intercept or separate executor: its current profile already includes
-`maintain_memory`, and the generic gateway forwards the canonical arguments to
-the same leaf. Capability/profile generation and actual-wire tests prove the
-surface rather than relying on documentation.
+For profiles whose pinned schema declares curation, the request-bound
+maintenance refusal changes from a single `structured-files` exception to the
+explicit set `{structured-files, curation}`. No other maintenance write is
+admitted remotely. The v5 runtime needs no intercept or separate executor: its
+profile includes the new `maintain_memory` schema, and the generic gateway
+forwards the canonical arguments to the same leaf. V1-v4 keep their frozen
+schema and refuse the new arguments before manager dispatch. Runtime capability
+and actual-wire tests prove both boundaries rather than relying on
+documentation.
+
+Hosted v1-v4 source and generated artifacts, locks, archives, definitions,
+fixtures, promotion records, resolved command schemas, and actual-wire
+identities remain byte-identical. The curation implementation supplies a
+generic synthetic contribution input outside the candidate tree at
+`tests/fixtures/hosted_v5_contributions/governed_curation.json`. The single v5
+owner canonicalises and freezes that input into the candidate-owned combined
+fixture before the first render or lock. The curation lane does not edit,
+render, lock, archive, promote, or roll back any v5 file.
 
 Standalone mode stores all canonical run material inside the vault and uses
 only the existing local mutation/runtime state; it requires no Hosted service,
@@ -328,9 +341,11 @@ refuse, not recover optimistically.
 3. Add the private leaf commit-witness seam and one adapter at a time with
    crash tests before enabling its step kind.
 4. Add forward apply/resume, then compensation derivation/execution.
-5. Update read/write classification, the narrow request-bound exception,
-   schema fixtures, capability docs, scaffold workflow skill, and Hosted v4
-   generated artifacts.
+5. Update standalone read/write classification, schema fixtures, capability
+   docs, and scaffold workflow skill; provide the generic curation contribution
+   input outside the v5 tree. The v5 owner adds profile-scoped remote admission,
+   composes the candidate-owned fixture, and proves the complete historical
+   v1-v4 manifest unchanged.
 6. Run scoped suites during implementation, then the full lean corpus,
    OpenSpec strict validation, artifact freshness, and privacy/leak gates.
 

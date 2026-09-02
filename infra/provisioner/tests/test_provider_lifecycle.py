@@ -1236,6 +1236,67 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
 
 
 @pytest.mark.asyncio
+async def test_retargeted_stranded_provision_migrates_before_runtime_admission() -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    source_target = _runtime_target(
+        releaseVersion="0.21.0",
+        gatewayContractDigest="e" * 64,
+        schemaDigest="f" * 64,
+    )
+    target = _runtime_target()
+    source_config = replace(
+        _config(),
+        image="registry.invalid/exomem@sha256:" + "e" * 64,
+        release_version="0.21.0",
+        runtime_target=source_target,
+    )
+    config = replace(
+        _config(),
+        runtime_target=target,
+        migration_mode="state-root-v1",
+        legacy_runtime_units={
+            ("0.21.0", "1"): {
+                **source_target,
+                "runtimeImage": "registry.invalid/exomem@sha256:" + "e" * 64,
+                "sourceCommit": "e" * 40,
+            }
+        },
+    )
+    source_request = _v2_request(runtimeTarget=source_target)
+    target_request = _v2_request(runtimeTarget=target)
+    await plane.seed_ready_cell(_metadata(), source_request, source_config)
+    cell = plane._cells[plane._key(_metadata())]
+    cell.runtime_admitted = False
+    cell.control_route = False
+    cell.transfer_route = False
+    before_volume = plane.bound_handle(_metadata())
+    before_fingerprint = plane.vault_fingerprint(_metadata())
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+
+    final, checkpoints = await _run_action(
+        driver,
+        "provision",
+        target_request,
+        _context(checkpoint="volume-owned", wire_protocol=WIRE_PROTOCOL_V2),
+    )
+
+    assert checkpoints[:5] == [
+        "retarget-runtime-stop-wait",
+        "retarget-runtime-stopped",
+        f"retarget-vault-fingerprinted-{before_fingerprint}",
+        f"retarget-migration-complete-{before_fingerprint}",
+        "initialized",
+    ]
+    assert final.result["providerRef"] == plane.provider_reference(_metadata())
+    assert plane.bound_handle(_metadata()) == before_volume
+    assert plane.vault_fingerprint(_metadata()) == before_fingerprint
+    assert plane.helm_values(_metadata())["image"] == config.image
+    assert plane.helm_values(_metadata())["expectedRelease"] == "0.22.0"
+    assert plane.runtime_admitted(_metadata()) is True
+    assert plane.routes_enabled(_metadata()) == (True, True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "policy",
     [

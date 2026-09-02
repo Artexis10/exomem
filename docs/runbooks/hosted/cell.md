@@ -122,7 +122,7 @@ The recovery helper runs only in a short-lived, non-network-published operator
 Pod. Use the exact digest selected by the deployment lock; do not use a tag or
 substitute the API/worker ServiceAccount. The chart renders the dedicated
 `exomem-init-retry-recovery` ServiceAccount and read-only ClusterRole. It can
-observe only namespaces, PVCs/PVs, ConfigMaps, StatefulSets, Jobs, and
+observe only namespaces, PVCs/PVs, ConfigMaps, Pods, StatefulSets, Jobs, and
 IngressRoutes. It cannot read Secrets or create, update, patch, or delete any
 Kubernetes object. Stop if that rendered role differs; do not widen the routine
 provisioner role.

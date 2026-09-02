@@ -47,7 +47,7 @@ from .provider_identity import (
     authenticate_cell_provider_recovery_envelopes,
     provider_operation_resource_name,
 )
-from .repository import OperationRepository
+from .repository import OperationRepository, canonical_request_sha256
 from .wire_protocol import runtime_identity
 
 
@@ -629,6 +629,8 @@ class LiveLifecyclePlane:
         self,
         metadata: OpaqueProviderMetadata,
         request: dict[str, Any],
+        *,
+        require_fresh: bool = True,
     ) -> str:
         """Ensure one authenticated bootstrap generation before Helm can start a pod."""
 
@@ -676,6 +678,7 @@ class LiveLifecyclePlane:
                 expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
                 expected_recovery_envelope=recovery_envelope,
                 now=current,
+                _require_fresh=require_fresh,
             )
         return bundle.revision
 
@@ -684,10 +687,12 @@ class LiveLifecyclePlane:
         metadata: OpaqueProviderMetadata,
         request: dict[str, Any],
         values: dict[str, Any],
+        *,
+        require_fresh: bool = True,
     ) -> dict[str, Any]:
         desired = dict(values)
         desired["authorizationSessionRevision"] = await self._authorization_session_revision(
-            metadata, request
+            metadata, request, require_fresh=require_fresh
         )
         return desired
 
@@ -905,6 +910,97 @@ class LiveLifecyclePlane:
         desired["authorizationSessionRevision"] = revision
         await self._helm.ensure_release(owned, desired)
         await self._refresh(metadata)
+
+    async def provision_retarget_required(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        config: LifecycleConfig,
+    ) -> bool:
+        if request.get("provisionMode") != "serve":
+            return False
+        internal_operation_id = self._operation_ids.get(self._key(metadata))
+        if internal_operation_id is None:
+            raise MetadataConflict("retargeted provision operation is unavailable")
+        operation = await self._repository.get_by_id(internal_operation_id)
+        marker = operation.progress.get("_runtime_retarget_recovery_v1") if operation else None
+        marker_keys = {
+            "schema",
+            "preflight_sha256",
+            "source_request_sha256",
+            "target_request_sha256",
+            "target_runtime_sha256",
+            "helper_source_sha256",
+            "claim_generation",
+            "committed_at",
+        }
+        target_runtime = request.get("runtimeTarget")
+        target_runtime_sha256 = (
+            hashlib.sha256(
+                json.dumps(
+                    target_runtime, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+                ).encode("utf-8")
+            ).hexdigest()
+            if isinstance(target_runtime, dict)
+            else ""
+        )
+        if (
+            operation is None
+            or operation.action.value != "provision"
+            or operation.external_operation_id != metadata.operation_id
+            or operation.tenant_id != metadata.tenant_id
+            or operation.cell_id != metadata.subject_id
+            or operation.fence_generation != metadata.fence_generation
+            or not isinstance(marker, dict)
+            or set(marker) != marker_keys
+            or marker.get("schema") != 1
+            or marker.get("target_request_sha256") != operation.canonical_request_sha256
+            or marker.get("target_runtime_sha256") != target_runtime_sha256
+            or marker.get("source_request_sha256") == marker.get("target_request_sha256")
+            or not isinstance(marker.get("claim_generation"), int)
+            or marker["claim_generation"] < 0
+            or not isinstance(marker.get("committed_at"), str)
+            or any(
+                not isinstance(marker.get(key), str) or len(marker[key]) != 64
+                for key in marker_keys
+                if key.endswith("sha256")
+            )
+        ):
+            raise MetadataConflict("retargeted provision recovery receipt is invalid")
+        desired = _fixed_helm_values(self._owner(metadata), request, config)
+        current = await self._helm.current_release_values(self._owner(metadata))
+        for key in ("image", "expectedRelease", "expectedProtocol"):
+            if not isinstance(current.get(key), str):
+                raise MetadataConflict("current Helm runtime selection is invalid")
+        changed = any(
+            current[key] != desired[key] for key in ("image", "expectedRelease", "expectedProtocol")
+        )
+        operation_digest = hashlib.sha256(metadata.operation_id.encode("utf-8")).hexdigest()
+        marker = current.get("runtimeUpgrade")
+        transition_owned = (
+            isinstance(marker, dict)
+            and marker.get("schemaVersion") == 1
+            and marker.get("operationDigest") == operation_digest
+            and isinstance(marker.get("priorRevision"), int)
+            and not isinstance(marker.get("priorRevision"), bool)
+            and marker["priorRevision"] >= 1
+        )
+        if not changed and not transition_owned:
+            return False
+        snapshot = self._snapshot(metadata)
+        if snapshot.runtime_admitted or snapshot.routes != (False, False):
+            raise MetadataConflict("retargeted provision is already admitted or routed")
+        if config.migration_mode not in {"binding-v1-to-v2", "state-root-v1"}:
+            raise MetadataConflict("retargeted provision requires a declared migration")
+        return True
+
+    async def stop_stranded_provision(self, metadata: OpaqueProviderMetadata) -> None:
+        snapshot = self._snapshot(metadata)
+        if snapshot.runtime_admitted or snapshot.routes != (False, False):
+            raise MetadataConflict("retargeted provision is already admitted or routed")
+        if snapshot.runtime_desired_replicas != 0:
+            await self._cell.scale(self._owner(metadata), 0)
+            await self._refresh(metadata)
 
     async def volume_claim_bound(self, metadata: OpaqueProviderMetadata) -> bool:
         return await self._cell.volume_claim_bound(self._owner(metadata))
@@ -1153,11 +1249,16 @@ class LiveLifecyclePlane:
         if config.migration_mode not in {"binding-v1-to-v2", "state-root-v1"}:
             raise MetadataConflict("runtime migration was not declared by the deployment lock")
         values = self._rollforward_helm_values(metadata, request, config)
-        values = await self._authorization_helm_values(metadata, request, values)
+        values = await self._authorization_helm_values(
+            metadata, request, values, require_fresh=False
+        )
         values["workloadMode"] = "migrate"
         values["routes"]["enabled"] = False
-        values["initOperationId"] = operation_id
-        values["initRequestId"] = _deterministic_uuid4(operation_id + ":runtime-migration")
+        migration_operation_id = (
+            f"{operation_id}:runtime-migration:{canonical_request_sha256(request)}"
+        )
+        values["initOperationId"] = migration_operation_id
+        values["initRequestId"] = _deterministic_uuid4(migration_operation_id)
         await self._helm.transition_release(
             self._owner(metadata),
             values,

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from record_fixtures import copy_vehicle_maintenance_fixture, copy_x3_fixture
 
-from exomem import graph_sync, record_formats, vault, writer_lease
+from exomem import cli_ops, graph_sync, record_formats, vault, writer_lease
 from exomem import structured_collections as collections
 
 
@@ -1102,3 +1102,80 @@ item_schema:
     assert not list(tmp_path.rglob(".exomem-batch-*"))
     monkeypatch.setattr(vault._BatchWorkspace, "create_artifact", real_create)
     assert records.create_collection(tmp_path, manifest_path, text, why="retry collection")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owner-only residue mode is a POSIX contract")
+@pytest.mark.parametrize("scaffold", [True, False])
+def test_record_create_reports_recovery_required_for_unsafe_batch_residue(
+    tmp_path: Path,
+    scaffold: bool,
+) -> None:
+    from exomem import records
+
+    _activity_log(tmp_path)
+    manifest_path = "Knowledge Base/Records/New/_collection.md"
+    text = """---
+type: collection
+exomem_id: 33333333-3333-4333-8333-333333333333
+title: New records
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: Events
+  format_version: 1
+item_schema:
+  natural_key: [occurred_on]
+  fields:
+    occurred_on:
+      type: date
+      required: true
+---
+"""
+    residue = tmp_path / "Knowledge Base" / f".exomem-batch-{'a' * 32}"
+    residue.mkdir(mode=0o700)
+    (residue / "stage-0.tmp").write_bytes(b"recoverable staged bytes")
+    residue.chmod(0o755)
+
+    validated = records.validate_collection_create(
+        tmp_path,
+        manifest_path,
+        text,
+        scaffold=scaffold,
+    )
+    assert validated["valid"] is True
+
+    with pytest.raises(collections.CollectionError) as blocked:
+        records.create_collection(
+            tmp_path,
+            manifest_path,
+            text,
+            why="create collection",
+            scaffold=scaffold,
+        )
+
+    assert blocked.value.code == "RECORD_RECOVERY_REQUIRED"
+    assert blocked.value.reason == "private transaction residue blocks safe publication"
+    assert not (tmp_path / manifest_path).exists()
+    assert not (tmp_path / "Knowledge Base/Records/New/Events").exists()
+    assert (residue / "stage-0.tmp").read_bytes() == b"recoverable staged bytes"
+    public = cli_ops.OpError(blocked.value.code, blocked.value.reason).as_public_dict()
+    assert public["remediation"] == (
+        "Have the cell operator inspect and quarantine stale private transaction residue, "
+        "then retry the unchanged request."
+    )
+
+    residue.rename(tmp_path / "quarantined-batch-residue")
+    created = records.create_collection(
+        tmp_path,
+        manifest_path,
+        text,
+        why="retry after operator recovery",
+        scaffold=scaffold,
+    )
+
+    assert created["outcome"] == "committed"
+    assert (tmp_path / manifest_path).is_file()
+    assert (tmp_path / "Knowledge Base/Records/New/Events").is_dir() is scaffold

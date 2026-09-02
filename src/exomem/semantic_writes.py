@@ -78,6 +78,42 @@ _MAX_REVIEWED_STAMP_AGE = dt.timedelta(hours=24)
 _MAX_REVIEWED_STAMP_SKEW = dt.timedelta(minutes=5)
 
 
+def _structured_item_product_route(source: str) -> str | None:
+    """Return the owning mutation surface for an exact structured-item identity."""
+    try:
+        frontmatter, _body, marker = vault.parse_frontmatter(source, strict=True)
+    except vault.FrontmatterError:
+        return None
+    if marker is None or type(frontmatter.get("schema_version")) is not int:
+        return None
+    item_type = frontmatter.get("type")
+    identity_field, route = (
+        ("plan_id", "plan_memory")
+        if item_type == "plan"
+        else ("record_id", "record_memory")
+        if item_type == "record"
+        else (None, None)
+    )
+    if identity_field is None:
+        return None
+    try:
+        uuid.UUID(str(frontmatter.get("collection_id", "")))
+        uuid.UUID(str(frontmatter.get(identity_field, "")))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    return route
+
+
+def _reject_generic_structured_item_write(path: str, source: str) -> None:
+    route = _structured_item_product_route(source)
+    if route is None:
+        return
+    raise SemanticWriteError(
+        "STRUCTURED_ITEM_REQUIRES_PRODUCT_ROUTE",
+        f"{path} is owned by {route}; use that product route so its schema and audit chain remain valid",
+    )
+
+
 def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[str, int]:
     """Pure canonical path-only rewrite shared by move staging and review carry."""
     old_no_ext = old_rel.removesuffix(".md")
@@ -1720,6 +1756,12 @@ def _preflight_existing(
         before_hash,
     }:
         raise SemanticWriteError("STALE_SEMANTIC_WRITE", "page changed before semantic preflight")
+    # Tier-2 overwrite is the deliberate break-glass route for repairing a
+    # malformed structured item that its typed adapter can no longer load.
+    # It still creates an inspectable collection-audit gap; routine generic
+    # writers must never create that gap themselves.
+    if operation != "tier2_overwrite":
+        _reject_generic_structured_item_write(path, before_source)
 
     closure_required = bool(
         operation == "tier2_overwrite"
