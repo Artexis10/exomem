@@ -61,6 +61,25 @@ _TARGET_IDENTITY = "11111111-2222-4333-8444-555555555555"
 # four.  Correctness on this path is enforced every run by
 # tests/test_read_after_write_visibility.py, which is deterministic and cheap;
 # this flag is for measuring the window when someone is working on it.
+# Environment: the fast-acknowledgement rows need managed retrieval admission,
+# and the gate asserts it rather than measuring the offline walk by accident.
+# Two env levers are worth stating explicitly because they look like they
+# should matter and only one of them does.
+#
+#   EXOMEM_DISABLE_FILE_WATCHER=1 -- inert here, and safe to keep set. It is
+#   read only by `graph_drain`, `server_runtime` and `hosted_runtime`; nothing
+#   in `freshness`, `readiness` or `lexstore` consults it, and this script is
+#   not a server, so it starts no watcher either way. Admission is unaffected,
+#   and the gate does NOT need to be run without it.
+#
+#   EXOMEM_DISABLE_EVENT_INDEXES -- this is the one `freshness.
+#   event_indexes_enabled()` actually reads, and it changes how admission is
+#   proved, not whether it can be. Set, `recall_is_live` is always False and
+#   the catalogue proof falls back to published rather than live checkpoints
+#   (the documented polling rollback); unset, `warmup.warm_retrieval_catalog`
+#   rebaselines the projections once and proves them live. Both admit. Leave
+#   it unset for a gate run, so the rows measure the maintained path the
+#   product ships.
 VALIDATE_MEDIAN_MS = 500.0
 VALIDATE_P95_MS = 1_000.0
 COMMIT_MEDIAN_MS = 750.0
@@ -360,11 +379,47 @@ def _measure_fts5_visibility(
 
 
 def _enter_managed_recall(vault_root: Path) -> None:
-    """Stand up the admission a served process has, for this phase only."""
+    """Stand up the admission a served process has, for this phase only.
+
+    The warm window is not the admission. `begin_warm`/`finish_warm` only open
+    and close the window; what actually admits retrieval is the *catalogue
+    proof* published inside it -- `readiness.admit_retrieval_proof`, which is
+    the sole writer of the `retrieval_catalog` event that
+    `readiness.retrieval_admission` reads. An earlier version of this function
+    opened and closed the window without ever publishing that proof, so it left
+    `_warm_finished` set with the event unset, which is precisely the
+    `unavailable` state, and the gate died at the assertion below within a
+    minute of starting.
+
+    So this delegates to `warmup.warm_retrieval_catalog`, the function the
+    served process itself calls, rather than restating an abbreviation of it.
+    That keeps the rebaseline, the live-projection requirement, the maintained
+    versus reference index distinction and the proof CAS in one place, and it
+    means this warm-up cannot drift away from the product's.
+
+    `EXOMEM_EAGER_BOOT` is set for the call because a benchmark needs the
+    synchronous contract: without it, an incomplete catalogue is delegated to
+    the background repair worker and the function returns False, leaving the
+    sampling loop to race a rebuild. With it, the repair is awaited and proven,
+    and a failure to converge raises here instead of quietly measuring the
+    wrong thing.
+    """
+    from exomem import warmup
+
     lexstore.ensure_fresh(vault_root)
     readiness.manage_runtime()
+    previous_eager = os.environ.get("EXOMEM_EAGER_BOOT")
+    os.environ["EXOMEM_EAGER_BOOT"] = "1"
     readiness.begin_warm()
-    readiness.finish_warm()
+    try:
+        warmup.warm_retrieval_catalog(vault_root)
+    finally:
+        readiness.finish_warm()
+        if previous_eager is None:
+            os.environ.pop("EXOMEM_EAGER_BOOT", None)
+        else:
+            os.environ["EXOMEM_EAGER_BOOT"] = previous_eager
+
     admission = readiness.retrieval_admission(vault_root)
     if not admission.get("admitted"):
         # A gate that silently measured the offline walk instead of managed

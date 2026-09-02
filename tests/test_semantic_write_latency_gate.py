@@ -651,3 +651,57 @@ def test_the_warmup_wait_is_a_named_budget_and_still_fails_the_run() -> None:
     finally:
         with module.lexstore._REPAIRS_LOCK:
             module.lexstore._REPAIRS_IN_FLIGHT.discard(key)
+
+
+def test_managed_recall_warmup_actually_admits(tmp_path) -> None:
+    """The warm-up must publish the catalogue proof, not just open the window.
+
+    `begin_warm`/`finish_warm` only bracket the warm window. What admits
+    retrieval is `readiness.admit_retrieval_proof`, the sole writer of the
+    `retrieval_catalog` event. A warm-up that opens and closes the window
+    without publishing that proof leaves `_warm_finished` set and the event
+    unset, which reads as `unavailable` -- and that shipped once, killing the
+    gate a minute into a two-size run. This node drives the real function on a
+    real vault root so the script cannot ship a warm-up that cannot admit.
+    """
+    module = load_module()
+
+    vault_root = tmp_path / "vault"
+    (vault_root / "Knowledge Base" / "Notes").mkdir(parents=True)
+    (vault_root / "Knowledge Base" / "Notes" / "seed.md").write_text(
+        "---\ntype: insight\nstatus: active\n---\n\n## Observations\n\n- [test] seed\n",
+        encoding="utf-8",
+    )
+
+    try:
+        module._enter_managed_recall(vault_root)
+        admission = module.readiness.retrieval_admission(vault_root)
+        assert admission.get("admitted") is True, admission
+        assert admission.get("state") == "ready", admission
+        # The proof itself, not merely a finished warm window.
+        assert module.readiness.is_ready("retrieval_catalog")
+    finally:
+        module.readiness.unmanage_runtime()
+
+
+def test_the_file_watcher_switch_does_not_gate_admission(tmp_path, monkeypatch) -> None:
+    """`EXOMEM_DISABLE_FILE_WATCHER` is inert on the admission path.
+
+    Stated as a test rather than a comment because the gate is run with it set,
+    and "we believe it does not matter" is not evidence.
+    """
+    module = load_module()
+    monkeypatch.setenv("EXOMEM_DISABLE_FILE_WATCHER", "1")
+
+    vault_root = tmp_path / "vault"
+    (vault_root / "Knowledge Base" / "Notes").mkdir(parents=True)
+    (vault_root / "Knowledge Base" / "Notes" / "seed.md").write_text(
+        "---\ntype: insight\nstatus: active\n---\n\n## Observations\n\n- [test] seed\n",
+        encoding="utf-8",
+    )
+
+    try:
+        module._enter_managed_recall(vault_root)
+        assert module.readiness.retrieval_admission(vault_root).get("admitted") is True
+    finally:
+        module.readiness.unmanage_runtime()
