@@ -414,6 +414,22 @@ _IDENTITY_CASES: tuple[tuple[str, dict[str, Any] | None, dict[str, Any]], ...] =
         {"$or": [{"page.status": {"$eq": "active"}}, {"unit.category": {"$eq": "constraint"}}]},
         {},
     ),
+    # `$between` is settled by kind identity, never by `_temporal_match`, so a
+    # date-kinded window excludes an instant-recorded page the day column
+    # includes. Both `upd-instant*.md` sit inside this window, so a complement
+    # taken over the day column would drop them. The bare `$not` is refused
+    # (see the complement test); paired with a clause that narrows, the widened
+    # complement is settled by the evaluation and the answer must still match.
+    (
+        "AND with NOT $between",
+        {
+            "$and": [
+                {"page.status": {"$eq": "active"}},
+                {"$not": {"page.updated": {"$between": ["2026-06-01", "2026-06-30"]}}},
+            ]
+        },
+        {},
+    ),
     ("NOT page", {"$not": {"page.type": {"$eq": "insight"}}}, {}),
     ("NOT page $in", {"$not": {"page.tags": {"$in": ["retrieval"]}}}, {}),
     ("NOT unit", {"$not": {"unit.category": {"$eq": "constraint"}}}, {}),
@@ -695,6 +711,19 @@ def test_a_complement_the_columns_cannot_express_is_refused_not_deferred(
     error = caught.value
     assert error.code == "UNSUPPORTED_FILTER_FIELD"
     assert "page.updated" in error.message
+
+    # `$between` is the same class for a different reason: it is the one
+    # ordered operator the evaluator settles by kind identity rather than
+    # through `_temporal_match`, so a WHOLE-DAY window is still only a superset
+    # (it admits instant-recorded pages the evaluator refuses) and still must
+    # not be complemented.
+    window = {"$not": {"page.updated": {"$between": ["2026-06-01", "2026-06-30"]}}}
+    assert not structured_filters.plan_index_eligibility(_plan(window)).narrows
+    sentinel.reset()
+    with pytest.raises(structured_filters.FilterError) as between_caught:
+        _filtered_recall(vault, filters=window)
+    assert between_caught.value.code == "UNSUPPORTED_FILTER_FIELD"
+    assert sentinel.count == 0, sentinel.report()
     # The remediation has to be actionable, so it names the shortcuts that are
     # day-scoped and therefore exact.
     assert "updated_after" in error.remediation
@@ -711,6 +740,56 @@ def test_a_complement_the_columns_cannot_express_is_refused_not_deferred(
     monkeypatch.setattr(readiness, "runtime_managed", lambda: False)
     find_module.reset_page_and_result_caches()
     assert _indexed(vault, _plan(precise)) == _oracle(vault, _plan(precise))
+
+
+def test_a_null_valued_date_comparison_is_refused_not_deferred(
+    vault: Path, warm_managed_cell, walk_sentinel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A predicate that yields no column test is refused, like a complement.
+
+    `page.updated $eq null` asks for a page that declares the key as an
+    explicit null. The columns record "declared, but not as a comparable
+    value", which cannot tell that apart from a declared 7 or a declared list,
+    so the predicate contributes no constraint and the plan folds to a
+    tautology. Left alone that reached the same never-succeeding warming a
+    complement used to get — the shape has no column, and no later generation
+    grows one.
+
+    It is the un-negated half of the same defect, so it gets the same typed
+    refusal rather than a second outcome to reason about.
+    """
+    _seed_adversarial(vault)
+    warm_managed_cell(vault)
+    sentinel = walk_sentinel(*_scope_roots(vault))
+
+    for expr in (
+        {"page.updated": {"$eq": None}},
+        {"unit.check_by": {"$eq": None}},
+    ):
+        plan = _plan(expr)
+        eligibility = structured_filters.plan_index_eligibility(plan)
+        assert eligibility.refuses, eligibility
+        sentinel.reset()
+        with pytest.raises(structured_filters.FilterError) as caught:
+            _filtered_recall(vault, filters=expr, result_level="page")
+        assert caught.value.code == "UNSUPPORTED_FILTER_FIELD", expr
+        assert "null-valued" in caught.value.message, caught.value.message
+        assert "recency_days" in caught.value.remediation
+        assert sentinel.count == 0, f"{expr}: {sentinel.report()}"
+
+    # A sibling clause that DOES narrow keeps the plan answerable: the
+    # unconstrained predicate is settled by the evaluation over a candidate set
+    # the other clause bounded, so refusing it would remove working capability.
+    paired = {"$and": [{"page.type": {"$eq": "insight"}}, {"page.updated": {"$eq": None}}]}
+    expected = _oracle(vault, _plan(paired))
+    with _oracle_withdrawn():
+        assert _indexed(vault, _plan(paired)) == expected
+
+    # And an offline caller keeps the exact source walk for the refused shape.
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: False)
+    find_module.reset_page_and_result_caches()
+    solo = _plan({"page.updated": {"$eq": None}})
+    assert _indexed(vault, solo) == _oracle(vault, solo)
 
 
 def test_a_plan_the_columns_cannot_narrow_declines_instead_of_hydrating(

@@ -885,6 +885,14 @@ def _eligibility_predicate(
             reasons.append((field, _inexactness_reason(field, operator, operand)))
         if test is not None:
             tests.append(test)
+    if not tests:
+        # The predicate produced no column constraint at all. Left alone it
+        # folds into a tautology, and a plan with nothing else to narrow by
+        # would be answered with the retryable warming outcome — the same
+        # never-succeeding promise a complement used to get. Record the shape
+        # so the refusal fires instead; if a sibling clause does narrow, the
+        # plan still answers and `refuses` stays false.
+        issues.shapes.extend(reasons)
     return _fold_all(tests), exact, tuple(reasons)
 
 
@@ -897,7 +905,11 @@ def _inexactness_reason(
     describes the operand the caller supplied rather than the column that could
     not hold it.
     """
+    if isinstance(operand, TypedScalar) and operand.kind == "null":
+        return f"a null-valued {field} comparison"
     if field in INDEX_PAGE_DATE_AXES or field in INDEX_UNIT_DATE_AXES:
+        if operator == "$between":
+            return f"a {field} $between window, which is settled by kind identity"
         if operator in _ORDERED:
             return f"a {field} bound with sub-day precision"
         if operator in {"$eq", "$ne", "$in"}:
@@ -906,8 +918,6 @@ def _inexactness_reason(
                 "day from a recorded instant"
             )
         return f"a {field} comparison a day column cannot decide"
-    if isinstance(operand, TypedScalar) and operand.kind == "null":
-        return f"a null-valued {field} comparison"
     return f"a {field} {operator} comparison with no exact column"
 
 
@@ -1035,8 +1045,15 @@ def _date_range_test(
         lower, upper = _operand_day(operand[0]), _operand_day(operand[1])
         if lower is None or upper is None:
             return None, False
-        exact = _day_scoped(operand[0]) and _day_scoped(operand[1])
-        return AxisTest(field, "range", lower=lower, upper=upper), exact
+        # NEVER exact, day-scoped or not. `$between` is the one ordered
+        # operator `_evaluate_operator` does not route through
+        # `_temporal_match`: it settles by KIND IDENTITY
+        # (`scalar.kind == operand[0].kind`), so a date-kinded bound never
+        # matches a page recorded to the instant, however plainly the day sits
+        # inside the window. A day column says the opposite, so the seed is a
+        # superset here even for a whole-day question — and a superset must
+        # never be complemented.
+        return AxisTest(field, "range", lower=lower, upper=upper), False
     return None, False
 
 
