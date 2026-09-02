@@ -64,6 +64,7 @@ from . import envelope as envelope_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
+from . import find_types, query_log, retrieval_models, semantic_census, upload_tokens, vault
 from . import get_page as get_page_module
 from . import knowledge_packs as knowledge_packs_module
 from . import link as link_module
@@ -83,7 +84,6 @@ from . import plan_memory as plan_memory_module
 from . import plan_progress as plan_progress_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
-from . import query_log, retrieval_models, semantic_census, upload_tokens, vault
 from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import record_memory as record_memory_module
@@ -2172,10 +2172,16 @@ def op_fetch(
 
 
 def _timing_log_summary(timings_dict: dict | None) -> dict | None:
-    """Query-log-safe slice of a timings envelope: totals + per-stage ms only
-    (never content; stage entries drop skip/error detail to stay compact)."""
+    """Query-log-safe slice of a timings envelope: totals, per-stage ms and
+    per-stage source only (never content; stage entries drop skip/error detail
+    to stay compact)."""
     if timings_dict is None:
         return None
+    timed_stages = {
+        name: entry
+        for name, entry in timings_dict.get("stages", {}).items()
+        if isinstance(entry, dict) and "ms" in entry
+    }
     return {
         "total_ms": timings_dict.get("total_ms"),
         # Carried deliberately. This projection is closed, so a field it does
@@ -2184,10 +2190,18 @@ def _timing_log_summary(timings_dict: dict | None) -> dict | None:
         # which is the thing #283 spent a month unable to see.
         "unattributed_ms": timings_dict.get("unattributed_ms"),
         "cache_hit": bool(timings_dict.get("cache", {}).get("hit")),
-        "stage_ms": {
-            name: entry["ms"]
-            for name, entry in timings_dict.get("stages", {}).items()
-            if isinstance(entry, dict) and "ms" in entry
+        "stage_ms": {name: entry["ms"] for name, entry in timed_stages.items()},
+        # Same closure argument, one level up: a corpus walk that reappears is
+        # a stage that stops saying `index` and starts saying `computed`, and
+        # across many requests the query log is the only place that is visible
+        # without re-running a benchmark. Drawn from the same filtered set as
+        # `stage_ms`, so the log cannot report a stage's time without also
+        # reporting where it came from, and closed to the known vocabulary so
+        # only those four tokens can ever reach the durable record.
+        "stage_source": {
+            name: entry["source"]
+            for name, entry in timed_stages.items()
+            if entry.get("source") in find_types.STAGE_SOURCES
         },
     }
 

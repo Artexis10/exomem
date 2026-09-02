@@ -183,3 +183,29 @@ def test_a_hot_cache_hit_reports_itself_as_a_cache(
     assert hot["cache"]["hit"] is True
     assert hot["stages"]["filter_eligibility"]["source"] == "cache"
     assert hot["stages"]["filter_eligibility"]["cache_hit"] is True
+
+
+def test_the_query_log_summary_carries_a_source_for_every_stage_it_lists(
+    vault: Path, warm_managed_cell
+) -> None:
+    """The durable log is where a returning walk becomes visible over many requests.
+
+    `_timing_log_summary` is a closed projection: a field it does not name never
+    reaches the query log. It already carries `unattributed_ms` for exactly this
+    reason — #283 was a month of not being able to see a rising uninstrumented
+    term. A stage that silently stops answering from an index and starts walking
+    is the same shape of defect one level up, so the source rides alongside the
+    duration, drawn from the same filtered set: the log cannot report a stage's
+    time without saying where that time came from.
+    """
+    warm_managed_cell(vault)
+    timings = _timed_filtered_recall(vault)
+
+    summary = commands._timing_log_summary(timings)
+
+    assert summary is not None
+    assert summary["stage_ms"], "the summary listed no stages"
+    assert set(summary["stage_source"]) == set(summary["stage_ms"])
+    assert set(summary["stage_source"].values()) <= SOURCE_VOCABULARY
+    # The stage this change exists to expose, carried all the way to the log.
+    assert summary["stage_source"]["filter_eligibility"] == "computed"
