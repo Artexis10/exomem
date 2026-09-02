@@ -898,6 +898,24 @@ def test_hook_rearms_the_exact_ordinary_entity_read_without_becoming_a_decider()
     assert "at balanced/maximal" in cadence, cadence
 
 
+def _lifecycle_block(path: Path) -> str:
+    """The one block in each carrier that states the recurrence cadence.
+
+    Scoped, not whole-file: `operations.md` also says "do not repeat the same
+    advice within one conversation" hundreds of lines away, which satisfies a
+    file-wide "do not repeat" check even when the cadence sentence beside
+    `entity_recurrence` has been inverted.
+    """
+    text = path.read_text(encoding="utf-8")
+    if path.name == "operations.md":
+        block = text.split("## recurring entity lifecycle", 1)[1].split("\n## ", 1)[0]
+    else:
+        block = text.split(
+            "- **Recurring-identity maintenance boundary", 1
+        )[1].split("\n- ", 1)[0]
+    return " ".join(block.split())
+
+
 def test_every_carrier_file_states_the_cadence_bounds_on_its_own() -> None:
     """Per FILE, not concatenated: a pair that is only jointly complete is not.
 
@@ -912,10 +930,9 @@ def test_every_carrier_file_states_the_cadence_bounds_on_its_own() -> None:
         Path("src/exomem/_scaffold/_Schema/references/operations.md"),
         Path("plugins/claude-code/skills/exomem/references/operations.md"),
     ):
-        text = path.read_text(encoding="utf-8")
-        prose = " ".join(text.split())
-        folded = prose.casefold()
-        assert "limit=3" in prose, path
+        block = _lifecycle_block(path)
+        folded = block.casefold()
+        assert "limit=3" in block, path
         assert "once per session" in folded, path
         assert "at most three candidates" in folded, path
         assert ("do not rescan" in folded) or ("do not repeat" in folded), path
@@ -1349,6 +1366,10 @@ def test_candidate_meta_without_state_or_grammar_fails_closed(missing: str) -> N
     seals a binding against a grammar the review never named.
     """
     meta = {
+        # The ordinary-text lane: this candidate DID match the text grammar, so
+        # a missing grammar_version here is a broken signal rather than the
+        # wikilink lane, and must still fail closed.
+        "reasons": ["ordinary_identity_recurs"],
         "candidate_state": "hydration",
         "identity": "cobalt workshop",
         "signal_version": "c" * 64,
@@ -1395,14 +1416,94 @@ def test_item_by_ref_still_resolves_a_non_entity_partitioned_category(
 ) -> None:
     """The entity narrowing must not have taken the shared triage path with it.
 
-    `entity_candidate_by_ref` is a narrowed lookup beside `item_by_ref`; if the
-    narrowing had been applied to the shared resolver instead, every other
-    partitioned category would silently stop resolving.
+    `entity_candidate_by_ref` is a narrowed lookup beside `item_by_ref`; had the
+    narrowing been applied to the shared resolver instead, every other
+    partitioned category would silently stop resolving. The vault therefore has
+    to actually produce a non-entity item -- a loop over an empty report asserts
+    nothing at all.
     """
-    _promotion(tmp_path)
-    report = attention.attention(
-        tmp_path, categories=["supersession_integrity"], limit=3, record_surfacing=False
+    _write(
+        tmp_path,
+        "Knowledge Base/Notes/superseded-head.md",
+        "---\n"
+        "type: insight\n"
+        "title: Superseded head\n"
+        "status: superseded\n"
+        "superseded_by: '[[Knowledge Base/Notes/successor-that-was-never-written]]'\n"
+        "---\n"
+        "# Superseded head\n\nThe successor this points at does not exist.\n",
     )
-    assert report is not None
+
+    report = attention.attention(
+        tmp_path, categories=["supersession_integrity"], limit=5, record_surfacing=False
+    )
+    assert len(report.items) >= 1, report
     for item in report.items:
+        assert item.categories == ["supersession_integrity"]
         assert attention.item_by_ref(tmp_path, item.ref).ref == item.ref
+
+
+def test_wikilink_only_candidate_binds_its_own_grammar_lane(tmp_path: Path) -> None:
+    """The unresolved-wikilink lane is a real lane, not a malformed signal.
+
+    `audit` emits `grammar_version: None` for a candidate that never matched the
+    ordinary-text grammar, so a fail-closed check that only asks "is it present"
+    refuses the whole wikilink lane. The lane has to be recognised and bound by
+    name instead -- a candidate whose grammar we genuinely cannot place still
+    fails closed.
+    """
+    for index in range(3):
+        _write(
+            tmp_path,
+            f"Knowledge Base/Notes/wiki-{index:02d}.md",
+            "---\ntype: insight\ntitle: Wiki "
+            f"{index}\nstatus: active\n---\n# Wiki {index}\n\n"
+            "The roster names [[Amber Guild]] and the minutes name "
+            "[[Amber Guild]] again.\n",
+        )
+    candidate = _candidate(tmp_path)
+    meta = candidate.reasons[0]["meta"]
+    assert meta["grammar_version"] is None
+    assert meta["predicate_table_digest"] is None
+    assert "ordinary_identity_recurs" not in meta["reasons"]
+    assert meta["candidate_state"] == "promotion"
+
+    item = curation.work_item(tmp_path, review_ref=candidate.ref)
+    binding = item["entity_candidate"]
+    assert binding["candidate_state"] == "promotion"
+    assert binding["grammar_identity"] == {
+        "version": "unresolved-wikilink-v1",
+        "predicate_table_digest": None,
+    }
+
+    proposal = curation.propose(
+        tmp_path,
+        {
+            "version": 1,
+            "title": "Promote a wikilink-only recurring identity",
+            "entity_candidate": binding,
+            "steps": [
+                {
+                    "step_id": "promote",
+                    "kind": "create-entity",
+                    "args": {
+                        "entity_type": "organization",
+                        "name": binding["identity"],
+                        "summary": "A recurring identity named only by wikilinks.",
+                    },
+                }
+            ],
+        },
+    )
+    result = curation.apply(
+        tmp_path,
+        run_id=proposal["run_id"],
+        plan_id=proposal["plan_id"],
+        expected_plan_fingerprint=proposal["plan_fingerprint"],
+        why="Confirm the reviewed wikilink-lane promotion.",
+    )
+    while result["phase"] != "completed":
+        result = curation.resume(
+            tmp_path, run_id=proposal["run_id"], plan_id=proposal["plan_id"]
+        )
+    assert result["phase"] == "completed"

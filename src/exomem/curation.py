@@ -692,6 +692,16 @@ def _read_page(vault_root: Path, raw: str) -> tuple[str, str]:
     return path, source
 
 
+#: The two recurrence lanes, by the reason the review reports them under, and
+#: the grammar id the substrate documents for the wikilink-only lane. A
+#: wikilink-only candidate has no ordinary-text grammar to name, so `audit`
+#: emits None for both grammar fields and the lane id lives here instead.
+#: Follow-up outside this lane: audit should emit the lane id explicitly.
+_ORDINARY_TEXT_REASON = "ordinary_identity_recurs"
+_UNRESOLVED_WIKILINK_REASON = "unresolved_identity_recurs"
+_UNRESOLVED_WIKILINK_GRAMMAR = "unresolved-wikilink-v1"
+
+
 def _entity_candidate_binding(item: Any, *, registry_fallback: str) -> dict[str, Any]:
     reasons = [
         reason
@@ -719,18 +729,38 @@ def _entity_candidate_binding(item: Any, *, registry_fallback: str) -> dict[str,
             if candidate.get("path")
         }
     )
-    # No silent defaults here.  Defaulting the state to "promotion" offers a
-    # create-entity route for a candidate whose state we could not read, and
-    # defaulting the grammar seals a binding against a grammar the review never
-    # named.  Both are the executable direction; fail closed instead.
-    for required in ("candidate_state", "grammar_version"):
-        if not str(meta.get(required) or "").strip():
+    # No silent default for the state: defaulting it to "promotion" offers a
+    # create-entity route for a candidate whose state we could not read, which
+    # is the executable direction.
+    if not str(meta.get("candidate_state") or "").strip():
+        raise _error(
+            "CURATION_ENTITY_CANDIDATE_INVALID",
+            "recurring identity signal does not carry candidate_state",
+        )
+    # The grammar is a LANE, not a free-text field, and the review reports the
+    # lane through its reasons.  A candidate that never matched the ordinary
+    # text grammar is emitted with `grammar_version: None` by design, so a
+    # presence check alone refuses the entire unresolved-wikilink lane.  Bind
+    # that lane by name; anything we cannot place still fails closed rather than
+    # sealing a binding against a grammar the review never named.
+    reasons = {str(reason) for reason in list(meta.get("reasons") or [])}
+    raw_grammar = meta.get("grammar_version")
+    if raw_grammar is None and _ORDINARY_TEXT_REASON not in reasons:
+        if _UNRESOLVED_WIKILINK_REASON not in reasons:
             raise _error(
                 "CURATION_ENTITY_CANDIDATE_INVALID",
-                f"recurring identity signal does not carry {required}",
+                "recurring identity signal does not name a recognised grammar lane",
             )
-    grammar_version = str(meta["grammar_version"])
-    predicate_digest = meta.get("predicate_table_digest")
+        grammar_version = _UNRESOLVED_WIKILINK_GRAMMAR
+        predicate_digest = None
+    elif not str(raw_grammar or "").strip():
+        raise _error(
+            "CURATION_ENTITY_CANDIDATE_INVALID",
+            "recurring identity signal does not carry grammar_version",
+        )
+    else:
+        grammar_version = str(raw_grammar)
+        predicate_digest = meta.get("predicate_table_digest")
     registry_identity = str(meta.get("registry_fingerprint") or registry_fallback)
     binding = {
         "review_ref": str(getattr(item, "ref", None) or ""),
