@@ -1278,7 +1278,7 @@
     }
   },
   "schema_version": 1,
-  "source_revision": "ee5f4a675a7948a7e6cc2f0d3bd8b5ebecfc786c",
+  "source_revision": "18bb516e4906fa028d4696ee1ad30a0cdd1952dc",
   "sources": {
     "hosted-alpha-agent-v1": "plugins/hosted/generated/compatibility.json",
     "hosted-alpha-agent-v2": "plugins/hosted/generated/candidates/hosted-alpha-agent-v2/compatibility.json",

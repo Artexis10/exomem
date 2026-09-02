@@ -2749,6 +2749,11 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "reconcile": False,
             "backfill-ids": True,
             "structured-files": True,
+            # Governed curation registers as `mutation`: `mode="curation"` with
+            # no action is conservatively mutating, so the bare selector is not
+            # read-only. The registry gained it with the curation lane; this
+            # literal did not, and no lane gate ran this file until now.
+            "curation": False,
         },
     }
     product = {command.name: command for command in commands.PRODUCT_COMMANDS}

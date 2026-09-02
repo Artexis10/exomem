@@ -30,8 +30,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPO_ROOT / "tests" / "fixtures" / "hosted_v1_v4_immutability_manifest.json"
-MANIFEST_SHA256 = "3acf80ce40dcfeaa09d37b82ef30ecdcb41f873ba4c697988d5c6a15fc154ee7"
-SOURCE_REVISION = "ee5f4a675a7948a7e6cc2f0d3bd8b5ebecfc786c"
+MANIFEST_SHA256 = "a9ca74c5d7b2adc722378ca43b66baade855930f0ec484060d60c2a929121583"
+SOURCE_REVISION = "18bb516e4906fa028d4696ee1ad30a0cdd1952dc"
 
 
 def _manifest() -> dict:
