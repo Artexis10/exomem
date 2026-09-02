@@ -382,7 +382,7 @@ def test_h3_two_providers_carrying_host_unvalidated_latency_end_to_end(tmp_path:
     memorybench-export.v1.json with host_unvalidated latency -> no
     comparative column, but neither provider's own indicative row is
     dropped (F1's correction to the original, wrong, "no numbers at all"
-    pin)."""
+    pin); H1: the two never share a `latency_ms` column/table."""
 
     from reports.consolidate import consolidate
 
@@ -394,12 +394,17 @@ def test_h3_two_providers_carrying_host_unvalidated_latency_end_to_end(tmp_path:
 
     report = (out_dir / "report.md").read_text(encoding="utf-8")
     assert "## Latency" in report
-    assert "| exomem | n/a | indicative (host_unvalidated) |" in report
-    assert "| basic-memory | n/a | indicative (host_unvalidated) |" in report
+    assert "### exomem" in report
+    assert "### basic-memory" in report
+    assert "| n/a | indicative (host_unvalidated) |" in report
     assert "withheld: transport asymmetry (4b.40)" in report
-    # No comparative construct: neither provider's row is ever juxtaposed
-    # against the other inside a single cell.
-    assert "exomem | basic-memory" not in report
+    # H1: no shared column -- each provider's own table/header appears
+    # exactly once, never one table both providers' rows land in.
+    assert report.count("| latency_ms | disposition |") == 2
+    exomem_block = report.split("### exomem", 1)[1].split("### basic-memory", 1)[0]
+    basic_memory_block = report.split("### basic-memory", 1)[1]
+    assert "| latency_ms | disposition |" in exomem_block
+    assert "| latency_ms | disposition |" in basic_memory_block
     assert "aggregate" not in report.lower()
 
 
@@ -412,7 +417,8 @@ def test_h3_a_single_provider_export_renders_without_the_withheld_marker(tmp_pat
     consolidate([export_dir], out_dir, repo_root=REPO_ROOT)
 
     report = (out_dir / "report.md").read_text(encoding="utf-8")
-    assert "| exomem | n/a | indicative (host_unvalidated) |" in report
+    assert "### exomem" in report
+    assert "| n/a | indicative (host_unvalidated) |" in report
     assert "withheld: transport asymmetry (4b.40)" not in report
 
 
