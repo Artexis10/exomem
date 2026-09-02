@@ -464,6 +464,37 @@ def test_a_refused_curation_read_blocks_the_quiet_assertion_rather_than_silencin
     assert "never silence" in result.evidence
 
 
+def test_a_signal_bearing_finding_without_its_subject_is_refused() -> None:
+    """A candidate the runtime raised may not project as an ordinary page defect.
+
+    The signal class is attached from the finding's category and the subject
+    from its own identity. If a future `entity_recurrence` finding ever arrived
+    without one, keeping the row and dropping the class would demote a real
+    candidate into page hygiene — invisible to `_signals_targeting`, so every
+    quiet assertion over that snapshot would pass while the runtime was in fact
+    nagging about the subject. Refusing is the only answer that is not silence.
+    """
+
+    from types import SimpleNamespace
+
+    from epistemic.projectors.exomem_vault import _audit_finding_items
+
+    report = SimpleNamespace(
+        summary={"entity_recurrence": 1},
+        findings=[
+            SimpleNamespace(
+                category="entity_recurrence",
+                path="Knowledge Base/Notes/Insights/anything.md",
+                detail="a candidate with no identity",
+                meta={"candidate_state": "promotion"},
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="carries no identity"):
+        _audit_finding_items(report)
+
+
 def test_the_f21_runtime_twin_is_frequency_matched_to_both_positives(
     f21_vault: Path,
 ) -> None:
