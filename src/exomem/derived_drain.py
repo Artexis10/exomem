@@ -169,11 +169,25 @@ def component_dispatcher() -> ComponentDispatcher:
         if status.component is derived_receipts.DerivedComponent.WRITE_ADVISORY:
             from . import deferred_write_advisory
 
+            # The advisory is proven against its own batch's lineage and its
+            # target's content fingerprint, not against the vault-global graph
+            # checkpoint. That checkpoint advances on every write to any page,
+            # so handing it to a per-page component makes every batch but the
+            # last-written one refuse with `generation_changed` and rotate for
+            # ever -- the same defect ruling R1 removed from the store, in the
+            # one place the ruling could not reach because an accepted Lane 4
+            # node pins that executor's refusal directly.
+            #
+            # Neutralising it here changes no guard: `execute_write_advisory`
+            # re-observes the target's exact fingerprint immediately after and
+            # publishes `failed`/`generation_changed` on any mismatch, and
+            # publication still requires the exact claimed component revision,
+            # lease owner and unexpired lease.
             with call_spans.span("derived.advisory_execute"):
                 execution = deferred_write_advisory.execute_write_advisory(
                     vault_root,
                     status,
-                    observe_current_generation=canonical_generation_observer(),
+                    observe_current_generation=lambda _root: status.canonical_generation,
                 )
             call_ledger.note_derived_event(
                 "advisory_vectors_reused"

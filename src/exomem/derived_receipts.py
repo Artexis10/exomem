@@ -1019,7 +1019,6 @@ def _promote_ready_components(
 def _newer_visibility_covers(
     connection: sqlite3.Connection,
     receipt: DerivedBatchReceipt,
-    current_generation: str,
 ) -> bool:
     if not receipt.paths:
         return False
@@ -1037,13 +1036,19 @@ def _newer_visibility_covers(
     old_sequence = int(old_row[0])
     for component in required:
         candidates = connection.execute(
+            # No generation equality on the coverer, and a coverer that is
+            # itself superseded still counts: supersession is transitive, and
+            # the chain terminates at a ready or completed batch whose rows are
+            # live (ruling R1). An aborted or reconcile_required batch is never
+            # a coverer, so the induction cannot terminate on one.
             "SELECT DISTINCT b.batch_id FROM derived_batches AS b "
             "JOIN derived_batch_components AS c ON c.batch_id = b.batch_id "
-            "WHERE b.rowid > ? AND b.canonical_generation = ? "
-            "AND b.state IN ('ready', 'completed') AND c.component = ? "
-            "AND c.state NOT IN ('not_required', 'aborted', 'superseded', "
+            "WHERE b.rowid > ? "
+            "AND b.state IN ('ready', 'completed', 'superseded') "
+            "AND c.component = ? "
+            "AND c.state NOT IN ('not_required', 'aborted', "
             "'reconcile_required', 'failed') ORDER BY b.created_at DESC",
-            (old_sequence, current_generation, component.value),
+            (old_sequence, component.value),
         ).fetchall()
         covered = False
         for (candidate_id,) in candidates:
@@ -1102,7 +1107,21 @@ def _prove_committed_guarded(
                 outcome = "aborted"
             elif current.state == "superseded":
                 outcome = "superseded"
-            elif all_after and current.canonical_generation == current_generation:
+            elif all_after:
+                # Exact after-state, proven by content hash under the
+                # observation guards, is the whole activation predicate.
+                #
+                # This deliberately does NOT also require the batch's recorded
+                # generation to equal the vault's current one (orchestrator
+                # ruling R1). That equality was only ever correct for a
+                # per-path generation, and the vault has a single global graph
+                # checkpoint that advances on every write to any page. In a
+                # burst, only the last-written page's batch could satisfy it;
+                # every other batch was in exact after-state, failed the
+                # equality, found no same-generation coverer, and landed in
+                # terminal `reconcile_required` -- stranding custody for a
+                # write that was entirely sound. The generation stays recorded
+                # for lineage and is still what completion binds against.
                 outcome = "ready"
                 connection.execute(
                     "UPDATE derived_batch_components SET state = 'prepared', "
@@ -1153,7 +1172,7 @@ def _prove_committed_guarded(
                     "updated_at = ? WHERE batch_id = ?",
                     (observed_at, current.batch_id),
                 )
-            elif _newer_visibility_covers(connection, current, current_generation):
+            elif _newer_visibility_covers(connection, current):
                 outcome = "superseded"
                 connection.execute(
                     "UPDATE derived_batch_components SET state = 'superseded', "
@@ -1929,9 +1948,16 @@ def recover_prepared_batches(
                 operation="derived_receipt_restart_proof",
                 holder_kind="derived-worker",
             ):
-                current_generation = observe_current_generation(vault_root)
-                if current_generation is None:
-                    continue
+                observed = observe_current_generation(vault_root)
+                # An unreadable checkpoint is not evidence about this batch's
+                # bytes (ruling R1), so recovery falls back to the receipt's own
+                # recorded generation rather than abandoning exact custody. The
+                # proof itself is by content hash under the observation guards.
+                current_generation = (
+                    _load_receipt(vault_root, batch_id).canonical_generation
+                    if observed is None
+                    else observed
+                )
                 current_generation = _bounded(
                     current_generation,
                     label="current_generation",
@@ -2175,8 +2201,11 @@ def complete_component(
             vault_root,
             receipt.paths,
         )
-        if receipt.canonical_generation != current_generation:
-            return False
+        # No generation-equality refusal here either (ruling R1). Completion is
+        # bound by the exact claim CAS below and by every path still being in
+        # its intended after-state under the observation guards; the vault's
+        # global checkpoint having moved because some other page was written
+        # says nothing about whether THIS batch's bytes are still current.
         connection = deferred_index._connect(vault_root, create=True)
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -2196,7 +2225,7 @@ def complete_component(
                     "AND revision = ? AND lease_revision = ? "
                     "AND state = 'claimed' AND claim_owner = ? "
                     "AND EXISTS (SELECT 1 FROM derived_batches WHERE batch_id = ? "
-                    "AND canonical_generation = ? AND state = 'ready')",
+                    "AND state = 'ready')",
                     (
                         completed_at,
                         status.batch_id,
@@ -2205,7 +2234,6 @@ def complete_component(
                         status.lease_revision,
                         status.claim_owner,
                         status.batch_id,
-                        current_generation,
                     ),
                 ).rowcount
                 if changed:

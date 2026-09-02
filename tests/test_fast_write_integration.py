@@ -1514,3 +1514,206 @@ def test_live_acceptance_connector_transport_requires_an_endpoint(
                 "1",
             ]
         )
+
+
+# --------------------------------------------------------------------------- #
+# Ruling R1 — a burst of ordinary writes strands no custody
+# --------------------------------------------------------------------------- #
+
+
+def _batch_states(root: Path) -> dict[str, str]:
+    from exomem import deferred_index
+
+    connection = sqlite3.connect(deferred_index.store_path(root))
+    try:
+        return {
+            str(row[0]): str(row[1])
+            for row in connection.execute(
+                "SELECT batch_id, state FROM derived_batches ORDER BY rowid"
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+
+
+def _pending_row_states(root: Path) -> list[str]:
+    from exomem import deferred_index
+
+    connection = sqlite3.connect(deferred_index.store_path(root))
+    try:
+        return [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT state FROM pending_recall_rows"
+            ).fetchall()
+        ]
+    finally:
+        connection.close()
+
+
+def test_a_burst_of_ordinary_writes_strands_no_custody(
+    vault: Path, tmp_path: Path
+) -> None:
+    """Three pages, each written twice, leave nothing in reconciliation demand.
+
+    This is the shape that exposed the foundation's proof predicate. A batch's
+    generation is the graph checkpoint at prepare time and the proof's
+    `current_generation` is the vault-global checkpoint at proof time, which
+    advances on every write to any page -- so under a generation-equality gate
+    only the last-written page's batch could ever prove `ready`. Every other
+    batch was in exact after-state, failed the equality, found no
+    same-generation coverer, and landed in terminal `reconcile_required`, whose
+    rows can never retire and which therefore accumulate against the bounded
+    hydration snapshot until managed recall fails closed.
+
+    Exact after-state is proven by content hash. A burst of ordinary writes is
+    ordinary: every older batch is superseded, every newest batch converges,
+    and no row is left behind.
+    """
+    manager = _manager(tmp_path)
+    rels = [
+        f"Knowledge Base/Notes/Insights/lane5-burst-{index}.md" for index in range(3)
+    ]
+    for index, rel in enumerate(rels):
+        _governed_write(
+            manager,
+            vault,
+            rel_path=rel,
+            source=_compiled_page(f"Lane5 burst {index}", f"lane5burstfirst{index}"),
+            idempotency_key=f"lane5-burst-a-{index}",
+        )
+    for index, rel in enumerate(rels):
+        _governed_write(
+            manager,
+            vault,
+            rel_path=rel,
+            source=_compiled_page(f"Lane5 burst {index}", f"lane5burstsecond{index}"),
+            idempotency_key=f"lane5-burst-b-{index}",
+        )
+
+    _drain(vault)
+
+    states = _batch_states(vault)
+    assert len(states) == 6, states
+    ordered = list(states.values())
+    older, newest = ordered[:3], ordered[3:]
+    assert all(state == "superseded" for state in older), ordered
+    assert all(state == "completed" for state in newest), ordered
+    assert "reconcile_required" not in ordered, ordered
+
+    # Retirement waits for the persistent lanes, by design: an overlay row is
+    # cleared only once the catalogue actually holds the exact after
+    # generation. The lexical component reports `deferred` -- its publication
+    # belongs to the repair worker, not to the drain -- so the catalogue is
+    # driven here the way a running server's would be, and only then does the
+    # next hydration retire the custody.
+    lexstore.ensure_fresh(vault)
+    pending_recall.reset(vault)
+    pending_recall.overlay(vault)
+
+    assert set(_pending_row_states(vault)) == {"retired"}, _pending_row_states(vault)
+    assert derived_receipts.recoverable_batch_count(vault) == 0
+    assert derived_receipts.due_component_count(vault) == 0
+
+
+def test_a_revert_to_earlier_bytes_never_activates_a_rolled_back_batch(
+    vault: Path,
+) -> None:
+    """The reviewer's revert scenario, pinned.
+
+    Dropping the generation equality means activation rests entirely on the
+    content-hash proof, so the case that has to hold is a batch whose intended
+    after-state is NOT what is on disk. It must never activate, and a later
+    batch touching the same path must retire it as superseded rather than let
+    it publish a generation the vault never held.
+
+    The case that is deliberately NOT a defect: if a later batch happens to
+    write exactly the bytes an earlier batch intended, that earlier batch is
+    `ready`, and publishing derived rows for those bytes is correct because
+    they are the current canonical content. Hash proof is a statement about
+    content, not about who wrote it.
+    """
+    rel = "Knowledge Base/Notes/burst-revert.md"
+    v0, v1, v2 = "v0 body\n", "v1 body\n", "v2 body\n"
+    _put(vault, rel, v0)
+
+    # A batch that intended v1 and rolled back: disk is still v0.
+    rolled_back = _prepare_store_batch(
+        vault,
+        batch_id="revert-rolled-back",
+        generation="generation-1",
+        changes=((rel, v0, v1),),
+        now=10.0,
+    )
+    proof = derived_receipts.prove_committed(
+        vault, rolled_back, current_generation="generation-9"
+    )
+    assert proof.outcome == "reconcile_required", proof.outcome
+    assert proof.ready_components == ()
+    with pytest.raises(RuntimeError):
+        derived_receipts.publish_pending_visibility(
+            vault, rolled_back, publisher=pending_recall.publish
+        )
+
+    # A later batch takes the page somewhere else entirely. The rolled-back
+    # batch's intended bytes are still nowhere on disk, so it retires as
+    # superseded -- never as ready, and it still publishes nothing.
+    forward = _prepare_store_batch(
+        vault,
+        batch_id="revert-forward",
+        generation="generation-2",
+        changes=((rel, v0, v2),),
+        now=11.0,
+    )
+    _put(vault, rel, v2)
+    assert (
+        derived_receipts.prove_committed(
+            vault, forward, current_generation="generation-2"
+        ).outcome
+        == "ready"
+    )
+    assert derived_receipts.publish_pending_visibility(
+        vault, forward, publisher=pending_recall.publish
+    )
+
+    superseded = derived_receipts.prove_committed(
+        vault, rolled_back, current_generation="generation-9"
+    )
+    assert superseded.outcome == "superseded", superseded.outcome
+    assert superseded.ready_components == ()
+    with pytest.raises(RuntimeError):
+        derived_receipts.publish_pending_visibility(
+            vault, rolled_back, publisher=pending_recall.publish
+        )
+
+
+def test_mixed_canonical_state_still_refuses_after_the_generation_gate_is_gone(
+    vault: Path,
+) -> None:
+    """Half a batch landed is still not a batch. Nothing activates."""
+    first = "Knowledge Base/Notes/burst-mixed-a.md"
+    second = "Knowledge Base/Notes/burst-mixed-b.md"
+    _put(vault, first, "a0\n")
+    _put(vault, second, "b0\n")
+    receipt = _prepare_store_batch(
+        vault,
+        batch_id="burst-mixed",
+        generation="generation-1",
+        changes=((first, "a0\n", "a1\n"), (second, "b0\n", "b1\n")),
+    )
+    _put(vault, first, "a1\n")  # only half the batch landed
+
+    proof = derived_receipts.prove_committed(
+        vault, receipt, current_generation="generation-1"
+    )
+    assert proof.outcome == "reconcile_required", proof.outcome
+    assert proof.ready_components == ()
+    assert (
+        derived_receipts.component_status(
+            vault, receipt, DerivedComponent.LEXSTORE
+        ).state
+        == "reconcile_required"
+    )
+    assert derived_receipts.claim_ready_components(
+        vault, owner="worker", limit=8, lease_seconds=30.0, now=99.0
+    ) == ()

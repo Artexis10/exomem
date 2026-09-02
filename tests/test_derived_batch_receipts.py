@@ -555,14 +555,38 @@ def test_mixed_or_stale_state_never_activates_components(vault: Path) -> None:
         vault, receipt, protocol.DerivedComponent.LEXSTORE
     ).state == "reconcile_required"
 
+    # Corrected under orchestrator ruling R1. Once every path IS in its exact
+    # intended after-state, the batch is ready -- and stays ready when the
+    # vault's global checkpoint has moved on, because that checkpoint advances
+    # on every write to any page and says nothing about whether THIS batch's
+    # bytes are current. The mixed-state refusal above is the guard; the
+    # generation was a redundancy that only held for a per-path generation the
+    # vault does not have.
     _write(vault / rels[1], after[1])
     stale = protocol.prove_committed(
         vault, receipt, current_generation="generation-stale"
     )
-    assert stale.outcome == "reconcile_required"
+    assert stale.outcome == "ready"
+    assert protocol.component_status(
+        vault, receipt, protocol.DerivedComponent.LEXSTORE
+    ).state == "ready"
+    # Still unclaimable, but now for the right reason: the batch's pending
+    # visibility has not been published, and the store refuses to hand out a
+    # component whose overlay rows are still `prepared`. Activation and
+    # claimability are separate gates, and only the second one is about
+    # publication.
     assert protocol.claim_ready_components(
         vault, owner="worker", limit=10, lease_seconds=30, now=20.0
     ) == ()
+    assert protocol.publish_pending_visibility(
+        vault, receipt, publisher=lambda _root, _receipt: True
+    )
+    claimed = protocol.claim_ready_components(
+        vault, owner="worker", limit=10, lease_seconds=30, now=21.0
+    )
+    assert [status.component for status in claimed] == [
+        protocol.DerivedComponent.LEXSTORE
+    ]
 
 
 def test_newer_exact_custody_supersedes_only_after_visibility_is_live(
