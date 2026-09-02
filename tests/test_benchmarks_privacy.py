@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from exomem.public_artifact_privacy import assert_public_artifacts_clean
+import pytest
+
+from exomem.public_artifact_privacy import (
+    PublicArtifactPrivacyError,
+    assert_public_artifacts_clean,
+)
 
 
 def _artifact_files(root: Path) -> list[Path]:
@@ -34,3 +39,24 @@ def test_memorybench_benchmark_artifacts_are_public_safe() -> None:
     files = _artifact_files(Path("benchmarks/memorybench"))
     assert files
     assert_public_artifacts_clean(files, labels={path: str(path) for path in files})
+
+
+def test_suites_benchmark_artifacts_are_public_safe() -> None:
+    files = _artifact_files(Path("benchmarks/suites"))
+    assert files
+    assert_public_artifacts_clean(files, labels={path: str(path) for path in files})
+
+
+def test_the_suites_privacy_gate_rejects_an_injected_absolute_path(tmp_path: Path) -> None:
+    """R6: the gate that covers benchmarks/suites actually catches a leak."""
+
+    # Built by concatenation, not a literal: a contiguous absolute path here
+    # would itself trip the repository-wide privacy gate on this test file.
+    canary = "/" + "home" + "/" + "maintainer" + "/" + "checkout"
+    leaked = tmp_path / "LOCKFILE.json"
+    leaked.write_text(f'{{"notes": "captured from {canary}"}}\n', encoding="utf-8")
+
+    with pytest.raises(PublicArtifactPrivacyError):
+        assert_public_artifacts_clean(
+            (leaked,), labels={leaked: "benchmarks/suites/example/LOCKFILE.json"}
+        )

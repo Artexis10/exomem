@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import defaultdict
 from collections.abc import Mapping, Set
-import json
-import hashlib
 from pathlib import Path
 
 from protocol.offline import offline_guard
 
-from .dataset import LmeDataset, QUESTION_TYPES, load_dataset
-
+from .dataset import QUESTION_TYPES, LmeDataset, load_dataset
 
 ABSTENTION_ABILITY = "abstention"
 
@@ -67,6 +66,8 @@ def render_report(
 ) -> str:
     """Render only per-ability rows; missing bounds block the affected row."""
 
+    from .judge_io import verified_judge_banner
+
     by_type: dict[str, list[str]] = defaultdict(list)
     for question in dataset.questions:
         ability = ABSTENTION_ABILITY if question.is_abstention else question.question_type
@@ -74,8 +75,7 @@ def render_report(
     lines = [
         "# LongMemEval-S per-ability report",
         "",
-        "> UNVERIFIED judge command: confirm the emitted evaluate_qa.py flags against "
-        "the fetched official suite before judging.",
+        f"> {verified_judge_banner()}",
         "",
     ]
     if invalid_reason:
@@ -184,8 +184,8 @@ def validate_selection_evidence(run_dir: Path | str, *, manifest=None) -> None:
         raise ValueError("25-question selection evidence is missing")
     if lme.get("canonical_selection") is not True:
         raise ValueError("canonical selection evidence mode differs")
-    from protocol.models import DatasetIdentity
     from equivalence.selection import CANONICAL_LME_S_SOURCE
+    from protocol.models import DatasetIdentity
     expected_identity = DatasetIdentity(
         id="longmemeval", variant="LongMemEval-S cleaned September 2025",
         source="xiaowu0162/longmemeval-cleaned", revision=CANONICAL_LME_S_SOURCE["revision"],

@@ -1,0 +1,22 @@
+{
+  "suite": "lme_v1",
+  "paper": "arXiv:2410.10813 (ICLR 2025)",
+  "repo_url": "https://github.com/xiaowu0162/LongMemEval",
+  "commit_sha": "9e0b455f4ef0e2ab8f2e582289761153549043fc",
+  "upstream_last_commit": "2026-05-11",
+  "license_spdx": "MIT",
+  "license_sha256": "d3c4b9aa54759df6ded337978a6f3b55b75615e5e4525c3b82d7e2627d4b9732",
+  "checkout_env_var": "LONGMEMEVAL_HOME",
+  "runability": "runnable-with-cost",
+  "verified_at_utc": "2026-09-02",
+  "notes": "Official LongMemEval V1 harness (LongMemEval-V2 is a separate repo, out of scope for this pin). evaluate_qa.py takes three positional arguments, not the --dataset_file/--hypothesis_file/--output_file/--model flags an earlier, unverified ledger entry assumed; see the evaluate_qa block. README.md:101 and :106 claim the script saves evaluation logs to a '[hypothesis_file].log' file; at this pin, evaluate_qa.py writes only <hyp_file>.eval-results-<metric_model_short> (verified against the source), never a .log file -- the README is wrong upstream, so no log_derivation field is recorded here. The judge is a metered OpenAI call this package never invokes; commands are emitted for the operator to run.",
+  "evaluate_qa": {
+    "path": "src/evaluation/evaluate_qa.py",
+    "sha256": "ecce9c4c79dc89d99534ac17b383a5cbb5b9f0c69ee98adaf0684742e3d95251",
+    "invocation": "positional",
+    "arity": 3,
+    "argv_template": ["<metric_model_short>", "<hyp_file>", "<ref_file>"],
+    "result_file_derivation": "<hyp_file>.eval-results-<metric_model_short>",
+    "readme_example": "python3 evaluate_qa.py gpt-4o your_hypothesis_file ../../data/longmemeval_oracle.json"
+  }
+}

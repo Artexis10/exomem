@@ -4,15 +4,13 @@ import json
 from pathlib import Path
 
 import pytest
-
-from lme.dataset import LmeQuestion, render_session
 from lme import cli as cli_module
+from lme.dataset import LmeQuestion, render_session
 from lme.fetch import file_sha256
-from lme.judge_io import ingest_judge_labels, load_labels, rerender_report
+from lme.judge_io import ingest_judge_labels, load_labels, rerender_report, verified_judge_banner
 from lme.reader import MeteredApprovalRequired, StubReader
 from lme.runner import FullRunApprovalRequired, RunConfig, execute_run
 from membench.adapters.base import OpResult
-
 
 FIXTURE = Path("benchmarks/lme/fixtures/mini.json")
 
@@ -61,7 +59,7 @@ def test_runner_writes_official_hypotheses_bounds_environment_and_ability_report
     assert (result.run_dir / "bounds" / "null-abstain-floor.jsonl").is_file()
     assert (result.run_dir / "environment.json").is_file()
     assert (result.run_dir / "OFFICIAL_JUDGE_COMMAND.txt").is_file()
-    assert "UNVERIFIED" in (result.run_dir / "OFFICIAL_JUDGE_COMMAND.txt").read_text(
+    assert verified_judge_banner() in (result.run_dir / "OFFICIAL_JUDGE_COMMAND.txt").read_text(
         encoding="utf-8"
     )
     manifest = json.loads((result.run_dir / "run.json").read_text(encoding="utf-8"))
@@ -83,7 +81,7 @@ def test_runner_writes_official_hypotheses_bounds_environment_and_ability_report
     # (runner, judge re-render, artifact-only regeneration) render one shape.
     assert "| Ability | Variant | Questions |" in report
     assert "| single-session-assistant | exomem-source-only | 0 |" in report
-    assert "UNVERIFIED" in report
+    assert verified_judge_banner() in report
 
     with pytest.raises(FileExistsError, match="immutable"):
         execute_run(
@@ -479,8 +477,8 @@ def test_canonical_twenty_five_report_refuses_stripped_claims_and_judge_bypass(t
 
 
 def test_canonical_ids_cannot_be_downgraded_to_generic_pilot(tmp_path: Path) -> None:
-    from lme.report import validate_selection_evidence
     from equivalence.selection import load_frozen_lme_selection
+    from lme.report import validate_selection_evidence
 
     result = execute_run(RunConfig(dataset=FIXTURE, out=tmp_path, run_id="downgrade"), reader=StubReader(), adapter_factory=FixtureAdapter)
     artifact, _ = load_frozen_lme_selection()

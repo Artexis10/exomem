@@ -461,8 +461,19 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 
 ## 8. Suites (W10)
 
-- [ ] 8.1 `suites/registry.py` (LOCKFILE-or-GAP invariant) + `lme_v1`
+- [x] 8.1 `suites/registry.py` (LOCKFILE-or-GAP invariant) + `lme_v1`
       LOCKFILE (verifies `judge_io` UNVERIFIED flags → tested string)
+      Landed 2026-09-02 (`benchmarks/suites/registry.py`, `benchmarks/suites/lme_v1/LOCKFILE.json`):
+      closed registry with fullmatched digests and a deep-validated `evaluate_qa`
+      block; the four existing lockfiles validate byte-unchanged. CORRECTION: the
+      official LongMemEval `evaluate_qa.py` at 9e0b455 is POSITIONAL
+      (`metric_model hyp_file ref_file`, arity 3, result file derived from the
+      hypothesis path); the `--dataset_file/--hypothesis_file/--output_file/--model`
+      flags this item assumed never existed. `judge_io.official_judge_commands`
+      and the report banner now render one verified sentence and the positional
+      command from the lockfile. Fresh review REQUEST_CHANGES -> correction ->
+      recheck APPROVE; 29 guards mutation-killed. Hypothesis-file format
+      compatibility with the official script is owed by 7.5.
 - [ ] 8.2 LongMemEval-V2: pin official harness; 3-case offline fixture
       through THEIR harness with stub model; ≤25-case small tier only if
       budget allows
