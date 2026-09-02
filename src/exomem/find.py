@@ -4222,7 +4222,11 @@ def _keyword_match_paths(
     the surviving rows: the lane orders by `updated` descending, a pending page
     is by construction the newest committed generation of its identity, and the
     catalogue's own `updated` values are not available here without a parse per
-    row. `k` is re-applied after the merge, so the bound is unchanged.
+    row. The merged bound is `k` plus the number of admitted pending rows,
+    and the persistent side is over-fetched by the same count: leading rows
+    that displaced settled ones would shorten the catalogue half of a
+    bounded lane, so each side keeps its own budget instead of competing
+    for one. Callers apply their own `limit` after re-sorting.
     """
     merge_pending = pending is not None and not pending.empty
     admitted_pending: list[str] = []

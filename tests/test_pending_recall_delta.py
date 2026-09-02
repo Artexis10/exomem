@@ -1728,3 +1728,99 @@ def test_retirement_refuses_a_lane_pass_that_indexed_an_older_generation(
     find_module.reset_page_and_result_caches()
     with pytest.raises(find_module.RetrievalIndexWarming):
         _keyword(vault, marker)
+
+
+def test_publication_notice_reprojects_only_the_published_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Micro-round M: one publication must not re-parse unrelated custody.
+
+    A lane publishing one path used to drop the whole cached projection and
+    re-derive it, so a single one-path watcher batch parsed every other
+    outstanding pending path -- quadratic across a burst. Publishing one changed
+    path must stay bounded by that path's own batch (invariant 1), while
+    hydration itself keeps costing exactly one parse per pending row.
+    """
+    vault = tmp_path
+    _seed_corpus(vault)
+    _prime(vault)
+
+    batch_rows = 10
+    batch_count = 25
+    published_rel = "Knowledge Base/Notes/amp-b00-r00.md"
+    batch_paths: dict[str, list[str]] = {}
+    for batch_index in range(batch_count):
+        changes: list[tuple[str, str | None, str | None, str | None]] = []
+        rels: list[str] = []
+        for row_index in range(batch_rows):
+            rel = f"Knowledge Base/Notes/amp-b{batch_index:02d}-r{row_index:02d}.md"
+            rels.append(rel)
+            changes.append(
+                (
+                    rel,
+                    None,
+                    _page(
+                        title=f"Amp {batch_index:02d} {row_index:02d}",
+                        body="A committed page awaiting derived convergence.",
+                        updated="2026-08-01",
+                    ),
+                    None,
+                )
+            )
+        batch_paths[f"batch-amp-{batch_index:02d}"] = rels
+        _publish_change(
+            vault,
+            batch_id=f"batch-amp-{batch_index:02d}",
+            generation="generation-amp",
+            changes=tuple(changes),
+        )
+
+    pending_total = batch_rows * batch_count
+    assert len(_non_retired_rows(vault)) == pending_total
+
+    published_batch = next(
+        rels for rels in batch_paths.values() if published_rel in rels
+    )
+    unrelated = {
+        rel
+        for rels in batch_paths.values()
+        for rel in rels
+        if rel not in published_batch
+    }
+
+    # Warm the projection so the notice has a current cached fence to reuse.
+    assert _overlay(vault).ready is True
+
+    parsed: list[str] = []
+    real_parse = find_corpus.parse_page
+
+    def _spy(path, mtime, vault_root, **kwargs):
+        rel = find_module._vault_rel(vault, Path(path))
+        if rel is not None:
+            parsed.append(rel)
+        return real_parse(path, mtime, vault_root, **kwargs)
+
+    module = _pending_module()
+    assert module is not None
+    with monkeypatch.context() as guard:
+        guard.setattr(find_corpus, "parse_page", _spy)
+        module.note_persistent_publication(vault, "lexstore", [published_rel])
+
+    assert not (set(parsed) & unrelated), sorted(set(parsed) & unrelated)[:5]
+    assert len(parsed) <= len(published_batch) + 2, len(parsed)
+
+    # Hydration is unchanged: exactly one parse per outstanding pending row.
+    _reset_overlay()
+    hydration: list[str] = []
+
+    def _hydration_spy(path, mtime, vault_root, **kwargs):
+        rel = find_module._vault_rel(vault, Path(path))
+        if rel is not None:
+            hydration.append(rel)
+        return real_parse(path, mtime, vault_root, **kwargs)
+
+    with monkeypatch.context() as guard:
+        guard.setattr(find_corpus, "parse_page", _hydration_spy)
+        assert _overlay(vault).ready is True
+
+    assert len(hydration) == pending_total, len(hydration)

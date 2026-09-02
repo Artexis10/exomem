@@ -353,6 +353,53 @@ def _project_batches(vault_root: Path, batches: Sequence[object]) -> _Projection
     return _Projection(rows=proven, unprovable=frozenset(wanted - set(proven)))
 
 
+def _reproject_named(
+    vault_root: Path,
+    batches: Sequence[object],
+    cached: Mapping[str, PendingRow],
+    named: set[str],
+) -> _Projection:
+    """Re-prove only the identities a publication named; reuse the rest.
+
+    A lane publishing one path says nothing about any other pending identity, so
+    re-deriving the whole projection to account for it makes one publication
+    cost a parse of every outstanding row -- quadratic across a burst, and a
+    walk of paths the publication never touched. The named rows are re-proven
+    because their canonical bytes are exactly what may have moved; every other
+    row in the same batch is reused from the fenced projection, which is still
+    current by construction because the caller checked the fence first.
+    """
+    rows: dict[str, PendingRow] = {}
+    wanted: set[str] = set()
+    for batch in batches:
+        receipt = batch.receipt
+        by_path = {path.rel_path: path for path in receipt.paths}
+        for row in batch.rows:
+            rel = row.rel_path
+            wanted.add(rel)
+            if rel in rows:
+                continue
+            if rel not in named:
+                existing = cached.get(rel)
+                if existing is not None:
+                    rows[rel] = existing
+                continue
+            path = by_path.get(rel)
+            if path is None or row.canonical_generation != receipt.canonical_generation:
+                continue
+            proved = _prove_row(
+                vault_root,
+                rel,
+                after_hash=path.after_hash,
+                canonical_generation=row.canonical_generation,
+                batch_id=receipt.batch_id,
+                stable_memory_ref=path.stable_memory_ref,
+            )
+            if proved is not None:
+                rows[rel] = proved
+    return _Projection(rows=rows, unprovable=frozenset(wanted - set(rows)))
+
+
 def _canonical_identity(vault_root: Path, rel_path: str) -> str | None | object:
     """The identity the persistent lanes must hold for this path right now.
 
@@ -621,20 +668,49 @@ def reference_projection(vault_root: Path) -> ReferenceProjection | None:
 def note_persistent_publication(
     vault_root: Path, lane: str, rel_paths: Iterable[str]
 ) -> None:
-    """A persistent recall lane published; re-derive custody and retire it.
+    """A persistent recall lane published; re-derive that custody and retire it.
 
     Nothing is remembered from this call. Whether a lane holds an identity is a
     question for that lane's durable state, asked at retirement time against the
     exact generation the receipt recorded -- so a pass that indexed one
     generation before the file moved cannot retire custody the store does not
     hold, and a restart between two lane publications does not strand a row.
+
+    The re-derivation is scoped to the batches the reported paths belong to.
+    Publishing one changed path therefore costs that batch, not the whole
+    outstanding set: the fenced projection already describes every row the
+    publication did not name, and reusing it is what keeps a burst of
+    publications linear instead of quadratic.
     """
     if lane not in set(_RETIREMENT_LANES.values()):
         raise ValueError(f"unknown persistent recall lane: {lane!r}")
-    if not any(isinstance(rel, str) and rel for rel in rel_paths):
+    named = {rel for rel in rel_paths if isinstance(rel, str) and rel}
+    if not named:
         return
-    _forget(_key(Path(vault_root)))
-    overlay(Path(vault_root))
+    root = Path(vault_root)
+    key = _key(root)
+    with _STATE_LOCK:
+        state = _STATES.get(key)
+    if state is None or not derived_receipts.pending_visibility_snapshot_is_current(
+        root, state.snapshot_generation
+    ):
+        # Nothing this process may reuse: the ordinary bounded hydration owns
+        # the pass, and retires whatever has converged as part of it.
+        _forget(key)
+        overlay(root)
+        return
+    batches = tuple(
+        batch
+        for batch in state.batches
+        if any(row.rel_path in named for row in batch.rows)
+    )
+    if not batches:
+        return
+    projection = _reproject_named(root, batches, state.rows, named)
+    if _retire_settled(root, batches, projection):
+        # Custody converged, so the store's pending generation has moved and
+        # this projection is fenced out; the next request re-hydrates.
+        _forget(key)
 
 
 # --------------------------------------------------------------------------- #
