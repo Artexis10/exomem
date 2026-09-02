@@ -25,7 +25,7 @@ jobs:
   # tests/conftest.py; tests/test_ci_reliability_contract.py proves the two
   # tiers plus the latency file partition the previous lean suite exactly.
   core-tests:
-    name: core tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/8)
+    name: core tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/12)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -39,7 +39,7 @@ jobs:
         python-version: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["3.11", "3.13"]') || fromJSON('["3.13"]') }}
         # Separate runners keep process, port, filesystem, and mutation-lock
         # state isolated while cutting the serial critical path.
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,11 +93,11 @@ jobs:
         # scripts/refresh_test_durations.py — CI never commits durations.
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
-          --splits=8
+          --splits=12
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path=.test_durations.json
-          --session-timeout=1500
+          --session-timeout=1400
           --durations=50
           --durations-min=1
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml

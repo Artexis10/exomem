@@ -29,10 +29,13 @@ FULL_CI_JOBS = {
 #: `retrieval-latency` job) they cover exactly the previous lean suite —
 #: pinned below by test_pr_tiers_partition_the_lean_suite_exactly.
 PR_TIER_JOBS = (
-    ("core-tests", 8, "core"),
+    ("core-tests", 12, "core"),
     ("harness-tests", 4, "harness"),
 )
 
+#: Session caps per tier; the headroom test derives the floor from the durations file.
+CORE_SESSION_TIMEOUT = 1400
+HARNESS_SESSION_TIMEOUT = 900
 HARNESS_MODULES_FILE = ROOT / "tests" / "harness_modules.txt"
 NIGHTLY_OWNED_MODULE = "tests/test_latency_gate.py"
 
@@ -74,7 +77,7 @@ def test_pr_tier_lanes_have_time_bounds_and_versioned_timing_evidence(
 
     assert job["timeout-minutes"] == 30
     run_step = _run_step(job)
-    assert "--session-timeout=900" in run_step["run"]
+    assert f"--session-timeout={CORE_SESSION_TIMEOUT if tier == 'core' else HARNESS_SESSION_TIMEOUT}" in run_step["run"]
     assert "--durations=50" in run_step["run"]
     assert "--durations-min=1" in run_step["run"]
     assert (
