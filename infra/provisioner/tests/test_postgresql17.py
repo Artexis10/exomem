@@ -54,6 +54,9 @@ if PROVISIONER_TEST_IMAGE is None:
         LiveObservation,
         RecoveryRefusal,
         RecoveryService,
+        canonical_sha256,
+        retarget_resume_marker,
+        retarget_retry_marker,
     )
     from exomem_provisioner.provider_identity import cell_resource_name
     from exomem_provisioner.repository import OperationRepository, StaleFence
@@ -818,6 +821,7 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
                 **retargeted,
                 "status": "retarget-verified",
             }
+            prior_retarget_progress = dict(operation.progress)
         successor_service = RecoveryService(
             sessions=database.session_factory,
             codec=codec,
@@ -862,6 +866,68 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
                 **successor_result,
                 "status": "successor-retarget-verified",
             }
+        now = datetime.now(UTC)
+        retarget_receipt = prior_retarget_progress["_runtime_retarget_recovery_v1"]
+        resume_receipt = retarget_resume_marker(
+            retarget_marker_sha256=canonical_sha256(retarget_receipt),
+            preflight_sha256="a" * 64,
+            helper_source_sha256="b" * 64,
+            claim_generation=5,
+            committed_at=now,
+        )
+        retry_receipt = retarget_retry_marker(
+            retarget_marker_sha256=canonical_sha256(retarget_receipt),
+            resume_marker_sha256=canonical_sha256(resume_receipt),
+            preflight_sha256="c" * 64,
+            helper_source_sha256="d" * 64,
+            claim_generation=6,
+            committed_at=now,
+        )
+        source_request = {
+            **request,
+            "releaseVersion": "0.68.1",
+            "protocolVersion": "1",
+        }
+        async with database.session_factory.begin() as session:
+            operation = await session.get(Operation, operation_id, with_for_update=True)
+            assert operation is not None
+            operation.state = OperationState.ERROR
+            operation.checkpoint = "failed"
+            operation.error_code = "PROVISIONER_PROVIDER_METADATA_CONFLICT"
+            operation.finalized_at = now
+            operation.canonical_request_sha256 = repository_module.canonical_request_sha256(
+                source_request
+            )
+            operation.request_ciphertext = codec.encrypt_json(
+                source_request,
+                purpose="operation-request:provision:recovery-postgresql-key",
+            )
+            operation.progress = {
+                **prior_retarget_progress,
+                "_runtime_retarget_resume_v1": resume_receipt,
+                "_runtime_retarget_retry_v1": retry_receipt,
+            }
+        exhausted, exhausted_replay = await asyncio.gather(
+            successor_service.successor_retarget(operation_id),
+            successor_service.successor_retarget(operation_id),
+        )
+        assert {exhausted["status"], exhausted_replay["status"]} == {
+            "successor-retargeted",
+            "already-successor-retargeted",
+        }
+        async with database.session_factory() as session:
+            operation = await session.get(Operation, operation_id)
+            assert operation is not None
+            decoded = codec.decrypt_json(
+                operation.request_ciphertext,
+                purpose="operation-request:provision:recovery-postgresql-key",
+            )
+            assert decoded["releaseVersion"] == "0.68.3"
+            assert operation.state is OperationState.PENDING
+            assert operation.checkpoint == "volume-owned"
+            assert operation.error_code is None
+            assert operation.finalized_at is None
+            assert "_runtime_retarget_successor_v1" in operation.progress
         for role, schema in (("wrong-role", target.schema), (target.role, "wrong_schema")):
             wrong_identity = RecoveryService(
                 sessions=database.session_factory,
