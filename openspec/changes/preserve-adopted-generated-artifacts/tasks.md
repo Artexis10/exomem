@@ -9,7 +9,7 @@
 
 - [x] 2.1 Add and validate the optional single-artifact adoption envelope on `capture_source` and `preserve_artifacts` without changing either command's ordinary behavior.
 - [x] 2.2 Extend the Source artifact page and Evidence companion vocabularies with the same versioned vault-owned adoption receipt and keep every renderer and media reconciler lossless for it.
-- [ ] 2.3 Implement transport-window no-fetch replay, then durable receipt lookup plus re-stage/hash comparison beyond the window; return the original receipt on exact identity, `ADOPTION_KEY_REUSED` on mismatch, and `ADOPTION_REPLAY_UNVERIFIABLE` when bytes cannot be reproved.
+- [x] 2.3 Implement transport-window no-fetch replay, then durable receipt lookup plus re-stage/hash comparison beyond the window; return the original receipt on exact identity, `ADOPTION_KEY_REUSED` on mismatch, and `ADOPTION_REPLAY_UNVERIFIABLE` when bytes cannot be reproved.
 - [x] 2.4 Publish adoption inputs and bounded committed/replayed/failed/unverifiable/handoff outcomes for both lanes through MCP, CLI, REST/OpenAPI, compact projections, and generated tool contracts.
 - [x] 2.5 Add Source/Evidence parity tests proving identical bytes and receipt fields, lane-specific canonical pages, exact lane preservation, and no cross-lane duplicate from one adoption request.
 
@@ -31,7 +31,7 @@
 ## 5. Mutants and verification
 
 - [x] 5.1 Kill mutants that remove explicit selection, swap the selected id, reconstruct bytes, omit receipt fields, or mark handoff committed.
-- [ ] 5.2 Kill mutants that disable request-window replay, skip later re-stage/hash comparison, accept an unverifiable expired handle, lose Source/Evidence receipt parity, record delivery before receipt, or assert remote identity without platform proof.
+- [x] 5.2 Kill mutants that disable request-window replay, skip later re-stage/hash comparison, accept an unverifiable expired handle, lose Source/Evidence receipt parity, record delivery before receipt, or assert remote identity without platform proof.
 - [ ] 5.3 Run focused preservation, Records, carrier, Hosted package/promotion, public-input, scaffold leak, generated-contract, and historical-lock tests.
 - [ ] 5.4 Run `ruff check`, the full non-model pytest suite, and `openspec validate --all --strict` and report exact false-positive and draft-clutter counts.
 
