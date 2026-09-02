@@ -266,6 +266,23 @@ def emit_write_advisories(
     )
 
 
+@dataclass(frozen=True)
+class EmittedWriteAdvisory:
+    """One surfaced write advisory: its rendered warning and its identity.
+
+    `identity` is None exactly on the fail-open paths, where the warning is
+    the unidentified prose the write path has always emitted when advisory
+    state could not be read. A consumer that must address the advisory later
+    (rather than print it now) has to treat that as unaddressable.
+    """
+
+    kind: str
+    candidate: DupCandidate
+    warning: str
+    identity: WriteAdvisoryIdentity | None
+    counterpart_rel_path: str | None
+
+
 def emit_write_advisory_groups(
     vault_root: Path,
     *,
@@ -274,6 +291,31 @@ def emit_write_advisory_groups(
     apply_declared_pair_filter: bool = False,
 ) -> list[str]:
     """Render all advisory classes with one ref batch and one review-state read."""
+    return [
+        emitted.warning
+        for emitted in emitted_write_advisory_groups(
+            vault_root,
+            self_path=self_path,
+            groups=groups,
+            apply_declared_pair_filter=apply_declared_pair_filter,
+        )
+    ]
+
+
+def emitted_write_advisory_groups(
+    vault_root: Path,
+    *,
+    self_path: str,
+    groups: list[tuple[str, list[DupCandidate]]],
+    apply_declared_pair_filter: bool = False,
+) -> list[EmittedWriteAdvisory]:
+    """The structured form of `emit_write_advisory_groups`, same order and text.
+
+    Deferred advisory work needs the review identity beside each warning, not
+    just the rendered string. Sharing this one body keeps the deterministic
+    suppression, family disposition, quiet offer, and first-surfaced ledger
+    exactly as the synchronous write path performs them.
+    """
     from . import contradiction_stance, review_state
 
     for kind, _candidates in groups:
@@ -294,7 +336,7 @@ def emit_write_advisory_groups(
         else None
     )
     eligible: list[tuple[str, DupCandidate, str]] = []
-    warnings: list[str] = []
+    warnings: list[EmittedWriteAdvisory] = []
     for kind, candidate in advisories:
         try:
             if declared_pair is not None and declared_pair(candidate.path):
@@ -302,7 +344,15 @@ def emit_write_advisory_groups(
             eligible.append((kind, candidate, _advisory_path(root, candidate.path)))
         except Exception as error:  # noqa: BLE001 — advisory state must fail open
             log.debug("write advisory suppression failed open: %s", error)
-            warnings.append(_render_write_advisory(kind, candidate))
+            warnings.append(
+                EmittedWriteAdvisory(
+                    kind=kind,
+                    candidate=candidate,
+                    warning=_render_write_advisory(kind, candidate),
+                    identity=None,
+                    counterpart_rel_path=None,
+                )
+            )
 
     if not eligible:
         return warnings
@@ -326,7 +376,7 @@ def emit_write_advisory_groups(
         store = review_state.ReviewStateStore(root)
         payload = store.load()
         excluded_kinds = _excluded_advisory_kinds(payload)
-        emitted: list[tuple[str, DupCandidate, WriteAdvisoryIdentity]] = []
+        emitted: list[tuple[str, DupCandidate, str, WriteAdvisoryIdentity]] = []
         surfaced: list[tuple[str, str, str]] = []
         for kind, candidate, candidate_rel in eligible:
             if kind in excluded_kinds:
@@ -349,22 +399,38 @@ def emit_write_advisory_groups(
             )
             if state in {"dismissed", "snoozed"}:
                 continue
-            emitted.append((kind, candidate, identity))
+            emitted.append((kind, candidate, candidate_rel, identity))
             surfaced.append((identity.review_id, identity.fingerprint, kind))
         ledgered = _record_surfaced_advisories(root, surfaced, known=payload)
-        for kind, candidate, identity in emitted:
+        for kind, candidate, candidate_rel, identity in emitted:
             offer = None
             if ledgered:
                 try:
                     offer = store.arm_quiet_offer(kind, known=payload)
                 except Exception as error:  # noqa: BLE001 — optional state fails open
                     log.debug("write advisory quiet offer failed open: %s", error)
-            warnings.append(_render_identified_write_advisory(kind, candidate, identity, offer))
+            warnings.append(
+                EmittedWriteAdvisory(
+                    kind=kind,
+                    candidate=candidate,
+                    warning=_render_identified_write_advisory(
+                        kind, candidate, identity, offer
+                    ),
+                    identity=identity,
+                    counterpart_rel_path=candidate_rel,
+                )
+            )
     except Exception as error:  # noqa: BLE001 — advisory state must fail open
         log.debug("write advisory suppression failed open: %s", error)
         warnings.extend(
-            _render_write_advisory(kind, candidate)
-            for kind, candidate, _path in eligible
+            EmittedWriteAdvisory(
+                kind=kind,
+                candidate=candidate,
+                warning=_render_write_advisory(kind, candidate),
+                identity=None,
+                counterpart_rel_path=candidate_rel,
+            )
+            for kind, candidate, candidate_rel in eligible
         )
     return warnings
 
@@ -646,6 +712,59 @@ def _best_cosine_per_file(
         return {}
     except Exception as e:  # noqa: BLE001 — best-effort
         log.debug("_best_cosine_per_file failed: %s", e)
+        return {}
+
+
+def best_cosine_per_file_for_vectors(
+    vault_root: Path,
+    vectors,
+    *,
+    self_path: str | None = None,
+    k: int = 15,
+) -> dict[str, float]:
+    """`_best_cosine_per_file` for vectors a caller already holds — no encode.
+
+    Deferred advisory work reuses the exact vectors the embedding pass
+    published for one generation, so the same page is never encoded twice.
+    The target identity is excluded HERE rather than downstream, so a page
+    cannot rank against itself or consume a `top_n` slot with a self-match.
+
+    Returns ``{}`` on the same no-op contract as `_best_cosine_per_file`:
+    embeddings disabled, sidecar empty or unreadable, or no vectors supplied.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return {}
+    try:
+        from . import embeddings, index_paths
+
+        rows = list(vectors)
+        if not rows:
+            return {}
+        idx = embeddings.get_embedding_index(vault_root)
+        allowed_paths = {
+            rel
+            for rel in (
+                index_paths.rel_to_vault(vault_root, path)
+                for path in index_paths.iter_index_markdown(vault_root)
+            )
+            if rel is not None
+        }
+        self_canon = _canon(self_path) if self_path else None
+        best_per_file: dict[str, float] = {}
+        for v in rows:
+            for fp, _cidx, _ctext, score in idx.search(
+                v, k=k, allowed_paths=allowed_paths
+            ):
+                if self_canon and _canon(fp) == self_canon:
+                    continue
+                if fp not in best_per_file or score > best_per_file[fp]:
+                    best_per_file[fp] = score
+        return best_per_file
+    except ImportError as e:
+        log.debug("best_cosine_per_file_for_vectors unavailable (%s)", e)
+        return {}
+    except Exception as e:  # noqa: BLE001 — best-effort
+        log.debug("best_cosine_per_file_for_vectors failed: %s", e)
         return {}
 
 

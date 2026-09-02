@@ -53,6 +53,7 @@ from . import contradiction_stance as contradiction_stance_module
 from . import corpus_aware as corpus_aware_module
 from . import create_directory as create_directory_module
 from . import create_file as create_file_module
+from . import deferred_write_advisory as deferred_write_advisory_module
 from . import delete_directory as delete_directory_module
 from . import delete_file as delete_file_module
 from . import edit as edit_module
@@ -5848,7 +5849,14 @@ def op_review_memory(
     Args:
         mode: attention, activation, item, audit, dispositions, provenance,
             evolution, compilation, stale, contradiction, unprocessed-sources,
-            relation-debt, relation-queue, adoption, or plan-progress.
+            relation-debt, relation-queue, adoption, plan-progress, or
+            write-advisory-result. `write-advisory-result` resolves exactly one
+            opaque `exomem://write-advisory-result/<id>` reference returned by a
+            committed write and reports only that job's current `pending`,
+            `ready`, `failed`, or `superseded` state; it requires `ref`, has no
+            list, browse, search, rank, count, continuation, or
+            implicit-current form, and a malformed, unknown, unauthorized, or
+            expired reference returns the shared not-found outcome.
             `plan-progress` reports, for each committed Planning item declaring
             `progress_evidence`, the counts its bound Records views return; it is
             derived and read-only, and it scores nothing. `dispositions` lists every
@@ -5882,7 +5890,9 @@ def op_review_memory(
             `chain_id` is always the active head. An unresolvable path raises an
             explicit error.
         state: For attention/activation, open (default), all, snoozed, or dismissed.
-        ref: Stable `exomem://review/<id>` reference for item mode.
+        ref: Stable `exomem://review/<id>` reference for item mode, or the
+            opaque `exomem://write-advisory-result/<id>` reference for
+            write-advisory-result mode. Required by both.
         detail: Audit output detail: actionable (default) or full.
         legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
 
@@ -5912,6 +5922,8 @@ def op_review_memory(
         if not ref:
             raise ValueError("INVALID_REVIEW: item mode requires `ref`")
         return attention_module.item_by_ref(vault_root, ref).as_dict()
+    if mode == "write-advisory-result":
+        return deferred_write_advisory_module.resolve_result(vault_root, ref)
     if mode == "dispositions":
         return _dispositions_view(vault_root)
     if mode == "audit":
@@ -5961,7 +5973,8 @@ def op_review_memory(
     raise ValueError(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "dispositions, provenance, evolution, compilation, stale, contradiction, "
-        "unprocessed-sources, relation-debt, relation-queue, adoption, or plan-progress"
+        "unprocessed-sources, relation-debt, relation-queue, adoption, plan-progress, "
+        "or write-advisory-result"
     )
 
 
