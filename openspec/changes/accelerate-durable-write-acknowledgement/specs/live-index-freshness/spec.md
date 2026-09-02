@@ -35,3 +35,8 @@ demand.
 - **THEN** the component drain is scheduled without waiting for a watcher event or new mutation
 - **AND** repeated failures back off while preserving the receipts and health telemetry
 
+#### Scenario: Aborted batch releases its pending rows
+
+- **WHEN** a prepared batch is retired as `aborted`
+- **THEN** its pending-visibility rows are retired in the same transition
+- **AND** they no longer count against the bounded hydration limit

@@ -1379,6 +1379,136 @@ def _embed_live_chunks(chunks: list[str]) -> np.ndarray:
     return np.concatenate(parts, axis=0)
 
 
+@dataclass(frozen=True, slots=True)
+class GenerationVectors:
+    """One page generation's exact chunks and vectors, encoded at most once.
+
+    ``reused`` is True when the vectors came from the already-published
+    sidecar rows rather than a fresh encode.  It is the observable a caller
+    needs to prove that two consumers of one generation did not both pay for
+    it, and it is content-free.
+    """
+
+    rel_path: str
+    fingerprint: str
+    title: str
+    body: str
+    chunks: tuple[str, ...]
+    vectors: np.ndarray
+    reused: bool
+
+
+def published_generation_vectors(
+    vault_root: Path, rel_path: str, *, chunks: list[str]
+) -> np.ndarray | None:
+    """The sidecar's own vectors for exactly `chunks`, or None.
+
+    Exactness is decided on the stored chunk TEXT, not on an mtime or a row
+    count: a page whose current chunking differs by one character is a
+    different generation and must not borrow the previous one's vectors.
+    """
+    if not chunks:
+        return np.zeros((0, VECTOR_DIM), dtype=np.float32)
+    try:
+        index = get_embedding_index(vault_root)
+        metadata, matrix = index.all_vectors()
+    except Exception as e:  # noqa: BLE001 - sidecar reuse is an optimisation
+        log.debug("published generation vectors unavailable for %s: %s", rel_path, e)
+        return None
+    rows = sorted(
+        (
+            (chunk_index, row)
+            for row, (file_path, chunk_index) in enumerate(metadata)
+            if file_path == rel_path
+        )
+    )
+    if [chunk_index for chunk_index, _row in rows] != list(range(len(chunks))):
+        return None
+    try:
+        texts = index._texts_for([(rel_path, chunk_index) for chunk_index, _row in rows])
+    except Exception as e:  # noqa: BLE001 - sidecar reuse is an optimisation
+        log.debug("published chunk text unavailable for %s: %s", rel_path, e)
+        return None
+    if [texts.get((rel_path, chunk_index)) for chunk_index, _row in rows] != list(chunks):
+        return None
+    return np.asarray([matrix[row] for _chunk_index, row in rows], dtype=np.float32)
+
+
+def prepare_generation_vectors(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    expected_fingerprint: str,
+    allow_encode: bool = True,
+) -> GenerationVectors | None:
+    """Resolve one exact page generation's chunks and vectors for reuse.
+
+    The handoff between the embedding consumer and the advisory consumer is the
+    published sidecar itself: whichever runs first pays the encode, and the
+    other reads those exact rows back.  That is what also makes a post-crash
+    replay free — the vectors for the generation are already durable.
+
+    Returns None when the page is absent, unreadable, no longer the expected
+    generation, or when encoding would be required and is not allowed.  It
+    never falls back to a different generation's vectors.
+    """
+    from . import find as find_module
+    from .vault import content_hash
+
+    target = Path(vault_root).joinpath(*str(rel_path).split("/"))
+    try:
+        if target.is_symlink() or not target.is_file():
+            return None
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    fingerprint = content_hash(text)
+    if fingerprint != expected_fingerprint:
+        return None
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return None
+    try:
+        page = find_module._CACHE.get(target, Path(vault_root))
+        if page is None:
+            return None
+        chunks = _chunks_for_page(Path(vault_root), page)
+    except Exception as e:  # noqa: BLE001 - chunk extraction is best-effort
+        log.debug("generation chunks could not be prepared for %s: %s", rel_path, e)
+        return None
+
+    published = published_generation_vectors(vault_root, rel_path, chunks=chunks)
+    if published is not None and len(published) == len(chunks):
+        vectors, reused = published, True
+    elif not allow_encode:
+        return None
+    else:
+        try:
+            get_model()
+        except Exception as e:  # noqa: BLE001 - model backends soft-fail by contract
+            log.debug("generation vectors need a model that did not load: %s", e)
+            return None
+        try:
+            vectors, reused = _embed_live_chunks(chunks), False
+        except Exception as e:  # noqa: BLE001 - one bad encode must not fail a worker
+            log.debug("generation vectors could not be encoded for %s: %s", rel_path, e)
+            return None
+    # The page can move under a slow encode; re-prove before handing it on.
+    try:
+        if content_hash(target.read_text(encoding="utf-8")) != expected_fingerprint:
+            return None
+    except (OSError, UnicodeDecodeError):
+        return None
+    return GenerationVectors(
+        rel_path=str(rel_path),
+        fingerprint=fingerprint,
+        title=page.title,
+        body=page.body,
+        chunks=tuple(chunks),
+        vectors=np.asarray(vectors, dtype=np.float32),
+        reused=reused,
+    )
+
+
 def delete_after_remove_status(
     vault_root: Path, removed_rel_paths: list[str]
 ) -> EmbeddingSyncStatus:

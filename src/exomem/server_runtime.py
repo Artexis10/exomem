@@ -55,6 +55,7 @@ class ServerRuntime:
     base_url: str
     media_worker: Any | None = None
     file_watcher: Any | None = None
+    derived_drain: Any | None = None
     hosted_config: HostedCellConfig | None = None
     hosted_lifecycle: HostedCellLifecycle | None = None
     hosted_security_authority: Any | None = None
@@ -113,6 +114,7 @@ class LocalRuntimeActivation:
         self._thread: threading.Thread | None = None
         self.media_worker: Any | None = None
         self.file_watcher: Any | None = None
+        self.derived_drain: Any | None = None
 
     def start(self) -> None:
         """Launch local workers once; safe from health and timer races."""
@@ -133,6 +135,10 @@ class LocalRuntimeActivation:
 
     def _activate(self) -> None:
         if self._shutdown.is_set():
+            return
+        self._start_component("derived drain", self._start_derived_drain)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
             return
         self._start_component("file watcher", self._start_file_watcher)
         if self._shutdown.is_set():
@@ -234,6 +240,7 @@ class LocalRuntimeActivation:
     def _stop_background_workers(self) -> None:
         """Stop workers already owned by this activation during shutdown."""
         for label, worker in (
+            ("derived drain", self.derived_drain),
             ("media", self.media_worker),
             ("file watcher", self.file_watcher),
         ):
@@ -257,6 +264,9 @@ class LocalRuntimeActivation:
 
     def _start_media_worker(self, vault_root: Path) -> None:
         self.media_worker = _start_media_worker(vault_root)
+
+    def _start_derived_drain(self, vault_root: Path) -> None:
+        self.derived_drain = _start_derived_drain(vault_root)
 
     def _start_file_watcher(self, vault_root: Path) -> None:
         self.file_watcher = _start_file_watcher(vault_root)
@@ -392,6 +402,15 @@ def _initialize_locked_hosted_runtime(
 
     media_worker = None
     file_watcher = None
+    derived_drain = None
+    if mutation_ready and startup.phase == "active":
+        derived_drain = _start_derived_drain(vault_root)
+        if derived_drain is not None:
+            _register_derived_drain_worker(lifecycle, derived_drain)
+    elif mutation_ready and startup.phase == "quiesced":
+        derived_drain = _create_derived_drain(vault_root)
+        if derived_drain is not None:
+            _register_derived_drain_worker(lifecycle, derived_drain)
     if mutation_ready and startup.phase == "active":
         # Retrieval catalog warm-up is core service work, not an optional
         # hosted worker.  A zero optional-worker budget must still converge
@@ -477,6 +496,7 @@ def _initialize_locked_hosted_runtime(
         base_url="",
         media_worker=media_worker,
         file_watcher=file_watcher,
+        derived_drain=derived_drain,
         hosted_config=config,
         hosted_lifecycle=lifecycle,
         hosted_security_authority=security_authority,
@@ -705,6 +725,47 @@ def _start_graph_drain(vault_root: Path) -> Any | None:
     except Exception as exc:  # noqa: BLE001 - convergence must not break startup
         log.warning("graph drain start failed: %s", exc)
         return None
+
+
+def _start_derived_drain(vault_root: Path) -> Any | None:
+    """Start exact component convergence independently of the file watcher.
+
+    The three production callbacks the drain needs -- the component router, the
+    canonical-generation observer and Lane 2's pending publisher -- are the
+    drain module's own defaults, so the server keeps naming only the cell it is
+    starting and there is exactly one place that knows what production wiring
+    is.
+    """
+    from . import derived_drain
+
+    try:
+        return derived_drain.start(vault_root)
+    except Exception as exc:  # noqa: BLE001 - custody survives startup failure
+        log.warning("derived component drain start failed: %s", exc)
+        return None
+
+
+def _create_derived_drain(vault_root: Path) -> Any | None:
+    """Construct dormant exact-custody convergence for a quiesced hosted cell."""
+    from . import derived_drain
+
+    try:
+        return derived_drain.DerivedDrain(vault_root)
+    except Exception as exc:  # noqa: BLE001 - custody survives startup failure
+        log.warning("derived component drain unavailable: %s", exc)
+        return None
+
+
+def _register_derived_drain_worker(lifecycle: HostedCellLifecycle, worker: Any) -> None:
+    """Register hosted stop/start for the exact component drain.
+
+    The lifecycle calls a stopper with no arguments and keeps its quiesce
+    deadline private, so the registered stopper is the drain's bounded
+    fail-closed stop.  A pass that is still dispatching leaves the cell
+    quiescing instead of reporting a drained cell the deadline never proved.
+    """
+
+    lifecycle.register_background_worker(stopper=worker.stop, starter=worker.start)
 
 
 def _start_file_watcher(vault_root: Path) -> Any | None:

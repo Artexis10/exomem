@@ -3473,6 +3473,13 @@ def commit_recovery(
                 )
             )
             semantic_states = {item.after.path: item.after for item in preflight.evaluations}
+            # The batch seam wants index states, not contract states, and it is
+            # the only place a governed page in this batch can be named for
+            # derived custody. Declare them on every batch this function owns.
+            batch_semantic_states = {
+                path: semantic_index.from_semantic_page_state(state)
+                for path, state in semantic_states.items()
+            }
 
             def graph_replacement_provider():
                 return graph_producer.replacements_for_semantic_transition(
@@ -3501,6 +3508,7 @@ def commit_recovery(
                     lifecycle_writes,
                     vault_root=root,
                     required_guards=(*required_guards, destination_root_guard),
+                    semantic_states=batch_semantic_states,
                 )
             destination_root_guard.recheck(root)
             for destination_guard in destination_guards:
@@ -3511,6 +3519,7 @@ def commit_recovery(
                     vault.batch_atomic_write(
                         preflight.catalog_auxiliary_writes,
                         vault_root=root,
+                        semantic_states=batch_semantic_states,
                     )
             from .writer_lease import mark_active_mutation_committed
 
@@ -3750,7 +3759,10 @@ def _prewarm_embeddings() -> None:
     every failure, including the model being unavailable or still warming
     up, is swallowed.
     """
-    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+    if (
+        os.environ.get("EXOMEM_FAST_DURABLE_ACK") == "1"
+        or os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")
+    ):
         return
     try:
         from . import readiness
