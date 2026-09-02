@@ -23,7 +23,8 @@ from epistemic.report import render_epistemic_report
 from lme.report import render_run_report
 from protocol.offline import offline_guard
 
-from .latency import ProviderLatency, assert_no_cross_provider_latency
+from .guards import ReportRefused, refuse_aggregate
+from .latency import ProviderLatency, render_indicative_latency
 
 
 @dataclass(frozen=True)
@@ -42,10 +43,6 @@ class EpistemicCohort:
 
 
 ReportInput = LmeRun | EpistemicCohort
-
-
-class ReportRefused(ValueError):
-    """A rendered report would violate the no-aggregate invariant."""
 
 
 def render_all(
@@ -73,13 +70,11 @@ def render_all(
                 )
             else:
                 raise TypeError(f"unsupported report input: {item!r}")
-        latency_section = assert_no_cross_provider_latency(latency)
+        latency_section = render_indicative_latency(latency)
     if latency_section:
         sections.append(latency_section)
     report = "\n".join(sections)
-    if "aggregate" in report.lower():
-        raise ReportRefused("rendered report must never contain the word aggregate")
-    return report
+    return refuse_aggregate(report)
 
 
 __all__ = ["LmeRun", "EpistemicCohort", "ReportInput", "ReportRefused", "render_all"]
