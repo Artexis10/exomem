@@ -93,12 +93,16 @@ def test_a_stage_that_runs_twice_reports_both_runs() -> None:
 
 
 def test_a_stage_that_runs_once_carries_no_call_count() -> None:
-    """The single-run shape is pinned by exact-dict assertions elsewhere."""
+    """The single-run shape is pinned by exact-dict assertions elsewhere.
+
+    `source` joined `ms` when every stage was made to say where its answer came
+    from; `calls` still appears only when a stage ran more than once.
+    """
     timings = FindTimings()
     with timings.span("keyword"):
         pass
 
-    assert set(timings.as_dict()["stages"]["keyword"]) == {"ms"}
+    assert set(timings.as_dict()["stages"]["keyword"]) == {"ms", "source"}
 
 
 def test_the_query_log_projection_carries_the_unattributed_term() -> None:

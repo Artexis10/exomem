@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import date
@@ -476,6 +477,85 @@ class SemanticUnitHit:
         return out
 
 
+#: Where a stage got its answer. `index` is a maintained index or catalogue,
+#: `cache` an in-process or published cache, `declined` a stage that returned a
+#: warming outcome or did not run, `computed` everything else — including a
+#: corpus walk. The vocabulary is what makes a walk visible in the diagnostics
+#: without a benchmark: a stage that starts scanning the scope stops being able
+#: to call itself `index`.
+SOURCE_INDEX = "index"
+SOURCE_CACHE = "cache"
+SOURCE_DECLINED = "declined"
+SOURCE_COMPUTED = "computed"
+
+#: Reported source when one stage runs more than once with different sources
+#: (`filter_eligibility` runs once per lane when `result_level` is "mixed").
+#: The widest wins, so a stage that computed once can never be reported as
+#: index-backed — the direction that would hide a walk.
+_SOURCE_RANK = {
+    SOURCE_CACHE: 0,
+    SOURCE_INDEX: 1,
+    SOURCE_DECLINED: 2,
+    SOURCE_COMPUTED: 3,
+}
+
+STAGE_SOURCES = frozenset(_SOURCE_RANK)
+
+
+def _validated_source(source: str) -> str:
+    if source not in _SOURCE_RANK:
+        raise ValueError(
+            f"unknown find timing source {source!r}; expected one of {sorted(STAGE_SOURCES)}"
+        )
+    return source
+
+
+def _widest_source(existing: str | None, incoming: str) -> str:
+    if existing is None:
+        return incoming
+    return max(existing, incoming, key=lambda value: _SOURCE_RANK.get(value, 0))
+
+
+class StagesTable(Mapping[str, dict[str, Any]]):
+    """The per-stage table, write-through from `FindTimings.span` only.
+
+    #983 found three stages whose duration was written straight into this table
+    without registering an interval. `unattributed_ms` merges intervals, so
+    every one of them was counted twice — once as its own stage, once in the
+    remainder — and nothing but review stood between the fourth and the same
+    defect. Refusing the write is what stops it: a stage that cannot be written
+    by hand cannot report time that no interval covered.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, dict[str, Any]] = {}
+
+    def __getitem__(self, name: str) -> dict[str, Any]:
+        return self._entries[name]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._entries)
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self._entries!r})"
+
+    def __setitem__(self, name: str, value: Any) -> None:
+        raise TypeError(
+            "find timing stages are write-through from FindTimings.span(); "
+            f"register an interval for {name!r} rather than writing the table"
+        )
+
+    def __delitem__(self, name: str) -> None:
+        raise TypeError("find timing stages cannot be deleted")
+
+    def _entry(self, name: str) -> dict[str, Any]:
+        """Internal writer seam. Only `FindTimings` may call this."""
+        return self._entries.setdefault(name, {})
+
+
 class FindTimings:
     """Opt-in per-stage timing collector for one find call.
 
@@ -485,11 +565,15 @@ class FindTimings:
     said so. `unattributed_ms` closes that: it is wall time inside the call
     that no span claimed, so an uninstrumented region announces itself instead
     of waiting to be found by subtracting a table by hand.
+
+    Two properties are structural rather than reviewed: the table is
+    write-through from `span` (see `StagesTable`), and every entry carries the
+    `source` it was answered from.
     """
 
     def __init__(self) -> None:
         self._t0 = time.perf_counter()
-        self.stages: dict[str, dict[str, Any]] = {}
+        self.stages = StagesTable()
         self.cache: dict[str, Any] = {"enabled": False, "hit": False}
         self.profile: dict[str, Any] = {}
         # Every span's (start, end). `unattributed_ms` merges these rather than
@@ -497,9 +581,19 @@ class FindTimings:
         # lane that ever moves to its own thread still accounts correctly.
         self._intervals: list[tuple[float, float]] = []
         self._intervals_lock = threading.Lock()
+        # Sources declared from inside an open span, consumed by its exit so
+        # the exit stays the table's single writer.
+        self._pending_sources: dict[str, str] = {}
 
     @contextmanager
-    def span(self, name: str):
+    def span(self, name: str, *, source: str = SOURCE_COMPUTED, **fields: Any):
+        """Time one stage and record where its answer came from.
+
+        `source` is the stage's static answer. A stage that only learns it
+        inside the span calls `mark_source` instead; this exit still performs
+        the write.
+        """
+        _validated_source(source)
         t0 = time.perf_counter()
         try:
             yield
@@ -507,7 +601,8 @@ class FindTimings:
             t1 = time.perf_counter()
             with self._intervals_lock:
                 self._intervals.append((t0, t1))
-            entry = self.stages.setdefault(name, {})
+                declared = self._pending_sources.pop(name, source)
+            entry = self.stages._entry(name)
             elapsed = round((t1 - t0) * 1000.0, 3)
             if "ms" in entry:
                 # A stage can run twice in one call — `filter_eligibility` does,
@@ -519,12 +614,33 @@ class FindTimings:
                 entry["calls"] = entry.get("calls", 1) + 1
             else:
                 entry["ms"] = elapsed
+            entry["source"] = _widest_source(entry.get("source"), declared)
+            entry.update(fields)
+
+    def mark_source(self, name: str, source: str) -> None:
+        """Declare, from inside an open span, where that stage answered from.
+
+        `filter_eligibility` seeds from the semantic-unit sidecar or falls
+        through to the scan oracle; `bm25` answers from the maintained
+        catalogue or rebuilds a Python corpus; `recall_projection` reads a
+        cache, a published projection or a cold scope snapshot. None of them
+        knows which before it runs, and all of them must say so afterwards.
+        """
+        _validated_source(source)
+        with self._intervals_lock:
+            self._pending_sources[name] = source
 
     def skipped(self, name: str) -> None:
-        self.stages.setdefault(name, {})["skipped"] = True
+        entry = self.stages._entry(name)
+        entry["skipped"] = True
+        entry["source"] = _widest_source(entry.get("source"), SOURCE_DECLINED)
 
     def error(self, name: str, exc: BaseException) -> None:
-        self.stages.setdefault(name, {})["error"] = type(exc).__name__
+        entry = self.stages._entry(name)
+        entry["error"] = type(exc).__name__
+        # A lane that raised did the work it failed at, so it does not get to
+        # claim an index; a span that already spoke keeps its own answer.
+        entry.setdefault("source", SOURCE_COMPUTED)
 
     def _covered_seconds(self) -> float:
         """Wall seconds covered by at least one span, counting overlap once."""
@@ -557,6 +673,20 @@ class FindTimings:
         }
 
 
-def timing_span(timings: FindTimings | None, name: str):
+def timing_span(
+    timings: FindTimings | None,
+    name: str,
+    *,
+    source: str = SOURCE_COMPUTED,
+    **fields: Any,
+):
     """A timing span when a collector is present, else a no-op context."""
-    return timings.span(name) if timings is not None else nullcontext()
+    if timings is None:
+        return nullcontext()
+    return timings.span(name, source=source, **fields)
+
+
+def timing_mark_source(timings: FindTimings | None, name: str, source: str) -> None:
+    """`FindTimings.mark_source` for the many call sites that may have none."""
+    if timings is not None:
+        timings.mark_source(name, source)

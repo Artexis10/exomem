@@ -63,6 +63,7 @@ _passes_filters = find_corpus.passes_filters
 _all_projects = find_corpus.all_projects
 _format_timestamp = find_types._format_timestamp
 _span = find_types.timing_span
+_mark_source = find_types.timing_mark_source
 
 EXCERPT_RADIUS = find_results.EXCERPT_RADIUS
 EXCERPT_MAX_LEN = find_results.EXCERPT_MAX_LEN
@@ -254,19 +255,44 @@ def _set_catalog_timing_profile(
     timings.profile["catalog"] = lexstore.catalog_timing_profile(readiness, cache_hit=cache_hit)
 
 
+#: How the recall-projection outcome maps onto the stage source vocabulary.
+#: `offline_fallback` is `computed` on purpose: that branch rebuilds the
+#: projection from a scope snapshot, which walks. Calling it `index` would let
+#: the one stage that CAN still walk describe itself as index-backed.
+_RECALL_PROJECTION_SOURCES = {
+    "cache": find_types.SOURCE_CACHE,
+    "live_cache": find_types.SOURCE_CACHE,
+    "live": find_types.SOURCE_INDEX,
+    "admitted": find_types.SOURCE_INDEX,
+    "offline": find_types.SOURCE_COMPUTED,
+    "offline_fallback": find_types.SOURCE_COMPUTED,
+    "warming": find_types.SOURCE_DECLINED,
+    "unavailable": find_types.SOURCE_DECLINED,
+    "pending_unavailable": find_types.SOURCE_DECLINED,
+}
+
+
 def _set_recall_projection_timing_outcome(
     timings: FindTimings | None,
     outcome: str,
 ) -> None:
     if timings is not None:
         timings.profile.setdefault("recall_projection", {})["outcome"] = outcome
+        source = _RECALL_PROJECTION_SOURCES.get(outcome)
+        if source is not None:
+            timings.mark_source("recall_projection", source)
 
 
 def _record_filter_eligibility_cache_hit(timings: FindTimings | None) -> None:
-    """Record a measurable exact-catalog hot lane without timing clock noise."""
-    if timings is None:
-        return
-    timings.stages["filter_eligibility"] = {"ms": 0.0, "cache_hit": True}
+    """Record the exact-catalog hot lane as the (near-zero) interval it is.
+
+    This used to write the stage straight into the table, which is exactly the
+    shape `unattributed_ms` double-counts. The lane genuinely costs almost
+    nothing, so registering its real interval keeps the number honest without
+    inventing clock noise, and the source says why it was free.
+    """
+    with _span(timings, "filter_eligibility", source=find_types.SOURCE_CACHE, cache_hit=True):
+        pass
 
 
 def _order_reranked_prefix(hits: list[Any], *, prefix_count: int) -> list[Any]:
@@ -1097,7 +1123,9 @@ def find(
     # existing exact source-walk fallback, which reads canonical Markdown
     # directly and never consults this custody, so refusing it would deny an
     # answer that is already exact.
-    with _span(timings, "pending_visibility"):
+    # The durable pending-custody rows ARE an index; reading them is the
+    # alternative to proving custody by reading the corpus.
+    with _span(timings, "pending_visibility", source=find_types.SOURCE_INDEX):
         pending = freshness.recall_pending_coverage(vault_root)
         if not pending.ready:
             if managed_runtime:
@@ -1107,17 +1135,25 @@ def find(
                     status="temporarily_unavailable",
                 )
             pending = _EMPTY_PENDING_COVERAGE
-    admission = readiness.retrieval_admission()
-    if managed_runtime and admission["state"] == "unavailable":
-        # A background repair may have published the exact catalog after its
-        # one promotion callback lost a race.  Re-prove once before scheduling
-        # another whole-corpus rebuild; normal ready requests keep one proof.
-        admission = readiness.retrieval_admission(vault_root)
+    # Admission is part of resolving the projection, and used to be the one
+    # material region between two spans: measured at request level it looked
+    # like unattributed time. Folding it into `recall_projection` reports it
+    # where a reader would look for it.
+    with _span(timings, "recall_projection", source=find_types.SOURCE_INDEX):
+        admission = readiness.retrieval_admission()
+        if managed_runtime and admission["state"] == "unavailable":
+            # A background repair may have published the exact catalog after its
+            # one promotion callback lost a race.  Re-prove once before scheduling
+            # another whole-corpus rebuild; normal ready requests keep one proof.
+            admission = readiness.retrieval_admission(vault_root)
     state = str(admission["state"]) if managed_runtime else "unverified"
     require_live_recall = managed_runtime and freshness.event_indexes_enabled()
     catalog_proof: dict[str, freshness.RecallFreshnessCheckpoint] | None = None
     stale_recall_scopes: frozenset[str] = frozenset()
-    with _span(timings, "recall_projection"):
+    # The catalogue admission proof is an index read; the outcome below
+    # narrows it (an offline caller proved nothing from an index, and a
+    # warming or unavailable catalogue declined).
+    with _span(timings, "recall_projection", source=find_types.SOURCE_INDEX):
         if state == "ready" and require_live_recall:
             # Bounded projection lag is served, not refused. `admission` takes
             # the strict proof when it binds and otherwise falls back to the
@@ -1325,7 +1361,7 @@ def find(
                 resolved_config,
             )
             unit_cache_key = (unit_request_key, unit_fresh)
-            with _span(timings, "cache_lookup"):
+            with _span(timings, "cache_lookup", source=find_types.SOURCE_CACHE):
                 with _FIND_CACHE_LOCK:
                     cached_units = _FIND_CACHE.get(unit_cache_key)
                     if cached_units is not None:
@@ -1336,7 +1372,12 @@ def find(
                 if unit_algebra.status == "complete":
                     _record_filter_eligibility_cache_hit(timings)
                     _set_catalog_timing_profile(timings, cache_hit=True)
-                return copy.deepcopy(cached_units)
+                # The copy is what a cache hit actually costs — the hit list is
+                # returned by value so a caller cannot mutate the cached one —
+                # and it is proportional to `limit`. Unspanned it was reported
+                # as unattributed remainder on every hot request.
+                with _span(timings, "cache_copy", source=find_types.SOURCE_CACHE):
+                    return copy.deepcopy(cached_units)
         unit_hits = _find_semantic_units(
             vault_root,
             query=query,
@@ -1473,7 +1514,7 @@ def find(
         prior_checkpoints: tuple[
             tuple[str, freshness.RecallFreshnessCheckpoint], ...
         ] | None = None
-        with _span(timings, "cache_lookup"):
+        with _span(timings, "cache_lookup", source=find_types.SOURCE_CACHE):
             with _FIND_CACHE_LOCK:
                 cached = _FIND_CACHE.get(cache_key)
                 if cached is not None:
@@ -1534,7 +1575,8 @@ def find(
             ):
                 _record_filter_eligibility_cache_hit(timings)
                 _set_catalog_timing_profile(timings, cache_hit=True)
-            return copy.deepcopy(cached)
+            with _span(timings, "cache_copy", source=find_types.SOURCE_CACHE):
+                return copy.deepcopy(cached)
 
     # Track warm-window degradation even when the caller passed no list —
     # internal callers (suggest_links, evolution, note/add sweeps) must never
@@ -2229,7 +2271,7 @@ def _find_semantic_units(
             # Exact eligibility is normal-table metadata only. Hybrid/vector
             # content ranking consumes this finite candidate set independently,
             # so FTS absence cannot change the catalog outcome.
-            with _span(timings, "filter_eligibility"):
+            with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
                 exact_freshness = snapshot.for_scope(scope)
                 exact_repair = _bounded_lexical_repair_allowed(exact_freshness)
                 bounded_filter_only = (
@@ -3014,10 +3056,15 @@ def _resolve_eligible_filter_paths(
     """
     algebra = structured_filters.plan_index_candidates(plan)
     if algebra.status != "complete":
+        # The canonical full-scan oracle. It reads every page's frontmatter on
+        # the reader thread, which is precisely the cost this stage must never
+        # be able to describe as index-backed.
+        _mark_source(timings, "filter_eligibility", find_types.SOURCE_COMPUTED)
         return _eligible_filter_paths(
             vault_root, scope=scope, plan=plan, pending=pending
         )
     if algebra.definitely_empty:
+        _mark_source(timings, "filter_eligibility", find_types.SOURCE_INDEX)
         _set_catalog_timing_profile(timings, cache_hit=True)
         return set()
     candidate_parents = _indexed_candidate_parent_paths(
@@ -3028,6 +3075,7 @@ def _resolve_eligible_filter_paths(
         timings=timings,
     )
     if candidate_parents is None:
+        _mark_source(timings, "filter_eligibility", find_types.SOURCE_DECLINED)
         # A ``complete`` plan must never silently regress to the scan oracle:
         # the sidecar could not answer the safe seed and the lower lexical path
         # has already scheduled the single-flight repair, so the honest outcome
@@ -3042,6 +3090,7 @@ def _resolve_eligible_filter_paths(
         candidate_parents = set(pending.shadow(candidate_parents)) | {
             row.rel_path for row in pending.current_pages()
         }
+    _mark_source(timings, "filter_eligibility", find_types.SOURCE_INDEX)
     return _indexed_eligible_filter_paths(
         vault_root,
         plan=plan,
