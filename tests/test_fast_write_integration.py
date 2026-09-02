@@ -473,19 +473,36 @@ def test_default_write_never_encodes_advisory_inline(
     encoder, so the default public-write latency claim is false.
     """
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
-    from exomem import embeddings
+    from exomem import corpus_aware, embeddings, index_sync
 
     calls: list[str] = []
 
-    def exploding_encode(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-        calls.append("encode")
-        raise AssertionError("the default write encoded an advisory inline")
+    def sentinel(name: str):
+        def fire(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            calls.append(name)
+            raise AssertionError(
+                f"the default write ran {name} on the acknowledgement path"
+            )
 
+        return fire
+
+    # The whole synchronous fan-out the receipt replaces, sentinelled at its
+    # entry point rather than at an encoder. An encoder sentinel is vacuous
+    # wherever the optional retrieval model is absent -- which is most CI --
+    # so it could never turn this node red there. `upsert_after_write` is the
+    # seam that carries the inline encode and comparison, and it is present
+    # whether or not a model is.
+    monkeypatch.setattr(
+        index_sync, "upsert_after_write", sentinel("index.upsert_after_write")
+    )
     for seam in ("encode_texts", "embed_texts", "encode"):
         if hasattr(embeddings, seam):
-            monkeypatch.setattr(embeddings, seam, exploding_encode, raising=False)
+            monkeypatch.setattr(embeddings, seam, sentinel(seam), raising=False)
     monkeypatch.setattr(
-        "exomem.corpus_aware._best_cosine_per_file", exploding_encode, raising=False
+        corpus_aware,
+        "_best_cosine_per_file",
+        sentinel("corpus_aware._best_cosine_per_file"),
+        raising=False,
     )
 
     rel = "Knowledge Base/Notes/Insights/lane5-no-inline-encode.md"
@@ -497,7 +514,7 @@ def test_default_write_never_encodes_advisory_inline(
     )
 
     assert terminal["status"] == "committed"
-    assert calls == []
+    assert calls == [], calls
     assert terminal["advisory_sync"] == "pending"
 
 
