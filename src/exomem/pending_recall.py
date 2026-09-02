@@ -73,23 +73,32 @@ _RETIREMENT_LANES: Final[dict[str, str]] = {
     derived_receipts.DerivedComponent.MEMORY_REFS.value: "memory_refs",
 }
 
+#: The only components Design Decisions 4 and 6 allow to omit the pending
+#: generation: vector and graph lanes contribute proven-current generations
+#: only and disclose their pending coverage instead, and advisory work is
+#: noncanonical background review. Every OTHER required component -- including
+#: one added after this module was written -- must prove completion before the
+#: overlay stops shadowing, because ordinary recall reads through it.
+_OMITTABLE_COMPONENTS: Final[frozenset[str]] = frozenset(
+    {
+        derived_receipts.DerivedComponent.GRAPH.value,
+        derived_receipts.DerivedComponent.EMBEDDINGS.value,
+        derived_receipts.DerivedComponent.CLAIMS.value,
+        derived_receipts.DerivedComponent.WRITE_ADVISORY.value,
+    }
+)
+
 #: Bounded re-attempts when the store's pending generation moves under a
-#: hydration pass. A concurrent publisher invalidates the fence rather than
-#: corrupting it, so a small fixed budget converges or fails closed.
-_HYDRATION_ATTEMPTS: Final = 3
+#: hydration pass, or when a pass retires custody and must re-snapshot. A
+#: concurrent publisher invalidates the fence rather than corrupting it, so a
+#: small fixed budget converges or fails closed.
+_HYDRATION_ATTEMPTS: Final = 4
+
+#: An identity that could not be observed at all. Never a retirement target.
+_UNREADABLE: Final = object()
 
 _STATE_LOCK = threading.RLock()
 _STATES: dict[str, _VaultState] = {}
-#: Which persistent lanes have published each pending identity at its exact
-#: after generation. Kept beside the projection rather than inside it: a fence
-#: miss re-hydrates the projection from durable custody, and a lane proof that
-#: already landed must not have to be re-observed for the row to retire.
-_PUBLISHED: dict[str, dict[str, set[str]]] = {}
-
-
-# --------------------------------------------------------------------------- #
-# Typed projection
-# --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +213,30 @@ def _key(vault_root: Path) -> str:
         return str(Path(vault_root))
 
 
+def vault_rel_path(vault_root: Path, path: Path | str) -> str | None:
+    """The one vault-relative identity spelling every pending consumer uses.
+
+    ``find`` walks candidates, ``lexstore`` and ``memory_refs`` report published
+    identities, and this module keys custody by the same string. They used to
+    normalize differently -- one through ``absolute()``, the others through
+    ``resolve()`` -- which agreed on ordinary vaults and diverged through a
+    symlinked root. One helper, used by all of them, removes the class.
+
+    The cheap spelling is tried first because the walk calls this per candidate;
+    ``resolve()`` is the fallback that also handles a link on either side.
+    """
+    root = Path(vault_root)
+    candidate = Path(path)
+    try:
+        return candidate.absolute().relative_to(root.absolute()).as_posix()
+    except (OSError, ValueError):
+        pass
+    try:
+        return candidate.resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return None
+
+
 def _digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -274,24 +307,39 @@ def _page_memory_ref(page: ParsedPage) -> str | None:
     return None if identity is None else memory_refs.memory_ref(identity)
 
 
-def _rows_from_batches(vault_root: Path, batches: Sequence[object]) -> dict[str, PendingRow] | None:
+@dataclass(frozen=True, slots=True)
+class _Projection:
+    """One hydration pass: what proved, and what could not."""
+
+    rows: dict[str, PendingRow]
+    unprovable: frozenset[str]
+
+
+def _project_batches(vault_root: Path, batches: Sequence[object]) -> _Projection:
     """Project every snapshot row, resolving supersession by exact proof.
 
     Two batches may cover one path when a later write lands before the earlier
     one converges. Only the generation whose after state the canonical bytes
     actually prove is current; the older row is superseded and cannot publish.
-    A path no batch can prove fails the hydration closed.
+
+    A path no batch can prove is reported rather than raised. Overlay-wide
+    fail-closed is still what a caller gets -- that is the spec sentence -- but
+    the retirement pass first gets a chance to clear an out-of-band supersession
+    the persistent lanes have already published, so one hand edit cannot deny
+    every unrelated query forever.
     """
     proven: dict[str, PendingRow] = {}
+    wanted: set[str] = set()
     for batch in batches:
         receipt = batch.receipt
         by_path = {path.rel_path: path for path in receipt.paths}
         for row in batch.rows:
+            wanted.add(row.rel_path)
             if row.rel_path in proven:
                 continue
             path = by_path.get(row.rel_path)
             if path is None or row.canonical_generation != receipt.canonical_generation:
-                return None
+                continue
             candidate = _prove_row(
                 vault_root,
                 row.rel_path,
@@ -302,18 +350,117 @@ def _rows_from_batches(vault_root: Path, batches: Sequence[object]) -> dict[str,
             )
             if candidate is not None:
                 proven[row.rel_path] = candidate
-    wanted = {row.rel_path for batch in batches for row in batch.rows}
-    if wanted - set(proven):
-        return None
-    return proven
+    return _Projection(rows=proven, unprovable=frozenset(wanted - set(proven)))
 
 
-def _required_lanes(receipt: object) -> frozenset[str]:
-    return frozenset(
-        _RETIREMENT_LANES[status.component.value]
-        for status in receipt.components
-        if status.component.value in _RETIREMENT_LANES and status.state != "not_required"
+def _canonical_identity(vault_root: Path, rel_path: str) -> str | None | object:
+    """The identity the persistent lanes must hold for this path right now.
+
+    ``None`` means proven absence. The ``_UNREADABLE`` sentinel means the path
+    could not be observed at all, which never authorizes retirement.
+    """
+    target = Path(vault_root).joinpath(*rel_path.split("/"))
+    try:
+        if not target.exists():
+            return None
+        if target.is_symlink() or not target.is_file():
+            return _UNREADABLE
+        return _digest(target.read_bytes())
+    except OSError:
+        return _UNREADABLE
+
+
+def _required_components(receipt: object) -> tuple[object, ...]:
+    return tuple(
+        status for status in receipt.components if status.state != "not_required"
     )
+
+
+def _components_allow_retirement(vault_root: Path, batch: object) -> bool:
+    """Whether every component ordinary recall reads through has converged.
+
+    `lexstore` and `memory_refs` are proven by what those stores actually hold
+    (see :func:`_lanes_hold`). Graph, embeddings, claims and write-advisory may
+    omit the pending generation by design. Everything else -- resolver, semantic
+    purge, freshness, and any component added after this module was written --
+    must be `completed` at the batch's own component revision, read through the
+    frozen public `component_status` seam. An unmapped component therefore
+    blocks retirement rather than silently contributing nothing.
+    """
+    for status in _required_components(batch.receipt):
+        component = status.component.value
+        if component in _RETIREMENT_LANES or component in _OMITTABLE_COMPONENTS:
+            continue
+        try:
+            current = derived_receipts.component_status(
+                vault_root, batch.receipt, status.component
+            )
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+            return False
+        if current.state != "completed" or current.revision != status.revision:
+            return False
+    return True
+
+
+def _lanes_hold(vault_root: Path, expected: dict[str, str | None]) -> bool:
+    """Whether both persistent recall lanes hold exactly these identities.
+
+    The lanes answer from what they durably store, not from a report that a pass
+    ran: a pass that indexed one generation and a file that moved before the
+    report would otherwise retire custody the catalogue does not actually hold.
+    Asking the stores also means the proof survives a restart, so a process that
+    dies between the two publications does not strand the row.
+    """
+    if not expected:
+        return True
+    from . import lexstore, memory_refs
+
+    try:
+        # The identity sidecar answers the whole batch in one query, so it is
+        # asked first and short-circuits the per-path catalogue comparison.
+        identities = memory_refs.holds_content_identities(vault_root, expected)
+        if not all(identities.get(rel, False) for rel in expected):
+            return False
+        catalogue = lexstore.holds_content_identities(vault_root, expected)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return all(catalogue.get(rel, False) for rel in expected)
+
+
+def _retire_settled(
+    vault_root: Path, batches: Sequence[object], projection: _Projection
+) -> bool:
+    """Retire every batch both recall lanes have published. Returns whether any did.
+
+    The identity a lane must hold is the row's proven after state, or -- when an
+    out-of-band write superseded that state -- the canonical bytes now on disk.
+    The second case is what lets a hand edit heal instead of denying recall
+    forever, and it is still exact: the lanes must hold the current generation,
+    and the clearing itself goes through the frozen exact-batch CAS.
+    """
+    retired = False
+    for batch in batches:
+        expected: dict[str, str | None] = {}
+        blocked = False
+        for row in batch.rows:
+            proven = projection.rows.get(row.rel_path)
+            if proven is not None:
+                expected[row.rel_path] = proven.after_hash
+                continue
+            identity = _canonical_identity(vault_root, row.rel_path)
+            if identity is _UNREADABLE:
+                blocked = True
+                break
+            expected[row.rel_path] = identity
+        if blocked:
+            continue
+        if not _components_allow_retirement(vault_root, batch):
+            continue
+        if not _lanes_hold(vault_root, expected):
+            continue
+        if derived_receipts.retire_pending_visibility(vault_root, batch).outcome == "retired":
+            retired = True
+    return retired
 
 
 def _warming(failure_code: str, generation: int = 0) -> PendingOverlay:
@@ -352,18 +499,12 @@ def publish(vault_root: Path, receipt: object) -> bool:
         if row is None:
             return False
         rows[path.rel_path] = row
-    key = _key(root)
     with _STATE_LOCK:
         # Publishing advances the store's pending generation, so any cached
         # projection is already fenced out and the next request re-hydrates from
-        # durable custody. What must be dropped explicitly is the lane proof for
-        # these identities: a newer generation is not published by an older
-        # lane pass.
-        _STATES.pop(key, None)
-        proofs = _PUBLISHED.get(key)
-        if proofs is not None:
-            for rel_path in rows:
-                proofs.pop(rel_path, None)
+        # durable custody. Nothing else is remembered here: whether a persistent
+        # lane holds an identity is asked of that lane, never cached.
+        _STATES.pop(_key(root), None)
     return True
 
 
@@ -377,8 +518,13 @@ def overlay(vault_root: Path) -> PendingOverlay:
 
     A cached projection is reused only while the store's opaque pending
     generation still fences it; any concurrent pending-row mutation forces
-    another bounded hydration attempt. Every incomplete outcome is typed and
-    carries no rows.
+    another bounded hydration attempt. Every incomplete outcome is typed,
+    carries a closed failure code, and carries no rows.
+
+    Each attempt first retires whatever both recall lanes have published. That
+    is what converges a restart which lost its in-process lane bookkeeping, and
+    what heals a row an out-of-band write made unprovable once the lanes publish
+    the current canonical bytes.
     """
     root = Path(vault_root)
     key = _key(root)
@@ -408,8 +554,13 @@ def overlay(vault_root: Path) -> PendingOverlay:
                 snapshot.failure_code or f"pending_visibility_{snapshot.outcome}",
                 snapshot.snapshot_generation,
             )
-        rows = _rows_from_batches(root, snapshot.batches)
-        if rows is None:
+        projection = _project_batches(root, snapshot.batches)
+        if _retire_settled(root, snapshot.batches, projection):
+            # Custody converged during this pass; re-snapshot so the projection
+            # and its fence describe the same state.
+            _forget(key)
+            continue
+        if projection.unprovable:
             _forget(key)
             return _warming(
                 "pending_visibility_unprovable", snapshot.snapshot_generation
@@ -421,19 +572,15 @@ def overlay(vault_root: Path) -> PendingOverlay:
         with _STATE_LOCK:
             _STATES[key] = _VaultState(
                 snapshot_generation=snapshot.snapshot_generation,
-                rows=rows,
+                rows=projection.rows,
                 batches=tuple(snapshot.batches),
                 hydrated_at=time.monotonic(),
             )
-            proofs = _PUBLISHED.setdefault(key, {})
-            for rel_path in tuple(proofs):
-                if rel_path not in rows:
-                    proofs.pop(rel_path, None)
         return PendingOverlay(
             outcome="ready",
             failure_code=None,
             snapshot_generation=snapshot.snapshot_generation,
-            rows=dict(rows),
+            rows=dict(projection.rows),
         )
     _forget(key)
     return _warming("pending_visibility_unprovable")
@@ -474,81 +621,20 @@ def reference_projection(vault_root: Path) -> ReferenceProjection | None:
 def note_persistent_publication(
     vault_root: Path, lane: str, rel_paths: Iterable[str]
 ) -> None:
-    """Record that one persistent lane published these exact identities.
+    """A persistent recall lane published; re-derive custody and retire it.
 
-    Retirement happens here and only here: a batch is retired once every lane it
-    requires has published every one of its paths at the exact after generation
-    the receipt recorded. Removal therefore always follows publication, and the
-    exact-batch CAS in the frozen protocol refuses to clear a newer pending row.
+    Nothing is remembered from this call. Whether a lane holds an identity is a
+    question for that lane's durable state, asked at retirement time against the
+    exact generation the receipt recorded -- so a pass that indexed one
+    generation before the file moved cannot retire custody the store does not
+    hold, and a restart between two lane publications does not strand a row.
     """
     if lane not in set(_RETIREMENT_LANES.values()):
         raise ValueError(f"unknown persistent recall lane: {lane!r}")
-    wanted = [rel for rel in rel_paths if isinstance(rel, str) and rel]
-    if not wanted:
+    if not any(isinstance(rel, str) and rel for rel in rel_paths):
         return
-    root = Path(vault_root)
-    current = overlay(root)
-    if not current.ready or current.empty:
-        return
-    key = _key(root)
-    with _STATE_LOCK:
-        state = _STATES.get(key)
-        if state is None:
-            return
-        proofs = _PUBLISHED.setdefault(key, {})
-        for rel in wanted:
-            if rel in state.rows:
-                proofs.setdefault(rel, set()).add(lane)
-        batches = tuple(state.batches)
-
-    for batch in batches:
-        _retire_if_published(root, key, batch)
-
-
-def _retire_if_published(root: Path, key: str, batch: object) -> None:
-    lanes = _required_lanes(batch.receipt)
-    with _STATE_LOCK:
-        state = _STATES.get(key)
-        if state is None or not any(item == batch for item in state.batches):
-            return
-        proofs = _PUBLISHED.get(key, {})
-        for row in batch.rows:
-            if not lanes <= proofs.get(row.rel_path, set()):
-                return
-        pending_rows = [state.rows.get(row.rel_path) for row in batch.rows]
-
-    # Re-prove the exact after generation before clearing custody: a newer
-    # out-of-band write between publication and retirement must leave the row
-    # pending rather than have this batch retire on its behalf.
-    by_path = {path.rel_path: path for path in batch.receipt.paths}
-    for row, projected in zip(batch.rows, pending_rows, strict=True):
-        path = by_path.get(row.rel_path)
-        if path is None or projected is None:
-            return
-        proof = _prove_row(
-            root,
-            row.rel_path,
-            after_hash=projected.after_hash,
-            canonical_generation=projected.canonical_generation,
-            batch_id=projected.batch_id,
-            stable_memory_ref=projected.stable_memory_ref,
-        )
-        if proof is None:
-            return
-
-    retirement = derived_receipts.retire_pending_visibility(root, batch)
-    with _STATE_LOCK:
-        # Either way the cached projection is now behind: a retirement advances
-        # the store's pending generation, and `stale`/`unprovable` means the
-        # store has disowned what this process held. Both resolve by
-        # re-hydrating from durable custody on the next request; the lane proofs
-        # in `_PUBLISHED` survive so an already-published lane is not re-asked.
-        _STATES.pop(key, None)
-        if retirement.outcome == "retired":
-            proofs = _PUBLISHED.get(key)
-            if proofs is not None:
-                for row in batch.rows:
-                    proofs.pop(row.rel_path, None)
+    _forget(_key(Path(vault_root)))
+    overlay(Path(vault_root))
 
 
 # --------------------------------------------------------------------------- #
@@ -591,8 +677,5 @@ def reset(vault_root: Path | None = None) -> None:
     with _STATE_LOCK:
         if vault_root is None:
             _STATES.clear()
-            _PUBLISHED.clear()
         else:
-            key = _key(Path(vault_root))
-            _STATES.pop(key, None)
-            _PUBLISHED.pop(key, None)
+            _STATES.pop(_key(Path(vault_root)), None)

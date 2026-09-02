@@ -186,6 +186,7 @@ def _prepare(
     batch_id: str,
     generation: str,
     paths: tuple[DerivedBatchPath, ...],
+    required=None,
     now: float = 10.0,
 ):
     return derived_receipts.prepare_batch(
@@ -195,7 +196,7 @@ def _prepare(
         canonical_generation=generation,
         checkpoint_id=f"checkpoint-{generation}",
         paths=paths,
-        required_components=_REQUIRED,
+        required_components=_REQUIRED if required is None else frozenset(required),
         now=now,
     )
 
@@ -220,6 +221,7 @@ def _publish_change(
     batch_id: str,
     generation: str,
     changes: tuple[tuple[str, str | None, str | None, str | None], ...],
+    required=None,
 ) -> None:
     """Prepare custody, apply the canonical change, then prove and publish.
 
@@ -230,7 +232,13 @@ def _publish_change(
         _batch_path(rel, before=before, after=after, stable_memory_ref=ref)
         for rel, before, after, ref in changes
     )
-    receipt = _prepare(vault, batch_id=batch_id, generation=generation, paths=paths)
+    receipt = _prepare(
+        vault,
+        batch_id=batch_id,
+        generation=generation,
+        paths=paths,
+        required=required,
+    )
     for rel, _before, after, _ref in changes:
         target = vault / rel
         if after is None:
@@ -1180,3 +1188,543 @@ def test_no_pending_fast_path_preserves_existing_recall_behavior(
     pending_degraded: list[str] = []
     assert _keyword(vault, "gamma", degraded=pending_degraded) == [rel]
     assert any("pending" in component for component in pending_degraded)
+
+
+# --------------------------------------------------------------------------- #
+# Correction round 1 — reviewer findings
+# --------------------------------------------------------------------------- #
+
+
+def _publish_lanes(vault: Path, rel_paths: tuple[str, ...]) -> None:
+    """Publish the persistent lexical and identity lanes for exact paths."""
+    present = [vault / rel for rel in rel_paths if (vault / rel).exists()]
+    absent = [rel for rel in rel_paths if not (vault / rel).exists()]
+    if present:
+        assert lexstore.get_store(vault).upsert_paths(present) is True
+        assert memory_refs.upsert_after_write(vault, present) is True
+    if absent:
+        assert lexstore.delete_after_remove(vault, absent) is True
+        assert memory_refs.delete_after_remove(vault, absent) is True
+
+
+def _overlay(vault: Path):
+    return freshness.recall_pending_coverage(vault)
+
+
+def _records_manifest() -> str:
+    return (
+        "---\n"
+        "type: collection\n"
+        "exomem_id: 12345678-1234-4abc-8def-123456789abc\n"
+        "title: Measurements\n"
+        "semantic_profile: records\n"
+        "collection_version: 1\n"
+        "lifecycle: active\n"
+        "schema_version: 1\n"
+        "storage:\n"
+        "  strategy: markdown-items\n"
+        "  format_version: 1\n"
+        "  source: items\n"
+        "item_schema:\n"
+        "  natural_key: [observed]\n"
+        "  fields:\n"
+        "    observed:\n"
+        "      type: string\n"
+        "---\n"
+    )
+
+
+def test_unmanaged_recall_keeps_its_exact_source_walk_fallback(tmp_path: Path) -> None:
+    """Finding 1(a): only managed recall fails closed on unprovable coverage."""
+    vault = tmp_path
+    _seed_corpus(vault)
+    settled_rel = "Knowledge Base/Notes/unmanaged-settled.md"
+    pending_rel = "Knowledge Base/Notes/unmanaged-pending.md"
+    marker = "sigmaunmanagedmarker"
+    _write(
+        vault,
+        settled_rel,
+        _page(
+            title="Unmanaged settled",
+            body=f"A settled page recording {marker} evidence.",
+            updated="2026-08-01",
+        ),
+    )
+    before = _page(title="Unmanaged pending", body="Nothing yet.", updated="2026-08-02")
+    _write(vault, pending_rel, before)
+    _prime(vault)
+
+    after = _page(
+        title="Unmanaged pending", body="Committed bytes.", updated="2026-08-20"
+    )
+    _publish_change(
+        vault,
+        batch_id="batch-unmanaged",
+        generation="generation-unmanaged",
+        changes=((pending_rel, before, after, None),),
+    )
+    # An out-of-band editor save makes the pending row unprovable.
+    _write(
+        vault,
+        pending_rel,
+        _page(title="Unmanaged pending", body="Hand edit.", updated="2026-08-21"),
+    )
+    _reset_overlay()
+    find_module.reset_page_and_result_caches()
+
+    # `readiness.runtime_managed()` is False here: this is the offline/CLI
+    # contract, which keeps its existing exact source-walk fallback rather than
+    # being refused for custody it never consults.
+    assert readiness.runtime_managed() is False
+    assert _keyword(vault, marker) == [settled_rel]
+    assert _hybrid(vault, marker) == [settled_rel]
+
+
+def test_out_of_band_supersession_recovers_after_persistent_publication(
+    tmp_path: Path, managed_runtime: None
+) -> None:
+    """Finding 1(b): an unprovable row must be able to retire and self-heal."""
+    vault = tmp_path
+    _seed_corpus(vault)
+    rel = "Knowledge Base/Notes/self-heal.md"
+    marker = "tauselfhealmarker"
+    before = _page(title="Self heal", body="Nothing yet.", updated="2026-08-01")
+    _write(vault, rel, before)
+    _prime(vault)
+
+    after = _page(title="Self heal", body="Committed bytes.", updated="2026-08-20")
+    _publish_change(
+        vault,
+        batch_id="batch-self-heal",
+        generation="generation-self-heal",
+        changes=((rel, before, after, None),),
+    )
+    hand_edited = _page(
+        title="Self heal",
+        body=f"A hand edit that records {marker} evidence.",
+        updated="2026-08-22",
+    )
+    _write(vault, rel, hand_edited)
+    _reset_overlay()
+    find_module.reset_page_and_result_caches()
+
+    # The receipt's intended after state is no longer on disk, so managed recall
+    # fails closed rather than serving an unprovable projection.
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        _keyword(vault, marker)
+
+    # Once the persistent lanes publish the current canonical bytes, the row is
+    # superseded out of band and retires; recall recovers instead of warming
+    # forever on a row that can never prove its original after state.
+    _publish_lanes(vault, (rel,))
+    _reset_overlay()
+    find_module.reset_page_and_result_caches()
+
+    assert _non_retired_rows(vault) == {}
+    assert _keyword(vault, marker) == [rel]
+
+
+def test_retirement_requires_every_non_omittable_component(tmp_path: Path) -> None:
+    """Finding 2: only graph/embeddings/claims/advisory may omit the generation."""
+    vault = tmp_path
+    _seed_corpus(vault)
+    blocked_rel = "Knowledge Base/Notes/component-blocked.md"
+    omittable_rel = "Knowledge Base/Notes/component-omittable.md"
+    blocked_before = _page(title="Blocked", body="Nothing yet.", updated="2026-08-01")
+    omittable_before = _page(title="Omittable", body="Nothing yet.", updated="2026-08-02")
+    _write(vault, blocked_rel, blocked_before)
+    _write(vault, omittable_rel, omittable_before)
+    _prime(vault)
+
+    _publish_change(
+        vault,
+        batch_id="batch-component-blocked",
+        generation="generation-components",
+        changes=(
+            (
+                blocked_rel,
+                blocked_before,
+                _page(title="Blocked", body="Committed.", updated="2026-08-10"),
+                None,
+            ),
+        ),
+        required={
+            DerivedComponent.LEXSTORE,
+            DerivedComponent.MEMORY_REFS,
+            DerivedComponent.RESOLVER,
+            DerivedComponent.SEMANTIC_PURGE,
+        },
+    )
+    _publish_change(
+        vault,
+        batch_id="batch-component-omittable",
+        generation="generation-components",
+        changes=(
+            (
+                omittable_rel,
+                omittable_before,
+                _page(title="Omittable", body="Committed.", updated="2026-08-11"),
+                None,
+            ),
+        ),
+        required={
+            DerivedComponent.LEXSTORE,
+            DerivedComponent.MEMORY_REFS,
+            DerivedComponent.GRAPH,
+            DerivedComponent.EMBEDDINGS,
+            DerivedComponent.CLAIMS,
+        },
+    )
+
+    _publish_lanes(vault, (blocked_rel, omittable_rel))
+    _reset_overlay()
+
+    # The lanes ordinary recall reads through have published both pages, but the
+    # blocked batch still owes resolver and semantic-purge convergence.
+    assert _non_retired_rows(vault) == {blocked_rel: "live"}
+
+
+def test_lane_proof_survives_restart_and_retires_at_hydration(tmp_path: Path) -> None:
+    """Finding 3: a restart between lane publications must not strand a row."""
+    vault = tmp_path
+    _seed_corpus(vault)
+    rel = "Knowledge Base/Notes/restart-retire.md"
+    before = _page(title="Restart retire", body="Nothing yet.", updated="2026-08-01")
+    _write(vault, rel, before)
+    _prime(vault)
+
+    after = _page(title="Restart retire", body="Committed.", updated="2026-08-20")
+    _publish_change(
+        vault,
+        batch_id="batch-restart-retire",
+        generation="generation-restart-retire",
+        changes=((rel, before, after, None),),
+    )
+    assert _non_retired_rows(vault) == {rel: "live"}
+
+    assert lexstore.get_store(vault).upsert_paths([vault / rel]) is True
+    # The process restarts between the two lane publications.
+    _reset_overlay()
+    lexstore.clear_stores()
+    assert memory_refs.upsert_after_write(vault, [vault / rel]) is True
+    _reset_overlay()
+
+    assert _overlay(vault).ready is True
+    assert _non_retired_rows(vault) == {}
+
+
+def test_pending_projection_excludes_non_recall_candidates(tmp_path: Path) -> None:
+    """Finding 4: pending identities join the projection under current policy."""
+    vault = tmp_path
+    _seed_corpus(vault)
+    manifest_rel = "Knowledge Base/Records/Health/_collection.md"
+    raw_rel = "Knowledge Base/Records/Health/items/raw.md"
+    _write(vault, manifest_rel, _records_manifest())
+    raw_before = "private measurement\n"
+    _write(vault, raw_rel, raw_before)
+    _prime(vault)
+
+    raw_after = "private measurement, revised\n"
+    _publish_change(
+        vault,
+        batch_id="batch-records",
+        generation="generation-records",
+        changes=((raw_rel, raw_before, raw_after, None),),
+    )
+    overlay = _overlay(vault)
+    assert overlay.ready is True
+    assert overlay.covers(raw_rel) is True
+
+    snapshot = find_module.FreshnessSnapshot(vault, pending=overlay)
+    assert raw_rel not in snapshot.recall_paths("vault")
+    assert raw_rel not in snapshot.recall_paths("kb")
+
+
+def test_resolve_page_applies_current_recall_admission(tmp_path: Path) -> None:
+    """Finding 10: the hydration seam carries its own admission check."""
+    vault = tmp_path
+    _seed_corpus(vault)
+    manifest_rel = "Knowledge Base/Records/Health/_collection.md"
+    raw_rel = "Knowledge Base/Records/Health/items/raw.md"
+    _write(vault, manifest_rel, _records_manifest())
+    raw_before = "private measurement\n"
+    _write(vault, raw_rel, raw_before)
+    _prime(vault)
+
+    raw_after = "private measurement, revised\n"
+    _publish_change(
+        vault,
+        batch_id="batch-records-resolve",
+        generation="generation-records-resolve",
+        changes=((raw_rel, raw_before, raw_after, None),),
+    )
+    overlay = _overlay(vault)
+    assert overlay.covers(raw_rel) is True
+    assert overlay.page(raw_rel) is not None, "custody holds the row"
+
+    # Custody is not release: the hydration seam refuses the suppressed identity
+    # on its own, without relying on a caller having checked first.
+    assert find_module._resolve_page(vault, raw_rel, overlay) is None
+
+
+def test_shadowed_identity_is_absent_from_lane_rankings_before_fusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 5: shadowing precedes scoring, fusion and every lane cap."""
+    vault = tmp_path
+    _seed_corpus(vault)
+    stale_rel = "Knowledge Base/Notes/prefusion-stale.md"
+    live_rel = "Knowledge Base/Notes/prefusion-live.md"
+    marker = "upsilonprefusionmarker"
+    stale_before = _page(
+        title="Prefusion stale",
+        body=" ".join([marker] * 30),
+        updated="2026-09-01",
+    )
+    _write(vault, stale_rel, stale_before)
+    _write(
+        vault,
+        live_rel,
+        _page(
+            title="Prefusion live",
+            body=f"A settled page recording {marker} once.",
+            updated="2026-08-01",
+        ),
+    )
+    _prime(vault)
+
+    stale_after = _page(
+        title="Prefusion stale",
+        body="Every distinguishing term has been removed.",
+        updated="2026-09-02",
+    )
+    _publish_change(
+        vault,
+        batch_id="batch-prefusion",
+        generation="generation-prefusion",
+        changes=((stale_rel, stale_before, stale_after, None),),
+    )
+
+    requested: list[set[str]] = []
+    real_hints = lexstore.emitted_parent_hints_result
+
+    def _spy(vault_root, paths, **kwargs):
+        requested.append(set(paths))
+        return real_hints(vault_root, paths, **kwargs)
+
+    monkeypatch.setattr(lexstore, "emitted_parent_hints_result", _spy)
+    assert _hybrid(vault, marker, limit=5) == [live_rel]
+
+    assert requested, "the candidate lanes did not reach the parent-hint seam"
+    for admitted in requested:
+        assert stale_rel not in admitted, (
+            "a shadowed identity reached the fused lane set"
+        )
+
+
+def test_keyword_merge_does_not_evict_bounded_catalogue_rows(tmp_path: Path) -> None:
+    """Finding 6: the merge over-fetches instead of displacing settled rows.
+
+    Two ways the merge could shorten the settled half of a bounded lane, and
+    both are pinned: the merged answer must not spend the caller's whole budget
+    on pending rows, and the persistent side must be asked for enough rows that
+    shadowing an identity inside the window does not simply lose a slot.
+    """
+    vault = tmp_path
+    _seed_corpus(vault)
+    marker = "phimergemarker"
+    settled: list[str] = []
+    for index in range(6):
+        rel = f"Knowledge Base/Notes/merge-settled-{index:02d}.md"
+        _write(
+            vault,
+            rel,
+            _page(
+                title=f"Merge settled {index:02d}",
+                body=f"A settled page recording {marker} evidence.",
+                updated=f"2026-07-{index + 1:02d}",
+            ),
+        )
+        settled.append(rel)
+    # The newest settled page is inside the bounded window and is the one a
+    # pending edit shadows out of it.
+    shadowed_rel = settled[-1]
+    shadowed_before = _read(vault, shadowed_rel)
+
+    pending_changes: list[tuple[str, str | None, str | None, str | None]] = [
+        (
+            shadowed_rel,
+            shadowed_before,
+            _page(
+                title="Merge settled 05",
+                body="Every distinguishing term has been removed.",
+                updated="2026-07-06",
+            ),
+            None,
+        )
+    ]
+    for index in range(10):
+        rel = f"Knowledge Base/Notes/merge-pending-{index:02d}.md"
+        pending_changes.append(
+            (
+                rel,
+                None,
+                _page(
+                    title=f"Merge pending {index:02d}",
+                    body=f"A committed page recording {marker} evidence.",
+                    updated=f"2026-08-{index + 1:02d}",
+                ),
+                None,
+            )
+        )
+    _prime(vault)
+
+    def _lane(pending=None) -> list[str]:
+        return find_module._keyword_match_paths(
+            vault,
+            marker,
+            "kb",
+            freshness=freshness.recall_checkpoint(vault, "kb").triple,
+            repair=False,
+            k=5,
+            pending=pending,
+        )
+
+    baseline = _lane()
+    assert len(baseline) == 5, baseline
+    assert shadowed_rel in baseline
+
+    _publish_change(
+        vault,
+        batch_id="batch-merge",
+        generation="generation-merge",
+        changes=tuple(pending_changes),
+    )
+    merged = _lane(pending=_overlay(vault))
+
+    # Nothing the base kept and still carries the term was displaced.
+    surviving = [rel for rel in baseline if rel != shadowed_rel]
+    for rel in surviving:
+        assert rel in merged, (rel, merged)
+    # And the settled half is no shorter than it was, because the persistent
+    # side is asked for enough rows to replace the one shadowing removed.
+    settled_in_merged = [rel for rel in merged if rel in settled]
+    assert len(settled_in_merged) >= len(baseline), (settled_in_merged, merged)
+    assert shadowed_rel not in merged
+
+
+def test_stale_pending_snapshot_generation_is_refused(tmp_path: Path) -> None:
+    """Finding 7: the completeness fence must gate the cached projection."""
+    vault = tmp_path
+    _seed_corpus(vault)
+    first_rel = "Knowledge Base/Notes/fence-first.md"
+    second_rel = "Knowledge Base/Notes/fence-second.md"
+    marker = "chifencemarker"
+    _prime(vault)
+
+    _publish_change(
+        vault,
+        batch_id="batch-fence-first",
+        generation="generation-fence",
+        changes=(
+            (
+                first_rel,
+                None,
+                _page(title="Fence first", body="Committed.", updated="2026-08-01"),
+                None,
+            ),
+        ),
+    )
+    # Hydrate and cache this process's projection.
+    assert _overlay(vault).covers(first_rel) is True
+
+    # Another process publishes a second batch against the same store: the
+    # durable rows and the store's pending generation both advance, while this
+    # process's cached projection does not.
+    second_after = _page(
+        title="Fence second",
+        body=f"A second committed page recording {marker} evidence.",
+        updated="2026-08-02",
+    )
+    paths = (_batch_path(second_rel, before=None, after=second_after),)
+    receipt = _prepare(
+        vault, batch_id="batch-fence-second", generation="generation-fence", paths=paths
+    )
+    _write(vault, second_rel, second_after)
+    proof = derived_receipts.prove_committed(
+        vault, receipt, current_generation=receipt.canonical_generation
+    )
+    assert proof.outcome == "ready"
+    assert derived_receipts.publish_pending_visibility(
+        vault, receipt, publisher=lambda _root, _receipt: True
+    )
+
+    refreshed = _overlay(vault)
+    assert refreshed.covers(second_rel) is True, "a stale cached projection was served"
+    assert _keyword(vault, marker) == [second_rel]
+
+
+def test_retirement_refuses_a_lane_pass_that_indexed_an_older_generation(
+    tmp_path: Path, managed_runtime: None
+) -> None:
+    """Finding 8: a lane pass proves the identity it holds, not that it ran.
+
+    The lanes index one generation and the file moves before their publication
+    is accounted for. Retiring on "a pass ran" would clear custody while the
+    catalogue still holds the older bytes, so the row must stay pending and
+    managed recall must keep failing closed until the lanes hold the current
+    generation.
+    """
+    vault = tmp_path
+    _seed_corpus(vault)
+    rel = "Knowledge Base/Notes/lane-race.md"
+    marker = "psilaneracemarker"
+    before = _page(title="Lane race", body="Nothing yet.", updated="2026-08-01")
+    _write(vault, rel, before)
+    _prime(vault)
+
+    first = _page(title="Lane race", body="The committed bytes.", updated="2026-08-20")
+    _publish_change(
+        vault,
+        batch_id="batch-lane-race",
+        generation="generation-lane-race",
+        changes=((rel, before, first, None),),
+    )
+
+    # Both lanes index the committed generation.
+    assert lexstore.get_store(vault).upsert_paths([vault / rel]) is True
+    assert memory_refs.upsert_after_write(vault, [vault / rel]) is True
+    assert _non_retired_rows(vault) == {}
+
+    # A second committed generation, whose custody the lanes have not published.
+    second = _page(
+        title="Lane race",
+        body=f"A newer generation recording {marker} evidence.",
+        updated="2026-08-21",
+    )
+    _publish_change(
+        vault,
+        batch_id="batch-lane-race-newer",
+        generation="generation-lane-race-newer",
+        changes=((rel, first, second, None),),
+    )
+    assert _non_retired_rows(vault) == {rel: "live"}
+
+    # The file moves again before anything accounts for the lanes' pass, so the
+    # lanes now hold neither the receipt's after state nor the current bytes.
+    _write(
+        vault,
+        rel,
+        _page(title="Lane race", body="A third generation.", updated="2026-08-22"),
+    )
+    _reset_overlay()
+    memory_refs.delete_after_remove(vault, [])
+    lexstore.get_store(vault)._note_pending_publication([vault / rel], [])
+
+    assert _non_retired_rows(vault) == {rel: "live"}, (
+        "custody was cleared while the lanes held an older generation"
+    )
+    _reset_overlay()
+    find_module.reset_page_and_result_caches()
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        _keyword(vault, marker)

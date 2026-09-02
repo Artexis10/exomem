@@ -543,7 +543,12 @@ class FreshnessSnapshot:
         pending = self._pending
         if pending is None or pending.empty:
             return projected
-        return (projected | pending.current_paths()) - pending.tombstoned_paths()
+        admitted = {
+            rel_path
+            for rel_path in pending.current_paths()
+            if recall_policy.is_recall_candidate(self._root, self._root / rel_path)
+        }
+        return (projected | admitted) - pending.tombstoned_paths()
 
     def _load_recall_projection(self, scope: str) -> None:
         if scope in self._recall and scope in self._recall_paths:
@@ -653,12 +658,55 @@ class FreshnessSnapshot:
                 ) from exc
 
 
-def _vault_rel(vault_root: Path, path: Path) -> str | None:
-    """Vault-relative POSIX identity for a walked candidate, or None."""
-    try:
-        return Path(path).absolute().relative_to(vault_root.absolute()).as_posix()
-    except (OSError, ValueError):
+class _EmptyPendingCoverage:
+    """The no-custody projection an offline caller proceeds under.
+
+    Structurally identical to a ready, empty overlay: it shadows nothing, merges
+    nothing, and leaves every existing lane exactly as it was.
+    """
+
+    ready = True
+    empty = True
+    rows: dict[str, Any] = {}
+
+    @staticmethod
+    def covers(_rel_path: str) -> bool:
+        return False
+
+    @staticmethod
+    def shadow(rel_paths: Iterable[str]) -> list[str]:
+        return list(rel_paths)
+
+    @staticmethod
+    def page(_rel_path: str) -> ParsedPage | None:
         return None
+
+    @staticmethod
+    def current_pages() -> tuple:
+        return ()
+
+    @staticmethod
+    def current_paths() -> frozenset[str]:
+        return frozenset()
+
+    @staticmethod
+    def tombstoned_paths() -> frozenset[str]:
+        return frozenset()
+
+
+_EMPTY_PENDING_COVERAGE = _EmptyPendingCoverage()
+
+
+def _vault_rel(vault_root: Path, path: Path) -> str | None:
+    """Vault-relative POSIX identity for a walked candidate, or None.
+
+    Delegates to the one helper the pending overlay, `lexstore` and
+    `memory_refs` also normalize through, so a candidate and the custody that
+    shadows it can never be keyed by two different spellings of one file.
+    """
+    from . import pending_recall
+
+    return pending_recall.vault_rel_path(vault_root, path)
 
 
 def _resolve_page(
@@ -1038,23 +1086,27 @@ def find(
         )
     query_norm = (query or "").lower().strip()
 
-    # Exact pending coverage is proven before anything reads a persistent
-    # catalogue. Outstanding durable custody that cannot be hydrated within its
-    # bound means this request cannot be answered exactly, and the last
-    # published catalogue must not be served as though no committed mutation
-    # were outstanding.
-    with _span(timings, "pending_visibility"):
-        pending = freshness.recall_pending_coverage(vault_root)
-        if not pending.ready:
-            _set_recall_projection_timing_outcome(timings, "pending_unavailable")
-            raise RetrievalIndexWarming(
-                site="pending_visibility_incomplete",
-                status="temporarily_unavailable",
-            )
-
     from . import lexstore, readiness
 
     managed_runtime = readiness.runtime_managed()
+    # Exact pending coverage is proven before anything reads a persistent
+    # catalogue. Outstanding durable custody that cannot be hydrated within its
+    # bound means MANAGED recall cannot answer exactly, and the last published
+    # catalogue must not be served as though no committed mutation were
+    # outstanding. An offline/CLI caller is a different contract: it keeps its
+    # existing exact source-walk fallback, which reads canonical Markdown
+    # directly and never consults this custody, so refusing it would deny an
+    # answer that is already exact.
+    with _span(timings, "pending_visibility"):
+        pending = freshness.recall_pending_coverage(vault_root)
+        if not pending.ready:
+            if managed_runtime:
+                _set_recall_projection_timing_outcome(timings, "pending_unavailable")
+                raise RetrievalIndexWarming(
+                    site="pending_visibility_incomplete",
+                    status="temporarily_unavailable",
+                )
+            pending = _EMPTY_PENDING_COVERAGE
     admission = readiness.retrieval_admission()
     if managed_runtime and admission["state"] == "unavailable":
         # A background repair may have published the exact catalog after its
@@ -3373,6 +3425,11 @@ def _find_semantic(
             eligible_paths=eligible_paths,
             capture_trace=retrieval_trace is not None,
             query_vector_provider=query_vector_provider,
+            shadow=(
+                pending.shadow
+                if pending is not None and not pending.empty
+                else None
+            ),
         )
     except lexstore.CatalogUnavailable as error:
         _raise_catalog_outcome(error.readiness)
@@ -3434,17 +3491,11 @@ def _find_semantic(
     usage_map = bundle.usage_map
 
     if pending is not None and not pending.empty:
-        # Every persistent lane is stripped of the identities pending custody
-        # owns, before rank lookups, scoring, excerpts and the top-k cap are
-        # built from them. A shadowed identity keeps its fused position but can
-        # only survive the loop below on the proven overlay page's own merit,
-        # so a stale catalogue, vector, graph or CLIP row can neither be
-        # returned nor consume a result slot.
-        vector_ranking = pending.shadow(vector_ranking)
-        bm25_ranking = pending.shadow(bm25_ranking)
-        keyword_ranking = pending.shadow(keyword_ranking)
-        clip_ranking = pending.shadow(clip_ranking)
-        graph_ranking = pending.shadow(graph_ranking)
+        # The lane rankings themselves were shadowed at their source, before
+        # fusion and every lane cap. What remains here are the per-path evidence
+        # maps, which are tallied outside those lists -- graph in-degree is
+        # counted for every neighbour edge, for instance -- and which describe
+        # the generation the persistent sidecars still hold.
         chunk_text_by_path = _without_shadowed(chunk_text_by_path, pending)
         vector_score_by_path = _without_shadowed(vector_score_by_path, pending)
         clip_score_by_path = _without_shadowed(clip_score_by_path, pending)
@@ -4174,21 +4225,28 @@ def _keyword_match_paths(
     row. `k` is re-applied after the merge, so the bound is unchanged.
     """
     merge_pending = pending is not None and not pending.empty
-
-    def _merged(paths: list[str]) -> list[str]:
-        if not merge_pending:
-            return paths
-        admitted = _pending_keyword_paths(
+    admitted_pending: list[str] = []
+    if merge_pending and query_norm:
+        admitted_pending = _pending_keyword_paths(
             vault_root,
             pending=pending,
             query_norm=query_norm,
             scope=scope,
         )
-        seen = set(admitted)
-        merged = admitted + [
+    # The persistent side is over-fetched by exactly the number of pending rows
+    # that will lead it, so merging cannot evict a catalogue row the unmerged
+    # lane would have kept. Without this, a burst of pending writes silently
+    # shortens the settled half of a bounded lane.
+    persistent_k = k if k is None else max(0, int(k)) + len(admitted_pending)
+
+    def _merged(paths: list[str]) -> list[str]:
+        if not merge_pending:
+            return paths
+        seen = set(admitted_pending)
+        merged = admitted_pending + [
             rel_path for rel_path in pending.shadow(paths) if rel_path not in seen
         ]
-        return merged if k is None else merged[: max(0, int(k))]
+        return merged if k is None else merged[: max(0, int(k)) + len(admitted_pending)]
 
     if not query_norm:
         return []
@@ -4200,7 +4258,7 @@ def _keyword_match_paths(
             query_norm,
             scope=scope,
             freshness=freshness,
-            k=k,
+            k=persistent_k,
         )
         if not catalog_result.readiness.complete:
             _raise_catalog_outcome(catalog_result.readiness)
@@ -4211,7 +4269,7 @@ def _keyword_match_paths(
         scope=scope,
         freshness=freshness,
         repair=repair,
-        k=k,
+        k=persistent_k,
     )
     if indexed is not None:
         return _merged(indexed)
@@ -4266,7 +4324,7 @@ def _keyword_match_paths(
             continue
         matches.append((page.updated or "0000-00-00", page.rel_path))
     matches.sort(reverse=True)  # most-recent first
-    bounded = matches if k is None else matches[: max(0, int(k))]
+    bounded = matches if persistent_k is None else matches[: max(0, int(persistent_k))]
     return _merged([p for _, p in bounded])
 
 

@@ -107,14 +107,50 @@ def _note_pending_reference_publication(vault_root: Path, rel_paths: list[str]) 
 
 
 def _vault_rel_paths(vault_root: Path, paths: Iterable[Path]) -> list[str]:
-    root = Path(vault_root).resolve()
+    """Normalize through the one shared helper every pending consumer uses."""
+    from . import pending_recall
+
     rels: list[str] = []
     for path in paths:
-        try:
-            rels.append(Path(path).resolve().relative_to(root).as_posix())
-        except (OSError, ValueError):
-            continue
+        rel = pending_recall.vault_rel_path(vault_root, path)
+        if rel is not None:
+            rels.append(rel)
     return rels
+
+
+def holds_content_identities(
+    vault_root: Path, expected: dict[str, str | None]
+) -> dict[str, bool]:
+    """Whether the identity sidecar holds each path at exactly that identity.
+
+    ``expected`` maps a vault-relative Markdown identity to the sha256 of the
+    canonical bytes it must be indexed at, or ``None`` for proven absence. The
+    sidecar already stores that digest per row (`source_hash`), so this is one
+    read-only query and no corpus walk. An absent or incompatible sidecar
+    answers ``False`` for everything, which keeps pending custody in place
+    rather than clearing it on state nothing can prove.
+    """
+    if not expected:
+        return {}
+    answers = dict.fromkeys(expected, False)
+    index = ReferenceIndex(Path(vault_root))
+    conn = index._current_readonly_connection()
+    if conn is None:
+        return answers
+    try:
+        for rel, digest in expected.items():
+            row = conn.execute(
+                "SELECT source_hash FROM identities WHERE path = ?", (rel,)
+            ).fetchone()
+            if digest is None:
+                answers[rel] = row is None
+            else:
+                answers[rel] = row is not None and str(row[0]) == digest
+    except sqlite3.Error:
+        return dict.fromkeys(expected, False)
+    finally:
+        conn.close()
+    return answers
 
 
 #: How many paths one identity lookup binds at a time. SQLite's compiled-in
