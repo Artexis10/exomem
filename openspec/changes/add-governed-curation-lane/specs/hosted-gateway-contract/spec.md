@@ -36,7 +36,8 @@ dispatch.
 
 ### Requirement: Remote maintenance refusal remains closed around curation
 
-For a profile whose pinned schema declares curation, the request-bound remote
+For a profile whose resolved schema (pinned or registry-derived) declares
+curation, the request-bound remote
 maintenance gate SHALL admit write execution only for `structured-files` and
 `curation`. `fix`, `reconcile`, `backfill-ids`, and every future unknown write
 mode SHALL retain the operator-only refusal before manager dispatch. Within

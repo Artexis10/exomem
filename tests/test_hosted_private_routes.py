@@ -20,6 +20,7 @@ from fastmcp import FastMCP
 from starlette.middleware import Middleware as ASGIMiddleware
 
 from exomem import (
+    capabilities,
     cli_ops,
     find_corpus,
     hosted_portability,
@@ -2898,11 +2899,13 @@ def test_v5_curation_apply_commits_exactly_one_step_per_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Edge duration, mirroring the one-content-step-per-request family.
+    """One committed content step per request, whatever the plan's length.
 
-    The bound is what keeps a curation request inside a hosted edge timeout: a
-    plan of any length is walked one request at a time, so request duration is a
-    function of one step rather than of the plan. Two steps is the smallest plan
+    This bounds per-request *work*, not wall-clock time, and says nothing about
+    either the duration of a single step or any edge timeout -- those are the
+    motivation for the bound, not what is measured here. What is measured is
+    that a two-step plan commits its first step and stops: the second note does
+    not exist until a second request asks for it. Two steps is the smallest plan
     that can tell "one step per request" apart from "the whole plan per request".
     """
     client, config, _lifecycle, _invoker = _v5_cell(
@@ -2944,7 +2947,7 @@ def test_v5_curation_apply_commits_exactly_one_step_per_request(
     assert list(config.vault_root.rglob("*v5-step-second*.md"))
 
 
-def test_v5_curation_apply_replays_under_one_public_idempotency_key(
+def test_v5_curation_apply_replays_to_one_terminal_and_one_content_effect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2955,12 +2958,27 @@ def test_v5_curation_apply_replays_under_one_public_idempotency_key(
     public key has to see the same terminal and leave exactly one content
     effect -- the failure mode being a second note, or a second committed step,
     written because the first answer never arrived.
+
+    It runs on the production invoker. The isolated double the other tests use
+    keeps its own `completed` map, so the second apply never reached a leaf and
+    "exactly one note on disk" was true of the double rather than of the
+    product. Here the real writer manager performs the replay.
+
+    Two mechanisms are in play and the test says which owns what, because
+    crediting the wrong one is how a guard gets removed later by someone who
+    reads only the assertion. The single content effect is owned by curation's
+    own completed-replay terminal: the third request below carries no
+    idempotency key at all and still commits nothing new. What the public key
+    adds is that a keyed retry is answered from the same terminal rather than
+    re-entering the leaf, which is the acknowledgement-loss case.
     """
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "lease-state"))
     client, config, _lifecycle, _invoker = _v5_cell(
         tmp_path,
         monkeypatch,
         cell_id="cell-v5-idempotent",
         credential="v5-idempotent-service-credential-0001",
+        production_invoker=True,
     )
     proposed = _curation(
         client, config, "propose", {"plan": _curation_plan(_curation_step("one", "v5-replay"))}
@@ -2977,9 +2995,24 @@ def test_v5_curation_apply_replays_under_one_public_idempotency_key(
     assert replay.json()["data"]["committed_steps"] == first.json()["data"]["committed_steps"]
     assert len(list(config.vault_root.rglob("*v5-replay*.md"))) == 1
 
-    status = _curation(client, config, "status", {"run_id": proposed["run_id"]})
-    assert status.json()["data"]["committed_steps"] == ["one"]
-    assert len(status.json()["data"]["receipts"]) == 1
+    before = _curation(client, config, "status", {"run_id": proposed["run_id"]}).json()["data"]
+
+    # The control: no idempotency key at all. The run is already terminal, so
+    # the retry is answered from the store -- as the committed terminal, or as a
+    # stale-binding refusal once the approval has been replayed -- and never as
+    # a fresh commit. That refusal is what identifies the curation terminal
+    # rather than the public key as the owner of the single content effect.
+    unkeyed = _curation(client, config, "apply", approval)
+    if unkeyed.status_code == 200:
+        assert unkeyed.json()["data"]["terminal"] is True, unkeyed.text
+    else:
+        assert unkeyed.status_code == 400, unkeyed.text
+        assert unkeyed.json()["error"]["code"].startswith("CURATION_"), unkeyed.text
+
+    after = _curation(client, config, "status", {"run_id": proposed["run_id"]}).json()["data"]
+    assert after["committed_steps"] == before["committed_steps"] == ["one"]
+    assert len(after["receipts"]) == len(before["receipts"]) == 1
+    assert len(list(config.vault_root.rglob("*v5-replay*.md"))) == 1
 
 
 def test_v5_curation_recovers_a_run_across_a_process_restart(
@@ -3059,3 +3092,107 @@ def test_v5_curation_recovers_a_run_across_a_process_restart(
     assert (config.vault_root / committed_path).read_bytes() == committed_bytes
     assert len(list(config.vault_root.rglob("*v5-restart-first*.md"))) == 1
     assert len(list(config.vault_root.rglob("*v5-restart-second*.md"))) == 1
+
+
+# ---------------------------------------------------------------------------
+# The request-bound curation exception, tested at its own layer
+#
+# The route tests above prove the door opens for v5 and stays shut for v4, but
+# they reach the gate through profile resolution, coercion and dispatch -- so a
+# gate that admitted *any* product profile would still pass them, because the
+# only thing standing between v4 and curation on that path is the coercer
+# refusing `curation_action`. These address the gate directly.
+# ---------------------------------------------------------------------------
+
+
+def _curation_kwargs() -> dict[str, Any]:
+    return {
+        "mode": "curation",
+        "curation_action": "propose",
+        "plan": _curation_plan(_curation_step("one", "v5-gate-probe")),
+    }
+
+
+@pytest.mark.parametrize(
+    ("profile", "admitted"),
+    [
+        (commands_module.HOSTED_ALPHA_AGENT_PROFILE, False),
+        (commands_module.HOSTED_ALPHA_AGENT_V2_PROFILE, False),
+        (commands_module.HOSTED_ALPHA_AGENT_V3_PROFILE, False),
+        (commands_module.HOSTED_ALPHA_AGENT_V4_PROFILE, False),
+        (V5_PROFILE, True),
+    ],
+)
+def test_the_curation_exception_reads_the_profile_schema_not_the_profile_name(
+    profile: str, admitted: bool
+) -> None:
+    """The gate's own decision, with nothing else in the way.
+
+    A released profile does not publish `curation_action`, which is why it must
+    fail here -- not because it is on a list of old names, and not because
+    something downstream would have refused it anyway.
+    """
+    descriptor = gateway.hosted_agent_surface_descriptor(profile)
+
+    assert (
+        writer_lease._profile_admits_request_bound_curation(descriptor, _curation_kwargs())
+        is admitted
+    )
+
+    # The exception is scoped to curation. No profile buys the other write modes.
+    for mode in ("fix", "reconcile", "backfill-ids", "a-mode-nobody-has-added-yet"):
+        assert not writer_lease._profile_admits_request_bound_curation(
+            descriptor, {"mode": mode}
+        )
+
+
+def test_a_surface_with_no_product_profile_never_admits_curation() -> None:
+    """Fail closed: the direct-Python default and the personal MCP server."""
+    default = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp",
+        profile="canonical-full-product",
+        tier2_enabled=True,
+        product_commands=("maintain_memory",),
+    )
+
+    assert not writer_lease._profile_admits_request_bound_curation(default, _curation_kwargs())
+    assert not writer_lease._profile_admits_request_bound_curation(None, _curation_kwargs())
+
+
+@pytest.mark.parametrize(
+    ("profile", "refused"),
+    [
+        (commands_module.HOSTED_ALPHA_AGENT_V4_PROFILE, True),
+        (V5_PROFILE, False),
+    ],
+)
+def test_the_shared_dispatcher_refuses_v4_curation_and_lets_v5_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str, refused: bool
+) -> None:
+    """The gate as `writer_lease.invoke_command` actually applies it.
+
+    `MAINTENANCE_REQUIRES_CLI` is raised before the writer manager is asked for,
+    so the manager is replaced with a sentinel: reaching it is how "not refused"
+    is proven, rather than by the absence of one particular error.
+    """
+
+    class _ReachedTheManager(RuntimeError):
+        pass
+
+    monkeypatch.setattr(
+        writer_lease, "get_manager", lambda: (_ for _ in ()).throw(_ReachedTheManager())
+    )
+    command = next(
+        entry
+        for entry in commands_module.product_commands_for_profile(profile, "rest")
+        if entry.name == "maintain_memory"
+    )
+
+    with capabilities.active_surface(gateway.hosted_agent_surface_descriptor(profile)):
+        if refused:
+            with pytest.raises(cli_ops.OpError) as raised:
+                writer_lease.invoke_command(command, tmp_path, **_curation_kwargs())
+            assert raised.value.code == "MAINTENANCE_REQUIRES_CLI"
+        else:
+            with pytest.raises(_ReachedTheManager):
+                writer_lease.invoke_command(command, tmp_path, **_curation_kwargs())
