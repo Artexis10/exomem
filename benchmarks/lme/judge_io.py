@@ -10,7 +10,6 @@ from pathlib import Path
 from .dataset import load_dataset
 from .report import manifest_banner, render_report
 
-
 LANE_FILES = {
     "main": ("hypotheses.jsonl", "judge-labels.jsonl"),
     "ceiling": (
@@ -24,23 +23,69 @@ LANE_FILES = {
 }
 
 
+def verified_judge_banner() -> str:
+    """The single verified-judge sentence every report entry point renders.
+
+    Reads the pinned interface off benchmarks/suites/lme_v1/LOCKFILE.json
+    through the suites registry, so this sentence and the command
+    `official_judge_commands` emits can never independently drift from what
+    is actually pinned. Replaces an earlier UNVERIFIED banner: the ledger
+    text it guarded against had assumed a --dataset_file/--hypothesis_file/
+    --output_file/--model flag interface that never existed upstream.
+    """
+
+    from suites.registry import suite_lockfile
+
+    lockfile = suite_lockfile("lme_v1")
+    evaluate_qa = lockfile["evaluate_qa"]
+    short_sha = lockfile["commit_sha"][:7]
+    return (
+        f"VERIFIED against LongMemEval {short_sha} {evaluate_qa['path']} "
+        "(positional CLI); pins: benchmarks/suites/lme_v1/LOCKFILE.json"
+    )
+
+
+def _substitute_template(template: str, *, hyp_file: str, metric_model_short: str) -> str:
+    """Fill a lockfile-sourced `<hyp_file>`/`<metric_model_short>` template.
+
+    The literal derivation suffix (e.g. what the official script appends to
+    a hypothesis filename) is never typed here; it is read from the pinned
+    LOCKFILE.json so the rendered path cannot drift from what is pinned.
+    """
+
+    return template.replace("<hyp_file>", hyp_file).replace(
+        "<metric_model_short>", metric_model_short
+    )
+
+
 def official_judge_commands(run_dir: Path, *, judge_model: str = "gpt-4o") -> str:
     """Return user-run commands; this package never invokes the official judge."""
 
+    from suites.registry import suite_lockfile
+
     run_dir = Path(run_dir).resolve()
-    dataset = shlex.quote(str(run_dir / "dataset.json"))
-    commands = [
-        "# UNVERIFIED: confirm these flags against the fetched official "
-        "evaluate_qa.py before judging."
-    ]
-    for input_name, output_name in LANE_FILES.values():
+    dataset = str(run_dir / "dataset.json")
+    lockfile = suite_lockfile("lme_v1")
+    evaluate_qa = lockfile["evaluate_qa"]
+    # Double-quoted (not shlex.quote(), which would use single quotes): the
+    # env var must still expand when an operator pastes this into a shell.
+    # Neither the env var name nor the pinned relative path ever contains a
+    # `"`, so this is exactly one shlex token both ways.
+    env_var = lockfile["checkout_env_var"]
+    script_path = evaluate_qa["path"]
+    script = f'"${env_var}/{script_path}"'
+    result_template = evaluate_qa["result_file_derivation"]
+    commands = [f"# {verified_judge_banner()}"]
+    for input_name, _output_name in LANE_FILES.values():
+        hyp_path = str(run_dir / input_name)
         commands.append(
-            "python evaluate_qa.py "
-            f"--dataset_file {dataset} "
-            f"--hypothesis_file {shlex.quote(str(run_dir / input_name))} "
-            f"--output_file {shlex.quote(str(run_dir / output_name))} "
-            f"--model {shlex.quote(judge_model)}"
+            f"python3 {script} "
+            f"{shlex.quote(judge_model)} {shlex.quote(hyp_path)} {shlex.quote(dataset)}"
         )
+        result_path = _substitute_template(
+            result_template, hyp_file=hyp_path, metric_model_short=judge_model
+        )
+        commands.append(f"# writes results to {shlex.quote(result_path)}")
     return "\n".join(commands) + "\n"
 
 
