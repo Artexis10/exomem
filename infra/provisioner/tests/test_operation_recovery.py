@@ -556,6 +556,13 @@ def test_successor_retarget_accepts_pending_or_exhausted_prior_retarget_only() -
         "claim_expires_at": None,
         "finalized_at": None,
     }
+    capacity_blocked = replace(
+        pending,
+        checkpoint="capacity-live-observation-mismatch",
+    )
+    assert recovery.retarget_successor_transition_values(capacity_blocked)["checkpoint"] == (
+        "volume-owned"
+    )
     exhausted = replace(
         pending,
         state="error",

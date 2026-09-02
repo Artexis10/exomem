@@ -446,7 +446,11 @@ def retarget_successor_transition_values(
         raise RecoveryRefusal("successor retarget preflight failed")
     if before.state == "pending":
         valid_state = (
-            before.checkpoint == "volume-owned"
+            before.checkpoint
+            in {
+                "volume-owned",
+                "capacity-live-observation-mismatch",
+            }
             and before.error_code is None
             and not before.finalized
         )

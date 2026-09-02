@@ -255,7 +255,7 @@ checkpoint identity. Repetition SHALL verify the existing receipt without a seco
 
 #### Scenario: A broken immutable target is superseded without replacing the provision
 
-- **WHEN** a never-routed recovered provision is still pending at `volume-owned`, or exhausted its separately attributed retry with the same provider-metadata failure, and a signed patch runtime supersedes its immutable target
+- **WHEN** a never-routed recovered provision is still pending at `volume-owned` or the exact pre-driver `capacity-live-observation-mismatch` retry checkpoint, or exhausted its separately attributed retry with the same provider-metadata failure, and a signed patch runtime supersedes its immutable target
 - **THEN** a separately invoked signed successor retarget validates the full append-only recovery receipt chain, source and target deployment locks, exact encrypted request, unchanged four-resource identity, active reservation, stable unrouted live state, and absence of conflicts before atomically selecting the patch target and making the same operation claimable
 - **AND** it appends one content-free successor receipt bound to the complete prior receipt chain, source request, target request, target runtime, and live preflight evidence
 - **AND** any missing, reordered, mismatched, or already-superseded receipt, active claim, route, result, resource, reservation, fence, request, runtime, or live identity refuses without changing the operation, cell, PVC, PV, or provider volume
