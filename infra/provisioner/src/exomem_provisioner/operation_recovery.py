@@ -52,11 +52,15 @@ _FIXED_MODES = (
     "retry-retarget-preflight",
     "retry-retarget",
     "verify-retry-retarget",
+    "successor-retarget-preflight",
+    "successor-retarget",
+    "verify-successor-retarget",
 )
 _RECOVERY_MARKER = "_init_retry_recovery_v1"
 _RETARGET_MARKER = "_runtime_retarget_recovery_v1"
 _RETARGET_RESUME_MARKER = "_runtime_retarget_resume_v1"
 _RETARGET_RETRY_MARKER = "_runtime_retarget_retry_v1"
+_RETARGET_SUCCESSOR_MARKER = "_runtime_retarget_successor_v1"
 _RECOVERY_MARKER_KEYS = frozenset(
     {"schema", "preflight_sha256", "helper_source_sha256", "claim_generation", "committed_at"}
 )
@@ -88,6 +92,19 @@ _RETARGET_RETRY_MARKER_KEYS = frozenset(
         "retarget_marker_sha256",
         "resume_marker_sha256",
         "preflight_sha256",
+        "helper_source_sha256",
+        "claim_generation",
+        "committed_at",
+    }
+)
+_RETARGET_SUCCESSOR_MARKER_KEYS = frozenset(
+    {
+        "schema",
+        "prior_receipts_sha256",
+        "preflight_sha256",
+        "source_request_sha256",
+        "target_request_sha256",
+        "target_runtime_sha256",
         "helper_source_sha256",
         "claim_generation",
         "committed_at",
@@ -214,6 +231,22 @@ class RetargetRetryPreState:
     has_retarget_marker: bool
     has_resume_marker: bool
     has_retry_marker: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RetargetSuccessorPreState:
+    action: str
+    state: str
+    checkpoint: str
+    error_code: str | None
+    has_claim: bool
+    has_result: bool
+    finalized: bool
+    has_recovery_marker: bool
+    has_retarget_marker: bool
+    has_resume_marker: bool
+    has_retry_marker: bool
+    has_successor_marker: bool
 
 
 class RecoveryLiveObserver(Protocol):
@@ -388,6 +421,47 @@ def retarget_retry_transition_values(before: RetargetRetryPreState) -> dict[str,
         or not before.has_resume_marker
     ):
         raise RecoveryRefusal("retarget retry preflight failed")
+    return {
+        "state": OperationState.PENDING,
+        "checkpoint": "volume-owned",
+        "error_code": None,
+        "claim_owner": None,
+        "claim_token": None,
+        "claim_expires_at": None,
+        "finalized_at": None,
+    }
+
+
+def retarget_successor_transition_values(
+    before: RetargetSuccessorPreState,
+) -> dict[str, object]:
+    if (
+        before.action != "provision"
+        or before.has_claim
+        or before.has_result
+        or not before.has_recovery_marker
+        or not before.has_retarget_marker
+        or before.has_successor_marker
+    ):
+        raise RecoveryRefusal("successor retarget preflight failed")
+    if before.state == "pending":
+        valid_state = (
+            before.checkpoint == "volume-owned"
+            and before.error_code is None
+            and not before.finalized
+        )
+    elif before.state == "error":
+        valid_state = (
+            before.checkpoint == "failed"
+            and before.error_code == "PROVISIONER_PROVIDER_METADATA_CONFLICT"
+            and before.finalized
+            and before.has_resume_marker
+            and before.has_retry_marker
+        )
+    else:
+        valid_state = False
+    if not valid_state:
+        raise RecoveryRefusal("successor retarget preflight failed")
     return {
         "state": OperationState.PENDING,
         "checkpoint": "volume-owned",
@@ -602,6 +676,53 @@ def parse_retarget_retry_marker(value: object) -> dict[str, object]:
         datetime.fromisoformat(value["committed_at"].replace("Z", "+00:00"))
     except ValueError as error:
         raise RecoveryRefusal("retarget retry marker is invalid") from error
+    return dict(value)
+
+
+def retarget_successor_marker(
+    *,
+    prior_receipts_sha256: str,
+    preflight_sha256: str,
+    source_request_sha256: str,
+    target_request_sha256: str,
+    target_runtime_sha256: str,
+    helper_source_sha256: str,
+    claim_generation: int,
+    committed_at: datetime,
+) -> dict[str, object]:
+    marker = {
+        "schema": 1,
+        "prior_receipts_sha256": prior_receipts_sha256,
+        "preflight_sha256": preflight_sha256,
+        "source_request_sha256": source_request_sha256,
+        "target_request_sha256": target_request_sha256,
+        "target_runtime_sha256": target_runtime_sha256,
+        "helper_source_sha256": helper_source_sha256,
+        "claim_generation": claim_generation,
+        "committed_at": _json_value(committed_at),
+    }
+    return parse_retarget_successor_marker(marker)
+
+
+def parse_retarget_successor_marker(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != _RETARGET_SUCCESSOR_MARKER_KEYS:
+        raise RecoveryRefusal("successor retarget marker is invalid")
+    if (
+        value.get("schema") != 1
+        or not isinstance(value.get("claim_generation"), int)
+        or value["claim_generation"] < 0
+        or not isinstance(value.get("committed_at"), str)
+        or any(
+            not isinstance(value.get(key), str) or len(value[key]) != 64
+            for key in _RETARGET_SUCCESSOR_MARKER_KEYS
+            if key.endswith("sha256")
+        )
+    ):
+        raise RecoveryRefusal("successor retarget marker is invalid")
+    try:
+        datetime.fromisoformat(value["committed_at"].replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RecoveryRefusal("successor retarget marker is invalid") from error
     return dict(value)
 
 
@@ -1249,6 +1370,180 @@ class RecoveryService:
         except Exception as error:
             raise RecoveryRefusal("retarget-retry-verification-failed") from error
 
+    async def successor_retarget_preflight(self, operation_id: str) -> dict[str, object]:
+        try:
+            async with self._sessions.begin() as session:
+                now = await self._database_now(session)
+                snapshot = await self._retarget_successor_preflight(
+                    session, operation_id, now=now
+                )
+                observation = await self._observer.observe(
+                    snapshot.recovery.operation, snapshot.recovery.resources
+                )
+                validate_live_observation(observation)
+                return {
+                    "status": "successor-retarget-ready",
+                    "state": snapshot.recovery.operation.state.value,
+                    "checkpoint": snapshot.recovery.operation.checkpoint,
+                    "error_code": snapshot.recovery.operation.error_code,
+                    "resource_kind_counts": {
+                        **{
+                            kind.value: 1
+                            for kind in (
+                                ResourceKind.HELM_RELEASE,
+                                ResourceKind.KUBERNETES_NAMESPACE,
+                                ResourceKind.PVC,
+                                ResourceKind.VOLUME,
+                            )
+                        },
+                        ResourceKind.ROUTE.value: 0,
+                        "provider-object": 0,
+                    },
+                    "active_reservation": True,
+                }
+        except RecoveryRefusal:
+            raise
+        except Exception as error:
+            raise RecoveryRefusal("successor-retarget-preflight-failed") from error
+
+    async def successor_retarget(self, operation_id: str) -> dict[str, object]:
+        try:
+            async with self._sessions.begin() as session:
+                await self._require_database_identity(session)
+                current = await session.get(Operation, operation_id, with_for_update=True)
+                if current is None:
+                    raise RecoveryRefusal("operation is unavailable")
+                existing = current.progress.get(_RETARGET_SUCCESSOR_MARKER)
+                if existing is not None:
+                    return self._retarget_successor_result(
+                        current, existing, "already-successor-retargeted"
+                    )
+                now = await self._database_now(session)
+                snapshot = await self._retarget_successor_preflight_locked(
+                    session, current, now=now
+                )
+                first = await self._observer.observe(
+                    snapshot.recovery.operation, snapshot.recovery.resources
+                )
+                validate_live_observation(first)
+                second = await self._observer.observe(
+                    snapshot.recovery.operation, snapshot.recovery.resources
+                )
+                validate_live_observation(second)
+                if first != second:
+                    raise RecoveryRefusal("live recovery preflight failed")
+                prior_receipts_sha256 = self._prior_retarget_receipts_sha256(current)
+                evidence_digest = canonical_sha256(
+                    {
+                        "operation_sha256": snapshot.recovery.operation_sha256,
+                        "preserved_sha256": snapshot.recovery.preserved_sha256,
+                        "prior_receipts_sha256": prior_receipts_sha256,
+                        "source_request_sha256": canonical_request_sha256(
+                            snapshot.source_request
+                        ),
+                        "target_request_sha256": canonical_request_sha256(
+                            snapshot.target_request
+                        ),
+                        "request_ciphertext_sha256": (
+                            snapshot.recovery.request_ciphertext_sha256
+                        ),
+                        "resources_sha256": snapshot.recovery.resources_sha256,
+                        "reservation_sha256": snapshot.recovery.reservation_sha256,
+                        "tenant_fence_sha256": snapshot.recovery.tenant_fence_sha256,
+                        "first_observation_sha256": canonical_sha256(asdict(first)),
+                        "second_observation_sha256": canonical_sha256(asdict(second)),
+                    }
+                )
+                target_sha256 = canonical_request_sha256(snapshot.target_request)
+                marker = retarget_successor_marker(
+                    prior_receipts_sha256=prior_receipts_sha256,
+                    preflight_sha256=evidence_digest,
+                    source_request_sha256=current.canonical_request_sha256,
+                    target_request_sha256=target_sha256,
+                    target_runtime_sha256=snapshot.target_runtime_sha256,
+                    helper_source_sha256=self._helper_source_sha256,
+                    claim_generation=current.claim_generation,
+                    committed_at=now,
+                )
+                progress = {**current.progress, _RETARGET_SUCCESSOR_MARKER: marker}
+                transition = retarget_successor_transition_values(
+                    self._retarget_successor_pre_state(current)
+                )
+                purpose = f"operation-request:{current.action.value}:{current.idempotency_key}"
+                target_ciphertext = self._codec.encrypt_json(
+                    snapshot.target_request, purpose=purpose
+                )
+                updated = await session.scalar(
+                    update(Operation)
+                    .where(
+                        Operation.id == current.id,
+                        Operation.action == OperationAction.PROVISION,
+                        Operation.state == current.state,
+                        Operation.checkpoint == current.checkpoint,
+                        Operation.error_code == current.error_code,
+                        Operation.claim_owner.is_(None),
+                        Operation.claim_token.is_(None),
+                        Operation.claim_expires_at.is_(None),
+                        Operation.result_ciphertext.is_(None),
+                        cast(Operation.result_redacted, JSONB) == cast({}, JSONB),
+                        Operation.finalized_at == current.finalized_at,
+                        Operation.external_operation_id == current.provider_operation_id,
+                        Operation.fence_generation == current.provider_fence_generation,
+                        Operation.canonical_request_sha256 == current.canonical_request_sha256,
+                        Operation.request_ciphertext == current.request_ciphertext,
+                        Operation.claim_generation == current.claim_generation,
+                        Operation.updated_at == current.updated_at,
+                        cast(Operation.progress, JSONB) == cast(current.progress, JSONB),
+                        cast(Operation.progress, JSONB).has_key(_RECOVERY_MARKER),
+                        cast(Operation.progress, JSONB).has_key(_RETARGET_MARKER),
+                        ~cast(Operation.progress, JSONB).has_key(_RETARGET_SUCCESSOR_MARKER),
+                    )
+                    .values(
+                        **transition,
+                        canonical_request_sha256=target_sha256,
+                        request_ciphertext=target_ciphertext,
+                        available_at=now,
+                        updated_at=now,
+                        progress=progress,
+                    )
+                    .returning(Operation)
+                )
+                if updated is None:
+                    reread = await session.get(Operation, operation_id, with_for_update=True)
+                    if reread is not None and _RETARGET_SUCCESSOR_MARKER in reread.progress:
+                        return self._retarget_successor_result(
+                            reread,
+                            reread.progress[_RETARGET_SUCCESSOR_MARKER],
+                            "already-successor-retargeted",
+                        )
+                    raise RecoveryRefusal("already progressed")
+                await session.flush()
+                return self._retarget_successor_result(
+                    updated, marker, "successor-retargeted"
+                )
+        except RecoveryRefusal:
+            raise
+        except Exception as error:
+            raise RecoveryRefusal("successor-retarget-failed") from error
+
+    async def verify_successor_retarget(self, operation_id: str) -> dict[str, object]:
+        try:
+            async with self._sessions.begin() as session:
+                await self._require_database_identity(session)
+                operation = await session.get(Operation, operation_id)
+                if operation is None:
+                    raise RecoveryRefusal("operation is unavailable")
+                marker = operation.progress.get(_RETARGET_SUCCESSOR_MARKER)
+                if marker is None:
+                    raise RecoveryRefusal("successor retarget attribution is unavailable")
+                return self._retarget_successor_result(
+                    operation, marker, "successor-retarget-verified"
+                )
+        except RecoveryRefusal:
+            raise
+        except Exception as error:
+            raise RecoveryRefusal("successor-retarget-verification-failed") from error
+
     async def _retarget_resume_preflight(
         self, session: AsyncSession, operation_id: str
     ) -> _RecoverySnapshot:
@@ -1381,6 +1676,105 @@ class RecoveryService:
             ),
             reservation_sha256=_hash_model(reservation),
             tenant_fence_sha256=_hash_model(fence),
+        )
+
+    async def _retarget_successor_preflight(
+        self, session: AsyncSession, operation_id: str, *, now: datetime
+    ) -> _RetargetSnapshot:
+        await self._require_database_identity(session)
+        initial = await session.get(Operation, operation_id)
+        if initial is None:
+            raise RecoveryRefusal("operation is unavailable")
+        fence = await session.get(TenantFence, initial.tenant_id, with_for_update=True)
+        operation = await session.get(Operation, operation_id, with_for_update=True)
+        if (
+            operation is None
+            or fence is None
+            or fence.tenant_id != operation.tenant_id
+            or fence.fence_generation != operation.fence_generation
+        ):
+            raise RecoveryRefusal("successor retarget preflight failed")
+        return await self._retarget_successor_preflight_locked(
+            session, operation, now=now, fence=fence
+        )
+
+    async def _retarget_successor_preflight_locked(
+        self,
+        session: AsyncSession,
+        operation: Operation,
+        *,
+        now: datetime,
+        fence: TenantFence | None = None,
+    ) -> _RetargetSnapshot:
+        if fence is None:
+            fence = await session.get(TenantFence, operation.tenant_id, with_for_update=True)
+        if (
+            fence is None
+            or fence.fence_generation != operation.fence_generation
+            or operation.cell_id is None
+            or operation.external_operation_id != operation.provider_operation_id
+            or operation.fence_generation != operation.provider_fence_generation
+        ):
+            raise RecoveryRefusal("successor retarget preflight failed")
+        retarget_successor_transition_values(self._retarget_successor_pre_state(operation))
+        self._prior_retarget_receipts_sha256(operation)
+        await self._lock_conflicts(
+            session,
+            operation,
+            allow_expired_current=True,
+            now=now,
+        )
+        request = self._codec.decrypt_json(
+            operation.request_ciphertext,
+            purpose=f"operation-request:{operation.action.value}:{operation.idempotency_key}",
+        )
+        if (
+            canonical_request_sha256(request) != operation.canonical_request_sha256
+            or request.get("tenantId") != operation.tenant_id
+            or request.get("cellId") != operation.cell_id
+            or request.get("operationId") != operation.external_operation_id
+            or request.get("fenceGeneration") != operation.fence_generation
+            or request.get("checkpoint") != operation.caller_checkpoint
+            or request.get("provisionMode") != "serve"
+            or not self._source_deployment_lock.matches_runtime_request(
+                request,
+                wire_protocol=operation.wire_protocol.value,
+                selection=self._runtime_selection,
+            )
+        ):
+            raise RecoveryRefusal("successor retarget preflight failed")
+        selected = self._deployment_lock.selected_runtime(self._runtime_selection)
+        target_runtime = selected.runtimeTarget.model_dump(mode="json")
+        if selected.compatibilityDigest is not None:
+            target_runtime["compatibilityDigest"] = selected.compatibilityDigest
+        target_request = retarget_provision_request(
+            request,
+            wire_protocol=operation.wire_protocol.value,
+            runtime_target=target_runtime,
+        )
+        resources = await self._resources(session, operation)
+        reservation = await self._reservation(session, operation)
+        recovery = _RecoverySnapshot(
+            operation=operation,
+            resources=resources,
+            reservation=reservation,
+            operation_sha256=_hash_model(operation),
+            preserved_sha256=_hash_model(operation, excluded=self._CHANGED_COLUMNS),
+            request_sha256=operation.canonical_request_sha256,
+            request_ciphertext_sha256=hashlib.sha256(
+                operation.request_ciphertext.encode()
+            ).hexdigest(),
+            resources_sha256=canonical_sha256(
+                {item.id: _hash_model(item) for item in sorted(resources, key=lambda item: item.id)}
+            ),
+            reservation_sha256=_hash_model(reservation),
+            tenant_fence_sha256=_hash_model(fence),
+        )
+        return _RetargetSnapshot(
+            recovery=recovery,
+            source_request=request,
+            target_request=target_request,
+            target_runtime_sha256=canonical_sha256(target_runtime),
         )
 
     async def _preflight(self, session: AsyncSession, operation_id: str) -> _RecoverySnapshot:
@@ -1654,6 +2048,68 @@ class RecoveryService:
         )
 
     @staticmethod
+    def _retarget_successor_pre_state(operation: Operation) -> RetargetSuccessorPreState:
+        return RetargetSuccessorPreState(
+            action=operation.action.value,
+            state=operation.state.value,
+            checkpoint=operation.checkpoint,
+            error_code=operation.error_code,
+            has_claim=any(
+                value is not None
+                for value in (
+                    operation.claim_owner,
+                    operation.claim_token,
+                    operation.claim_expires_at,
+                )
+            ),
+            has_result=(operation.result_ciphertext is not None or operation.result_redacted != {}),
+            finalized=operation.finalized_at is not None,
+            has_recovery_marker=_RECOVERY_MARKER in operation.progress,
+            has_retarget_marker=_RETARGET_MARKER in operation.progress,
+            has_resume_marker=_RETARGET_RESUME_MARKER in operation.progress,
+            has_retry_marker=_RETARGET_RETRY_MARKER in operation.progress,
+            has_successor_marker=_RETARGET_SUCCESSOR_MARKER in operation.progress,
+        )
+
+    @staticmethod
+    def _prior_retarget_receipts_sha256(
+        operation: Operation, *, request_sha256: str | None = None
+    ) -> str:
+        recovery = parse_recovery_marker(operation.progress.get(_RECOVERY_MARKER))
+        retarget = parse_retarget_marker(operation.progress.get(_RETARGET_MARKER))
+        if (
+            request_sha256 or operation.canonical_request_sha256
+        ) != retarget["target_request_sha256"]:
+            raise RecoveryRefusal("successor retarget preflight failed")
+        resume_value = operation.progress.get(_RETARGET_RESUME_MARKER)
+        retry_value = operation.progress.get(_RETARGET_RETRY_MARKER)
+        resume_sha256 = ""
+        retry_sha256 = ""
+        if resume_value is not None:
+            resume = parse_retarget_resume_marker(resume_value)
+            if resume["retarget_marker_sha256"] != canonical_sha256(retarget):
+                raise RecoveryRefusal("successor retarget preflight failed")
+            resume_sha256 = canonical_sha256(resume)
+        if retry_value is not None:
+            if resume_value is None:
+                raise RecoveryRefusal("successor retarget preflight failed")
+            retry = parse_retarget_retry_marker(retry_value)
+            if (
+                retry["retarget_marker_sha256"] != canonical_sha256(retarget)
+                or retry["resume_marker_sha256"] != resume_sha256
+            ):
+                raise RecoveryRefusal("successor retarget preflight failed")
+            retry_sha256 = canonical_sha256(retry)
+        return canonical_sha256(
+            {
+                "recovery": canonical_sha256(recovery),
+                "retarget": canonical_sha256(retarget),
+                "resume": resume_sha256,
+                "retry": retry_sha256,
+            }
+        )
+
+    @staticmethod
     def _preflight_evidence_digest(
         snapshot: _RecoverySnapshot, first: LiveObservation, second: LiveObservation
     ) -> str:
@@ -1911,6 +2367,35 @@ class RecoveryService:
             "recovery_digest": canonical_sha256(marker),
         }
 
+    @staticmethod
+    def _retarget_successor_result(
+        operation: Operation, marker_value: object, status: str
+    ) -> dict[str, object]:
+        marker = parse_retarget_successor_marker(marker_value)
+        if (
+            operation.canonical_request_sha256 != marker["target_request_sha256"]
+            or marker["prior_receipts_sha256"]
+            != RecoveryService._prior_retarget_receipts_sha256(
+                operation, request_sha256=str(marker["source_request_sha256"])
+            )
+        ):
+            raise RecoveryRefusal("successor retarget attribution is unavailable")
+        if operation.state not in {
+            OperationState.PENDING,
+            OperationState.CLAIMED,
+            OperationState.ERROR,
+            OperationState.FINAL,
+        }:
+            raise RecoveryRefusal("successor retarget attribution is unavailable")
+        return {
+            "status": status,
+            "state": operation.state.value,
+            "checkpoint": operation.checkpoint,
+            "error_code": operation.error_code,
+            "recovery_digest": canonical_sha256(marker),
+        }
+
+
 
 @dataclass(frozen=True, slots=True)
 class _ProductionRecoveryObserver:
@@ -2108,6 +2593,12 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 return await service.retry_retarget(operation_id)
             case "verify-retry-retarget":
                 return await service.verify_retry_retarget(operation_id)
+            case "successor-retarget-preflight":
+                return await service.successor_retarget_preflight(operation_id)
+            case "successor-retarget":
+                return await service.successor_retarget(operation_id)
+            case "verify-successor-retarget":
+                return await service.verify_successor_retarget(operation_id)
         raise RecoveryRefusal("recovery mode is invalid")
     except RecoveryRefusal:
         raise

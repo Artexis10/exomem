@@ -127,6 +127,9 @@ def test_recovery_command_has_only_fixed_modes_and_environment_free_help(
         "retry-retarget-preflight",
         "retry-retarget",
         "verify-retry-retarget",
+        "successor-retarget-preflight",
+        "successor-retarget",
+        "verify-successor-retarget",
     ):
         assert parser.parse_args([mode, "--stdin"]).mode == mode
     with pytest.raises(recovery.RecoveryRefusal):
@@ -525,6 +528,152 @@ def test_retarget_retry_marker_binds_both_prior_recovery_receipts() -> None:
     }
     with pytest.raises(recovery.RecoveryRefusal):
         recovery.parse_retarget_retry_marker({**marker, "cellId": "cell-alpha"})
+
+
+def test_successor_retarget_accepts_pending_or_exhausted_prior_retarget_only() -> None:
+    recovery = _module()
+    pending = recovery.RetargetSuccessorPreState(
+        action="provision",
+        state="pending",
+        checkpoint="volume-owned",
+        error_code=None,
+        has_claim=False,
+        has_result=False,
+        finalized=False,
+        has_recovery_marker=True,
+        has_retarget_marker=True,
+        has_resume_marker=False,
+        has_retry_marker=False,
+        has_successor_marker=False,
+    )
+
+    assert recovery.retarget_successor_transition_values(pending) == {
+        "state": recovery.OperationState.PENDING,
+        "checkpoint": "volume-owned",
+        "error_code": None,
+        "claim_owner": None,
+        "claim_token": None,
+        "claim_expires_at": None,
+        "finalized_at": None,
+    }
+    exhausted = replace(
+        pending,
+        state="error",
+        checkpoint="failed",
+        error_code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+        finalized=True,
+        has_resume_marker=True,
+        has_retry_marker=True,
+    )
+    assert recovery.retarget_successor_transition_values(exhausted)["state"] is (
+        recovery.OperationState.PENDING
+    )
+    for changed in (
+        {"checkpoint": "requested"},
+        {"has_claim": True},
+        {"has_result": True},
+        {"has_recovery_marker": False},
+        {"has_retarget_marker": False},
+        {"has_successor_marker": True},
+        {"state": "error", "checkpoint": "failed", "error_code": "OTHER", "finalized": True},
+        {
+            "state": "error",
+            "checkpoint": "failed",
+            "error_code": "PROVISIONER_PROVIDER_METADATA_CONFLICT",
+            "finalized": True,
+            "has_resume_marker": True,
+            "has_retry_marker": False,
+        },
+    ):
+        with pytest.raises(recovery.RecoveryRefusal):
+            recovery.retarget_successor_transition_values(replace(pending, **changed))
+
+
+def test_successor_retarget_marker_binds_prior_chain_and_both_requests() -> None:
+    recovery = _module()
+    marker = recovery.retarget_successor_marker(
+        prior_receipts_sha256="a" * 64,
+        preflight_sha256="b" * 64,
+        source_request_sha256="c" * 64,
+        target_request_sha256="d" * 64,
+        target_runtime_sha256="e" * 64,
+        helper_source_sha256="f" * 64,
+        claim_generation=6,
+        committed_at=datetime(2030, 1, 4, tzinfo=UTC),
+    )
+
+    assert recovery.parse_retarget_successor_marker(marker) == marker
+    assert set(marker) == {
+        "schema",
+        "prior_receipts_sha256",
+        "preflight_sha256",
+        "source_request_sha256",
+        "target_request_sha256",
+        "target_runtime_sha256",
+        "helper_source_sha256",
+        "claim_generation",
+        "committed_at",
+    }
+    assert b"secret" not in recovery.canonical_receipt_bytes(marker)
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.parse_retarget_successor_marker({**marker, "tenantId": "tenant-alpha"})
+
+
+def test_successor_retarget_prior_chain_refuses_reordered_or_unbound_receipts() -> None:
+    recovery = _module()
+    now = datetime(2030, 1, 4, tzinfo=UTC)
+    recovered = recovery.recovery_marker(
+        preflight_sha256="1" * 64,
+        helper_source_sha256="2" * 64,
+        claim_generation=4,
+        committed_at=now,
+    )
+    retargeted = recovery.retarget_marker(
+        preflight_sha256="3" * 64,
+        source_request_sha256="4" * 64,
+        target_request_sha256="5" * 64,
+        target_runtime_sha256="6" * 64,
+        helper_source_sha256="7" * 64,
+        claim_generation=4,
+        committed_at=now,
+    )
+    resumed = recovery.retarget_resume_marker(
+        retarget_marker_sha256=recovery.canonical_sha256(retargeted),
+        preflight_sha256="8" * 64,
+        helper_source_sha256="9" * 64,
+        claim_generation=5,
+        committed_at=now,
+    )
+    retried = recovery.retarget_retry_marker(
+        retarget_marker_sha256=recovery.canonical_sha256(retargeted),
+        resume_marker_sha256=recovery.canonical_sha256(resumed),
+        preflight_sha256="a" * 64,
+        helper_source_sha256="b" * 64,
+        claim_generation=6,
+        committed_at=now,
+    )
+    operation = type(
+        "PriorOperation",
+        (),
+        {
+            "canonical_request_sha256": "5" * 64,
+            "progress": {
+                "_init_retry_recovery_v1": recovered,
+                "_runtime_retarget_recovery_v1": retargeted,
+                "_runtime_retarget_resume_v1": resumed,
+                "_runtime_retarget_retry_v1": retried,
+            },
+        },
+    )()
+
+    digest = recovery.RecoveryService._prior_retarget_receipts_sha256(operation)
+    assert len(digest) == 64
+    operation.progress["_runtime_retarget_retry_v1"] = {
+        **retried,
+        "resume_marker_sha256": "c" * 64,
+    }
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.RecoveryService._prior_retarget_receipts_sha256(operation)
 
 
 def test_database_stays_at_0006_without_recovery_receipt_table() -> None:
