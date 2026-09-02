@@ -744,6 +744,26 @@ def _cold_recall_projection_scope_snapshot(
     )
 
 
+def recall_pending_coverage(vault_root: Path):
+    """Bounded pending-visibility coverage managed recall must prove before ready.
+
+    The persistent projections above describe what the sidecars have published.
+    A committed write whose derived components have not converged yet is covered
+    instead by exact durable receipts, and recall may only be declared ready once
+    that bounded set has been hydrated and fenced. This is the seam that answers
+    it, kept beside the other recall projection identities so a consumer proves
+    both through one module.
+
+    Returns the typed coverage; ``ready`` means the whole outstanding set was
+    proven, and every other outcome is the caller's cue to return its existing
+    warming/temporarily-unavailable result rather than the last published
+    catalogue.
+    """
+    from . import pending_recall
+
+    return pending_recall.overlay(Path(vault_root))
+
+
 def recall_projection_scope_snapshot(
     vault_root: Path,
     scope: str,
