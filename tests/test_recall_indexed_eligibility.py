@@ -656,10 +656,8 @@ def test_a_complement_over_an_inexact_bound_declines_rather_than_under_selecting
     assert early in _oracle(vault, _plan({"$not": bound}))
 
     negated = structured_filters.plan_index_eligibility(_plan({"$not": bound}))
+    assert negated.inexpressible, negated
     assert not negated.narrows, negated.expr
-    with _oracle_withdrawn(), pytest.raises(find_module.RetrievalIndexWarming) as caught:
-        _indexed(vault, _plan({"$not": bound}))
-    assert caught.value.site == "filter_eligibility_unnarrowed"
 
     # The day-scoped counter-case, so this is a rule about exactness and not a
     # blanket refusal of `$not`: a whole-day bound IS exact, and complements.
@@ -668,6 +666,51 @@ def test_a_complement_over_an_inexact_bound_declines_rather_than_under_selecting
     expected = _oracle(vault, _plan({"$not": day_bound}))
     with _oracle_withdrawn():
         assert _indexed(vault, _plan({"$not": day_bound})) == expected
+
+
+def test_a_complement_the_columns_cannot_express_is_refused_not_deferred(
+    vault: Path, warm_managed_cell, walk_sentinel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An inexpressible shape is refused; only a stale index is deferred.
+
+    The retryable warming outcome is a promise: come back and this will work.
+    It is the right answer for a catalogue behind the live projection, and the
+    wrong one for a shape no catalogue generation can express — a caller that
+    retries a sub-day `$not` bound retries forever, and nothing in the envelope
+    says so.
+
+    So the two outcomes are separated. The typed refusal names the shape and
+    the day-scoped bounds that do work, because the fix is on the caller's
+    side; the warming outcome keeps its meaning for the case that really does
+    resolve itself.
+    """
+    _seed_adversarial(vault)
+    warm_managed_cell(vault)
+    sentinel = walk_sentinel(*_scope_roots(vault))
+    precise = {"$not": {"page.updated": {"$gte": "2026-06-15T12:00:00Z"}}}
+
+    sentinel.reset()
+    with pytest.raises(structured_filters.FilterError) as caught:
+        _filtered_recall(vault, filters=precise)
+    error = caught.value
+    assert error.code == "UNSUPPORTED_FILTER_FIELD"
+    assert "page.updated" in error.message
+    # The remediation has to be actionable, so it names the shortcuts that are
+    # day-scoped and therefore exact.
+    assert "updated_after" in error.remediation
+    assert "recency_days" in error.remediation
+    assert sentinel.count == 0, sentinel.report()
+
+    # The day-scoped bound is exact, complements, and is not refused.
+    day = {"$not": {"page.updated": {"$gte": "2026-06-15"}}}
+    expected = _oracle(vault, _plan(day))
+    with _oracle_withdrawn():
+        assert _indexed(vault, _plan(day)) == expected
+
+    # An offline caller keeps the exact source walk for the refused shape.
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: False)
+    find_module.reset_page_and_result_caches()
+    assert _indexed(vault, _plan(precise)) == _oracle(vault, _plan(precise))
 
 
 def test_a_plan_the_columns_cannot_narrow_declines_instead_of_hydrating(

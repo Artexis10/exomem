@@ -1267,6 +1267,9 @@ def find(
         unsupported_fields = _unsupported_filter_fields(filter_plan)
         if unsupported_fields:
             raise _unsupported_filter_field_error(unsupported_fields)
+        refused_shapes = _refused_filter_shapes(filter_plan)
+        if refused_shapes:
+            raise _unsupported_filter_shape_error(refused_shapes)
     filter_key = json.dumps(
         filter_plan.to_dict(),
         ensure_ascii=False,
@@ -3167,6 +3170,42 @@ def _unsupported_filter_field_error(fields: tuple[str, ...]) -> structured_filte
     )
 
 
+def _unsupported_filter_shape_error(
+    shapes: tuple[tuple[str, str], ...],
+) -> structured_filters.FilterError:
+    """The refusal for a shape no catalogue generation can express.
+
+    Deliberately NOT the warming outcome. Warming promises that retrying will
+    work — true of a catalogue behind the live projection, false of a
+    complement the columns cannot describe — so a caller that retries this one
+    retries forever with nothing in the envelope to say so. The fix is on the
+    caller's side, so the message names the shape and the remediation names the
+    bounds that are day-scoped, and therefore exact, and therefore complement.
+    """
+    field = shapes[0][0] if shapes else "$"
+    named = "; ".join(text for _field, text in shapes)
+    return structured_filters.FilterError(
+        "UNSUPPORTED_FILTER_FIELD",
+        f"$.{field}" if field != "$" else "$",
+        f"no maintained index can evaluate {named}",
+        expected="a comparison the maintained catalogue can resolve exactly",
+        remediation=(
+            "Use a whole-day date bound — updated_after, updated_before or "
+            "recency_days, or an ISO date rather than a timestamp — which the "
+            "catalogue answers exactly and can therefore negate. Or run the "
+            "query offline, where the exact source-walk fallback is available."
+        ),
+    )
+
+
+def _refused_filter_shapes(
+    plan: structured_filters.FilterPlan,
+) -> tuple[tuple[str, str], ...]:
+    """Shapes that leave a managed reader nothing to resolve the plan by."""
+    eligibility = structured_filters.plan_index_eligibility(plan)
+    return eligibility.inexpressible if eligibility.refuses else ()
+
+
 def _managed_eligible_filter_paths(
     vault_root: Path,
     *,
@@ -3181,13 +3220,18 @@ def _managed_eligible_filter_paths(
     if not eligibility.resolvable:
         _mark_source(timings, "filter_eligibility", find_types.SOURCE_DECLINED)
         raise _unsupported_filter_field_error(eligibility.unsupported_fields)
+    if eligibility.refuses:
+        # A shape the columns cannot express, with nothing left to narrow by.
+        # Refused rather than deferred: no later generation makes it work.
+        _mark_source(timings, "filter_eligibility", find_types.SOURCE_DECLINED)
+        raise _unsupported_filter_shape_error(eligibility.inexpressible)
     if not eligibility.narrows:
         # A tautology over the columns. Answering it would mean hydrating the
         # whole scope on the request thread, which is the cost this stage
         # exists to remove — the same cost, reached by a different road, and
-        # invisible because the answer would still be correct. The spec's
-        # sentence is unconditional: a filter plan the index cannot answer
-        # yields the retryable warming outcome.
+        # invisible because the answer would still be correct. Unlike the
+        # refusal above this one IS transient in principle, so it keeps the
+        # spec's retryable warming outcome.
         _mark_source(timings, "filter_eligibility", find_types.SOURCE_DECLINED)
         raise RetrievalIndexWarming(site="filter_eligibility_unnarrowed")
     try:

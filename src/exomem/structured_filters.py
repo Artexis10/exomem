@@ -716,6 +716,7 @@ class EligibilityPlan:
     expr: EligibilityExpr = ELIGIBILITY_TRUE
     exact: bool = False
     has_unit_axis: bool = False
+    inexpressible: tuple[tuple[str, str], ...] = ()
 
     @property
     def resolvable(self) -> bool:
@@ -724,6 +725,24 @@ class EligibilityPlan:
     @property
     def narrows(self) -> bool:
         return self.expr != ELIGIBILITY_TRUE
+
+    @property
+    def refuses(self) -> bool:
+        """A complement the columns cannot express, with nothing to fall back on.
+
+        Kept distinct from a stale index on purpose. The retryable warming
+        outcome promises that retrying will work, which is true of a catalogue
+        behind the live projection and false of a shape no generation can
+        express — so this one is refused with a typed error naming the shape,
+        and the caller is told which bound does work.
+
+        Only when the plan is left with NOTHING to narrow by. A widened
+        complement inside a conjunction still answers correctly through the
+        surviving clauses (the seed is a superset and the evaluation settles
+        it), so refusing that would remove working capability rather than fix
+        a wrong answer.
+        """
+        return bool(self.inexpressible) and not self.narrows
 
 
 def canonicalize_axis_value(field: str, value: str) -> str | None:
@@ -741,64 +760,90 @@ def canonicalize_axis_value(field: str, value: str) -> str | None:
         return None
 
 
+class _EligibilityIssues:
+    """What a plan walk could not express, collected as it goes."""
+
+    __slots__ = ("fields", "shapes")
+
+    def __init__(self) -> None:
+        self.fields: list[str] = []
+        self.shapes: list[tuple[str, str]] = []
+
+
 def plan_index_eligibility(plan: FilterPlan) -> EligibilityPlan:
     """Classify a compiled plan for index-backed eligibility resolution."""
-    unsupported: list[str] = []
-    expr, exact = _eligibility_expr(plan.root, unsupported)
-    if unsupported:
-        return EligibilityPlan("unsupported", tuple(sorted(set(unsupported))))
+    issues = _EligibilityIssues()
+    expr, exact, _reasons = _eligibility_expr(plan.root, issues)
+    if issues.fields:
+        return EligibilityPlan("unsupported", tuple(sorted(set(issues.fields))))
     return EligibilityPlan(
         "resolvable",
         (),
         expr,
         exact,
         has_unit_axis=plan.has_unit_predicate,
+        inexpressible=tuple(dict.fromkeys(issues.shapes)),
     )
 
 
+#: Why one predicate could not be described exactly. Carried out of the walk so
+#: a refusal can name the shape the caller wrote rather than an internal state.
+_Reasons = tuple[tuple[str, str], ...]
+
+
 def _eligibility_expr(
-    node: FilterNode | None, unsupported: list[str]
-) -> tuple[EligibilityExpr, bool]:
-    """One subtree as a column expression, and whether it is exact."""
+    node: FilterNode | None, issues: _EligibilityIssues
+) -> tuple[EligibilityExpr, bool, _Reasons]:
+    """One subtree as a column expression, whether it is exact, and why not."""
     if node is None:
-        return ELIGIBILITY_TRUE, True
+        return ELIGIBILITY_TRUE, True, ()
     if isinstance(node, Predicate):
-        return _eligibility_predicate(node, unsupported)
+        return _eligibility_predicate(node, issues)
     if isinstance(node, AllOf):
         children: list[EligibilityExpr] = []
         exact = True
+        reasons: list[tuple[str, str]] = []
         for child in node.children:
             # Recursed unconditionally: an unsupported field anywhere in the
             # tree still has to be evaluated, so it still has to be reported.
-            child_expr, child_exact = _eligibility_expr(child, unsupported)
+            child_expr, child_exact, child_reasons = _eligibility_expr(child, issues)
             exact = exact and child_exact
+            reasons.extend(child_reasons)
             if child_expr == ELIGIBILITY_FALSE:
                 children = [ELIGIBILITY_FALSE]
             elif child_expr != ELIGIBILITY_TRUE and children != [ELIGIBILITY_FALSE]:
                 children.append(child_expr)
-        return _fold_all(children), exact
+        return _fold_all(children), exact, tuple(reasons)
     if isinstance(node, AnyOf):
         or_children: list[EligibilityExpr] = []
         exact = True
+        or_reasons: list[tuple[str, str]] = []
         for child in node.children:
-            child_expr, child_exact = _eligibility_expr(child, unsupported)
+            child_expr, child_exact, child_reasons = _eligibility_expr(child, issues)
             exact = exact and child_exact
+            or_reasons.extend(child_reasons)
             if child_expr == ELIGIBILITY_TRUE:
                 or_children = [ELIGIBILITY_TRUE]
             elif child_expr != ELIGIBILITY_FALSE and or_children != [ELIGIBILITY_TRUE]:
                 or_children.append(child_expr)
-        return _fold_any(or_children), exact
-    child_expr, child_exact = _eligibility_expr(node.child, unsupported)
+        return _fold_any(or_children), exact, tuple(or_reasons)
+    child_expr, child_exact, child_reasons = _eligibility_expr(node.child, issues)
     if not child_exact:
         # The complement of a SUPERSET is an under-selection, which would drop
-        # pages the evaluator keeps. Widen to "every page" instead and let the
-        # evaluation settle it.
-        return ELIGIBILITY_TRUE, False
+        # pages the evaluator keeps. Widen to "every page" and record the shape:
+        # if nothing else narrows the plan, the caller is told so rather than
+        # handed a retryable outcome that can never succeed.
+        issues.shapes.extend(
+            (field, f"$not over {text}") for field, text in child_reasons
+        )
+        if not child_reasons:
+            issues.shapes.append(("$", "$not over a comparison with no exact column"))
+        return ELIGIBILITY_TRUE, False, ()
     if child_expr == ELIGIBILITY_TRUE:
-        return ELIGIBILITY_FALSE, True
+        return ELIGIBILITY_FALSE, True, ()
     if child_expr == ELIGIBILITY_FALSE:
-        return ELIGIBILITY_TRUE, True
-    return EligibilityNot(child_expr), True
+        return ELIGIBILITY_TRUE, True, ()
+    return EligibilityNot(child_expr), True, ()
 
 
 def _fold_all(children: list[EligibilityExpr]) -> EligibilityExpr:
@@ -822,22 +867,48 @@ def _fold_any(children: list[EligibilityExpr]) -> EligibilityExpr:
 
 
 def _eligibility_predicate(
-    predicate: Predicate, unsupported: list[str]
-) -> tuple[EligibilityExpr, bool]:
+    predicate: Predicate, issues: _EligibilityIssues
+) -> tuple[EligibilityExpr, bool, _Reasons]:
     field = predicate.field.name
     if predicate.field.pointer is not None or field not in INDEX_ANSWERABLE_FIELDS:
         # `page.frontmatter:/<pointer>` is open-ended by construction: there is
         # no column, and no index answer to give.
-        unsupported.append(field)
-        return ELIGIBILITY_TRUE, False
+        issues.fields.append(field)
+        return ELIGIBILITY_TRUE, False, ()
     tests: list[EligibilityExpr] = []
     exact = True
+    reasons: list[tuple[str, str]] = []
     for operator, operand in predicate.operators:
         test, test_exact = _axis_test(field, operator, operand)
         exact = exact and test_exact
+        if not test_exact:
+            reasons.append((field, _inexactness_reason(field, operator, operand)))
         if test is not None:
             tests.append(test)
-    return _fold_all(tests), exact
+    return _fold_all(tests), exact, tuple(reasons)
+
+
+def _inexactness_reason(
+    field: str, operator: str, operand: TypedScalar | tuple[TypedScalar, ...] | bool
+) -> str:
+    """Why one comparison is only a superset, in the caller's own terms.
+
+    A refusal is only useful if it names the shape that was written, so this
+    describes the operand the caller supplied rather than the column that could
+    not hold it.
+    """
+    if field in INDEX_PAGE_DATE_AXES or field in INDEX_UNIT_DATE_AXES:
+        if operator in _ORDERED:
+            return f"a {field} bound with sub-day precision"
+        if operator in {"$eq", "$ne", "$in"}:
+            return (
+                f"a {field} equality comparison, which cannot tell a recorded "
+                "day from a recorded instant"
+            )
+        return f"a {field} comparison a day column cannot decide"
+    if isinstance(operand, TypedScalar) and operand.kind == "null":
+        return f"a null-valued {field} comparison"
+    return f"a {field} {operator} comparison with no exact column"
 
 
 def _axis_test(
