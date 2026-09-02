@@ -8,38 +8,79 @@ promotion record rather than failing loudly anywhere near the edit.
 The pin covers every tracked file of the v1-v4 release surface -- source skills
 and assets, candidate definitions and selection cases, generated packages,
 locks, archives, compatibility descriptors, behavior and acceptance fixtures,
-and promotion records. `plugins/hosted/directory/**` is deliberately outside it:
-directory publication state is operator-driven listing state, not a release
-identity.
+promotion records, and the generated directory packets, which embed v1's
+compatibility, lock and archive digests and are therefore release identity
+rather than listing state. What is excluded is excluded by name with its reason
+recorded in the manifest itself, so the boundary is reviewable instead of
+implied.
 
 The digests were computed from the committed blobs at the manifest's own
 `source_revision`, never from a working tree, so a dirty tree could not seed the
-pin. `plugins/hosted/generated/candidates/hosted-alpha-agent-v5/**` and
-`plugins/hosted/candidates/hosted-alpha-agent-v5/**` are excluded by name: v5 is
-the candidate this change adds, and pinning it here would make the guard for the
-historical releases move with the new one.
+pin. `hosted-alpha-agent-v5` is excluded by name: v5 is the candidate this
+change adds, and pinning it here would make the guard for the historical
+releases move with the new one.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPO_ROOT / "tests" / "fixtures" / "hosted_v1_v4_immutability_manifest.json"
-HOSTED_ROOT = REPO_ROOT / "plugins" / "hosted"
+MANIFEST_SHA256 = "3acf80ce40dcfeaa09d37b82ef30ecdcb41f873ba4c697988d5c6a15fc154ee7"
+SOURCE_REVISION = "ee5f4a675a7948a7e6cc2f0d3bd8b5ebecfc786c"
 
 
-def _manifest() -> dict[str, object]:
+def _manifest() -> dict:
     return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 
 
-def _covered(path: Path) -> bool:
-    relative = path.relative_to(REPO_ROOT).as_posix()
+def _tracked_hosted_files() -> list[str]:
+    """Every tracked file under `plugins/hosted`, from the index rather than disk.
+
+    `rglob` also returns whatever a concurrent render or an interrupted
+    promotion left lying around -- `.claude.promotion.lock`, a
+    `.exomem-hosted-render-*` staging directory -- and a guard that reports
+    those as unpinned release files is a guard that cries wolf. The index knows
+    the difference.
+    """
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--", "plugins/hosted"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=True,
+    ).stdout.decode("utf-8")
+    return [path for path in listed.split("\0") if path]
+
+
+def _committed_bytes(relative: str) -> bytes:
+    """The file's bytes, from disk when present and from the index when not.
+
+    A tracked path can legitimately be absent from a working tree -- a sparse
+    checkout, a partial clone -- and reading only from disk turns that into a
+    stopped audit rather than a failed one. Absent from both is the real
+    failure, and it names the path.
+    """
+    path = REPO_ROOT / relative
+    if path.is_file():
+        return path.read_bytes()
+    completed = subprocess.run(
+        ["git", "cat-file", "blob", f":0:{relative}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(f"pinned v1-v4 file is absent from disk and from the index: {relative}")
+    return completed.stdout
+
+
+def _covered(relative: str) -> bool:
     manifest = _manifest()
-    excluded_prefixes = tuple(manifest["excluded_prefixes"])  # type: ignore[arg-type]
-    if relative.startswith(excluded_prefixes):
+    excluded = tuple(manifest["excluded_prefixes"])
+    if relative.startswith(excluded):
         return False
     return str(manifest["excluded_candidate"]) not in relative.split("/")
 
@@ -51,20 +92,14 @@ def test_v1_v4_release_surface_is_byte_identical_to_the_pinned_manifest() -> Non
     assert manifest["file_count"] == len(files)
 
     mismatched: list[str] = []
-    missing: list[str] = []
     for relative, expected in sorted(files.items()):
-        path = REPO_ROOT / relative
-        if not path.is_file():
-            missing.append(relative)
-            continue
-        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        if hashlib.sha256(_committed_bytes(relative)).hexdigest() != expected:
             mismatched.append(relative)
 
-    assert not missing, f"pinned v1-v4 files are gone: {missing}"
     assert not mismatched, f"pinned v1-v4 files changed: {mismatched}"
 
 
-def test_the_manifest_still_enumerates_every_v1_v4_file_on_disk() -> None:
+def test_the_manifest_still_enumerates_every_v1_v4_file() -> None:
     """A guard that can be defeated by deleting a row is not a guard.
 
     The equality is two-way on purpose: the previous test proves each pinned
@@ -73,19 +108,45 @@ def test_the_manifest_still_enumerates_every_v1_v4_file_on_disk() -> None:
     after the manifest was cut.
     """
     manifest = _manifest()
-    on_disk = {
-        path.relative_to(REPO_ROOT).as_posix()
-        for path in HOSTED_ROOT.rglob("*")
-        if path.is_file() and _covered(path)
+    tracked = {relative for relative in _tracked_hosted_files() if _covered(relative)}
+    assert tracked == set(manifest["files"])
+
+
+def test_the_generated_directory_packets_are_inside_the_pin() -> None:
+    """They carry v1's release digests, so they are identity, not listing state."""
+    manifest = _manifest()
+    generated = {
+        relative
+        for relative in manifest["files"]
+        if relative.startswith("plugins/hosted/directory/generated/")
     }
-    assert on_disk == set(manifest["files"])  # type: ignore[arg-type]
+    assert generated, "the generated directory packets are not pinned"
+
+    v1_lock = json.loads(
+        (REPO_ROOT / "plugins/hosted/generated/claude.lock.json").read_text(encoding="utf-8")
+    )
+    packets = "".join(
+        (REPO_ROOT / relative).read_text(encoding="utf-8") for relative in sorted(generated)
+    )
+    assert v1_lock["compatibility_sha256"] in packets
+
+
+def test_every_exclusion_states_why_it_is_not_release_identity() -> None:
+    """An exclusion with no reason is how a guard quietly stops covering things."""
+    manifest = _manifest()
+    excluded = manifest["excluded_prefixes"]
+    assert isinstance(excluded, dict) and excluded
+
+    for prefix, reason in excluded.items():
+        assert prefix.startswith("plugins/hosted/") and prefix.endswith("/"), prefix
+        assert isinstance(reason, str) and len(reason) > 80, f"{prefix}: reason is too thin"
+        assert not any(
+            placeholder in reason.lower()
+            for placeholder in ("tbd", "todo", "for now", "later", "out of scope")
+        ), f"{prefix}: placeholder reason"
 
 
 def test_the_manifest_itself_is_pinned() -> None:
     """The manifest is evidence; its own digest is what a report can quote."""
-    body = MANIFEST_PATH.read_bytes()
-    assert (
-        hashlib.sha256(body).hexdigest()
-        == "415cc748638291ac987e8ae33f07666fab9354cc413b0f674afc440fc567fb8e"
-    )
-    assert _manifest()["source_revision"] == "ee5f4a675a7948a7e6cc2f0d3bd8b5ebecfc786c"
+    assert hashlib.sha256(MANIFEST_PATH.read_bytes()).hexdigest() == MANIFEST_SHA256
+    assert _manifest()["source_revision"] == SOURCE_REVISION

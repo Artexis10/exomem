@@ -1,9 +1,10 @@
 {
   "excluded_candidate": "hosted-alpha-agent-v5",
-  "excluded_prefixes": [
-    "plugins/hosted/directory/"
-  ],
-  "file_count": 132,
+  "excluded_prefixes": {
+    "plugins/hosted/directory/publication/": "Operator-driven listing state. It records where a channel submission currently sits in a marketplace review queue, which moves without any release changing, so pinning it would make an operator action look like a v1-v4 mutation.",
+    "plugins/hosted/directory/submissions/": "One file per submission attempt, appended by the operator as channels are re-submitted. Additive by design, and the same argument applies."
+  },
+  "file_count": 135,
   "files": {
     "plugins/hosted/acceptance-fixture-v1.json": "2a34b1aaec33d9ba3e428ef9861910fe7e4aa2dfb046b2c08e23f982dfc488fb",
     "plugins/hosted/assets/icon.svg": "9eef30cfe92ee021218bc9076f0a107e8adf84664c70eb61f7b9790d4afc27bb",
@@ -20,6 +21,9 @@
     "plugins/hosted/candidates/hosted-alpha-agent-v4/skills/exomem-records/SKILL.md": "021b7697c184ccbc32926ee467b1039ae5eeef0d3f0a8467903e1350d341915e",
     "plugins/hosted/candidates/hosted-alpha-agent-v4/skills/exomem-supersede/SKILL.md": "ee88626bf1e994fecdae793bbf1c332f8ae9ecdf9dd3142117a723521c8c3105",
     "plugins/hosted/definition.json": "96f92d72b47b2578d28e8cc60fe65a3d1dbb0f0ea11d3ee8ecc44d895e443196",
+    "plugins/hosted/directory/generated/claude-connector.json": "99c972ca9df1b98b7b0c279704c22b7ee275e10a60eb47833fbca90e39fa1a19",
+    "plugins/hosted/directory/generated/claude-plugin.json": "e18fdb110785d89ce28bcf906efe393fe25e2cd11065ff35c71e85aa8ba3500b",
+    "plugins/hosted/directory/generated/openai-plugin.json": "41b6adac5e6443fe5b0a0c657e76101cf852ca2c72bbfc4afaac43caa05f4882",
     "plugins/hosted/generated/candidates/hosted-alpha-agent-v2/claude.lock.json": "eea0ac42d934f57676e369aa18ebc3b3fe58b339750a1a4ccf503fafd5683745",
     "plugins/hosted/generated/candidates/hosted-alpha-agent-v2/claude.zip": "63c3975784d5e2513240da259412fb9b2ee0feb5925906c661b2fd58fbc1cc34",
     "plugins/hosted/generated/candidates/hosted-alpha-agent-v2/claude.zip.lock.json": "ce9929a763136f2d932a4cc30a6ef953e27a924ab399f609a07d9a1bb13d83cd",
@@ -138,6 +142,6 @@
     "plugins/hosted/skills/exomem-review/SKILL.md": "c3ef70470bfb2b65c0a0442e88c51dce2c63507e084fce445439a82046ec19d8",
     "plugins/hosted/skills/exomem/SKILL.md": "830dd0876c93169e5c659fde6d31088de845a3da6846732289614f599cb6eca3"
   },
-  "schema_version": 1,
+  "schema_version": 2,
   "source_revision": "ee5f4a675a7948a7e6cc2f0d3bd8b5ebecfc786c"
 }

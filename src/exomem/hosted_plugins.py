@@ -63,6 +63,10 @@ SELF_CONTAINED_CANDIDATES: frozenset[str] = frozenset({BASELINE_CANDIDATE})
 FIXTURE_BOUND_CANDIDATES: frozenset[str] = frozenset({BASELINE_CANDIDATE})
 #: The candidate-owned frozen snapshot of the generic contribution inputs.
 COMBINED_FIXTURE_NAME = "behavior-fixture.json"
+#: The top-level lists in a contribution input that hold behavior cases. It is
+#: an allowlist rather than a discovery rule so that a sibling lane inventing a
+#: fourth list is a loud refusal rather than silent under-coverage.
+CONTRIBUTION_CASE_KEYS: tuple[str, ...] = ("cases", "traces", "separate_executed_method_cases")
 #: Generic synthetic inputs, one per implementing change, that sibling lanes
 #: own and this module only ever reads. Keyed by the `family` each file
 #: declares for itself, so a renamed family fails rather than silently
@@ -109,6 +113,16 @@ DIRECTORY_REVIEWER_EVIDENCE_MAX_AGE = timedelta(hours=1)
 DEMOTION_REASONS = frozenset(
     {"artifact-withdrawn", "client-regression", "contract-drift", "operator-withdrawal"}
 )
+#: Stable refusal for a candidate name whose published identity would move.
+#:
+#: A promoted release is an identity, not a directory. `demote` exists so
+#: selection can move away from a candidate, and `promote` accepts a demoted
+#: record as a starting state so the same release can be rolled forward again --
+#: which together made demote the correction path the contract forbids: demote,
+#: edit the candidate, render, promote, and a different release ships under the
+#: promoted name. The first live identity is therefore sticky per candidate
+#: name, for every candidate, and a correction has to arrive as a new one.
+PROMOTED_IDENTITY_IMMUTABLE = "HOSTED_PROMOTED_IDENTITY_IMMUTABLE"
 SKILL_NAMES = (
     "exomem",
     "exomem-capture",
@@ -456,8 +470,26 @@ def _contribution_case_ids(contribution: dict[str, Any]) -> tuple[str, ...]:
     else: the positive and the paired negative are both just cases the promotion
     evidence has to cover, which is what stops a run reporting only its wins.
     """
+    known = CONTRIBUTION_CASE_KEYS
+    unmapped = sorted(
+        key
+        for key, value in contribution.items()
+        if key not in known
+        and isinstance(value, list)
+        and any(isinstance(entry, dict) and "id" in entry for entry in value)
+    )
+    if unmapped:
+        # Fail closed. A sibling lane adding `negative_cases` alongside `cases`
+        # would otherwise be silently dropped from the coverage set, and the
+        # promotion gate that requires a trace per declared case would go on
+        # passing while covering less than the contribution declares.
+        raise ValueError(
+            "Hosted contribution declares case list(s) the combined fixture does not map: "
+            + ", ".join(unmapped)
+            + "; the v5 owner must map them in CONTRIBUTION_CASE_KEYS before they can ship"
+        )
     identifiers: list[str] = []
-    for key in ("cases", "traces", "separate_executed_method_cases"):
+    for key in known:
         entries = contribution.get(key)
         if not isinstance(entries, list):
             continue
@@ -534,8 +566,27 @@ def check_behavior_fixture(repo_root: Path | None = None, *, candidate: str) -> 
     expected = combined_behavior_fixture(root)
     if frozen != expected:
         paths = ", ".join(_json_difference_paths(frozen, expected))
-        raise ValueError(f"Hosted combined behavior fixture is stale: {paths}")
+        raise ValueError(
+            f"Hosted combined behavior fixture is stale: {paths}; run "
+            f"`scripts/hosted-plugin.py freeze-fixture --candidate {candidate}` to re-freeze "
+            "the contribution inputs, then render again"
+        )
     return frozen
+
+
+def freeze_behavior_fixture(repo_root: Path | None = None, *, candidate: str) -> Path:
+    """Write the candidate-owned snapshot of the four contribution inputs.
+
+    Freezing is a deliberate act by the candidate's owner, which is why it is
+    its own subcommand rather than something `render` does on the way past: a
+    render that silently re-froze would turn a sibling lane's edit to its own
+    input into a new release identity without anyone deciding to cut one.
+    """
+    root = _repo_root(repo_root)
+    path = behavior_fixture_path(root, candidate=candidate)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_bytes_atomic(path, _canonical_json(combined_behavior_fixture(root)) + b"\n")
+    return path
 
 
 def validate_behavior_observation(scenario: dict[str, Any], observation: dict[str, Any]) -> None:
@@ -2609,6 +2660,54 @@ def archive(
     return output_root
 
 
+def _record_live_identity(record: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The release identity a live promotion record binds, if it binds one."""
+    lock = record.get("package_lock")
+    compatibility_sha256 = record.get("compatibility_sha256")
+    if isinstance(lock, dict) and isinstance(compatibility_sha256, str):
+        return {"compatibility_sha256": compatibility_sha256, "package_lock": dict(lock)}
+    return None
+
+
+def _prior_live_identities(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Every identity this candidate name has been promoted with, so far.
+
+    The record's own current identity is folded in rather than trusted to be
+    listed, so a live record written before this field existed still pins what
+    it published.
+    """
+    identities = [
+        dict(entry)
+        for entry in (record.get("prior_live_identities") or [])
+        if isinstance(entry, dict)
+    ]
+    live = _record_live_identity(record)
+    if live is not None and live not in identities:
+        identities.append(live)
+    return identities
+
+
+def _refuse_moved_release_identity(
+    prior: Mapping[str, Any],
+    identity: Mapping[str, Any],
+    *,
+    candidate: str,
+) -> list[dict[str, Any]]:
+    """Refuse a promotion that would move a candidate name's published identity."""
+    recorded = _prior_live_identities(prior)
+    if recorded and dict(identity) not in recorded:
+        raise ValueError(
+            f"{PROMOTED_IDENTITY_IMMUTABLE}: {candidate} has already been promoted with a "
+            "different identity; a promoted candidate's source, fixture, package, lock, "
+            "archive and promotion identity are immutable, so ship the correction as a "
+            "new candidate rather than re-promoting this one"
+        )
+    merged = list(recorded)
+    if dict(identity) not in merged:
+        merged.append(dict(identity))
+    return merged
+
+
 def promotion_record(
     repo_root: Path | None, platform: str, *, candidate: str = DEFAULT_CANDIDATE
 ) -> Path:
@@ -3069,6 +3168,14 @@ def promote(
                 candidate=candidate,
                 records_expectation=records_expectation,
             )
+            _refuse_moved_release_identity(
+                prior,
+                {
+                    "compatibility_sha256": compatibility["compatibility_sha256"],
+                    "package_lock": lock,
+                },
+                candidate=candidate,
+            )
             if (
                 prior.get("package_lock") != lock
                 or prior.get("compatibility_sha256") != compatibility["compatibility_sha256"]
@@ -3084,6 +3191,14 @@ def promote(
             candidate=candidate,
             records_expectation=records_expectation,
         )
+        live_identities = _refuse_moved_release_identity(
+            prior,
+            {
+                "compatibility_sha256": compatibility["compatibility_sha256"],
+                "package_lock": lock,
+            },
+            candidate=candidate,
+        )
         promoted = {
             "schema_version": 1,
             "platform": platform,
@@ -3095,6 +3210,7 @@ def promote(
             "state": "live",
             "package_lock": lock,
             "compatibility_sha256": compatibility["compatibility_sha256"],
+            "prior_live_identities": live_identities,
             "evidence": evidence,
         }
         if expected_state == "live":
@@ -3131,6 +3247,9 @@ def demote(
             or _sha256(_canonical_json(prior)) != expected_record_sha256
         ):
             raise ValueError("promotion record changed; refresh before retrying")
+        # Demotion drops the package lock and the compatibility digest, which is
+        # what let the candidate come back as something else. Keep them.
+        retained = _prior_live_identities(prior)
         _write_json_atomic(
             record_path,
             {
@@ -3139,6 +3258,7 @@ def demote(
                 **({"candidate": candidate, "minimum_records_reader_version": 2} if candidate in RECORDS_CANDIDATES else {}),
                 "state": "failed",
                 "reason": reason,
+                **({"prior_live_identities": retained} if retained else {}),
             },
         )
 

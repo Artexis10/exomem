@@ -25,6 +25,7 @@ def main() -> int:
             "render",
             "regenerate",
             "check",
+            "freeze-fixture",
             "archive",
             "promote",
             "demote",
@@ -178,6 +179,21 @@ def main() -> int:
                 candidate=args.candidate,
             )
             print("Hosted generated artifacts are current")
+        elif args.command == "freeze-fixture":
+            if args.candidate not in hosted_plugins.FIXTURE_BOUND_CANDIDATES:
+                parser.error("freeze-fixture requires a candidate that owns a behavior fixture")
+            path = hosted_plugins.freeze_behavior_fixture(REPO_ROOT, candidate=args.candidate)
+            print(
+                json.dumps(
+                    {
+                        "path": str(path.relative_to(REPO_ROOT)),
+                        "behavior_fixture_sha256": hosted_plugins.behavior_fixture_sha256(
+                            REPO_ROOT, candidate=args.candidate
+                        ),
+                    },
+                    sort_keys=True,
+                )
+            )
         elif args.command == "archive":
             print(
                 hosted_plugins.archive(

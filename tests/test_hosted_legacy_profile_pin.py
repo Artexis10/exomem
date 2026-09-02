@@ -20,12 +20,22 @@ released for -- is the only one that discovers them through the live registry.
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import json
+import typing
 from pathlib import Path
 
 import pytest
+import test_hosted_protected_tree_guard as guard
 
-from exomem import cli_ops, commands, hosted_legacy_schemas, hosted_plugins
+from exomem import (
+    cli_ops,
+    commands,
+    hosted_gateway,
+    hosted_legacy_schemas,
+    hosted_plugins,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -157,3 +167,145 @@ def test_the_pin_refuses_a_command_whose_pinned_parameter_disappeared() -> None:
         commands.apply_legacy_profile_pin(
             command, ("title", "content", "a_parameter_that_never_existed")
         )
+
+
+# ---------------------------------------------------------------------------
+# Actual-wire identities, at the route rather than at `cli_ops.coerce`
+#
+# `coerce` is what the route calls, but asserting against it directly proves
+# the coercer refuses the argument, not that the request does. Everything
+# between -- profile resolution, trusted-context auth, the descriptor the
+# gateway builds -- is exactly where a pinned schema could be lost. So these
+# go through the real profile-scoped POST, using the protected-tree harness.
+# ---------------------------------------------------------------------------
+
+#: A value of the right shape for each argument. Coercion refuses an unknown
+#: parameter before it looks at any value, so on a pinned profile these are
+#: never read; on v5 they have to be plausible enough to get past coercion and
+#: fail somewhere downstream instead.
+V5_ONLY_ARGUMENT_VALUES: dict[str, object] = {
+    "adoption": {"key": "synthetic:probe", "trigger": "selected", "selected_file_id": "probe"},
+    "delivery": {"kind": "reference"},
+    "curation_action": "status",
+    "review_ref": "exomem://review/aaaaaaaaaaaaaaaaaaaaaaaa",
+    "hydration_recheck": 3,
+}
+
+
+def _published_schema(profile: str, command_name: str) -> dict:
+    contract = hosted_gateway.build_agent_gateway_contract(profile=profile)
+    entry = next(item for item in contract["commands"] if item["name"] == command_name)
+    return entry["mcp_tool"]["inputSchema"]
+
+
+@pytest.mark.parametrize("candidate", HISTORICAL_CANDIDATES)
+@pytest.mark.parametrize(("command_name", "argument"), V5_ONLY_ARGUMENTS)
+def test_a_released_profile_refuses_a_v5_only_argument_over_the_real_route(
+    tmp_path: Path, candidate: str, command_name: str, argument: str
+) -> None:
+    profile = hosted_plugins.CANDIDATE_PROFILES[candidate]
+    if command_name not in _resolved(profile):
+        pytest.skip(f"{profile} does not expose {command_name}")
+
+    app, config = guard._cell(tmp_path, profile=profile)
+    response = guard._call(
+        app, config, command_name, {argument: V5_ONLY_ARGUMENT_VALUES[argument]}
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "UNKNOWN_PARAM", response.text
+    assert argument not in _published_schema(profile, command_name)["properties"]
+
+
+@pytest.mark.parametrize(("command_name", "argument"), V5_ONLY_ARGUMENTS)
+def test_v5_admits_the_same_body_over_the_real_route(
+    tmp_path: Path, command_name: str, argument: str
+) -> None:
+    profile = commands.HOSTED_ALPHA_AGENT_V5_PROFILE
+    app, config = guard._cell(tmp_path, profile=profile)
+    response = guard._call(
+        app, config, command_name, {argument: V5_ONLY_ARGUMENT_VALUES[argument]}
+    )
+
+    # Admitted, not necessarily successful: these bodies are deliberately
+    # incomplete, so the call lands on a downstream refusal. What matters is
+    # that it is no longer the coercer's.
+    assert "UNKNOWN_PARAM" not in response.text, response.text
+    assert "COMMAND_NOT_FOUND" not in response.text, response.text
+    assert argument in _published_schema(profile, command_name)["properties"]
+
+
+class _ForeignProbe:
+    """A type that exists only in this module's namespace."""
+
+
+def _foreign_module_leaf(
+    vault_root: Path,
+    kept: _ForeignProbe | None = None,
+    dropped: _ForeignProbe | None = None,
+) -> dict:
+    """A leaf defined outside `exomem.commands`.
+
+    Args:
+        kept: Retained by the pin.
+        dropped: Removed by the pin.
+    """
+    return {"vault_root": vault_root, "kept": kept, "dropped": dropped}
+
+
+def test_the_pin_resolves_annotations_in_the_leaf_s_own_namespace() -> None:
+    """A pinned wrapper must not lose a leaf's types by changing namespace.
+
+    The wrapper is built inside `exomem.commands`, so its `__globals__` are that
+    module's. Carrying the leaf's *string* annotations across would make
+    `typing.get_type_hints` resolve them there and quietly fall back to an
+    unannotated parameter -- which reaches the published MCP schema as an
+    untyped field rather than as a failure.
+    """
+    canonical = next(
+        entry for entry in commands.PRODUCT_COMMANDS if entry.name == "capture_source"
+    )
+    probe = dataclasses.replace(
+        canonical,
+        name="foreign_probe",
+        leaf=_foreign_module_leaf,
+        params=(
+            commands.Param(name="kept", type="json", required=False, help="Retained."),
+            commands.Param(name="dropped", type="json", required=False, help="Removed."),
+        ),
+        needs_schema=False,
+    )
+
+    pinned = commands.apply_legacy_profile_pin(probe, ("kept",))
+    hints = typing.get_type_hints(pinned.leaf, include_extras=True)
+
+    assert tuple(param.name for param in pinned.params) == ("kept",)
+    assert "dropped" not in hints
+    assert hints["kept"] == _ForeignProbe | None
+    assert list(inspect.signature(pinned.leaf).parameters) == ["vault_root", "kept"]
+
+
+def test_the_pin_source_revision_matches_the_manifest_it_was_cut_with() -> None:
+    """Two pins, one moment. Say so, rather than leaving it to inspection."""
+    manifest = json.loads(
+        (REPO_ROOT / "tests/fixtures/hosted_v1_v4_immutability_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert hosted_legacy_schemas.SOURCE_REVISION == manifest["source_revision"]
+
+
+def test_the_pin_names_the_descriptor_each_profile_was_read_from() -> None:
+    payload = json.loads(
+        (REPO_ROOT / "src/exomem/hosted_legacy_profile_schemas.json").read_text(encoding="utf-8")
+    )
+    sources = payload["sources"]
+
+    assert set(sources) == set(hosted_legacy_schemas.LEGACY_PROFILE_PARAMS)
+    for profile, relative in sources.items():
+        descriptor = json.loads((REPO_ROOT / relative).read_text(encoding="utf-8"))
+        assert descriptor["profile"] == profile
+        assert {
+            entry["name"]: tuple(param["name"] for param in entry["params"])
+            for entry in descriptor["agent_contract"]["commands"]
+        } == hosted_legacy_schemas.LEGACY_PROFILE_PARAMS[profile]

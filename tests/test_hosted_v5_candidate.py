@@ -262,38 +262,124 @@ def test_the_frozen_fixture_is_the_canonicalisation_of_all_four_inputs() -> None
         assert frozen["families"][family]["source"].endswith(filename)
 
 
-def test_the_fixture_covers_the_positive_and_negative_case_of_every_family() -> None:
+#: The twenty behaviours the hosted-agent-surface scenario names, each against
+#: the contribution case that actually carries it. Written out rather than
+#: implied, because "its evidence accepts X and rejects Y" is only checkable if
+#: every X and Y has a name on this side of the fixture too.
+#:
+#: Four labels are carried as a constraint *inside* another case rather than by
+#: a standalone case of their own -- a forbidden write id, a forbidden claim, a
+#: decision order. Those are marked, because "covered" and "has its own case"
+#: are different claims and the second one is not true for them.
+SCENARIO_POSITIVES: dict[str, str] = {
+    "stable preference": "stable-preference-entity-facet",
+    "recurring routine": "recurring-routine-compiled-observation",
+    "historical baseline": "historical-baseline-records",
+    "durable affiliation": "durable-affiliation-entity-facet",
+    "exact adopted-artifact": "direct-source-adoption",
+    "stable recurring-identity": "generic-promotion",
+    "existing-Entity hydration": "existing-identity-hydration",
+    "reviewed curation": "reviewed-one-step-apply",
+}
+SCENARIO_NEGATIVES: dict[str, str] = {
+    "fleeting": "fleeting-preference-quiet",
+    "one-off": "one-off-routine-quiet",
+    "incidental": "frequency-matched-twin",
+    "trivial": "stable-low-reuse-trivia-quiet",
+    "tentative": "tentative-unresolved-affiliation-quiet",
+    "unselected-draft": "unselected-drafts-stay-ephemeral",
+    # Carried as `forbidden_write_file_ids` on the adoption traces: the sibling
+    # variant of the same artifact must not be written.
+    "wrong-variant": "direct-evidence-adoption",
+    "false-save": "no-handle-handoff-is-honest",
+    "ambiguous-identity auto-selection": "ambiguous-identity-stop",
+    # Carried as the fixture's `decision_order` "hydrate-one-match-before-
+    # duplicate" and as this case's expected route.
+    "duplicate-Entity": "existing-identity-hydration",
+    # Carried as the conservatively-mutating fail-closed path: a curation write
+    # whose action is omitted is refused rather than assumed confirmed.
+    "unconfirmed-curation": "omitted-action-fails-closed",
+    "false-terminal": "reported-remote-reference-is-not-byte-proof",
+}
+#: Every other case the four contributions declare. Listed so that no case can
+#: sit in the frozen fixture unaccounted for -- the check below is a partition,
+#: not a subset.
+NON_SCENARIO_CASES: dict[str, str] = {
+    "durable affiliation routed to an accepted relation": "durable-affiliation-accepted-relation",
+    "executed method, positive": "executed-method-positive",
+    "executed method, failure": "executed-method-failure",
+    "executed method, parameter boundary": "executed-method-parameter-boundary",
+    "executed method, unreusable one-off": "executed-method-unreusable-one-off",
+    "receipt-linked reported delivery": "receipt-linked-reported-delivery",
+    "open registry family metadata": "open-registry-family-metadata",
+    "curation work-item read": "explicit-work-item-read",
+    "curation sealed-plan preview": "sealed-plan-preview",
+    "curation plan proposal": "agent-authored-plan-proposal",
+    "curation approved-plan resume": "approved-plan-resume",
+    "curation compensation proposal": "compensation-plan-proposal",
+    "curation unknown action fails closed": "unknown-action-fails-closed",
+}
+
+
+def test_every_named_scenario_behaviour_maps_to_a_real_case_and_back() -> None:
+    """The scenario's twenty behaviours, traceable in both directions.
+
+    Forward: every named behaviour resolves to a case id that exists in the
+    frozen fixture. Backward: every case id in the frozen fixture is claimed by
+    some label -- one of the twenty, or one of the additional behaviours the
+    contributions carry beyond the scenario. A case nobody claims is a case
+    nobody is reading, and the promotion gate would still demand a trace for it.
+    """
     frozen = hosted_plugins.check_behavior_fixture(REPO_ROOT, candidate=V5)
     covered = {
         case for declared in frozen["families"].values() for case in declared["case_ids"]
     }
 
-    positives = {
-        "stable-preference-entity-facet",
-        "recurring-routine-compiled-observation",
-        "historical-baseline-records",
-        "durable-affiliation-entity-facet",
-        "direct-source-adoption",
-        "direct-evidence-adoption",
-        "existing-identity-hydration",
-        "reviewed-one-step-apply",
+    assert len(SCENARIO_POSITIVES) == 8
+    assert len(SCENARIO_NEGATIVES) == 12
+
+    labelled = {**SCENARIO_POSITIVES, **SCENARIO_NEGATIVES, **NON_SCENARIO_CASES}
+    missing = {label: case for label, case in labelled.items() if case not in covered}
+    assert not missing, f"labels naming a case that does not exist: {missing}"
+
+    unclaimed = covered - set(labelled.values())
+    assert not unclaimed, f"cases no label claims: {sorted(unclaimed)}"
+
+
+def test_the_scenario_positives_and_negatives_are_paired_across_all_four_families() -> None:
+    """Each family has to contribute to both halves, not just to the easy one."""
+    frozen = hosted_plugins.check_behavior_fixture(REPO_ROOT, candidate=V5)
+    family_of = {
+        case: family
+        for family, declared in frozen["families"].items()
+        for case in declared["case_ids"]
     }
-    negatives = {
-        "fleeting-preference-quiet",
-        "one-off-routine-quiet",
-        "stable-low-reuse-trivia-quiet",
-        "tentative-unresolved-affiliation-quiet",
-        "unselected-drafts-stay-ephemeral",
-        "no-handle-handoff-is-honest",
-        "reported-remote-reference-is-not-byte-proof",
-        "ambiguous-identity-stop",
-        "frequency-matched-twin",
-        "unknown-action-fails-closed",
-        "omitted-action-fails-closed",
-        "executed-method-unreusable-one-off",
+
+    assert set(hosted_plugins.CONTRIBUTION_INPUTS) == {
+        family_of[case] for case in SCENARIO_POSITIVES.values()
     }
-    assert positives <= covered
-    assert negatives <= covered
+    assert set(hosted_plugins.CONTRIBUTION_INPUTS) == {
+        family_of[case] for case in SCENARIO_NEGATIVES.values()
+    }
+
+
+def test_a_contribution_case_list_the_owner_never_mapped_is_refused(tmp_path: Path) -> None:
+    """Fail closed on a shape the owner has not read.
+
+    A sibling lane adding `negative_cases` beside `cases` would be dropped from
+    the coverage set silently, and the promotion gate would keep passing while
+    demanding traces for fewer cases than the contribution declares.
+    """
+    root = copy_release_tree(tmp_path / "repo")
+    source = root / hosted_plugins.CONTRIBUTION_ROOT / "recurring_entity_lifecycle.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    payload["negative_cases"] = [{"id": "a-case-the-owner-never-mapped"}]
+    source.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="negative_cases"):
+        hosted_plugins.combined_behavior_fixture(root)
+    with pytest.raises(ValueError, match="negative_cases"):
+        hosted_plugins.check(root, platform="claude", candidate=V5)
 
 
 def test_the_combined_digest_is_bound_in_every_evidence_surface() -> None:
@@ -560,11 +646,22 @@ def test_v5_ships_unpromoted_like_v4(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_pre_lock_rebuild_of_an_unpromoted_candidate_is_allowed(tmp_path: Path) -> None:
-    """Before promotion a failed doctrine can leave and the candidate rebuild."""
+def test_pre_promotion_rebuild_of_an_unpromoted_candidate_is_allowed(tmp_path: Path) -> None:
+    """Before promotion a failed doctrine can leave and the candidate rebuild.
+
+    "Pre-lock" in the design means before the candidate's identity is published,
+    which is promotion -- the lock files are regenerated by every render, so a
+    rebuild replaces them rather than being blocked by them. This deletes them
+    first anyway, to say plainly that nothing about a rendered lock stands in
+    the way of a rebuild that no promotion record has bound yet.
+    """
     root = copy_release_tree(tmp_path / "repo")
     core = root / "plugins/hosted/candidates" / V5 / "skills/exomem/SKILL.md"
     before = hosted_plugins.compatibility_manifest(root, candidate=V5)["compatibility_sha256"]
+    generated = root / "plugins/hosted/generated/candidates" / V5
+    for platform in hosted_plugins.PLATFORMS:
+        for suffix in (".lock.json", ".zip", ".zip.lock.json"):
+            (generated / f"{platform}{suffix}").unlink()
 
     core.write_text(
         core.read_text(encoding="utf-8").replace(
@@ -616,23 +713,192 @@ def test_a_promoted_candidate_cannot_be_corrected_by_mutation(tmp_path: Path) ->
         )
 
 
-def test_a_correction_after_promotion_needs_a_new_candidate() -> None:
-    """v6 is the only place a corrected identity can go.
+def test_a_failed_contribution_can_be_re_frozen_and_the_candidate_rebuilt(
+    tmp_path: Path,
+) -> None:
+    """The pre-promotion rollback the design describes, run end to end.
 
-    The registry is append-only in effect: a candidate's profile name is its
-    published identity, and every digest a promotion record binds is derived
-    from files that candidate owns. Correcting v5 in place changes those
-    digests, which is exactly what the previous test refuses -- so the
-    correction has to arrive as a candidate the registry does not yet have.
+    "Before the first v5 lock, a failed doctrine can be removed from the
+    candidate and the combined candidate rebuilt." That is three steps -- change
+    the contribution, re-freeze, render -- and the middle one is a deliberate
+    act with its own subcommand, because a render that re-froze on its own would
+    turn a sibling lane's edit into a new release identity unasked.
     """
-    assert V5 in hosted_plugins.CANDIDATE_PROFILES
-    assert "hosted-alpha-agent-v6" not in hosted_plugins.CANDIDATE_PROFILES
-    assert hosted_plugins.CANDIDATE_PROFILES[V5] == commands.HOSTED_ALPHA_AGENT_V5_PROFILE
-    # Selection may move away from a promoted candidate; nothing removes it.
-    assert set(hosted_plugins.CANDIDATE_PROFILES) >= {
-        "hosted-alpha-agent-v1",
-        "hosted-alpha-agent-v2",
-        "hosted-alpha-agent-v3",
-        "hosted-alpha-agent-v4",
-        V5,
+    root = copy_release_tree(tmp_path / "repo")
+    before = hosted_plugins.behavior_fixture_sha256(root, candidate=V5)
+    source = root / hosted_plugins.CONTRIBUTION_ROOT / "governed_curation.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    removed = payload["cases"].pop()
+    source.write_text(json.dumps(payload), encoding="utf-8")
+
+    # Until the owner re-freezes, the candidate is stale and refuses to render,
+    # and the refusal says what to run.
+    with pytest.raises(ValueError, match="freeze-fixture --candidate"):
+        hosted_plugins.render(
+            root,
+            platform="all",
+            openai_app_id=hosted_plugins.REGISTERED_OPENAI_APP_ID,
+            candidate=V5,
+        )
+
+    hosted_plugins.freeze_behavior_fixture(root, candidate=V5)
+    hosted_plugins.render(
+        root, platform="all", openai_app_id=hosted_plugins.REGISTERED_OPENAI_APP_ID, candidate=V5
+    )
+    hosted_plugins.check(root, platform="all", candidate=V5)
+
+    after = hosted_plugins.behavior_fixture_sha256(root, candidate=V5)
+    assert after != before
+    rebuilt = json.loads(
+        (root / "plugins/hosted/candidates" / V5 / hosted_plugins.COMBINED_FIXTURE_NAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert removed["id"] not in rebuilt["families"]["governed-curation"]["case_ids"]
+    for platform in hosted_plugins.PLATFORMS:
+        lock = json.loads(
+            (
+                root / "plugins/hosted/generated/candidates" / V5 / f"{platform}.lock.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert lock["behavior_fixture_sha256"] == after
+
+
+def test_the_freeze_tool_writes_exactly_the_committed_serialisation(tmp_path: Path) -> None:
+    """Re-freezing an unchanged candidate must not move a single byte."""
+    root = copy_release_tree(tmp_path / "repo")
+    frozen = root / "plugins/hosted/candidates" / V5 / hosted_plugins.COMBINED_FIXTURE_NAME
+    before = frozen.read_bytes()
+
+    hosted_plugins.freeze_behavior_fixture(root, candidate=V5)
+
+    assert frozen.read_bytes() == before
+    assert before.endswith(b"\n")
+
+
+def test_a_demote_and_re_promote_cycle_cannot_correct_a_promoted_candidate(
+    tmp_path: Path,
+) -> None:
+    """The rollback contract's real adversary: the operator with a demote button.
+
+    `demote` moves a live record to `failed`, and `promote` accepts `failed` as
+    a starting state -- so demote, edit the candidate, render, promote again and
+    a corrected release ships under the promoted name, with the first live
+    identity nowhere on disk. Asserting that a v6 directory does not exist
+    proves nothing about that; this runs the cycle.
+
+    A candidate name's first live identity is sticky. Re-promoting the *same*
+    identity after a demote stays allowed, because that is a rollback forward,
+    not a correction.
+    """
+    root = copy_release_tree(tmp_path / "repo")
+    for platform in hosted_plugins.PLATFORMS:
+        _seed_pending_promotion(root, platform)
+    expectation = v5_expectation(root)
+
+    def promote(state: str) -> None:
+        hosted_plugins.promote(
+            root,
+            "claude",
+            v5_signed_evidence(root, expectation),
+            trusted_key_id="operator-key",
+            trusted_secret="operator-secret",
+            expected_state=state,
+            expected_record_sha256=hosted_plugins.promotion_record_sha256(
+                root, "claude", candidate=V5
+            ),
+            candidate=V5,
+            records_expectation=expectation,
+        )
+
+    def demote() -> None:
+        hosted_plugins.demote(
+            root,
+            "claude",
+            "client-regression",
+            expected_state="live",
+            expected_record_sha256=hosted_plugins.promotion_record_sha256(
+                root, "claude", candidate=V5
+            ),
+            candidate=V5,
+        )
+
+    def record() -> dict:
+        return json.loads(
+            hosted_plugins.promotion_record(root, "claude", candidate=V5).read_text(
+                encoding="utf-8"
+            )
+        )
+
+    promote("pending")
+    first_identity = record()["compatibility_sha256"]
+
+    # Demoting is legitimate: selection moves away from v5.
+    demote()
+    assert record()["state"] == "failed"
+    # ...but the identity it was promoted with survives the demotion.
+    assert first_identity in json.dumps(record())
+
+    # Re-promoting the same bytes is a rollback forward, and stays allowed.
+    promote("failed")
+    assert record()["state"] == "live"
+    assert record()["compatibility_sha256"] == first_identity
+
+    # Now the correction attempt: demote, edit, render, promote.
+    demote()
+    core = root / "plugins/hosted/candidates" / V5 / "skills/exomem/SKILL.md"
+    core.write_text(
+        core.read_text(encoding="utf-8") + "\nA post-promotion correction.\n", encoding="utf-8"
+    )
+    hosted_plugins.render(
+        root, platform="all", openai_app_id=hosted_plugins.REGISTERED_OPENAI_APP_ID, candidate=V5
+    )
+    assert (
+        hosted_plugins.compatibility_manifest(root, candidate=V5)["compatibility_sha256"]
+        != first_identity
+    )
+
+    with pytest.raises(ValueError, match="HOSTED_PROMOTED_IDENTITY_IMMUTABLE"):
+        promote("failed")
+
+    # The refusal has to leave the first identity intact and the record unlive.
+    assert record()["state"] == "failed"
+    assert first_identity in json.dumps(record())
+
+
+def test_the_sticky_identity_rule_covers_every_candidate_name(tmp_path: Path) -> None:
+    """Not a v5 rule. The canonical spec says historical candidates are immutable.
+
+    v2 is the oldest candidate with its own promotion record, so it is the one
+    that shows the rule is keyed on the candidate name rather than on v5.
+    """
+    root = copy_release_tree(tmp_path / "repo")
+    candidate = hosted_plugins.LIFECYCLE_CANDIDATE
+    record_path = hosted_plugins.promotion_record(root, "claude", candidate=candidate)
+    live = {
+        "schema_version": 1,
+        "platform": "claude",
+        "candidate": candidate,
+        "minimum_records_reader_version": 2,
+        "state": "live",
+        "package_lock": {"artifact_sha256": "a" * 64},
+        "compatibility_sha256": "b" * 64,
     }
+    record_path.write_bytes(hosted_plugins._canonical_json(live) + b"\n")
+
+    hosted_plugins.demote(
+        root,
+        "claude",
+        "client-regression",
+        expected_state="live",
+        expected_record_sha256=hosted_plugins.promotion_record_sha256(
+            root, "claude", candidate=candidate
+        ),
+        candidate=candidate,
+    )
+    demoted = json.loads(record_path.read_text(encoding="utf-8"))
+
+    assert demoted["state"] == "failed"
+    assert demoted["prior_live_identities"] == [
+        {"compatibility_sha256": "b" * 64, "package_lock": {"artifact_sha256": "a" * 64}}
+    ]

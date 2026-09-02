@@ -88,6 +88,22 @@ class _BaselineProfileConfig(HostedCellConfig):
         return V5_PROFILE
 
 
+def _selected_profile_config(profile: str) -> type[HostedCellConfig]:
+    """The same one-line stub for any other profile a caller asks for.
+
+    The three named classes above stay because they document why each profile
+    is reached for. This covers v1 and v2, which the wire-admission tests need
+    and which no path-guard test does.
+    """
+    if profile not in commands_module.PRODUCT_SURFACE_PROFILES:
+        return HostedCellConfig
+    return type(
+        "_SelectedProfileConfig",
+        (HostedCellConfig,),
+        {"active_agent_profile": property(lambda _self, selected=profile: selected)},
+    )
+
+
 def _profile_exposing(command: str) -> str:
     """The narrowest test profile that actually routes `command`.
 
@@ -125,7 +141,7 @@ def _cell(tmp_path: Path, *, profile: str = V3_PROFILE) -> tuple[Any, HostedCell
         V3_PROFILE: _ProfileConfig,
         V4_PROFILE: _ParityProfileConfig,
         V5_PROFILE: _BaselineProfileConfig,
-    }.get(profile, HostedCellConfig)
+    }.get(profile) or _selected_profile_config(profile)
     config = factory(
         cell_id="cell-protected-tree",
         vault_root=vault_root,

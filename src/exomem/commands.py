@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import typing
 from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
@@ -9471,12 +9472,6 @@ HOSTED_ALPHA_AGENT_V2_PROFILE = "hosted-alpha-agent-v2"
 HOSTED_ALPHA_AGENT_V3_PROFILE = "hosted-alpha-agent-v3"
 HOSTED_ALPHA_AGENT_V4_PROFILE = "hosted-alpha-agent-v4"
 HOSTED_ALPHA_AGENT_V5_PROFILE = "hosted-alpha-agent-v5"
-#: Profiles whose published command schema is frozen. See
-#: `exomem.hosted_legacy_schemas` for why a released profile may not keep
-#: resolving whatever the live registry holds.
-HOSTED_LEGACY_PROFILES: frozenset[str] = frozenset(
-    hosted_legacy_schemas_module.LEGACY_PROFILE_PARAMS
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -9757,10 +9752,17 @@ def _pinned_legacy_leaf(command: Command, keep: frozenset[str]) -> Any:
     pinned.__doc__ = leaf.__doc__
     pinned.__signature__ = signature.replace(parameters=retained)  # type: ignore[attr-defined]
     retained_names = {parameter.name for parameter in retained} | {"return"}
+    # Resolve in the *leaf's* namespace and hand on the resolved objects. The
+    # wrapper is defined here, so its `__globals__` are this module's; copying
+    # the leaf's string annotations across would make `typing.get_type_hints`
+    # look them up in the wrong namespace and fall back silently to an
+    # unannotated parameter for any leaf that lives somewhere else.
+    try:
+        resolved = typing.get_type_hints(leaf, include_extras=True)
+    except Exception:  # noqa: BLE001 - fall back to the raw annotations
+        resolved = dict(getattr(leaf, "__annotations__", {}))
     pinned.__annotations__ = {
-        name: annotation
-        for name, annotation in getattr(leaf, "__annotations__", {}).items()
-        if name in retained_names
+        name: annotation for name, annotation in resolved.items() if name in retained_names
     }
     return pinned
 
