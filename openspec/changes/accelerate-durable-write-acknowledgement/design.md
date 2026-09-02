@@ -121,14 +121,36 @@ current mutation attempt; it does not expose arguments or content.
 No post-commit `activate` write is required for correctness. A worker or the
 original request evaluates a prepared batch from source of truth:
 
-- every path equals its intended after hash/tombstone and generation matches →
-  transition components to `ready`;
+- every path equals its intended after hash/tombstone → transition components
+  to `ready`. The batch's recorded canonical generation is lineage for ordering
+  and supersession, not an equality gate at proof time: the vault's graph
+  checkpoint advances on every write to any page, so requiring it to match
+  stranded every page but the last of a multi-page burst in
+  `reconcile_required` (integration finding, 2026-09-02). Exact after-state is
+  proven by content hashes plus the observation recheck alone;
 - every path equals the before state and the canonical attempt is known not to
-  have committed → retire as `aborted`;
-- a newer exact batch covers the same path/component and current canonical
-  generation → retire as `superseded` only after the newer pending-recall row is
-  live;
+  have committed → retire as `aborted`, retiring the batch's own pending
+  rows in the same transition;
+- a newer exact batch (higher store sequence) covers every required path and
+  component of this batch, whether that newer batch is `ready`, `completed`, or
+  itself `superseded` (coverage is transitive) → retire as `superseded` only
+  after the newer pending-recall row is live or retired;
 - mixed or otherwise unprovable state → `reconcile_required`, never publish.
+
+A batch superseded at proof time acknowledges `derived_sync="pending"` (its
+convergence is owned by the covering batch), `advisory_sync="not_required"`,
+and carries no advisory result reference; the covering write's terminal carries
+the applicable reference. If the superseded batch held the session's single
+advisory claim, that claim is released so a later committed batch in the same
+session can take it.
+
+The after-state clause is evaluated before the abort clause. A batch whose
+canonical attempt is known not to have committed, but whose intended after
+bytes another writer later produced, therefore reaches `ready` rather than
+`aborted`; that is bounded and safe because canonical replay is never
+authorized from a receipt, its pending rows stay `prepared`, and the writer
+that actually produced the bytes keeps live custody. The abort clause requires
+every path to equal its before state.
 
 Caught rollback attempts to CAS-retire the prepared row while authority remains
 held, but safety does not depend on cleanup succeeding. A stale prepared row
@@ -234,6 +256,15 @@ There is one scheduling owner per component family, reusing the current watcher
 reconcile, graph drain, resource mode, model guards, and CAS receipt mechanics.
 No new free-running scheduler competes with them.
 
+Receipt-owned execution of the non-advisory components (`freshness`,
+`memory_refs`, `resolver`, `semantic_purge`, `lexstore`, `graph`, `embeddings`,
+`claims`) routes each claimed component to the existing writer fan-out
+(`upsert_after_write`) over the batch's own paths, memoizing one successful
+report per batch generation for a bounded window so the components cost one
+fan-out rather than one each; a degraded report is never memoized. An optional
+component that the configuration disables (embeddings, claims) completes as
+`not_required` rather than holding receipt custody open.
+
 Dependency order inside one batch is:
 
 1. prove canonical generation and publish pending recall;
@@ -259,6 +290,14 @@ cosines excluding the target identity, then feeds the existing deterministic
 duplicate/overlap thresholds and review-state suppression. If vector rows were
 published before a worker crash, replay reads the exact current page vectors
 from the sidecar and excludes self instead of re-encoding.
+
+Applicability is decided from the committed page: compiled governed pages take
+advisory custody, and a page whose frontmatter cannot be parsed at commit time
+also takes it. The error costs are asymmetric: custody taken for an
+inapplicable page costs one noncanonical component that converges to nothing,
+while custody declined for a real compiled page silently loses the
+duplicate/overlap signal. The worker publishes `not_required` when it later
+proves the page inapplicable.
 
 Advisory output remains noncanonical and fail-open with respect to the committed
 write. The compact terminal returns a stable opaque
@@ -323,7 +362,15 @@ prepare/proof, canonical commit, pending-visibility publication, acknowledgement
 per-component queue age/depth, component completion, and advisory vector reuse.
 The existing write timing script gains public-leaf acknowledgement and immediate
 stable-ref/keyword/hybrid read rows; boundary, validate, and commit rows remain so
-regressions can be localized.
+regressions can be localized. The fast-acknowledgement rows state a production
+contract, so they are measured under the production lexical backend selection
+(`auto`, FTS5 where available) with the catalogue built and repair-idle before
+the first sample; the historical boundary rows stay pinned to the deterministic
+Python rung, which is deliberately O(N), so a row inherited into that scope
+would fail the contract for the wrong reason. The stable-ref read row is
+report-only: `resolve_identifier_read_only` walks the vault instead of
+consulting the identities sidecar, a pre-existing cost carried to a successor
+change.
 
 Red-first failure injection covers every cut:
 
@@ -379,6 +426,15 @@ The executable DAG is therefore:
 
 Lane 5 is itself an authored lane, not unreviewed orchestrator glue. Its fresh
 reviewer examines both the merge and every instrumentation/integration byte.
+Lane 5 also owns receipt-owned execution of the non-advisory components
+(Decision 5), the `EXOMEM_FAST_DURABLE_ACK` gate (default `0`), the advisory
+applicability predicate threaded from Lane 4, and abort-time retirement of an
+aborted batch's pending rows. Two integration rulings widened frozen files:
+the vault-global generation equality left `derived_receipts.py` (Decision 2),
+and the advisory worker's vault-global generation guard left
+`deferred_write_advisory.py`, its fingerprint recheck being the substantive
+guard; both accepted nodes that pinned the equality were corrected to pin the
+content proof instead.
 No author may review their own lane, and correction commits return to the same
 fresh reviewer for recheck.
 
@@ -435,6 +491,15 @@ not eligible for review.
 - **[Risk] The plan collides with unfinished graph/deferred work.** → Lane intake
   refuses shared-file implementation until prerequisite branches are reconciled;
   integration order is explicit in `tasks.md`.
+- **[Risk] A faster acknowledgement raises the write rate against the
+  whole-vault graph rebuild.** → The pre-existing scheduler's vault-global
+  optimistic check refuses a rebuild whenever any write moves the projection
+  (`GraphProjectionMoved`, Class C), which the delivery-boundary gate observed
+  once under five back-to-back samples at 8k pages. The receipt records the
+  graph handoff and never authors `graph_sync` state, so the stop is neither
+  absorbed nor masked; its frequency under an unblocked writer is a reasoned
+  expectation, not a measurement, and its fix is owned by
+  `converge-graph-incrementally`.
 
 ## Migration Plan
 
