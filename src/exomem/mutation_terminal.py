@@ -92,6 +92,8 @@ _ADVISORY_FAILURE = (
     "WRITE_ADVISORY_FAILED",
     "Query the advisory result or retry reconciliation.",
 )
+#: Bounds the diagnostics carried by one acknowledgement, not one batch: a
+#: multi-batch mutation shares this budget rather than multiplying it.
 _MAX_DERIVED_DIAGNOSTICS = 9
 
 #: Keys a client may branch on. Everything else in a response is advisory.
@@ -654,9 +656,16 @@ def with_fast_acknowledgement(
     component_diagnostics: Sequence[Mapping[str, Any]] = (),
     advisory_sync: str,
     advisory_result_ref: str | None = None,
-    graph_sync: str | None = None,
 ) -> dict[str, Any]:
-    """Freeze one bounded derived-custody snapshot into a committed terminal."""
+    """Freeze one bounded derived-custody snapshot into a committed terminal.
+
+    ``graph_sync`` is deliberately absent. Graph convergence has one author --
+    the existing graph pipeline -- and its outcome always travels with its own
+    code and remediation. A second writer here would strip those and let the
+    receipt store reinterpret a field this contract says it must not touch.
+    The receipt's own graph component stays visible under the derived
+    diagnostics instead.
+    """
     if (
         terminal.get("_terminal") != _TERMINAL_MARKER
         or terminal.get("version") != _TERMINAL_VERSION
@@ -667,8 +676,6 @@ def with_fast_acknowledgement(
         raise ValueError("unknown derived acknowledgement outcome")
     if advisory_sync not in ADVISORY_SYNC_OUTCOMES:
         raise ValueError("unknown advisory acknowledgement outcome")
-    if graph_sync is not None and graph_sync not in GRAPH_SYNC_OUTCOMES:
-        raise ValueError("unknown graph acknowledgement outcome")
 
     components = tuple(sorted(set(derived_sync_components)))
     if len(components) > len(_DERIVED_COMPONENT_NAMES) or any(
@@ -729,8 +736,6 @@ def with_fast_acknowledgement(
     else:
         frozen.pop("advisory_sync_code", None)
         frozen.pop("advisory_sync_next_action", None)
-    if graph_sync is not None:
-        frozen["graph_sync"] = graph_sync
     frozen["_derived_diagnostics"] = diagnostics
     return frozen
 

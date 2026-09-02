@@ -93,11 +93,15 @@ _FAST_ACK_NON_GRAPH_COMPONENTS = tuple(
 
 @dataclass(frozen=True, slots=True)
 class DerivedAcknowledgementSnapshot:
-    """Bounded acknowledgement-time view; never worker or replay authority."""
+    """Bounded acknowledgement-time view; never worker or replay authority.
+
+    Carries no graph outcome. The receipt store's graph component is reported
+    among ``diagnostics`` only -- the authoritative ``graph_sync`` field has
+    one author, and it is not this one.
+    """
 
     derived_sync: str
     derived_sync_components: tuple[str, ...]
-    graph_sync: str
     advisory_sync: str
     diagnostics: tuple[tuple[str, str, str | None], ...]
 
@@ -148,7 +152,6 @@ def derived_acknowledgement_snapshot(
     return DerivedAcknowledgementSnapshot(
         derived_sync=derived_sync,
         derived_sync_components=tuple(sorted(unfinished)),
-        graph_sync=outcome(by_component[DerivedComponent.GRAPH]),
         advisory_sync=outcome(
             by_component[DerivedComponent.WRITE_ADVISORY], advisory=True
         ),

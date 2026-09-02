@@ -4763,7 +4763,7 @@ def _batch_atomic_write_locked(
                 ):
                     raise ContentHashMismatchError(final, write.expected_hash, actual_hash)
         if vault_root is not None:
-            from . import deferred_index, derived_receipts
+            from . import derived_receipts
             from .writer_lease import (
                 active_derived_batch_custody,
                 prepare_active_derived_batch,
@@ -4779,24 +4779,25 @@ def _batch_atomic_write_locked(
                         relative = Path(os.path.abspath(final)).relative_to(root)
                     except ValueError:
                         continue
-                    # The receipt store defines what a governed canonical
-                    # Markdown identity is, and rejects anything else. Ask it
-                    # rather than keeping a second suffix test here that would
-                    # admit non-governed Markdown and fail the canonical write.
-                    rel_path = deferred_index._safe_markdown_rel_path(
-                        relative.as_posix()
-                    )
-                    if rel_path is None:
-                        continue
-                    receipt_paths.append(
-                        derived_receipts.DerivedBatchPath(
-                            rel_path=rel_path,
-                            before_hash=(
-                                snapshot.content_hash if snapshot is not None else None
-                            ),
-                            after_hash=artifact.content_hash,
+                    # The receipt store's own constructor is the single
+                    # predicate for a governed canonical Markdown identity.
+                    # Anything it refuses carries no derived custody and must
+                    # be skipped rather than allowed to fail a canonical write
+                    # that is otherwise sound.
+                    try:
+                        receipt_paths.append(
+                            derived_receipts.DerivedBatchPath(
+                                rel_path=relative.as_posix(),
+                                before_hash=(
+                                    snapshot.content_hash
+                                    if snapshot is not None
+                                    else None
+                                ),
+                                after_hash=artifact.content_hash,
+                            )
                         )
-                    )
+                    except ValueError:
+                        continue
                 selected_checkpoint = deferred_checkpoint
                 if (
                     selected_checkpoint is None

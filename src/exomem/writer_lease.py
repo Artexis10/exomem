@@ -170,6 +170,7 @@ _fast_ack_monotonic = time.monotonic
 class _FastAcknowledgementBatch:
     receipt: Any
     canonical_commit_monotonic: float
+    advisory_target: str | None = None
 
 
 @dataclass(slots=True)
@@ -181,9 +182,12 @@ class _FastAcknowledgementSession:
     advisory_required: bool
     sequence: int = 0
     #: One acknowledgement carries one stable advisory result ref, so the first
-    #: canonical batch that can name a target claims the session's advisory job
-    #: and later batches in the same mutation carry none.
+    #: canonical batch that *commits* with a named target claims the session's
+    #: advisory job and later batches in the same mutation carry none. The
+    #: claim is taken at the committed handoff, never at preparation: a
+    #: prepared batch that rolls back must leave the claim for its successor.
     advisory_claimed: bool = False
+    advisory_prepared_target: str | None = None
     batches: list[_FastAcknowledgementBatch] = field(default_factory=list)
 
 
@@ -196,10 +200,41 @@ def _fast_ack_enabled() -> bool:
     return os.environ.get("EXOMEM_FAST_DURABLE_ACK") == "1"
 
 
+def _fast_ack_root_key(value: os.PathLike[str] | str) -> Path:
+    """Normalize both sides of every fast-ack root comparison identically.
+
+    The session root is produced with ``resolve`` while the batch seam passes
+    an ``abspath``. Comparing those two forms directly would silently disable
+    fast acknowledgement for a vault reached through a symlink, so both sides
+    go through one normalization instead of two nearly-equal ones.
+    """
+    return Path(os.path.realpath(value))
+
+
 def active_derived_batch_custody(vault_root: Path) -> bool:
     """Whether this exact vault currently owns a governed fast-ack session."""
     session = _ACTIVE_FAST_ACK_SESSION.get()
-    return session is not None and Path(vault_root) == session.vault_root
+    return session is not None and _fast_ack_root_key(vault_root) == _fast_ack_root_key(
+        session.vault_root
+    )
+
+
+def _current_canonical_generation(vault_root: Path) -> str | None:
+    """The vault's current canonical generation, or None when unreadable.
+
+    Proof must compare a receipt against what the vault holds *now*. Passing
+    the receipt's own generation makes that comparison a tautology and searches
+    for a superseding batch at the generation being superseded, so a real
+    supersession can never be recognized. This reads the same graph-checkpoint
+    family ``_batch_atomic_write_locked`` selects a receipt's generation from.
+    """
+    try:
+        from . import graph_sync
+
+        checkpoint = graph_sync.read_checkpoint(Path(vault_root))
+    except Exception:  # noqa: BLE001 - proof falls back to the receipt's generation
+        return None
+    return None if checkpoint is None else str(checkpoint.generation)
 
 
 def prepare_active_derived_batch(
@@ -221,7 +256,11 @@ def prepare_active_derived_batch(
     """
     session = _ACTIVE_FAST_ACK_SESSION.get()
     root = Path(vault_root)
-    if session is None or root != session.vault_root or not paths:
+    if (
+        session is None
+        or _fast_ack_root_key(root) != _fast_ack_root_key(session.vault_root)
+        or not paths
+    ):
         return None
     from . import derived_receipts
 
@@ -259,7 +298,7 @@ def prepare_active_derived_batch(
         if after_hash is not None:
             advisory_target = advisory_target_rel_path
             advisory_fingerprint = after_hash
-            session.advisory_claimed = True
+    session.advisory_prepared_target = advisory_target
     required_components = set(derived_receipts.DerivedComponent)
     if advisory_target is None:
         required_components.remove(derived_receipts.DerivedComponent.WRITE_ADVISORY)
@@ -293,8 +332,20 @@ def complete_active_derived_batch(
     session = _ACTIVE_FAST_ACK_SESSION.get()
     if session is None:
         raise RuntimeError("derived receipt committed outside its acknowledgement session")
+    advisory_target = session.advisory_prepared_target
+    session.advisory_prepared_target = None
+    if advisory_target is not None:
+        # The canonical batch is known committed, so this is the point the
+        # session's one advisory job becomes real. A batch that prepared a
+        # target and then rolled back never reaches here and leaves the claim
+        # available to the next governed batch in the same mutation.
+        session.advisory_claimed = True
     session.batches.append(
-        _FastAcknowledgementBatch(receipt, float(canonical_commit_monotonic))
+        _FastAcknowledgementBatch(
+            receipt,
+            float(canonical_commit_monotonic),
+            advisory_target=advisory_target,
+        )
     )
 
 
@@ -346,28 +397,51 @@ def _acknowledge_derived_batches(
         )
         for batch in session.batches:
             receipt = batch.receipt
+            observed_generation = (
+                _current_canonical_generation(session.vault_root)
+                or receipt.canonical_generation
+            )
             proof = derived_receipts.prove_committed(
                 session.vault_root,
                 receipt,
-                current_generation=receipt.canonical_generation,
+                current_generation=observed_generation,
             )
-            if (
-                proof.outcome != "ready"
-                or proof.batch_id != receipt.batch_id
-                or proof.canonical_generation != receipt.canonical_generation
-                or proof.canonical_replay_authorized
-            ):
-                raise RuntimeError("derived receipt did not prove the committed generation")
-            if not derived_receipts.publish_pending_visibility(
-                session.vault_root,
-                receipt,
-                publisher=_PENDING_VISIBILITY_PUBLISHER,
-            ):
-                raise RuntimeError("pending visibility publication was not proven")
-            derived_receipts.signal_components(session.vault_root, receipt)
+            if proof.batch_id != receipt.batch_id or proof.canonical_replay_authorized:
+                raise RuntimeError("derived receipt proof does not match this batch")
+            superseded = proof.outcome == "superseded"
+            if not superseded:
+                # The proof answers about the generation it was handed, so
+                # that is the generation its answer must be bound to.
+                if (
+                    proof.outcome != "ready"
+                    or proof.canonical_generation != observed_generation
+                ):
+                    raise RuntimeError(
+                        "derived receipt did not prove the committed generation"
+                    )
+                if not derived_receipts.publish_pending_visibility(
+                    session.vault_root,
+                    receipt,
+                    publisher=_PENDING_VISIBILITY_PUBLISHER,
+                ):
+                    raise RuntimeError("pending visibility publication was not proven")
+                derived_receipts.signal_components(session.vault_root, receipt)
 
             statuses = []
             for component in derived_receipts.DerivedComponent:
+                if superseded:
+                    # Newer exact custody covers these paths and components.
+                    # Republishing this generation is forbidden, so the batch
+                    # hands nothing off and reports its own demand as still
+                    # unfinished rather than claiming work it cannot prove.
+                    statuses.append(
+                        next(
+                            item
+                            for item in receipt.components
+                            if item.component is component
+                        )
+                    )
+                    continue
                 status = derived_receipts.component_status(
                     session.vault_root, receipt, component
                 )
@@ -400,7 +474,6 @@ def _acknowledge_derived_batches(
         derived_sync = _fast_ack_outcome(
             snapshot.derived_sync for snapshot in snapshots
         )
-        graph_sync = _fast_ack_outcome(snapshot.graph_sync for snapshot in snapshots)
         advisory_sync = _fast_ack_outcome(
             (snapshot.advisory_sync for snapshot in snapshots),
             not_required=True,
@@ -425,11 +498,17 @@ def _acknowledge_derived_batches(
             component_diagnostics=diagnostics,
             advisory_sync=advisory_sync,
             advisory_result_ref=advisory_refs[0] if advisory_refs else None,
-            graph_sync=graph_sync,
         )
     except _PostCommitOutcomeUncertain:
         raise
     except Exception as error:
+        # Name the class only -- never the message, which can carry a path.
+        # Without it a projection defect is indistinguishable from a storage
+        # failure in the caller's committed-uncertain terminal.
+        logger.warning(
+            "fast acknowledgement failed; returning committed-uncertain (%s)",
+            type(error).__name__,
+        )
         raise _PostCommitOutcomeUncertain() from error
 
 
