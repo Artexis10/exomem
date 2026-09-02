@@ -1717,3 +1717,55 @@ def test_mixed_canonical_state_still_refuses_after_the_generation_gate_is_gone(
     assert derived_receipts.claim_ready_components(
         vault, owner="worker", limit=8, lease_seconds=30.0, now=99.0
     ) == ()
+
+
+def test_an_older_published_batch_never_retires_a_newer_unlanded_batch(
+    vault: Path,
+) -> None:
+    """Supersession runs one way only: forward.
+
+    Coverage is what lets a batch retire without its derived rows ever being
+    built, so it has to mean "something newer already carries these paths". An
+    older batch that happens to hold the same path carries the *previous*
+    content; letting it cover would silently drop custody for a write whose
+    intent never landed and was never shadowed by anything.
+    """
+    rel = "Knowledge Base/Notes/burst-backwards.md"
+    v0, v1, v2 = "b0 body\n", "b1 body\n", "b2 body\n"
+    _put(vault, rel, v0)
+
+    older = _prepare_store_batch(
+        vault,
+        batch_id="backwards-older",
+        generation="generation-1",
+        changes=((rel, v0, v1),),
+        now=10.0,
+    )
+    _put(vault, rel, v1)
+    assert (
+        derived_receipts.prove_committed(
+            vault, older, current_generation="generation-1"
+        ).outcome
+        == "ready"
+    )
+    assert derived_receipts.publish_pending_visibility(
+        vault, older, publisher=pending_recall.publish
+    )
+
+    # A newer batch -- higher rowid -- whose intended bytes were never written.
+    newer = _prepare_store_batch(
+        vault,
+        batch_id="backwards-newer",
+        generation="generation-2",
+        changes=((rel, v1, v2),),
+        now=11.0,
+    )
+    proof = derived_receipts.prove_committed(
+        vault, newer, current_generation="generation-2"
+    )
+    assert proof.outcome == "reconcile_required", proof.outcome
+    assert proof.ready_components == ()
+    with pytest.raises(RuntimeError):
+        derived_receipts.publish_pending_visibility(
+            vault, newer, publisher=pending_recall.publish
+        )
