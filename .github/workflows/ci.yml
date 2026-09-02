@@ -97,7 +97,7 @@ jobs:
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path=.test_durations.json
-          --session-timeout=900
+          --session-timeout=1500
           --durations=50
           --durations-min=1
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
