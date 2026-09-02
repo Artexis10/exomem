@@ -27,9 +27,9 @@ import secrets
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from . import corpus_aware, derived_receipts, embeddings
+from . import corpus_aware, derived_receipts
 from .derived_receipts import (
     DerivedAdvisoryCandidate,
     DerivedBatchReceipt,
@@ -40,6 +40,9 @@ from .governance import decisions, egress, membership, scrubber
 from .governance import policy as policy_module
 from .governance.principal import effective_principal
 from .vault import content_hash
+
+if TYPE_CHECKING:
+    from . import embeddings
 
 log = logging.getLogger(__name__)
 
@@ -348,6 +351,8 @@ def execute_write_advisory(
             observed=observed,
             now=now,
         )
+
+    from . import embeddings  # numpy-backed; loaded only when a claim is executed
 
     generation = embeddings.prepare_generation_vectors(
         vault_root, stored.target_rel_path, expected_fingerprint=observed
