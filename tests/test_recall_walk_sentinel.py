@@ -115,3 +115,38 @@ def test_sentinel_counts_a_real_walk(
 
     assert eligible, "the oracle must resolve some pages, or it walked for nothing"
     assert sentinel.count > 0, "the sentinel did not see the canonical scan oracle walk"
+
+
+@pytest.mark.xfail(strict=True, reason="lane 3: read-side exact custody")
+def test_cold_refs_sidecar_declines_instead_of_walking(
+    vault: Path, warm_managed_cell, walk_sentinel
+) -> None:
+    """The spec's other decline case, unpinned until now.
+
+    "An unanswerable filter declines instead of walking" is stated for
+    eligibility, but the rule is about the reader thread, not about one stage.
+    The reference sidecar is a maintained index like any other, and when it is
+    not current `refs_for_paths` rebuilds it inline from a full corpus scan —
+    40 scope enumerations inside `serialize`, on the request. A managed reader
+    owes the typed warming outcome there for the same reason it owes it for a
+    filter it cannot answer from an index.
+
+    Lane 3 owns the fix (read-side exact custody), so this is `strict` xfail: it
+    turns green exactly when that lands, and fails loudly if it turns green for
+    any other reason.
+    """
+    warm_managed_cell(vault, prebuild_refs=False)
+    sentinel = walk_sentinel(*_scope_roots(vault))
+
+    sentinel.reset()
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        commands.op_find(
+            vault,
+            query="metabolism",
+            mode="hybrid",
+            scope="kb-only",
+            graph=False,
+            include_timings=True,
+        )
+
+    assert sentinel.count == 0, sentinel.report()

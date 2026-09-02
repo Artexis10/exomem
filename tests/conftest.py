@@ -1096,7 +1096,7 @@ def warm_managed_cell(monkeypatch: pytest.MonkeyPatch):
     `tests/test_projection_lag_tolerance.py` uses, plus the sidecar.
     """
 
-    def _warm(vault: Path) -> None:
+    def _warm(vault: Path, *, prebuild_refs: bool = True) -> None:
         from exomem import embeddings, file_watcher, lexstore, memory_refs, readiness
 
         monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
@@ -1108,8 +1108,11 @@ def warm_managed_cell(monkeypatch: pytest.MonkeyPatch):
         assert lexstore.runtime_retrieval_catalog_proof(vault, schedule_repair=False) is not None
         # The reference sidecar is a maintained index too: `refs_for_paths`
         # scans the corpus exactly once, on first use or a schema upgrade, and
-        # a live cell paid that long before any measured request.
-        memory_refs.ReferenceIndex(vault).rebuild_all()
+        # a live cell paid that long before any measured request. `prebuild_refs
+        # =False` leaves it cold on purpose, for the one test that pins what a
+        # managed reader OUGHT to do when an index it needs is not current.
+        if prebuild_refs:
+            memory_refs.ReferenceIndex(vault).rebuild_all()
 
         monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
         monkeypatch.setattr(

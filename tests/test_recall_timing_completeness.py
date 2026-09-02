@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, structured_filters
+from exomem import commands, find_types, structured_filters
 from exomem import find as find_module
 from exomem.find_types import FindTimings
 
@@ -44,18 +44,32 @@ def _timed_filtered_recall(vault: Path) -> dict:
     return result["timings"]
 
 
-def _top_level_stage_ms(timings: dict) -> float:
-    """Sum only un-nested stages.
+def _root_stages(timings: dict) -> dict[str, dict]:
+    """The stages that partition the call: the ones no other stage contained.
 
-    `graph` wraps `graph.seeds`/`graph.expand`/`graph.resolver`, so a sub-stage's
-    time is already inside its parent's interval; summing every entry would
-    over-count the same wall time and could not satisfy any bound.
+    A root is an entry with no `parent` key. This replaces a dot-in-the-name
+    heuristic that was wrong in both directions: `semantic.search` is a ROOT
+    whose name contains a dot (so a 28 ms parent was dropped from the sum), and
+    `recall_projection` was one name opened at three depths (so a nested scalar
+    was counted as a root). The bound held by accident, not by partition.
     """
-    return sum(
-        stage["ms"]
-        for name, stage in timings["stages"].items()
-        if "." not in name and "ms" in stage
-    )
+    return {
+        name: entry
+        for name, entry in timings["stages"].items()
+        if "parent" not in entry and "ms" in entry
+    }
+
+
+def _rounding_budget(terms: int) -> float:
+    """Slack owed purely to 3-dp rounding, and nothing else.
+
+    Every `ms` in the payload is rounded to three decimals, so a sum of `terms`
+    of them can sit up to 0.0005 ms above the unrounded truth for each term
+    while `total_ms` sits up to 0.0005 ms below it. That is microseconds; no
+    real stage hides inside it, and the budget shrinks to nothing if the
+    payload ever reports full precision.
+    """
+    return 0.0005 * terms
 
 
 def test_manual_stage_write_is_rejected() -> None:
@@ -94,18 +108,61 @@ def test_every_stage_carries_a_source(vault: Path, warm_managed_cell) -> None:
 def test_real_op_find_satisfies_the_attribution_bounds(
     vault: Path, warm_managed_cell
 ) -> None:
-    """The public leaf, not a hand-built timing object, must account for its own time."""
+    """The public leaf, not a hand-built timing object, must account for its own time.
+
+    The sum is over ROOT stages, which is the only set that partitions the call:
+    a nested stage's time is already inside its parent's interval, so adding it
+    counts the same wall clock twice.
+    """
     warm_managed_cell(vault)
 
     timings = _timed_filtered_recall(vault)
 
     total = timings["total_ms"]
     unattributed = timings["unattributed_ms"]
-    assert _top_level_stage_ms(timings) + unattributed <= total, timings["stages"]
+    roots = _root_stages(timings)
+    assert roots, "a real recall reported no root stages"
+    root_ms = sum(entry["ms"] for entry in roots.values())
+    budget = _rounding_budget(len(roots) + 2)
+
+    assert root_ms + unattributed <= total + budget, (
+        f"root stages {round(root_ms, 3)} + unattributed {unattributed} "
+        f"exceed total {total}; roots="
+        f"{ {name: entry['ms'] for name, entry in sorted(roots.items())} }"
+    )
     assert unattributed <= 0.15 * total, (
         f"unattributed_ms={unattributed} of total_ms={total}: "
         "material time is reported only as the remainder"
     )
+
+
+def test_every_nested_stage_fits_inside_its_parent(
+    vault: Path, warm_managed_cell
+) -> None:
+    """The other half of the partition: containment must actually contain.
+
+    A root sum only means anything if the entries excluded from it really are
+    inside the ones that remain. A nested stage reporting more time than its
+    parent would prove the recorded forest is a fiction and the bound above is
+    measuring the wrong set.
+    """
+    warm_managed_cell(vault)
+
+    stages = _timed_filtered_recall(vault)["stages"]
+
+    nested = {
+        name: entry
+        for name, entry in stages.items()
+        if "parent" in entry and "ms" in entry
+    }
+    assert nested, "no stage reported containment at all"
+    for name, entry in sorted(nested.items()):
+        parent = stages[entry["parent"]]
+        assert "ms" in parent, f"{name} names a parent that recorded no duration"
+        assert entry["ms"] <= parent["ms"] + _rounding_budget(2), (
+            f"{name}={entry['ms']}ms does not fit inside "
+            f"{entry['parent']}={parent['ms']}ms"
+        )
 
 
 def _plan(**shortcuts) -> structured_filters.FilterPlan:
@@ -209,3 +266,99 @@ def test_the_query_log_summary_carries_a_source_for_every_stage_it_lists(
     assert set(summary["stage_source"].values()) <= SOURCE_VOCABULARY
     # The stage this change exists to expose, carried all the way to the log.
     assert summary["stage_source"]["filter_eligibility"] == "computed"
+
+
+_DEPTH_SHAPES = (
+    ("hybrid with a page filter", {"query": "metabolism", "projects": ["project-alpha"]}),
+    ("mixed with a page filter", {
+        "query": "metabolism", "projects": ["project-alpha"], "result_level": "mixed",
+    }),
+    ("mixed with a unit filter", {
+        "query": "metabolism", "categories": ["rule"], "result_level": "mixed",
+    }),
+    ("keyword", {"query": "metabolism", "mode": "keyword", "graph": False}),
+    ("empty query with a tag filter", {"query": "", "tags": ["metabolism"]}),
+)
+
+
+def test_no_stage_name_spans_two_depths(vault: Path, warm_managed_cell) -> None:
+    """One name at two depths breaks the partition and the source routing both.
+
+    `recall_projection` was opened at the top level, inside `freshness`, and
+    inside `graph.resolver`. Its scalar was therefore simultaneously a root
+    stage and time already inside two other roots, which is how the old bound
+    passed while `sum(stage.ms) + unattributed` exceeded `total_ms` by 34 ms.
+    The same collision aliases `_pending_sources`, which is keyed by stage name:
+    an inner span's `mark_source` could be consumed by an outer one.
+
+    Driven through `find` with an explicit collector because the conflict
+    record is a defect report, not a diagnostic, and so is deliberately absent
+    from the response payload.
+    """
+    warm_managed_cell(vault)
+
+    for label, request in _DEPTH_SHAPES:
+        timings = FindTimings()
+        find_module.find(vault, scope="kb-only", timings=timings, **request)
+        assert timings.parent_conflicts() == {}, f"{label}: {timings.parent_conflicts()}"
+
+
+def test_span_rejects_a_reserved_field() -> None:
+    """`**fields` may not write the accounting the collector computes.
+
+    `span("semantic.search", ms=0.0)` hid thirty milliseconds of a fifty
+    millisecond request with every gate green: the field update ran after the
+    computed keys and simply overwrote the measured duration. The same door let
+    a caller relabel `source`, which is the one field the walk sentinel's
+    diagnostics rely on.
+    """
+    timings = FindTimings()
+
+    for field in ("ms", "calls", "skipped", "error", "parent"):
+        with pytest.raises(TypeError):
+            with timings.span("semantic.search", **{field: 0.0}):
+                pass
+
+    # `source` cannot reach `**fields` at all — it is a named parameter — and
+    # the other half of that door is closed too: it only accepts the four
+    # values the vocabulary defines.
+    assert "source" in find_types._RESERVED_STAGE_FIELDS
+    with pytest.raises(ValueError):
+        with timings.span("semantic.search", source="fast"):
+            pass
+
+    assert "semantic.search" not in timings.as_dict()["stages"]
+
+
+def test_span_rejects_a_non_scalar_field_value() -> None:
+    """Timing diagnostics never carry bulk content, and the type says so."""
+    timings = FindTimings()
+
+    with pytest.raises(TypeError):
+        with timings.span("keyword", excerpt=["a note body", "another"]):
+            pass
+
+    # A scalar fact about the stage is exactly what the field is for.
+    with timings.span("keyword", cache_hit=True):
+        pass
+    assert timings.as_dict()["stages"]["keyword"]["cache_hit"] is True
+
+
+def test_a_stage_entry_cannot_be_mutated_through_the_table() -> None:
+    """Refusing `stages[name] = ...` is worthless if `stages[name]` is writable.
+
+    The table handed out its live dict, so `stages["keyword"]["ms"] = 999.0`
+    took effect and no gate could see it — the same defect as a manual write,
+    one subscript further in.
+    """
+    timings = FindTimings()
+    with timings.span("keyword"):
+        pass
+    measured = timings.stages["keyword"]["ms"]
+
+    with pytest.raises(TypeError):
+        timings.stages["keyword"]["ms"] = 999.0
+    with pytest.raises(TypeError):
+        timings.stages["keyword"]["source"] = "index"
+
+    assert timings.as_dict()["stages"]["keyword"]["ms"] == measured

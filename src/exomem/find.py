@@ -64,6 +64,7 @@ _all_projects = find_corpus.all_projects
 _format_timestamp = find_types._format_timestamp
 _span = find_types.timing_span
 _mark_source = find_types.timing_mark_source
+_nested_name = find_types.timing_nested_name
 
 EXCERPT_RADIUS = find_results.EXCERPT_RADIUS
 EXCERPT_MAX_LEN = find_results.EXCERPT_MAX_LEN
@@ -280,7 +281,15 @@ def _set_recall_projection_timing_outcome(
         timings.profile.setdefault("recall_projection", {})["outcome"] = outcome
         source = _RECALL_PROJECTION_SOURCES.get(outcome)
         if source is not None:
-            timings.mark_source("recall_projection", source)
+            # The projection stage reports under a name qualified by whatever
+            # contains it, so the source has to reach the span that is actually
+            # open. The `pending_visibility` site is the exception: it reports a
+            # projection outcome from inside a different stage, and must not
+            # relabel that stage.
+            open_stage = timings.current_stage()
+            if open_stage is None or not open_stage.endswith("recall_projection"):
+                open_stage = "recall_projection"
+            timings.mark_source(open_stage, source)
 
 
 def _record_filter_eligibility_cache_hit(timings: FindTimings | None) -> None:
@@ -579,7 +588,12 @@ class FreshnessSnapshot:
     def _load_recall_projection(self, scope: str) -> None:
         if scope in self._recall and scope in self._recall_paths:
             return
-        with _span(self._timings, "recall_projection"):
+        # Reached at three depths — top level, inside `freshness`, and inside
+        # `graph.resolver` — so it reports under a name qualified by whatever
+        # holds it. A single shared name accumulated all three into one scalar
+        # that was simultaneously a root stage and nested inside two others.
+        stage = _nested_name(self._timings, "recall_projection")
+        with _span(self._timings, stage):
             try:
                 root = self._root.absolute()
                 cache_key = (root, scope)

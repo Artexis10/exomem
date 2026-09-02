@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from functools import cached_property
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from . import temporal
@@ -501,6 +502,13 @@ _SOURCE_RANK = {
 
 STAGE_SOURCES = frozenset(_SOURCE_RANK)
 
+#: Keys the collector computes for itself. A caller that could set them could
+#: report a duration no interval covered — `span("semantic.search", ms=0.0)`
+#: hid 30 ms of a 50 ms request with every gate green — or relabel where a
+#: stage answered from. `**fields` is for small facts a stage knows about
+#: itself (`cache_hit`), never for the accounting.
+_RESERVED_STAGE_FIELDS = frozenset({"ms", "calls", "source", "skipped", "error", "parent"})
+
 
 def _validated_source(source: str) -> str:
     if source not in _SOURCE_RANK:
@@ -514,6 +522,24 @@ def _widest_source(existing: str | None, incoming: str) -> str:
     if existing is None:
         return incoming
     return max(existing, incoming, key=lambda value: _SOURCE_RANK.get(value, 0))
+
+
+def _validated_fields(name: str, fields: dict[str, Any]) -> dict[str, Any]:
+    """Refuse a caller's attempt to write the accounting or to carry content."""
+    reserved = sorted(_RESERVED_STAGE_FIELDS & set(fields))
+    if reserved:
+        raise TypeError(
+            f"span({name!r}) may not set {reserved}: a duration comes from the "
+            "registered interval, a source from `source=`, and containment from "
+            "the enclosing span"
+        )
+    for key, value in fields.items():
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            raise TypeError(
+                f"span({name!r}) field {key!r} must be a scalar or None, not "
+                f"{type(value).__name__}: timing diagnostics never carry bulk content"
+            )
+    return fields
 
 
 class StagesTable(Mapping[str, dict[str, Any]]):
@@ -530,8 +556,11 @@ class StagesTable(Mapping[str, dict[str, Any]]):
     def __init__(self) -> None:
         self._entries: dict[str, dict[str, Any]] = {}
 
-    def __getitem__(self, name: str) -> dict[str, Any]:
-        return self._entries[name]
+    def __getitem__(self, name: str) -> Mapping[str, Any]:
+        # A live dict handed out here is a second writer: `stages["keyword"]["ms"]
+        # = 999.0` took effect and no gate could see it. The proxy is a view, so
+        # it stays current without being writable.
+        return MappingProxyType(self._entries[name])
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._entries)
@@ -566,9 +595,17 @@ class FindTimings:
     that no span claimed, so an uninstrumented region announces itself instead
     of waiting to be found by subtracting a table by hand.
 
-    Two properties are structural rather than reviewed: the table is
-    write-through from `span` (see `StagesTable`), and every entry carries the
-    `source` it was answered from.
+    Three properties are structural rather than reviewed: the table is
+    write-through from `span` (see `StagesTable`), every entry carries the
+    `source` it was answered from, and every entry names the stage that
+    contained it so the table is a forest rather than a flat list.
+
+    Containment is what makes the attribution bound provable instead of
+    plausible. Summing every entry double-counts a nested span; summing by a
+    dotted-name convention is a guess about the names, and it was wrong —
+    `semantic.search` is a ROOT stage whose name contains a dot, while
+    `recall_projection` was opened at three different depths and its scalar
+    accumulated across all of them. Only the roots partition the call.
     """
 
     def __init__(self) -> None:
@@ -582,26 +619,73 @@ class FindTimings:
         self._intervals: list[tuple[float, float]] = []
         self._intervals_lock = threading.Lock()
         # Sources declared from inside an open span, consumed by its exit so
-        # the exit stays the table's single writer.
+        # the exit stays the table's single writer. Keyed by stage name, which
+        # is safe only because no stage name is opened at two depths — see
+        # `parent_conflicts`.
         self._pending_sources: dict[str, str] = {}
+        # Open spans, innermost last. Thread-local: a lane that moves to its
+        # own thread is not lexically inside the caller's span, and claiming it
+        # was would invent a containment the merge cannot honour.
+        self._local = threading.local()
+        # Every parent a stage name has been opened under. One name at two
+        # depths breaks both the root partition and the `_pending_sources` key,
+        # so it is recorded rather than assumed away.
+        self._parents_seen: dict[str, set[str | None]] = {}
+
+    def _open_stages(self) -> list[str]:
+        stack = getattr(self._local, "stack", None)
+        if stack is None:
+            stack = []
+            self._local.stack = stack
+        return stack
+
+    def current_stage(self) -> str | None:
+        """The innermost span open on this thread, or None at the top level.
+
+        A call site that can run at more than one depth reads this to qualify
+        its own stage name, so one name never straddles two depths.
+        """
+        stack = self._open_stages()
+        return stack[-1] if stack else None
+
+    def parent_conflicts(self) -> dict[str, set[str | None]]:
+        """Stage names opened under more than one parent, if any.
+
+        Not part of `as_dict`: it is a defect report, not a diagnostic. A name
+        at two depths makes the root partition wrong and lets one span's
+        `mark_source` be consumed by another, so a test asserts this is empty.
+        """
+        return {
+            name: set(parents)
+            for name, parents in self._parents_seen.items()
+            if len(parents) > 1
+        }
 
     @contextmanager
     def span(self, name: str, *, source: str = SOURCE_COMPUTED, **fields: Any):
-        """Time one stage and record where its answer came from.
+        """Time one stage, record where its answer came from, and what held it.
 
         `source` is the stage's static answer. A stage that only learns it
         inside the span calls `mark_source` instead; this exit still performs
-        the write.
+        the write. `**fields` carries small scalar facts a stage knows about
+        itself and may not touch the accounting — see `_validated_fields`.
         """
         _validated_source(source)
+        _validated_fields(name, fields)
+        stack = self._open_stages()
+        parent = stack[-1] if stack else None
+        stack.append(name)
         t0 = time.perf_counter()
         try:
             yield
         finally:
             t1 = time.perf_counter()
+            if stack and stack[-1] == name:
+                stack.pop()
             with self._intervals_lock:
                 self._intervals.append((t0, t1))
                 declared = self._pending_sources.pop(name, source)
+                self._parents_seen.setdefault(name, set()).add(parent)
             entry = self.stages._entry(name)
             elapsed = round((t1 - t0) * 1000.0, 3)
             if "ms" in entry:
@@ -615,6 +699,10 @@ class FindTimings:
             else:
                 entry["ms"] = elapsed
             entry["source"] = _widest_source(entry.get("source"), declared)
+            # Root stages carry no `parent` key at all: the absence IS the
+            # membership test the attribution bound sums over.
+            if parent is not None:
+                entry.setdefault("parent", parent)
             entry.update(fields)
 
     def mark_source(self, name: str, source: str) -> None:
@@ -690,3 +778,16 @@ def timing_mark_source(timings: FindTimings | None, name: str, source: str) -> N
     """`FindTimings.mark_source` for the many call sites that may have none."""
     if timings is not None:
         timings.mark_source(name, source)
+
+
+def timing_nested_name(timings: FindTimings | None, leaf: str) -> str:
+    """Qualify a stage name by the span that contains it, if any.
+
+    For the one call site that is genuinely reachable at more than one depth.
+    `FreshnessSnapshot._load_recall_projection` is entered from the top level,
+    from inside `freshness`, and from inside `graph.resolver`; one shared name
+    made its scalar the sum of three different containments, which is what let
+    the attribution bound hold by accident.
+    """
+    parent = timings.current_stage() if timings is not None else None
+    return leaf if parent is None else f"{parent}.{leaf}"
