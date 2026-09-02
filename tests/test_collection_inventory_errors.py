@@ -190,3 +190,23 @@ def test_a_reference_that_escapes_the_vault_still_reports_the_vault_boundary(
     assert error.code == "INVALID_COLLECTION_PATH"
     assert error.message == "collection path is outside the governed vault"
     assert error.remediation is None
+
+
+def test_a_bare_title_is_not_reported_as_a_path_that_escaped_the_vault(
+    tmp_path: Path,
+) -> None:
+    from exomem.plan_memory import plan_memory
+
+    _seed_records_collection(tmp_path)
+    _seed_planning_collection(tmp_path)
+
+    with pytest.raises(OpError) as raised:
+        plan_memory(tmp_path, "query", collection="Planning work")
+
+    error = raised.value
+    assert error.code == "INVALID_COLLECTION_PATH"
+    assert error.message == (
+        "collection reference must be the collection's `_collection.md` manifest path "
+        "(a title is not a reference)"
+    )
+    assert error.remediation == "pass the manifest path; use the collection's UUID if you have it"

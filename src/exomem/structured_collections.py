@@ -2658,7 +2658,9 @@ def _collection_reference_error(
     open; otherwise it states the requirement without confirming anything.
     """
     normalized = _normalized_vault_reference(root, raw)
-    if normalized is None or Path(normalized).name == "_collection.md":
+    if normalized is None:
+        return _non_path_reference_error(raw) or error
+    if Path(normalized).name == "_collection.md":
         return error
     manifest_rel = f"{normalized}/_collection.md"
     names_manifest = (
@@ -2674,6 +2676,28 @@ def _collection_reference_error(
                 else "pass the collection's `_collection.md` manifest path"
             )
         },
+    )
+
+
+def _non_path_reference_error(raw: str) -> CollectionError | None:
+    """A reference with no separator never named a path, so it cannot have escaped one.
+
+    Telling a caller who passed the collection's *title* that their path left
+    the governed vault describes a path they never wrote, and sends them
+    checking a boundary that was never in question. A single segment that is
+    not the manifest filename is a name, not a route: say what a reference is,
+    and name the other spelling that works. Anything carrying a separator is
+    still judged as a path, so a genuine `../` escape keeps the boundary
+    message.
+    """
+    spelled = raw.replace("\\", "/")
+    if "/" in spelled or spelled == "_collection.md":
+        return None
+    return CollectionError(
+        "INVALID_COLLECTION_PATH",
+        "collection reference must be the collection's `_collection.md` manifest path "
+        "(a title is not a reference)",
+        {"remediation": "pass the manifest path; use the collection's UUID if you have it"},
     )
 
 
