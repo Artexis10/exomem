@@ -281,6 +281,31 @@ def test_security_authority_bootstraps_private_durable_digest_only_state(
         request_digest=_digest("bootstrap-request"),
     )
     assert replay == snapshot
+    migration_replay = authority.bootstrap(
+        active_version="active",
+        operation_id="runtime-migration-bootstrap",
+        request_digest=_digest("runtime-migration-request"),
+    )
+    assert migration_replay == snapshot
+    with sqlite3.connect(database) as connection:
+        recorded = connection.execute(
+            "SELECT action, request_digest, result_json FROM operations "
+            "WHERE operation_id='runtime-migration-bootstrap'"
+        ).fetchone()
+    assert recorded is not None
+    assert recorded[0] == "bootstrap"
+    assert recorded[1] == _digest("runtime-migration-request")
+    assert json.loads(recorded[2]) == {
+        "snapshot": {
+            "phase": "stable",
+            "revision": 1,
+            "active_version": "active",
+            "pending_version": None,
+            "preferred_version": "active",
+            "rotation_id": None,
+            "proof_valid_until": None,
+        }
+    }
     with pytest.raises(security.HostedOperationConflict):
         authority.bootstrap(
             active_version="active",
@@ -319,6 +344,56 @@ def test_security_descriptor_owner_converges_and_is_verified_as_root(
     security._converge_descriptor_owner(7, expected_uid=10001, expected_gid=10002)
 
     assert ownership_changes == [(7, 10001, 10002)]
+
+
+def test_bootstrap_new_operation_refuses_changed_or_nonstable_authority(
+    tmp_path: Path,
+) -> None:
+    active = _credential("active")
+    pending = _credential("pending")
+    current_bundle = [_bundle(active=active)]
+    authority = security.HostedSecurityAuthority(
+        tmp_path / "state",
+        cell_id="cell-alpha",
+        vault_id="vault-alpha",
+        bundle_loader=lambda: current_bundle[0],
+    )
+    authority.bootstrap(
+        active_version="active",
+        operation_id="bootstrap-1",
+        request_digest=_digest("bootstrap"),
+    )
+
+    current_bundle[0] = _bundle(active=_credential("changed"))
+    with pytest.raises(security.HostedSecurityStateInvalid):
+        authority.bootstrap(
+            active_version="active",
+            operation_id="changed-bootstrap",
+            request_digest=_digest("changed-bootstrap"),
+        )
+
+    current_bundle[0] = _bundle(active=active, pending=pending)
+    authority.stage(
+        pending_version="pending",
+        expected_revision=1,
+        operation_id="stage-1",
+        request_digest=_digest("stage"),
+    )
+    current_bundle[0] = _bundle(active=active)
+    with pytest.raises(security.HostedCredentialTransitionInvalid):
+        authority.bootstrap(
+            active_version="active",
+            operation_id="staged-bootstrap",
+            request_digest=_digest("staged-bootstrap"),
+        )
+
+    database = tmp_path / "state" / "hosted-security.sqlite"
+    with sqlite3.connect(database) as connection:
+        recorded = connection.execute(
+            "SELECT operation_id FROM operations WHERE operation_id IN (?, ?)",
+            ("changed-bootstrap", "staged-bootstrap"),
+        ).fetchall()
+    assert recorded == []
 
 
 def test_security_authority_rejects_foreign_runtime_owner(tmp_path: Path) -> None:

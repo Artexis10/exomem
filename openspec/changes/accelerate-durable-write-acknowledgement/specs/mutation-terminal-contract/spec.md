@@ -42,6 +42,12 @@ the compatibility window.
 - **THEN** the compact terminal reports `derived_sync="pending"`
 - **AND** it does not report `failed` or hide a real component error behind the deadline
 
+#### Scenario: Batch superseded at proof time
+
+- **WHEN** the proof of a committed batch finds a newer exact batch covering every required path and component
+- **THEN** the compact terminal reports `derived_sync="pending"` and `advisory_sync="not_required"` with no advisory result reference
+- **AND** `response_detail="full"` names the closed `superseded` component state under `diagnostics`
+
 ## ADDED Requirements
 
 ### Requirement: Derived Convergence Does Not Rewrite The Original Terminal

@@ -1760,6 +1760,29 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> bool:
     return True
 
 
+def holds_content_identities(
+    vault_root: Path, expected: dict[str, str | None]
+) -> dict[str, bool]:
+    """Whether the published catalogue holds each path at exactly that identity.
+
+    ``expected`` maps a vault-relative Markdown identity to the sha256 of the
+    canonical bytes it must be indexed at, or ``None`` for proven absence. This
+    is a read-only question about durable state, asked by the pending-recall
+    overlay before it stops shadowing an identity: a pass that indexed one
+    generation and a file that moved before the pass reported would otherwise
+    retire custody this catalogue does not actually hold.
+
+    A retired, disabled or absent catalogue answers ``False`` for everything,
+    which keeps the overlay shadowing rather than clearing custody it cannot
+    prove.
+    """
+    if not expected:
+        return {}
+    if not _catalog_usable() or not lexical_path(vault_root).exists():
+        return dict.fromkeys(expected, False)
+    return get_store(vault_root).holds_content_identities(expected)
+
+
 def purge_exact_persisted_rows(
     vault_root: Path, values: list[str], *, connection_path: Path | None = None
 ) -> int:
@@ -3298,6 +3321,38 @@ class LexicalStore:
 
     # -------------------------------------------------------------- dual-write
 
+    def _note_pending_publication(
+        self, paths: list[Path], rel_paths: list[str]
+    ) -> None:
+        """Report an exact lexical publication to the pending-recall overlay.
+
+        This is the retirement half of the read-your-write handoff: an overlay
+        row may be removed only after the persistent lane that shadows it has
+        published the exact after generation, and this seam is where that
+        publication becomes observable. Bounded to the identities this pass
+        actually applied, and never able to fail a write -- a derived overlay is
+        best-effort custody bookkeeping, not canonical authority.
+        """
+        try:
+            from . import pending_recall
+
+            rels = [str(rel) for rel in rel_paths if isinstance(rel, str) and rel]
+            for path in paths:
+                rel = pending_recall.vault_rel_path(self.vault_root, path)
+                if rel is not None:
+                    rels.append(rel)
+            pending_recall.note_persistent_publication(
+                self.vault_root, "lexstore", rels
+            )
+        except Exception as error:  # noqa: BLE001 - never fail a write on custody
+            # A closed code and the exception's type only: an arbitrary message
+            # can carry a vault path or note content through the log boundary.
+            log.info(
+                "pending recall retirement skipped code=%s error_type=%s",
+                "pending_visibility_retirement_skipped",
+                type(error).__name__,
+            )
+
     def _membership(self, path: Path) -> tuple[bool, bool]:
         """Would each walk yield this file? Single-file replay of the walks'
         directory skip rules, so hook-written rows match a rebuild's."""
@@ -3362,6 +3417,7 @@ class LexicalStore:
             # publication barrier is released so managed retrieval cannot stay
             # unavailable forever despite an exact-current catalog.
             _admit_after_bounded_runtime_repair(self.vault_root, applied)
+            self._note_pending_publication(list(paths), [])
         return applied
 
     def apply_watcher_batch(self, paths: list[Path], rel_paths: list[str]) -> bool:
@@ -3408,6 +3464,7 @@ class LexicalStore:
             _schedule_runtime_catalog_repair(self.vault_root)
         else:
             _admit_after_bounded_runtime_repair(self.vault_root, applied)
+            self._note_pending_publication(list(paths), list(rel_paths))
         return applied
 
     def retry_deferred_upsert(self, paths: list[Path]) -> bool:
@@ -3551,6 +3608,7 @@ class LexicalStore:
             _schedule_runtime_catalog_repair(self.vault_root)
         else:
             _admit_after_bounded_runtime_repair(self.vault_root, applied)
+            self._note_pending_publication([], list(rel_paths))
         return applied
 
     def purge_exact_persisted_rows(
@@ -4726,6 +4784,86 @@ class LexicalStore:
                 backend_name,
                 schedule_repair=schedule_repair,
             )
+
+    def holds_content_identities(
+        self, expected: dict[str, str | None]
+    ) -> dict[str, bool]:
+        """Compare stored rows against the exact bytes each identity names.
+
+        The catalogue stores no content digest, so the comparison is made
+        against everything it derives from a page's bytes and then serves:
+        title, ``updated``, the emitted-parent link, and the trigram lane's
+        lowercased title and body. Naming the expected sha256 keeps that exact
+        -- the file must hash to it before its parse is compared -- so a row
+        built from a different generation cannot answer yes.
+        """
+        answers = dict.fromkeys(expected, False)
+        if self._failed or not self.path.exists():
+            return answers
+        from . import find_corpus
+
+        try:
+            conn = self._connect()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical identity probe declined (%s)")
+            return answers
+        try:
+            if not self._schema_is_current(conn):
+                return answers
+            for rel, digest in expected.items():
+                row = conn.execute(
+                    "SELECT p.rowid, p.title, p.updated, p.emitted_parent_path "
+                    "FROM pages AS p WHERE p.path = ?",
+                    (rel,),
+                ).fetchone()
+                if digest is None:
+                    # Proven absence: the catalogue must hold no row either.
+                    answers[rel] = row is None
+                    continue
+                if row is None:
+                    continue
+                target = self.vault_root.joinpath(*rel.split("/"))
+                try:
+                    if target.is_symlink() or not target.is_file():
+                        continue
+                    content = target.read_bytes()
+                    mtime = target.stat().st_mtime
+                except OSError:
+                    continue
+                if hashlib.sha256(content).hexdigest() != digest:
+                    continue
+                page = find_corpus.parse_page(
+                    target, mtime, self.vault_root, content=content
+                )
+                if page is None:
+                    continue
+                expected_title = page.title
+                expected_parent = (
+                    page.parent_media + ".md" if page.parent_media else None
+                )
+                if (
+                    row[1] != expected_title
+                    or str(row[2]) != (page.updated or "0000-00-00")
+                    or row[3] != expected_parent
+                ):
+                    continue
+                if fts5_available():
+                    tri = conn.execute(
+                        "SELECT title_lower, body_lower FROM tri WHERE rowid = ?",
+                        (row[0],),
+                    ).fetchone()
+                    if tri is None:
+                        continue
+                    title_lower = page.title_norm if expected_title else ""
+                    if tri[0] != title_lower or tri[1] != page.body_norm:
+                        continue
+                answers[rel] = True
+            return answers
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical identity probe declined (%s)")
+            return dict.fromkeys(expected, False)
+        finally:
+            conn.close()
 
     def recall_resolver_entries(
         self, scope: str, checkpoint: Any | None

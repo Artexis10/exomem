@@ -809,7 +809,11 @@ def _validate_frozen_v1_corpus(raw: bytes) -> None:
             WIRE_PROTOCOL_V1,
         )
     except ImportError as error:
-        raise ValueError("strict provisioner wire models are unavailable") from error
+        raise ValueError(
+            "strict provisioner wire models are unavailable: the provisioner "
+            "dependencies are not installed in this interpreter. Run this verifier "
+            "under `uv run --project infra/provisioner`."
+        ) from error
     finally:
         if inserted:
             sys.path.remove(provisioner_source)

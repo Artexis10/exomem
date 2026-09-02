@@ -170,8 +170,17 @@ def collect_candidates(
     eligible_paths: set[str] | None = None,
     capture_trace: bool = False,
     query_vector_provider: Callable[[], Any] | None = None,
+    shadow: Callable[[list[str]], list[str]] | None = None,
 ) -> CandidateBundle:
-    """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them."""
+    """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them.
+
+    `shadow` optionally removes identities no lane may attest -- the caller's
+    exact pending-visibility overlay owns those generations -- and is applied to
+    every lane this collector builds itself, at its source, before rank lookups,
+    frame collapsing, eligibility, graph seeding, fusion and every lane cap
+    consume it. The keyword lane is excluded because it arrives from the
+    caller's own provider already shadowed. Default None is a strict no-op.
+    """
     from . import bm25, embeddings, epistemic_graph, fusion, lexstore, readiness, runtime_resources
 
     usage_map: dict[str, float] = {}
@@ -459,6 +468,18 @@ def collect_candidates(
                 repair=lexical_repair,
                 k=candidate_k * 3,
             )
+    if shadow is not None:
+        # Before anything downstream reads a lane: a shadowed identity must not
+        # seed the graph lane, reach the parent-hint seam, occupy a bounded lane
+        # window, or take a fused position derived from its stale rank.
+        #
+        # Deliberately not `keyword_ranking`: that lane comes from the caller's
+        # own `keyword_match_paths` provider, which has already suppressed the
+        # identities the caller shadows AND merged back the generations only it
+        # can attest. Shadowing it again here would delete that attestation.
+        vector_ranking = shadow(vector_ranking)
+        clip_ranking = shadow(clip_ranking)
+        bm25_ranking = shadow(bm25_ranking)
     raw_rankings = (vector_ranking, clip_ranking, bm25_ranking, keyword_ranking)
     admitted_raw_paths = set().union(*raw_rankings) & recall_paths
     parent_hints: Mapping[str, str | None] | None = None
@@ -732,6 +753,9 @@ def collect_candidates(
     with _span(timings, "fusion"):
         intent_label = intent or find_policy.classify_intent(query)
         weights = config.intent_weights(intent_label)
+        if shadow is not None:
+            graph_ranking = shadow(graph_ranking)
+            temporal_ranking = shadow(temporal_ranking)
         lane_rankings = [
             vector_ranking,
             bm25_ranking,

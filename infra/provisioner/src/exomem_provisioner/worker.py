@@ -10,6 +10,7 @@ from .capacity import CapacityIdentityConflict
 from .driver import (
     DriverFinal,
     DriverPending,
+    DriverResource,
     DriverRetryable,
     DriverTerminal,
     EffectContext,
@@ -17,7 +18,13 @@ from .driver import (
     ProvisionerDriver,
 )
 from .models import OperationAction
-from .repository import ClaimConflict, OperationRepository, OperationSnapshot, StaleFence
+from .repository import (
+    ClaimConflict,
+    ImmutableMetadataConflict,
+    OperationRepository,
+    OperationSnapshot,
+    StaleFence,
+)
 from .wire_protocol import FINAL_MODELS_BY_PROTOCOL, WIRE_PROTOCOL_V2, runtime_identity
 
 
@@ -168,6 +175,58 @@ class ProvisionerWorker:
                     lost.set()
                     return
 
+    async def _record_resources(
+        self,
+        operation: OperationSnapshot,
+        resources: tuple[DriverResource, ...],
+        *,
+        claim: dict[str, Any],
+        claim_lost: asyncio.Event,
+    ) -> bool:
+        """Record each driver resource, or terminally fail the operation.
+
+        A recorded resource is immutable, so a provider reference that no longer
+        matches one can never be reconciled by retrying -- the provider resource it
+        named is gone. Letting that escape kills the process, and the restarted pod
+        re-claims this same operation and re-drives its effect without bound.
+
+        Scoped deliberately to these calls. `complete()` raises the same exception for
+        unrelated capacity-ledger integrity violations, and converting those here would
+        park a DISCARD or DESTROY under a provider-metadata code that `reopen()` cannot
+        recover, because it admits only PROVISION.
+
+        Returns False when the operation was failed and the caller must stop.
+        """
+
+        try:
+            for resource in resources:
+                await self._repository.record_resource(
+                    operation_id=operation.id,
+                    worker_id=self._worker_id,
+                    tenant_id=operation.tenant_id,
+                    cell_id=operation.cell_id,
+                    kind=resource.kind,
+                    recoverable_reference=resource.recoverable_reference,
+                    provider_operation_id=operation.external_operation_id,
+                    provider_fence_generation=operation.fence_generation,
+                    **claim,
+                )
+        except ImmutableMetadataConflict:
+            if not claim_lost.is_set():
+                try:
+                    await self._repository.fail(
+                        operation.id,
+                        self._worker_id,
+                        code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+                        **claim,
+                    )
+                except (ClaimConflict, StaleFence):
+                    # The claim expired while handling the conflict. The row becomes
+                    # claimable again and the next holder reaches the same outcome.
+                    pass
+            return False
+        return True
+
     async def _run_claimed(
         self,
         operation: OperationSnapshot,
@@ -267,18 +326,10 @@ class ProvisionerWorker:
         if claim_lost.is_set():
             return True
         if isinstance(outcome, DriverPending):
-            for resource in outcome.resources:
-                await self._repository.record_resource(
-                    operation_id=operation.id,
-                    worker_id=self._worker_id,
-                    tenant_id=operation.tenant_id,
-                    cell_id=operation.cell_id,
-                    kind=resource.kind,
-                    recoverable_reference=resource.recoverable_reference,
-                    provider_operation_id=operation.external_operation_id,
-                    provider_fence_generation=operation.fence_generation,
-                    **claim,
-                )
+            if not await self._record_resources(
+                operation, outcome.resources, claim=claim, claim_lost=claim_lost
+            ):
+                return True
             await self._repository.mark_pending(
                 operation.id,
                 self._worker_id,
@@ -310,18 +361,10 @@ class ProvisionerWorker:
             self._worker_id,
             **claim,
         )
-        for resource in outcome.resources:
-            await self._repository.record_resource(
-                operation_id=operation.id,
-                worker_id=self._worker_id,
-                tenant_id=operation.tenant_id,
-                cell_id=operation.cell_id,
-                kind=resource.kind,
-                recoverable_reference=resource.recoverable_reference,
-                provider_operation_id=operation.external_operation_id,
-                provider_fence_generation=operation.fence_generation,
-                **claim,
-            )
+        if not await self._record_resources(
+            operation, outcome.resources, claim=claim, claim_lost=claim_lost
+        ):
+            return True
         await self._repository.complete(
             operation.id,
             outcome.result,

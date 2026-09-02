@@ -52,6 +52,23 @@ assert "exomem.video_frames" not in sys.modules
     assert result.returncode == 0, result.stderr
 
 
+def test_hosted_runtime_and_cli_entry_imports_do_not_load_numpy() -> None:
+    # The hosted server and the CLI entry are the two other process roots a
+    # module-level numpy edge could ship through; pin them alongside commands
+    # and server so the next eager import is caught before CI.
+    result = _run_import_probe(
+        """
+import importlib
+import sys
+importlib.import_module("exomem.hosted_runtime")
+importlib.import_module("exomem.__main__")
+assert "numpy" not in sys.modules
+assert "exomem.embeddings" not in sys.modules
+"""
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_extract_import_and_media_type_check_do_not_load_numpy() -> None:
     result = _run_import_probe(
         """

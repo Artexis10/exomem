@@ -15,6 +15,172 @@ def _terminal_module():
     return mutation_terminal
 
 
+def _fast_ack_terminal(
+    *,
+    derived_sync: str = "pending",
+    advisory_sync: str = "pending",
+    advisory_result_ref: str | None = "exomem://write-advisory-result/" + "a" * 32,
+):
+    mutation_terminal = _terminal_module()
+    raw = {
+        "path": "Knowledge Base/Notes/Insights/fast.md",
+        "warnings": [],
+        "semantic": {"transition": "complete"},
+    }
+    terminal = mutation_terminal.committed_terminal(
+        raw,
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id="receipt-fast",
+        idempotency_key="fast-key",
+    )
+    terminal.update(
+        {
+            "derived_sync": derived_sync,
+            "derived_sync_components": ["embeddings", "claims"],
+            "graph_sync": "failed",
+            "graph_sync_code": "GRAPH_SYNC_RECOVERY_REQUIRED",
+            "graph_sync_remediation": "Run reconcile to recover the derived graph.",
+            "advisory_sync": advisory_sync,
+            "_derived_diagnostics": [
+                {"component": "claims", "state": "prepared", "code": None},
+                {"component": "embeddings", "state": "prepared", "code": None},
+            ],
+        }
+    )
+    if advisory_result_ref is not None:
+        terminal["advisory_result_ref"] = advisory_result_ref
+    if derived_sync == "failed":
+        terminal.update(
+            derived_sync_code="DERIVED_COMPONENT_FAILED",
+            derived_sync_next_action="Run reconcile to repair derived state.",
+        )
+    if advisory_sync == "failed":
+        terminal.update(
+            advisory_sync_code="WRITE_ADVISORY_FAILED",
+            advisory_sync_next_action="Query the advisory result or retry reconciliation.",
+        )
+    return terminal, raw
+
+
+def test_fast_ack_compact_projection_separates_derived_graph_and_advisory() -> None:
+    mutation_terminal = _terminal_module()
+    terminal, _raw = _fast_ack_terminal()
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert compact["derived_sync"] == "pending"
+    assert compact["derived_sync_components"] == ["claims", "embeddings"]
+    assert compact["graph_sync"] == "failed"
+    assert compact["advisory_sync"] == "pending"
+    assert compact["advisory_result_ref"].startswith(
+        "exomem://write-advisory-result/"
+    )
+
+
+def test_fast_ack_full_projection_adds_diagnostics_without_changing_terminal() -> None:
+    mutation_terminal = _terminal_module()
+    terminal, raw = _fast_ack_terminal()
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+    full = mutation_terminal.project_terminal(terminal, "full")
+
+    assert {key: full[key] for key in compact} == compact
+    assert full["diagnostics"]["leaf_result"] == raw
+    assert full["diagnostics"]["derived_components"] == [
+        {"component": "claims", "state": "prepared", "code": None},
+        {"component": "embeddings", "state": "prepared", "code": None},
+    ]
+
+
+def test_fast_ack_legacy_projection_preserves_raw_leaf() -> None:
+    mutation_terminal = _terminal_module()
+    terminal, raw = _fast_ack_terminal()
+
+    assert mutation_terminal.project_terminal(terminal, "legacy") is raw
+
+
+def test_exact_retry_replays_original_fast_ack_terminal_byte_for_byte(tmp_path) -> None:
+    from exomem import writer_lease
+
+    calls = 0
+    terminal, raw = _fast_ack_terminal()
+
+    terminal = _terminal_module().with_fast_acknowledgement(
+        _terminal_module().committed_terminal(
+            raw,
+            request_id="11111111-1111-4111-8111-111111111111",
+            receipt_id="receipt-fast",
+            idempotency_key="fast-key",
+        ),
+        derived_sync="pending",
+        derived_sync_components=("embeddings",),
+        component_diagnostics=(
+            {"component": "embeddings", "state": "prepared", "code": None},
+        ),
+        advisory_sync="pending",
+        advisory_result_ref="exomem://write-advisory-result/" + "a" * 32,
+    )
+
+    def leaf():
+        nonlocal calls
+        calls += 1
+        return terminal
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    original = manager.idempotency.run("fast-replay", "a" * 64, leaf)
+    replay = manager.idempotency.run("fast-replay", "a" * 64, leaf)
+
+    assert replay == original
+    assert calls == 1
+    assert replay["derived_sync"] == "pending"
+    assert replay["advisory_result_ref"]
+
+
+@pytest.mark.parametrize("state", ("completed", "pending", "failed"))
+def test_applicable_advisory_states_keep_stable_result_ref(state: str) -> None:
+    mutation_terminal = _terminal_module()
+    terminal, _raw = _fast_ack_terminal(advisory_sync=state)
+
+    compact = mutation_terminal.project_terminal(terminal)
+
+    assert compact["advisory_sync"] == state
+    assert compact["advisory_result_ref"] == (
+        "exomem://write-advisory-result/" + "a" * 32
+    )
+
+
+def test_not_required_advisory_omits_result_ref() -> None:
+    mutation_terminal = _terminal_module()
+    terminal, _raw = _fast_ack_terminal(
+        advisory_sync="not_required", advisory_result_ref=None
+    )
+
+    compact = mutation_terminal.project_terminal(terminal)
+
+    assert compact["advisory_sync"] == "not_required"
+    assert "advisory_result_ref" not in compact
+
+
+def test_failed_component_uses_closed_code_and_fixed_next_action() -> None:
+    mutation_terminal = _terminal_module()
+    terminal, _raw = _fast_ack_terminal(
+        derived_sync="failed", advisory_sync="failed"
+    )
+
+    compact = mutation_terminal.project_terminal(terminal)
+
+    assert compact["derived_sync_code"] == "DERIVED_COMPONENT_FAILED"
+    assert compact["derived_sync_next_action"] == (
+        "Run reconcile to repair derived state."
+    )
+    assert compact["advisory_sync_code"] == "WRITE_ADVISORY_FAILED"
+    assert compact["advisory_sync_next_action"] == (
+        "Query the advisory result or retry reconciliation."
+    )
+
+
 def test_compact_projection_leads_with_decisive_commit_fields() -> None:
     mutation_terminal = _terminal_module()
     raw = {

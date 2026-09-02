@@ -10,8 +10,11 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Final
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -24,16 +27,27 @@ import scratch_root  # noqa: E402
 from synth_vault import gen_dense_vault  # noqa: E402
 
 from exomem import (  # noqa: E402
+    call_spans,
+    derived_drain,
+    derived_receipts,
     find,
     freshness,
     graph_sync,
     lexstore,
+    memory_refs,
+    pending_recall,
+    readiness,
     semantic_contract,
     semantic_writes,
+    vault,
+    writer_lease,
 )
 from exomem.vault import walk_vault_md  # noqa: E402
 
 DEFAULT_SIZES = (2_000, 8_000)
+#: Fixed so a run is reproducible and the stable-ref row measures the same
+#: resolution every time.
+_TARGET_IDENTITY = "11111111-2222-4333-8444-555555555555"
 # FTS5 visibility is report-only AND opt-in (--fts5-visibility).  Measured
 # 2026-08-20 on the same contended Windows host as the Python baseline: the
 # targeted retry itself landed in 32ms @ 2k and 250ms @ 8k, but the subsequent
@@ -47,6 +61,25 @@ DEFAULT_SIZES = (2_000, 8_000)
 # four.  Correctness on this path is enforced every run by
 # tests/test_read_after_write_visibility.py, which is deterministic and cheap;
 # this flag is for measuring the window when someone is working on it.
+# Environment: the fast-acknowledgement rows need managed retrieval admission,
+# and the gate asserts it rather than measuring the offline walk by accident.
+# Two env levers are worth stating explicitly because they look like they
+# should matter and only one of them does.
+#
+#   EXOMEM_DISABLE_FILE_WATCHER=1 -- inert here, and safe to keep set. It is
+#   read only by `graph_drain`, `server_runtime` and `hosted_runtime`; nothing
+#   in `freshness`, `readiness` or `lexstore` consults it, and this script is
+#   not a server, so it starts no watcher either way. Admission is unaffected,
+#   and the gate does NOT need to be run without it.
+#
+#   EXOMEM_DISABLE_EVENT_INDEXES -- this is the one `freshness.
+#   event_indexes_enabled()` actually reads, and it changes how admission is
+#   proved, not whether it can be. Set, `recall_is_live` is always False and
+#   the catalogue proof falls back to published rather than live checkpoints
+#   (the documented polling rollback); unset, `warmup.warm_retrieval_catalog`
+#   rebaselines the projections once and proves them live. Both admit. Leave
+#   it unset for a gate run, so the rows measure the maintained path the
+#   product ships.
 VALIDATE_MEDIAN_MS = 500.0
 VALIDATE_P95_MS = 1_000.0
 COMMIT_MEDIAN_MS = 750.0
@@ -178,6 +211,23 @@ COLD_PREFLIGHT_SCALING_RATIO = 8.0
 COLD_PREFLIGHT_SCALING_SLACK_MS = 5_000.0
 
 
+# --- Fast durable acknowledgement (design "Fast Acknowledgement Is Proven End
+# To End"). Unlike every ceiling above, these four are NOT calibrated from this
+# runner and are not this gate's to tune: they are the capability's stated
+# contract. The rows above bound the mutation boundary and the read that
+# follows it, and by construction they cannot see the acknowledgement the
+# caller actually waits for -- which is exactly the quantity this change moves.
+# A boundary-only measurement would report work relocated onto the public leaf
+# as a pure improvement, which is the invisibility class the design names.
+PUBLIC_WRITE_P95_MS = 4_000.0
+IMMEDIATE_READ_P95_MS = 1_500.0
+PAIRED_WRITE_READ_P95_MS = 5_000.0
+# A bound on EVERY sample, not a percentile: the post-canonical budget is one
+# shared hard deadline, so a single sample outside it is a breach of the
+# contract rather than a tail.
+POST_CANONICAL_BOUND_MS = 2_000.0
+
+
 def _percentile(values: list[float], fraction: float) -> float:
     ordered = sorted(values)
     index = min(len(ordered) - 1, max(0, int(len(ordered) * fraction + 0.999) - 1))
@@ -241,10 +291,35 @@ def _lexical_backend(name: str):
             os.environ["EXOMEM_LEXICAL_BACKEND"] = previous
 
 
-def _wait_for_lexical_repair_idle(vault_root: Path, timeout: float = 60.0) -> None:
-    """Wait for the repair-flight condition; timeout is only a deadlock valve."""
+#: How long a measured phase may wait for the lexical catalogue to go quiet.
+#:
+#: This is a *setup* budget, not a gate threshold: no measured row is compared
+#: against it and no ceiling depends on it. What it bounds is warm-up, and
+#: exceeding it fails the run as a setup failure rather than letting a
+#: half-built catalogue be timed as though it were the product.
+#:
+#: It replaces an unnamed 60-second value described as "only a deadlock valve".
+#: That framing was wrong in a way that cost a run: on a box at load 7 the
+#: catalogue legitimately needed longer than 60 s, the valve tripped in the
+#: FTS5 report phase, and the failure named neither a budget nor a cause. A
+#: wait that can fail a run is a budget whatever it is called, so it is named,
+#: stated, and sized for a loaded box here.
+LEXICAL_WARMUP_BUDGET_SECONDS: Final = 300.0
+
+
+def _wait_for_lexical_repair_idle(
+    vault_root: Path, timeout: float = LEXICAL_WARMUP_BUDGET_SECONDS
+) -> None:
+    """Wait, within a stated budget, for the lexical repair flight to finish.
+
+    Failing here is deliberate and must stay failing: proceeding with repairs
+    still in flight would measure a catalogue that is still being built, and
+    the reads this gate bounds would be timed against something no served
+    reader ever sees.
+    """
     key = vault_root.resolve()
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
     wake = threading.Event()
     while True:
         with lexstore._REPAIRS_LOCK:
@@ -252,8 +327,29 @@ def _wait_for_lexical_repair_idle(vault_root: Path, timeout: float = 60.0) -> No
                 return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise RuntimeError("lexical repair worker did not become idle")
+            raise RuntimeError(
+                "lexical repair worker did not become idle within the "
+                f"{timeout:.0f}s warm-up budget "
+                f"(waited {time.monotonic() - started:.1f}s); this is a setup "
+                "failure, not a measured row"
+            )
         wake.wait(min(0.01, remaining))
+
+
+@contextmanager
+def _production_read_backend(vault_root: Path):
+    """Scope a phase to the backend a served reader actually gets.
+
+    `auto` is the product's own selection -- FTS5 where the SQLite build has
+    it, the Python rung where it does not -- so a row measured in here is a row
+    about the shipped read path. The catalogue is built and allowed to go quiet
+    first, because an unbuilt or still-repairing catalogue turns the first
+    sample into a build cost and the rest into something else entirely.
+    """
+    with _lexical_backend("auto"):
+        lexstore.ensure_fresh(vault_root)
+        _wait_for_lexical_repair_idle(vault_root)
+        yield
 
 
 def _measure_fts5_visibility(
@@ -280,6 +376,189 @@ def _measure_fts5_visibility(
         _wait_for_lexical_repair_idle(vault_root)
         _read_after_write(vault_root, rel_path, version)
         return (time.perf_counter() - visible_started) * 1_000.0
+
+
+def _enter_managed_recall(vault_root: Path) -> None:
+    """Stand up the admission a served process has, for this phase only.
+
+    The warm window is not the admission. `begin_warm`/`finish_warm` only open
+    and close the window; what actually admits retrieval is the *catalogue
+    proof* published inside it -- `readiness.admit_retrieval_proof`, which is
+    the sole writer of the `retrieval_catalog` event that
+    `readiness.retrieval_admission` reads. An earlier version of this function
+    opened and closed the window without ever publishing that proof, so it left
+    `_warm_finished` set with the event unset, which is precisely the
+    `unavailable` state, and the gate died at the assertion below within a
+    minute of starting.
+
+    So this delegates to `warmup.warm_retrieval_catalog`, the function the
+    served process itself calls, rather than restating an abbreviation of it.
+    That keeps the rebaseline, the live-projection requirement, the maintained
+    versus reference index distinction and the proof CAS in one place, and it
+    means this warm-up cannot drift away from the product's.
+
+    `EXOMEM_EAGER_BOOT` is set for the call because a benchmark needs the
+    synchronous contract: without it, an incomplete catalogue is delegated to
+    the background repair worker and the function returns False, leaving the
+    sampling loop to race a rebuild. With it, the repair is awaited and proven,
+    and a failure to converge raises here instead of quietly measuring the
+    wrong thing.
+    """
+    from exomem import warmup
+
+    lexstore.ensure_fresh(vault_root)
+    readiness.manage_runtime()
+    previous_eager = os.environ.get("EXOMEM_EAGER_BOOT")
+    os.environ["EXOMEM_EAGER_BOOT"] = "1"
+    readiness.begin_warm()
+    try:
+        warmup.warm_retrieval_catalog(vault_root)
+    finally:
+        readiness.finish_warm()
+        if previous_eager is None:
+            os.environ.pop("EXOMEM_EAGER_BOOT", None)
+        else:
+            os.environ["EXOMEM_EAGER_BOOT"] = previous_eager
+
+    admission = readiness.retrieval_admission(vault_root)
+    if not admission.get("admitted"):
+        # A gate that silently measured the offline walk instead of managed
+        # recall would report the wrong capability entirely.
+        raise RuntimeError(
+            f"managed recall admission was not granted: {admission}"
+        )
+
+
+def _drain_derived_custody(vault_root: Path, *, passes: int = 64) -> None:
+    """Run the production scheduler pass until exact custody settles.
+
+    Time is advanced explicitly rather than slept: the store's backoff is a
+    wall-clock `next_attempt_at`, and sleeping it out would measure the backoff
+    constant instead of convergence.
+    """
+    dispatch = derived_drain.component_dispatcher()
+    observe = derived_drain.canonical_generation_observer()
+    now = time.time()
+    for _attempt in range(passes):
+        derived_drain.drain_once(
+            vault_root,
+            dispatch=dispatch,
+            observe_current_generation=observe,
+            visibility_publisher=pending_recall.publish,
+            limit=32,
+            now=now,
+        )
+        now += derived_drain.MAX_RETRY_SECONDS + 1.0
+        if not derived_receipts.due_component_count(
+            vault_root, now=now
+        ) and not derived_receipts.recoverable_batch_count(vault_root):
+            return
+
+
+def _public_transition(
+    vault_root: Path,
+    rel_path: str,
+    version: int,
+    manager: Any,
+) -> tuple[float, float]:
+    """Time one complete public governed write, entry to acknowledgement.
+
+    The boundary rows below measure preflight and commit directly. This drives
+    the same transition through the real lease manager, which is where the fast
+    acknowledgement session lives -- so what is timed is what the caller waits
+    for, guard, terminal persistence and post-canonical observation included.
+
+    The second value is the interval the shared 2.0-second budget governs,
+    taken from the writer's own phase rather than inferred by subtracting other
+    spans: the one measurement in this gate that must not be an approximation.
+    """
+    path = vault_root / rel_path
+    before = path.read_text(encoding="utf-8")
+    after = _next_source(before, version)
+
+    def leaf(root: Path):
+        preflight = semantic_writes.preflight_existing(
+            root, path=rel_path, after_source=after, operation="observe"
+        )
+        if preflight.contract_result.should_block:
+            codes = [item.code for item in preflight.contract_result.blocking_findings]
+            raise RuntimeError(f"synthetic transition was blocked: {codes}")
+        semantic_writes.commit_existing(root, preflight=preflight)
+        return {"path": rel_path, "warnings": []}
+
+    command = SimpleNamespace(name="observe_memory", leaf=leaf, read_only=False)
+    token_value = f"semantic-write-latency-{version}"
+    call_spans.reset()
+    token = call_spans.MCP_CALL_TOKEN.set(token_value)
+    started = time.perf_counter()
+    try:
+        manager.invoke(
+            command,
+            (vault_root,),
+            {"response_detail": "compact"},
+            mutation_request_id=str(uuid.uuid4()),
+        )
+        public_ms = (time.perf_counter() - started) * 1_000.0
+        spans = {
+            span["name"]: span for span in call_spans.pop_call_spans(token_value)
+        }
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(token)
+    post_canonical_ms = float(spans.get("derived.post_canonical", {}).get("ms", 0.0))
+    return public_ms, post_canonical_ms
+
+
+def _immediate_reads(
+    vault_root: Path, rel_path: str, version: int
+) -> tuple[float, float, float | None]:
+    """Keyword, hybrid and stable-reference reads of a just-committed version.
+
+    Each asserts the new generation is actually visible before returning its
+    cost. A fast-but-stale read has to fail this gate, not pass it -- that is
+    the whole difference between deferring derived work and losing it.
+    """
+    marker = f"Synthetic write latency version {version} "
+    keyword_started = time.perf_counter()
+    keyword_hits = find.find(
+        vault_root, query=marker.strip(), scope="kb", mode="keyword", limit=5
+    )
+    keyword_ms = (time.perf_counter() - keyword_started) * 1_000.0
+    if not any(marker in (hit.excerpt or "") for hit in keyword_hits):
+        raise RuntimeError(
+            f"immediate keyword read did not see version {version} for {rel_path}"
+        )
+
+    hybrid_started = time.perf_counter()
+    hybrid_hits = find.find(
+        vault_root, query=marker.strip(), scope="kb", mode="hybrid", limit=5
+    )
+    hybrid_ms = (time.perf_counter() - hybrid_started) * 1_000.0
+    if not any(hit.path == rel_path for hit in hybrid_hits):
+        raise RuntimeError(
+            f"immediate hybrid read did not see version {version} for {rel_path}"
+        )
+
+    identity = memory_refs.normalize_id(
+        vault.parse_frontmatter((vault_root / rel_path).read_text(encoding="utf-8"))[
+            0
+        ].get(memory_refs.ID_FIELD)
+    )
+    if identity is None:
+        # Recorded as absent rather than as zero: the row is report-only and a
+        # missing stable identity is a fact about the corpus, not a fast read.
+        return keyword_ms, hybrid_ms, None
+    # The stable reference, not the bare identity: this is the read-only route
+    # a caller verifying by reference actually takes, and it is the one that
+    # consults the pending identity projection before the sidecar.
+    reference = memory_refs.memory_ref(identity)
+    ref_started = time.perf_counter()
+    resolved = memory_refs.resolve_identifier_read_only(vault_root, reference)
+    ref_ms = (time.perf_counter() - ref_started) * 1_000.0
+    if resolved != rel_path:
+        raise RuntimeError(
+            f"immediate stable-ref read resolved {resolved!r}, not {rel_path!r}"
+        )
+    return keyword_ms, hybrid_ms, ref_ms
 
 
 def _commit_transition(vault_root: Path, rel_path: str, version: int) -> tuple[float, float]:
@@ -332,8 +611,15 @@ def measure(
     *,
     fts5_visibility: bool = False,
 ) -> dict[str, float | int]:
-    # Keep the historical deterministic baseline pinned to the Python rung.
-    # The focused FTS5 phase below overrides this scope only for its own reads.
+    # Keep the historical deterministic baseline pinned to the Python rung:
+    # `validate`, `commit`, `read_after_write` and the cold rows are a stable
+    # cross-release series and their comparability depends on the instrument
+    # not changing under them.
+    #
+    # Two phases override this scope for their own reads, and both are about
+    # the shipped read path rather than the baseline: the focused FTS5
+    # visibility measurement, and the fast-acknowledgement rows, which run
+    # under the production `auto` selection (ruling R4).
     with _lexical_backend("python"):
         return _measure(vault_root, size, samples, fts5_visibility=fts5_visibility)
 
@@ -357,6 +643,10 @@ def _measure(
         "type: entity\n"
         "status: active\n"
         "updated: 2026-07-22\n"
+        # A real compiled page carries a stable identity, and the immediate
+        # stable-reference read below is only a measurement if there is one to
+        # resolve.
+        f"{memory_refs.ID_FIELD}: {_TARGET_IDENTITY}\n"
         "---\n\n"
         "# Write latency target\n\n"
         "## Observations\n\n"
@@ -390,8 +680,83 @@ def _measure(
     # samples, neither folded into the warm `reads`/`validates`/`commits`
     # lists above so they cannot skew ceilings scoped to steady-state
     # (cache-warm) operation:
-    cold_write_version = samples + 2
-    cold_probe_version = samples + 3
+    # --- Fast durable acknowledgement: the public leaf, and the read that
+    # immediately follows it. Driven through the real lease manager with the
+    # capability enabled, because the acknowledgement session only exists
+    # there -- measuring `commit_existing` directly would time the boundary
+    # again under a new name.
+    public_writes: list[float] = []
+    post_canonical: list[float] = []
+    keyword_reads: list[float] = []
+    hybrid_reads: list[float] = []
+    stable_ref_reads: list[float] = []
+    paired: list[float] = []
+    previous_flag = os.environ.get("EXOMEM_FAST_DURABLE_ACK")
+    os.environ["EXOMEM_FAST_DURABLE_ACK"] = "1"
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault_root.parent / "lease-state")
+    )
+    # The pending overlay is deliberately scoped to managed recall: an offline
+    # caller keeps its exact source-walk fallback. This gate is about what a
+    # served request sees, so it stands up the same admission a served process
+    # has -- managed runtime, a completed warm, and an admitted catalogue proof
+    # -- for exactly this phase, and hands admission back afterwards. Without
+    # the warm and the proof, managed recall answers `warming` by contract and
+    # the rows below would measure a refusal.
+    # Ruling R4: these rows run on the *production* backend selection, not the
+    # Python rung the historical boundary rows are pinned to.
+    #
+    # The rung above is deliberately O(N) even when warm, which is exactly what
+    # makes it a stable baseline for the boundary rows -- and exactly what makes
+    # it the wrong instrument here. The design's 1.5 s immediate-read and 5.0 s
+    # paired contracts are promises about what a served reader waits for, and a
+    # served reader gets `auto`. Measured on the slow rung these rows reported
+    # 6.2 s keyword and 11.6 s hybrid at 8k pages while the write side passed
+    # with two orders of magnitude of headroom, and the immediate keyword read
+    # came out equal to `read_after_write` at both sizes -- the overlay adding
+    # nothing measurable, the rung supplying all of it. That is a measurement of
+    # the instrument, not of the product.
+    #
+    # No ceiling changes. The rows are simply pointed at the path they are
+    # about.
+    with _production_read_backend(vault_root):
+        _enter_managed_recall(vault_root)
+        try:
+            first_public = samples + 2
+            for version in range(first_public, first_public + samples):
+                public_ms, post_ms = _public_transition(
+                    vault_root, target_rel, version, manager
+                )
+                keyword_ms, hybrid_ms, ref_ms = _immediate_reads(
+                    vault_root, target_rel, version
+                )
+                public_writes.append(public_ms)
+                post_canonical.append(post_ms)
+                keyword_reads.append(keyword_ms)
+                hybrid_reads.append(hybrid_ms)
+                if ref_ms is not None:
+                    stable_ref_reads.append(ref_ms)
+                # The pair is one caller's complete experience: acknowledge,
+                # then immediately verify. Measured together because a change
+                # that shortens one by lengthening the other is exactly what
+                # the paired bound exists to catch.
+                paired.append(public_ms + max(keyword_ms, hybrid_ms))
+        finally:
+            readiness.unmanage_runtime()
+            # Converge the custody this phase created before anything else is
+            # measured. The cold rows below read through the persistent
+            # catalogues, and leaving a burst of exact receipts outstanding
+            # would charge their convergence to a row that is not about it.
+            _drain_derived_custody(vault_root)
+            pending_recall.reset(vault_root)
+            find.clear_cache()
+            if previous_flag is None:
+                os.environ.pop("EXOMEM_FAST_DURABLE_ACK", None)
+            else:
+                os.environ["EXOMEM_FAST_DURABLE_ACK"] = previous_flag
+
+    cold_write_version = samples + 2 + samples
+    cold_probe_version = cold_write_version + 1
     _transition(vault_root, target_rel, cold_write_version)  # ordinary warm write
     semantic_contract.reset_corpus_context_cache()
     freshness.clear()
@@ -410,6 +775,22 @@ def _measure(
         "read_after_write_p95_ms": round(_percentile(reads, 0.95), 1),
         "cold_read_after_write_ms": round(cold_read_after_write_ms, 1),
         "cold_preflight_ms": round(cold_preflight_ms, 1),
+        "public_write_median_ms": round(statistics.median(public_writes), 1),
+        "public_write_p95_ms": round(_percentile(public_writes, 0.95), 1),
+        "immediate_keyword_read_median_ms": round(
+            statistics.median(keyword_reads), 1
+        ),
+        "immediate_keyword_read_p95_ms": round(_percentile(keyword_reads, 0.95), 1),
+        "immediate_hybrid_read_median_ms": round(statistics.median(hybrid_reads), 1),
+        "immediate_hybrid_read_p95_ms": round(_percentile(hybrid_reads, 0.95), 1),
+        "immediate_stable_ref_read_median_ms": (
+            round(statistics.median(stable_ref_reads), 1) if stable_ref_reads else None
+        ),
+        "immediate_stable_ref_read_p95_ms": (
+            round(_percentile(stable_ref_reads, 0.95), 1) if stable_ref_reads else None
+        ),
+        "paired_write_read_p95_ms": round(_percentile(paired, 0.95), 1),
+        "post_canonical_max_ms": round(max(post_canonical), 1),
     }
     if fts5_visibility:
         measured["fts5_visibility_latency_ms"] = round(
@@ -434,6 +815,11 @@ def check(results: list[dict[str, float | int]]) -> None:
             ("read_after_write_p95_ms", READ_AFTER_WRITE_P95_MS),
             ("cold_read_after_write_ms", COLD_READ_AFTER_WRITE_MS),
             ("cold_preflight_ms", COLD_PREFLIGHT_MS),
+            ("public_write_p95_ms", PUBLIC_WRITE_P95_MS),
+            ("immediate_keyword_read_p95_ms", IMMEDIATE_READ_P95_MS),
+            ("immediate_hybrid_read_p95_ms", IMMEDIATE_READ_P95_MS),
+            ("paired_write_read_p95_ms", PAIRED_WRITE_READ_P95_MS),
+            ("post_canonical_max_ms", POST_CANONICAL_BOUND_MS),
         ):
             value = float(result[key])
             if value >= ceiling:

@@ -2030,6 +2030,11 @@ class HelmCliAdapter:
             raise MetadataConflict("current Helm values are invalid")
         return value
 
+    async def current_release_values(self, metadata: OpaqueProviderMetadata) -> dict[str, Any]:
+        environment = {"HELM_DRIVER": "configmap"}
+        await self._require_version(environment)
+        return await self._current_values(metadata, environment)
+
     async def _revision_values(
         self,
         metadata: OpaqueProviderMetadata,

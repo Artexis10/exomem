@@ -431,7 +431,7 @@ jobs:
     name: semantic write latency (2k and 8k)
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install uv

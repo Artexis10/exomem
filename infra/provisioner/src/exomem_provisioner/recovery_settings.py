@@ -23,6 +23,7 @@ _RECOVERY_ENVIRONMENT = {
     "EXOMEM_RECOVERY_ENVELOPE_KEY": "envelope_key",
     "EXOMEM_RECOVERY_PROVIDER_RECOVERY_PUBLIC_KEY": "provider_recovery_public_key",
     "EXOMEM_RECOVERY_DEPLOYMENT_LOCK_JSON": "deployment_lock",
+    "EXOMEM_RECOVERY_SOURCE_DEPLOYMENT_LOCK_JSON": "source_deployment_lock",
     "EXOMEM_RECOVERY_RUNTIME_SELECTION": "runtime_selection",
     "EXOMEM_RECOVERY_HCLOUD_TOKEN": "hcloud_token",
     "EXOMEM_RECOVERY_HCLOUD_LOCATION": "hcloud_location",
@@ -52,6 +53,7 @@ class RecoverySettings(BaseModel):
         min_length=40, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"
     )
     deployment_lock: DeploymentLock
+    source_deployment_lock: DeploymentLock
     runtime_selection: Literal["active", "rollback"]
     hcloud_token: SecretStr = Field(min_length=32, max_length=4096)
     hcloud_location: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,31}$")
@@ -82,6 +84,7 @@ class RecoverySettings(BaseModel):
     @model_validator(mode="after")
     def validate_selected_runtime(self) -> RecoverySettings:
         self.deployment_lock.selected_runtime(self.runtime_selection)
+        self.source_deployment_lock.selected_runtime(self.runtime_selection)
         return self
 
     @property
@@ -110,7 +113,11 @@ def load_recovery_settings(
             source["EXOMEM_RECOVERY_DEPLOYMENT_LOCK_JSON"],
             object_pairs_hook=_reject_duplicate_json_keys,
         )
-        if not isinstance(lock_value, dict):
+        source_lock_value = json.loads(
+            source["EXOMEM_RECOVERY_SOURCE_DEPLOYMENT_LOCK_JSON"],
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+        if not isinstance(lock_value, dict) or not isinstance(source_lock_value, dict):
             raise ValueError("recovery deployment lock is invalid")
         values: dict[str, object] = {
             field: source[name] for name, field in _RECOVERY_ENVIRONMENT.items()
@@ -119,6 +126,7 @@ def load_recovery_settings(
             source["EXOMEM_RECOVERY_DATABASE_LOCK_TIMEOUT_SECONDS"]
         )
         values["deployment_lock"] = lock_value
+        values["source_deployment_lock"] = source_lock_value
         return RecoverySettings.model_validate(values)
     except (TypeError, ValueError, json.JSONDecodeError) as error:
         raise ValueError("recovery environment is invalid") from error

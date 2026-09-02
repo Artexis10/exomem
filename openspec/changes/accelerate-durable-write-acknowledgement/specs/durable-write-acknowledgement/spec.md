@@ -38,14 +38,16 @@ generation, affected safe relative paths, exact before and intended after hashes
 or tombstones, and the required component set. The receipt MUST carry no
 arbitrary vault content. A prepared receipt SHALL authorize derived publication
 only after exact canonical state proves the intended after-state. Rollback,
-partial state, an unrelated later state, or a mismatched generation MUST NOT
-activate it. A later exact receipt MAY supersede older work only when it covers
+partial state, or an unrelated later state MUST NOT activate it. The recorded
+canonical generation is lineage for ordering and supersession; proof SHALL NOT
+require it to equal the vault-wide checkpoint, which advances on every write to
+any page. A later exact receipt MAY supersede older work only when it covers
 the same path/component demand without a visibility gap.
 
 #### Scenario: Process dies after canonical replacement
 
 - **WHEN** the process dies after canonical files commit but before any post-commit activation update
-- **THEN** restart recovery proves the prepared receipt against the canonical after-hashes and generation
+- **THEN** restart recovery proves the prepared receipt against the canonical after-hashes
 - **AND** every required component remains eligible for exactly-once-publication or at-least-once safe replay without re-executing the canonical mutation
 
 #### Scenario: Caught batch failure rolls back
@@ -59,6 +61,12 @@ the same path/component demand without a visibility gap.
 - **WHEN** a later governed mutation changes a path before an older derived receipt completes
 - **THEN** the older receipt cannot republish the stale generation
 - **AND** it is retired only after newer exact custody or full reconciliation covers the path and component
+
+#### Scenario: Multi-page burst keeps every batch provable
+
+- **WHEN** several governed pages are each written more than once in one burst
+- **THEN** every older batch retires as `superseded` and every newest batch completes, with no batch left in `reconcile_required`
+- **AND** every pending-visibility row of the superseded batches is retired
 
 ### Requirement: Post-Canonical Waiting Has One Shared Two-Second Budget
 

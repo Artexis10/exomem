@@ -137,7 +137,7 @@ infra/scripts/prepare_hosted_release.py \
   --values-output "${deploy_work_dir}/release-values.json" \
   --control-hostname "$control_hostname" \
   --transfer-hostname "$transfer_hostname"
-infra/scripts/verify_hosted_release.py \
+uv run --project infra/provisioner python infra/scripts/verify_hosted_release.py \
   --phase "$EXOMEM_DEPLOYMENT_PHASE" \
   --lock-pair "$lock_pair" \
   --lock-evidence "$lock_evidence" \
