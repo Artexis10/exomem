@@ -90,3 +90,4 @@
 - [ ] 8.9 Run free preflight, prepare the explicit eligible reviewer client, and conduct the human-timed Claude/OpenAI promotion ceremony
 - [ ] 8.10 Complete personal-account OAuth and full read/write/reconnect acceptance on `0.68.1`, keep the personal tenant live, and record final fleet, lock, cohort, authority, capacity, and operation state
 - [ ] 8.11 Land and publish the signed one-way retarget helper, advance the two never-routed recovered provisions in place to `0.68.1`, and verify their original operation, cell, PVC, PV, and provider-volume identities are preserved
+- [ ] 8.12 Make target-image initialization replay an unchanged stable credential authority under the selected-target migration identity, publish the corrected signed `0.68.1` image, and prove mismatched or rotating authority still fails closed

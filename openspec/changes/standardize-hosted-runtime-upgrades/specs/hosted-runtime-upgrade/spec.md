@@ -242,6 +242,12 @@ checkpoint identity. Repetition SHALL verify the existing receipt without a seco
 - **WHEN** a recovered retarget runs its target-image migration after an earlier initialization proof exists for the same provider operation lineage
 - **THEN** the migration initialization identity is derived from the durable operation and canonical selected-target request digest, so retries of that exact request are byte-stable and a different target request cannot collide with its proof
 
+#### Scenario: Target migration replays an unchanged stable credential authority
+
+- **WHEN** target-image initialization uses its selected-target migration identity and the existing security authority is stable with the same active credential version and digest
+- **THEN** it atomically records a bootstrap result for the new operation identity and returns the unchanged durable security snapshot without rotating, replacing, or exposing credential material
+- **AND** a non-stable authority, changed active version, or mismatched projected credential fails closed without recording the new operation
+
 #### Scenario: A failed resumed retarget receives one separately attributed retry
 
 - **WHEN** that resumed retarget fails closed with a provider-metadata conflict before migration while the same four resources remain stopped, unrouted, reserved, and conflict-free
