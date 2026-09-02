@@ -136,7 +136,7 @@ is made**, or **an observed outcome or event is reported** — capture it:
   first user turn after bootstrap, after primary work and before the final
   response, call `review_memory(mode="attention",
   categories=["entity_recurrence"], limit=3)` once per session. Later ordinary
-  prompts do not rescan. Each candidate carries at most eight contexts. Resolve
+  prompts do not rescan. It returns at most three candidates, each carrying at most eight contexts. Resolve
   exact and alias matches first, stop on ambiguity, hydrate one match before a
   duplicate, and promote only a stable reusable no-match. Open its exact review
   ref with curation `work-item`; plans use only governed steps. An unknown kind

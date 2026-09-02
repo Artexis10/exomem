@@ -603,6 +603,12 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
                 _assert_baseline_authority_mapping(name, mutant)
     assert "when torn between saving and letting it pass, save" in blocks["maximal docs"]
     assert "not mid-thought exploration" in blocks["balanced docs"]
+    # The generic "records" marker above is satisfied by the Planning/Records
+    # routing line, so it cannot tell whether the reminder still carries the
+    # Records-compatibility rule or the distilled-notes rule. Pin both.
+    reminder = blocks["structural reminder"]
+    assert "records only" in reminder
+    assert "transcripts" in reminder
 
 
 def test_executed_method_cases_remain_a_separate_predicate() -> None:

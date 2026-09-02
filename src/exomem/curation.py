@@ -719,13 +719,23 @@ def _entity_candidate_binding(item: Any, *, registry_fallback: str) -> dict[str,
             if candidate.get("path")
         }
     )
-    grammar_version = str(meta.get("grammar_version") or "unresolved-wikilink-v1")
+    # No silent defaults here.  Defaulting the state to "promotion" offers a
+    # create-entity route for a candidate whose state we could not read, and
+    # defaulting the grammar seals a binding against a grammar the review never
+    # named.  Both are the executable direction; fail closed instead.
+    for required in ("candidate_state", "grammar_version"):
+        if not str(meta.get(required) or "").strip():
+            raise _error(
+                "CURATION_ENTITY_CANDIDATE_INVALID",
+                f"recurring identity signal does not carry {required}",
+            )
+    grammar_version = str(meta["grammar_version"])
     predicate_digest = meta.get("predicate_table_digest")
     registry_identity = str(meta.get("registry_fingerprint") or registry_fallback)
     binding = {
         "review_ref": str(getattr(item, "ref", None) or ""),
         "review_fingerprint": str(getattr(item, "fingerprint", None) or ""),
-        "candidate_state": str(meta.get("candidate_state") or "promotion"),
+        "candidate_state": str(meta["candidate_state"]),
         "identity": str(meta.get("identity") or ""),
         "signal_version": str(meta.get("signal_version") or ""),
         "first_disconnected_context_batch": contexts,
@@ -746,10 +756,16 @@ def project_entity_candidate_binding(
 ) -> dict[str, Any]:
     """Project one identity-bound continuation under the eight-batch budget.
 
-    The active agent owns the session counter.  The eighth terminal receipt may
-    buy one final state read, but that read cannot expose an executable ninth
-    batch.  Redacting the batch here makes the bound true at the API boundary,
-    not merely an instruction to ignore bytes already returned.
+    The eighth terminal receipt may buy one final state read, but that read
+    cannot expose an executable ninth batch: the redaction withholds the batch,
+    its fingerprint and its pages from the response itself rather than returning
+    them with an instruction to ignore them.
+
+    What is NOT enforced here is the counter.  The ordinal arrives from the
+    caller and the server does not bind a recheck to the receipt that earned it,
+    so per the spec the session budget is agent-side: an agent that keeps asking
+    for ordinal 1 is not stopped by this function.  Binding rechecks to terminal
+    receipts server-side is a separate design question.
     """
     if type(hydration_recheck) is not int or not 1 <= hydration_recheck <= 8:
         raise _error(
@@ -821,21 +837,25 @@ def work_item(
                 "CURATION_WORK_ITEM_MIXED",
                 "an entity-candidate work item cannot add unrelated refs or paths",
             )
-        if hydration_recheck is not None:
-            if type(hydration_recheck) is not int or not 1 <= hydration_recheck <= 8:
-                raise _error(
-                    "INVALID_HYDRATION_RECHECK",
-                    "hydration_recheck must be an integer from 1 through 8",
-                )
-            from . import review_state as review_state_module
+        if hydration_recheck is not None and (
+            type(hydration_recheck) is not int or not 1 <= hydration_recheck <= 8
+        ):
+            raise _error(
+                "INVALID_HYDRATION_RECHECK",
+                "hydration_recheck must be an integer from 1 through 8",
+            )
+        # A ref that was never well-formed is a caller error, not a review that
+        # drifted.  Parsing it before the store lookup keeps STALE meaning
+        # "re-read and retry", which is advice a malformed ref can never follow.
+        from . import review_state as review_state_module
 
-            try:
-                review_state_module.parse_review_ref(str(review_ref))
-            except ValueError as error:
-                raise _error(
-                    "INVALID_HYDRATION_RECHECK",
-                    "hydration_recheck requires a valid entity candidate review ref",
-                ) from error
+        try:
+            review_state_module.parse_review_ref(str(review_ref))
+        except ValueError as error:
+            raise _error(
+                "CURATION_ENTITY_REVIEW_REF_INVALID",
+                "review_ref is not a well-formed review reference",
+            ) from error
         try:
             item, binding = _current_entity_candidate_binding(
                 Path(vault_root), str(review_ref)
@@ -878,9 +898,23 @@ def work_item(
             else binding
         )
         evidence = dict(item.reasons[0].get("meta") or {})
+        # Read the batch from the PROJECTION, never the live binding: the
+        # ordinal-8 projection has already redacted the ninth batch, and paging
+        # the live binding would hand back the bytes the redaction withheld.
+        closure_only = bool(projected.get("closure_only"))
+        if closure_only:
+            # Counts stay on entity_candidate so the agent still learns work
+            # remains; the paths, hashes and fingerprint that would let it act
+            # on that work this session do not travel.
+            for withheld in (
+                "disconnected_contexts",
+                "batch_fingerprint",
+                "remaining_disconnected_count",
+            ):
+                evidence.pop(withheld, None)
         context_paths = [
             context["path"]
-            for context in binding["first_disconnected_context_batch"]
+            for context in (projected.get("first_disconnected_context_batch") or [])
         ]
         selected_pages: list[dict[str, Any]] = []
         truncated_pages: list[str] = []

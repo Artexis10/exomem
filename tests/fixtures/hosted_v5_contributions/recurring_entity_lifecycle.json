@@ -62,6 +62,17 @@
       "identity": "passing reference",
       "candidate_state": "quiet",
       "expected_route": "absent"
+    },
+    {
+      "id": "open-registry-family-metadata",
+      "identity": "harbour guild",
+      "entity_type": {
+        "id": "guild",
+        "label": "Guild",
+        "folder": "Guilds",
+        "family": "organization"
+      },
+      "expected_route": "traversal-only"
     }
   ],
   "compatibility": {

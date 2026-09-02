@@ -659,9 +659,15 @@ def op_bootstrap(
                     "arguments": {
                         "mode": "curation",
                         "curation_action": "work-item",
-                        "review_ref": "same-review-ref",
-                        "hydration_recheck": "next-ordinal-1-through-8",
+                        # Angle brackets plus the sibling flag below: these two
+                        # values are shapes to fill in, not arguments to send.
+                        # A bare "same-review-ref" reads as a literal a client
+                        # can pass through, and the server would then reject it
+                        # as a malformed ref.
+                        "review_ref": "<same-review-ref>",
+                        "hydration_recheck": "<next-ordinal-1-through-8>",
                     },
+                    "placeholders": True,
                 },
                 "eighth_recheck": "closure-only",
                 "later_batches": "next-session-ordinary-read",

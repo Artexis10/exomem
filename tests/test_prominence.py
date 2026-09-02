@@ -295,7 +295,9 @@ def test_the_capture_reminder_stays_one_paragraph_of_instruction() -> None:
     """
     reminder = capture_hook.REMINDER
 
-    assert len(reminder) < 1600, len(reminder)
+    # 1,800: four capture doctrines plus the entity cadence did not fit in 1,600
+    # (2026-09-02); still one paragraph. Carrier budget composition is the follow-up.
+    assert len(reminder) < 1800, len(reminder)
     assert reminder.startswith("[Exomem capture check]")
 
 

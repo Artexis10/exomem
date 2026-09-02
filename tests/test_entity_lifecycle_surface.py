@@ -93,6 +93,23 @@ def _hydration_corpus(root: Path, *, identity: str, contexts: int) -> str:
     return target
 
 
+def _strings_in(value: object) -> set[str]:
+    """Every string anywhere in a response, so a leak cannot hide in a new key."""
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, dict):
+        found: set[str] = set()
+        for key, item in value.items():
+            found |= _strings_in(key) | _strings_in(item)
+        return found
+    if isinstance(value, (list, tuple)):
+        found = set()
+        for item in value:
+            found |= _strings_in(item)
+        return found
+    return set()
+
+
 def _apply_hydration_batch(
     root: Path,
     *,
@@ -535,6 +552,30 @@ def test_nine_hydration_batches_defer_exactly_one_batch_to_next_session(
     assert closure["first_disconnected_context_batch"] == []
     assert closure["deferred_remaining_count"] == 8
 
+    # The closure-only read may report that work remains; it may not hand back
+    # the ninth batch in any field.  Redacting only the projection while the
+    # page bodies and the raw review evidence still travel would make the bound
+    # a suggestion rather than an API boundary.
+    assert item["pages"] == []
+    assert item["truncation"] == {"pages": [], "disclosed": False}
+    evidence = item["candidate_evidence"]
+    for withheld in ("disconnected_contexts", "batch_fingerprint", "remaining_disconnected_count"):
+        assert withheld not in evidence, withheld
+    deferred_meta = _candidate(tmp_path).reasons[0]["meta"]
+    deferred_paths = {
+        str(context["path"]) for context in deferred_meta["disconnected_contexts"]
+    }
+    assert len(deferred_paths) == 8
+    # Paths and the batch fingerprint are the identifying values; a raw
+    # context_hash is a digest of the matched clause alone, so contexts sharing
+    # a clause share a hash and it cannot distinguish a deferred context from an
+    # already-connected one. The fingerprint is a digest over the exact deferred
+    # rows, so it IS unique to batch nine and is the value an agent would need
+    # to bind to it.
+    deferred_fingerprint = str(deferred_meta["batch_fingerprint"])
+    leaked = _strings_in(item) & (deferred_paths | {deferred_fingerprint})
+    assert leaked == set(), sorted(leaked)
+
     next_session = curation.work_item(tmp_path, review_ref=review_ref)
     resumed = next_session["entity_candidate"]
     assert len(resumed["first_disconnected_context_batch"]) == 8
@@ -650,32 +691,25 @@ def test_candidate_plan_refuses_duplicate_create_and_direct_registry_mutation(
         curation.propose(tmp_path, plan)
 
 
-def test_eighth_hydration_recheck_is_closure_only() -> None:
-    binding = {
-        "review_ref": "exomem://review/" + "a" * 24,
-        "review_fingerprint": "b" * 24,
-        "candidate_state": "hydration",
-        "identity": "cobalt workshop",
-        "signal_version": "c" * 64,
-        "first_disconnected_context_batch": [
-            {"path": f"Knowledge Base/Notes/context-{index}.md", "context_hash": f"h-{index}"}
-            for index in range(8)
-        ],
-        "remaining_disconnected_count": 8,
-        "batch_fingerprint": "d" * 64,
-        "target_refs": ["Knowledge Base/Entities/Organizations/cobalt-workshop.md"],
-        "grammar_identity": {
-            "version": "identity-frames-v1",
-            "predicate_table_digest": "e" * 64,
-        },
-        "registry_identity": "f" * 64,
-    }
+def test_eighth_hydration_recheck_is_closure_only(tmp_path: Path) -> None:
+    """Built through work_item so the binding is one the validator actually accepts.
+
+    A hand-written binding can carry shapes the real path rejects, which makes a
+    green projection test say nothing about the live boundary.
+    """
+    _hydration_corpus(tmp_path, identity="cobalt workshop", contexts=16)
+    item = curation.work_item(tmp_path, review_ref=_candidate(tmp_path).ref)
+    binding = item["entity_candidate"]
+    assert binding["candidate_state"] == "hydration"
+    assert len(binding["first_disconnected_context_batch"]) == 8
+    assert binding["remaining_disconnected_count"] == 8
 
     ordinary = curation.project_entity_candidate_binding(binding, hydration_recheck=7)
     closure = curation.project_entity_candidate_binding(binding, hydration_recheck=8)
 
     assert len(ordinary["first_disconnected_context_batch"]) == 8
     assert ordinary["executable"] is True
+    assert ordinary["closure_only"] is False
     assert closure["first_disconnected_context_batch"] == []
     assert closure["batch_fingerprint"] is None
     assert closure["executable"] is False
@@ -730,9 +764,10 @@ def test_bootstrap_carries_capability_honest_bounded_entity_cadence(
         "arguments": {
             "mode": "curation",
             "curation_action": "work-item",
-            "review_ref": "same-review-ref",
-            "hydration_recheck": "next-ordinal-1-through-8",
+            "review_ref": "<same-review-ref>",
+            "hydration_recheck": "<next-ordinal-1-through-8>",
         },
+        "placeholders": True,
     }
     assert lifecycle["hydration_continuation"]["eighth_recheck"] == "closure-only"
 
@@ -804,6 +839,38 @@ def test_hosted_v5_entity_lifecycle_input_is_generic_and_bounded() -> None:
     }
     assert "community" not in value["primitive"]
 
+    # Every case pinned by id, state and route. Asserting only that cases exist
+    # lets one be renamed, restated or silently dropped while the count holds.
+    assert [case["id"] for case in value["cases"]] == [
+        "generic-promotion",
+        "existing-identity-hydration",
+        "ambiguous-identity-stop",
+        "frequency-matched-twin",
+        "open-registry-family-metadata",
+    ]
+    assert {
+        case["id"]: (case.get("candidate_state"), case["expected_route"])
+        for case in value["cases"]
+    } == {
+        "generic-promotion": ("promotion", "governed-create-entity"),
+        "existing-identity-hydration": ("hydration", "governed-edit-or-accept-relation"),
+        "ambiguous-identity-stop": ("ambiguous", "no-executable-default"),
+        "frequency-matched-twin": ("quiet", "absent"),
+        "open-registry-family-metadata": (None, "traversal-only"),
+    }
+
+    # D3: the canonical kind is a singular open leaf, the folder is a plural
+    # projection of it, and the parent family is traversal only. The case
+    # mirrors the shape bootstrap serves at entity_registry.types[*].
+    family_case = next(
+        case for case in value["cases"] if case["id"] == "open-registry-family-metadata"
+    )
+    assert set(family_case["entity_type"]) == {"id", "label", "folder", "family"}
+    assert family_case["entity_type"]["id"] == "guild"
+    assert family_case["entity_type"]["folder"] == "Guilds"
+    assert family_case["entity_type"]["family"] == "organization"
+    assert family_case["entity_type"]["id"] != family_case["entity_type"]["folder"]
+
 
 def test_hook_rearms_the_exact_ordinary_entity_read_without_becoming_a_decider() -> None:
     reminder = exomem_capture_nudge.REMINDER
@@ -820,7 +887,38 @@ def test_hook_rearms_the_exact_ordinary_entity_read_without_becoming_a_decider()
     assert "no model" in folded
     assert "terminal receipt" in folded
     assert "closure-only eighth recheck" in folded
-    assert len(reminder) < 1600
+    assert len(reminder) < 1800
+
+    # The ordinary read is a balanced/maximal behaviour. Unqualified, the hook
+    # tells a light or off session to spend a category read it never opted into,
+    # which is the nudge the prominence levels exist to withhold. The qualifier
+    # has to sit in the cadence sentence itself, not merely somewhere in the
+    # paragraph.
+    cadence = reminder.split("review_memory", 1)[0].rsplit(". ", 1)[-1].casefold()
+    assert "at balanced/maximal" in cadence, cadence
+
+
+def test_every_carrier_file_states_the_cadence_bounds_on_its_own() -> None:
+    """Per FILE, not concatenated: a pair that is only jointly complete is not.
+
+    Asserting skill+operations together lets either file drop the cadence, the
+    once-per bound, the do-not-rescan rule or the three-candidate cap while the
+    other one covers for it -- and an agent that loads only one of them is then
+    told something the tests never checked.
+    """
+    for path in (
+        Path("src/exomem/_scaffold/_Schema/SKILL.md"),
+        Path("plugins/claude-code/skills/exomem/SKILL.md"),
+        Path("src/exomem/_scaffold/_Schema/references/operations.md"),
+        Path("plugins/claude-code/skills/exomem/references/operations.md"),
+    ):
+        text = path.read_text(encoding="utf-8")
+        prose = " ".join(text.split())
+        folded = prose.casefold()
+        assert "limit=3" in prose, path
+        assert "once per session" in folded, path
+        assert "at most three candidates" in folded, path
+        assert ("do not rescan" in folded) or ("do not repeat" in folded), path
 
 
 def test_portable_skill_and_operation_reference_carry_the_same_lifecycle() -> None:
@@ -858,6 +956,19 @@ def test_hookless_custom_instruction_blocks_name_the_ordinary_entity_boundary() 
         assert "before the final response" in block
         assert "once per chat" in block
         assert "limit=3" in block
+        # The spec's unavailable-skip rule: a surface that cannot request the
+        # category must skip, not invent a substitute. Without it the pasted
+        # block reads as an unconditional instruction.
+        folded = block.casefold()
+        assert "unavailable" in folded and "skip" in folded, block
+        # The block is bounded by the 1,500-byte web custom-instructions limit,
+        # so it defers the decision order to the bootstrap payload it already
+        # instructs the agent to follow. That deferral is only honest if the
+        # instruction to follow bootstrap is actually present.
+        assert 'bootstrap(profile="compact")' in block
+        assert "follow it" in folded
+        for restated in ("stop ambiguity", "hydrate before create", "resolve first"):
+            assert restated not in folded, restated
 
 
 def test_hookless_client_spends_one_ordinary_read_and_one_general_recheck(
@@ -916,6 +1027,36 @@ def test_hookless_client_spends_one_ordinary_read_and_one_general_recheck(
     assert repeated_general is None
     assert calls == ["ordinary-after-primary", "general-mutation"]
 
+    # 5.2's last leg: a separately confirmed hydration batch buys exactly one
+    # bounded same-identity continuation, on the same review ref, and it is a
+    # continuation rather than a fresh scan.
+    target = _entity(tmp_path, title="cobalt workshop", slug="cobalt-workshop")
+    for index, body in enumerate(
+        ("I work with cobalt workshop.", "I use cobalt workshop.", "I attend cobalt workshop."),
+        start=3,
+    ):
+        _note(tmp_path, index, body)
+    next_session = attention.attention(
+        tmp_path,
+        categories=route["categories"],
+        limit=route["limit"],
+        record_surfacing=False,
+    )
+    hydration = next(
+        item
+        for item in next_session.items
+        if item.reasons[0]["meta"]["identity"] == "cobalt workshop"
+    )
+    work = curation.work_item(tmp_path, review_ref=hydration.ref)
+    assert work["entity_candidate"]["candidate_state"] == "hydration"
+    _apply_hydration_batch(tmp_path, target=target, item=work, ordinal=1)
+    continuation = curation.work_item(
+        tmp_path, review_ref=hydration.ref, hydration_recheck=1
+    )
+    assert continuation["entity_candidate"]["review_ref"] == hydration.ref
+    assert lifecycle["hydration_continuation"]["same_identity_only"] is True
+    assert lifecycle["hydration_continuation"]["fresh_confirmation_per_batch"] is True
+
 
 def test_three_batch_and_nine_batch_carrier_budgets_are_exact(tmp_path: Path) -> None:
     lifecycle = commands.op_bootstrap(tmp_path)["entity_registry"]["lifecycle"]
@@ -941,3 +1082,327 @@ def test_three_batch_and_nine_batch_carrier_budgets_are_exact(tmp_path: Path) ->
 
     assert journey(3) == (3, 3, False, 0)
     assert journey(9) == (8, 8, True, 1)
+
+
+def test_ninth_binding_rebuilt_from_the_closure_response_is_not_proposable(
+    tmp_path: Path,
+) -> None:
+    """The closure read must not be re-assemblable into an executable ninth batch.
+
+    Withholding the batch is only a bound if the response cannot be turned back
+    into one.  An agent that keeps the ordinal-8 payload and re-proposes from it
+    is exactly the ninth mutation the eight-batch budget exists to refuse.
+    """
+    target = _hydration_corpus(tmp_path, identity="silver forum", contexts=72)
+    review_ref = _candidate(tmp_path).ref
+    assert review_ref is not None
+    item = curation.work_item(tmp_path, review_ref=review_ref)
+    for ordinal in range(1, 9):
+        _apply_hydration_batch(tmp_path, target=target, item=item, ordinal=ordinal)
+        item = curation.work_item(
+            tmp_path, review_ref=review_ref, hydration_recheck=ordinal
+        )
+
+    rebuilt = dict(item["entity_candidate"])
+    rebuilt.pop("closure_only", None)
+    rebuilt.pop("deferred_remaining_count", None)
+    rebuilt["executable"] = True
+    plan = {
+        "version": 1,
+        "title": "Connect a ninth batch the closure read never disclosed",
+        "entity_candidate": rebuilt,
+        "steps": [
+            {
+                "step_id": "ninth",
+                "kind": "edit",
+                "args": {
+                    "path": "Knowledge Base/Notes/context-64.md",
+                    "why": "Attempt a ninth hydration mutation this session.",
+                    "operation": {
+                        "kind": "replace_string",
+                        "old_string": "silver forum",
+                        "new_string": f"[[{target.removesuffix('.md')}|silver forum]]",
+                        "expected_hash": content_hash(
+                            (tmp_path / "Knowledge Base/Notes/context-64.md").read_text(
+                                encoding="utf-8"
+                            )
+                        ),
+                    },
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(curation.CurationError) as raised:
+        curation.propose(tmp_path, plan)
+    assert raised.value.code in {
+        "CURATION_ENTITY_CANDIDATE_STALE",
+        "CURATION_ENTITY_BATCH_STALE",
+    }, raised.value.code
+
+
+def _relation_candidate(root: Path, *, source: str, target: str):  # noqa: ANN202
+    review = commands.op_review_memory(root, mode="relation-queue")
+    candidate = next(
+        row
+        for group in review["groups"]
+        for row in group["items"]
+        if row["from"] == source and row["to"] == target
+    )
+    expected_hash = next(
+        group["content_hash"] for group in review["groups"] if group["path"] == source
+    )
+    return candidate, expected_hash
+
+
+def _hydration_with_relation(root: Path, identity: str = "cobalt workshop") -> str:
+    """A hydration corpus whose first context both mentions and wikilinks the target.
+
+    The plain mention keeps the line a disconnected context; the separate
+    wikilink line raises an unresolved-relation candidate on the same page. That
+    is the only shape in which the accept-relation hydration route is reachable.
+    """
+    target = _entity(root, title=identity, slug=identity.replace(" ", "-"))
+    stem = target.removesuffix(".md")
+    _write(
+        root,
+        "Knowledge Base/Notes/context-00.md",
+        "---\ntype: insight\ntitle: Context 0\nstatus: active\n---\n"
+        f"# Context 0\n\nI work with {identity}.\n\nSee also [[{stem}]] for the roster.\n",
+    )
+    for index, body in enumerate((f"I use {identity}.", f"I attend {identity}."), start=1):
+        _note(root, index, body)
+    return target
+
+
+def test_hydration_accepts_a_reviewed_relation_to_the_bound_target(tmp_path: Path) -> None:
+    target = _hydration_with_relation(tmp_path)
+    item = curation.work_item(tmp_path, review_ref=_candidate(tmp_path).ref)
+    binding = item["entity_candidate"]
+    assert binding["candidate_state"] == "hydration"
+    assert item["allowed_candidate_step_kinds"] == ["accept-relation", "edit"]
+    source = "Knowledge Base/Notes/context-00.md"
+    assert source in {row["path"] for row in binding["first_disconnected_context_batch"]}
+    candidate, expected_hash = _relation_candidate(tmp_path, source=source, target=target)
+
+    proposal = curation.propose(
+        tmp_path,
+        {
+            "version": 1,
+            "title": "Accept one reviewed relation to the bound Entity",
+            "entity_candidate": binding,
+            "steps": [
+                {
+                    "step_id": "relation",
+                    "kind": "accept-relation",
+                    "args": {
+                        "ref": candidate["ref"],
+                        "expected_hash": expected_hash,
+                        "why": "Connect the reviewed context to the bound Entity.",
+                        "expected_fingerprint": candidate["fingerprint"],
+                    },
+                }
+            ],
+        },
+    )
+    result = curation.apply(
+        tmp_path,
+        run_id=proposal["run_id"],
+        plan_id=proposal["plan_id"],
+        expected_plan_fingerprint=proposal["plan_fingerprint"],
+        why="Confirm one reviewed hydration relation.",
+    )
+    while result["phase"] != "completed":
+        result = curation.resume(
+            tmp_path, run_id=proposal["run_id"], plan_id=proposal["plan_id"]
+        )
+    assert result["phase"] == "completed"
+    assert "## Relations" in (tmp_path / source).read_text(encoding="utf-8")
+
+
+def test_hydration_refuses_a_relation_to_a_different_entity(tmp_path: Path) -> None:
+    """X1: the relation-target containment guard, exercised rather than assumed."""
+    _hydration_with_relation(tmp_path)
+    other = _entity(tmp_path, title="tin syndicate", slug="tin-syndicate")
+    stem = other.removesuffix(".md")
+    _write(
+        tmp_path,
+        "Knowledge Base/Notes/context-03.md",
+        "---\ntype: insight\ntitle: Context 3\nstatus: active\n---\n"
+        f"# Context 3\n\nI work with cobalt workshop.\n\nSee also [[{stem}]] elsewhere.\n",
+    )
+    item = curation.work_item(tmp_path, review_ref=_candidate(tmp_path).ref)
+    binding = item["entity_candidate"]
+    source = "Knowledge Base/Notes/context-03.md"
+    assert source in {row["path"] for row in binding["first_disconnected_context_batch"]}
+    candidate, expected_hash = _relation_candidate(tmp_path, source=source, target=other)
+
+    with pytest.raises(curation.CurationError, match="CURATION_ENTITY_BATCH_STALE"):
+        curation.propose(
+            tmp_path,
+            {
+                "version": 1,
+                "title": "Accept a relation pointing away from the bound Entity",
+                "entity_candidate": binding,
+                "steps": [
+                    {
+                        "step_id": "relation",
+                        "kind": "accept-relation",
+                        "args": {
+                            "ref": candidate["ref"],
+                            "expected_hash": expected_hash,
+                            "why": "Attempt a relation outside the reviewed targets.",
+                            "expected_fingerprint": candidate["fingerprint"],
+                        },
+                    }
+                ],
+            },
+        )
+
+
+def test_hydration_refuses_an_edit_outside_the_reviewed_batch(tmp_path: Path) -> None:
+    """X6: an edit on a context the review never batched must fail closed."""
+    target = _hydration_corpus(tmp_path, identity="silver forum", contexts=12)
+    item = curation.work_item(tmp_path, review_ref=_candidate(tmp_path).ref)
+    binding = item["entity_candidate"]
+    batched = {row["path"] for row in binding["first_disconnected_context_batch"]}
+    outside = next(
+        path
+        for path in (f"Knowledge Base/Notes/context-{index:02d}.md" for index in range(12))
+        if path not in batched
+    )
+    source = (tmp_path / outside).read_text(encoding="utf-8")
+
+    with pytest.raises(curation.CurationError, match="CURATION_ENTITY_BATCH_STALE"):
+        curation.propose(
+            tmp_path,
+            {
+                "version": 1,
+                "title": "Connect a context the review never batched",
+                "entity_candidate": binding,
+                "steps": [
+                    {
+                        "step_id": "outside",
+                        "kind": "edit",
+                        "args": {
+                            "path": outside,
+                            "why": "Attempt an unreviewed hydration context.",
+                            "operation": {
+                                "kind": "replace_string",
+                                "old_string": "silver forum",
+                                "new_string": f"[[{target.removesuffix('.md')}|silver forum]]",
+                                "expected_hash": content_hash(source),
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+
+
+def test_promotion_refuses_a_name_that_is_not_the_bound_identity(tmp_path: Path) -> None:
+    """X3: the promotion name must preserve the reviewed normalized identity."""
+    _promotion(tmp_path)
+    item = curation.work_item(tmp_path, review_ref=_candidate(tmp_path).ref)
+
+    with pytest.raises(curation.CurationError, match="CURATION_ENTITY_ROUTE_INVALID"):
+        curation.propose(
+            tmp_path,
+            {
+                "version": 1,
+                "title": "Promote under a name the review never resolved",
+                "entity_candidate": item["entity_candidate"],
+                "steps": [
+                    {
+                        "step_id": "promote",
+                        "kind": "create-entity",
+                        "args": {
+                            "entity_type": "organization",
+                            "name": "bronze consortium",
+                            "summary": "A different identity than the reviewed one.",
+                        },
+                    }
+                ],
+            },
+        )
+
+
+def test_malformed_review_ref_is_invalid_rather_than_stale(tmp_path: Path) -> None:
+    """A ref that was never well-formed is a caller error, not a drifted review.
+
+    Reporting it as STALE tells the agent to re-read and retry, which can never
+    succeed, and hides a malformed argument behind a concurrency story.
+    """
+    _promotion(tmp_path)
+
+    with pytest.raises(curation.CurationError) as raised:
+        curation.work_item(tmp_path, review_ref="not-a-review-ref")
+    assert raised.value.code == "CURATION_ENTITY_REVIEW_REF_INVALID"
+
+
+@pytest.mark.parametrize("missing", ["candidate_state", "grammar_version"])
+def test_candidate_meta_without_state_or_grammar_fails_closed(missing: str) -> None:
+    """A silent default turns a signal we could not read into an executable route.
+
+    Defaulting `candidate_state` to "promotion" means a candidate whose state is
+    missing is offered a create-entity plan; defaulting the grammar version
+    seals a binding against a grammar the review never named.
+    """
+    meta = {
+        "candidate_state": "hydration",
+        "identity": "cobalt workshop",
+        "signal_version": "c" * 64,
+        "grammar_version": "identity-frames-v1",
+        "predicate_table_digest": "e" * 64,
+        "registry_fingerprint": "f" * 64,
+        "disconnected_contexts": [],
+        "remaining_disconnected_count": 0,
+        "resolution_candidates": [],
+    }
+    meta.pop(missing)
+
+    class _Item:
+        ref = "exomem://review/" + "a" * 24
+        fingerprint = "b" * 24
+        reasons = [{"category": "entity_recurrence", "meta": meta}]
+
+    with pytest.raises(curation.CurationError) as raised:
+        curation._entity_candidate_binding(_Item(), registry_fallback="f" * 64)
+    assert raised.value.code == "CURATION_ENTITY_CANDIDATE_INVALID"
+
+
+def test_entity_candidates_never_enter_due_state(tmp_path: Path) -> None:
+    """f21: the recurrence category is explicit-request-only, never a due nag.
+
+    A candidate that reached due-state would arrive unasked on ordinary results,
+    which is precisely the nudge the no-nudge architecture withholds until the
+    existing evidence gate authorizes it. Naming the category here means the
+    absence is asserted, not merely a side effect of nobody wiring it up.
+    """
+    from exomem import due_state
+
+    assert "entity_recurrence" not in due_state.PROJECTION_CATEGORIES
+    assert "entity_recurrence" not in due_state.DELTA_CATEGORIES
+    assert "entity_recurrence" not in due_state.PAGE_DELTA_CATEGORIES
+
+    _promotion(tmp_path)
+    assert _candidate(tmp_path).ref is not None
+    assert "entity_recurrence" not in json.dumps(due_state.recompute(tmp_path))
+
+
+def test_item_by_ref_still_resolves_a_non_entity_partitioned_category(
+    tmp_path: Path,
+) -> None:
+    """The entity narrowing must not have taken the shared triage path with it.
+
+    `entity_candidate_by_ref` is a narrowed lookup beside `item_by_ref`; if the
+    narrowing had been applied to the shared resolver instead, every other
+    partitioned category would silently stop resolving.
+    """
+    _promotion(tmp_path)
+    report = attention.attention(
+        tmp_path, categories=["supersession_integrity"], limit=3, record_surfacing=False
+    )
+    assert report is not None
+    for item in report.items:
+        assert attention.item_by_ref(tmp_path, item.ref).ref == item.ref

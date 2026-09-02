@@ -440,8 +440,8 @@ an explicit reviewed operation because paths are graph addresses.
 
 ## recurring entity lifecycle
 
-At balanced or maximal prominence, spend one ordinary recurrence read on the
-first turn after bootstrap, after primary work and before the final response:
+At balanced or maximal prominence, spend one ordinary recurrence read once per session,
+on the first turn after bootstrap, after primary work and before the final response:
 `review_memory(mode="attention", categories=["entity_recurrence"], limit=3)`.
 Do not repeat it on later ordinary prompts. The response is deterministic
 evidence for the active agent, not an Entity decision. It returns at most three
