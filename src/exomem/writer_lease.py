@@ -52,6 +52,7 @@ from .mutation_terminal import (
     split_response_detail,
     valid_collection_receipt,
     valid_structured_files_receipt,
+    with_fast_acknowledgement,
 )
 from .privacy_log import content_private_logging_enabled
 
@@ -159,6 +160,277 @@ _ACTIVE_LEASE_MANAGER: ContextVar[Any | None] = ContextVar(
 _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = ContextVar(
     "exomem_active_direct_mutation_guards", default=()
 )
+
+_FAST_ACK_DEADLINE_SECONDS = 2.0
+_PENDING_VISIBILITY_PUBLISHER: Callable[[Path, Any], bool] | None = None
+_fast_ack_monotonic = time.monotonic
+
+
+@dataclass(slots=True)
+class _FastAcknowledgementBatch:
+    receipt: Any
+    canonical_commit_monotonic: float
+
+
+@dataclass(slots=True)
+class _FastAcknowledgementSession:
+    vault_root: Path
+    request_id: str
+    mutation_attempt_digest: str
+    terminal_replay_until: float
+    advisory_required: bool
+    sequence: int = 0
+    #: One acknowledgement carries one stable advisory result ref, so the first
+    #: canonical batch that can name a target claims the session's advisory job
+    #: and later batches in the same mutation carry none.
+    advisory_claimed: bool = False
+    batches: list[_FastAcknowledgementBatch] = field(default_factory=list)
+
+
+_ACTIVE_FAST_ACK_SESSION: ContextVar[_FastAcknowledgementSession | None] = ContextVar(
+    "exomem_active_fast_ack_session", default=None
+)
+
+
+def _fast_ack_enabled() -> bool:
+    return os.environ.get("EXOMEM_FAST_DURABLE_ACK") == "1"
+
+
+def active_derived_batch_custody(vault_root: Path) -> bool:
+    """Whether this exact vault currently owns a governed fast-ack session."""
+    session = _ACTIVE_FAST_ACK_SESSION.get()
+    return session is not None and Path(vault_root) == session.vault_root
+
+
+def prepare_active_derived_batch(
+    vault_root: Path,
+    paths: tuple[Any, ...],
+    *,
+    canonical_generation: str | None = None,
+    checkpoint_id: str | None = None,
+    advisory_target_rel_path: str | None = None,
+) -> Any | None:
+    """Prepare exact receipt custody for the active governed mutation batch.
+
+    ``advisory_target_rel_path`` is the one governed note this canonical batch
+    is about, as named by the batch's own semantic-page declaration. Advisory
+    custody applies only when that target is present in this batch with a
+    surviving after-hash, and its fingerprint is exactly that after-hash -- the
+    sha256 the advisory worker will later be asked to re-observe. When no
+    single target exists the component is not required for this batch.
+    """
+    session = _ACTIVE_FAST_ACK_SESSION.get()
+    root = Path(vault_root)
+    if session is None or root != session.vault_root or not paths:
+        return None
+    from . import derived_receipts
+
+    session.sequence += 1
+    identity_material = json.dumps(
+        {
+            "request_id": session.request_id,
+            "sequence": session.sequence,
+            "mutation_attempt_digest": session.mutation_attempt_digest,
+            "paths": [
+                [path.rel_path, path.before_hash, path.after_hash] for path in paths
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    batch_id = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()
+    canonical_generation = canonical_generation or batch_id
+    checkpoint_id = checkpoint_id or batch_id
+    advisory_target: str | None = None
+    advisory_fingerprint: str | None = None
+    if (
+        session.advisory_required
+        and not session.advisory_claimed
+        and advisory_target_rel_path is not None
+    ):
+        after_hash = next(
+            (
+                path.after_hash
+                for path in paths
+                if path.rel_path == advisory_target_rel_path
+            ),
+            None,
+        )
+        if after_hash is not None:
+            advisory_target = advisory_target_rel_path
+            advisory_fingerprint = after_hash
+            session.advisory_claimed = True
+    required_components = set(derived_receipts.DerivedComponent)
+    if advisory_target is None:
+        required_components.remove(derived_receipts.DerivedComponent.WRITE_ADVISORY)
+    return derived_receipts.prepare_batch(
+        root,
+        batch_id=batch_id,
+        mutation_attempt_digest=session.mutation_attempt_digest,
+        canonical_generation=canonical_generation,
+        checkpoint_id=checkpoint_id,
+        paths=paths,
+        required_components=required_components,
+        advisory_target_rel_path=advisory_target,
+        advisory_target_fingerprint=advisory_fingerprint,
+        terminal_replay_until=(
+            session.terminal_replay_until if advisory_target is not None else None
+        ),
+        advisory_retention_until=(
+            session.terminal_replay_until if advisory_target is not None else None
+        ),
+    )
+
+
+def complete_active_derived_batch(
+    receipt: Any | None,
+    *,
+    canonical_commit_monotonic: float,
+) -> None:
+    """Retain a successfully committed receipt for the post-authority handoff."""
+    if receipt is None:
+        return
+    session = _ACTIVE_FAST_ACK_SESSION.get()
+    if session is None:
+        raise RuntimeError("derived receipt committed outside its acknowledgement session")
+    session.batches.append(
+        _FastAcknowledgementBatch(receipt, float(canonical_commit_monotonic))
+    )
+
+
+def _wait_for_derived_component(
+    vault_root: Path,
+    receipt: Any,
+    status: Any,
+    *,
+    deadline_monotonic: float,
+) -> Any:
+    """Observe one already-running component without ever extending the deadline."""
+    from . import derived_receipts
+
+    current = status
+    while current.state == "claimed" and _fast_ack_monotonic() < deadline_monotonic:
+        time.sleep(min(0.025, max(0.0, deadline_monotonic - _fast_ack_monotonic())))
+        current = derived_receipts.component_status(
+            vault_root, receipt, current.component
+        )
+    return current
+
+
+def _fast_ack_outcome(values: Iterable[str], *, not_required: bool = False) -> str:
+    outcomes = tuple(values)
+    if not_required and outcomes and all(value == "not_required" for value in outcomes):
+        return "not_required"
+    if "failed" in outcomes:
+        return "failed"
+    if "pending" in outcomes:
+        return "pending"
+    return "completed"
+
+
+def _acknowledge_derived_batches(
+    result: Any,
+    session: _FastAcknowledgementSession,
+) -> Any:
+    """Prove, publish, signal and freeze one post-canonical status snapshot."""
+    if not session.batches:
+        return result
+    try:
+        from . import derived_receipts, index_sync
+
+        snapshots = []
+        advisory_refs: list[str] = []
+        deadline = (
+            min(batch.canonical_commit_monotonic for batch in session.batches)
+            + _FAST_ACK_DEADLINE_SECONDS
+        )
+        for batch in session.batches:
+            receipt = batch.receipt
+            proof = derived_receipts.prove_committed(
+                session.vault_root,
+                receipt,
+                current_generation=receipt.canonical_generation,
+            )
+            if (
+                proof.outcome != "ready"
+                or proof.batch_id != receipt.batch_id
+                or proof.canonical_generation != receipt.canonical_generation
+                or proof.canonical_replay_authorized
+            ):
+                raise RuntimeError("derived receipt did not prove the committed generation")
+            if not derived_receipts.publish_pending_visibility(
+                session.vault_root,
+                receipt,
+                publisher=_PENDING_VISIBILITY_PUBLISHER,
+            ):
+                raise RuntimeError("pending visibility publication was not proven")
+            derived_receipts.signal_components(session.vault_root, receipt)
+
+            statuses = []
+            for component in derived_receipts.DerivedComponent:
+                status = derived_receipts.component_status(
+                    session.vault_root, receipt, component
+                )
+                if status.state == "claimed":
+                    status = _wait_for_derived_component(
+                        session.vault_root,
+                        receipt,
+                        status,
+                        deadline_monotonic=deadline,
+                    )
+                statuses.append(status)
+            snapshots.append(index_sync.derived_acknowledgement_snapshot(statuses))
+            advisory_status = next(
+                status
+                for status in statuses
+                if status.component is derived_receipts.DerivedComponent.WRITE_ADVISORY
+            )
+            if advisory_status.state != "not_required":
+                result_ref = derived_receipts.advisory_result_ref(
+                    session.vault_root, receipt
+                )
+                if not result_ref:
+                    raise RuntimeError("applicable advisory custody has no stable result ref")
+                advisory_refs.append(result_ref)
+
+        if len(advisory_refs) > 1:  # pragma: no cover - one job per session
+            raise RuntimeError(
+                "one acknowledgement cannot carry several advisory result refs"
+            )
+        derived_sync = _fast_ack_outcome(
+            snapshot.derived_sync for snapshot in snapshots
+        )
+        graph_sync = _fast_ack_outcome(snapshot.graph_sync for snapshot in snapshots)
+        advisory_sync = _fast_ack_outcome(
+            (snapshot.advisory_sync for snapshot in snapshots),
+            not_required=True,
+        )
+        diagnostics = [
+            {"component": component, "state": state, "code": code}
+            for snapshot in snapshots
+            for component, state, code in snapshot.diagnostics
+        ]
+        return with_fast_acknowledgement(
+            result,
+            derived_sync=derived_sync,
+            derived_sync_components=tuple(
+                sorted(
+                    {
+                        component
+                        for snapshot in snapshots
+                        for component in snapshot.derived_sync_components
+                    }
+                )
+            ),
+            component_diagnostics=diagnostics,
+            advisory_sync=advisory_sync,
+            advisory_result_ref=advisory_refs[0] if advisory_refs else None,
+            graph_sync=graph_sync,
+        )
+    except _PostCommitOutcomeUncertain:
+        raise
+    except Exception as error:
+        raise _PostCommitOutcomeUncertain() from error
 
 
 def _direct_mutation_boundary(
@@ -2999,6 +3271,21 @@ class LeaseManager:
         request_id = mutation_request_id or str(uuid.uuid4())
         receipt = _receipt_tag(key) if key else None
         commit_state = {"observed": False}
+        fast_ack_session = (
+            _FastAcknowledgementSession(
+                vault_root=receipt_vault_root,
+                request_id=request_id,
+                mutation_attempt_digest=digest,
+                terminal_replay_until=self.idempotency.clock()
+                + (expires_after or _IMPLICIT_RETRY_TTL_SECONDS),
+                advisory_required=True,
+            )
+            if _fast_ack_enabled()
+            and not kwargs.get("suggestions")
+            and receipt_vault_root is not None
+            and _is_receipt_vault_root(receipt_vault_root)
+            else None
+        )
         _log_mutation_event(
             "received",
             request_id=request_id,
@@ -3036,6 +3323,11 @@ class LeaseManager:
             trace_token = _ACTIVE_MUTATION_TRACE.set((request_id, command.name, receipt or "none"))
             commit_token = _ACTIVE_MUTATION_COMMITTED.set(False)
             manager_token = _ACTIVE_LEASE_MANAGER.set(self)
+            fast_ack_token = (
+                _ACTIVE_FAST_ACK_SESSION.set(fast_ack_session)
+                if fast_ack_session is not None
+                else None
+            )
             try:
                 leaf_result = command.leaf(*injected, **kwargs)
                 if _ACTIVE_MUTATION_COMMITTED.get():
@@ -3072,6 +3364,8 @@ class LeaseManager:
                 raise
             finally:
                 commit_state["observed"] = _ACTIVE_MUTATION_COMMITTED.get()
+                if fast_ack_token is not None:
+                    _ACTIVE_FAST_ACK_SESSION.reset(fast_ack_token)
                 _ACTIVE_LEASE_MANAGER.reset(manager_token)
                 _ACTIVE_MUTATION_COMMITTED.reset(commit_token)
                 _ACTIVE_MUTATION_TRACE.reset(trace_token)
@@ -3248,6 +3542,14 @@ class LeaseManager:
             if isinstance(terminal_result, Mapping):
                 return with_graph_outcome(terminal_result, {"graph_sync": "completed"})
             return terminal_result
+
+        def finish_fast_ack_and_graph(result: Any) -> Any:
+            acknowledged = (
+                _acknowledge_derived_batches(result, fast_ack_session)
+                if fast_ack_session is not None
+                else result
+            )
+            return wait_for_graph_sync(acknowledged)
 
         def persist_graph_sync_progress(
             result: Any, attempt: _ExecutionAttempt, canonical_disposition: str = "success"
@@ -3620,7 +3922,7 @@ class LeaseManager:
                 ),
                 commit_observed=lambda: commit_state["observed"],
                 after_canonical_persisted=persist_graph_sync_progress,
-                after_operation_guard=wait_for_graph_sync,
+                after_operation_guard=finish_fast_ack_and_graph,
                 resume_canonically_committed=resume_graph_sync,
                 commit_evidence=exact_commit_evidence,
                 legacy_graph_pending_proof=legacy_graph_pending_proof,

@@ -3708,7 +3708,10 @@ def _prewarm_embeddings() -> None:
     every failure, including the model being unavailable or still warming
     up, is swallowed.
     """
-    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+    if (
+        os.environ.get("EXOMEM_FAST_DURABLE_ACK") == "1"
+        or os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")
+    ):
         return
     try:
         from . import readiness

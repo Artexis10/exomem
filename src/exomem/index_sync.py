@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from . import call_spans, deferred_index, semantic_index
+from .derived_receipts import DerivedComponent, DerivedComponentStatus
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +73,87 @@ _DEFERRAL_TELEMETRY_LOCK = threading.Lock()
 #: paths. The disabled codes record nothing and are deliberately absent, so a
 #: stale queue entry naming the same path can never bless them.
 _GRAPH_COVERAGE_CODES = frozenset({"graph_repair_queued"})
+
+_FAST_ACK_PENDING_STATES = frozenset({"prepared", "ready", "claimed"})
+_FAST_ACK_FAILED_STATES = frozenset(
+    {
+        "retryable",
+        "aborted",
+        "superseded",
+        "reconcile_required",
+        "failed",
+    }
+)
+_FAST_ACK_NON_GRAPH_COMPONENTS = tuple(
+    component
+    for component in DerivedComponent
+    if component not in {DerivedComponent.GRAPH, DerivedComponent.WRITE_ADVISORY}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DerivedAcknowledgementSnapshot:
+    """Bounded acknowledgement-time view; never worker or replay authority."""
+
+    derived_sync: str
+    derived_sync_components: tuple[str, ...]
+    graph_sync: str
+    advisory_sync: str
+    diagnostics: tuple[tuple[str, str, str | None], ...]
+
+
+def derived_acknowledgement_snapshot(
+    statuses: Iterable[DerivedComponentStatus],
+) -> DerivedAcknowledgementSnapshot:
+    """Separate non-graph, graph and advisory outcomes from one exact snapshot."""
+    by_component = {status.component: status for status in statuses}
+    if set(by_component) != set(DerivedComponent):
+        raise ValueError("derived acknowledgement requires every closed component")
+
+    def outcome(status: DerivedComponentStatus, *, advisory: bool = False) -> str:
+        if status.state == "not_required":
+            return "not_required" if advisory else "completed"
+        if status.state == "completed":
+            return "completed"
+        if status.state in _FAST_ACK_FAILED_STATES:
+            return "failed"
+        if status.state in _FAST_ACK_PENDING_STATES:
+            return "pending"
+        raise ValueError("unknown derived component state")
+
+    unfinished: list[str] = []
+    non_graph_outcomes: list[str] = []
+    for component in _FAST_ACK_NON_GRAPH_COMPONENTS:
+        component_outcome = outcome(by_component[component])
+        non_graph_outcomes.append(component_outcome)
+        if component_outcome != "completed":
+            unfinished.append(component.value)
+    derived_sync = (
+        "failed"
+        if "failed" in non_graph_outcomes
+        else "pending"
+        if "pending" in non_graph_outcomes
+        else "completed"
+    )
+    diagnostics = tuple(
+        sorted(
+            (
+                status.component.value,
+                status.state,
+                status.failure_code,
+            )
+            for status in by_component.values()
+        )
+    )
+    return DerivedAcknowledgementSnapshot(
+        derived_sync=derived_sync,
+        derived_sync_components=tuple(sorted(unfinished)),
+        graph_sync=outcome(by_component[DerivedComponent.GRAPH]),
+        advisory_sync=outcome(
+            by_component[DerivedComponent.WRITE_ADVISORY], advisory=True
+        ),
+        diagnostics=diagnostics,
+    )
 
 
 def _note_deferral(reason: str) -> None:

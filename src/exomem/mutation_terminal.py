@@ -68,6 +68,31 @@ TERMINAL_STATES = frozenset({"committed", "rejected"})
 #: CI, so a second hand-maintained copy of this vocabulary would drift silently
 #: until someone ran the script against a real build. One definition, imported.
 GRAPH_SYNC_OUTCOMES = frozenset({"completed", "failed", "pending"})
+DERIVED_SYNC_OUTCOMES = frozenset({"completed", "failed", "pending"})
+ADVISORY_SYNC_OUTCOMES = frozenset(
+    {"completed", "failed", "not_required", "pending"}
+)
+
+_DERIVED_COMPONENT_NAMES = frozenset(
+    {
+        "freshness",
+        "memory_refs",
+        "resolver",
+        "semantic_purge",
+        "lexstore",
+        "embeddings",
+        "claims",
+    }
+)
+_DERIVED_FAILURE = (
+    "DERIVED_COMPONENT_FAILED",
+    "Run reconcile to repair derived state.",
+)
+_ADVISORY_FAILURE = (
+    "WRITE_ADVISORY_FAILED",
+    "Query the advisory result or retry reconciliation.",
+)
+_MAX_DERIVED_DIAGNOSTICS = 9
 
 #: Keys a client may branch on. Everything else in a response is advisory.
 _ENVELOPE_KEYS = (
@@ -621,6 +646,95 @@ def committed_terminal(
     return terminal
 
 
+def with_fast_acknowledgement(
+    terminal: Mapping[str, Any],
+    *,
+    derived_sync: str,
+    derived_sync_components: Sequence[str] = (),
+    component_diagnostics: Sequence[Mapping[str, Any]] = (),
+    advisory_sync: str,
+    advisory_result_ref: str | None = None,
+    graph_sync: str | None = None,
+) -> dict[str, Any]:
+    """Freeze one bounded derived-custody snapshot into a committed terminal."""
+    if (
+        terminal.get("_terminal") != _TERMINAL_MARKER
+        or terminal.get("version") != _TERMINAL_VERSION
+        or terminal.get("state") != "committed"
+    ):
+        raise ValueError("fast acknowledgement requires a committed mutation terminal")
+    if derived_sync not in DERIVED_SYNC_OUTCOMES:
+        raise ValueError("unknown derived acknowledgement outcome")
+    if advisory_sync not in ADVISORY_SYNC_OUTCOMES:
+        raise ValueError("unknown advisory acknowledgement outcome")
+    if graph_sync is not None and graph_sync not in GRAPH_SYNC_OUTCOMES:
+        raise ValueError("unknown graph acknowledgement outcome")
+
+    components = tuple(sorted(set(derived_sync_components)))
+    if len(components) > len(_DERIVED_COMPONENT_NAMES) or any(
+        component not in _DERIVED_COMPONENT_NAMES for component in components
+    ):
+        raise ValueError("derived acknowledgement components are invalid")
+    if derived_sync == "completed" and components:
+        raise ValueError("completed derived acknowledgement cannot name unfinished work")
+
+    diagnostics: list[dict[str, str | None]] = []
+    for item in component_diagnostics:
+        if len(diagnostics) >= _MAX_DERIVED_DIAGNOSTICS:
+            break
+        component = item.get("component")
+        state = item.get("state")
+        code = item.get("code")
+        if (
+            not isinstance(component, str)
+            or not component
+            or len(component) > 32
+            or not isinstance(state, str)
+            or not state
+            or len(state) > 32
+            or (code is not None and (not isinstance(code, str) or len(code) > 64))
+        ):
+            raise ValueError("derived acknowledgement diagnostic is invalid")
+        diagnostics.append({"component": component, "state": state, "code": code})
+    diagnostics.sort(key=lambda item: item["component"] or "")
+
+    applicable_advisory = advisory_sync != "not_required"
+    if applicable_advisory != (
+        isinstance(advisory_result_ref, str)
+        and advisory_result_ref.startswith("exomem://write-advisory-result/")
+        and len(advisory_result_ref) <= 256
+    ):
+        raise ValueError("applicable advisory acknowledgement requires one stable result ref")
+
+    frozen = dict(terminal)
+    frozen["derived_sync"] = derived_sync
+    if components:
+        frozen["derived_sync_components"] = list(components)
+    else:
+        frozen.pop("derived_sync_components", None)
+    if derived_sync == "failed":
+        frozen["derived_sync_code"], frozen["derived_sync_next_action"] = _DERIVED_FAILURE
+    else:
+        frozen.pop("derived_sync_code", None)
+        frozen.pop("derived_sync_next_action", None)
+    frozen["advisory_sync"] = advisory_sync
+    if advisory_result_ref is not None:
+        frozen["advisory_result_ref"] = advisory_result_ref
+    else:
+        frozen.pop("advisory_result_ref", None)
+    if advisory_sync == "failed":
+        frozen["advisory_sync_code"], frozen["advisory_sync_next_action"] = (
+            _ADVISORY_FAILURE
+        )
+    else:
+        frozen.pop("advisory_sync_code", None)
+        frozen.pop("advisory_sync_next_action", None)
+    if graph_sync is not None:
+        frozen["graph_sync"] = graph_sync
+    frozen["_derived_diagnostics"] = diagnostics
+    return frozen
+
+
 def replayed_terminal(
     leaf_result: Any,
     *,
@@ -743,6 +857,40 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     compact = {key: result[key] for key in _ENVELOPE_KEYS if key in result}
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]
+    if result.get("derived_sync") in DERIVED_SYNC_OUTCOMES:
+        compact["derived_sync"] = result["derived_sync"]
+        components = result.get("derived_sync_components")
+        if isinstance(components, (list, tuple)):
+            bounded_components = sorted(
+                {
+                    component
+                    for component in components
+                    if isinstance(component, str)
+                    and component in _DERIVED_COMPONENT_NAMES
+                }
+            )
+            if bounded_components:
+                compact["derived_sync_components"] = bounded_components
+        if result["derived_sync"] == "failed":
+            if result.get("derived_sync_code") == _DERIVED_FAILURE[0]:
+                compact["derived_sync_code"] = _DERIVED_FAILURE[0]
+            if result.get("derived_sync_next_action") == _DERIVED_FAILURE[1]:
+                compact["derived_sync_next_action"] = _DERIVED_FAILURE[1]
+    if result.get("advisory_sync") in ADVISORY_SYNC_OUTCOMES:
+        compact["advisory_sync"] = result["advisory_sync"]
+        advisory_ref = result.get("advisory_result_ref")
+        if (
+            result["advisory_sync"] != "not_required"
+            and isinstance(advisory_ref, str)
+            and advisory_ref.startswith("exomem://write-advisory-result/")
+            and len(advisory_ref) <= 256
+        ):
+            compact["advisory_result_ref"] = advisory_ref
+        if result["advisory_sync"] == "failed":
+            if result.get("advisory_sync_code") == _ADVISORY_FAILURE[0]:
+                compact["advisory_sync_code"] = _ADVISORY_FAILURE[0]
+            if result.get("advisory_sync_next_action") == _ADVISORY_FAILURE[1]:
+                compact["advisory_sync_next_action"] = _ADVISORY_FAILURE[1]
     if _is_record_receipt(leaf):
         if leaf["receipt_version"] == _LIFECYCLE_RECEIPT_VERSION:
             compact.update(
@@ -819,7 +967,16 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     if warnings:
         compact["warnings"] = warnings
     if detail == "full":
-        compact["diagnostics"] = leaf
+        derived_diagnostics = result.get("_derived_diagnostics")
+        if isinstance(derived_diagnostics, (list, tuple)):
+            compact["diagnostics"] = {
+                "leaf_result": leaf,
+                "derived_components": list(
+                    derived_diagnostics[:_MAX_DERIVED_DIAGNOSTICS]
+                ),
+            }
+        else:
+            compact["diagnostics"] = leaf
     return compact
 
 
