@@ -1521,6 +1521,16 @@ def test_hosted_operator_maintenance_refusal_preserves_terminal_guidance(
             ),
             commands_module.HOSTED_ALPHA_AGENT_V4_PROFILE,
         ),
+        # v5 admits `mode="curation"`. The entitlement it gains is exactly that
+        # one mode: `fix`, `reconcile` and `backfill-ids` stay operator-only, and
+        # the profile that opened the narrow door must not have widened this one.
+        (
+            (
+                "/private/exomem/v1/agent/"
+                f"{commands_module.HOSTED_ALPHA_AGENT_V5_PROFILE}/command/maintain_memory"
+            ),
+            commands_module.HOSTED_ALPHA_AGENT_V5_PROFILE,
+        ),
     ],
 )
 def test_hosted_http_surfaces_refuse_write_maintenance_before_manager_dispatch(
@@ -2556,3 +2566,496 @@ def test_hosted_server_build_skips_personal_oauth_assets_rest_and_transfer(
         path.read_text(encoding="utf-8", errors="replace")
         for path in config.vault_root.rglob("*.md")
     )
+
+
+# ---------------------------------------------------------------------------
+# v5 one-step governed curation, admitted through the generic registry boundary
+#
+# `test_frozen_hosted_v4_neither_advertises_nor_admits_curation` above pins the
+# closed door. These pin the open one: the six properties task 7.4 names, each
+# mirroring the v4-era family that already states it for another command, and
+# each driven through the real profile-scoped route rather than the leaf.
+# ---------------------------------------------------------------------------
+
+V5_PROFILE = commands_module.HOSTED_ALPHA_AGENT_V5_PROFILE
+V5_ROUTE = f"/private/exomem/v1/agent/{V5_PROFILE}"
+
+
+def _v5_cell(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cell_id: str,
+    credential: str,
+    production_invoker: bool = False,
+) -> tuple[_ASGIClient, HostedCellConfig, HostedCellLifecycle, IsolatedInvoker]:
+    """A cell whose operator has selected v5. Only the selection is stubbed."""
+    monkeypatch.setattr(
+        HostedCellConfig,
+        "active_agent_profile",
+        property(lambda _config: V5_PROFILE),
+    )
+    return _cell(
+        tmp_path,
+        cell_id=cell_id,
+        credential=credential,
+        production_invoker=production_invoker,
+    )
+
+
+def _curation_step(step_id: str, slug: str, *, reviewed_none: bool = False) -> dict[str, Any]:
+    """One create-note step.
+
+    `reviewed_none` is the authoring contract's escape for a conclusion with no
+    honest relation to anything already saved. The first note in a fresh vault
+    has no relation *candidates*, so declaring a reviewed-none disposition there
+    is refused as not applicable; from the second note on the contract requires
+    one. So the flag is per step rather than a constant.
+    """
+    args: dict[str, Any] = {
+        "title": f"Curation {slug}",
+        "slug": slug,
+        "content": f"## Observations\n\n- [finding] Commit {slug} exactly once. ^{slug}\n",
+    }
+    if reviewed_none:
+        args["relation_disposition"] = "reviewed_none"
+        args["relation_review_reason"] = "No honest relation exists for this synthetic fixture."
+    return {"step_id": step_id, "kind": "create-note", "args": args}
+
+
+def _curation_plan(*steps: dict[str, Any]) -> dict[str, Any]:
+    return {"version": 1, "title": "Forward curation", "steps": list(steps)}
+
+
+def _curation(
+    client: _ASGIClient,
+    config: HostedCellConfig,
+    action: str,
+    arguments: dict[str, Any],
+    *,
+    idempotency_key: str | None = None,
+    principal: str = DEFAULT_PRINCIPAL,
+) -> httpx.Response:
+    return client.post(
+        f"{V5_ROUTE}/command/maintain_memory",
+        headers=_headers(config, principal=principal, idempotency_key=idempotency_key),
+        json={"mode": "curation", "curation_action": action, **arguments},
+    )
+
+
+def _approval(proposed: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": proposed["run_id"],
+        "plan_id": proposed["plan_id"],
+        "expected_plan_fingerprint": proposed["plan_fingerprint"],
+        "why": "Approved exact plan.",
+    }
+
+
+def test_v5_advertises_and_admits_curation_through_the_generic_registry_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counterpart of the frozen-v4 test, and the precondition for the rest.
+
+    "Without a candidate-specific executor" is the load-bearing half: v5 must
+    reach curation through the same `maintain_memory` object every other surface
+    resolves, not through a v5 branch in the resolver. So this asserts object
+    identity with the canonical registry entry, not merely that the call works.
+    """
+    client, config, _lifecycle, invoker = _v5_cell(
+        tmp_path,
+        monkeypatch,
+        cell_id="cell-v5-curation-admission",
+        credential="v5-curation-admission-credential-0001",
+    )
+
+    canonical = {command.name: command for command in commands_module.PRODUCT_COMMANDS}
+    resolved = {
+        command.name: command
+        for command in commands_module.product_commands_for_profile(V5_PROFILE, "rest")
+    }
+    assert resolved["maintain_memory"] is canonical["maintain_memory"], (
+        "v5 resolves a candidate-specific maintain_memory"
+    )
+
+    contract = client.get(f"{V5_ROUTE}/contract", headers=_headers(config))
+    assert contract.status_code == 200, contract.text
+    command = next(
+        item for item in contract.json()["commands"] if item["name"] == "maintain_memory"
+    )
+    curation_fields = {
+        "curation_action",
+        "run_id",
+        "plan",
+        "refs",
+        "paths",
+        "review_ref",
+        "hydration_recheck",
+        "expected_plan_fingerprint",
+    }
+    published = {item["name"] for item in command["params"]}
+    assert curation_fields <= published
+    assert curation_fields <= set(command["mcp_tool"]["inputSchema"]["properties"])
+    assert "curation" in command["mcp_tool"]["inputSchema"]["properties"]["mode"]["enum"]
+
+    proposed = _curation(
+        client, config, "propose", {"plan": _curation_plan(_curation_step("one", "v5-admits"))}
+    )
+    assert proposed.status_code == 200, proposed.text
+    assert proposed.json()["data"]["phase"] == "proposed"
+    assert [call["command"] for call in invoker.calls] == ["maintain_memory"]
+
+
+def test_v5_is_entitled_to_curation_and_to_nothing_else_in_maintain_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Entitlement has two halves and both have to be stated.
+
+    The half that is easy to forget is the positive one: a profile is entitled
+    to curation, so the call must actually be admitted. The half that is easy to
+    lose is the negative one: curation is the *only* maintenance mode it buys,
+    and `fix`, `reconcile` and `backfill-ids` stay operator-only -- refused
+    before the writer manager is ever asked for, on the same cell, in the same
+    request shape.
+    """
+    client, config, _lifecycle, _invoker = _v5_cell(
+        tmp_path,
+        monkeypatch,
+        cell_id="cell-v5-entitlement",
+        credential="v5-entitlement-service-credential-0001",
+        production_invoker=True,
+    )
+
+    # The positive half runs the real writer path, manager and all: curation is
+    # the one write mode that is allowed to get that far request-bound.
+    admitted = _curation(
+        client, config, "propose", {"plan": _curation_plan(_curation_step("one", "v5-entitled"))}
+    )
+    assert admitted.status_code == 200, admitted.text
+    assert admitted.json()["data"]["phase"] == "proposed"
+
+    # The negative half is the stronger claim, so the manager is booby-trapped
+    # only now: these three must be refused before dispatch is even asked for.
+    monkeypatch.setattr(
+        writer_lease,
+        "get_manager",
+        lambda: pytest.fail("hosted write maintenance reached manager dispatch"),
+    )
+    for mode in ("fix", "reconcile", "backfill-ids"):
+        refused = client.post(
+            f"{V5_ROUTE}/command/maintain_memory",
+            headers=_headers(config),
+            json={"mode": mode, "dry_run": False},
+        )
+        assert refused.status_code == 400, refused.text
+        assert refused.json()["error"]["code"] == "MAINTENANCE_REQUIRES_CLI", mode
+
+    # The entitlement is the profile's, not the cell's. The same cell's generic
+    # command route carries no product profile, so it falls back to the refusal
+    # every request-bound remote surface had before v5 -- fail closed, and the
+    # exception cannot be reached by dropping the profile from the URL.
+    generic = client.post(
+        "/private/exomem/v1/command/maintain_memory",
+        headers=_headers(config),
+        json={
+            "mode": "curation",
+            "curation_action": "propose",
+            "plan": _curation_plan(_curation_step("one", "v5-generic-route")),
+        },
+    )
+    assert generic.status_code == 400, generic.text
+    assert generic.json()["error"]["code"] == "MAINTENANCE_REQUIRES_CLI"
+
+
+def test_a_cell_on_an_older_profile_is_not_entitled_to_the_v5_curation_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other side of entitlement, mirroring the v1-refuses-v2-routes family.
+
+    Admission is the operator's selected profile, not the URL the caller types.
+    A v4 cell reaching for the v5 route is refused before any leaf runs -- so a
+    tenant cannot buy curation by addressing a profile its runtime never served.
+
+    This one holds identically before and after v5 admits curation, and it is
+    supposed to: it is a refusal, not a capability.
+    """
+    monkeypatch.setattr(
+        HostedCellConfig,
+        "active_agent_profile",
+        property(lambda _config: commands_module.HOSTED_ALPHA_AGENT_V4_PROFILE),
+    )
+    client, config, _lifecycle, invoker = _cell(
+        tmp_path,
+        cell_id="cell-v4-reaching-for-v5",
+        credential="v4-reaching-for-v5-credential-0001",
+    )
+    headers = _headers(config)
+
+    contract = client.get(f"{V5_ROUTE}/contract", headers=headers)
+    assert contract.status_code == 400, contract.text
+    assert contract.json()["error"]["code"] == "HOSTED_SURFACE_PROFILE_UNSUPPORTED"
+
+    refused = client.post(
+        f"{V5_ROUTE}/command/maintain_memory",
+        headers=headers,
+        json={"mode": "curation", "curation_action": "status", "run_id": "cur-probe"},
+    )
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["error"]["code"] == "HOSTED_SURFACE_PROFILE_UNSUPPORTED"
+    assert invoker.calls == []
+
+
+def test_v5_curation_runs_are_isolated_between_two_cells(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tenant isolation, mirroring the two-cell identical-path family above.
+
+    Both cells run the same principal, the same public idempotency key and a
+    byte-identical plan, which is the shape that makes a shared store or a
+    shared key namespace visible: the plan hashes to the same identity in both,
+    so anything keyed on plan identity rather than on the cell would collide.
+    """
+    alpha, alpha_config, _alpha_lifecycle, alpha_invoker = _v5_cell(
+        tmp_path,
+        monkeypatch,
+        cell_id="cell-v5-alpha",
+        credential="v5-alpha-service-credential-0001",
+    )
+    bravo, bravo_config, _bravo_lifecycle, bravo_invoker = _v5_cell(
+        tmp_path,
+        monkeypatch,
+        cell_id="cell-v5-bravo",
+        credential="v5-bravo-service-credential-0002",
+    )
+    plan = _curation_plan(_curation_step("one", "v5-two-cell"))
+    public_key = "same-public-curation-key"
+
+    alpha_proposed = _curation(
+        alpha,
+        alpha_config,
+        "propose",
+        {"plan": plan},
+        idempotency_key=public_key,
+        principal=SHARED_PRINCIPAL,
+    ).json()["data"]
+    bravo_proposed = _curation(
+        bravo,
+        bravo_config,
+        "propose",
+        {"plan": plan},
+        idempotency_key=public_key,
+        principal=SHARED_PRINCIPAL,
+    ).json()["data"]
+
+    # Plan identity binds each vault's own manifest and registry identities, so
+    # byte-identical plan text still resolves to a different plan in each cell.
+    # That is itself the isolation property: a run id or approval fingerprint
+    # minted in one cell names nothing in the other.
+    assert alpha_proposed["plan_id"] != bravo_proposed["plan_id"]
+    assert alpha_proposed["plan_fingerprint"] != bravo_proposed["plan_fingerprint"]
+    assert alpha_proposed["run_id"] != bravo_proposed["run_id"]
+    # The internal idempotency scope is separate too.
+    assert (
+        alpha_invoker.calls[0]["idempotency_key"] != bravo_invoker.calls[0]["idempotency_key"]
+    )
+    assert public_key not in str(alpha_invoker.calls[0]["idempotency_key"])
+    assert alpha_invoker.calls[0]["public_idempotency_key"] == public_key
+    assert bravo_invoker.calls[0]["public_idempotency_key"] == public_key
+
+    applied = _curation(
+        alpha,
+        alpha_config,
+        "apply",
+        _approval(alpha_proposed),
+        principal=SHARED_PRINCIPAL,
+    )
+    assert applied.status_code == 200, applied.text
+    committed = applied.json()["data"]["receipts"][0]["effect"]["path"]
+
+    assert (alpha_config.vault_root / committed).is_file()
+    assert not (bravo_config.vault_root / committed).exists()
+
+    # Alpha's run id names nothing in bravo, and asking for it must not reach
+    # across: either bravo refuses it or reports an empty run of its own.
+    bravo_status = _curation(
+        bravo,
+        bravo_config,
+        "status",
+        {"run_id": alpha_proposed["run_id"]},
+        principal=SHARED_PRINCIPAL,
+    )
+    assert alpha_proposed["run_id"] not in bravo_status.text or (
+        bravo_status.json()["data"]["committed_steps"] == []
+    )
+    assert not list(bravo_config.vault_root.rglob("*v5-two-cell*.md"))
+
+
+def test_v5_curation_apply_commits_exactly_one_step_per_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Edge duration, mirroring the one-content-step-per-request family.
+
+    The bound is what keeps a curation request inside a hosted edge timeout: a
+    plan of any length is walked one request at a time, so request duration is a
+    function of one step rather than of the plan. Two steps is the smallest plan
+    that can tell "one step per request" apart from "the whole plan per request".
+    """
+    client, config, _lifecycle, _invoker = _v5_cell(
+        tmp_path,
+        monkeypatch,
+        cell_id="cell-v5-one-step",
+        credential="v5-one-step-service-credential-0001",
+    )
+    proposed = _curation(
+        client,
+        config,
+        "propose",
+        {
+            "plan": _curation_plan(
+                _curation_step("first", "v5-step-first"),
+                _curation_step("second", "v5-step-second", reviewed_none=True),
+            )
+        },
+    ).json()["data"]
+
+    applied = _curation(client, config, "apply", _approval(proposed))
+    assert applied.status_code == 200, applied.text
+    first = applied.json()["data"]
+    assert first["phase"] == "executing"
+    assert first["committed_steps"] == ["first"]
+    assert (config.vault_root / first["receipts"][0]["effect"]["path"]).is_file()
+    assert not list(config.vault_root.rglob("*v5-step-second*.md"))
+
+    resumed = _curation(
+        client,
+        config,
+        "resume",
+        {"run_id": proposed["run_id"], "plan_id": proposed["plan_id"]},
+    )
+    assert resumed.status_code == 200, resumed.text
+    second = resumed.json()["data"]
+    assert second["phase"] == "completed"
+    assert second["committed_steps"] == ["first", "second"]
+    assert list(config.vault_root.rglob("*v5-step-second*.md"))
+
+
+def test_v5_curation_apply_replays_under_one_public_idempotency_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idempotency: a lost acknowledgement is retried, not re-executed.
+
+    This is the hosted half of the curation spec's retried-acknowledgement
+    scenario. The same principal replaying the same approval under the same
+    public key has to see the same terminal and leave exactly one content
+    effect -- the failure mode being a second note, or a second committed step,
+    written because the first answer never arrived.
+    """
+    client, config, _lifecycle, _invoker = _v5_cell(
+        tmp_path,
+        monkeypatch,
+        cell_id="cell-v5-idempotent",
+        credential="v5-idempotent-service-credential-0001",
+    )
+    proposed = _curation(
+        client, config, "propose", {"plan": _curation_plan(_curation_step("one", "v5-replay"))}
+    ).json()["data"]
+    approval = _approval(proposed)
+    public_key = "curation-apply-public-key"
+
+    first = _curation(client, config, "apply", approval, idempotency_key=public_key)
+    assert first.status_code == 200, first.text
+    replay = _curation(client, config, "apply", approval, idempotency_key=public_key)
+    assert replay.status_code == 200, replay.text
+
+    assert replay.json()["data"]["phase"] == first.json()["data"]["phase"]
+    assert replay.json()["data"]["committed_steps"] == first.json()["data"]["committed_steps"]
+    assert len(list(config.vault_root.rglob("*v5-replay*.md"))) == 1
+
+    status = _curation(client, config, "status", {"run_id": proposed["run_id"]})
+    assert status.json()["data"]["committed_steps"] == ["one"]
+    assert len(status.json()["data"]["receipts"]) == 1
+
+
+def test_v5_curation_recovers_a_run_across_a_process_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Process-restart recovery, mirroring the survives-process-restart family.
+
+    A second cell object is built over the same vault and state roots, which is
+    what a restarted process gets: no in-memory run state, only what was made
+    durable. The committed step must still be committed, `resume` must run the
+    *next* step, and the first step must not execute twice.
+    """
+    client, config, _lifecycle, _invoker = _v5_cell(
+        tmp_path,
+        monkeypatch,
+        cell_id="cell-v5-restart",
+        credential="v5-restart-service-credential-0001",
+    )
+    proposed = _curation(
+        client,
+        config,
+        "propose",
+        {
+            "plan": _curation_plan(
+                _curation_step("first", "v5-restart-first"),
+                _curation_step("second", "v5-restart-second", reviewed_none=True),
+            )
+        },
+    ).json()["data"]
+    applied = _curation(client, config, "apply", _approval(proposed))
+    assert applied.status_code == 200, applied.text
+    committed_path = applied.json()["data"]["receipts"][0]["effect"]["path"]
+    committed_bytes = (config.vault_root / committed_path).read_bytes()
+
+    # The restart: a new lifecycle, a new app and new routes over the same
+    # durable roots, with none of the first process's state in memory.
+    restarted_lifecycle = HostedCellLifecycle(config)
+    restarted_lifecycle.complete_startup(
+        vault_ready=True,
+        mutation_authority_ready=True,
+        service_auth_ready=True,
+    )
+    restarted_invoker = IsolatedInvoker()
+
+    @contextmanager
+    def _guard(_vault_root: Path) -> Iterator[None]:
+        yield
+
+    restarted_app = FastMCP("test-cell-v5-restart-2")
+    register_hosted_routes(
+        restarted_app,
+        config=config,
+        lifecycle=restarted_lifecycle,
+        source_schema=schema.load_source_schema(config.vault_root),
+        invoke_command_func=restarted_invoker,
+        mutation_guard_factory=_guard,
+    )
+    restarted = _ASGIClient(restarted_app.http_app())
+
+    status = _curation(restarted, config, "status", {"run_id": proposed["run_id"]})
+    assert status.status_code == 200, status.text
+    assert status.json()["data"]["committed_steps"] == ["first"]
+    assert status.json()["data"]["phase"] == "executing"
+
+    resumed = _curation(
+        restarted,
+        config,
+        "resume",
+        {"run_id": proposed["run_id"], "plan_id": proposed["plan_id"]},
+    )
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["data"]["phase"] == "completed"
+    assert resumed.json()["data"]["committed_steps"] == ["first", "second"]
+
+    # The step the first process committed was neither re-run nor rewritten.
+    assert (config.vault_root / committed_path).read_bytes() == committed_bytes
+    assert len(list(config.vault_root.rglob("*v5-restart-first*.md"))) == 1
+    assert len(list(config.vault_root.rglob("*v5-restart-second*.md"))) == 1
