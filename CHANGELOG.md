@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.68.3](https://github.com/Artexis10/exomem/compare/v0.68.2...v0.68.3) (2026-09-02)
+
+
+### Bug Fixes
+
+* **hosted:** bind migration replay to target request ([#1041](https://github.com/Artexis10/exomem/issues/1041)) ([cb42f89](https://github.com/Artexis10/exomem/commit/cb42f890435ca1d246b2fd45d1bbda3e4f441599))
+* **hosted:** complete retargeted provisions in place ([#1039](https://github.com/Artexis10/exomem/issues/1039)) ([a61519c](https://github.com/Artexis10/exomem/commit/a61519cefaceaaba2d4957fcc4c5be38d88a3b3b))
+* **hosted:** replay stable security bootstrap for migration ([#1042](https://github.com/Artexis10/exomem/issues/1042)) ([5fd5e85](https://github.com/Artexis10/exomem/commit/5fd5e85a0f95a80b5eae75f062c20de59f2dfd8e))
+* **hosted:** resume failed retarget migrations ([#1040](https://github.com/Artexis10/exomem/issues/1040)) ([46bf620](https://github.com/Artexis10/exomem/commit/46bf620c6e57458132e688a88dad3b8c7d727aac))
+* **hosted:** retarget stranded provisions in place ([#1035](https://github.com/Artexis10/exomem/issues/1035)) ([0f239f0](https://github.com/Artexis10/exomem/commit/0f239f0317df83ac77b65f734812bf41f4967251))
+* **hosted:** retarget v2 recovery operations ([#1038](https://github.com/Artexis10/exomem/issues/1038)) ([9e878e9](https://github.com/Artexis10/exomem/commit/9e878e92d1143492d4f8c33877847cc942aa9299))
+
 ## [0.68.2](https://github.com/Artexis10/exomem/compare/v0.68.1...v0.68.2) (2026-09-01)
 
 
