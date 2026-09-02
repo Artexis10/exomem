@@ -80,6 +80,43 @@ def sidecar_path(vault_root: Path) -> Path:
     return state_paths.vault_state_dir(vault_root) / ".refs.sqlite"
 
 
+def _pending_reference_projection(vault_root: Path):
+    """Pending ref/path state to consult before the persistent sidecar.
+
+    None when no committed mutation is still awaiting derived convergence, so
+    the settled path stays exactly as it was.
+    """
+    try:
+        from . import pending_recall
+
+        return pending_recall.reference_projection(Path(vault_root))
+    except Exception:  # noqa: BLE001 - identity resolution must not depend on it
+        return None
+
+
+def _note_pending_reference_publication(vault_root: Path, rel_paths: list[str]) -> None:
+    """Report an exact identity publication to the pending-recall overlay."""
+    try:
+        from . import pending_recall
+
+        pending_recall.note_persistent_publication(
+            Path(vault_root), "memory_refs", rel_paths
+        )
+    except Exception as exc:  # noqa: BLE001 - custody bookkeeping is best-effort
+        del exc
+
+
+def _vault_rel_paths(vault_root: Path, paths: Iterable[Path]) -> list[str]:
+    root = Path(vault_root).resolve()
+    rels: list[str] = []
+    for path in paths:
+        try:
+            rels.append(Path(path).resolve().relative_to(root).as_posix())
+        except (OSError, ValueError):
+            continue
+    return rels
+
+
 #: How many paths one identity lookup binds at a time. SQLite's compiled-in
 #: `SQLITE_MAX_VARIABLE_NUMBER` is the hard ceiling — measured on this build at
 #: 32,766 fine and 32,767 raising `OperationalError: too many SQL variables` —
@@ -296,6 +333,7 @@ class ReferenceIndex:
             rows = self._paths_for_id(normalized)
         if not rows:
             rows = self._scan_paths_for_id(normalized)
+        rows = _apply_pending_identity(self.vault_root, normalized, rows)
         if len(rows) > 1:
             # A COUNT, never the paths. Merging or duplicating identities is
             # what manufactures a collision, so a caller can manufacture one
@@ -356,8 +394,16 @@ class ReferenceIndex:
             out: dict[str, str | None] = {}
             for start in range(0, len(wanted), REFS_QUERY_CHUNK):
                 out.update(self._refs_for_paths_batch(wanted[start : start + REFS_QUERY_CHUNK]))
-            return out
-        return self._refs_for_paths_batch(wanted)
+        else:
+            out = self._refs_for_paths_batch(wanted)
+        # Pending custody owns the current mapping for the identities it covers,
+        # so it answers ahead of the sidecar's previous generation.
+        projection = _pending_reference_projection(self.vault_root)
+        if projection is not None and not projection.empty:
+            for path in wanted:
+                if path in projection.refs_by_path:
+                    out[path] = projection.refs_by_path[path]
+        return out
 
     def _refs_for_paths_batch(self, wanted: list[str]) -> dict[str, str | None]:
         """One bounded batch: at most `REFS_QUERY_CHUNK` paths, already cleaned."""
@@ -493,6 +539,27 @@ class ReferenceIndex:
         return sorted(issues, key=lambda item: (item["kind"], item["value"], item["path"]))
 
 
+def _apply_pending_identity(
+    vault_root: Path, exomem_id: str, rows: list[str]
+) -> list[str]:
+    """Resolve one identity against pending custody before the persistent rows.
+
+    A committed page that has not reached the sidecar yet resolves here, and a
+    committed tombstone withdraws the sidecar's now-dead row rather than handing
+    back a path the canonical tree no longer has. Both are exact: the projection
+    only holds generations whose after state was proven.
+    """
+    projection = _pending_reference_projection(vault_root)
+    if projection is None or projection.empty:
+        return rows
+    surviving = [path for path in rows if path not in projection.absent_paths]
+    pending_paths = projection.paths_by_id.get(memory_ref(exomem_id), ())
+    for path in pending_paths:
+        if path not in surviving:
+            surviving.append(path)
+    return sorted(surviving)
+
+
 def paths_for_ids_read_only(
     vault_root: Path, ids: Iterable[Any]
 ) -> dict[str, tuple[str, ...]]:
@@ -574,7 +641,11 @@ def resolve_identifier_read_only(vault_root: Path, value: str) -> str:
     if raw.lower().startswith(REF_PREFIX):
         if memory_id is None:
             raise ReferenceError("INVALID_REFERENCE", f"invalid memory reference: {raw!r}")
-        rows = ReferenceIndex(vault_root)._scan_paths_for_id(memory_id)
+        rows = _apply_pending_identity(
+            Path(vault_root),
+            memory_id,
+            ReferenceIndex(vault_root)._scan_paths_for_id(memory_id),
+        )
         if len(rows) > 1:
             # Content-free, for the reason given at `ReferenceIndex.resolve`.
             raise ReferenceError(
@@ -681,6 +752,9 @@ def upsert_after_write(vault_root: Path, paths: list[Path]) -> bool:
         ReferenceIndex(vault_root).refresh_paths(markdown)
     except Exception:  # noqa: BLE001 - derived sidecar failure must not break a write
         return False
+    _note_pending_reference_publication(
+        vault_root, _vault_rel_paths(vault_root, markdown)
+    )
     return True
 
 
@@ -689,6 +763,9 @@ def delete_after_remove(vault_root: Path, paths: list[str]) -> bool:
         ReferenceIndex(vault_root).delete_paths(paths)
     except Exception:  # noqa: BLE001 - derived sidecar failure must not break a delete
         return False
+    _note_pending_reference_publication(
+        vault_root, [str(path).replace("\\", "/").lstrip("/") for path in paths]
+    )
     return True
 
 

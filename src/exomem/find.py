@@ -93,6 +93,15 @@ _DEGRADATION_COUNTS: dict[str, int] = {}
 # answer without a new envelope field.
 _RECALL_PROJECTION_STALE_COMPONENT = "recall_projection"
 
+# Pending-derived-work disclosure. A request answered while exact durable
+# receipts still cover part of the corpus is exact for direct, stable-ref,
+# keyword and hybrid recall, but the vector and graph lanes may legitimately
+# omit the pending generation (they contribute only proven-current ones). That
+# limitation rides the same `warming.components` envelope, so the caller can
+# tell a fully converged answer from one whose slower projections are behind
+# without a new envelope field.
+_PENDING_VISIBILITY_COMPONENT = "pending_visibility"
+
 
 def _record_degradation(lane: str) -> None:
     """Increment the process-lifetime silent-degradation counter for `lane`."""
@@ -439,10 +448,16 @@ class FreshnessSnapshot:
         ]
         | None = None,
         stale_recall_scopes: frozenset[str] = frozenset(),
+        pending: Any | None = None,
     ) -> None:
         self._root = vault_root
         self._require_live_recall = require_live_recall
         self._timings = timings
+        # Exact pending custody this request may serve from. It is part of the
+        # request's projection, not of the maintained registry: a committed page
+        # whose derived components have not converged is admitted here, and a
+        # committed tombstone is withdrawn here, before any lane scores.
+        self._pending = pending
         self._expected_recall_checkpoints = expected_recall_checkpoints or {}
         # Scopes admitted at the catalog's published projection rather than an
         # exactly-current live one. For those the live registry has no
@@ -512,10 +527,23 @@ class FreshnessSnapshot:
         the same projection from the human-owned Markdown files.
         """
         cached = self._recall_paths.get(scope)
-        if cached is not None:
-            return cached
-        self._load_recall_projection(scope)
-        return self._recall_paths[scope]
+        if cached is None:
+            self._load_recall_projection(scope)
+            cached = self._recall_paths[scope]
+        return self._with_pending(cached)
+
+    def _with_pending(self, projected: frozenset[str]) -> frozenset[str]:
+        """Admit committed pending identities and withdraw committed tombstones.
+
+        The maintained registry describes the last projection the watcher
+        published. A page committed since then is proven by exact durable
+        custody instead, so it belongs in this request's projection; a path the
+        same custody tombstones does not, however the registry still lists it.
+        """
+        pending = self._pending
+        if pending is None or pending.empty:
+            return projected
+        return (projected | pending.current_paths()) - pending.tombstoned_paths()
 
     def _load_recall_projection(self, scope: str) -> None:
         if scope in self._recall and scope in self._recall_paths:
@@ -623,6 +651,107 @@ class FreshnessSnapshot:
                     site="projection_unavailable",
                     status="temporarily_unavailable",
                 ) from exc
+
+
+def _vault_rel(vault_root: Path, path: Path) -> str | None:
+    """Vault-relative POSIX identity for a walked candidate, or None."""
+    try:
+        return Path(path).absolute().relative_to(vault_root.absolute()).as_posix()
+    except (OSError, ValueError):
+        return None
+
+
+def _resolve_page(
+    vault_root: Path,
+    rel: str,
+    pending: Any | None = None,
+) -> ParsedPage | None:
+    """Hydrate one candidate identity under the current request's policy.
+
+    An identity under pending custody is served from the exact generation the
+    receipt proved, never from an unproven re-read: the overlay's page is the
+    only one whose after hash was checked against the receipt. Recall admission
+    runs here, at request time, so a pending page inherits no earlier disclosure
+    decision and a pending tombstone hydrates as absence.
+    """
+    target = vault_root / rel
+    if not recall_policy.is_recall_candidate(vault_root, target):
+        return None
+    if pending is not None and pending.covers(rel):
+        return pending.page(rel)
+    return _CACHE.get(target, vault_root)
+
+
+def _without_shadowed(by_path: dict, pending: Any) -> dict:
+    """Drop per-path persistent-lane evidence a pending identity shadows."""
+    return {
+        rel_path: value
+        for rel_path, value in by_path.items()
+        if not pending.covers(rel_path)
+    }
+
+
+def _merge_pending_walk(
+    vault_root: Path,
+    walk: Iterable[Path],
+    *,
+    pending: Any,
+    scope: str,
+) -> Iterable[Path]:
+    """Yield a scope walk with pending tombstones withdrawn and creates admitted.
+
+    Bounded by the overlay: the walk itself is unchanged, and at most one extra
+    candidate per pending identity is appended.
+    """
+    seen: set[str] = set()
+    for path in walk:
+        rel_path = _vault_rel(vault_root, path)
+        if rel_path is not None:
+            if pending.covers(rel_path):
+                # The overlay owns this identity; it is re-offered below only if
+                # its committed generation still exists.
+                continue
+            seen.add(rel_path)
+        yield path
+    prefix = kb_prefix()
+    for row in pending.current_pages():
+        if row.rel_path in seen:
+            continue
+        if scope != "vault" and not row.rel_path.startswith(prefix):
+            continue
+        yield vault_root / row.rel_path
+
+
+def _pending_keyword_paths(
+    vault_root: Path,
+    *,
+    pending: Any,
+    query_norm: str,
+    scope: str,
+) -> list[str]:
+    """Pending identities the keyword contract admits, most recent first.
+
+    The lane's own ordering contract is `updated` descending, and a pending page
+    is by construction the newest committed generation of its identity, so the
+    merged rows lead. Every gate an ordinary candidate passes -- navigation
+    exclusion, scope membership, current recall admission and the
+    all-tokens-present excerpt -- is applied here, before the merge reaches
+    scoring or any cap.
+    """
+    admitted: list[str] = []
+    prefix = kb_prefix()
+    for row in pending.current_pages():
+        rel = row.rel_path
+        if scope != "vault" and not rel.startswith(prefix):
+            continue
+        if rel.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
+            continue
+        if not recall_policy.is_recall_candidate(vault_root, vault_root / rel):
+            continue
+        if query_norm and _make_excerpt(row.page, query_norm) is None:
+            continue
+        admitted.append(rel)
+    return admitted
 
 
 def _freshness_key(
@@ -909,6 +1038,20 @@ def find(
         )
     query_norm = (query or "").lower().strip()
 
+    # Exact pending coverage is proven before anything reads a persistent
+    # catalogue. Outstanding durable custody that cannot be hydrated within its
+    # bound means this request cannot be answered exactly, and the last
+    # published catalogue must not be served as though no committed mutation
+    # were outstanding.
+    with _span(timings, "pending_visibility"):
+        pending = freshness.recall_pending_coverage(vault_root)
+        if not pending.ready:
+            _set_recall_projection_timing_outcome(timings, "pending_unavailable")
+            raise RetrievalIndexWarming(
+                site="pending_visibility_incomplete",
+                status="temporarily_unavailable",
+            )
+
     from . import lexstore, readiness
 
     managed_runtime = readiness.runtime_managed()
@@ -1065,25 +1208,33 @@ def find(
         timings=timings,
         expected_recall_checkpoints=catalog_proof,
         stale_recall_scopes=stale_recall_scopes,
+        pending=pending,
     )
     page_memo: dict[str, ParsedPage | None] = {}
 
     def _page_of(rel: str) -> ParsedPage | None:
         if rel not in page_memo:
-            page_memo[rel] = (
-                _CACHE.get(vault_root / rel, vault_root)
-                if recall_policy.is_recall_candidate(vault_root, vault_root / rel)
-                else None
-            )
+            page_memo[rel] = _resolve_page(vault_root, rel, pending)
         return page_memo[rel]
 
     walk_scope = "vault" if scope == "vault" else "kb"
     resolved_config = config if config is not None else _active_ranking()
     degraded = degraded_out if degraded_out is not None else []
     failed = failed_out if failed_out is not None else []
+    pending_active = not pending.empty
+    if pending_active:
+        # Disclosed, never silent: the answer is exact for direct, stable-ref,
+        # keyword and hybrid recall, while the vector and graph lanes contribute
+        # only proven-current generations. Appending to `degraded` also keeps
+        # the result out of the hot cache, which must not outlive retirement.
+        degraded.append(_PENDING_VISIBILITY_COMPONENT)
     if effective_result_level == "unit":
         unit_algebra = structured_filters.plan_index_candidates(filter_plan)
-        cache_size = 0 if retrieval_trace is not None else _find_cache_size()
+        cache_size = (
+            0
+            if retrieval_trace is not None or pending_active
+            else _find_cache_size()
+        )
         if timings is not None:
             timings.cache["enabled"] = cache_size > 0
         _set_rerank_timing_profile(
@@ -1181,7 +1332,14 @@ def find(
     # ---- Hot cache lookup (freshness-keyed; see _freshness_key above) ----
     # prefer_used bypasses the cache entirely — simplest correct interaction;
     # log freshness never has to enter the cache key.
-    cache_size = 0 if prefer_used or mixed or retrieval_trace is not None else _find_cache_size()
+    # A pending overlay is deliberately uncacheable: its rows retire as soon
+    # as the persistent lanes publish, and an entry keyed only by the
+    # persistent projections would outlive that retirement.
+    cache_size = (
+        0
+        if prefer_used or mixed or retrieval_trace is not None or pending_active
+        else _find_cache_size()
+    )
     cache_key: tuple | None = None
     cache_checkpoints: tuple[
         tuple[str, freshness.RecallFreshnessCheckpoint], ...
@@ -1374,6 +1532,7 @@ def find(
                 plan=filter_plan,
                 snapshot=snapshot,
                 timings=timings,
+                pending=pending,
             )
     # Intersect the relation participants into the eligibility seam so the filter
     # composes AND with every structured filter and gates every ranking lane and
@@ -1401,6 +1560,7 @@ def find(
                 eligible_paths=eligible_paths,
                 freshness_key=snapshot.for_scope(walk_scope),
                 failed_out=failed,
+                pending=pending,
             )
     else:
         with _span(timings, "semantic.search"):
@@ -1436,6 +1596,7 @@ def find(
                 recall_scope="kb" if scope == "kb-only" else "vault",
                 retrieval_trace=retrieval_trace,
                 query_vector_provider=_query_vector if mixed else None,
+                pending=pending,
             )
 
     if retrieval_trace is not None and (mode == "keyword" or not query_norm):
@@ -2513,6 +2674,7 @@ def _eligible_filter_paths(
     *,
     scope: str,
     plan: structured_filters.FilterPlan,
+    pending: Any | None = None,
 ) -> set[str]:
     """Resolve the one backend-independent eligible parent identity set."""
     if scope == "kb":
@@ -2522,14 +2684,17 @@ def _eligible_filter_paths(
         from .vault import walk_vault_md
 
         walk = walk_vault_md(vault_root)
+    if pending is not None and not pending.empty:
+        walk = _merge_pending_walk(vault_root, walk, pending=pending, scope=scope)
 
     pages: dict[str, ParsedPage] = {}
     for path in walk:
         if path.name.lower() in _NAVIGATION_BASENAMES:
             continue
-        if not recall_policy.is_recall_candidate(vault_root, path):
+        rel_path = _vault_rel(vault_root, path)
+        if rel_path is None:
             continue
-        page = _CACHE.get(path, vault_root)
+        page = _resolve_page(vault_root, rel_path, pending)
         if page is not None:
             pages[page.rel_path] = page
 
@@ -2595,6 +2760,7 @@ _RETRIEVAL_WARMING_RETRY_MS = 250
 RETRIEVAL_WARMING_SITES = (
     "projection_unavailable",
     "catalog_proof_incomplete",
+    "pending_visibility_incomplete",
     "semantic_unit_index",
     "semantic_unit_seed",
     "catalog_outcome",
@@ -2781,6 +2947,7 @@ def _resolve_eligible_filter_paths(
     plan: structured_filters.FilterPlan,
     snapshot: FreshnessSnapshot,
     timings: FindTimings | None = None,
+    pending: Any | None = None,
 ) -> set[str]:
     """Resolve eligible parents, preferring the maintained semantic index.
 
@@ -2795,7 +2962,9 @@ def _resolve_eligible_filter_paths(
     """
     algebra = structured_filters.plan_index_candidates(plan)
     if algebra.status != "complete":
-        return _eligible_filter_paths(vault_root, scope=scope, plan=plan)
+        return _eligible_filter_paths(
+            vault_root, scope=scope, plan=plan, pending=pending
+        )
     if algebra.definitely_empty:
         _set_catalog_timing_profile(timings, cache_hit=True)
         return set()
@@ -2813,10 +2982,19 @@ def _resolve_eligible_filter_paths(
         # is a typed, non-cacheable warming signal — not a false empty or a
         # divergent full-scan ranking.
         raise RetrievalIndexWarming(site="semantic_unit_seed")
+    if pending is not None and not pending.empty:
+        # The seed names what the maintained metadata holds, which is the
+        # previous generation for every identity pending custody owns. Withdraw
+        # those seeds and re-offer the committed ones, so the plan is evaluated
+        # against the exact current page rather than a stale or removed row.
+        candidate_parents = set(pending.shadow(candidate_parents)) | {
+            row.rel_path for row in pending.current_pages()
+        }
     return _indexed_eligible_filter_paths(
         vault_root,
         plan=plan,
         candidate_parent_paths=candidate_parents,
+        pending=pending,
     )
 
 
@@ -2856,6 +3034,7 @@ def _indexed_eligible_filter_paths(
     *,
     plan: structured_filters.FilterPlan,
     candidate_parent_paths: set[str],
+    pending: Any | None = None,
 ) -> set[str]:
     """Evaluate eligibility for indexed candidate parents only — no scope walk.
 
@@ -2883,20 +3062,15 @@ def _indexed_eligible_filter_paths(
     for rel_path in candidate_parent_paths:
         if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
             continue
-        if not recall_policy.is_recall_candidate(vault_root, vault_root / rel_path):
-            continue
-        page = _CACHE.get(vault_root / rel_path, vault_root)
+        page = _resolve_page(vault_root, rel_path, pending)
         # Access policy always runs before caller filters, including for a
         # scene-frame child whose match is emitted as its parent video.
         if page is None or not _indexable(page):
             continue
         if page.parent_media:
-            parent_path = vault_root / (page.parent_media + ".md")
             emitted = (
-                _CACHE.get(parent_path, vault_root)
-                if recall_policy.is_recall_candidate(vault_root, parent_path)
-                else None
-            ) or page
+                _resolve_page(vault_root, page.parent_media + ".md", pending) or page
+            )
         else:
             emitted = page
         if not _indexable(emitted):
@@ -2946,6 +3120,7 @@ def _find_keyword(
     eligible_paths: set[str] | None = None,
     freshness_key: tuple[int, int, str] | None = None,
     failed_out: list[str] | None = None,
+    pending: Any | None = None,
 ) -> list[Hit]:
     """Keyword-mode recall, hydrating only maintained-index matches."""
     lexical_repair = _bounded_lexical_repair_allowed(freshness_key)
@@ -2957,6 +3132,7 @@ def _find_keyword(
             freshness=freshness_key,
             failed_out=failed_out,
             repair=lexical_repair,
+            pending=pending,
         )
         if eligible_paths is not None:
             # A finite eligible set (a complete category/kind plan resolved
@@ -3001,6 +3177,12 @@ def _find_keyword(
 
         walk = walk_vault_md(vault_root)
 
+    if pending is not None and not pending.empty and not query_norm:
+        # The query branch already merged through `_keyword_match_paths`; the
+        # filter-only and walk branches merge here, so an empty-query recall
+        # sees the same committed identities and none of the shadowed ones.
+        walk = _merge_pending_walk(vault_root, walk, pending=pending, scope=scope)
+
     hits: list[tuple[str, Hit]] = []
     by_path: dict[str, Hit] = {}
     for path in walk:
@@ -3008,7 +3190,10 @@ def _find_keyword(
             continue
         if not recall_policy.is_recall_candidate(vault_root, path):
             continue
-        page = _CACHE.get(path, vault_root)
+        rel_path = _vault_rel(vault_root, path)
+        if rel_path is None:
+            continue
+        page = _resolve_page(vault_root, rel_path, pending)
         if page is None:
             continue
         if eligible_paths is not None and page.rel_path not in eligible_paths:
@@ -3022,11 +3207,8 @@ def _find_keyword(
         scene_frame: str | None = None
         scene_frame_ts: float | None = None
         if page.parent_media:
-            parent_path = vault_root / (page.parent_media + ".md")
-            parent_page = (
-                _CACHE.get(parent_path, vault_root)
-                if recall_policy.is_recall_candidate(vault_root, parent_path)
-                else None
+            parent_page = _resolve_page(
+                vault_root, page.parent_media + ".md", pending
             )
             if parent_page is not None:
                 existing = by_path.get(parent_page.rel_path)
@@ -3117,6 +3299,7 @@ def _find_semantic(
     recall_scope: str | None = None,
     retrieval_trace: Any | None = None,
     query_vector_provider: Callable[[], Any] | None = None,
+    pending: Any | None = None,
 ) -> list[Hit]:
     """Hybrid (BM25+vector) or vector-only mode.
 
@@ -3150,12 +3333,11 @@ def _find_semantic(
 
     def _page_of(rel: str) -> ParsedPage | None:
         if rel not in page_memo:
-            page_memo[rel] = (
-                _CACHE.get(vault_root / rel, vault_root)
-                if recall_policy.is_recall_candidate(vault_root, vault_root / rel)
-                else None
-            )
+            page_memo[rel] = _resolve_page(vault_root, rel, pending)
         return page_memo[rel]
+
+    def _keyword_lane(vault_root_arg: Path, *args: Any, **kwargs: Any) -> list[str]:
+        return _keyword_match_paths(vault_root_arg, *args, pending=pending, **kwargs)
 
     try:
         bundle = find_candidates.collect_candidates(
@@ -3175,7 +3357,7 @@ def _find_semantic(
             timings=timings,
             snapshot=snapshot,
             page_of=_page_of,
-            keyword_match_paths=_keyword_match_paths,
+            keyword_match_paths=_keyword_lane,
             outbound_wikilink_paths=_outbound_wikilink_paths,
             get_query_resolver=lambda root, freshness=None: recall_resolver_snapshot(
                 root,
@@ -3215,6 +3397,7 @@ def _find_semantic(
             eligible_paths=eligible_paths,
             freshness_key=snapshot.for_scope(scope),
             failed_out=failed_out,
+            pending=pending,
         )
         if retrieval_trace is not None:
             retrieval_trace.record_keyword_fallback(
@@ -3249,6 +3432,26 @@ def _find_semantic(
     graph_in_degree_by_path = bundle.graph_in_degree_by_path
     graph_provenance_by_path = bundle.graph_provenance_by_path
     usage_map = bundle.usage_map
+
+    if pending is not None and not pending.empty:
+        # Every persistent lane is stripped of the identities pending custody
+        # owns, before rank lookups, scoring, excerpts and the top-k cap are
+        # built from them. A shadowed identity keeps its fused position but can
+        # only survive the loop below on the proven overlay page's own merit,
+        # so a stale catalogue, vector, graph or CLIP row can neither be
+        # returned nor consume a result slot.
+        vector_ranking = pending.shadow(vector_ranking)
+        bm25_ranking = pending.shadow(bm25_ranking)
+        keyword_ranking = pending.shadow(keyword_ranking)
+        clip_ranking = pending.shadow(clip_ranking)
+        graph_ranking = pending.shadow(graph_ranking)
+        chunk_text_by_path = _without_shadowed(chunk_text_by_path, pending)
+        vector_score_by_path = _without_shadowed(vector_score_by_path, pending)
+        clip_score_by_path = _without_shadowed(clip_score_by_path, pending)
+        clip_frame_ts_by_path = _without_shadowed(clip_frame_ts_by_path, pending)
+        frame_attribution = _without_shadowed(frame_attribution, pending)
+        graph_in_degree_by_path = _without_shadowed(graph_in_degree_by_path, pending)
+        graph_provenance_by_path = _without_shadowed(graph_provenance_by_path, pending)
 
     # Pre-compute per-mode rank lookups so we can tag each Hit's signals.
     vector_rank_by_path = {p: i + 1 for i, p in enumerate(vector_ranking)}
@@ -3936,6 +4139,7 @@ def _keyword_match_paths(
     failed_out: list[str] | None = None,
     repair: bool = True,
     k: int | None = None,
+    pending: Any | None = None,
 ) -> list[str]:
     """Return paths that satisfy keyword mode's all-tokens-present gate.
 
@@ -3959,8 +4163,33 @@ def _keyword_match_paths(
     order was applied first -- which is exactly what the sidecar's `LIMIT` and
     the truncation below do.
 
-    Both backends truncate identically, so parity holds at any `k`.
+    Both backends bound the result identically, so parity holds at any `k`.
+
+    `pending` supplies the exact committed generations the persistent catalogue
+    has not published yet. Its identities shadow every catalogue row they own --
+    only the overlay can attest that generation -- and are merged back ahead of
+    the surviving rows: the lane orders by `updated` descending, a pending page
+    is by construction the newest committed generation of its identity, and the
+    catalogue's own `updated` values are not available here without a parse per
+    row. `k` is re-applied after the merge, so the bound is unchanged.
     """
+    merge_pending = pending is not None and not pending.empty
+
+    def _merged(paths: list[str]) -> list[str]:
+        if not merge_pending:
+            return paths
+        admitted = _pending_keyword_paths(
+            vault_root,
+            pending=pending,
+            query_norm=query_norm,
+            scope=scope,
+        )
+        seen = set(admitted)
+        merged = admitted + [
+            rel_path for rel_path in pending.shadow(paths) if rel_path not in seen
+        ]
+        return merged if k is None else merged[: max(0, int(k))]
+
     if not query_norm:
         return []
     from . import lexstore
@@ -3975,7 +4204,7 @@ def _keyword_match_paths(
         )
         if not catalog_result.readiness.complete:
             _raise_catalog_outcome(catalog_result.readiness)
-        return list(catalog_result.value or [])
+        return _merged(list(catalog_result.value or []))
     indexed = lexstore.search_substring(
         vault_root,
         query_norm,
@@ -3985,7 +4214,7 @@ def _keyword_match_paths(
         k=k,
     )
     if indexed is not None:
-        return indexed
+        return _merged(indexed)
     if lexstore.backend() != "python":
         # The sidecar declined. `search_substring` documents exactly one meaning
         # for None -- "fall back" -- and its causes are a retired store, a
@@ -4027,7 +4256,10 @@ def _keyword_match_paths(
             continue
         if not recall_policy.is_recall_candidate(vault_root, path):
             continue
-        page = _CACHE.get(path, vault_root)
+        rel_path = _vault_rel(vault_root, path)
+        if rel_path is None:
+            continue
+        page = _resolve_page(vault_root, rel_path, pending)
         if page is None:
             continue
         if _make_excerpt(page, query_norm) is None:
@@ -4035,7 +4267,7 @@ def _keyword_match_paths(
         matches.append((page.updated or "0000-00-00", page.rel_path))
     matches.sort(reverse=True)  # most-recent first
     bounded = matches if k is None else matches[: max(0, int(k))]
-    return [p for _, p in bounded]
+    return _merged([p for _, p in bounded])
 
 
 def _outbound_wikilink_paths(

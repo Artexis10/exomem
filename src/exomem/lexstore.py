@@ -3298,6 +3298,34 @@ class LexicalStore:
 
     # -------------------------------------------------------------- dual-write
 
+    def _note_pending_publication(
+        self, paths: list[Path], rel_paths: list[str]
+    ) -> None:
+        """Report an exact lexical publication to the pending-recall overlay.
+
+        This is the retirement half of the read-your-write handoff: an overlay
+        row may be removed only after the persistent lane that shadows it has
+        published the exact after generation, and this seam is where that
+        publication becomes observable. Bounded to the identities this pass
+        actually applied, and never able to fail a write -- a derived overlay is
+        best-effort custody bookkeeping, not canonical authority.
+        """
+        try:
+            from . import pending_recall
+
+            root = self.vault_root.resolve()
+            rels = [str(rel) for rel in rel_paths if isinstance(rel, str) and rel]
+            for path in paths:
+                try:
+                    rels.append(Path(path).resolve().relative_to(root).as_posix())
+                except (OSError, ValueError):
+                    continue
+            pending_recall.note_persistent_publication(
+                self.vault_root, "lexstore", rels
+            )
+        except Exception as error:  # noqa: BLE001 - never fail a write on custody
+            log.info("pending recall retirement skipped (%s)", error)
+
     def _membership(self, path: Path) -> tuple[bool, bool]:
         """Would each walk yield this file? Single-file replay of the walks'
         directory skip rules, so hook-written rows match a rebuild's."""
@@ -3362,6 +3390,7 @@ class LexicalStore:
             # publication barrier is released so managed retrieval cannot stay
             # unavailable forever despite an exact-current catalog.
             _admit_after_bounded_runtime_repair(self.vault_root, applied)
+            self._note_pending_publication(list(paths), [])
         return applied
 
     def apply_watcher_batch(self, paths: list[Path], rel_paths: list[str]) -> bool:
@@ -3408,6 +3437,7 @@ class LexicalStore:
             _schedule_runtime_catalog_repair(self.vault_root)
         else:
             _admit_after_bounded_runtime_repair(self.vault_root, applied)
+            self._note_pending_publication(list(paths), list(rel_paths))
         return applied
 
     def retry_deferred_upsert(self, paths: list[Path]) -> bool:
@@ -3551,6 +3581,7 @@ class LexicalStore:
             _schedule_runtime_catalog_repair(self.vault_root)
         else:
             _admit_after_bounded_runtime_repair(self.vault_root, applied)
+            self._note_pending_publication([], list(rel_paths))
         return applied
 
     def purge_exact_persisted_rows(
