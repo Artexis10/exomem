@@ -308,6 +308,7 @@ def emitted_write_advisory_groups(
     self_path: str,
     groups: list[tuple[str, list[DupCandidate]]],
     apply_declared_pair_filter: bool = False,
+    record_surfacing: bool = True,
 ) -> list[EmittedWriteAdvisory]:
     """The structured form of `emit_write_advisory_groups`, same order and text.
 
@@ -315,6 +316,14 @@ def emitted_write_advisory_groups(
     just the rendered string. Sharing this one body keeps the deterministic
     suppression, family disposition, quiet offer, and first-surfaced ledger
     exactly as the synchronous write path performs them.
+
+    `record_surfacing=False` computes without committing the once-only
+    first-surfaced ledger (and therefore without arming a quiet offer, which
+    the inline path arms only when that ledger write persisted). It exists for
+    a consumer whose candidate set may still be refused after it is computed:
+    the ledger measures when a signal reached somebody, and a refused set
+    reached nobody. Such a consumer commits the stamp with
+    `record_write_advisory_surfacing` once its result is durable.
     """
     from . import contradiction_stance, review_state
 
@@ -401,7 +410,11 @@ def emitted_write_advisory_groups(
                 continue
             emitted.append((kind, candidate, candidate_rel, identity))
             surfaced.append((identity.review_id, identity.fingerprint, kind))
-        ledgered = _record_surfaced_advisories(root, surfaced, known=payload)
+        ledgered = (
+            _record_surfaced_advisories(root, surfaced, known=payload)
+            if record_surfacing
+            else False
+        )
         for kind, candidate, candidate_rel, identity in emitted:
             offer = None
             if ledgered:
@@ -433,6 +446,27 @@ def emitted_write_advisory_groups(
             for kind, candidate, candidate_rel in eligible
         )
     return warnings
+
+
+def record_write_advisory_surfacing(
+    vault_root: Path,
+    emitted: list[EmittedWriteAdvisory],
+    *,
+    known: dict | None = None,
+) -> bool:
+    """Stamp the first surfacing for advisories that actually reached someone.
+
+    The deferred half of `emitted_write_advisory_groups(record_surfacing=False)`.
+    Unidentified fail-open advisories carry no review identity and so cannot be
+    ledgered, exactly as inline. Fails open like every other advisory-state
+    write: an unwritable ledger records the entry on a later surfacing.
+    """
+    entries = [
+        (item.identity.review_id, item.identity.fingerprint, item.kind)
+        for item in emitted
+        if item.identity is not None
+    ]
+    return _record_surfaced_advisories(Path(vault_root), entries, known=known)
 
 
 def _excluded_advisory_kinds(payload: dict) -> frozenset[str]:

@@ -36,7 +36,9 @@ from .derived_receipts import (
     DerivedComponent,
     DerivedComponentStatus,
 )
-from .governance import egress, scrubber
+from .governance import decisions, egress, membership, scrubber
+from .governance import policy as policy_module
+from .governance.principal import effective_principal
 from .vault import content_hash
 
 log = logging.getLogger(__name__)
@@ -85,6 +87,10 @@ class AdvisoryExecution:
     It names the batch, the closed publication outcome, and the closed state
     that was published. No path, title, excerpt, exception text, authorization
     fact, or queue internal appears here.
+
+    `reused_vectors` reports that this attempt invoked no encoder -- either
+    because the published generation vectors were reused, or because an
+    already-published result was replayed without recomputation at all.
     """
 
     batch_id: str
@@ -165,8 +171,13 @@ def _candidates_for(
     generation: embeddings.GenerationVectors,
     *,
     result_ref: str,
-) -> tuple[DerivedAdvisoryCandidate, ...]:
-    """The bounded candidate set for one proven generation, without re-encoding."""
+) -> tuple[tuple[DerivedAdvisoryCandidate, ...], list[Any]]:
+    """The bounded candidate set for one proven generation, without re-encoding.
+
+    Returns the candidates and the emitted advisories behind them, so the
+    caller can commit the once-only first-surfaced ledger after -- and only
+    after -- the store accepts the result they belong to.
+    """
     scores = corpus_aware.best_cosine_per_file_for_vectors(
         vault_root,
         generation.vectors,
@@ -197,6 +208,9 @@ def _candidates_for(
             *corpus_aware.detected_overlap_advisory_groups(overlaps),
         ],
         apply_declared_pair_filter=True,
+        # This set may still be refused by the store, and a refused set reached
+        # nobody. The stamp is committed after publication succeeds.
+        record_surfacing=False,
     )
 
     candidates: dict[tuple[str, str], DerivedAdvisoryCandidate] = {}
@@ -222,7 +236,7 @@ def _candidates_for(
         )
         if len(candidates) >= MAX_RESULT_CANDIDATES:
             break
-    return tuple(candidates.values())
+    return tuple(candidates.values()), emitted
 
 
 def _publish(
@@ -298,6 +312,23 @@ def execute_write_advisory(
             batch_id=batch_id, outcome="unprovable", failure_code="generation_changed"
         )
 
+    if stored.state != "pending":
+        # A crash after publication reuses the stored result and completes the
+        # component without recomputation (Design Decision 6). Recomputing here
+        # could not converge: ordinary corpus drift between the crash and this
+        # replay changes the candidate tuple, the store refuses the mismatched
+        # replay as a stale claim, and the component would rotate for ever
+        # while its attempt count climbed. Nothing is encoded, emitted or
+        # published on this path; completion is proved by the caller.
+        return AdvisoryExecution(
+            batch_id=batch_id,
+            outcome="already_published",
+            state=stored.state,
+            failure_code=stored.failure_code,
+            candidate_count=len(stored.candidates),
+            reused_vectors=True,
+        )
+
     observed = _observe_fingerprint(vault_root, stored.target_rel_path)
     if observed is None:
         # Nothing current to observe, so nothing may be published against it.
@@ -330,7 +361,7 @@ def execute_write_advisory(
         )
 
     try:
-        candidates = _candidates_for(vault_root, generation, result_ref=ref)
+        candidates, emitted = _candidates_for(vault_root, generation, result_ref=ref)
     except _UnaddressableAdvisory:
         log.debug("advisory batch=%s surfaced an unaddressable advisory", batch_id)
         return _publish(
@@ -354,7 +385,7 @@ def execute_write_advisory(
             reused_vectors=generation.reused,
         )
 
-    return _publish(
+    execution = _publish(
         vault_root,
         claimed_status,
         state="ready",
@@ -363,6 +394,11 @@ def execute_write_advisory(
         now=now,
         reused_vectors=generation.reused,
     )
+    if execution.outcome == "published":
+        # Durable now, so the signal has genuinely reached its result. A refused
+        # publication deliberately leaves the once-only ledger untouched.
+        corpus_aware.record_write_advisory_surfacing(vault_root, emitted)
+    return execution
 
 
 def _release(
@@ -478,6 +514,63 @@ def _released_paths(vault_root: Path, pairs: Sequence[tuple[str, str]]) -> set[s
     return {str(getattr(hit, "path", "")) for hit in annotated.hits}
 
 
+def _path_authority_allows(vault_root: Path, rel_path: str) -> bool:
+    """Decide current authority for a path with no bytes left to read.
+
+    A deleted target still has to be authorized before its result may report
+    any status, but there is nothing to read and no content hash to bind a
+    decision to. So the decision comes from the caller's current policy against
+    the path's own scope membership through `membership.evaluate_path_only` --
+    the seam the release plane itself uses when it must not read an item --
+    with no standing grants applied, because a content-bound grant cannot be
+    proven against content that no longer exists. Omitting them can only refuse
+    more than the full decision would, never less.
+
+    Every failure to establish the answer is a refusal: an unresolved
+    membership, an unavailable authorization session, or an unreadable policy
+    all fail closed rather than guess.
+    """
+    root = Path(vault_root)
+    try:
+        policy = policy_module.load(root)
+    except Exception:  # noqa: BLE001 - an undecidable policy refuses
+        return False
+    if policy.empty:
+        # No governance configured: the same open fast path `annotate_hits`
+        # takes, so a deleted target behaves exactly as a present one would.
+        return True
+    who = effective_principal()
+    if policy.blocked or not who.resolved:
+        return False
+    try:
+        purpose = egress._declared_purpose(root, who, None)
+    except Exception:  # noqa: BLE001 - an undecidable session refuses
+        return False
+    try:
+        scope_ids = membership.evaluate_path_only(
+            root, rel_path, policy
+        ).require_classified()
+    except Exception:  # noqa: BLE001 - unresolved membership refuses
+        return False
+    decision = decisions.decide(
+        scope_ids,
+        audience=who.audience_id,
+        purpose=purpose,
+        policy=policy,
+        active_grants=(),
+    )
+    return decision.level >= egress.RELEASE_FLOOR
+
+
+def _target_is_releasable(
+    vault_root: Path, rel_path: str, *, fingerprint: str | None
+) -> bool:
+    """Whether this caller may currently receive anything about the target."""
+    if fingerprint is None:
+        return _path_authority_allows(vault_root, rel_path)
+    return bool(_released_paths(vault_root, ((rel_path, fingerprint),)))
+
+
 def _released_candidates(
     vault_root: Path, candidates: Sequence[DerivedAdvisoryCandidate]
 ) -> list[dict[str, str]]:
@@ -551,14 +644,21 @@ def resolve_result(
         # the store's own compatibility code rather than raising.
         return _projected(stored.ref, "failed", code=stored.failure_code)
 
+    # Authority first, and before any status can be derived from the target.
+    # Deciding supersession first would leak: an unauthorized caller would get
+    # `superseded` for a real reference and not-found for an unknown one, which
+    # separates the two. The observation below stays server-internal until this
+    # gate has passed.
     observed = _observe_fingerprint(vault_root, stored.target_rel_path)
-    if observed is None or observed != stored.target_fingerprint:
-        return _projected(stored.ref, "superseded")
-    if not _released_paths(vault_root, ((stored.target_rel_path, observed),)):
+    if not _target_is_releasable(
+        vault_root, stored.target_rel_path, fingerprint=observed
+    ):
         # The caller cannot currently receive the written page, so it cannot
         # receive a result about it either -- and cannot tell that apart from
         # a reference that never existed.
         raise ValueError(RESULT_NOT_FOUND)
+    if observed is None or observed != stored.target_fingerprint:
+        return _projected(stored.ref, "superseded")
 
     if stored.state in {"superseded", "pending"}:
         return _projected(stored.ref, stored.state)

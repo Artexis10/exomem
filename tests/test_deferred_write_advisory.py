@@ -25,7 +25,11 @@ from exomem import commands, corpus_aware, derived_receipts, embeddings
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.governance import egress as egress_module
-from exomem.governance.principal import RequestPrincipal, request_scope
+from exomem.governance.principal import (
+    RequestPrincipal,
+    owner_principal,
+    request_scope,
+)
 
 _REVIEW_REF_RE = re.compile(r"^exomem://review/write-advisory/[0-9a-f]{24}$")
 _RESULT_REF_RE = re.compile(r"^exomem://write-advisory-result/[0-9a-f]{32}$")
@@ -260,6 +264,19 @@ def _govern(vault: Path, *, glob: str, ceiling: int) -> None:
 
 def _external() -> RequestPrincipal:
     return RequestPrincipal(audience_id=_EXTERNAL, surface="mcp")
+
+
+def _review_state_bytes(vault: Path) -> str:
+    """The whole review-state payload: first-surfaced ledger and quiet offers.
+
+    Snapshotting all of it, rather than one key, is deliberate: the guard is
+    that a retryable pass performs no once-only mutation at all.
+    """
+    from exomem import review_state as review_state_module
+
+    return json.dumps(
+        review_state_module.ReviewStateStore(vault).load(), sort_keys=True, default=str
+    )
 
 
 def _carrier_bytes(vault: Path) -> str:
@@ -981,3 +998,199 @@ def test_lane1_terminal_handoff_fake_is_used_without_shape_translation(vault: Pa
     assert fake.call_count("component_status") == 2
     assert fake.call_count("advisory_result_ref") == 2
     assert "component_status" in fake.call_order and "advisory_result_ref" in fake.call_order
+
+
+# ---------------------------------------------------------------------------
+# Correction round 1 — convergence, authority ordering, once-only side effects
+# ---------------------------------------------------------------------------
+
+
+def test_crash_after_publication_completes_without_recomputation(
+    vault: Path, encoder: _DeterministicEncoder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker that died after publishing converges on the next pass.
+
+    Design Decision 6: a crash after result publication reuses the stored
+    result and completes the component without recomputation. Ordinary corpus
+    drift between the crash and the replay must not change that, which is
+    exactly the case a recomputing replay cannot survive: its freshly computed
+    candidate tuple no longer matches the published one, so the store refuses
+    the write and the component never completes.
+    """
+    module = _advisory()
+    target = _seed_page(vault, "lane4-crash", "Crash after publication body.")
+    drifting = _candidate(vault, "lane4-crash-drifting")
+    steady = _candidate(vault, "lane4-crash-steady")
+    _wire_candidates(monkeypatch, [drifting, steady])
+    receipt, _ = _prepare_custody(vault, batch_id="b-crash", target_rel=target)
+    ref = derived_receipts.advisory_result_ref(vault, receipt)
+
+    # Worker A publishes, then dies before completing the component.
+    worker_a = _claim(vault, owner="worker-a", now=20.0, lease=5.0)
+    published = module.execute_write_advisory(
+        vault,
+        worker_a,
+        observe_current_generation=_observer("generation-1"),
+        now=21.0,
+    )
+    assert published.outcome == "published"
+    assert published.state == "ready"
+    stored_before = derived_receipts.read_advisory_result(vault, ref)
+    assert stored_before is not None and len(stored_before.candidates) == 2
+    assert (
+        derived_receipts.component_status(
+            vault, receipt, derived_receipts.DerivedComponent.WRITE_ADVISORY
+        ).state
+        == "claimed"
+    )
+
+    # An ordinary write edits one counterpart before the replay.
+    (vault / drifting.path).write_text(
+        "---\ntype: insight\nstatus: active\n---\n\nDrifted counterpart body.\n",
+        encoding="utf-8",
+    )
+    find_module.clear_cache()
+    encoder.reset()
+    review_state_before = _review_state_bytes(vault)
+
+    executions = _run(vault, owner="worker-b", now=100.0)
+
+    assert [execution.outcome for execution in executions] == ["already_published"]
+    assert executions[0].completed is True
+    assert (
+        derived_receipts.component_status(
+            vault, receipt, derived_receipts.DerivedComponent.WRITE_ADVISORY
+        ).state
+        == "completed"
+    )
+    # No recomputation: no encoder call and no once-only review-state mutation.
+    assert encoder.calls == []
+    assert _review_state_bytes(vault) == review_state_before
+    # The stored result is reused, not rewritten.
+    stored_after = derived_receipts.read_advisory_result(vault, ref)
+    assert stored_after is not None
+    assert stored_after.state == "ready"
+    assert stored_after.candidates == stored_before.candidates
+    assert stored_after.publication_revision == stored_before.publication_revision
+
+    # Benign control: the same replay with no drift also converges.
+    control_target = _seed_page(vault, "lane4-crash-control", "Control target body.")
+    _wire_candidates(monkeypatch, [steady])
+    control_receipt, _ = _prepare_custody(
+        vault,
+        batch_id="b-crash-control",
+        target_rel=control_target,
+        generation="generation-2",
+        now=200.0,
+    )
+    control_claim = _claim(vault, owner="worker-c", now=210.0, lease=5.0)
+    assert (
+        module.execute_write_advisory(
+            vault,
+            control_claim,
+            observe_current_generation=_observer("generation-2"),
+            now=211.0,
+        ).outcome
+        == "published"
+    )
+    control = _run(vault, generation="generation-2", owner="worker-d", now=300.0)
+    assert [execution.outcome for execution in control] == ["already_published"]
+    assert control[0].completed is True
+    assert (
+        derived_receipts.component_status(
+            vault, control_receipt, derived_receipts.DerivedComponent.WRITE_ADVISORY
+        ).state
+        == "completed"
+    )
+
+
+def test_retryable_publication_burns_no_once_only_review_state(
+    vault: Path, encoder: _DeterministicEncoder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pass whose publication is refused leaves the ledger untouched.
+
+    The first-surfaced ledger measures when a signal reached somebody. A
+    candidate set that was computed and then refused by the store reached
+    nobody, so stamping it would both burn the once-only record and change the
+    warning text a later successful pass renders.
+    """
+    module = _advisory()
+    target = _seed_page(vault, "lane4-ledger", "Ledger guard target body.")
+    counterpart = _candidate(vault, "lane4-ledger-counterpart")
+    _wire_candidates(monkeypatch, [counterpart])
+    receipt, _ = _prepare_custody(vault, batch_id="b-ledger", target_rel=target)
+    before = _review_state_bytes(vault)
+
+    # A real refusal: the claim's lease has expired by publication time.
+    expired = _claim(vault, owner="expired-worker", now=20.0, lease=1.0)
+    refused = module.execute_write_advisory(
+        vault,
+        expired,
+        observe_current_generation=_observer("generation-1"),
+        now=500.0,
+    )
+
+    assert refused.outcome == "stale_claim"
+    assert _review_state_bytes(vault) == before
+
+    # The control: a publication the store accepts does record the surfacing.
+    assert _run(vault, owner="live-worker", now=600.0)[0].outcome == "published"
+    assert _review_state_bytes(vault) != before
+
+
+def test_unauthorized_and_deleted_target_states_stay_indistinguishable(
+    vault: Path, encoder: _DeterministicEncoder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Authority is decided before any status, including for a deleted target.
+
+    A reference addresses operational state and authorizes nothing, so an
+    unauthorized caller must not be able to separate a real reference from an
+    unknown one by watching whether the answer is `superseded` or not-found.
+    An authorized caller keeps `superseded`, because that is the true state.
+    """
+    module = _advisory()
+    unchanged = _seed_page(vault, "lane4-auth-unchanged", "Unchanged body.", folder="Patterns")
+    changed = _seed_page(vault, "lane4-auth-changed", "Changed body.", folder="Patterns")
+    deleted = _seed_page(vault, "lane4-auth-deleted", "Deleted body.", folder="Patterns")
+    _wire_candidates(monkeypatch, [])
+
+    refs = {}
+    for index, rel in enumerate((unchanged, changed, deleted)):
+        receipt, _ = _prepare_custody(
+            vault,
+            batch_id=f"b-auth-{index}",
+            target_rel=rel,
+            generation=f"generation-{index}",
+            now=10.0 + index,
+        )
+        assert (
+            _run(vault, generation=f"generation-{index}", owner=f"w-{index}", now=50.0 + index)[
+                0
+            ].outcome
+            == "published"
+        )
+        refs[rel] = derived_receipts.advisory_result_ref(vault, receipt)
+
+    (vault / changed).write_text("---\ntype: insight\n---\n\nRewritten.\n", encoding="utf-8")
+    (vault / deleted).unlink()
+    find_module.clear_cache()
+
+    _govern(vault, glob="Notes/Patterns/**", ceiling=0)
+
+    unknown = "exomem://write-advisory-result/" + "b" * 32
+    outcomes = []
+    with request_scope(_external()):
+        for ref in (refs[unchanged], refs[changed], refs[deleted], unknown):
+            with pytest.raises(ValueError) as error:
+                commands.op_review_memory(vault, mode="write-advisory-result", ref=ref)
+            outcomes.append((type(error.value), str(error.value)))
+
+    assert len(set(outcomes)) == 1, outcomes
+    assert outcomes[0][1].startswith("REVIEW_ITEM_NOT_FOUND")
+
+    # The owner is authorized, so the true state survives — including for the
+    # deleted target, whose authority is decided without any content.
+    with request_scope(owner_principal()):
+        assert module.resolve_result(vault, refs[unchanged])["status"] == "ready"
+        assert module.resolve_result(vault, refs[changed])["status"] == "superseded"
+        assert module.resolve_result(vault, refs[deleted])["status"] == "superseded"
