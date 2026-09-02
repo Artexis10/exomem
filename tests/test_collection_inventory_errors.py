@@ -401,6 +401,11 @@ _WITHHELD_PAIRS = [
     (f"{_PRIV_LINK}/_collection.md", f"{_ABSENT_LINK}/_collection.md", True),
     (f"{_PRIV_PARENT}/_collection.md", f"{_ABSENT_PARENT}/_collection.md", True),
     (f"{_PRIV}/_collection.md/", f"{_ABSENT}/_collection.md/", False),
+    # The one cell that reaches the legacy-tracker route with an UNSAFE form:
+    # `record_memory` sends every non-manifest `.md` spelling there, and a
+    # symlinked tracker inside a withheld collection is what tells a
+    # stat-before-authorize ordering apart from the correct one.
+    (f"{_PRIV}/linked.md", f"{_ABSENT}/linked.md", True),
 ]
 _WITHHELD_IDS = [
     "md_file",
@@ -410,6 +415,7 @@ _WITHHELD_IDS = [
     "symlinked_manifest",
     "symlinked_parent",
     "trailing_slash",
+    "symlinked_tracker",
 ]
 
 
@@ -430,6 +436,7 @@ def _seed_withheld_vault(vault: Path) -> bool:
         (vault / _PRIV_LINK).mkdir(parents=True)
         (vault / _PRIV_LINK / "_collection.md").symlink_to(vault / _PRIV / "_collection.md")
         (vault / _PRIV_PARENT).symlink_to(vault / _PRIV)
+        (vault / _PRIV / "linked.md").symlink_to(vault / _PRIV / "Items" / "x.md")
     except OSError:
         symlinked = False
     (vault / "Knowledge Base" / "_access.yaml").write_text(
