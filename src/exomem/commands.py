@@ -65,6 +65,7 @@ from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
 from . import get_page as get_page_module
+from . import hosted_legacy_schemas as hosted_legacy_schemas_module
 from . import knowledge_packs as knowledge_packs_module
 from . import link as link_module
 from . import link_summary as link_summary_module
@@ -9469,6 +9470,13 @@ HOSTED_ALPHA_AGENT_PROFILE = "hosted-alpha-agent-v1"
 HOSTED_ALPHA_AGENT_V2_PROFILE = "hosted-alpha-agent-v2"
 HOSTED_ALPHA_AGENT_V3_PROFILE = "hosted-alpha-agent-v3"
 HOSTED_ALPHA_AGENT_V4_PROFILE = "hosted-alpha-agent-v4"
+HOSTED_ALPHA_AGENT_V5_PROFILE = "hosted-alpha-agent-v5"
+#: Profiles whose published command schema is frozen. See
+#: `exomem.hosted_legacy_schemas` for why a released profile may not keep
+#: resolving whatever the live registry holds.
+HOSTED_LEGACY_PROFILES: frozenset[str] = frozenset(
+    hosted_legacy_schemas_module.LEGACY_PROFILE_PARAMS
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -9697,8 +9705,89 @@ PRODUCT_SURFACE_PROFILES = MappingProxyType(
             ),
             expose_tier2=True,
         ),
+        # v5 carries the durable-baseline, generated-artifact adoption,
+        # recurring-entity lifecycle and governed-curation doctrine. Its
+        # membership is v4's, unchanged and in v4's order: those four changes
+        # add arguments and skills, not commands, and `transfer_artifact` stays
+        # withheld until its gateway bridge exists rather than being published
+        # as a call that returns an interception error.
+        #
+        # What v5 does not have is a pinned schema. It is the release those new
+        # arguments were cut for, so it discovers them through the registry --
+        # which is exactly what v1-v4 must no longer do.
+        HOSTED_ALPHA_AGENT_V5_PROFILE: ProductSurfaceProfile(
+            name=HOSTED_ALPHA_AGENT_V5_PROFILE,
+            command_names=hosted_complete_surface_names(),
+            expose_tier2=True,
+        ),
     }
 )
+
+
+def _pinned_legacy_leaf(command: Command, keep: frozenset[str]) -> Any:
+    """Return `command`'s leaf with only the pinned parameters visible.
+
+    Trimming `Command.params` alone pins the REST wire, because `cli_ops.coerce`
+    validates against it -- but not the MCP tool schema, which `bind_vault`
+    derives from the leaf's own signature. Both have to narrow together or the
+    published descriptor and the admitted call disagree.
+    """
+    leaf = command.leaf
+    injected = 2 if command.needs_schema else 1
+    signature = inspect.signature(leaf)
+    parameters = list(signature.parameters.values())
+    retained = [
+        parameter
+        for index, parameter in enumerate(parameters)
+        if index < injected or parameter.name in keep
+    ]
+
+    def pinned(*args: Any, **kwargs: Any) -> Any:
+        unexpected = sorted(set(kwargs) - keep)
+        if unexpected:
+            raise TypeError(
+                f"{command.name}() got unexpected keyword argument(s) "
+                f"{', '.join(unexpected)} for a pinned Hosted profile"
+            )
+        return leaf(*args, **kwargs)
+
+    pinned.__name__ = getattr(leaf, "__name__", command.name)
+    pinned.__qualname__ = getattr(leaf, "__qualname__", command.name)
+    pinned.__module__ = getattr(leaf, "__module__", __name__)
+    pinned.__doc__ = leaf.__doc__
+    pinned.__signature__ = signature.replace(parameters=retained)  # type: ignore[attr-defined]
+    retained_names = {parameter.name for parameter in retained} | {"return"}
+    pinned.__annotations__ = {
+        name: annotation
+        for name, annotation in getattr(leaf, "__annotations__", {}).items()
+        if name in retained_names
+    }
+    return pinned
+
+
+def apply_legacy_profile_pin(command: Command, pinned: tuple[str, ...]) -> Command:
+    """Narrow one command to the parameter names a released profile published.
+
+    A pinned name that no longer exists, or one that moved, is raised rather
+    than tolerated: both are breaking changes to a published descriptor, and a
+    pin that absorbed them would bless the very drift it exists to catch.
+    """
+    current = tuple(param.name for param in command.params)
+    if current == pinned:
+        return command
+    missing = [name for name in pinned if name not in current]
+    if missing:
+        raise RuntimeError(
+            f"{command.name}: pinned parameter(s) no longer exist: {', '.join(missing)}"
+        )
+    keep = frozenset(pinned)
+    if tuple(name for name in current if name in keep) != pinned:
+        raise RuntimeError(f"{command.name}: pinned parameter order changed")
+    return dataclass_replace(
+        command,
+        leaf=_pinned_legacy_leaf(command, keep),
+        params=tuple(param for param in command.params if param.name in keep),
+    )
 
 
 def commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, ...]:
@@ -9724,6 +9813,7 @@ def product_commands_for_profile(
         raise ValueError(f"unsupported product surface profile: {profile!r}")
 
     canonical = {command.name: command for command in PRODUCT_COMMANDS}
+    pinned_schema = hosted_legacy_schemas_module.LEGACY_PROFILE_PARAMS.get(profile)
     selected: list[Command] = []
     for name in definition.command_names:
         command = canonical.get(name)
@@ -9745,6 +9835,13 @@ def product_commands_for_profile(
                 params=(*_derive_params(_hosted_v4_maintain_memory, skip=1), response_detail),
                 description=_hosted_v4_maintain_memory.__doc__ or "",
             )
+        if pinned_schema is not None:
+            published = pinned_schema.get(name)
+            if published is None:
+                raise RuntimeError(
+                    f"released profile {profile!r} has no pinned schema for {name!r}"
+                )
+            command = apply_legacy_profile_pin(command, published)
         selected.append(command)
     return tuple(selected)
 

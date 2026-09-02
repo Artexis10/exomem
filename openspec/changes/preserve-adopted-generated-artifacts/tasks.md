@@ -23,10 +23,10 @@
 ## 4. Hosted v5 candidate
 
 - [x] 4.1 Add the generic synthetic artifact contribution input at `tests/fixtures/hosted_v5_contributions/artifact_adoption.json`; do not edit, render, lock, archive, promote, or roll back v5 files from this lane.
-- [ ] 4.2 Require the single v5 owner to validate, canonicalise, and freeze the artifact input into the candidate-owned combined fixture while preserving v4 command order and withholding `transfer_artifact` until a real bridge exists.
+- [x] 4.2 Require the single v5 owner to validate, canonicalise, and freeze the artifact input into the candidate-owned combined fixture while preserving v4 command order and withholding `transfer_artifact` until a real bridge exists.
 - [ ] 4.3 Prove the shared combined fixture digest includes artifact behavior alongside baseline, recurring-entity, and governed-curation behavior and is bound by the owner's compatibility, package, lock, archive, and promotion gates; fixture drift MUST invalidate package verification.
 - [ ] 4.4 Supply clean supported-client traces for Source and Evidence direct adoption, sibling no-write, no-handle handoff, receipt-linked delivery, and no false remote-byte claim before owner render/promotion.
-- [ ] 4.5 Verify pre-lock rebuild and post-promotion v6-only correction semantics through the owner's shared-v5 rollback tests.
+- [x] 4.5 Verify pre-lock rebuild and post-promotion v6-only correction semantics through the owner's shared-v5 rollback tests.
 
 ## 5. Mutants and verification
 
