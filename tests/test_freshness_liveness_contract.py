@@ -981,6 +981,138 @@ def test_watcher_drain_still_marks_unclassified_graph_incompleteness(
     assert clock_after == clock_before + 3
 
 
+def test_a_busy_boundary_does_not_latch_the_external_pending_epoch(
+    contract_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient lock refusal must not leave the graph on the whole-vault path.
+
+    The compare-and-ack withdrawal contends for the vault mutation boundary
+    with `epistemic_graph_drain_paths` -- the incremental drain, repairing the
+    very pages this dispatch is reacting to. On a cell whose queue is working,
+    losing that race is the expected outcome, and the refusal says it is
+    survivable: `status: "retryable"`, with a `retry_after_ms`.
+
+    Abandoning the withdrawal on that first refusal is what made the
+    incremental path disable itself. `ack_ready` goes false,
+    `clear_external_pending` is skipped, and the in-memory epoch stays set --
+    which declines the graph read snapshot, which fails
+    `_graph_sync_predecessor_state`, which sends every subsequent write down a
+    whole-vault rebuild until a reconcile cycle happens to find the boundary
+    free. Measured on a live cell: one 4.9 s drain hold, then 43 s rebuilds on
+    every write for the rest of the window.
+
+    The refusal here is real, not synthetic: a second thread holds the actual
+    boundary under the actual holder name, and the withdrawal is refused by
+    `mutation_lock` itself. The hold is transient, exactly as a drain's is, so
+    a withdrawal that waits at all clears the epoch and one that gives up
+    immediately does not.
+    """
+    import threading
+
+    from exomem import mutation_lock
+    from exomem.file_watcher import FileWatcher
+
+    root = contract_vault
+    # Refuse fast so the test spends its time on the retry, not the first wait.
+    monkeypatch.setattr(mutation_lock, "_DEFAULT_TIMEOUT_SECONDS", 0.3)
+    coordinator = epistemic_graph.EpistemicGraphIndex(root)._mutation_coordinator
+
+    holding = threading.Event()
+    attempted = threading.Event()
+    released = threading.Event()
+    attempts: list[int] = []
+
+    # Release the boundary only once the withdrawal has actually been refused
+    # once, so the contention is deterministic rather than a sleep race.
+    real_suspend = epistemic_graph.EpistemicGraphIndex.suspend_reads
+
+    def counting_suspend(self) -> None:
+        attempts.append(1)
+        try:
+            return real_suspend(self)
+        except Exception:
+            # Only now has the boundary actually refused. Releasing before this
+            # would let the first attempt win and prove nothing.
+            attempted.set()
+            raise
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex, "suspend_reads", counting_suspend
+    )
+
+    def drain_holds_the_boundary() -> None:
+        with coordinator.hold(
+            operation="epistemic_graph_drain_paths", holder_kind="graph"
+        ):
+            holding.set()
+            attempted.wait(20)
+        released.set()
+
+    holder = threading.Thread(target=drain_holds_the_boundary, daemon=True)
+    holder.start()
+    assert holding.wait(10), "the contending drain never took the boundary"
+
+    watcher = FileWatcher(root)
+    edited = root / INSIGHT_A
+    edited.write_text(_page("Contract A", "A revised under contention."), encoding="utf-8")
+    pending_epoch = freshness.mark_external_pending(root)
+
+    watcher._dispatch_batch(
+        [edited], [INSIGHT_A], [], cap=False, pending_epoch=pending_epoch
+    )
+
+    assert attempts, "the withdrawal was never attempted, so nothing was contended"
+    assert released.wait(10), "the contending drain never let go"
+    assert freshness.external_pending(root) is False, (
+        "a transient, explicitly retryable boundary refusal latched the external "
+        "pending epoch; every write until the next reconcile now pays a "
+        "whole-vault rebuild"
+    )
+
+
+def test_a_non_retryable_withdrawal_failure_is_not_retried_and_keeps_the_epoch(
+    contract_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the carve-out above, and the one that keeps it narrow.
+
+    Waiting out a busy boundary is right because the refusal declares itself
+    survivable. A failure that makes no such claim is the fail-closed case the
+    epoch must survive: it is retried zero times, and the epoch stays pending
+    for periodic recovery exactly as before.
+
+    Without this, widening the retry to "any exception" would swallow a genuine
+    withdrawal failure by waiting on it, and the suite would stay green.
+    """
+    from exomem.file_watcher import FileWatcher
+
+    root = contract_vault
+    attempts: list[int] = []
+
+    def refuse_hard(self) -> None:
+        attempts.append(1)
+        raise OpError("GRAPH_SIDECAR_UNAVAILABLE", "sidecar cannot be opened")
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex, "suspend_reads", refuse_hard
+    )
+
+    watcher = FileWatcher(root)
+    edited = root / INSIGHT_A
+    edited.write_text(_page("Contract A", "A revised, hard failure."), encoding="utf-8")
+    pending_epoch = freshness.mark_external_pending(root)
+
+    watcher._dispatch_batch(
+        [edited], [INSIGHT_A], [], cap=False, pending_epoch=pending_epoch
+    )
+
+    assert attempts == [1], (
+        "a withdrawal failure that never claimed to be retryable was retried anyway"
+    )
+    assert freshness.external_pending(root) is True, (
+        "a genuine withdrawal failure must still keep the epoch pending"
+    )
+
+
 def test_refused_publication_is_memoized_instead_of_retried_at_full_cost(
     contract_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
