@@ -658,6 +658,11 @@
           "description": "Apply usage boost when explicitly requested.",
           "type": "boolean"
         },
+        "widen_outside_kb": {
+          "default": false,
+          "description": "With scope=\"kb\", also reserve up to limit-1 slots for curated vault pages OUTSIDE the knowledge base. Off by default: scope=\"kb\" means the knowledge base and nothing else. Turn it on when a terse out-of-KB file (a tracker, a handbook) is what you are looking for, or use scope=\"vault\" to search everything equally.",
+          "type": "boolean"
+        },
         "graph_enrich": {
           "default": false,
           "description": "With deep mode, include typed graph neighborhood data.",

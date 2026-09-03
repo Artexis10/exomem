@@ -986,6 +986,7 @@ def find(
     prefer_compiled: bool = True,
     prefer_active: bool = True,
     prefer_used: bool = False,
+    widen_outside_kb: bool = False,
     config: RankingConfig | None = None,
     timings: FindTimings | None = None,
     degraded_out: list[str] | None = None,
@@ -1091,6 +1092,15 @@ def find(
     content lanes already surfaced. Boosted hits expose `signals.activation`
     and `signals.usage_boost`. Strict no-op on cold start, absent logs, or
     `EXOMEM_DISABLE_USAGE_BOOST`. Bypasses the hot find cache.
+
+    `widen_outside_kb`: when True (OFF by default), `scope="kb"` reserves up
+    to `limit - 1` slots for pages OUTSIDE `Knowledge Base/` (see the reserve
+    note at the widening call site). Off, `scope="kb"` serves the knowledge
+    base and nothing else. The reserve used to run on every default recall and
+    cost the reader a whole-corpus lexical pass, so it is now something a
+    caller asks for. A managed reader serves it from the maintained catalogue
+    over the index-resolved out-of-KB eligible set, and declines rather than
+    scanning when the catalogue cannot answer.
     """
     if catalog_proof_out is not None:
         catalog_proof_out.clear()
@@ -1508,6 +1518,7 @@ def find(
             effective_result_level,
             prefer_compiled,
             prefer_active,
+            widen_outside_kb,
             resolved_config,
         )
         with _span(timings, "freshness"):
@@ -1744,10 +1755,19 @@ def find(
             reason="empty_query" if not query_norm else "requested_mode_keyword",
         )
 
-    # Auto-widen: reach into the wider vault (sibling folders like Tracking/,
-    # Reference/, plus curated trees) so content outside Knowledge Base/ isn't
-    # silently invisible. Only for scope="kb" (not "kb-only"/"vault") and
-    # non-empty queries (an empty query has no signal to widen on).
+    # Requested widening: reach into the wider vault (sibling folders like
+    # Tracking/, Reference/, plus curated trees) so content outside
+    # Knowledge Base/ isn't silently invisible. Only for scope="kb" (not
+    # "kb-only"/"vault"), non-empty queries (an empty query has no signal to
+    # widen on), and only when the caller asked for it.
+    #
+    # OPT-IN since `accelerate-governed-recall`. It used to run on every
+    # default recall and cost 7.6 s on the live cell, because it resolved
+    # eligibility a second time at vault scope and then ranked the whole
+    # non-KB corpus — building a Python BM25 corpus whenever the maintained
+    # catalogue was not fresh enough to serve it. The behaviour is reachable,
+    # not free: a caller that relies on the reserve asks for it, and the
+    # default stops paying for a lane most callers never read.
     #
     # We RESERVE a few result slots for out-of-KB hits rather than only
     # back-filling when the KB underfills. The reason is empirical: on a real
@@ -1758,7 +1778,7 @@ def find(
     # such a match surfaces. The KB keeps the majority of slots (strong literal
     # hits first, then weak graph/recency filler); the reserve never starves
     # the KB (capped at limit-1) and is empty when nothing outside matches.
-    if scope == "kb" and query_norm:
+    if scope == "kb" and query_norm and widen_outside_kb:
         with _span(timings, "outside_kb"):
             seen = {h.path for h in hits}
             outside = [
@@ -1779,6 +1799,7 @@ def find(
                     exclude_paths=seen,
                     failed_out=failed,
                     retrieval_trace=retrieval_trace,
+                    timings=timings,
                 )
                 if h.path not in seen
             ]
@@ -1806,9 +1827,15 @@ def find(
                         reserve=reserve,
                         kb_keep=kb_keep,
                     )
+    elif timings is not None:
+        # Silence and "ran, found nothing" are the same shape in a stage table,
+        # and the spec asks for the difference: a default recall must SAY the
+        # widening was skipped. `skipped` carries no `ms`, so the attribution
+        # partition is untouched.
+        timings.skipped("outside_kb")
 
     # Explicit recency window (off by default) — drop out-of-window hits last,
-    # after auto-widen, so it governs every mode uniformly.
+    # after the requested widening, so it governs every mode uniformly.
     with _span(timings, "date_filter"):
         hits = _filter_by_date(
             hits,
@@ -4152,6 +4179,62 @@ def _find_semantic(
     return final_hits
 
 
+def _widening_allowed_paths(
+    vault_root: Path,
+    *,
+    plan: structured_filters.FilterPlan | None,
+    snapshot: FreshnessSnapshot,
+    freshness: tuple | None,
+) -> set[str] | None:
+    """The out-of-KB eligible set for the reserve, or None to decline.
+
+    One classification and one page-catalogue query, both at vault scope, so
+    the reserve ranks exactly the pages a filter admits outside the knowledge
+    base. Two shapes reach here:
+
+    * a plan — the managed eligibility resolution already evaluates it exactly
+      against the catalogue's candidates, so the answer is that set with the
+      knowledge base removed;
+    * no plan — `plan_index_eligibility` classifies the empty plan as a
+      tautology, which the page catalogue answers as "every in-scope page".
+      That is a legitimate resolution, not a failure: the question really is
+      "everything outside the knowledge base", and answering it from `pages`
+      is what keeps the lexical query off an over-fetch cap that KB pages
+      dominate.
+
+    None is the decline: a catalogue that cannot answer for this generation
+    must not be substituted by a scan, and must not raise either — the KB
+    results the caller already has are returned unchanged.
+    """
+    from . import lexstore
+
+    try:
+        if plan is not None:
+            eligible = _resolve_eligible_filter_paths(
+                vault_root,
+                scope="vault",
+                plan=plan,
+                snapshot=snapshot,
+            )
+        else:
+            empty = structured_filters.compile_filter(None)
+            result = lexstore.search_eligible_parent_paths_result(
+                vault_root,
+                structured_filters.plan_index_eligibility(empty),
+                scope="vault",
+                freshness=freshness,
+            )
+            if not result.readiness.complete or result.value is None:
+                return None
+            eligible = set(result.value)
+    except RetrievalIndexWarming:
+        return None
+    except structured_filters.FilterError:
+        return None
+    prefix = kb_prefix()
+    return {path for path in eligible if not path.startswith(prefix)}
+
+
 def _find_outside_kb(
     vault_root: Path,
     *,
@@ -4169,9 +4252,10 @@ def _find_outside_kb(
     exclude_paths: set[str] | None = None,
     failed_out: list[str] | None = None,
     retrieval_trace: Any | None = None,
+    timings: FindTimings | None = None,
 ) -> list[Hit]:
     """BM25/keyword recall over the vault, RESTRICTED to paths outside
-    `Knowledge Base/`. Powers scope="kb" auto-widening.
+    `Knowledge Base/`. Powers the requested `scope="kb"` widening.
 
     Recall here is BM25-only (the vector lane already searches the WHOLE sidecar,
     so under `EXOMEM_INDEX_SCOPE=vault` out-of-KB notes surface semantically via
@@ -4181,39 +4265,81 @@ def _find_outside_kb(
     frontmatter-less files (e.g. a numbers-heavy workout tracker) would
     otherwise be filtered out by any natural-language query that includes a
     word they don't literally contain.
+
+    A MANAGED reader answers from the maintained catalogue and nothing else:
+    one lexical query restricted to the index-resolved out-of-KB eligible set,
+    with no repair, no in-process corpus and no walk. A catalogue that cannot
+    serve the query DECLINES — the widening is omitted and the knowledge-base
+    results are returned unchanged, because both alternatives are worse than
+    saying so: a stale answer is silently wrong, and a corpus build is the
+    7.6 s this stage exists to remove.
+
+    An OFFLINE (unmanaged) caller keeps exactly today's path, including the
+    in-process rung. A CLI user against a cold vault has no catalogue to
+    consult and must still get the out-of-KB page.
     """
     if not query_norm or limit < 1:
         return []
-    from . import bm25, lexstore
+    from . import bm25, lexstore, readiness
 
-    eligible_paths = (
-        _resolve_eligible_filter_paths(
+    managed = readiness.runtime_managed()
+    vault_freshness = snapshot.for_scope("vault") if snapshot is not None else None
+    snapshot = snapshot or FreshnessSnapshot(vault_root)
+    #: Applied per candidate AFTER ranking. Only the unrestricted rungs need
+    #: it: the catalogue query is already restricted to the eligible set, and
+    #: re-testing there would make the restriction unfalsifiable — a reserve
+    #: query that lost its `allowed_paths` would still look correct.
+    post_eligibility: set[str] | None = None
+
+    if managed:
+        # The eligible set for the reserve, resolved from the SAME page
+        # catalogue the knowledge-base eligibility reads (Lane 2's
+        # `plan_index_eligibility` at vault scope). With no filter plan the
+        # classifier is a tautology and the set is every non-KB page the
+        # catalogue holds — which is what "outside the knowledge base" means.
+        allowed_outside = _widening_allowed_paths(
             vault_root,
-            scope="vault",
             plan=filter_plan,
-            snapshot=snapshot or FreshnessSnapshot(vault_root),
+            snapshot=snapshot,
+            freshness=vault_freshness,
         )
-        if filter_plan is not None
-        else None
-    )
-
-    allowed_outside = (
-        {path for path in eligible_paths or () if not path.startswith(kb_prefix())}
-        if eligible_paths is not None
-        else None
-    )
-    # Unfiltered widening still over-fetches because KB files dominate the
-    # vault corpus. A structured filter instead ranks the exact outside-KB
-    # eligible set, so no eligible page can be buried below that over-fetch cap.
+        if allowed_outside is None:
+            _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
+            return []
+    else:
+        eligible_paths = (
+            _resolve_eligible_filter_paths(
+                vault_root,
+                scope="vault",
+                plan=filter_plan,
+                snapshot=snapshot,
+            )
+            if filter_plan is not None
+            else None
+        )
+        post_eligibility = eligible_paths
+        allowed_outside = (
+            {path for path in eligible_paths or () if not path.startswith(kb_prefix())}
+            if eligible_paths is not None
+            else None
+        )
+    # A structured filter ranks the EXACT outside-KB eligible set, so no
+    # eligible page can be buried below an over-fetch cap — the per-candidate
+    # gates below reject freely, and a short k would underfill. Without a
+    # filter the set is the whole non-KB corpus, so the cap stays: it is a
+    # bound on work, not on recall, and now that the query itself excludes the
+    # knowledge base the cap is no longer spent on KB rows.
     bm25_k = (
-        max(limit, len(allowed_outside)) if allowed_outside is not None else max(limit * 5, 100)
+        max(limit, len(allowed_outside))
+        if allowed_outside is not None and filter_plan is not None
+        else max(limit * 5, 100)
     )
     candidates: list[str] = []
     score_by_path: dict[str, float] = {}
     lexical_backend = lexstore.cache_token(vault_root)
+    catalog_served = False
     try:
-        vault_freshness = snapshot.for_scope("vault") if snapshot is not None else None
-        lexical_repair = _bounded_lexical_repair_allowed(vault_freshness)
+        lexical_repair = (not managed) and _bounded_lexical_repair_allowed(vault_freshness)
         bm25_hits: list[tuple[str, float]] | None
         if (
             not lexical_repair
@@ -4228,8 +4354,17 @@ def _find_outside_kb(
                 allowed_paths=allowed_outside,
             )
             if not catalog_result.readiness.complete:
+                if managed:
+                    _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
+                    return []
                 _raise_catalog_outcome(catalog_result.readiness)
             bm25_hits = list(catalog_result.value or [])
+            catalog_served = True
+        elif managed:
+            # Only reachable with the sidecar retired outright, which leaves a
+            # managed reader no index to widen from.
+            _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
+            return []
         else:
             bm25_hits = lexstore.search_bm25(
                 vault_root,
@@ -4260,17 +4395,39 @@ def _find_outside_kb(
                 _record_degradation("outside_kb_lexical")
                 return []
         for path, _score in bm25_hits:
-            if not path.startswith(kb_prefix()):
+            # Skip the prefix re-test only when the query was ACTUALLY
+            # restricted to the out-of-KB eligible set: then its rows need no
+            # second opinion, and must not get one, or the restriction stops
+            # being the thing that keeps a knowledge-base page out of the
+            # reserve (mutant M4). `catalog_served` alone is not that
+            # condition — an OFFLINE reader above the inline-repair page cap
+            # reaches the same catalogue query with `allowed_outside` None
+            # whenever no filter narrowed it, and an unrestricted vault-scope
+            # query returns knowledge-base rows.
+            restricted = catalog_served and allowed_outside is not None
+            if restricted or not path.startswith(kb_prefix()):
                 candidates.append(path)
                 score_by_path[path] = float(_score)
     except RetrievalIndexWarming:
+        if managed:
+            _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
+            return []
         raise
     except Exception as e:  # noqa: BLE001 — widening must never break find
-        log.warning("auto-widen lexical sidecar failed: %s", e)
+        log.warning("requested widening lexical sidecar failed: %s", e)
+        if managed:
+            # `declined` is the managed reader's contract: it asked an index
+            # and the index could not answer. An offline reader that fell over
+            # mid-scan DEGRADED, and says so through `failed_out` and the
+            # degradation counter; calling that `declined` would report a lane
+            # that broke as a lane that politely stood down.
+            _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
         if failed_out is not None:
             failed_out.append("outside_kb_lexical")
         _record_degradation("outside_kb_lexical")
         return []
+    if catalog_served:
+        _mark_source(timings, "outside_kb", find_types.SOURCE_INDEX)
 
     hits: list[Hit] = []
     seen: set[str] = set()
@@ -4283,7 +4440,7 @@ def _find_outside_kb(
         page = _CACHE.get(vault_root / rel_path, vault_root)
         if page is None:
             continue
-        if eligible_paths is not None and rel_path not in eligible_paths:
+        if post_eligibility is not None and rel_path not in post_eligibility:
             continue
         if not _passes_filters(
             page,
