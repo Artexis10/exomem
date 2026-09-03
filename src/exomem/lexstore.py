@@ -2182,11 +2182,28 @@ def _custody_indexable(vault_root: Path, rel: str) -> bool:
     A suppressed raw Record is on disk and deliberately absent from these rows,
     so "no row" is exact for it. Reading that as drift would fail a scope closed
     on every governed write that touched one.
+
+    Two predicates decide whether the catalogue owes a row, and custody has to
+    ask BOTH of them, because the writer does. `rebuild_atomic` walks
+    `walk_vault_md`, which never descends into a reserved scan directory, so a
+    page under one of those has no row and is right not to -- and
+    `is_recall_candidate` alone says it should have one. That disagreement is
+    the same shape as an absent catalogue read as drift: a legitimate "no row
+    is correct" state reported as a mismatch, failing both scopes closed.
+
+    It cannot fire from today's callers: `in_excluded_scan_dir` already filters
+    those paths out upstream of `batch.identity_paths`, and `audit_custody` has
+    no production caller. It goes live the day the audit is wired into
+    reconciliation, which design.md's Risks anticipate, so the predicate is
+    aligned now rather than left as a trap for that change.
     """
     from . import recall_policy
+    from .vault import in_excluded_scan_dir
 
     target = vault_root.joinpath(*rel.split("/"))
     if not rel.lower().endswith(".md"):
+        return False
+    if in_excluded_scan_dir(rel):
         return False
     try:
         if target.is_symlink() or not target.is_file():

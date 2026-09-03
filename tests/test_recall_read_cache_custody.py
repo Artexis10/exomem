@@ -64,6 +64,11 @@ _MOVED = "Knowledge Base/Notes/Custody/custody-alpha-moved.md"
 #: only, so this is the shape a widened recall surfaces and the sidecar can
 #: never hold.
 _OUTSIDE = "Reference/custody-outside.md"
+#: Inside the knowledge base but under a reserved scan directory, so
+#: `walk_vault_md` never descends to it and the catalogue's rebuild owes it no
+#: row. `is_recall_candidate` says otherwise, which is exactly the disagreement
+#: `_custody_indexable` has to resolve the writer's way.
+_EXCLUDED = "Knowledge Base/_Schema/custody-schema.md"
 
 #: Every substrate cache the invariant names, plus the reference sidecar, which
 #: is the fourth read-side index a recall consumes on the request thread.
@@ -702,6 +707,49 @@ def test_a_governed_write_with_no_catalogue_is_not_drift(vault: Path) -> None:
     assert find_corpus.CACHE.stale_paths(vault, (_ALPHA,)) == (), (
         "the resident row still describes the generation the write replaced"
     )
+
+
+def test_a_reserved_scan_directory_owes_no_row_and_is_not_drift(
+    vault: Path, warm_managed_cell
+) -> None:
+    """Custody asks the predicate the catalogue's WRITER asks, both halves of it.
+
+    `rebuild_atomic` walks `walk_vault_md`, which never descends into a
+    reserved scan directory, so a page under one has no catalogue row and is
+    right not to. `is_recall_candidate` on its own says it should have one, and
+    that disagreement reports a legitimate "no row is correct" state as drift —
+    the same shape as an absent catalogue read as drift, arriving by a
+    different route, and it fails BOTH scopes closed.
+
+    It cannot reach production today, because `in_excluded_scan_dir` filters
+    these paths upstream of `batch.identity_paths` and `audit_custody` has no
+    production caller. This node is what stops it becoming live the day the
+    audit is wired into reconciliation.
+    """
+    _seed(vault, _ALPHA, "Custody alpha", "alpha-seed")
+    _seed(vault, _EXCLUDED, "Custody schema", "schema-seed")
+    _warm(vault, warm_managed_cell)
+
+    # The premise, measured rather than assumed: the catalogue holds no row for
+    # this page, and the OTHER predicate would have said it should.
+    from exomem import recall_policy as _policy
+
+    assert lexstore.page_content_hashes(vault, [_EXCLUDED])[_EXCLUDED] is None, (
+        "the catalogue indexed a reserved scan directory; this pins nothing"
+    )
+    assert _policy.is_recall_candidate(vault, vault / _EXCLUDED), (
+        "is_recall_candidate already excludes this path, so the two predicates "
+        "no longer disagree and this node has stopped pinning the gap"
+    )
+
+    freshness.reset_custody_telemetry()
+    audit = freshness.audit_custody(vault, [_EXCLUDED], reason="reserved_scan_dir")
+
+    assert audit.mismatches == (), (
+        f"a page the catalogue's own walk skips read as drift: {audit.mismatches}"
+    )
+    assert audit.invalidated is False
+    assert freshness.custody_scope_invalidations() == ()
 
 
 def test_a_corrupted_filter_column_fails_the_audit_closed(
