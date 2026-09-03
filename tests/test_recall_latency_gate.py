@@ -278,15 +278,37 @@ def test_a_walker_stage_that_reports_computed_fails_the_gate() -> None:
     eligibility, widening, hydration and hit construction. Those are the
     stages whose source is decided at runtime, and the only ones where
     `computed` means the corpus was walked.
+
+    The stage here is `outside_kb`, NOT `filter_eligibility`, and that is the
+    whole point of the node. An earlier version used `filter_eligibility` and
+    survived the mutant that deletes the walker loop outright, because the
+    separate eligibility-source check below caught the same report and the node
+    could not tell the two guards apart. A node that passes for the wrong
+    reason is a guard that is not there. `outside_kb` is reachable only through
+    the walker loop, so this now fails when that loop is removed.
     """
-    report = _report(stage_sources={"filter_eligibility": "computed"})
+    report = _report(stage_sources={"outside_kb": "computed"})
 
     with pytest.raises(SystemExit) as raised:
         gate.check(report)
 
     message = str(raised.value)
-    assert "filter_eligibility" in message
+    assert "outside_kb" in message
     assert "computed" in message
+
+
+def test_the_filtered_eligibility_source_is_checked_on_its_own() -> None:
+    """The second, narrower guard: the filtered series names its own stage.
+
+    Separated from the node above so each guard has a node that dies with it
+    rather than two nodes that both survive because the other one fired.
+    """
+    report = _report(stage_sources={"filter_eligibility": "declined"})
+
+    with pytest.raises(SystemExit) as raised:
+        gate.check(report)
+
+    assert "filter_eligibility" in str(raised.value)
 
 
 def test_each_walker_stage_is_watched_not_just_the_first() -> None:
@@ -320,6 +342,26 @@ def test_a_computing_stage_that_is_not_a_walker_is_not_a_walk() -> None:
 def test_a_walker_stage_may_decline_without_failing_the_walk_check() -> None:
     """Declining is the contract's prescribed answer, not a breach."""
     gate.check(_report(stage_sources={"outside_kb": "declined"}))
+
+
+def test_a_cell_that_reports_no_stage_sources_is_not_a_pass() -> None:
+    """Silence is not proof, and this is not hypothetical.
+
+    Probed against the live 0.69.0 cell on 2026-09-03: `/api/ask_memory` with
+    `include_timings` returned 24 stages and ZERO of them carried a `source`,
+    because the source vocabulary ships with this change. A gate that reads
+    that as "no walker stage reported computed, therefore no walk" would
+    certify the walk sentinel against a cell that cannot answer it — and would
+    do so most convincingly on exactly the cell where the check matters least.
+    """
+    report = _report()
+    for series in report["series"].values():
+        series["stage_sources"] = {}
+
+    with pytest.raises(SystemExit) as raised:
+        gate.check(report)
+
+    assert "no stage sources" in str(raised.value)
 
 
 def test_the_filtered_eligibility_stage_is_held_to_its_index_outcome() -> None:

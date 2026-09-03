@@ -398,7 +398,19 @@ def check(report: dict[str, Any]) -> None:
                 f"{MAX_WARMING_SAMPLES} the contract allows"
             )
 
-        for stage, source in sorted(series.get("stage_sources", {}).items()):
+        # Measured against the live 0.69.0 cell on 2026-09-03: 24 stages, and
+        # NONE of them carried a `source`, because the stage-source vocabulary
+        # ships with this change and that cell predates it. Read naively, the
+        # walk check below then finds no walker stage, reports no walk, and
+        # passes — silence dressed as proof. A gate that cannot read its own
+        # sentinel has to say so, so an empty source map fails closed.
+        stage_sources = series.get("stage_sources", {})
+        if not stage_sources:
+            failures.append(
+                f"{shape} reported no stage sources at all: the walk sentinel cannot be "
+                "read on this cell, so zero walks is silence and not proof"
+            )
+        for stage, source in sorted(stage_sources.items()):
             if source == "computed" and _is_walker(stage):
                 failures.append(f"{shape} stage {stage} reported source computed: a walk")
 
