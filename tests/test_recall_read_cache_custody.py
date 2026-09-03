@@ -485,6 +485,64 @@ def test_a_suppressed_record_write_is_exact_custody_not_a_mismatch(
         )
 
 
+def test_a_correctness_eviction_does_not_discard_receipt_covered_pages(
+    vault: Path, warm_managed_cell
+) -> None:
+    """An in-flight graph rebuild may not take the substrate caches with it.
+
+    `epistemic_graph` evicts RAM caches to force a re-derivation of the
+    resolver, and that eviction used to take the parsed-page cache too. On a
+    busy cell that is the exact-custody rule broken from the other side: a
+    whole-scope correctness event discarding rows that exact receipts already
+    cover. The resolver still goes, because a stale resolver is a wrong answer;
+    the pages stay, because every one of them is keyed to its file's content
+    signature and evicted by its own receipt.
+
+    The second half is what makes the first half safe: after the eviction, a
+    governed write must still move exactly its own page's rows. Rows that
+    survive a whole-scope event but stop tracking their receipts would be worse
+    than rows that were dropped.
+    """
+    _seed(vault, _ALPHA, "Custody alpha", "alpha-seed")
+    _seed(vault, _BETA, "Custody beta", "beta-seed")
+    _warm(vault, warm_managed_cell)
+    resident = len(find_corpus.CACHE.entries)
+    assert resident, "the recall hydrated no pages, so this pins nothing"
+    freshness.reset_custody_telemetry()
+
+    # The seam `epistemic_graph.py` calls during a rebuild.
+    find_module.unload_ram_caches()
+
+    assert len(find_corpus.CACHE.entries) == resident, (
+        "a correctness eviction discarded receipt-covered page rows"
+    )
+    assert freshness.custody_rebuilds() == {}
+    assert (vault / _ALPHA) in find_corpus.CACHE.entries
+    assert (vault / _BETA) in find_corpus.CACHE.entries
+
+    _govern(vault, _ALPHA, "Custody alpha", "alpha-after-eviction")
+
+    report = freshness.last_custody_report()
+    assert report is not None
+    assert report.paths == (_ALPHA,)
+    for seam in _SEAMS:
+        assert report.updated.get(seam) == 1, (
+            f"{seam} lost track of its receipts after a whole-scope eviction: {report}"
+        )
+    assert report.rebuilt == {}
+    assert (vault / _ALPHA) not in find_corpus.CACHE.entries, (
+        "the written page's row survived its own receipt"
+    )
+    assert (vault / _BETA) in find_corpus.CACHE.entries, (
+        "a write to alpha evicted beta's row"
+    )
+
+    # The other meaning of "evict" is unchanged: a caller releasing memory
+    # still gets the large cache back.
+    find_module.release_idle_ram_caches()
+    assert find_corpus.CACHE.entries == {}
+
+
 def test_cold_lexical_corpus_declines_with_warming_and_schedules_repair(
     vault: Path, warm_managed_cell, walk_sentinel
 ) -> None:

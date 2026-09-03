@@ -5398,7 +5398,9 @@ def on_resolver_files_changed(
                 _evict_recall_resolver(root)
 
 
-def unload_ram_caches(*, keep_recall_resolver: bool = False) -> dict[str, int]:
+def unload_ram_caches(
+    *, keep_recall_resolver: bool = False, pages: bool = False
+) -> dict[str, int]:
     """Evict rebuildable find RAM caches without clearing freshness/inbound metadata.
 
     Two callers want different things from this. `epistemic_graph` uses it to
@@ -5412,20 +5414,25 @@ def unload_ram_caches(*, keep_recall_resolver: bool = False) -> dict[str, int]:
     caller releasing memory does not want a thread immediately spending it
     again.
 
-    The parsed-page cache still goes with both meanings, and the exact-custody
-    rule says it should not go with the first: "a change in a whole-scope
-    freshness key MUST NOT by itself discard a substrate cache whose paths are
-    all covered by exact receipts". A correctness eviction is about the
-    RESOLVER, and every page row is already keyed to its file's content
-    signature and evicted by its own receipt through the custody seam. Sparing
-    it here is a one-line change (`pages: bool = False`, passed True by
-    `release_idle_ram_caches` and `clear_cache`) and it is NOT made, because
-    `tests/test_find_hot_cache.py::test_unload_ram_caches_preserves_freshness`
-    pins this default in three assertions and that file is outside this lane's
-    allowlist. Reported as a stop condition instead of edited around.
+    `pages` says whether the parsed-page cache goes too, and it defaults to NOT
+    going. That is the exact-custody rule: "a change in a whole-scope freshness
+    key MUST NOT by itself discard a substrate cache whose paths are all
+    covered by exact receipts." A correctness eviction's subject is the
+    RESOLVER -- there, a stale projection is a wrong answer -- and the page
+    cache cannot be stale in that sense: every entry is keyed to its file's
+    content signature, and every governed write evicts its own rows through the
+    custody seam. Discarding it alongside would throw away receipt-covered
+    custody to fix a projection it has no part in, which on a busy cell is the
+    cost `accelerate-governed-recall` exists to remove; `epistemic_graph`
+    rebuilds are exactly the frequent whole-scope event that was paying it.
+
+    A caller releasing MEMORY still wants it gone, and now says so:
+    `release_idle_ram_caches` and the `clear_cache` test hook both pass
+    `pages=True`.
     """
-    page_entries = len(_CACHE.entries)
-    _CACHE.clear()
+    page_entries = len(_CACHE.entries) if pages else 0
+    if pages:
+        _CACHE.clear()
     with _RESOLVER_LOCK:
         resolver_entries = len(_RESOLVER_CACHE)
         _RESOLVER_CACHE.clear()
@@ -5460,7 +5467,7 @@ def release_idle_ram_caches() -> dict[str, int]:
     Everything else still goes: the page cache is the large one, and the hot
     find cache and recall path cache are cheap to refill.
     """
-    return unload_ram_caches(keep_recall_resolver=True)
+    return unload_ram_caches(keep_recall_resolver=True, pages=True)
 
 
 def evict_resolver_caches(vault_root: Path) -> int:
@@ -5506,7 +5513,7 @@ def clear_cache() -> None:
     """Test hook: flush every in-process find cache between tests — parsed
     pages, the wikilink resolver, the hot find-result cache, and the vault
     inbound-link index."""
-    unload_ram_caches()
+    unload_ram_caches(pages=True)
     freshness.clear()
     from . import vault as vault_module
 
