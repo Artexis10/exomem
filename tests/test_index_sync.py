@@ -981,8 +981,29 @@ def test_contended_lexical_upsert_stays_swallowed_from_the_batch_report(
     assert [receipt.rel_path for receipt in deferred_index.snapshot(tmp_path)] == [
         "Knowledge Base/Notes/swallowed.md"
     ]
-    # The only recovery for the refused rows is the process-local registry.
-    assert scheduled == [{"root": tmp_path, "deferred_paths": [page]}]
+    # The only recovery for the refused rows is the process-local registry, and
+    # since `accelerate-governed-recall` Lane 3 there are TWO process-local
+    # observers of that one refusal. The fan-out's lexical component registers
+    # the targeted retry; the exact-custody seam runs at the end of the same
+    # batch, finds the rows still stale -- of course it does, the write was
+    # refused -- attempts them once more, and is refused by the same held
+    # barrier. Both entries name the same vault and the same path set, so the
+    # recovery STATE is identical to the single-entry shape: the same paths into
+    # the same set behind the same in-flight worker.
+    #
+    # What this pin is for is unchanged and still asserted above: the refusal
+    # reaches no batch report, records no durable demand, and the deferred
+    # registry remains the only recovery. The second entry is not a per-write
+    # cost either -- on an UNCONTENDED write the fan-out's bounded write commits,
+    # custody finds nothing stale and schedules nothing at all, which
+    # `tests/test_recall_read_cache_custody.py::test_custody_schedules_no_repair_when_the_batch_write_lands`
+    # measures directly. It is also load-bearing: with the fan-out's lexical
+    # component degraded, custody's registration is the ONLY repair, which is
+    # what the M3b/M3c mutant pair in that lane's RESULT.md measures.
+    assert scheduled == [
+        {"root": tmp_path, "deferred_paths": [page]},
+        {"root": tmp_path, "deferred_paths": [page]},
+    ]
 
 
 # --- Graph durable-coverage carve-out (tasks 1.1 / 1.2 / 2.1) ---------------

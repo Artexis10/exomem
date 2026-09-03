@@ -709,6 +709,102 @@ def test_a_governed_write_with_no_catalogue_is_not_drift(vault: Path) -> None:
     )
 
 
+def _repair_spy(monkeypatch) -> list[dict]:
+    """Record every lexical repair this batch schedules, and who asked."""
+    scheduled: list[dict] = []
+    real = lexstore._schedule_repair
+
+    def _spy(root, **kwargs):
+        import traceback
+
+        frames = [f for f in traceback.extract_stack() if "exomem" in f.filename]
+        scheduled.append(
+            {
+                "root": root,
+                "custody": any(f.name == "_custody_apply" for f in frames),
+                **kwargs,
+            }
+        )
+        return real(root, **kwargs)
+
+    monkeypatch.setattr(lexstore, "_schedule_repair", _spy)
+    return scheduled
+
+
+def test_custody_schedules_no_repair_when_the_batch_write_lands(
+    vault: Path, warm_managed_cell, monkeypatch
+) -> None:
+    """The seam is not a per-write cost: an uncontended write leaves it nothing.
+
+    The fan-out's bounded lexical write commits, custody's comparison finds
+    every row already current, and its apply never reaches the store — so it
+    schedules nothing. This is the half that makes the contended case below a
+    repair rather than an overhead, and it is measured rather than argued: it is
+    the reason a second entry in
+    `tests/test_index_sync.py::test_contended_lexical_upsert_stays_swallowed_from_the_batch_report`
+    is not a cost every governed write pays.
+    """
+    _seed(vault, _ALPHA, "Custody alpha", "alpha-seed")
+    _seed(vault, _BETA, "Custody beta", "beta-seed")
+    _warm(vault, warm_managed_cell)
+    scheduled = _repair_spy(monkeypatch)
+
+    _govern(vault, _ALPHA, "Custody alpha", "alpha-committed")
+
+    assert [entry for entry in scheduled if entry["custody"]] == [], (
+        f"custody scheduled a repair for a write that landed: {scheduled}"
+    )
+    report = freshness.last_custody_report()
+    assert report is not None and report.mismatches == (), report
+
+
+def test_custody_registers_the_targeted_retry_the_refused_batch_needs(
+    vault: Path, warm_managed_cell, monkeypatch
+) -> None:
+    """Under a held barrier custody's registration IS the seam's repair.
+
+    The fan-out's bounded write is refused for contention and registers the
+    targeted retry. Custody then finds the rows still stale — of course it does,
+    the write was refused — attempts them once more, and the same barrier
+    refuses it. That second registration names the same vault and the same
+    paths, so the recovery state is unchanged; what it is NOT is redundant, and
+    the M3b/M3c mutant pair is where that shows: degrade the fan-out's lexical
+    component and custody's registration is the only repair the batch gets.
+
+    Pinned here so the seam's contribution is stated where the seam lives.
+    `tests/test_index_sync.py` carries the Task 1.3 baseline debt pin that counts
+    the same calls from the write side.
+    """
+    from exomem.vault import vault_creation_lock
+
+    _seed(vault, _ALPHA, "Custody alpha", "alpha-seed")
+    _warm(vault, warm_managed_cell)
+    page = vault / _ALPHA
+    page.write_text(_source("Custody alpha", "alpha-contended"), encoding="utf-8")
+    scheduled = _repair_spy(monkeypatch)
+    freshness.reset_custody_telemetry()
+
+    with vault_creation_lock(vault, "lexical-catalog-publication", timeout=5):
+        index_sync.upsert_after_write(vault, [page])
+
+    custody_entries = [entry for entry in scheduled if entry["custody"]]
+    assert len(custody_entries) == 1, (
+        f"custody registered {len(custody_entries)} retries for one refusal: {scheduled}"
+    )
+    assert custody_entries[0]["deferred_paths"] == [page], custody_entries
+    assert [entry for entry in scheduled if not entry["custody"]], (
+        "the fan-out registered nothing, so this no longer pins a SECOND observer"
+    )
+    # And the refusal is not swallowed by this lane: the row custody could not
+    # bring current is reported, and that fails the scope closed.
+    report = freshness.last_custody_report()
+    assert report is not None
+    assert ("eligibility_catalogue", _ALPHA) in report.mismatches, report.mismatches
+    assert freshness.custody_scope_invalidations(), (
+        "custody could not bring the row current and did not fail the scope closed"
+    )
+
+
 def test_a_reserved_scan_directory_owes_no_row_and_is_not_drift(
     vault: Path, warm_managed_cell
 ) -> None:
