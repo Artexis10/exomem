@@ -36,7 +36,16 @@ conversation already contains fresh KB evidence.
 
 An empty search means "not found with that query and scope." It is not proof that
 the knowledge does not exist. Try synonyms, adjacent terms, singular/plural
-forms, or `scope="vault"` before saying there is no relevant material.
+forms, `widen_outside_kb=true`, or `scope="vault"` before saying there is no
+relevant material.
+
+`scope="kb"` (the default) searches the knowledge base and nothing else.
+`widen_outside_kb` is off by default: set it to true to also reserve up to
+`limit - 1` slots for curated vault pages outside the knowledge base, which is
+what surfaces a terse tracker or handbook whose title is the query. Reserved
+hits carry `outside_kb: true`. Earlier releases widened on every `scope="kb"`
+recall; the reserve is now something the caller asks for, so the default costs
+nothing for the callers that never read it.
 
 Use page recall for conclusions, unit recall for exact observations, and mixed
 recall when both are useful. An empty query with structured filters is a
