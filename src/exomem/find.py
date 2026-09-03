@@ -4379,11 +4379,17 @@ def _find_outside_kb(
                 _record_degradation("outside_kb_lexical")
                 return []
         for path, _score in bm25_hits:
-            # The catalogue query was RESTRICTED to the out-of-KB eligible set,
-            # so its rows need no second opinion — and must not get one, or the
-            # restriction stops being the thing that keeps a knowledge-base
-            # page out of the reserve. The unrestricted rungs still need it.
-            if catalog_served or not path.startswith(kb_prefix()):
+            # Skip the prefix re-test only when the query was ACTUALLY
+            # restricted to the out-of-KB eligible set: then its rows need no
+            # second opinion, and must not get one, or the restriction stops
+            # being the thing that keeps a knowledge-base page out of the
+            # reserve (mutant M4). `catalog_served` alone is not that
+            # condition — an OFFLINE reader above the inline-repair page cap
+            # reaches the same catalogue query with `allowed_outside` None
+            # whenever no filter narrowed it, and an unrestricted vault-scope
+            # query returns knowledge-base rows.
+            restricted = catalog_served and allowed_outside is not None
+            if restricted or not path.startswith(kb_prefix()):
                 candidates.append(path)
                 score_by_path[path] = float(_score)
     except RetrievalIndexWarming:
@@ -4393,7 +4399,13 @@ def _find_outside_kb(
         raise
     except Exception as e:  # noqa: BLE001 — widening must never break find
         log.warning("requested widening lexical sidecar failed: %s", e)
-        _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
+        if managed:
+            # `declined` is the managed reader's contract: it asked an index
+            # and the index could not answer. An offline reader that fell over
+            # mid-scan DEGRADED, and says so through `failed_out` and the
+            # degradation counter; calling that `declined` would report a lane
+            # that broke as a lane that politely stood down.
+            _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
         if failed_out is not None:
             failed_out.append("outside_kb_lexical")
         _record_degradation("outside_kb_lexical")

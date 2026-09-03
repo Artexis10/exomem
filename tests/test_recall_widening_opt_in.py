@@ -31,7 +31,7 @@ from typing import Any
 
 import pytest
 
-from exomem import bm25, commands, freshness, lexstore
+from exomem import bm25, commands, find_types, freshness, lexstore
 from exomem import find as find_module
 from exomem.kbdir import kb_dirname, kb_prefix
 
@@ -153,8 +153,14 @@ def _withdraw_corpus_builds(monkeypatch: pytest.MonkeyPatch) -> list[_Tripwire]:
     """Watch every way the widening could answer by scanning the corpus.
 
     Scoped to the vault, which is the widening's own scope: the knowledge-base
-    lanes query the same primitives at ``scope="kb"`` and are not this file's
+    lanes query the same primitive at ``scope="kb"`` and are not this file's
     subject.
+
+    `_outside_kb_keyword_paths` is deliberately NOT watched. It has no
+    production caller at this revision or its base — `grep` finds only tests
+    patching it — so a tripwire on it asserts nothing and reads as coverage it
+    does not provide. `bm25.search` is the reachable corpus build, and the
+    decline node adds the scan oracle.
     """
     tripwires = [
         _Tripwire(
@@ -162,32 +168,33 @@ def _withdraw_corpus_builds(monkeypatch: pytest.MonkeyPatch) -> list[_Tripwire]:
             bm25.search,
             when=lambda *_a, **kw: kw.get("scope") == "vault",
         ),
-        _Tripwire(
-            "find._outside_kb_keyword_paths (vault walk)",
-            find_module._outside_kb_keyword_paths,
-        ),
     ]
     monkeypatch.setattr(bm25, "search", tripwires[0])
-    monkeypatch.setattr(find_module, "_outside_kb_keyword_paths", tripwires[1])
     return tripwires
 
 
-def _warm_reference_sidecar(vault: Path, paths: list[str]) -> None:
-    """Build the reference rows for pages only a widened recall reaches.
+def _warm_catalogue_for_an_offline_reader(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A published catalogue, served to a reader that is NOT runtime-managed.
 
-    ``warm_managed_cell`` rebuilds the reference sidecar, but that rebuild
-    covers the knowledge base; the first recall to return an out-of-KB page
-    finds no row for it and ``refs_for_paths`` rebuilds inline from a corpus
-    scan. That cold-sidecar walk is already pinned, by name, as Lane 3's
-    contract (``test_recall_walk_sentinel.py::
-    test_cold_refs_sidecar_declines_instead_of_walking``, xfail-strict), and
-    it is not what this file measures — so it is paid here, before the
-    sentinel is installed, and the assertions below are about the widening
-    lane alone.
+    `warm_managed_cell` without its last two lines. This is the configuration a
+    CLI user has after any command that publishes the catalogue, and the one
+    the offline rung of the reserve actually runs in — `runtime_managed()` is
+    False, so the managed contract does not apply, but
+    `maintained_content_index_enabled()` is True, so the catalogue query is
+    still the rung that serves.
     """
-    from exomem import memory_refs
+    from exomem import embeddings, file_watcher, memory_refs, readiness
 
-    memory_refs.ReferenceIndex(vault).refs_for_paths(list(paths))
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(embeddings, "ranking_enabled", lambda: True)
+    monkeypatch.setattr(readiness, "should_defer", lambda _component: False)
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+    assert lexstore.get_store(vault).rebuild_atomic() is True
+    assert lexstore.runtime_retrieval_catalog_proof(vault, schedule_repair=False) is not None
+    memory_refs.ReferenceIndex(vault).rebuild_all()
+    assert readiness.runtime_managed() is False, "this helper must leave the reader offline"
 
 
 def _age_the_vault_catalogue(vault: Path) -> None:
@@ -276,6 +283,38 @@ def test_requested_widening_serves_from_the_catalogue_with_source_index(
     assert "skipped" not in stage, stage
 
 
+def test_offline_catalogue_rung_never_tags_a_kb_page_outside_kb(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unrestricted rung keeps its prefix guard.
+
+    An offline reader on a vault above the inline-repair page cap reaches the
+    SAME `search_bm25_result` the managed reserve uses — but with no filter
+    plan there is nothing to narrow by, so `allowed_outside` is None and the
+    vault-scope query is unrestricted and returns knowledge-base rows. Skipping
+    the per-candidate prefix test on "the catalogue served it" rather than on
+    "the query was restricted" hands those rows to the reserve, tagged
+    `outside_kb=True`, consuming the slot the caller asked for out-of-KB
+    material with.
+    """
+    seeded = _seed(vault, outside=2, inside=8)
+    _warm_catalogue_for_an_offline_reader(vault, monkeypatch)
+    # Above the foreground-repair page cap: the catalogue rung serves, not the
+    # repairing one. `_bounded_lexical_repair_allowed` is the only thing that
+    # stands between this fixture corpus and a production-size vault.
+    monkeypatch.setattr(find_module, "_bounded_lexical_repair_allowed", lambda _key: False)
+    assert lexstore.maintained_content_index_enabled(), "the probe needs the catalogue rung"
+
+    result = _recall(vault, widen_outside_kb=True, limit=3)
+
+    leaked = [path for path in _outside_paths(result) if path.startswith(kb_prefix())]
+    assert not leaked, (
+        f"knowledge-base pages were tagged outside_kb: {leaked}; "
+        f"all outside hits={_outside_paths(result)}"
+    )
+    assert set(_outside_paths(result)) <= set(seeded["outside"]), _outside_paths(result)
+
+
 def test_requested_widening_keeps_the_reserve_under_limit_minus_one(
     vault: Path, warm_managed_cell
 ) -> None:
@@ -331,6 +370,51 @@ def test_requested_widening_declines_when_the_catalogue_is_not_live(
     assert stage["source"] == "declined", stage
 
 
+def test_requested_widening_declines_when_the_reserve_query_is_not_ready(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The OTHER decline site: the eligible set resolves, the lexical query does not.
+
+    Distinct from the stale-catalogue node above, and not covered by it. There,
+    ageing the vault makes `_widening_allowed_paths` decline first, so the
+    managed guard on `search_bm25_result`'s readiness is never reached — a
+    mutant that replaced that guard with an in-process corpus build passed the
+    whole suite. Here the eligible set is answerable and only the lexical query
+    reports itself unready, which is what a repair in flight looks like.
+    """
+    _seed(vault)
+    warm_managed_cell(vault)
+    baseline = _paths(_recall(vault))
+
+    real = lexstore.search_bm25_result
+
+    def _vault_query_not_ready(vault_root, query, k, *, scope="kb", **kwargs):
+        if scope == "vault":
+            return lexstore.CatalogQueryResult(
+                None, lexstore.CatalogReadiness("warming", False, "fts5")
+            )
+        return real(vault_root, query, k, scope=scope, **kwargs)
+
+    monkeypatch.setattr(lexstore, "search_bm25_result", _vault_query_not_ready)
+    tripwires = _withdraw_corpus_builds(monkeypatch)
+    oracle = _Tripwire(
+        "find._eligible_filter_paths (full-scan oracle)", find_module._eligible_filter_paths
+    )
+    monkeypatch.setattr(find_module, "_eligible_filter_paths", oracle)
+
+    result = _recall(vault, widen_outside_kb=True)
+
+    assert _outside_paths(result) == [], _paths(result)
+    assert _paths(result) == baseline, (
+        "a declined widening changed the knowledge-base results"
+    )
+    assert all(wire.calls == 0 for wire in [*tripwires, oracle]), [
+        (wire.name, wire.calls) for wire in [*tripwires, oracle]
+    ]
+    stage = _stage(result)
+    assert stage["source"] == "declined", stage
+
+
 def test_kb_ranking_is_identical_with_and_without_widening(
     vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -375,11 +459,136 @@ def test_kb_ranking_is_identical_with_and_without_widening(
     assert set(_outside_paths(widened)) <= set(seeded["outside"]), _outside_paths(widened)
 
 
+def test_a_list_filter_still_gates_the_reserve(
+    vault: Path, warm_managed_cell
+) -> None:
+    """A list filter excludes an out-of-KB page from the reserve, end to end.
+
+    What this pins is the OUTCOME, not a particular gate — and the distinction
+    was measured, not assumed. `types`/`projects`/`tags`/`speakers`/`file_types`
+    are compiled into `filter_plan` through `FilterShortcuts`
+    (`find.py:1253`), so setting any of them makes the reserve's eligible set
+    exact and the wrong-type page never reaches the lexical query at all. The
+    per-candidate `_passes_filters` call in the reserve loop is therefore
+    redundant for every shape reachable through the public leaf: deleting it
+    leaves this node, the rest of this file, `tests/test_find.py`,
+    `tests/test_find_structured_filters.py` and the reviewer's own type-gate
+    probe all green (63 passed). An equivalent mutant, on code this lane did
+    not add.
+
+    The node still earns its place: it is red under M4 (a reserve query that
+    loses `allowed_paths` surfaces the excluded page), which is the mechanism
+    that actually enforces the filter now.
+    """
+    kb = vault / kb_dirname() / "Notes" / "Insights"
+    kb.mkdir(parents=True, exist_ok=True)
+    (kb / "gate-kb.md").write_text(
+        "---\ntype: insight\nstatus: active\nupdated: 2026-07-01\n---\n\n"
+        f"# Gate KB\n\n{TOKEN} inside.\n",
+        encoding="utf-8",
+    )
+    reference = vault / "Reference"
+    reference.mkdir(parents=True, exist_ok=True)
+    (reference / "gate-out-wrong-type.md").write_text(
+        "---\ntype: reference\n---\n\n"
+        f"# Gate Out\n\n{TOKEN} outside, and the wrong type.\n",
+        encoding="utf-8",
+    )
+    find_module.clear_cache()
+    bm25.clear_cache()
+    warm_managed_cell(vault)
+
+    result = _recall(vault, widen_outside_kb=True, limit=5, types=["insight"])
+
+    assert "Reference/gate-out-wrong-type.md" not in _paths(result), _paths(result)
+
+
+def test_an_offline_lexical_failure_degrades_rather_than_declines(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`declined` is the managed reader's word, and it is not a synonym for broken.
+
+    A managed reader that says `declined` asked an index and the index said
+    "not for this generation". An offline reader whose lexical rung threw
+    DEGRADED: it says so through `failed_out` and the degradation counter, and
+    reporting that as `declined` would present a lane that fell over as a lane
+    that stood down. The catch-all is shared by both, so the distinction has to
+    be made there.
+    """
+    _seed(vault)
+    _warm_catalogue_for_an_offline_reader(vault, monkeypatch)
+    monkeypatch.setattr(find_module, "_bounded_lexical_repair_allowed", lambda _key: False)
+
+    real = lexstore.search_bm25_result
+
+    def _vault_query_explodes(vault_root, query, k, *, scope="kb", **kwargs):
+        if scope == "vault":
+            raise RuntimeError("sidecar handle lost mid-query")
+        return real(vault_root, query, k, scope=scope, **kwargs)
+
+    monkeypatch.setattr(lexstore, "search_bm25_result", _vault_query_explodes)
+
+    timings = find_types.FindTimings()
+    failed: list[str] = []
+    hits = find_module.find(
+        vault,
+        query=TOKEN,
+        mode="hybrid",
+        graph=False,
+        widen_outside_kb=True,
+        timings=timings,
+        failed_out=failed,
+    )
+
+    assert hits, "a broken widening must not empty the knowledge-base result"
+    assert failed == ["outside_kb_lexical"], failed
+    stage = timings.as_dict()["stages"]["outside_kb"]
+    assert stage["source"] != "declined", (
+        f"an offline lexical failure was reported as a decline: {stage}"
+    )
+    assert stage["source"] == find_types.SOURCE_COMPUTED, stage
+
+
+def test_the_unit_cache_key_omits_the_knob_because_the_unit_path_returns_first() -> None:
+    """A pin on WHY only one of the two cache keys carries `widen_outside_kb`.
+
+    `request_key` must carry it: the page path runs the widening block after
+    the cache lookup, so a key without it serves a widened request the
+    unwidened list it just cached (mutant M6). `unit_request_key` must not need
+    it: the unit-level path returns from `find()` before the widening block is
+    reached, so the knob cannot affect what it caches.
+
+    That is a claim about control flow, and control flow moves. Asserting the
+    absence pins the reasoning: move the widening block above the unit return,
+    or make the unit path reach it, and this fails and asks for the key to be
+    updated rather than silently caching across the knob.
+    """
+    import inspect
+
+    source = inspect.getsource(find_module.find)
+    unit_return, widening = source.index("return unit_hits"), source.index(
+        'if scope == "kb" and query_norm and widen_outside_kb:'
+    )
+    assert unit_return < widening, (
+        "the unit-level path no longer returns before the widening block; "
+        "`unit_request_key` must now carry `widen_outside_kb` too"
+    )
+    unit_key_block = source[source.index("unit_request_key = ("):source.index("unit_cache_key = (")]
+    assert "widen_outside_kb" not in unit_key_block, (
+        "unit_request_key gained the knob; if that was deliberate this pin and "
+        "its docstring are what need updating"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Never walks
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="lane 3 micro-round: refs sidecar declines for out-of-KB paths under a managed runtime",
+)
 def test_widening_never_walks_on_a_warm_managed_cell(
     vault: Path, warm_managed_cell, walk_sentinel
 ) -> None:
@@ -388,18 +597,33 @@ def test_widening_never_walks_on_a_warm_managed_cell(
     Three shapes, because they reach the widening lane differently: the strict
     opt-out, the new default, and the requested reserve.
 
+    XFAIL-STRICT, on the third shape only, and honestly so. `kb-only` and the
+    new default already report zero. `kb + widen` reports ONE enumeration of
+    the knowledge-base scope, and it is not the widening's: a widened recall
+    returns out-of-KB paths, `ReferenceIndex.rebuild_all()` covers the
+    knowledge base and not those paths, so `memory_refs.refs_for_paths`
+    (reached from `commands.op_find`) finds no row and rebuilds inline from a
+    corpus scan. An earlier revision of this node paid that enumeration before
+    installing the counter, which measured the widening lane in isolation and
+    also hid a real, reachable walk behind a fixture. It does not any more.
+
+    This is the same cold-refs walk Lane 1 pinned by name as Lane 3's contract
+    (`test_recall_walk_sentinel.py::test_cold_refs_sidecar_declines_instead_of_walking`),
+    widened in scope by this lane: opt-in widening enlarges the set of paths
+    that reach a cold sidecar. Strict, so it flips the moment Lane 3's decline
+    lands and fails loudly if it turns green for any other reason.
+
     A stale catalogue is deliberately NOT a fourth shape here. This counter is
     process-wide by construction (Lane 1: `os.scandir`/`os.listdir`, any
     thread), and a stale catalogue is exactly the state that wakes the
     single-flight repair worker — whose whole job is to walk, off the reader
     thread. Measuring it here would assert that the repair does not run. The
-    decline case proves what this lane owes instead, and proves it precisely:
+    decline cases prove what this lane owes instead, and prove it precisely:
     the reader-thread primitives that could substitute a scan are watched by
-    name in `test_requested_widening_declines_when_the_catalogue_is_not_live`.
+    name in the two decline nodes.
     """
-    seeded = _seed(vault)
+    _seed(vault)
     warm_managed_cell(vault)
-    _warm_reference_sidecar(vault, seeded["outside"])
     sentinel = walk_sentinel(*_scope_roots(vault))
 
     for label, kwargs in (
