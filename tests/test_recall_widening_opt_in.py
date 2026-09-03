@@ -599,19 +599,35 @@ def test_widening_never_walks_on_a_warm_managed_cell(
 
     XFAIL-STRICT, on the third shape only, and honestly so. `kb-only` and the
     new default already report zero. `kb + widen` reports ONE enumeration of
-    the knowledge-base scope, and it is not the widening's: a widened recall
-    returns out-of-KB paths, `ReferenceIndex.rebuild_all()` covers the
-    knowledge base and not those paths, so `memory_refs.refs_for_paths`
-    (reached from `commands.op_find`) finds no row and rebuilds inline from a
-    corpus scan. An earlier revision of this node paid that enumeration before
-    installing the counter, which measured the widening lane in isolation and
-    also hid a real, reachable walk behind a fixture. It does not any more.
+    the knowledge-base scope, and it is not the widening's. A widened recall
+    returns out-of-KB paths; `ReferenceIndex.rebuild_all()` covers the
+    knowledge base and not those paths, so the reference lookup has to resolve
+    an identity it has no row for. The measured chain, verbatim:
 
-    This is the same cold-refs walk Lane 1 pinned by name as Lane 3's contract
-    (`test_recall_walk_sentinel.py::test_cold_refs_sidecar_declines_instead_of_walking`),
-    widened in scope by this lane: opt-in widening enlarges the set of paths
-    that reach a cold sidecar. Strict, so it flips the moment Lane 3's decline
-    lands and fails loudly if it turns green for any other reason.
+        commands.py:1840:op_find
+        memory_refs.py:434:refs_for_paths
+        memory_refs.py:483:_refs_for_paths_batch
+        vault.py:5369:canonical_vault_rel
+        vault.py:5468:vault_casefolds
+        vault.py:5419:_probe_casefolds
+        __init__.py:836:iterdir      -> <vault>/Knowledge Base
+
+    So the terminal step is a single-level casefold probe — one `iterdir` of
+    the knowledge-base root to ask the filesystem whether it folds case — not
+    a corpus scan. An earlier revision of this docstring said "rebuilds inline
+    from a corpus scan", which overstated the last hop; the module, the chain
+    and the ownership below are what the measurement supports.
+
+    Lane 1 pinned a cold reference sidecar by name as Lane 3's contract
+    (`test_recall_walk_sentinel.py::test_cold_refs_sidecar_declines_instead_of_walking`,
+    40 enumerations inside `serialize`). This is a different, much smaller
+    enumeration in the same module, reached because opt-in widening enlarges
+    the set of paths the reference lookup is asked about. Same owner, same
+    fix; not the same walk. An earlier revision of this node paid it before
+    installing the counter, which measured the widening lane in isolation and
+    hid a real, reachable enumeration behind a fixture. It does not any more.
+    Strict, so it flips the moment Lane 3's decline lands and fails loudly if
+    it turns green for any other reason.
 
     A stale catalogue is deliberately NOT a fourth shape here. This counter is
     process-wide by construction (Lane 1: `os.scandir`/`os.listdir`, any
