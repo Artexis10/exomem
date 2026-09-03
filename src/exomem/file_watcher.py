@@ -100,6 +100,17 @@ RECONCILE_MAX_MEDIA_FILES = media_processing.DEFAULT_RECONCILE_LIMIT
 # Bounded rather than unbounded because this runs on the debounce thread, and a
 # boundary that stays busy this long is sustained contention -- a different
 # condition, which periodic recovery and the exhaustion log below both report.
+#
+# This is the retry budget, NOT the wall-clock bound a caller waits. The
+# deadline is only consulted after an attempt has already been refused, and
+# each attempt first spends the mutation coordinator's own timeout waiting for
+# the lock (`_DEFAULT_TIMEOUT_SECONDS`, 5.0 s today). So the real bound is this
+# budget plus one coordinator timeout -- about 20 s at today's defaults, and
+# measured at 20.00 s. `suspend_reads()` takes no timeout parameter to pass a
+# shortened one through, so the honest thing is to state the number rather than
+# imply a tighter one. Size this against watcher latency accordingly, and note
+# that `test_a_permanently_busy_boundary_gives_up_within_a_bounded_wall_time`
+# pins the bound against an absolute ceiling that does not scale with it.
 GRAPH_WITHDRAWAL_RETRY_SECONDS = 15.0
 
 
@@ -917,6 +928,12 @@ class FileWatcher:
         budget still leaves the epoch pending for periodic recovery -- but it
         says so, because sustained contention is a different condition from
         losing one race and should not look like it in a log.
+
+        The wall-clock bound is `GRAPH_WITHDRAWAL_RETRY_SECONDS` plus one
+        mutation-coordinator timeout, roughly 20 s at today's defaults, because
+        the deadline is checked only after an attempt has already spent that
+        timeout being refused. See the constant for why it is stated rather
+        than tightened.
         """
         from .cli_ops import OpError
 

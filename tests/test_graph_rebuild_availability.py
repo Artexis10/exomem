@@ -1444,6 +1444,33 @@ def test_dispatch_names_the_gate_that_sent_a_write_to_a_whole_vault_rebuild(
     )
     assert "external_pending=True" in caplog.text
 
+    # The genesis arm, both ways. `generation=1` has predecessor 0, so the
+    # answer is provable from the sidecar alone: a sidecar carrying no
+    # `graph_sync` acknowledgement can take it, and one that already carries an
+    # acknowledgement cannot. Collapsing the second into `available` is a
+    # False-to-True flip against the pre-fix predicate, and the rest of this
+    # suite does not notice it -- `refresh_paths` re-checks lineage downstream,
+    # which contains the blast radius but does not hold the seam.
+    freshness.clear_external_pending(tmp_path, through=freshness.external_pending_epoch(tmp_path))
+    genesis = graph_sync.GraphSyncCheckpoint.create(
+        generation=1,
+        mutation_id="0" * 24,
+        paths=(("Knowledge Base/Notes/Insights/gate.md", "d" * 64),),
+        created_paths=(),
+    )
+    fresh = epistemic_graph.EpistemicGraphIndex(tmp_path / "unbuilt")
+    (tmp_path / "unbuilt/Knowledge Base/Notes/Insights").mkdir(parents=True)
+    fresh.rebuild_all()
+    assert fresh._graph_sync_predecessor_state(genesis) == "available", (
+        "a sidecar with no graph_sync acknowledgement can take generation 1"
+    )
+    assert index._graph_sync_predecessor_state(genesis) == (
+        "graph_sync_predecessor_present_at_genesis"
+    ), (
+        "a sidecar that already carries a graph_sync acknowledgement cannot take "
+        "generation 1, and saying it can is a lineage claim the sidecar disproves"
+    )
+
 
 def test_single_flight_retries_for_new_checkpoint_and_never_releases_stale_waiter(
     tmp_path: Path,
