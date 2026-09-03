@@ -405,7 +405,10 @@ def _converge(
         completed += int(moved)
         stalled_passes = 0 if moved else stalled_passes + 1
         observation = _drain_observation(vault_root)
-        last_pass = derived_drain.last_pass_observation(vault_root)
+        try:
+            last_pass = derived_drain.last_pass_observation(vault_root)
+        except Exception:  # noqa: BLE001 - a report is worth more than a crash
+            last_pass = {}
         # After the observation reads, not before: they are part of the pass a
         # rate is being computed over.
         elapsed = time.monotonic() - started
@@ -435,13 +438,20 @@ def _converge(
             drain["projected_seconds_to_converge"] = round(
                 due * elapsed / completed, 1
             )
-        if due == 0:
+        # Convergence is an empty queue, not merely an empty DUE queue. A final
+        # pass in which every remaining component fails transiently leaves
+        # `due == 0` for the length of the backoff, and a row parked under a
+        # live lease is invisible to `due` entirely. Reporting "converged" over
+        # either is the exact outcome these counters exist to prevent, so they
+        # gate the verdict rather than only appearing in the report.
+        if due == 0 and observation["stuck"] == 0 and observation["claimed"] == 0:
             return round(elapsed, 3), True, drain
         # Stopping early is for the two states more waiting cannot fix: work
         # that is neither due nor shallow, and passes that move nothing. A row
         # backing off after one failed attempt is not either of them -- it is
-        # what a drain doing its job looks like.
-        if observation["stuck"] or observation["stuck"] < 0:
+        # what a drain doing its job looks like. An unreadable count (-1) stops
+        # too, because a counter that cannot be read has proved nothing.
+        if observation["stuck"] > 0 or observation["stuck"] < 0:
             return round(elapsed, 3), False, drain
         if stalled_passes >= 2:
             return round(elapsed, 3), False, drain

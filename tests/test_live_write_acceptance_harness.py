@@ -612,6 +612,76 @@ def test_the_drain_block_is_content_free(vault: Path, tmp_path: Path) -> None:
     assert set(drain) == DRAIN_KEYS
     assert drain["mode"] == module.mode.resolve_mode()
     assert drain["limit"] == module.derived_drain.progress_limit()
+    # Key names alone are not the content-free rule: a value could carry a path
+    # the token grep below never sees, because it lives outside the vault. Every
+    # drain value is therefore a count, a duration, an age or None, and `mode`
+    # is the single string, constrained to the mode vocabulary.
+    for key, value in drain.items():
+        if key == "mode":
+            assert value in module.mode.CANON, (key, value)
+            continue
+        assert value is None or isinstance(value, (int, float)), (key, value)
+        assert not isinstance(value, str), (key, value)
     rendered = json.dumps(report, sort_keys=True, default=str)
     for token in ("Knowledge Base", str(vault), "acceptance-", ".md"):
         assert token not in rendered, (token, rendered)
+
+
+def test_convergence_is_not_declared_over_stuck_or_claimed_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`due == 0` is not convergence while work is stuck or parked.
+
+    A final pass in which every remaining component fails transiently leaves
+    `due` at zero for the length of the backoff, and a row held under a live
+    lease is invisible to `due` at all. Either one used to satisfy the verdict,
+    so the acceptance could report converged over work that had not drained.
+    """
+    module = _acceptance()
+    observations = iter(
+        [
+            {
+                "due": 0,
+                "claimed": 0,
+                "retrying": 0,
+                "stuck": 2,
+                "failed": 2,
+                "max_attempt_count": 4,
+            },
+            {
+                "due": 0,
+                "claimed": 1,
+                "retrying": 0,
+                "stuck": 0,
+                "failed": 0,
+                "max_attempt_count": 0,
+            },
+            {
+                "due": 0,
+                "claimed": 0,
+                "retrying": 0,
+                "stuck": 0,
+                "failed": 0,
+                "max_attempt_count": 0,
+            },
+        ]
+    )
+    monkeypatch.setattr(module, "_drain_observation", lambda _root: next(observations))
+    monkeypatch.setattr(module.derived_drain, "drain_once", lambda *a, **k: 1)
+    monkeypatch.setattr(module.derived_drain, "progress_limit", lambda: 16)
+    monkeypatch.setattr(
+        module.derived_drain, "last_pass_observation", lambda _root: {}
+    )
+    monkeypatch.setattr(
+        module.derived_drain, "component_dispatcher", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        module.derived_drain, "canonical_generation_observer", lambda *a, **k: None
+    )
+
+    _elapsed, converged, drain = module._converge(tmp_path, bound_seconds=30.0)
+
+    # The stuck pass stops the loop; it never reaches the clean third reading.
+    assert converged is False
+    assert drain["stuck"] == 2
+    assert drain["passes"] == 1
