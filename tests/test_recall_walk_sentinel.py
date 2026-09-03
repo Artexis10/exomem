@@ -10,7 +10,7 @@ exact source-walk fallback by design, so every assertion here is taken against
 a warm managed cell — the registry seeded, the catalogue published, admission
 ready — which is the configuration the live cell runs in.
 
-Four shapes, one of them deliberately still failing:
+Four shapes, all of them now pinned:
 
 * the unfiltered `scope="kb-only"` hybrid recall, which already answers from
   the maintained indexes — a *pin*, so a later change that reintroduces a walk
@@ -22,8 +22,10 @@ Four shapes, one of them deliberately still failing:
 * the sentinel's own non-vacuity, proven by driving the scan oracle directly.
   A sentinel that cannot count a walk it is pointed at proves nothing about
   the two above;
-* the cold reference sidecar, which still rebuilds inline from a corpus scan —
-  `xfail(strict=True)` until Lane 3's read-side exact custody lands.
+* the cold reference sidecar, which used to rebuild inline from a corpus scan.
+  Lane 3's read-side exact custody made a managed reader decline there instead,
+  so it is a plain assertion now and a change that puts the rebuild back on the
+  request thread turns this red.
 """
 
 from __future__ import annotations
@@ -118,7 +120,6 @@ def test_sentinel_counts_a_real_walk(
     assert sentinel.count > 0, "the sentinel did not see the canonical scan oracle walk"
 
 
-@pytest.mark.xfail(strict=True, reason="lane 3: read-side exact custody")
 def test_cold_refs_sidecar_declines_instead_of_walking(
     vault: Path, warm_managed_cell, walk_sentinel
 ) -> None:
@@ -126,15 +127,12 @@ def test_cold_refs_sidecar_declines_instead_of_walking(
 
     "An unanswerable filter declines instead of walking" is stated for
     eligibility, but the rule is about the reader thread, not about one stage.
-    The reference sidecar is a maintained index like any other, and when it is
-    not current `refs_for_paths` rebuilds it inline from a full corpus scan —
+    The reference sidecar is a maintained index like any other, and when it was
+    not current `refs_for_paths` rebuilt it inline from a full corpus scan —
     40 scope enumerations inside `serialize`, on the request. A managed reader
     owes the typed warming outcome there for the same reason it owes it for a
-    filter it cannot answer from an index.
-
-    Lane 3 owns the fix (read-side exact custody), so this is `strict` xfail: it
-    turns green exactly when that lands, and fails loudly if it turns green for
-    any other reason.
+    filter it cannot answer from an index, and one background rebuild pays for
+    the scan off the request.
     """
     warm_managed_cell(vault, prebuild_refs=False)
     sentinel = walk_sentinel(*_scope_roots(vault))

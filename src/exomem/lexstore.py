@@ -63,7 +63,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
@@ -2124,6 +2124,150 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> bool:
         log.warning("lexical sidecar delete skipped (%s)", e)
         return False
     return True
+
+
+# ---------------------------------------------------- exact receipt custody
+
+#: The two substrate caches this store holds. They are one file and two
+#: questions: the trigram/BM25 content rows a keyword lane reads, and the
+#: `pages` metadata rows structured-filter eligibility resolves from. A receipt
+#: that refreshed one and not the other has to be able to say so.
+_CORPUS_CUSTODY_SEAM = "lexical_corpus"
+_CATALOGUE_CUSTODY_SEAM = "eligibility_catalogue"
+
+
+def page_content_hashes(vault_root: Path, rel_paths: Iterable[str]) -> dict[str, str | None]:
+    """The `pages.content_hash` this catalogue holds for each path, or None.
+
+    Lane 2 wrote the column and left it unread for exactly this: comparing a
+    catalogue row against the page it describes without re-parsing the page.
+    """
+    wanted = [str(rel) for rel in rel_paths]
+    if not wanted:
+        return {}
+    if not _catalog_usable() or not lexical_path(vault_root).exists():
+        return dict.fromkeys(wanted, None)
+    return get_store(vault_root).page_content_hashes(wanted)
+
+
+def _custody_indexable(vault_root: Path, rel: str) -> bool:
+    """Whether this catalogue is supposed to hold a row for this path at all.
+
+    A suppressed raw Record is on disk and deliberately absent from these rows,
+    so "no row" is exact for it. Reading that as drift would fail a scope closed
+    on every governed write that touched one.
+    """
+    from . import recall_policy
+
+    target = vault_root.joinpath(*rel.split("/"))
+    if not rel.lower().endswith(".md"):
+        return False
+    try:
+        if target.is_symlink() or not target.is_file():
+            return False
+    except OSError:
+        return False
+    try:
+        return bool(recall_policy.is_recall_candidate(vault_root, target))
+    except Exception:  # noqa: BLE001 - an unclassifiable page is not proven absent
+        return True
+
+
+def _custody_file_digest(vault_root: Path, rel: str) -> str | None:
+    target = vault_root.joinpath(*rel.split("/"))
+    try:
+        if target.is_symlink() or not target.is_file():
+            return None
+        return hashlib.sha256(target.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _custody_apply(
+    vault_root: Path, changed: tuple[str, ...], deleted: tuple[str, ...]
+) -> None:
+    """Bring exactly these paths' rows current; touch no other row.
+
+    The fan-out's own lexical component has normally done this already, so the
+    common case finds nothing to do. It repeats per path rather than trusting
+    that, because a degraded component is precisely the case where a stale row
+    would otherwise survive under a receipt that says it did not.
+    """
+    if not _catalog_usable() or not lexical_path(vault_root).exists():
+        return
+    # One query for the whole batch: a receipt naming a hundred paths must not
+    # cost a hundred connections to the store it is keeping current.
+    held = page_content_hashes(vault_root, [*changed, *deleted])
+    stale = [
+        rel
+        for rel in changed
+        if _custody_indexable(vault_root, rel)
+        and held.get(rel) != _custody_file_digest(vault_root, rel)
+    ]
+    retired = [
+        rel
+        for rel in (*deleted, *(rel for rel in changed if not _custody_indexable(vault_root, rel)))
+        if held.get(rel) is not None
+    ]
+    store = get_store(vault_root)
+    if stale:
+        store.upsert_paths([vault_root.joinpath(*rel.split("/")) for rel in stale])
+    if retired:
+        store.delete_rel_paths(retired)
+
+
+def _corpus_custody_verify(vault_root: Path, rel_paths: tuple[str, ...]) -> tuple[str, ...]:
+    """Content rows that do not describe the page they name.
+
+    `holds_content_identities` is the exact probe: it compares every value the
+    catalogue derives from a page's bytes and then serves, against those bytes.
+    """
+    expected: dict[str, str | None] = {}
+    for rel in rel_paths:
+        expected[rel] = (
+            _custody_file_digest(vault_root, rel)
+            if _custody_indexable(vault_root, rel)
+            else None
+        )
+    held = holds_content_identities(vault_root, expected)
+    return tuple(rel for rel in rel_paths if not held.get(rel, False))
+
+
+def _catalogue_custody_verify(vault_root: Path, rel_paths: tuple[str, ...]) -> tuple[str, ...]:
+    """Eligibility rows whose stored content hash is not the page's."""
+    rows = page_content_hashes(vault_root, list(rel_paths))
+    stale: list[str] = []
+    for rel in rel_paths:
+        expected = (
+            _custody_file_digest(vault_root, rel)
+            if _custody_indexable(vault_root, rel)
+            else None
+        )
+        if rows.get(rel) != expected:
+            stale.append(rel)
+    return tuple(stale)
+
+
+def register_path_custody() -> None:
+    """Register both of this store's per-path invalidation seams."""
+    from . import freshness
+
+    freshness.register_custody_seam(
+        freshness.CustodySeam(
+            name=_CORPUS_CUSTODY_SEAM,
+            apply=_custody_apply,
+            verify=_corpus_custody_verify,
+        )
+    )
+    freshness.register_custody_seam(
+        freshness.CustodySeam(
+            name=_CATALOGUE_CUSTODY_SEAM,
+            # One apply for one store: the second registration reports the
+            # `pages` half of the same bounded write, it does not repeat it.
+            apply=lambda _root, _changed, _deleted: None,
+            verify=_catalogue_custody_verify,
+        )
+    )
 
 
 def holds_content_identities(
@@ -4409,6 +4553,10 @@ class LexicalStore:
         from . import freshness as freshness_module
         from .vault import VaultLockError
 
+        # A whole-corpus re-derivation, by definition. Exact receipts exist so
+        # this counter does not move on an ordinary governed write.
+        freshness_module.note_custody_rebuild(_CORPUS_CUSTODY_SEAM)
+        freshness_module.note_custody_rebuild(_CATALOGUE_CUSTODY_SEAM)
         self._last_rebuild_result = None
         if backend() == "python":
             return self._decline_rebuild("transient_failure")
@@ -5311,6 +5459,35 @@ class LexicalStore:
         except sqlite3.Error as error:
             self._note_query_failure(error, "lexical identity probe declined (%s)")
             return dict.fromkeys(expected, False)
+        finally:
+            conn.close()
+
+    def page_content_hashes(self, rel_paths: list[str]) -> dict[str, str | None]:
+        """Stored `pages.content_hash` per path; None when there is no row.
+
+        Read-only and non-walking: one indexed lookup per path, never a parse.
+        """
+        answers: dict[str, str | None] = dict.fromkeys(rel_paths, None)
+        if self._failed or not self.path.exists():
+            return answers
+        try:
+            conn = self._connect()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical page-hash probe declined (%s)")
+            return answers
+        try:
+            if not self._schema_is_current(conn):
+                return answers
+            for rel in rel_paths:
+                row = conn.execute(
+                    "SELECT content_hash FROM pages WHERE path = ?", (rel,)
+                ).fetchone()
+                if row is not None and row[0] is not None:
+                    answers[rel] = str(row[0])
+            return answers
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical page-hash probe declined (%s)")
+            return dict.fromkeys(rel_paths, None)
         finally:
             conn.close()
 

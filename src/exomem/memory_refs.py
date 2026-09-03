@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 import threading
@@ -15,6 +16,8 @@ from urllib.parse import unquote
 from . import reserved_paths
 from . import vault as vault_module
 from .kbdir import kb_dirname
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 3
 REF_PREFIX = "exomem://memory/"
@@ -161,6 +164,135 @@ def holds_content_identities(
 #: costs one extra query only on inputs that would otherwise have failed.
 REFS_QUERY_CHUNK = 500
 
+_CUSTODY_SEAM = "reference_sidecar"
+#: Vaults whose single background sidecar rebuild is already in flight.
+_REBUILDS_IN_FLIGHT: set[str] = set()
+_REBUILDS_LOCK = threading.Lock()
+
+
+def request_rebuild(vault_root: Path) -> bool:
+    """Start at most one background sidecar rebuild per vault.
+
+    The non-walking retry seam for a managed reader that declined. Exactly the
+    shape the lexical repair worker already has: the reader gets a retryable
+    answer now, one thread pays the scan once, and every later reader is served
+    from the sidecar.
+    """
+    key = str(Path(vault_root).resolve())
+    with _REBUILDS_LOCK:
+        if key in _REBUILDS_IN_FLIGHT:
+            return False
+        _REBUILDS_IN_FLIGHT.add(key)
+
+    def _run() -> None:
+        try:
+            ReferenceIndex(Path(vault_root)).rebuild_all()
+        except Exception:  # noqa: BLE001 - best effort; the next reader retries
+            log.warning("background reference sidecar rebuild failed", exc_info=True)
+        finally:
+            with _REBUILDS_LOCK:
+                _REBUILDS_IN_FLIGHT.discard(key)
+
+    threading.Thread(
+        target=_run, name="exomem-refs-rebuild", daemon=True
+    ).start()
+    return True
+
+
+def rebuild_in_flight(vault_root: Path) -> bool:
+    """Whether a background sidecar rebuild is running for this vault."""
+    with _REBUILDS_LOCK:
+        return str(Path(vault_root).resolve()) in _REBUILDS_IN_FLIGHT
+
+
+def _decline_if_managed(vault_root: Path) -> None:
+    """A managed reader never rebuilds this sidecar on the request thread.
+
+    The reference sidecar is a maintained index like the lexical catalogue, and
+    the read-path contract is about the reader thread rather than about one
+    stage: a managed request that needs an index no generation has built owes
+    the typed warming outcome and one background repair, not a corpus scan
+    charged to whoever asked first. An offline/CLI caller keeps the inline
+    rebuild -- it has no background worker to wait for.
+    """
+    from . import readiness
+
+    if not readiness.runtime_managed():
+        return
+    from . import find as find_module
+
+    request_rebuild(vault_root)
+    raise find_module.RetrievalIndexWarming(site="reference_sidecar")
+
+
+def register_path_custody() -> None:
+    """Register the reference sidecar's per-path invalidation seam."""
+    from . import freshness
+
+    freshness.register_custody_seam(
+        freshness.CustodySeam(
+            name=_CUSTODY_SEAM,
+            apply=_custody_apply,
+            verify=_custody_verify,
+        )
+    )
+
+
+def _custody_expected(vault_root: Path, rel: str) -> tuple[str | None, bool]:
+    """`(expected source hash, whether a row is owed)` for one path."""
+    row = _read_identity(Path(vault_root), Path(vault_root).joinpath(*rel.split("/")))
+    if row is None:
+        return None, False
+    return row[3], True
+
+
+def _custody_verify(vault_root: Path, rel_paths: tuple[str, ...]) -> tuple[str, ...]:
+    index = ReferenceIndex(Path(vault_root))
+    conn = index._current_readonly_connection()
+    if conn is None:
+        # No current sidecar is not drift in these paths: it is the cold case,
+        # which the decline above already answers. Reporting every path as a
+        # mismatch here would fail the scope closed on a warming cell.
+        return ()
+    try:
+        stale: list[str] = []
+        for rel in rel_paths:
+            expected, owed = _custody_expected(vault_root, rel)
+            row = conn.execute(
+                "SELECT source_hash FROM identities WHERE path = ?", (rel,)
+            ).fetchone()
+            held = None if row is None else str(row[0])
+            if owed and held != expected:
+                stale.append(rel)
+            elif not owed and held is not None:
+                stale.append(rel)
+        return tuple(stale)
+    except sqlite3.Error:
+        return tuple(rel_paths)
+    finally:
+        conn.close()
+
+
+def _custody_apply(
+    vault_root: Path, changed: tuple[str, ...], deleted: tuple[str, ...]
+) -> None:
+    """Bring exactly these paths' identity rows current; touch nothing else."""
+    root = Path(vault_root)
+    index = ReferenceIndex(root)
+    if not index.available():
+        # Cold sidecar: the decline seam owns this case. Rebuilding here would
+        # put the corpus scan back on whichever thread committed the write.
+        return
+    stale = _custody_verify(root, (*changed, *deleted))
+    if not stale:
+        return
+    refresh = [root.joinpath(*rel.split("/")) for rel in stale if _custody_expected(root, rel)[1]]
+    retire = [rel for rel in stale if not _custody_expected(root, rel)[1]]
+    if refresh:
+        index.refresh_paths(refresh)
+    if retire:
+        index.delete_paths(retire)
+
 
 class ReferenceIndex:
     """Rebuildable path/identity index.
@@ -273,6 +405,11 @@ class ReferenceIndex:
                         raise
 
     def rebuild_all(self) -> dict[str, int]:
+        from . import freshness
+
+        # A full corpus scan. Exact receipts exist so an ordinary governed
+        # write never moves this counter.
+        freshness.note_custody_rebuild(_CUSTODY_SEAM)
         entries = _scan_pages(self.vault_root)
         conn = self._connect()
         try:
@@ -445,11 +582,13 @@ class ReferenceIndex:
         """One bounded batch: at most `REFS_QUERY_CHUNK` paths, already cleaned."""
         conn = self._current_readonly_connection()
         if conn is None:
+            _decline_if_managed(self.vault_root)
             # Schema upgrades and first use rebuild once. The lock prevents a
             # burst of concurrent reads from all scanning the corpus together.
             with _REFERENCE_REBUILD_LOCK:
                 conn = self._current_readonly_connection()
                 if conn is None:
+                    _decline_if_managed(self.vault_root)
                     try:
                         self.rebuild_all()
                     except (OSError, sqlite3.Error):

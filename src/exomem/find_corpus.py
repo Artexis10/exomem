@@ -8,6 +8,7 @@ import os
 import re
 import stat
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -62,8 +63,69 @@ class FrontmatterCache:
     )
 
     def clear(self) -> None:
+        freshness.note_custody_rebuild(_CUSTODY_SEAM)
         self.entries.clear()
         self._signatures.clear()
+
+    def invalidate_paths(self, vault_root: Path, rel_paths: Iterable[str]) -> int:
+        """Drop the entries a receipt names, and only those. Returns the count.
+
+        Exact custody rather than a stat comparison. The signature check in
+        `get` is the safety net, and its own docstring names the case it cannot
+        see -- a same-size rewrite that preserves the whole stat tuple. A
+        governed write knows exactly which pages it changed, so the row goes on
+        the receipt's word rather than on a filesystem inference.
+        """
+        root = Path(vault_root)
+        evicted = 0
+        for rel in rel_paths:
+            for candidate in _cache_key_candidates(root, rel):
+                if self.entries.pop(candidate, None) is not None:
+                    evicted += 1
+                self._signatures.pop(candidate, None)
+        return evicted
+
+    def invalidate_scope(self, vault_root: Path, scope: str) -> int:
+        """Drop every entry under one scope, for a change no receipt covers."""
+        root = _scope_root(Path(vault_root), scope)
+        try:
+            anchor = root.resolve()
+        except OSError:
+            anchor = root
+        dropped = 0
+        for path in tuple(self.entries):
+            try:
+                resolved = path.resolve()
+            except OSError:
+                resolved = path
+            if resolved == anchor or anchor in resolved.parents:
+                self.entries.pop(path, None)
+                self._signatures.pop(path, None)
+                dropped += 1
+        return dropped
+
+    def stale_paths(self, vault_root: Path, rel_paths: Iterable[str]) -> tuple[str, ...]:
+        """Which of these paths this cache holds a row that no longer describes.
+
+        A path this cache holds no row for is not a mismatch: an absent row is
+        re-parsed on the next read, which is exact by construction. Only a
+        RESIDENT row can be wrong.
+        """
+        root = Path(vault_root)
+        stale: list[str] = []
+        for rel in rel_paths:
+            for candidate in _cache_key_candidates(root, rel):
+                cached = self.entries.get(candidate)
+                if cached is None:
+                    continue
+                content = _read_page_bytes(candidate, root)
+                if content is None:
+                    stale.append(rel)
+                    break
+                if cached.snapshot_hash != hashlib.sha256(content).hexdigest():
+                    stale.append(rel)
+                    break
+        return tuple(stale)
 
     def get(self, path: Path, vault_root: Path) -> ParsedPage | None:
         snapshot = _read_page_snapshot(path, vault_root)
@@ -106,6 +168,50 @@ class FrontmatterCache:
 
 
 CACHE = FrontmatterCache()
+
+_CUSTODY_SEAM = "frontmatter_cache"
+
+
+def _scope_root(vault_root: Path, scope: str) -> Path:
+    from .kbdir import kb_dirname
+
+    return vault_root / kb_dirname() if scope == "kb" else vault_root
+
+
+def _cache_key_candidates(vault_root: Path, rel: str) -> tuple[Path, ...]:
+    """Every spelling this cache could be keyed under for one relative path.
+
+    Callers reach `get` with `vault_root / rel`, and a vault under a symlink
+    resolves to a second absolute spelling for the same file. Both are dropped,
+    because leaving either behind leaves a row a later read can still serve.
+    """
+    direct = vault_root.joinpath(*rel.split("/"))
+    candidates = [direct]
+    try:
+        resolved = direct.resolve()
+    except OSError:
+        resolved = direct
+    if resolved != direct:
+        candidates.append(resolved)
+    return tuple(candidates)
+
+
+def _custody_apply(
+    vault_root: Path, changed: tuple[str, ...], deleted: tuple[str, ...]
+) -> None:
+    CACHE.invalidate_paths(vault_root, (*changed, *deleted))
+
+
+def register_path_custody() -> None:
+    """Register the frontmatter cache's per-path invalidation seam."""
+    freshness.register_custody_seam(
+        freshness.CustodySeam(
+            name=_CUSTODY_SEAM,
+            apply=_custody_apply,
+            verify=CACHE.stale_paths,
+            invalidate_scope=lambda root, scope: CACHE.invalidate_scope(root, scope),
+        )
+    )
 
 
 def walk_freshness_key(paths) -> tuple[int, int, str]:

@@ -211,7 +211,19 @@ _FIND_CACHE_DELTA_PATH_CAP = 64
 
 
 def _bounded_lexical_repair_allowed(freshness_key: tuple | None) -> bool:
-    """Permit a cold inline sidecar build only for a provably small corpus."""
+    """Permit a cold inline sidecar build only for a provably small corpus.
+
+    Never for a MANAGED reader, whatever the corpus size. A page cap bounds how
+    long the walk takes; it does not stop it being a walk, and the read-path
+    contract is about whether the reader thread built an index rather than
+    about how long it took. A managed cell has a repair worker to hand the
+    build to and a typed warming outcome to answer with; an offline caller has
+    neither, so it keeps the bounded inline build.
+    """
+    from . import readiness
+
+    if readiness.runtime_managed():
+        return False
     return bool(
         freshness_key
         and isinstance(freshness_key[0], int)
@@ -2891,6 +2903,10 @@ RETRIEVAL_WARMING_SITES = (
     "resolver_checkpoint_absent",
     "resolver_entries_unavailable",
     "resolver_build_wait",
+    # Lane 3: the reference sidecar is a maintained index like any other, and a
+    # managed reader must not build it on the request thread. The lexical
+    # corpus already declines under `catalog_outcome`.
+    "reference_sidecar",
 )
 
 
@@ -5395,6 +5411,18 @@ def unload_ram_caches(*, keep_recall_resolver: bool = False) -> dict[str, int]:
     `_evict_recall_resolver`: that seam schedules a background rebuild, and a
     caller releasing memory does not want a thread immediately spending it
     again.
+
+    The parsed-page cache still goes with both meanings, and the exact-custody
+    rule says it should not go with the first: "a change in a whole-scope
+    freshness key MUST NOT by itself discard a substrate cache whose paths are
+    all covered by exact receipts". A correctness eviction is about the
+    RESOLVER, and every page row is already keyed to its file's content
+    signature and evicted by its own receipt through the custody seam. Sparing
+    it here is a one-line change (`pages: bool = False`, passed True by
+    `release_idle_ram_caches` and `clear_cache`) and it is NOT made, because
+    `tests/test_find_hot_cache.py::test_unload_ram_caches_preserves_freshness`
+    pins this default in three assertions and that file is outside this lane's
+    allowlist. Reported as a stop condition instead of edited around.
     """
     page_entries = len(_CACHE.entries)
     _CACHE.clear()

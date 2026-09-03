@@ -1012,8 +1012,14 @@ class ScopeWalkSentinel:
     an enumeration the sentinel cannot attribute is its own state, not a pass.
     """
 
-    def __init__(self, *scope_roots: Path) -> None:
+    def __init__(self, *scope_roots: Path, current_thread_only: bool = False) -> None:
         self._roots = tuple(os.path.realpath(root) for root in scope_roots)
+        # A walk on a background worker is not a walk on the reader thread, and
+        # the contract is about the reader thread. The default counts every
+        # thread (what Lane 1 pinned); a caller that must exclude, say, the
+        # graph rebuild lane -- which a governed write legitimately starts, and
+        # which is owned by another change -- asks for its own thread only.
+        self._owner = threading.get_ident() if current_thread_only else None
         self.enumerated: list[str] = []
         self.unresolved: list[str] = []
 
@@ -1047,6 +1053,8 @@ class ScopeWalkSentinel:
             return None
 
     def record(self, target: object) -> None:
+        if self._owner is not None and threading.get_ident() != self._owner:
+            return
         path = self._resolve(target)
         if path is None:
             return
@@ -1075,8 +1083,12 @@ class ScopeWalkSentinel:
 def walk_sentinel(monkeypatch: pytest.MonkeyPatch):
     """Install a `ScopeWalkSentinel` over the given scope roots."""
 
-    def _install(*scope_roots: Path) -> ScopeWalkSentinel:
-        sentinel = ScopeWalkSentinel(*scope_roots)
+    def _install(
+        *scope_roots: Path, current_thread_only: bool = False
+    ) -> ScopeWalkSentinel:
+        sentinel = ScopeWalkSentinel(
+            *scope_roots, current_thread_only=current_thread_only
+        )
         sentinel.install(monkeypatch)
         return sentinel
 
