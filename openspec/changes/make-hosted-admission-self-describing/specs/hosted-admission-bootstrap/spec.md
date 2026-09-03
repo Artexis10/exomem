@@ -24,23 +24,46 @@ SHALL reference the bootstrap procedure that clears it.
 - **THEN** the classification names that other cause
 - **AND** it does not reference the bootstrap procedure
 
+### Requirement: The fleet observation reports whether admission is open
+
+The control plane SHALL report, as part of its fleet observation, whether it would
+currently admit a new tenant. That report SHALL be derived from the same authority the
+admission path itself uses, so the two cannot disagree. Fleet inventory SHALL NOT
+re-derive admission readiness from cell-keyed observations.
+
+#### Scenario: The observation reports a closed control plane
+
+- **WHEN** the control plane would refuse to admit a new tenant
+- **THEN** its fleet observation reports admission as closed
+
+#### Scenario: The observation reports an open control plane
+
+- **WHEN** the control plane would admit a new tenant
+- **THEN** its fleet observation reports admission as open
+
+#### Scenario: The report cannot disagree with the admission path
+
+- **WHEN** the reported readiness is compared against the predicate the admission path
+  evaluates for the same control-plane state
+- **THEN** the two agree
+- **AND** the readiness is not computed from a second, independently maintained source
+
 ### Requirement: A fleet that cannot admit anyone is reported as an issue
 
-The system SHALL treat a reconciled fleet with zero bound cells and no live cohort as a
-reported inventory issue rather than a clean empty result. Fleet inventory SHALL NOT
-report a status that an operator would read as healthy while no tenant can be admitted.
+The system SHALL raise a reported inventory issue when the fleet observation reports
+admission as closed. Fleet inventory SHALL NOT report a status that an operator would
+read as healthy while no tenant can be admitted.
 
-#### Scenario: Empty fleet with no live cohort
+#### Scenario: Admission is closed
 
-- **WHEN** fleet inventory reconciles a fleet with zero bound cells and the control
-  plane reports no live cohort
+- **WHEN** fleet inventory reconciles an observation that reports admission as closed
 - **THEN** the inventory reports an admission-closed issue
 - **AND** the inventory status is not `empty` or `consistent`
 
-#### Scenario: Empty fleet with a live cohort still available
+#### Scenario: An empty fleet whose control plane would still admit
 
-- **WHEN** fleet inventory reconciles a fleet with zero bound cells while a live cohort
-  target does exist
+- **WHEN** fleet inventory reconciles a fleet with zero bound cells while the
+  observation reports admission as open
 - **THEN** the admission-closed issue is not reported
 
 #### Scenario: Upgrade phases refuse to advance into a closed fleet
