@@ -1826,7 +1826,15 @@ def op_find(
         )
         if projection_runtime is None:
             ref_index = memory_refs_module.ReferenceIndex(vault_root)
-            refs = ref_index.refs_for_paths([str(hit.get("path") or "") for hit in hit_dicts])
+            # The recall serializer is the one caller the no-walk contract
+            # governs: a cold sidecar here declines with the retryable warming
+            # outcome and one background rebuild instead of scanning the corpus
+            # on the request. Every other `refs_for_paths` caller keeps the
+            # inline build (see `ReferenceIndex.refs_for_paths`).
+            with memory_refs_module.recall_serializer():
+                refs = ref_index.refs_for_paths(
+                    [str(hit.get("path") or "") for hit in hit_dicts]
+                )
             for hit in hit_dicts:
                 ref = refs.get(str(hit.get("path") or ""))
                 if ref:

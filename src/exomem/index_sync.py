@@ -1383,9 +1383,13 @@ def _apply_exact_path_custody(
     against the pages, so a component that degraded above cannot leave a row
     that answers -- a path no seam can prove exact fails the scope closed.
 
-    Best-effort in the sense that it never fails a write that has already
-    committed: the caches are derived, and a seam that could not be applied has
-    already invalidated its scope rather than claimed custody it lacks.
+    It never fails a write that has already committed -- the caches are derived
+    -- but it does not fail OPEN either. An individual seam that raises is
+    already handled inside `apply_receipt_paths`, which names its paths as
+    mismatches and invalidates the scope; if the whole call fails, the batch's
+    custody is simply unknown, and unknown custody is exactly the state a
+    whole-scope invalidation exists for. Logging and returning would leave rows
+    that answer with nothing having checked them.
     """
     if not (changed or deleted):
         return
@@ -1397,6 +1401,13 @@ def _apply_exact_path_custody(
         )
     except Exception:  # noqa: BLE001 - canonical bytes are already committed
         log.warning("read-side exact custody could not be applied", exc_info=True)
+        try:
+            for scope in freshness.SCOPES:
+                freshness.invalidate_scope_for_drift(
+                    vault_root, scope=scope, reason=f"{reason}_custody_unavailable"
+                )
+        except Exception:  # noqa: BLE001 - the write itself must still return
+            log.warning("custody fallback invalidation failed", exc_info=True)
 
 
 @call_spans.timed("index.upsert_after_write")

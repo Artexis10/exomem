@@ -27,6 +27,8 @@ cell serves from.
 from __future__ import annotations
 
 import hashlib
+import os
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -34,13 +36,17 @@ from pathlib import Path
 import pytest
 
 from exomem import (
+    attention,
     commands,
+    due_state,
     file_watcher,
     find_corpus,
     freshness,
     index_sync,
     lexstore,
     memory_refs,
+    recall_policy,
+    review_state,
     semantic_writes,
 )
 from exomem import find as find_module
@@ -54,6 +60,10 @@ _ALPHA = "Knowledge Base/Notes/Custody/custody-alpha.md"
 _BETA = "Knowledge Base/Notes/Custody/custody-beta.md"
 _GAMMA = "Knowledge Base/Notes/Custody/custody-gamma.md"
 _MOVED = "Knowledge Base/Notes/Custody/custody-alpha-moved.md"
+#: Out of the knowledge base on purpose: the reference sidecar indexes the KB
+#: only, so this is the shape a widened recall surfaces and the sidecar can
+#: never hold.
+_OUTSIDE = "Reference/custody-outside.md"
 
 #: Every substrate cache the invariant names, plus the reference sidecar, which
 #: is the fourth read-side index a recall consumes on the request thread.
@@ -130,6 +140,8 @@ def test_one_governed_write_updates_only_its_rows_in_every_substrate_cache(
 
     beta_before = _digest(vault, _BETA)
     beta_row_before = lexstore.page_content_hashes(vault, [_BETA])[_BETA]
+    beta_parsed_before = find_corpus.CACHE.entries.get(vault / _BETA)
+    assert beta_parsed_before is not None, "the recall hydrated no row for beta"
     freshness.reset_custody_telemetry()
 
     _govern(vault, _ALPHA, "Custody alpha", "alpha-committed")
@@ -146,9 +158,18 @@ def test_one_governed_write_updates_only_its_rows_in_every_substrate_cache(
     assert report.mismatches == ()
     assert freshness.custody_scope_invalidations() == ()
 
-    # Nothing else moved: the untouched page's catalogue row is the same row.
+    # Nothing else moved: the untouched page's catalogue row is the same row,
+    # and its parsed-page row is still resident. A seam that evicted by folder
+    # rather than by path would answer every assertion above and still have
+    # thrown away a neighbour's work.
     assert lexstore.page_content_hashes(vault, [_BETA])[_BETA] == beta_row_before
     assert beta_row_before == beta_before
+    assert find_corpus.CACHE.entries.get(vault / _BETA) is beta_parsed_before, (
+        "a write to alpha evicted or re-parsed beta's row"
+    )
+    # Alpha's row was evicted or refreshed -- design Decision 2 allows either --
+    # and what is pinned is that it no longer describes the previous generation.
+    assert find_corpus.CACHE.stale_paths(vault, (_ALPHA,)) == ()
     # And the written page's rows are current, not merely untouched.
     assert lexstore.page_content_hashes(vault, [_ALPHA])[_ALPHA] == _digest(vault, _ALPHA)
 
@@ -530,17 +551,294 @@ def test_a_correctness_eviction_does_not_discard_receipt_covered_pages(
             f"{seam} lost track of its receipts after a whole-scope eviction: {report}"
         )
     assert report.rebuilt == {}
-    assert (vault / _ALPHA) not in find_corpus.CACHE.entries, (
-        "the written page's row survived its own receipt"
+    assert find_corpus.CACHE.stale_paths(vault, (_ALPHA,)) == (), (
+        "the written page's row still describes the previous generation"
     )
     assert (vault / _BETA) in find_corpus.CACHE.entries, (
         "a write to alpha evicted beta's row"
     )
 
     # The other meaning of "evict" is unchanged: a caller releasing memory
-    # still gets the large cache back.
+    # still gets the large cache back -- and asking for it is a policy
+    # decision, not drift, so it does not move the rebuild counter that says
+    # whether a governed write discarded receipt-covered work.
     find_module.release_idle_ram_caches()
     assert find_corpus.CACHE.entries == {}
+    assert freshness.custody_rebuilds() == {}, (
+        f"a reaper release was counted as a custody rebuild: {freshness.custody_rebuilds()}"
+    )
+
+
+def test_enrichment_callers_keep_answering_with_a_cold_sidecar(
+    vault: Path, warm_managed_cell, monkeypatch
+) -> None:
+    """The no-walk contract governs the recall serializer, not every reader.
+
+    A cold reference sidecar used to make `review_memory`, `attention` and
+    every other `refs_for_paths` caller raise the retryable warming outcome
+    under a managed runtime — and nothing in readiness warms that sidecar, so
+    the first review after a restart was an error. Those callers have no
+    warming outcome to offer anyone and no latency budget waiting on them: a
+    slow answer is the right answer for them, and a typed refusal is not.
+
+    The recall path is the exception, and it is opt-in at the call site.
+    """
+    _seed(vault, _ALPHA, "Custody alpha", "alpha-seed")
+    warm_managed_cell(vault, prebuild_refs=False)
+    # Keep the sidecar cold for the whole test: without this the background
+    # rebuild wins the race on a fixture-sized corpus and the question stops
+    # being asked at all.
+    monkeypatch.setattr(memory_refs, "request_rebuild", lambda _root: True)
+
+    # The governed caller goes first, while the sidecar is genuinely cold --
+    # the enrichment callers below build it inline, which is the whole point.
+    with pytest.raises(find_module.RetrievalIndexWarming) as declined:
+        commands.op_find(
+            vault, query="custody", mode="hybrid", scope="kb-only", graph=False
+        )
+    assert declined.value.site == "reference_sidecar"
+    assert not memory_refs.ReferenceIndex(vault).available(), (
+        "the decline built the sidecar it was supposed to decline on"
+    )
+
+    assert isinstance(review_state.refs_for_paths(vault, [_ALPHA]), dict)
+    assert attention.attention(vault, limit=5) is not None
+    assert isinstance(commands.op_attention(vault, limit=5), dict)
+    assert isinstance(
+        commands.op_review_memory(vault, mode="attention", limit=5), dict
+    )
+    assert isinstance(due_state.recompute(vault), dict)
+
+
+def test_a_widened_recall_does_not_walk_for_an_out_of_kb_hit(
+    vault: Path, warm_managed_cell, walk_sentinel, monkeypatch
+) -> None:
+    """The sidecar indexes the KB, so an out-of-KB hit is always "missing".
+
+    `refs_for_paths` retries a missing path through `canonical_vault_rel`,
+    whose casefold probe enumerates the containing directory — one walk per
+    widened request, on a WARM cell, for a page the sidecar is never going to
+    hold. A recall hit does not need a stable ref to be a correct hit, so the
+    managed serializer takes the sidecar's answer as final.
+
+    And it schedules NO repair for it. `rebuild_all` scans the knowledge base,
+    so a repair asked to heal an out-of-KB path cannot: the path is still
+    missing when the rebuild lands, the next widened request asks again, and a
+    warm cell walks its whole knowledge base once per recall for ever — off the
+    reader thread, but a walk, and one a process-wide counter sees.
+    """
+    _seed(vault, _OUTSIDE, "Custody outside", "widenmarker")
+    _seed(vault, _ALPHA, "Custody alpha", "widenmarker")
+    warm_managed_cell(vault)
+
+    requested: list[Path] = []
+    real_request_rebuild = memory_refs.request_rebuild
+
+    def _spy(root):  # noqa: ANN001
+        requested.append(Path(root))
+        return real_request_rebuild(root)
+
+    monkeypatch.setattr(memory_refs, "request_rebuild", _spy)
+
+    sentinel = walk_sentinel(vault, vault / kb_dirname(), current_thread_only=True)
+    sentinel.reset()
+    result = commands.op_find(
+        vault,
+        query="widenmarker",
+        mode="keyword",
+        scope="kb",
+        graph=False,
+        include_timings=True,
+    )
+
+    paths = [hit["path"] for hit in result["hits"]]
+    assert any(not path.startswith(f"{kb_dirname()}/") for path in paths), (
+        f"the widened recall surfaced no out-of-KB hit, so this pins nothing: {paths}"
+    )
+    assert any(path.startswith(f"{kb_dirname()}/") for path in paths), (
+        f"the recall surfaced no in-KB hit, so the sidecar was never consulted: {paths}"
+    )
+    assert sentinel.count == 0, sentinel.report()
+    assert requested == [], (
+        "a warm cell scheduled a knowledge-base rebuild to heal an out-of-KB path"
+    )
+
+
+def test_a_governed_write_with_no_catalogue_is_not_drift(vault: Path) -> None:
+    """An absent catalogue holds no rows, and no rows is not a stale row.
+
+    A fresh cell, an offline one, an FTS5-less SQLite, a cell mid-rebuild: the
+    catalogue answers "I hold nothing" for every path, and reading that as
+    drift made every governed write on such a cell invalidate both scopes and
+    empty the frontmatter cache — the exact opposite of what exact custody is
+    for. The cold case belongs to the repair worker.
+    """
+    _seed(vault, _ALPHA, "Custody alpha", "alpha-seed")
+    assert not lexstore.lexical_path(vault).exists(), (
+        "this pins the ABSENT-catalogue case; something built one"
+    )
+    # A reader has been here: the parsed-page row is resident and describes the
+    # SEEDED generation. This is also the one state in which the frontmatter
+    # seam is the only thing that can move that row -- with no catalogue, the
+    # fan-out's lexical component returns early and never re-parses the page --
+    # so it is where the seam's apply is load-bearing for a CHANGED path rather
+    # than only for a retired one.
+    seeded_row = find_corpus.CACHE.get(vault / _ALPHA, vault)
+    assert seeded_row is not None
+    freshness.reset_custody_telemetry()
+
+    _govern(vault, _ALPHA, "Custody alpha", "alpha-no-catalogue")
+
+    report = freshness.last_custody_report()
+    assert report is not None
+    assert report.mismatches == (), (
+        f"an absent catalogue read as drift: {report.mismatches}"
+    )
+    assert freshness.custody_scope_invalidations() == (), (
+        "a governed write on a catalogue-less cell invalidated the scope"
+    )
+    for seam in _SEAMS:
+        assert report.updated.get(seam) == 1, report
+    assert find_corpus.CACHE.stale_paths(vault, (_ALPHA,)) == (), (
+        "the resident row still describes the generation the write replaced"
+    )
+
+
+def test_a_corrupted_filter_column_fails_the_audit_closed(
+    vault: Path, warm_managed_cell
+) -> None:
+    """The audit compares every filter column, not one hash standing for all.
+
+    `content_hash` proves which bytes a row was built FROM. It does not prove
+    the row was built correctly, and a `projects_json` corrupted with the hash
+    left intact answers a `projects`-filtered recall wrongly while every
+    hash comparison says the row is current.
+    """
+    _seed(vault, _ALPHA, "Custody alpha", "alpha-seed")
+    _warm(vault, warm_managed_cell)
+    assert freshness.audit_custody(vault, [_ALPHA], reason="control").mismatches == ()
+
+    connection = sqlite3.connect(lexstore.lexical_path(vault))
+    try:
+        before = connection.execute(
+            "SELECT projects_json, content_hash FROM pages WHERE path = ?", (_ALPHA,)
+        ).fetchone()
+        assert before is not None and before[0] is not None
+        connection.execute(
+            "UPDATE pages SET projects_json = ? WHERE path = ?",
+            ('["project-omega"]', _ALPHA),
+        )
+        connection.commit()
+        after = connection.execute(
+            "SELECT projects_json, content_hash FROM pages WHERE path = ?", (_ALPHA,)
+        ).fetchone()
+    finally:
+        connection.close()
+    lexstore.clear_stores()
+    assert before[0] != after[0], "the corruption did not land"
+    assert before[1] == after[1], "the content hash must be untouched, or this pins nothing"
+
+    freshness.reset_custody_telemetry()
+    audit = freshness.audit_custody(vault, [_ALPHA], reason="filter_column")
+
+    assert ("eligibility_catalogue", _ALPHA) in audit.mismatches, audit.mismatches
+    assert audit.invalidated is True
+    assert freshness.custody_scope_invalidations()
+
+
+def test_a_same_size_mtime_preserving_rewrite_is_not_served_stale(
+    vault: Path, warm_managed_cell
+) -> None:
+    """The hardest shape for a cache keyed on file metadata.
+
+    The class docstring names it: on native Windows a same-size rewrite can
+    preserve the whole stat tuple, so a cache that trusted stat alone would
+    serve the old parse for ever. Reproduced here by restoring the mtime to the
+    nanosecond after a same-length rewrite, which is the strongest version of
+    that hazard this filesystem can express.
+    """
+    _seed(vault, _ALPHA, "Custody alpha", "aaaaaaaaaaaa")
+    _warm(vault, warm_managed_cell)
+    page = vault / _ALPHA
+    before_stat = page.stat()
+    assert (page) in find_corpus.CACHE.entries, "the recall hydrated no row for alpha"
+
+    _govern(vault, _ALPHA, "Custody alpha", "bbbbbbbbbbbb")
+    os.utime(page, ns=(before_stat.st_atime_ns, before_stat.st_mtime_ns))
+    after_stat = page.stat()
+    assert after_stat.st_size == before_stat.st_size, "the rewrite changed the size"
+    assert after_stat.st_mtime_ns == before_stat.st_mtime_ns, "the mtime was not restored"
+
+    parsed = find_corpus.CACHE.get(page, vault)
+    assert parsed is not None
+    assert "bbbbbbbbbbbb" in parsed.body, "a stale parse was served for the new bytes"
+    assert "aaaaaaaaaaaa" not in parsed.body
+    assert find_corpus.CACHE.stale_paths(vault, (_ALPHA,)) == ()
+
+
+def test_custody_is_applied_only_after_the_batch_revalidates(
+    vault: Path, warm_managed_cell, monkeypatch
+) -> None:
+    """A batch that did not commit takes no custody of anything.
+
+    The fan-out revalidates the batch against the canonical bytes one last time
+    before it reports; a receipt that failed that check names paths whose state
+    is not what the batch believed. Applying custody first would evict and
+    refresh rows for a write that then reported itself stale — the caches would
+    move for a generation nothing published.
+    """
+    _seed(vault, _ALPHA, "Custody alpha", "alpha-seed")
+    _warm(vault, warm_managed_cell)
+
+    calls = {"n": 0}
+    real_revalidate = recall_policy.RecallBatch.revalidate
+
+    def failing_last_revalidate(self, root):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            return False
+        return real_revalidate(self, root)
+
+    monkeypatch.setattr(recall_policy.RecallBatch, "revalidate", failing_last_revalidate)
+    freshness.reset_custody_telemetry()
+
+    report = index_sync.upsert_after_write(vault, [vault / _ALPHA])
+
+    assert calls["n"] >= 3, "the final revalidate was never reached"
+    assert report.reconcile_required, f"a stale batch reported success: {report.as_dict()}"
+    assert freshness.last_custody_report() is None, (
+        "custody was taken for a batch that did not commit"
+    )
+
+
+def test_custody_that_cannot_be_applied_fails_the_scope_closed(
+    vault: Path, warm_managed_cell, monkeypatch
+) -> None:
+    """Unknown custody is what a whole-scope invalidation is for.
+
+    A seam that raises is already handled inside `apply_receipt_paths`, which
+    names its paths and invalidates. If the whole call fails, nothing checked
+    anything — and logging that and returning would leave every row answering
+    with no one having looked at it. The write itself still returns: the bytes
+    are committed and the caches are derived.
+    """
+    _seed(vault, _ALPHA, "Custody alpha", "alpha-seed")
+    _warm(vault, warm_managed_cell)
+
+    def exploding_apply(*_args, **_kwargs):
+        raise RuntimeError("custody seam registry unavailable")
+
+    monkeypatch.setattr(freshness, "apply_receipt_paths", exploding_apply)
+    freshness.reset_custody_telemetry()
+
+    report = index_sync.upsert_after_write(vault, [vault / _ALPHA])
+
+    assert report is not None, "a custody failure must not fail the write"
+    invalidations = freshness.custody_scope_invalidations()
+    assert invalidations, "custody could not be applied and nothing was invalidated"
+    assert all(
+        reason.endswith("_custody_unavailable") for _scope, reason in invalidations
+    ), invalidations
 
 
 def test_cold_lexical_corpus_declines_with_warming_and_schedules_repair(

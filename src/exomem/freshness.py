@@ -1609,11 +1609,19 @@ class CustodySeam:
     its work reports zero updates rather than being believed. ``invalidate_scope``
     is the receipt-less counterpart and is optional: a durable store heals
     through its own repair worker, so only the in-process caches implement it.
+
+    Both callables receive ``digests``: the sha256 of each path's canonical
+    bytes right now, or ``None`` for a path that is not a readable file. It is
+    computed ONCE per batch and threaded through, because four seams each
+    hashing every path meant four full reads of every page a receipt named, on
+    the thread that had just written them.
     """
 
     name: str
-    apply: Callable[[Path, tuple[str, ...], tuple[str, ...]], None]
-    verify: Callable[[Path, tuple[str, ...]], tuple[str, ...]] | None = None
+    apply: Callable[[Path, tuple[str, ...], tuple[str, ...], Mapping[str, str | None]], None]
+    verify: (
+        Callable[[Path, tuple[str, ...], Mapping[str, str | None]], tuple[str, ...]] | None
+    ) = None
     invalidate_scope: Callable[[Path, str], None] | None = None
 
 
@@ -1647,7 +1655,12 @@ _custody_lock = threading.RLock()
 _custody_seams: dict[str, CustodySeam] = {}
 _custody_seams_loaded = False
 _custody_rebuilds: dict[str, int] = {}
-_custody_scope_invalidations: list[tuple[str, str]] = []
+#: Bounded like the report history. A long-lived cell that keeps hitting
+#: receipt-less drift would otherwise grow this list without limit, and it is
+#: diagnostics: the last N are what anyone reads.
+_custody_scope_invalidations: deque[tuple[str, str]] = deque(
+    maxlen=_CUSTODY_REPORT_HISTORY
+)
 _custody_reports: deque[CustodyReport] = deque(maxlen=_CUSTODY_REPORT_HISTORY)
 
 
@@ -1738,6 +1751,26 @@ def _custody_rel(value: object) -> str:
     return str(value or "").replace("\\", "/").lstrip("/")
 
 
+def custody_digests(vault_root: Path, rel_paths: Iterable[str]) -> dict[str, str | None]:
+    """sha256 of each path's canonical bytes now, or None when it is not a file.
+
+    One read per path for the whole batch. Every seam compares against this
+    rather than reading the page again: the frontmatter cache, both lexstore
+    seams and the reference sidecar were each hashing the same bytes, so a
+    receipt naming N pages cost 4N reads on the writer's thread.
+    """
+    from . import find_corpus
+
+    root = Path(vault_root)
+    digests: dict[str, str | None] = {}
+    for rel in rel_paths:
+        if rel in digests:
+            continue
+        content = find_corpus._read_page_bytes(root.joinpath(*rel.split("/")), root)
+        digests[rel] = None if content is None else hashlib.sha256(content).hexdigest()
+    return digests
+
+
 def _custody_rels(values: Iterable[object]) -> tuple[str, ...]:
     seen: dict[str, None] = {}
     for value in values:
@@ -1768,17 +1801,19 @@ def apply_receipt_paths(
     with _custody_lock:
         seams = tuple(_custody_seams.values())
         before = dict(_custody_rebuilds)
+    all_rels = (*changed_rels, *deleted_rels)
+    digests = custody_digests(vault_root, all_rels)
     updated: dict[str, int] = {}
     retired: dict[str, int] = {}
     mismatches: list[tuple[str, str]] = []
     for seam in seams:
         try:
-            seam.apply(Path(vault_root), changed_rels, deleted_rels)
+            seam.apply(Path(vault_root), changed_rels, deleted_rels, digests)
             # The count is the PROOF, not the seam's own word for it: a seam
             # that skipped its work leaves a row its verify still calls stale,
             # so the update it did not make cannot be reported as made.
             stale = frozenset(
-                seam.verify(Path(vault_root), (*changed_rels, *deleted_rels))
+                seam.verify(Path(vault_root), all_rels, digests)
                 if seam.verify is not None
                 else ()
             )
@@ -1831,12 +1866,13 @@ def audit_custody(
         return CustodyAudit(reason=reason, paths=())
     with _custody_lock:
         seams = tuple(_custody_seams.values())
+    digests = custody_digests(vault_root, rels)
     mismatches: list[tuple[str, str]] = []
     for seam in seams:
         if seam.verify is None:
             continue
         try:
-            seam_mismatches = seam.verify(Path(vault_root), rels)
+            seam_mismatches = seam.verify(Path(vault_root), rels, digests)
         except Exception:  # noqa: BLE001 - an unverifiable seam is not a pass
             log.warning("custody seam %s failed to verify", seam.name, exc_info=True)
             mismatches.extend((seam.name, rel) for rel in rels)

@@ -63,7 +63,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
@@ -2145,9 +2145,35 @@ def page_content_hashes(vault_root: Path, rel_paths: Iterable[str]) -> dict[str,
     wanted = [str(rel) for rel in rel_paths]
     if not wanted:
         return {}
-    if not _catalog_usable() or not lexical_path(vault_root).exists():
+    if not _custody_catalogue_live(vault_root):
         return dict.fromkeys(wanted, None)
     return get_store(vault_root).page_content_hashes(wanted)
+
+
+def page_eligibility_rows(
+    vault_root: Path, rel_paths: Iterable[str]
+) -> dict[str, tuple[str | None, ...] | None]:
+    """Every stored filter column plus `content_hash`, per path, or None."""
+    wanted = [str(rel) for rel in rel_paths]
+    if not wanted:
+        return {}
+    if not _custody_catalogue_live(vault_root):
+        return dict.fromkeys(wanted, None)
+    return get_store(vault_root).page_eligibility_rows(wanted)
+
+
+def _custody_catalogue_live(vault_root: Path) -> bool:
+    """Whether there is a catalogue for custody to have an opinion about.
+
+    A catalogue that is disabled, absent or retired holds no rows at all, and
+    "no rows" is not drift in the pages a receipt names — it is the cold case,
+    which the repair worker owns. Reading it as drift made every governed write
+    on a fresh, offline, FTS5-less or mid-rebuild cell invalidate both scopes
+    and empty the frontmatter cache, which is the opposite of what exact
+    custody is for. `memory_refs._custody_verify` already answers the cold case
+    this way; the two seams here now agree with it.
+    """
+    return bool(_catalog_usable() and lexical_path(vault_root).exists())
 
 
 def _custody_indexable(vault_root: Path, rel: str) -> bool:
@@ -2173,7 +2199,11 @@ def _custody_indexable(vault_root: Path, rel: str) -> bool:
         return True
 
 
-def _custody_file_digest(vault_root: Path, rel: str) -> str | None:
+def _custody_file_digest(
+    vault_root: Path, rel: str, digests: Mapping[str, str | None] | None = None
+) -> str | None:
+    if digests is not None and rel in digests:
+        return digests[rel]
     target = vault_root.joinpath(*rel.split("/"))
     try:
         if target.is_symlink() or not target.is_file():
@@ -2183,8 +2213,30 @@ def _custody_file_digest(vault_root: Path, rel: str) -> str | None:
         return None
 
 
+def _expected_eligibility_row(vault_root: Path, rel: str) -> tuple[str | None, ...] | None:
+    """The row this catalogue owes for one path, derived from the page itself.
+
+    `None` means the catalogue owes no row (not indexable, or unparseable).
+    Otherwise it is `_eligibility_columns` — the same derivation `_insert_page`
+    writes — so a comparison covers every filter column, not just the content
+    hash that stands in front of them.
+    """
+    from . import find_corpus
+
+    if not _custody_indexable(vault_root, rel):
+        return None
+    target = vault_root.joinpath(*rel.split("/"))
+    page = find_corpus.CACHE.get(target, vault_root)
+    if page is None:
+        return None
+    return _eligibility_columns(page)
+
+
 def _custody_apply(
-    vault_root: Path, changed: tuple[str, ...], deleted: tuple[str, ...]
+    vault_root: Path,
+    changed: tuple[str, ...],
+    deleted: tuple[str, ...],
+    digests: Mapping[str, str | None],
 ) -> None:
     """Bring exactly these paths' rows current; touch no other row.
 
@@ -2193,16 +2245,17 @@ def _custody_apply(
     that, because a degraded component is precisely the case where a stale row
     would otherwise survive under a receipt that says it did not.
     """
-    if not _catalog_usable() or not lexical_path(vault_root).exists():
+    if not _custody_catalogue_live(vault_root):
         return
-    # One query for the whole batch: a receipt naming a hundred paths must not
-    # cost a hundred connections to the store it is keeping current.
-    held = page_content_hashes(vault_root, [*changed, *deleted])
+    # One query for the whole batch, then one decision per path: a receipt
+    # naming a hundred paths must not cost a hundred connections to the store
+    # it is keeping current.
+    held = page_eligibility_rows(vault_root, [*changed, *deleted])
     stale = [
         rel
         for rel in changed
         if _custody_indexable(vault_root, rel)
-        and held.get(rel) != _custody_file_digest(vault_root, rel)
+        and held.get(rel) != _stored_row_for(vault_root, rel, digests)
     ]
     retired = [
         rel
@@ -2216,16 +2269,52 @@ def _custody_apply(
         store.delete_rel_paths(retired)
 
 
-def _corpus_custody_verify(vault_root: Path, rel_paths: tuple[str, ...]) -> tuple[str, ...]:
+#: Derived eligibility rows, keyed by the exact bytes they were derived from.
+#: `_custody_apply` and `_catalogue_custody_verify` ask for the same row inside
+#: one batch, and each derivation parses the page; the digest IS the content
+#: identity, so a hit is exact by construction. Bounded because a long-lived
+#: cell writes indefinitely many generations.
+_STORED_ROW_MEMO_LIMIT: int = 512
+_stored_row_memo: dict[tuple[str, str, str], tuple[str | None, ...] | None] = {}
+_STORED_ROW_LOCK = threading.Lock()
+
+
+def _stored_row_for(
+    vault_root: Path, rel: str, digests: Mapping[str, str | None] | None
+) -> tuple[str | None, ...] | None:
+    """`_expected_eligibility_row` plus the content hash, in stored order."""
+    digest = _custody_file_digest(vault_root, rel, digests)
+    if digest is None:
+        return None
+    key = (str(vault_root), rel, digest)
+    with _STORED_ROW_LOCK:
+        if key in _stored_row_memo:
+            return _stored_row_memo[key]
+    expected = _expected_eligibility_row(vault_root, rel)
+    row = None if expected is None else (*expected, digest)
+    with _STORED_ROW_LOCK:
+        if len(_stored_row_memo) >= _STORED_ROW_MEMO_LIMIT:
+            _stored_row_memo.clear()
+        _stored_row_memo[key] = row
+    return row
+
+
+def _corpus_custody_verify(
+    vault_root: Path,
+    rel_paths: tuple[str, ...],
+    digests: Mapping[str, str | None] | None = None,
+) -> tuple[str, ...]:
     """Content rows that do not describe the page they name.
 
     `holds_content_identities` is the exact probe: it compares every value the
-    catalogue derives from a page's bytes and then serves, against those bytes.
+    catalogue derives from a page's bytes and then serves.
     """
+    if not _custody_catalogue_live(vault_root):
+        return ()
     expected: dict[str, str | None] = {}
     for rel in rel_paths:
         expected[rel] = (
-            _custody_file_digest(vault_root, rel)
+            _custody_file_digest(vault_root, rel, digests)
             if _custody_indexable(vault_root, rel)
             else None
         )
@@ -2233,19 +2322,29 @@ def _corpus_custody_verify(vault_root: Path, rel_paths: tuple[str, ...]) -> tupl
     return tuple(rel for rel in rel_paths if not held.get(rel, False))
 
 
-def _catalogue_custody_verify(vault_root: Path, rel_paths: tuple[str, ...]) -> tuple[str, ...]:
-    """Eligibility rows whose stored content hash is not the page's."""
-    rows = page_content_hashes(vault_root, list(rel_paths))
-    stale: list[str] = []
-    for rel in rel_paths:
-        expected = (
-            _custody_file_digest(vault_root, rel)
-            if _custody_indexable(vault_root, rel)
-            else None
-        )
-        if rows.get(rel) != expected:
-            stale.append(rel)
-    return tuple(stale)
+def _catalogue_custody_verify(
+    vault_root: Path,
+    rel_paths: tuple[str, ...],
+    digests: Mapping[str, str | None] | None = None,
+) -> tuple[str, ...]:
+    """Eligibility rows that do not describe the page they name.
+
+    EVERY filter column, not the content hash alone. The hash proves the bytes
+    the row was built from; it does not prove the row was built correctly, and
+    a `projects_json` corrupted with the hash left intact is invisible to a
+    hash comparison while a `projects`-filtered recall answers wrongly from it.
+    So the comparison is against `_eligibility_columns` over the page's current
+    frontmatter — the same derivation `_insert_page` writes, so it inherits
+    `canonicalize_axis_value` and the members/scalar split exactly.
+    """
+    if not _custody_catalogue_live(vault_root):
+        return ()
+    held = page_eligibility_rows(vault_root, list(rel_paths))
+    return tuple(
+        rel
+        for rel in rel_paths
+        if held.get(rel) != _stored_row_for(vault_root, rel, digests)
+    )
 
 
 def register_path_custody() -> None:
@@ -2264,7 +2363,7 @@ def register_path_custody() -> None:
             name=_CATALOGUE_CUSTODY_SEAM,
             # One apply for one store: the second registration reports the
             # `pages` half of the same bounded write, it does not repeat it.
-            apply=lambda _root, _changed, _deleted: None,
+            apply=lambda _root, _changed, _deleted, _digests: None,
             verify=_catalogue_custody_verify,
         )
     )
@@ -5467,26 +5566,46 @@ class LexicalStore:
 
         Read-only and non-walking: one indexed lookup per path, never a parse.
         """
-        answers: dict[str, str | None] = dict.fromkeys(rel_paths, None)
+        rows = self.page_eligibility_rows(rel_paths)
+        return {
+            rel: (None if row is None else row[-1])
+            for rel, row in rows.items()
+        }
+
+    def page_eligibility_rows(
+        self, rel_paths: list[str]
+    ) -> dict[str, tuple[str | None, ...] | None]:
+        """Every stored filter column plus `content_hash`, per path, or None.
+
+        The columns are returned in `_ELIGIBILITY_COLUMNS` order with
+        `content_hash` last, which is exactly the shape `_eligibility_columns`
+        derives from a parsed page — so the audit can compare the two directly
+        instead of trusting one hash to stand for all sixteen values.
+        """
+        answers: dict[str, tuple[str | None, ...] | None] = dict.fromkeys(rel_paths, None)
         if self._failed or not self.path.exists():
             return answers
         try:
             conn = self._connect()
         except sqlite3.Error as error:
-            self._note_query_failure(error, "lexical page-hash probe declined (%s)")
+            self._note_query_failure(error, "lexical page-row probe declined (%s)")
             return answers
+        columns = ", ".join((*_ELIGIBILITY_COLUMNS, "content_hash"))
         try:
             if not self._schema_is_current(conn):
                 return answers
             for rel in rel_paths:
                 row = conn.execute(
-                    "SELECT content_hash FROM pages WHERE path = ?", (rel,)
+                    f"SELECT {columns} FROM pages WHERE path = ?",  # noqa: S608 - fixed names
+                    (rel,),
                 ).fetchone()
-                if row is not None and row[0] is not None:
-                    answers[rel] = str(row[0])
+                if row is not None:
+                    answers[rel] = tuple(
+                        None if value is None else str(value) for value in row
+                    )
             return answers
         except sqlite3.Error as error:
-            self._note_query_failure(error, "lexical page-hash probe declined (%s)")
+            self._note_query_failure(error, "lexical page-row probe declined (%s)")
             return dict.fromkeys(rel_paths, None)
         finally:
             conn.close()

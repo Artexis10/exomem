@@ -8,7 +8,7 @@ import os
 import re
 import stat
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -63,7 +63,22 @@ class FrontmatterCache:
     )
 
     def clear(self) -> None:
+        """Discard every row, and record it as a whole-cache re-derivation.
+
+        The counter is what "rebuild counters unchanged" is asserted against,
+        so a discard that a receipt did not ask for has to move it.
+        """
         freshness.note_custody_rebuild(_CUSTODY_SEAM)
+        self.release()
+
+    def release(self) -> None:
+        """Discard every row on the caller's explicit request, uncounted.
+
+        A memory release is a policy decision, not drift: the reaper asked for
+        this cache back and the next reader pays a re-parse it can predict.
+        Counting it as a custody rebuild would put a reaper's noise into the
+        one number that says whether a governed write discarded work.
+        """
         self.entries.clear()
         self._signatures.clear()
 
@@ -104,12 +119,21 @@ class FrontmatterCache:
                 dropped += 1
         return dropped
 
-    def stale_paths(self, vault_root: Path, rel_paths: Iterable[str]) -> tuple[str, ...]:
+    def stale_paths(
+        self,
+        vault_root: Path,
+        rel_paths: Iterable[str],
+        digests: Mapping[str, str | None] | None = None,
+    ) -> tuple[str, ...]:
         """Which of these paths this cache holds a row that no longer describes.
 
         A path this cache holds no row for is not a mismatch: an absent row is
         re-parsed on the next read, which is exact by construction. Only a
         RESIDENT row can be wrong.
+
+        `digests` is the batch's one read of each page (see
+        `freshness.custody_digests`); it is hashed here only when a caller does
+        not supply it.
         """
         root = Path(vault_root)
         stale: list[str] = []
@@ -118,11 +142,12 @@ class FrontmatterCache:
                 cached = self.entries.get(candidate)
                 if cached is None:
                     continue
-                content = _read_page_bytes(candidate, root)
-                if content is None:
-                    stale.append(rel)
-                    break
-                if cached.snapshot_hash != hashlib.sha256(content).hexdigest():
+                if digests is not None and rel in digests:
+                    digest = digests[rel]
+                else:
+                    content = _read_page_bytes(candidate, root)
+                    digest = None if content is None else hashlib.sha256(content).hexdigest()
+                if digest is None or cached.snapshot_hash != digest:
                     stale.append(rel)
                     break
         return tuple(stale)
@@ -197,7 +222,10 @@ def _cache_key_candidates(vault_root: Path, rel: str) -> tuple[Path, ...]:
 
 
 def _custody_apply(
-    vault_root: Path, changed: tuple[str, ...], deleted: tuple[str, ...]
+    vault_root: Path,
+    changed: tuple[str, ...],
+    deleted: tuple[str, ...],
+    _digests: Mapping[str, str | None],
 ) -> None:
     CACHE.invalidate_paths(vault_root, (*changed, *deleted))
 

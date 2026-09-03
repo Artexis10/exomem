@@ -5432,7 +5432,11 @@ def unload_ram_caches(
     """
     page_entries = len(_CACHE.entries) if pages else 0
     if pages:
-        _CACHE.clear()
+        # `release`, not `clear`: an explicit unload is the caller's policy
+        # decision, and counting it as a custody rebuild would put a reaper's
+        # noise into the number that says whether a governed write discarded
+        # receipt-covered work.
+        _CACHE.release()
     with _RESOLVER_LOCK:
         resolver_entries = len(_RESOLVER_CACHE)
         _RESOLVER_CACHE.clear()
