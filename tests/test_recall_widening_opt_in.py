@@ -464,17 +464,37 @@ def test_a_list_filter_still_gates_the_reserve(
 ) -> None:
     """A list filter excludes an out-of-KB page from the reserve, end to end.
 
-    What this pins is the OUTCOME, not a particular gate — and the distinction
-    was measured, not assumed. `types`/`projects`/`tags`/`speakers`/`file_types`
-    are compiled into `filter_plan` through `FilterShortcuts`
-    (`find.py:1253`), so setting any of them makes the reserve's eligible set
-    exact and the wrong-type page never reaches the lexical query at all. The
-    per-candidate `_passes_filters` call in the reserve loop is therefore
-    redundant for every shape reachable through the public leaf: deleting it
-    leaves this node, the rest of this file, `tests/test_find.py`,
+    What this pins is the OUTCOME, not a particular gate. The per-candidate
+    `_passes_filters` call in the reserve loop turns out to be redundant:
+    deleting it leaves this node, the rest of this file, `tests/test_find.py`,
     `tests/test_find_structured_filters.py` and the reviewer's own type-gate
     probe all green (63 passed). An equivalent mutant, on code this lane did
-    not add.
+    not add — but redundant for a reason worth stating exactly, because a
+    weaker statement of it would survive the change that makes it false.
+
+    `find_corpus.passes_filters:293-297` evaluates
+    `access.is_indexable(vault_root, page.rel_path)` FIRST, before any list
+    filter, and that check is not a list filter and has no counterpart in
+    `_widening_allowed_paths(plan=None)`. So the gate is not redundant merely
+    because `types`/`projects`/`tags` compile into `filter_plan`; it is
+    redundant because of where access enforcement lives today:
+
+    * `recall_policy.is_recall_candidate` ends in
+      `if not access.is_indexable(root, rel): return False`
+      (`recall_policy.py:225`, and `:213` for the structured-alias arm), so an
+      excluded page never becomes a recall candidate and never enters the
+      catalogue the reserve queries. The indexer applies the same predicate
+      again at `deferred_index.py:1483`.
+    * Excluding a tree after indexing does not leave stale rows servable:
+      `recall_policy_identity` is
+      `(RECALL_POLICY_VERSION, access.policy_fingerprint(vault_root))`, the
+      freshness snapshot binds it, and `access.py:98` says so in its own words
+      — "Moving it would flip `recall_policy.recall_policy_identity`". The
+      generation moves, the catalogue reads stale, and a managed recall returns
+      the retryable warming outcome rather than a page the policy now excludes.
+
+    Move access enforcement out of the index path and that stops being true,
+    loudly. Whoever does should put this gate back, or bring their own.
 
     The node still earns its place: it is red under M4 (a reserve query that
     loses `allowed_paths` surfaces the excluded page), which is the mechanism
