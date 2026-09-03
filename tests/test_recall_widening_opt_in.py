@@ -605,10 +605,6 @@ def test_the_unit_cache_key_omits_the_knob_because_the_unit_path_returns_first()
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="lane 3 micro-round: refs sidecar declines for out-of-KB paths under a managed runtime",
-)
 def test_widening_never_walks_on_a_warm_managed_cell(
     vault: Path, warm_managed_cell, walk_sentinel
 ) -> None:

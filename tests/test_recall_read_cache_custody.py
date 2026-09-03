@@ -654,6 +654,11 @@ def test_a_widened_recall_does_not_walk_for_an_out_of_kb_hit(
         scope="kb",
         graph=False,
         include_timings=True,
+        # Integration wiring: Lane 4 made scope widening opt-in, so a `scope="kb"`
+        # recall no longer reserves out-of-KB slots unless it is asked to. Without
+        # this the node's own premise assertion below fails rather than passing
+        # vacuously, which is why it is written as a premise.
+        widen_outside_kb=True,
     )
 
     paths = [hit["path"] for hit in result["hits"]]
