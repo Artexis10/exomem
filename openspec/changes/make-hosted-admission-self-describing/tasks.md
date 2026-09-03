@@ -11,16 +11,33 @@
 
 ## 2. Report a fleet nobody can join
 
-- [ ] 2.1 Add the `admission_closed` issue to `hosted_fleet_inventory.py` when the
-      reconciled fleet has zero bound cells and the Substrate observation reports no
-      live cohort
-- [ ] 2.2 Confirm the issue flows through the existing `status` derivation at
+Ordering note: 2.1 is in Substrate and blocks 2.2-2.5. The exomem-side inventory
+cannot derive admission readiness on its own — `_SUBSTRATE_FIELDS`
+(`hosted_fleet_inventory.py:49-61`) is a closed, exact-match schema of eleven
+cell-keyed fields, and every cell-keyed substrate signal already forces a cell to count
+as live. So whenever `live_count == 0`, the entire substrate dataset is empty and no
+field remains to carry the fact. Attempting 2.2 first can only produce a proxy that
+silently disagrees with the real admission path.
+
+- [ ] 2.1 Add an admission-readiness field to Substrate's fleet observation
+      (`src/lib/exomem-hosted/fleet-observation.ts`), derived from the same predicate
+      the admission path uses (`hosted-cohort-target.ts`) plus the effective issuance
+      protocol, so the two cannot disagree
+- [ ] 2.2 Widen `_SUBSTRATE_FIELDS` in `hosted_fleet_inventory.py` to accept the new
+      field, keeping the closed exact-match schema
+- [ ] 2.3 Raise the `admission_closed` issue when the observation reports admission
+      closed, following the existing issue-accumulation shape at `:1375-1450`
+- [ ] 2.4 Confirm the issue flows through the existing `status` derivation at
       `hosted_fleet_inventory.py:1549` so the result is not `empty` or `consistent`
-- [ ] 2.3 Make the upgrade phase gate at `hosted_runtime_upgrade.py:363` name
-      `admission_closed` as the blocking condition when it refuses
-- [ ] 2.4 Test the three cases: zero bound cells with no live cohort (issue raised),
-      zero bound cells with a live cohort (no issue), and a populated fleet (no issue)
-- [ ] 2.5 Resolve the open question on whether an operator may acknowledge the issue for
+- [ ] 2.5 Widen `_INVENTORY_FIELDS` (`hosted_runtime_upgrade.py:71`) so the execution
+      record can carry a blocking reason, then make the phase gate at `:363` name
+      `admission_closed` when it refuses
+- [ ] 2.6 Test: observation reports closed (issue raised, status not empty/consistent);
+      observation reports open with zero bound cells (no issue — reachable under v1
+      issuance); populated healthy fleet (no issue); phase gate names the issue
+- [ ] 2.7 Test that the reported readiness agrees with the admission predicate for the
+      same control-plane state, so a second source of truth cannot drift in
+- [ ] 2.8 Resolve the open question on whether an operator may acknowledge the issue for
       a deliberately empty platform, and implement whichever answer is chosen
 
 ## 3. Keep the catalogue current with the deployed runtime

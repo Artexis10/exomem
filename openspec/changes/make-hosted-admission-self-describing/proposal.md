@@ -25,9 +25,12 @@ the recovery from it be retried.
   distinguish "no live cohort" from other closures and MUST carry an operator-facing
   reference to the bootstrap procedure, without leaking tenant or invite detail to the
   invited person.
-- Make the closed state observable before a human hits it. Zero bound cells combined
-  with no live cohort MUST be a reported fleet-inventory issue, not a clean `empty`.
-  An operator MUST be able to see "admission is closed" from the inventory alone.
+- Make the closed state observable before a human hits it. The control plane MUST
+  report whether it would currently admit a tenant, derived from the same authority the
+  admission path uses, and a closed report MUST be a fleet-inventory issue rather than a
+  clean `empty`. The inventory MUST NOT re-derive that fact: its substrate observation
+  is a closed schema of cell-keyed fields, and every such field already forces a cell to
+  count as live, so at zero bound cells there is nothing left to derive from.
 - Register the release with the control plane as part of publishing it. Publishing a
   signed runtime image candidate MUST also record a `pending` agent-contract candidate
   for that release, so the service catalogue cannot silently lag the deployed runtime.
@@ -65,7 +68,8 @@ against a requirement that does not exist.
 
 ## Impact
 
-- Substrate: `src/lib/exomem-hosted/errors.ts` (refusal detail),
+- Substrate: `src/lib/exomem-hosted/fleet-observation.ts` (admission-readiness field on
+  the observation), `errors.ts` (refusal detail),
   `hosted-cohort-target.ts` and `db.ts:680,804-809` (closure classification),
   `agent-contract-store.ts` (promotion preconditions, assignment retirement),
   `oauth-store.ts` (bootstrap authority checkpoints), plus database migrations for

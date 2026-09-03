@@ -57,14 +57,31 @@ public message stays as it is. Alternative considered: a distinct
 `HOSTED_NO_LIVE_COHORT` code — rejected because it changes a user-visible contract for
 an audience that cannot act on the distinction, and every client would have to learn it.
 
-**Derive the inventory signal, do not store it.** `hosted_fleet_inventory.py:1549`
-computes `status` as `"inconsistent" if issues else "empty" if live_count == 0 else
-"consistent"`. Add `admission_closed` to the issue set when the reconciled fleet has
-zero bound cells and the Substrate observation reports no live cohort. This reuses the
-existing issue machinery, so it automatically blocks the upgrade phase gate at
-`hosted_runtime_upgrade.py:363` — which is correct: an upgrade should not advance into
-a fleet nobody can join. Alternative considered: a separate readiness endpoint —
-rejected as a second source of truth for the same fact.
+**Report admission readiness from the control plane; do not re-derive it in the
+inventory.** `hosted_fleet_inventory.py:1549` computes `status` as `"inconsistent" if
+issues else "empty" if live_count == 0 else "consistent"`, so adding `admission_closed`
+to the issue set reuses the existing machinery and automatically blocks the upgrade
+phase gate at `hosted_runtime_upgrade.py:363` — correct, because an upgrade should not
+advance into a fleet nobody can join.
+
+The readiness fact itself must come from Substrate. This design originally said to
+derive it in the inventory from "zero bound cells and no live cohort", which is not
+implementable: `_SUBSTRATE_FIELDS` (`hosted_fleet_inventory.py:49-61`) is a closed,
+exact-match schema of eleven cell-keyed fields, and every cell-keyed substrate signal
+already contributes to `independently_live`. So whenever `live_count == 0` the whole
+substrate dataset is empty and no field remains to carry the fact — any implementation
+could only invent a proxy that silently disagrees with the real admission path.
+
+The original phrasing was also wrong on its own terms: `hasLiveHostedCohortTarget`
+requires a `bound` cell, so "zero bound cells with a live cohort" is unreachable and
+the scenario asserting it described a state that cannot exist. The reachable case is
+zero bound cells while admission is nonetheless open, which happens under v1 issuance,
+where `redeemInviteAtomic` pins no contract at all (`db.ts:804-809`).
+
+Alternative considered: a separate readiness endpoint — still rejected, for the
+original reason. The fact belongs on the observation Substrate already publishes, and
+must be derived from the same predicate the admission path evaluates so the two cannot
+drift apart.
 
 **Register the candidate from the publication pipeline, not the deployment.** The
 signed candidate already exists as a release artifact with a verified digest, and
@@ -132,5 +149,8 @@ be treated as live and not re-promoted.
   whether step 4 is a storage change or also a re-verification change.
 - Should `admission_closed` block the upgrade phase gate outright, or report as an
   issue the operator can acknowledge for a deliberately empty platform?
-- Is there any legitimate operational state with zero bound cells where admission is
-  expected to stay open, which would make the inventory signal a false positive?
+- ~~Is there any legitimate operational state with zero bound cells where admission is
+  expected to stay open?~~ **Answered: yes.** Under v1 issuance `redeemInviteAtomic`
+  pins no contract (`db.ts:804-809`), so admission is open with zero bound cells. This
+  is exactly why the readiness fact must come from Substrate, which knows its own
+  issuance mode, rather than being inferred from cell counts.
