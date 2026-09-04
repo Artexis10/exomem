@@ -53,8 +53,21 @@ _STATUS_TIMEOUT_SECONDS = 0.25
 # ran long, went overdue, or was refused stays at INFO or louder whatever its
 # holder kind, because those are the rows a real diagnosis reads.  Quieting the
 # boring case must never quiet the interesting one.
-_QUIET_ACQUIRE_WAIT_MS = 100.0
-_QUIET_HOLD_MS = 100.0
+#
+# The acquire side is NOT a constant.  It derives from the coordinator's own
+# `poll_interval_seconds`, because that interval is what makes "contended"
+# measurable: an acquire that outlasted one poll went round the retry loop, so
+# the boundary was genuinely held by somebody else rather than merely missed.
+# Deriving it keeps the two in step if the interval is ever tuned, and it puts
+# the visible band at 25ms by default instead of a number picked by hand.
+#
+# The hold side has no such derivation, so it is a constant -- but a small one.
+# Measured over 5,000 uncontended reserved-state holds on a loaded box, one
+# exceeded 1ms and none exceeded 5ms, so 5ms costs nothing in volume while
+# leaving a 5ms hold (roughly 10x the uncontended median) visible.  An earlier
+# 100ms pair demoted the entire band below it, which hid a 55ms contended
+# acquire -- exactly the signal these thresholds exist to preserve.
+_QUIET_HOLD_MS = 5.0
 _HOLDER_SCHEMA = 1
 # Contention attribution window.  A boundary flag can never explain a stream of
 # short holds starving a bounded waiter: every one-shot probe lands in a gap and
@@ -121,7 +134,11 @@ def _log_mutation_lock_event(
 
 
 def _boundary_event_level(
-    *, publish_holder_metadata: bool, wait_ms: float, hold_ms: float | None
+    *,
+    publish_holder_metadata: bool,
+    wait_ms: float,
+    hold_ms: float | None,
+    poll_interval_seconds: float,
 ) -> int:
     """Return DEBUG only for a short, uncontended, metadata-free reserved hold.
 
@@ -132,7 +149,10 @@ def _boundary_event_level(
       the coordinator already carves out for high-frequency filesystem-identity
       work.  A command or lifecycle boundary publishes a holder sidecar, runs at
       human frequency, and keeps its INFO audit row.
-    * the acquire did not wait, so a contended acquire still reports itself.
+    * the acquire did not outlast one acquisition poll, so a contended acquire
+      still reports itself.  An acquire that waited longer than
+      `poll_interval_seconds` went round the retry loop at least once, which is
+      the cheapest honest definition of contention this code can measure.
     * the hold was short, so a slow hold still reports itself.
 
     Anything else is INFO.  `hold_ms` is `None` at acquire time, where the wait
@@ -140,7 +160,7 @@ def _boundary_event_level(
     """
     if publish_holder_metadata:
         return logging.INFO
-    if wait_ms >= _QUIET_ACQUIRE_WAIT_MS:
+    if wait_ms >= poll_interval_seconds * 1000.0:
         return logging.INFO
     if hold_ms is not None and hold_ms >= _QUIET_HOLD_MS:
         return logging.INFO
@@ -1988,6 +2008,7 @@ class VaultMutationCoordinator:
                     publish_holder_metadata=publish_holder_metadata,
                     wait_ms=wait_ms,
                     hold_ms=None,
+                    poll_interval_seconds=self.poll_interval_seconds,
                 ),
                 operation=operation,
                 holder_kind=holder_kind,
@@ -2077,6 +2098,7 @@ class VaultMutationCoordinator:
                             publish_holder_metadata=publish_holder_metadata,
                             wait_ms=wait_ms,
                             hold_ms=hold_ms,
+                            poll_interval_seconds=self.poll_interval_seconds,
                         )
                     ),
                     operation=operation,
@@ -2110,22 +2132,37 @@ class VaultMutationCoordinator:
         _note_busy_refusal(state, probed)
         probed["contention"] = _contention_view(state)
         wait_ms = (time.monotonic() - wait_start) * 1000
+        error = _mutation_busy(probed, wait_ms=wait_ms)
         # A refusal is the loudest thing this boundary can say, and until now it
         # said it only through the raised OpError -- so it reached the log only
         # where a caller happened to log what it caught, and a caller that
-        # retried quietly left the refusal invisible.  These are the same fields
-        # that let a live latency incident be diagnosed off `exomem.log.4`;
-        # recording them here means they survive the caller's choice.
+        # retried quietly left the refusal invisible.
+        #
+        # The row is built FROM the payload rather than beside it, so the log
+        # and the raised error cannot drift apart: every key a diagnosis read
+        # off `exomem.log.4` is here because it is in `details`, not because
+        # somebody remembered to copy it.  The contention counters matter more
+        # now than they did, not less: `_contention_view` is the only part of
+        # this payload that can show a bounded waiter losing to a stream of
+        # short holds, and those short holds no longer log at INFO themselves.
+        details = error.details
+        holder = details.get("holder") or {}
         _log_mutation_lock_event(
             "mutation_lock_refused",
             level=logging.WARNING,
-            operation=probed.get("operation"),
-            holder_kind=probed.get("holder_kind"),
-            age_seconds=probed.get("age_seconds"),
-            overdue=probed.get("overdue"),
-            wait_ms=round(wait_ms, 2),
+            operation=holder.get("operation"),
+            holder_kind=holder.get("holder_kind"),
+            age_seconds=holder.get("age_seconds"),
+            overdue=holder.get("overdue"),
+            status=details.get("status"),
+            retry_after_ms=details.get("retry_after_ms"),
+            wait_ms=details.get("wait_ms"),
+            acquire_attempts=details.get("acquire_attempts"),
+            busy_refusals=details.get("busy_refusals"),
+            busy_refusals_recent=details.get("busy_refusals_recent"),
+            contention_scope=details.get("contention_scope"),
         )
-        return _mutation_busy(probed, wait_ms=wait_ms)
+        return error
 
     def _probe(self, state: _LocalLockState) -> dict[str, object]:
         local = _snapshot_state(state, emit_warning=True)

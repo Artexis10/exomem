@@ -1181,6 +1181,14 @@ def test_long_hold_warning_is_guaranteed_on_release_without_any_probe(
     # Same level as the human line it twins: an operator who filters a noisy
     # JSONL log to WARNING and above must not lose the machine-readable half.
     assert events[0].levelno == logging.WARNING
+    # The total is bounded too, and that is the half the two filtered counts
+    # above cannot supply: without it, an extra WARNING under ANY other event
+    # name passes unseen -- including every release row escalating to WARNING,
+    # which is the flood regression this whole change exists to prevent.
+    assert len(caplog.records) == 2, (
+        f"expected exactly the human warning and its structured twin, got "
+        f"{[(r.levelname, getattr(r, 'event', None)) for r in caplog.records]}"
+    )
     assert all("unprobed-vault" not in record.getMessage() for record in caplog.records)
 
 
@@ -1805,7 +1813,7 @@ def test_attributable_command_holds_stay_at_info(
 
 
 def test_a_slow_reserved_state_hold_stays_visible_at_info(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A reserved-state hold that is NOT sub-millisecond is still interesting.
 
@@ -1816,7 +1824,6 @@ def test_a_slow_reserved_state_hold_stays_visible_at_info(
     vault = tmp_path / "vault"
     vault.mkdir()
     coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
-    monkeypatch.setattr(mutation_lock_module, "_QUIET_HOLD_MS", 5.0)
 
     with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
         with _reserved_state_hold(coordinator):
@@ -1827,20 +1834,27 @@ def test_a_slow_reserved_state_hold_stays_visible_at_info(
         "a slow reserved-state hold was demoted to DEBUG — the quieting swallowed "
         "the very signal a boundary diagnosis reads"
     )
-    assert released.fields["hold_ms"] >= 5.0
+    assert released.fields["hold_ms"] >= mutation_lock_module._QUIET_HOLD_MS
     # The INFO release row must be self-sufficient: it carries the wait as well
     # as the hold, because its paired acquire row may legitimately be DEBUG.
     assert isinstance(released.fields["wait_ms"], float)
 
 
 def test_a_contended_acquire_stays_visible_at_info(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """An acquire that actually waited is reported, whatever its holder kind."""
+    """An acquire that actually waited is reported, whatever its holder kind.
+
+    Nothing is monkeypatched here.  The acquire threshold is derived from the
+    coordinator's own `poll_interval_seconds`, so this exercises the shipped
+    value: the holder below keeps the boundary for ~60ms, which is more than
+    twice the 25ms default poll and therefore an acquire that went round the
+    retry loop rather than merely missing a free boundary.
+    """
     vault = tmp_path / "vault"
     vault.mkdir()
     coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
-    monkeypatch.setattr(mutation_lock_module, "_QUIET_ACQUIRE_WAIT_MS", 5.0)
+    threshold_ms = coordinator.poll_interval_seconds * 1000.0
 
     holder_in = threading.Event()
     release = threading.Event()
@@ -1859,7 +1873,7 @@ def test_a_contended_acquire_stays_visible_at_info(
                 target=lambda: _enter_and_leave(coordinator), daemon=True
             )
             contender.start()
-            time.sleep(0.05)
+            time.sleep(0.06)
             release.set()
             contender.join(timeout=_OBSERVE_SECONDS)
     finally:
@@ -1867,11 +1881,21 @@ def test_a_contended_acquire_stays_visible_at_info(
         thread.join(timeout=_OBSERVE_SECONDS)
 
     contended = [
-        r for r in _events(caplog, "mutation_lock_acquired") if r.fields["wait_ms"] >= 5.0
+        r
+        for r in _events(caplog, "mutation_lock_acquired")
+        if r.fields["wait_ms"] >= threshold_ms
     ]
     assert contended, "no contended acquire was observed — the test did not contend"
     assert all(r.levelno == logging.INFO for r in contended), (
         "a contended acquire was demoted to DEBUG"
+    )
+    # The band a 100ms constant used to swallow whole.  A wait of tens of
+    # milliseconds is ~1,000x the uncontended median and is the signal this
+    # threshold exists to keep; assert it lands inside the visible band rather
+    # than merely above whatever the threshold happens to be.
+    assert any(r.fields["wait_ms"] < 100.0 for r in contended), (
+        "the test did not exercise the 25-100ms band, where an acquire is "
+        "contended but a hand-picked 100ms threshold would have hidden it"
     )
 
 
@@ -1923,6 +1947,63 @@ def test_refusal_is_logged_at_warning_even_when_the_caller_swallows_it(
     assert refused.fields["holder_kind"] == "graph"
     assert refused.fields["operation"] == "epistemic_graph_drain_paths"
     assert refused.fields["wait_ms"] >= 0.0
+    # Every key the raised OpError carries, the row carries too.  A refusal row
+    # that dropped half the payload would still "log the refusal" while losing
+    # the fields a diagnosis actually reads.
+    assert refused.fields["status"] == "retryable"
+    assert isinstance(refused.fields["retry_after_ms"], int)
+    assert refused.fields["age_seconds"] >= 0.0
+    assert refused.fields["overdue"] is False
+    # The contention counters matter MORE now that routine holds are at DEBUG:
+    # `_contention_view` is the only remaining way to see a bounded waiter
+    # losing to a stream of short holds.
+    assert refused.fields["busy_refusals"] >= 1
+    assert refused.fields["busy_refusals_recent"] >= 1
+    assert refused.fields["acquire_attempts"] >= 1
+    assert refused.fields["contention_scope"] == "process_local"
+
+
+def test_the_refusal_row_and_the_raised_error_cannot_drift_apart(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The logged row is built FROM the payload, so it can never lag it.
+
+    Pinned as a relationship rather than a field list: a future key added to
+    `MUTATION_BUSY` should not need a second edit here to reach the log.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+
+    holder_in = threading.Event()
+    release = threading.Event()
+
+    def _holder() -> None:
+        with coordinator.hold(operation="epistemic_graph_drain_paths", holder_kind="graph"):
+            holder_in.set()
+            release.wait(timeout=_HOLD_SECONDS)
+
+    thread = threading.Thread(target=_holder, daemon=True)
+    thread.start()
+    try:
+        assert holder_in.wait(timeout=_OBSERVE_SECONDS)
+        with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
+            with pytest.raises(OpError) as raised:
+                with coordinator.hold(timeout_seconds=0.03):
+                    pytest.fail("contender entered a held mutation boundary")
+    finally:
+        release.set()
+        thread.join(timeout=_HOLD_SECONDS)
+
+    [refused] = _events(caplog, "mutation_lock_refused")
+    details = raised.value.details
+    holder = details["holder"]
+    for key in ("status", "retry_after_ms", "wait_ms"):
+        assert refused.fields[key] == details[key], f"refusal row disagrees on {key!r}"
+    for key in ("operation", "holder_kind", "age_seconds", "overdue"):
+        assert refused.fields[key] == holder[key], f"refusal row disagrees on holder {key!r}"
+    for key in ("acquire_attempts", "busy_refusals", "busy_refusals_recent"):
+        assert refused.fields[key] == details[key], f"refusal row disagrees on {key!r}"
 
 
 def test_refusal_payload_keeps_every_field_the_incident_diagnosis_used(
@@ -2056,3 +2137,117 @@ def test_boundary_metrics_fire_on_every_hold_including_the_quiet_ones(
         "exomem_boundary_wait_ms",
         "exomem_boundary_hold_ms",
     ]
+
+
+
+# --- The shipped thresholds themselves, exercised unpatched ---
+#
+# Every other test in this group monkeypatched `_QUIET_*` to a convenient
+# value, so between them they proved the MECHANISM works and never that the
+# SHIPPED numbers are sane.  Both constants could be raised to ten seconds --
+# hiding every contended acquire and every slow hold on the box -- with the
+# whole suite still green.  These four assert the real values.
+
+
+def test_the_shipped_hold_threshold_is_small_enough_to_matter(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A hold just above the shipped constant is INFO; a routine one is DEBUG.
+
+    Deliberately tight.  A generous margin here is what let a 100x-too-large
+    threshold survive: 50ms against a 5ms bar passes just as happily against a
+    10-second bar.  10ms against 5ms does not.
+    """
+    assert mutation_lock_module._QUIET_HOLD_MS <= 10.0, (
+        "the hold threshold has drifted upward; measured uncontended holds are "
+        "sub-millisecond, so anything above ~10ms starts hiding real signal"
+    )
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+
+    with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
+        with _reserved_state_hold(coordinator):
+            time.sleep(mutation_lock_module._QUIET_HOLD_MS / 1000.0 * 2.0)
+
+    [released] = _events(caplog, "mutation_lock_released")
+    assert released.levelno == logging.INFO, (
+        f"a hold of {released.fields['hold_ms']}ms was demoted while the "
+        f"threshold is {mutation_lock_module._QUIET_HOLD_MS}ms"
+    )
+
+
+def test_a_genuinely_routine_hold_is_still_demoted(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other side of the same bar: no sleep at all stays at DEBUG.
+
+    This is the population the flood came from -- 5,000 sampled uncontended
+    reserved-state holds, none of which exceeded 5ms.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+
+    with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
+        with _reserved_state_hold(coordinator):
+            pass
+
+    [released] = _events(caplog, "mutation_lock_released")
+    assert released.levelno == logging.DEBUG
+
+
+def test_the_acquire_threshold_tracks_the_coordinator_poll_interval(
+    tmp_path: Path,
+) -> None:
+    """The acquire bar IS the poll interval, not a constant that resembles it.
+
+    Pinning the derivation rather than a number: a wait that outlasted one
+    acquisition poll went round the retry loop, and that is what makes it
+    contended.  Asserted at three intervals so a hard-coded value cannot
+    impersonate the derived one.
+    """
+    for poll_seconds in (0.005, 0.025, 0.100):
+        bar_ms = poll_seconds * 1000.0
+        just_under = mutation_lock_module._boundary_event_level(
+            publish_holder_metadata=False,
+            wait_ms=bar_ms * 0.5,
+            hold_ms=0.1,
+            poll_interval_seconds=poll_seconds,
+        )
+        just_over = mutation_lock_module._boundary_event_level(
+            publish_holder_metadata=False,
+            wait_ms=bar_ms * 1.5,
+            hold_ms=0.1,
+            poll_interval_seconds=poll_seconds,
+        )
+        assert just_under == logging.DEBUG, f"poll={poll_seconds}s demoted nothing"
+        assert just_over == logging.INFO, (
+            f"a wait longer than one {poll_seconds}s poll was demoted to DEBUG"
+        )
+
+
+def test_the_default_acquire_threshold_keeps_the_tens_of_milliseconds_band(
+    tmp_path: Path,
+) -> None:
+    """A default coordinator must report a 55ms wait, not swallow it.
+
+    The exact case a hand-picked 100ms constant hid: 55.65ms is over twice the
+    25ms default poll and roughly 1,100x the uncontended median, and it logged
+    at DEBUG with zero INFO rows for the whole contended episode.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+    assert coordinator.poll_interval_seconds <= 0.030, (
+        "the default poll interval grew; the visible contention band grew with it"
+    )
+    assert (
+        mutation_lock_module._boundary_event_level(
+            publish_holder_metadata=False,
+            wait_ms=55.65,
+            hold_ms=0.5,
+            poll_interval_seconds=coordinator.poll_interval_seconds,
+        )
+        == logging.INFO
+    )

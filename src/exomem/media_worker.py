@@ -121,10 +121,14 @@ _LOCK_UNAVAILABLE_RECHECK_SECONDS = 30.0
 #: cost being removed below is the store open, not the wakeup, and stretching
 #: this is what would actually delay a job.
 _SUPERVISE_POLL_SECONDS = 0.5
-#: Backstop for the one thing a store signature cannot observe -- a foreign
-#: worker pid dying without writing anything.  Small enough that the worst case
-#: stays in seconds; every real enqueue is still seen on the next 0.5s pass,
-#: because writing to the store is what changes the signature.
+#: Backstop for the writes a signature comparison cannot separate from its own.
+#: Two of them: a foreign worker pid dying without writing anything at all, and
+#: a commit that lands between `needs_worker()`'s read and the signature taken
+#: after it -- or within the filesystem's mtime tick of it, measured at ~3.9ms
+#: here -- which is then folded into the recorded signature and looks settled.
+#: Neither can starve a job; both are bounded by this interval rather than by
+#: the 0.5s pass.  It is a real net, not a formality: with the signature
+#: defeated, this is the only thing that starts a worker at all.
 _SUPERVISE_FORCED_RECHECK_SECONDS = 5.0
 #: SQLite writes land in the WAL and SHM long before the main file is
 #: checkpointed, so a freshness signature that reads only the database file
