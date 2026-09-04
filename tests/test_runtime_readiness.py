@@ -394,6 +394,33 @@ def test_runtime_readiness_fails_closed_within_a_tight_bound_when_status_blocks(
     }
 
 
+def test_coordinated_timeout_without_a_replica_id_names_every_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 4-reason variant: nothing about the replica is knowable either."""
+    from exomem import runtime_readiness as readiness_module
+
+    vault = tmp_path / "no-replica-vault"
+    _, release = _block_coordination_status(vault, monkeypatch)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", "http://127.0.0.1:9/lease")
+    monkeypatch.delenv("EXOMEM_WRITER_LEASE_REPLICA_ID", raising=False)
+
+    try:
+        snapshot = readiness_module.runtime_readiness(
+            mcp_tool_surface_sha256="a" * 64, traffic={}
+        )
+    finally:
+        release.set()
+
+    assert snapshot["status"] == "not_ready"
+    assert snapshot["reasons"] == [
+        "coordination_status_timeout",
+        "coordinator_unavailable",
+        "coordination_role_unknown",
+        "replica_identity_missing",
+    ]
+
+
 def test_standalone_readiness_survives_a_blocked_coordination_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -433,6 +460,10 @@ def test_standalone_readiness_survives_a_blocked_coordination_probe(
         "state": "unknown",
         "reason": "status_timeout",
     }
+    # An unmeasured standalone cell must describe itself the way a measured one
+    # does (`LeaseManager.status()`), not contradict its own 200 payload.
+    assert snapshot["coordination"]["role"] == "standalone"
+    assert snapshot["coordination"]["coordinator_healthy"] is True
 
 
 def test_runtime_readiness_admits_a_slow_but_bounded_real_vault_snapshot(

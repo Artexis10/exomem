@@ -491,6 +491,25 @@ def _measure_observability() -> dict[str, Any]:
     }
 
 
+def _unmeasured_coordination(reason: str) -> dict[str, Any]:
+    """Coordination state for a probe that did not answer.
+
+    `role` and `coordinator_healthy` derive from `enabled` the same way
+    `LeaseManager.status()` derives them, so an unmeasured standalone cell
+    describes itself the way a measured one does. Hardcoding `unknown`/`False`
+    here made a standalone cell contradict its own successful payload — which
+    was invisible while the response was a 503, and is not once it is a 200.
+    """
+    enabled = bool(os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip())
+    return {
+        "enabled": enabled,
+        "role": "unknown" if enabled else "standalone",
+        "replica_id": os.environ.get("EXOMEM_WRITER_LEASE_REPLICA_ID") or None,
+        "coordinator_healthy": not enabled,
+        "mutation_boundary": {"state": "unknown", "reason": reason},
+    }
+
+
 def _bounded_coordination_status(
     vault_root: Path | None,
     probe: Callable[[Path | None], Mapping[str, Any]],
@@ -575,29 +594,14 @@ def runtime_readiness(
             coordination_status,
         )
         if measured is None:
-            coordination = {
-                "enabled": bool(os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip()),
-                "role": "unknown",
-                "replica_id": os.environ.get("EXOMEM_WRITER_LEASE_REPLICA_ID") or None,
-                "coordinator_healthy": False,
-                "status_timed_out": True,
-                "mutation_boundary": {
-                    "state": "unknown",
-                    "reason": "status_timeout",
-                },
-            }
+            coordination = _unmeasured_coordination("status_timeout")
+            coordination["status_timed_out"] = True
         else:
             coordination = measured
     except Exception:  # noqa: BLE001 - readiness must return structured 503 state
-        coordination = {
-            "enabled": bool(os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip()),
-            "role": "unknown",
-            "replica_id": os.environ.get("EXOMEM_WRITER_LEASE_REPLICA_ID") or None,
-            "coordinator_healthy": False,
-            # The probe failed; the boundary was not measured. Saying "free"
-            # here is what made MUTATION_LOCK_UNAVAILABLE read as healthy.
-            "mutation_boundary": {"state": "unknown", "reason": "status_error"},
-        }
+        # The probe failed; the boundary was not measured. Saying "free"
+        # here is what made MUTATION_LOCK_UNAVAILABLE read as healthy.
+        coordination = _unmeasured_coordination("status_error")
     retrieval = readiness.retrieval_admission(configured_vault)
     if configured_vault is not None:
         try:
