@@ -29,6 +29,7 @@ from .authorization_membership import (
     transition_hosted_authorization_bundle,
 )
 from .capacity import CapacityError
+from .conflict_reason import ConflictReason
 from .driver import EffectContext
 from .lifecycle import (
     HealthObservation,
@@ -114,13 +115,17 @@ class KubernetesProviderRegistry:
             )
         except ProviderIdentityConflict as error:
             raise MetadataConflict(
-                "Kubernetes provider recovery identity did not authenticate"
+                "Kubernetes provider recovery identity did not authenticate",
+                reason=ConflictReason.KUBERNETES_RECOVERY_IDENTITY_UNAUTHENTICATED,
             ) from error
 
     @staticmethod
     def _require_not_terminating(resource: Any) -> None:
         if getattr(getattr(resource, "metadata", None), "deletion_timestamp", None) is not None:
-            raise MetadataConflict("Kubernetes provider object is terminating")
+            raise MetadataConflict(
+                "Kubernetes provider object is terminating",
+                reason=ConflictReason.PROVIDER_OBJECT_TERMINATING,
+            )
 
     @staticmethod
     def _cell_identity(
@@ -136,7 +141,10 @@ class KubernetesProviderRegistry:
             "exomem.io/subject-digest",
         ):
             if values.get(key) != expected[key]:
-                raise MetadataConflict("Kubernetes cell identity annotations differ")
+                raise MetadataConflict(
+                    "Kubernetes cell identity annotations differ",
+                    reason=ConflictReason.KUBERNETES_CELL_IDENTITY_ANNOTATIONS_DIFFER,
+                )
 
     @staticmethod
     def _recovery_digest(*resources: Any) -> str:
@@ -182,7 +190,10 @@ class KubernetesProviderRegistry:
             or ()
         )
         if len(helm_records) != 1:
-            raise MetadataConflict("deployed Helm release record is not exact")
+            raise MetadataConflict(
+                "deployed Helm release record is not exact",
+                reason=ConflictReason.HELM_RELEASE_RECORD_NOT_EXACT,
+            )
         helm_record = helm_records[0]
         self._require_not_terminating(helm_record)
         helm_labels = dict(getattr(helm_record.metadata, "labels", None) or {})
@@ -192,7 +203,10 @@ class KubernetesProviderRegistry:
             or helm_labels.get("name") != metadata.resource_name
             or helm_labels.get("status") != "deployed"
         ):
-            raise MetadataConflict("deployed Helm release record identity differs")
+            raise MetadataConflict(
+                "deployed Helm release record identity differs",
+                reason=ConflictReason.HELM_RELEASE_RECORD_IDENTITY_DIFFERS,
+            )
         for resource in (namespace, pvc, operation_record):
             self._require_not_terminating(resource)
             _require_annotations(getattr(resource.metadata, "annotations", None), metadata)
@@ -380,7 +394,10 @@ class KubernetesProviderRegistry:
             if route is not None:
                 metadata = route.get("metadata", {})
                 if metadata.get("deletionTimestamp") is not None:
-                    raise MetadataConflict("Kubernetes provider object is terminating")
+                    raise MetadataConflict(
+                        "Kubernetes provider object is terminating",
+                        reason=ConflictReason.ROUTE_OBJECT_TERMINATING,
+                    )
                 _require_annotations(route.get("metadata", {}).get("annotations"), owned)
                 self._authenticate_annotations(
                     route.get("metadata", {}).get("annotations"),
@@ -471,7 +488,10 @@ class KubernetesProviderRegistry:
                 )
                 != provision_mode
             ):
-                raise MetadataConflict("Kubernetes namespace provision mode differs") from error
+                raise MetadataConflict(
+                    "Kubernetes namespace provision mode differs",
+                    reason=ConflictReason.NAMESPACE_PROVISION_MODE_DIFFERS,
+                ) from error
 
     async def record_operation(
         self, metadata: OpaqueProviderMetadata, recovery_envelope: str
@@ -617,7 +637,8 @@ class LiveLifecyclePlane:
             return self._snapshots[self._key(metadata)]
         except KeyError as error:
             raise MetadataConflict(
-                "provider state was not observed before reconciliation"
+                "provider state was not observed before reconciliation",
+                reason=ConflictReason.PROVIDER_STATE_NOT_OBSERVED,
             ) from error
 
     async def _refresh(self, metadata: OpaqueProviderMetadata) -> KubernetesProviderSnapshot:
@@ -639,10 +660,16 @@ class LiveLifecyclePlane:
         original = self._helm_requests.get(key, request)
         envelopes = original.get("_providerRecoveryEnvelopes")
         if not isinstance(envelopes, dict):
-            raise MetadataConflict("authorization Secret provider authority is absent")
+            raise MetadataConflict(
+                "authorization Secret provider authority is absent",
+                reason=ConflictReason.AUTHORIZATION_ENVELOPE_SET_ABSENT,
+            )
         recovery_envelope = envelopes.get("authorizationSessionSecret")
         if not isinstance(recovery_envelope, str) or not recovery_envelope:
-            raise MetadataConflict("authorization Secret provider authority is absent")
+            raise MetadataConflict(
+                "authorization Secret provider authority is absent",
+                reason=ConflictReason.AUTHORIZATION_SECRET_ENVELOPE_ABSENT,
+            )
         target = self._config.runtime_target_for(
             original,
             v2="runtimeTarget" in original,
@@ -715,17 +742,27 @@ class LiveLifecyclePlane:
             original = self._helm_requests[key]
         except KeyError as error:
             raise MetadataConflict(
-                "original authorization session identity is unavailable"
+                "original authorization session identity is unavailable",
+                reason=ConflictReason.ORIGINAL_AUTHORIZATION_SESSION_IDENTITY_UNAVAILABLE,
             ) from error
         envelopes = original.get("_providerRecoveryEnvelopes")
         if not isinstance(envelopes, dict):
-            raise MetadataConflict("authorization Secret provider authority is absent")
+            raise MetadataConflict(
+                "authorization Secret provider authority is absent",
+                reason=ConflictReason.AUTHORIZATION_ENVELOPE_SET_ABSENT,
+            )
         recovery_envelope = envelopes.get("authorizationSessionSecret")
         if not isinstance(recovery_envelope, str) or not recovery_envelope:
-            raise MetadataConflict("authorization Secret provider authority is absent")
+            raise MetadataConflict(
+                "authorization Secret provider authority is absent",
+                reason=ConflictReason.AUTHORIZATION_SECRET_ENVELOPE_ABSENT,
+            )
         files = await self._cell.read_authorization_session_bundle(owned)
         if files is None:
-            raise MetadataConflict("authorization session bundle is absent")
+            raise MetadataConflict(
+                "authorization session bundle is absent",
+                reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_ABSENT,
+            )
         current = int(self._now())
         source = inspect_hosted_authorization_bundle(
             files,
@@ -741,7 +778,10 @@ class LiveLifecyclePlane:
         runtime_attestation = None
         if require_runtime_attestation:
             if not runtime_credential or not runtime_protocol_version:
-                raise MetadataConflict("runtime attestation authority is unavailable")
+                raise MetadataConflict(
+                    "runtime attestation authority is unavailable",
+                    reason=ConflictReason.RUNTIME_ATTESTATION_AUTHORITY_UNAVAILABLE,
+                )
             runtime_attestation = (
                 await self._runtime.attest_authorization_session_membership(
                     owned,
@@ -802,7 +842,10 @@ class LiveLifecyclePlane:
                 operation_resource_name=provider_operation_resource_name(current.operation_id),
             )
         except ProviderIdentityConflict as error:
-            raise MetadataConflict("provider recovery envelope set did not authenticate") from error
+            raise MetadataConflict(
+                "provider recovery envelope set did not authenticate",
+                reason=ConflictReason.PROVIDER_RECOVERY_ENVELOPE_UNAUTHENTICATED,
+            ) from error
         self._recovery_envelopes[self._key(current)] = recovery_envelopes
         self._operation_ids[self._key(current)] = context.operation_id
         resources = await self._repository.list_resources(
@@ -843,10 +886,16 @@ class LiveLifecyclePlane:
         elif mode == "restore-candidate":
             reservation_class = CapacityReservationClass.RECOVERY
         else:
-            raise MetadataConflict("provision mode is invalid")
+            raise MetadataConflict(
+                "provision mode is invalid",
+                reason=ConflictReason.PROVISION_MODE_INVALID,
+            )
         internal_operation_id = self._operation_ids.get(self._key(metadata))
         if internal_operation_id is None:
-            raise MetadataConflict("capacity reservation operation is unavailable")
+            raise MetadataConflict(
+                "capacity reservation operation is unavailable",
+                reason=ConflictReason.CAPACITY_RESERVATION_OPERATION_UNAVAILABLE,
+            )
         try:
             await self._capacity.require_active(
                 internal_operation_id=internal_operation_id,
@@ -857,7 +906,10 @@ class LiveLifecyclePlane:
                 reservation_class=reservation_class,
             )
         except CapacityError as error:
-            raise MetadataConflict("exact active capacity reservation is absent") from error
+            raise MetadataConflict(
+                "exact active capacity reservation is absent",
+                reason=ConflictReason.ACTIVE_CAPACITY_RESERVATION_ABSENT,
+            ) from error
         return reservation_class
 
     async def ensure_namespace(
@@ -921,7 +973,10 @@ class LiveLifecyclePlane:
             return False
         internal_operation_id = self._operation_ids.get(self._key(metadata))
         if internal_operation_id is None:
-            raise MetadataConflict("retargeted provision operation is unavailable")
+            raise MetadataConflict(
+                "retargeted provision operation is unavailable",
+                reason=ConflictReason.RETARGET_OPERATION_UNAVAILABLE,
+            )
         operation = await self._repository.get_by_id(internal_operation_id)
         marker = operation.progress.get("_runtime_retarget_recovery_v1") if operation else None
         marker_keys = {
@@ -966,12 +1021,18 @@ class LiveLifecyclePlane:
                 if key.endswith("sha256")
             )
         ):
-            raise MetadataConflict("retargeted provision recovery receipt is invalid")
+            raise MetadataConflict(
+                "retargeted provision recovery receipt is invalid",
+                reason=ConflictReason.RETARGET_RECOVERY_RECEIPT_INVALID,
+            )
         desired = _fixed_helm_values(self._owner(metadata), request, config)
         current = await self._helm.current_release_values(self._owner(metadata))
         for key in ("image", "expectedRelease", "expectedProtocol"):
             if not isinstance(current.get(key), str):
-                raise MetadataConflict("current Helm runtime selection is invalid")
+                raise MetadataConflict(
+                    "current Helm runtime selection is invalid",
+                    reason=ConflictReason.CURRENT_HELM_RUNTIME_SELECTION_INVALID,
+                )
         changed = any(
             current[key] != desired[key] for key in ("image", "expectedRelease", "expectedProtocol")
         )
@@ -989,15 +1050,24 @@ class LiveLifecyclePlane:
             return False
         snapshot = self._snapshot(metadata)
         if snapshot.runtime_admitted or snapshot.routes != (False, False):
-            raise MetadataConflict("retargeted provision is already admitted or routed")
+            raise MetadataConflict(
+                "retargeted provision is already admitted or routed",
+                reason=ConflictReason.RETARGET_BLOCKED_BY_ADMITTED_OR_ROUTED_CELL,
+            )
         if config.migration_mode not in {"binding-v1-to-v2", "state-root-v1"}:
-            raise MetadataConflict("retargeted provision requires a declared migration")
+            raise MetadataConflict(
+                "retargeted provision requires a declared migration",
+                reason=ConflictReason.RETARGET_REQUIRES_DECLARED_MIGRATION,
+            )
         return True
 
     async def stop_stranded_provision(self, metadata: OpaqueProviderMetadata) -> None:
         snapshot = self._snapshot(metadata)
         if snapshot.runtime_admitted or snapshot.routes != (False, False):
-            raise MetadataConflict("retargeted provision is already admitted or routed")
+            raise MetadataConflict(
+                "retargeted provision is already admitted or routed",
+                reason=ConflictReason.STRANDED_PROVISION_ADMITTED_OR_ROUTED,
+            )
         if snapshot.runtime_desired_replicas != 0:
             await self._cell.scale(self._owner(metadata), 0)
             await self._refresh(metadata)
@@ -1016,7 +1086,10 @@ class LiveLifecyclePlane:
     ) -> bool:
         snapshot = await self._refresh(metadata)
         if snapshot.init_failed:
-            raise MetadataConflict("cell storage initialization failed")
+            raise MetadataConflict(
+                "cell storage initialization failed",
+                reason=ConflictReason.CELL_STORAGE_INITIALIZATION_ALREADY_FAILED,
+            )
         helm_request = request
         if not snapshot.init_complete:
             if snapshot.init_job_present:
@@ -1024,14 +1097,20 @@ class LiveLifecyclePlane:
             try:
                 helm_request = self._helm_requests[self._key(metadata)]
             except KeyError as error:
-                raise MetadataConflict("original Helm request was not authenticated") from error
+                raise MetadataConflict(
+                    "original Helm request was not authenticated",
+                    reason=ConflictReason.ORIGINAL_HELM_REQUEST_UNAUTHENTICATED,
+                ) from error
             values = _fixed_helm_values(self._owner(metadata), helm_request, config)
             values = await self._authorization_helm_values(metadata, helm_request, values)
             values["workloadMode"] = "initialize"
             await self._helm.ensure_release(self._owner(metadata), values)
             snapshot = await self._refresh(metadata)
             if snapshot.init_failed:
-                raise MetadataConflict("cell storage initialization failed")
+                raise MetadataConflict(
+                    "cell storage initialization failed",
+                    reason=ConflictReason.CELL_STORAGE_INITIALIZATION_FAILED,
+                )
             if not snapshot.init_complete:
                 return False
         values = _fixed_helm_values(self._owner(metadata), helm_request, config)
@@ -1067,7 +1146,10 @@ class LiveLifecyclePlane:
     ) -> None:
         owner = self._owner(metadata)
         if self._key(metadata) not in self._helm_requests:
-            raise MetadataConflict("original Helm request was not authenticated")
+            raise MetadataConflict(
+                "original Helm request was not authenticated",
+                reason=ConflictReason.ORIGINAL_HELM_REQUEST_UNAUTHENTICATED,
+            )
         values = (
             self._rollforward_helm_values(metadata, request, self._config)
             if "compatibilityDigest" in request
@@ -1135,7 +1217,10 @@ class LiveLifecyclePlane:
             try:
                 runtime_request = self._helm_requests[self._key(metadata)]
             except KeyError as error:
-                raise MetadataConflict("original runtime identity is unavailable") from error
+                raise MetadataConflict(
+                    "original runtime identity is unavailable",
+                    reason=ConflictReason.ORIGINAL_RUNTIME_IDENTITY_UNAVAILABLE,
+                ) from error
         target = runtime_identity(runtime_request)
         snapshot = await self._runtime.quiesce(
             self._owner(metadata),
@@ -1161,7 +1246,10 @@ class LiveLifecyclePlane:
             or not isinstance(snapshot.get("reason_code"), str)
             or not snapshot["reason_code"]
         ):
-            raise MetadataConflict("runtime did not acknowledge a complete authorization drain")
+            raise MetadataConflict(
+                "runtime did not acknowledge a complete authorization drain",
+                reason=ConflictReason.RUNTIME_DRAIN_NOT_ACKNOWLEDGED,
+            )
         await self._transition_authorization_session_membership(
             metadata,
             target_state="DRAINING",
@@ -1211,7 +1299,10 @@ class LiveLifecyclePlane:
         try:
             original = self._helm_requests[self._key(metadata)]
         except KeyError as error:
-            raise MetadataConflict("original Helm request was not authenticated") from error
+            raise MetadataConflict(
+                "original Helm request was not authenticated",
+                reason=ConflictReason.ORIGINAL_HELM_REQUEST_UNAUTHENTICATED,
+            ) from error
         merged = dict(original)
         merged["workerPolicy"] = dict(request["workerPolicy"])
         merged["runtimeTarget"] = dict(request["runtimeTarget"])
@@ -1227,11 +1318,17 @@ class LiveLifecyclePlane:
     ) -> str:
         del request
         if self._fingerprint is None:
-            raise MetadataConflict("vault fingerprint adapter is unavailable")
+            raise MetadataConflict(
+                "vault fingerprint adapter is unavailable",
+                reason=ConflictReason.VAULT_FINGERPRINT_ADAPTER_UNAVAILABLE,
+            )
         try:
             envelope = self._recovery_envelopes[self._key(metadata)]["initJob"]
         except KeyError as error:
-            raise MetadataConflict("vault fingerprint provider authority is absent") from error
+            raise MetadataConflict(
+                "vault fingerprint provider authority is absent",
+                reason=ConflictReason.VAULT_FINGERPRINT_AUTHORITY_ABSENT,
+            ) from error
         return await self._fingerprint.fingerprint(
             metadata,
             operation_id=operation_id,
@@ -1247,7 +1344,10 @@ class LiveLifecyclePlane:
         operation_id: str,
     ) -> None:
         if config.migration_mode not in {"binding-v1-to-v2", "state-root-v1"}:
-            raise MetadataConflict("runtime migration was not declared by the deployment lock")
+            raise MetadataConflict(
+                "runtime migration was not declared by the deployment lock",
+                reason=ConflictReason.RUNTIME_MIGRATION_NOT_DECLARED,
+            )
         values = self._rollforward_helm_values(metadata, request, config)
         values = await self._authorization_helm_values(
             metadata, request, values, require_fresh=False
@@ -1303,7 +1403,10 @@ class LiveLifecyclePlane:
         try:
             original = self._helm_requests[self._key(metadata)]
         except KeyError as error:
-            raise MetadataConflict("original runtime identity is unavailable") from error
+            raise MetadataConflict(
+                "original runtime identity is unavailable",
+                reason=ConflictReason.ORIGINAL_RUNTIME_IDENTITY_UNAVAILABLE,
+            ) from error
         revision = await self._transition_authorization_session_membership(
             metadata,
             target_state="SERVING",
@@ -1342,7 +1445,10 @@ class LiveLifecyclePlane:
         _, annotations = await self._cell.read_credential_bundle(self._owner(metadata))
         version = annotations.get("exomem.io/active-credential-version")
         if not version:
-            raise MetadataConflict("active credential version metadata is absent")
+            raise MetadataConflict(
+                "active credential version metadata is absent",
+                reason=ConflictReason.ACTIVE_CREDENTIAL_VERSION_ABSENT,
+            )
         return version
 
     @staticmethod
@@ -1390,7 +1496,10 @@ class LiveLifecyclePlane:
         active = annotations.get("exomem.io/active-credential-version")
         active_credential = credentials.get(str(active))
         if not active_credential:
-            raise MetadataConflict("active provider credential is absent")
+            raise MetadataConflict(
+                "active provider credential is absent",
+                reason=ConflictReason.ACTIVE_PROVIDER_CREDENTIAL_ABSENT,
+            )
         result = await self._runtime.operator(
             "credential",
             metadata,
@@ -1400,7 +1509,10 @@ class LiveLifecyclePlane:
         )
         revision = result.get("revision")
         if revision != expected + 1:
-            raise MetadataConflict("hosted credential revision did not advance exactly once")
+            raise MetadataConflict(
+                "hosted credential revision did not advance exactly once",
+                reason=ConflictReason.CREDENTIAL_REVISION_DID_NOT_ADVANCE,
+            )
         return result
 
     async def stage_credential(
@@ -1416,10 +1528,16 @@ class LiveLifecyclePlane:
         pending = str(version)
         active = annotations.get("exomem.io/active-credential-version")
         if active is None or credentials.get(active) != str(request["serviceCredential"]):
-            raise MetadataConflict("active credential does not match provider state")
+            raise MetadataConflict(
+                "active credential does not match provider state",
+                reason=ConflictReason.ACTIVE_CREDENTIAL_DOES_NOT_MATCH_PROVIDER,
+            )
         if annotations.get("exomem.io/credential-phase") in {"staged", "proved", "promoted"}:
             if credentials.get(pending) != credential:
-                raise MetadataConflict("pending credential version is immutable")
+                raise MetadataConflict(
+                    "pending credential version is immutable",
+                    reason=ConflictReason.PENDING_CREDENTIAL_VERSION_IMMUTABLE,
+                )
             return
         credentials[pending] = credential
         target = self._config.runtime_target_for(request, v2="runtimeTarget" in request)
@@ -1433,7 +1551,10 @@ class LiveLifecyclePlane:
             protocol_version=target["protocolVersion"],
         )
         if result.get("phase") != "staged" or result.get("pending_version") != pending:
-            raise MetadataConflict("hosted credential did not enter staged overlap")
+            raise MetadataConflict(
+                "hosted credential did not enter staged overlap",
+                reason=ConflictReason.CREDENTIAL_DID_NOT_STAGE,
+            )
         await self._cell.write_credential_bundle(
             owned,
             credentials,
@@ -1518,7 +1639,10 @@ class LiveLifecyclePlane:
                 protocol_version=target["protocolVersion"],
             )
         if old_version is None or pending not in credentials:
-            raise MetadataConflict("pending credential is absent")
+            raise MetadataConflict(
+                "pending credential is absent",
+                reason=ConflictReason.PENDING_CREDENTIAL_ABSENT,
+            )
         phase = annotations.get("exomem.io/credential-phase")
         if phase == "proved":
             result = await self._credential_transition(
@@ -1531,7 +1655,10 @@ class LiveLifecyclePlane:
                 protocol_version=target["protocolVersion"],
             )
             if result.get("phase") != "promoted":
-                raise MetadataConflict("hosted credential did not promote")
+                raise MetadataConflict(
+                    "hosted credential did not promote",
+                    reason=ConflictReason.CREDENTIAL_DID_NOT_PROMOTE,
+                )
             annotations = {
                 **annotations,
                 "exomem.io/security-revision": str(result["revision"]),
@@ -1552,7 +1679,10 @@ class LiveLifecyclePlane:
                 protocol_version=target["protocolVersion"],
             )
             if result.get("phase") != "stable" or result.get("active_version") != pending:
-                raise MetadataConflict("hosted credential did not finalize")
+                raise MetadataConflict(
+                    "hosted credential did not finalize",
+                    reason=ConflictReason.CREDENTIAL_DID_NOT_FINALIZE,
+                )
             annotations = {
                 **annotations,
                 "exomem.io/security-revision": str(result["revision"]),
@@ -1598,19 +1728,34 @@ class LiveLifecyclePlane:
         )
 
     async def discard_candidate(self, metadata: OpaqueProviderMetadata) -> dict[str, bool]:
-        raise MetadataConflict("candidate deletion requires the durability deletion worker")
+        raise MetadataConflict(
+            "candidate deletion requires the durability deletion worker",
+            reason=ConflictReason.CANDIDATE_DELETION_REQUIRES_DELETION_WORKER,
+        )
 
     async def destroy_tenant_online(self, tenant_id: str) -> None:
-        raise MetadataConflict("tenant deletion requires the durability deletion worker")
+        raise MetadataConflict(
+            "tenant deletion requires the durability deletion worker",
+            reason=ConflictReason.TENANT_DELETION_REQUIRES_DELETION_WORKER,
+        )
 
     def retention_wait_seconds(self, tenant_id: str) -> int | None:
-        raise MetadataConflict("tenant deletion requires the durability deletion worker")
+        raise MetadataConflict(
+            "tenant deletion requires the durability deletion worker",
+            reason=ConflictReason.TENANT_DELETION_REQUIRES_DELETION_WORKER,
+        )
 
     async def destroy_expired_retention(self, tenant_id: str) -> None:
-        raise MetadataConflict("tenant deletion requires the durability deletion worker")
+        raise MetadataConflict(
+            "tenant deletion requires the durability deletion worker",
+            reason=ConflictReason.TENANT_DELETION_REQUIRES_DELETION_WORKER,
+        )
 
     def destruction_proof(self, tenant_id: str) -> dict[str, bool]:
-        raise MetadataConflict("tenant deletion requires the durability deletion worker")
+        raise MetadataConflict(
+            "tenant deletion requires the durability deletion worker",
+            reason=ConflictReason.TENANT_DELETION_REQUIRES_DELETION_WORKER,
+        )
 
     def provider_reference(self, metadata: OpaqueProviderMetadata) -> str:
         return "cell-" + _digest(metadata.tenant_id + ":" + metadata.subject_id, length=32)
