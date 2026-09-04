@@ -22,7 +22,12 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
+    # Not OS Independent: every governed write acquires a reserved-path root
+    # through the held-filesystem substrate, which has a Linux backend and a
+    # Windows backend and no darwin implementation. Claiming independence
+    # advertised a platform where the write path refuses.
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

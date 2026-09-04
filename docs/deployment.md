@@ -33,7 +33,7 @@ For structured logs, metrics, and diagnosing a failure after the fact, see
                                               │ tunnel
                                               ▼
                             ┌────────────────────────────────────┐
-                            │ host: macOS / Linux / Windows      │
+                            │ host: Linux / Windows              │
                             │                                    │
                             │   FastMCP @ 127.0.0.1:8765         │
                             │   GitHub OAuth (single user)       │
@@ -259,11 +259,12 @@ Use `docker compose -f compose.yaml -f compose.ml.yaml ...` for CPU hybrid searc
 or `docker compose -f compose.yaml -f compose.cuda.yaml ...` for NVIDIA/Linux
 CUDA capability. The CUDA image remains CPU-default at idle unless you explicitly
 set performance mode. See [docker.md](docker.md). The native services below suit
-Windows live vaults (Docker Desktop/WSL2 bind mounts miss live file-watch events),
-macOS Apple Silicon GPU paths (MPS/MLX are native-only), and hosts where Docker
-isn't wanted.
+Windows live vaults (Docker Desktop/WSL2 bind mounts miss live file-watch events)
+and hosts where Docker isn't wanted. macOS is not a host exomem can serve: the
+held-filesystem substrate every governed write acquires a reserved-path root
+through has no darwin backend, so the server refuses there.
 
-Pick your platform — all three run the same `streamable-http` server and differ
+Pick your platform — both run the same `streamable-http` server and differ
 only in the OS service manager. The release commands create or update a separate
 PyPI-backed service venv, load the repository `.env` into the service manager,
 doctor-gate the selected profile and remote configuration, start the service, and
@@ -282,7 +283,11 @@ On macOS the JSON also reports Activity Monitor's physical-footprint metric via
 limit. That limit is evaluated only when every server PID has a native sample,
 while `--max-rss-mb` keeps its existing RSS meaning.
 
-**macOS (launchd):**
+**macOS (launchd) — does not work today:**
+
+Kept for the darwin held-filesystem backend that does not exist yet. The
+service starts and every governed write refuses at the reserved-path root, so
+this is a record of the intended shape rather than a route to follow.
 
 ```bash
 bash scripts/install-service.sh --release

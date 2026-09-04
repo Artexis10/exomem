@@ -489,6 +489,33 @@ def _check_python() -> DoctorCheck:
     return _check("python.version", "pass", f"Python {version} satisfies >=3.11.")
 
 
+def _check_held_filesystem_platform() -> DoctorCheck:
+    """Report a host with no held-filesystem backend as a platform fact.
+
+    This is deliberately a `fail` rather than a `warn`: every governed write
+    acquires a reserved-path root through this substrate, so where it has no
+    backend the vault is not degraded, it is unusable. Reporting it here is
+    what makes the CLI's one-line refusal answerable.
+    """
+    from . import held_fs
+
+    support = held_fs.platform_support()
+    if support.supported:
+        return _check(
+            "platform.held_filesystem",
+            "pass",
+            f"The held-filesystem substrate has a backend for {sys.platform!r}.",
+        )
+    return _check(
+        "platform.held_filesystem",
+        "fail",
+        f"{support.reason}.",
+        "Run exomem on Linux or Windows. Nothing about this vault can repair it: "
+        "the substrate has no implementation for this platform, so every governed "
+        "write would refuse.",
+    )
+
+
 def _check_uv() -> DoctorCheck:
     uv = shutil.which("uv")
     if uv:
@@ -3120,6 +3147,7 @@ def doctor(
     lock_parity = _check_editable_lock_parity(profile)
     checks: list[DoctorCheck] = [
         _check_python(),
+        _check_held_filesystem_platform(),
         _check_uv(),
         *([lock_parity] if lock_parity is not None else []),
         _check_console_scripts(),
