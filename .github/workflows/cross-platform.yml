@@ -108,14 +108,18 @@ jobs:
       # same modules again in this Windows matrix pushed a shard past its 45m
       # session cap; macOS still gets them here, and Linux keeps its ordinary
       # CI coverage.
-      # Six shards AND a 3300s cap, because sharding alone does not fix this.
-      # Measured: four-way Windows sessions ran 2482s, 2449s and 2595s; six-way
-      # ran 2184s, 2250s and 2644s with three more censored at the old 2700s
-      # cap. Fifty percent more shards bought six percent of runtime, so most
-      # of a Windows shard here is not test execution that splits. Until that
-      # fixed cost is found, the cap has to clear the measured worst case
-      # rather than a prediction: 3300s is 55 min inside a 60 min job, the
-      # margin ci.yml keeps, and about 22% above the worst session observed.
+      # Six shards AND a 3400s cap, because sharding alone does not fix this.
+      # Fifty percent more shards bought six percent of runtime, so most of a
+      # Windows shard here is not test execution that splits. The cap has to
+      # clear measured runtime rather than a prediction from the Linux-recorded
+      # durations file.
+      #
+      # Measured once the cap stopped truncating them, all six shards ran to
+      # completion at 1950s, 2575s, 2698s, 2788s, 2886s and 2896s. 3400s is
+      # 56:40 inside a 60 min job and about 17% above that worst case; setup
+      # and artifact upload measured about 45s, so the remaining budget is
+      # ample. The earlier 2705s figure was a floor read off a shard the old
+      # 2700s cap had truncated -- a bound wearing a measurement's clothes.
       #
       # Every flag below lives inside a folded `>-` scalar, so a `#` there is
       # part of the command and comments out the rest of it. Explanations go
@@ -140,7 +144,7 @@ jobs:
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path=.test_durations.json
-          --session-timeout=3300
+          --session-timeout=3400
           --durations=50
           --durations-min=1
           --junitxml=test-results/junit-${{ matrix.os }}-shard-${{ matrix.shard }}.xml
