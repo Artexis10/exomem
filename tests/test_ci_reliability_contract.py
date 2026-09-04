@@ -812,3 +812,82 @@ def test_release_evidence_automation_removes_both_manual_cranks() -> None:
         "contents": "read",
         "pull-requests": "read",
     }
+
+
+#: The worst cross-platform session observed, in seconds. A floor rather than a
+#: maximum: three six-way Windows shards were censored at the 2700s cap they hit,
+#: so the true worst is at least this.
+#:
+#: Measured rather than predicted, and the measurement is why. `.test_durations.json`
+#: is Linux-recorded and this lane does not run on Linux, so a prediction from it
+#: needs a platform factor -- and the factor is not a constant. Four-way sessions
+#: ran 2482s, 2449s and 2595s; six-way ran 2184s, 2250s and 2644s. Fifty percent
+#: more shards bought six percent of runtime, so most of a shard here is not test
+#: execution that splits, and no linear model over the durations file describes it.
+#: Finding that fixed cost is its own change; until then the cap clears the
+#: measurement.
+MEASURED_WORST_CROSS_PLATFORM_SESSION = 2705
+
+_FOLDED_RUN_RE = re.compile(
+    r"^(?P<indent>\s*)-?\s*run:\s*>[-+]?\s*$(?P<body>(?:\n(?:(?P=indent)\s+.*|\s*))*)",
+    re.MULTILINE,
+)
+
+
+def test_the_cross_platform_cap_clears_the_runtime_actually_measured() -> None:
+    """The cap must sit above what a healthy shard takes, not above a prediction.
+
+    At 2700s it sat below: shards reported clean summaries -- `2929 passed, 0
+    failed in 45:02` -- and then exit 1, so a green suite read as a red lane.
+
+    Deliberately not derived from `.test_durations.json` the way the pull-request
+    tiers are. Applying that rule here passed while the lane was failing, because
+    the file records Linux times and this lane runs on Windows and macOS. The
+    correction is not a constant either: six shards ran only six percent faster
+    than four, so the runtime does not scale with the split and a linear model
+    over the durations would keep being wrong in a new way.
+    """
+    workflow = _cross_platform_workflow()
+    job = workflow["jobs"]["suite"]
+    command = _run_step(job)["run"]
+
+    timeout = int(re.search(r"--session-timeout=(\d+)", command).group(1))
+    job_seconds = job["timeout-minutes"] * 60
+
+    assert timeout > MEASURED_WORST_CROSS_PLATFORM_SESSION, (
+        f"--session-timeout={timeout}s is at or below the worst session measured "
+        f"({MEASURED_WORST_CROSS_PLATFORM_SESSION}s), so a healthy shard reports as a failure"
+    )
+    assert timeout >= 1.15 * MEASURED_WORST_CROSS_PLATFORM_SESSION, (
+        f"--session-timeout={timeout}s leaves no margin over the worst measured "
+        "session; runner variance will cross it again"
+    )
+    assert timeout < job_seconds, (
+        "the session cap must stay inside the job budget, so a hang is reported by "
+        "pytest rather than killed silently by the runner"
+    )
+
+
+def test_no_folded_run_script_carries_a_yaml_style_comment() -> None:
+    """A `#` inside a folded `>` scalar is part of the command, not a comment.
+
+    Folding joins the lines with spaces, so one `#` comments out every flag after
+    it and the lane silently stops running what the file appears to say. Found by
+    doing it: an explanation added beside `--session-timeout` would have disabled
+    that flag, `--durations` and `--junitxml` on every shard.
+
+    Reads the raw file rather than the parsed tree, because `yaml.safe_load`
+    discards the scalar style that is the whole distinction -- a `#` is a correct
+    shell comment in a literal `|` block.
+    """
+    offenders: list[str] = []
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        for body in _FOLDED_RUN_RE.finditer(path.read_text(encoding="utf-8")):
+            for number, line in enumerate(body.group("body").splitlines(), start=1):
+                if "#" in line:
+                    offenders.append(f"{path.name}: folded run block line {number}: {line.strip()}")
+
+    assert not offenders, (
+        "a `#` inside a folded `>` run scalar is part of the command and comments "
+        f"out every flag after it: {offenders}"
+    )

@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   suite:
-    name: tests (${{ matrix.os }}, py3.13, shard ${{ matrix.shard }}/4)
+    name: tests (${{ matrix.os }}, py3.13, shard ${{ matrix.shard }}/6)
     # Pull requests retain one visible, cheap skipped check; only scheduled and
     # explicit manual runs spend the eight-runner diagnostic matrix.
     if: >-
@@ -53,7 +53,7 @@ jobs:
         # neutral cost. It is the feedback delay on every change to this repo,
         # and it is paid on platforms whose defects are the hardest to
         # reproduce locally, which is exactly where a slow loop hurts most.
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,6 +108,18 @@ jobs:
       # same modules again in this Windows matrix pushed a shard past its 45m
       # session cap; macOS still gets them here, and Linux keeps its ordinary
       # CI coverage.
+      # Six shards AND a 3300s cap, because sharding alone does not fix this.
+      # Measured: four-way Windows sessions ran 2482s, 2449s and 2595s; six-way
+      # ran 2184s, 2250s and 2644s with three more censored at the old 2700s
+      # cap. Fifty percent more shards bought six percent of runtime, so most
+      # of a Windows shard here is not test execution that splits. Until that
+      # fixed cost is found, the cap has to clear the measured worst case
+      # rather than a prediction: 3300s is 55 min inside a 60 min job, the
+      # margin ci.yml keeps, and about 22% above the worst session observed.
+      #
+      # Every flag below lives inside a folded `>-` scalar, so a `#` there is
+      # part of the command and comments out the rest of it. Explanations go
+      # here.
       - name: Run tests (lean — BM25/keyword, server media extraction off)
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
@@ -124,11 +136,11 @@ jobs:
           --deselect
           tests/test_governance_overhead.py::test_scrubber_throughput_under_budget
           ${{ startsWith(matrix.os, 'windows') && '--ignore=tests/test_held_fs_contract.py --ignore=tests/test_held_fs_windows.py --ignore=tests/test_reserved_admin_paths.py --ignore=tests/test_mutation_concurrency.py --ignore=tests/test_windows_path_alias_guard.py' || '' }}
-          --splits=4
+          --splits=6
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path=.test_durations.json
-          --session-timeout=2700
+          --session-timeout=3300
           --durations=50
           --durations-min=1
           --junitxml=test-results/junit-${{ matrix.os }}-shard-${{ matrix.shard }}.xml
