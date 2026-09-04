@@ -2024,6 +2024,23 @@ def search_eligible_parent_paths_result(
     )
 
 
+def search_eligible_parent_rows_result(
+    vault_root: Path,
+    eligibility: Any,
+    *,
+    scope: str = "kb",
+    freshness: tuple | None = None,
+) -> CatalogQueryResult[list[tuple[str, str, str | None]]]:
+    """The eligible parent set with the two columns a browse needs to order it."""
+    if not _catalog_usable():
+        return CatalogQueryResult(
+            None, CatalogReadiness("unsupported", False, backend())
+        )
+    return get_store(vault_root).search_eligible_parent_rows_result(
+        eligibility, scope, freshness
+    )
+
+
 def ensure_fresh(vault_root: Path) -> None:
     """Run the reconcile NOW (reconcile's seam) instead of lazily on the next
     search — and paranoidly: verified state is discarded first, so this pass
@@ -6116,6 +6133,64 @@ class LexicalStore:
             params,
         ).fetchall()
         return sorted(str(row[0]) for row in rows)
+
+    def search_eligible_parent_rows_result(
+        self,
+        eligibility: Any,
+        scope: str,
+        freshness: tuple | None,
+    ) -> CatalogQueryResult[list[tuple[str, str, str | None]]]:
+        """The same candidate set as `search_eligible_parent_paths_result`, ordered.
+
+        A browse that resolves only PATHS from the catalog has moved its walk
+        rather than removed it: it still has to open every page it was handed
+        to discover the `updated` it orders by, and `find_corpus.CACHE.get`
+        reads the bytes on every call, hit or miss. Projecting `updated`
+        alongside the path is what lets the reader hydrate the prefix the limit
+        can actually return.
+
+        `emitted_parent_path` comes back with it because it is the one fact
+        that decides whether the catalog's ordering key IS the request's: a
+        scene-frame child is reported under its parent video, whose `updated`
+        is its own. Reading it here means the caller can tell, without parsing
+        anything, whether a bounded prefix would be the right prefix.
+        """
+        return self._serve_from_ready_catalog_result(
+            scope,
+            freshness,
+            lambda conn: self._eligible_parent_rows_query(conn, eligibility, scope),
+            "lexical eligibility catalog row query failed (%s); browse ordering declines",
+        )
+
+    def _eligible_parent_rows_query(
+        self,
+        conn: sqlite3.Connection,
+        eligibility: Any,
+        scope: str,
+    ) -> list[tuple[str, str, str | None]]:
+        """`(path, updated, emitted_parent_path)` for the eligible parent set.
+
+        The membership is `_eligible_parent_paths_query`'s, restated as one
+        predicate over `pages` so the two extra columns come from the same row
+        as the path. Deliberately unordered: the caller sorts in Python with
+        the exact key the hit list is sorted by, rather than relying on this
+        connection's collation to agree with `str.__lt__`.
+        """
+        col = "in_vault" if scope == "vault" else "in_kb"
+        predicate, params = _eligibility_predicate(eligibility, col)
+        rows = conn.execute(
+            "WITH matched AS ("
+            f" SELECT p.path AS parent_path FROM pages p WHERE p.{col} = 1 AND (" + predicate + ")"
+            ") "
+            f"SELECT p.path, p.updated, p.emitted_parent_path FROM pages p WHERE p.{col} = 1 "
+            "AND (p.path IN (SELECT parent_path FROM matched)"
+            " OR p.emitted_parent_path IN (SELECT parent_path FROM matched))",
+            params,
+        ).fetchall()
+        return [
+            (str(path), str(updated or "0000-00-00"), None if parent is None else str(parent))
+            for path, updated, parent in rows
+        ]
 
     def emitted_parent_hints_result(
         self,

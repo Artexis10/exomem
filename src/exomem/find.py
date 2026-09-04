@@ -3480,13 +3480,13 @@ def _indexed_eligible_filter_paths(
     return eligible
 
 
-def _index_resolved_scope_paths(
+def _index_resolved_scope_rows(
     vault_root: Path,
     *,
     scope: str,
     freshness: tuple[int, int, str] | None,
-) -> set[str] | None:
-    """Every governed page in `scope`, resolved from the maintained index.
+) -> list[tuple[str, str, str | None]] | None:
+    """Every governed page in `scope`, with its ordering key, from the index.
 
     The empty-query browse shape is the schema default — `ask_memory.query`
     ships `"default": ""` with "Empty means recent/filtered recall" — and it
@@ -3497,33 +3497,87 @@ def _index_resolved_scope_paths(
     `query=""` with any filter already avoided it, so the walk was reachable
     only on the shape the tool surface recommends for browsing.
 
+    The contract names three verbs, not one: no stage may "enumerate, READ OR
+    PARSE every page ... on the reader thread". Resolving only PATHS from the
+    catalogue answers the first and leaves the other two untouched, because the
+    reader still has to open every page it was handed to learn the `updated` it
+    orders by — measured at 65 of 65 pages read for a `limit=5` browse, the
+    same corpus read the walk performed, in a request reporting zero
+    enumerations. So this returns the ordering key with the path, and the
+    caller hydrates the prefix the limit can return.
+
     A tautology eligibility plan asks the page catalogue for the same set the
     walk would have produced. `_widening_allowed_paths` already does this at
     vault scope; this is the same call at the requested scope, without the
     out-of-KB restriction.
 
-    Returns None when the index cannot answer — warming, stale, or an
-    incomplete catalogue — and the caller then keeps today's behaviour. An
-    offline/CLI reader is unaffected by design: the scan oracle is its
-    documented fallback, and only the MANAGED reader is under the contract.
+    Returns None only where this cell keeps no maintained content index at all,
+    which is the offline/CLI reader's documented scan fallback and is not under
+    the contract. On a cell that DOES maintain one, a catalogue that cannot
+    answer raises the typed warming outcome rather than returning None: the
+    caller has already proved the catalogue current for this generation two
+    branches up, so a query that then declines is not a licence to walk. That
+    is the spec's own remedy — "a stage that cannot be answered from an index
+    SHALL return the typed warming outcome" — and the previous shape of this
+    helper swallowed `RetrievalIndexWarming` and walked instead.
     """
     from . import lexstore
 
-    try:
-        empty = structured_filters.compile_filter(None)
-        result = lexstore.search_eligible_parent_paths_result(
-            vault_root,
-            structured_filters.plan_index_eligibility(empty),
-            scope=scope,
-            freshness=freshness,
-        )
-    except RetrievalIndexWarming:
+    if not lexstore.maintained_content_index_enabled():
         return None
-    except structured_filters.FilterError:
-        return None
+    empty = structured_filters.compile_filter(None)
+    result = lexstore.search_eligible_parent_rows_result(
+        vault_root,
+        structured_filters.plan_index_eligibility(empty),
+        scope=scope,
+        freshness=freshness,
+    )
     if not result.readiness.complete or result.value is None:
+        _raise_catalog_outcome(result.readiness)
+    return result.value
+
+
+#: The browse's ordering key, restated once so the catalogue sort and the hit
+#: sort cannot drift apart. `_find_keyword` sorts its hits by
+#: `(page.updated or "0000-00-00", hit.path)` descending, and `_insert_page`
+#: writes exactly `page.updated or "0000-00-00"` into the catalogue's `updated`
+#: column, so the two keys are the same value read from two places.
+def _browse_order_key(rel_path: str, updated: str) -> tuple[str, str]:
+    return (updated or "0000-00-00", rel_path)
+
+
+def _browse_hydration_limit(
+    rows: list[tuple[str, str, str | None]],
+    *,
+    limit: int,
+    pending: Any | None,
+) -> int | None:
+    """How many hits the browse may stop at, or None to hydrate the whole set.
+
+    Bounding is only sound while the catalogue's ordering key IS the request's,
+    because the bound works by trusting that a candidate ranked below the
+    `limit`-th accepted hit cannot enter the answer. Two states break that, and
+    both are decided here from the catalogue alone, without reading a page:
+
+    * a scene-frame child in the candidate set. `_find_keyword` reports such a
+      child under its parent video, and the parent's `updated` is its own, so
+      the child's catalogue key is not the key its hit sorts by. `pages
+      .emitted_parent_path` names exactly those rows.
+    * pending custody. Between a durable commit and the catalogue's
+      republication `_resolve_page` answers from the in-flight page and
+      `_merge_pending_walk` adds identities the catalogue does not carry yet,
+      so the catalogue key is stale for precisely the pages a reader most needs
+      current.
+
+    In both the browse hydrates the resolved set in full, which is what it did
+    before the bound existed: the same answer at the same cost, and never a
+    different answer at a lower one.
+    """
+    if pending is not None and not pending.empty:
         return None
-    return set(result.value)
+    if any(parent is not None for _rel, _updated, parent in rows):
+        return None
+    return max(0, int(limit))
 
 
 def _find_keyword(
@@ -3553,6 +3607,12 @@ def _find_keyword(
     resolved path set, `computed` when it enumerated.
     """
     lexical_repair = _bounded_lexical_repair_allowed(freshness_key)
+    # Set only by the index-served browse below: the number of hits it may stop
+    # at, and the catalogue's ordering key per path so the loop can prove that
+    # key was the right one before it acts on it. Every other branch leaves the
+    # bound off and hydrates what it walks, exactly as before.
+    browse_bound: int | None = None
+    browse_keys: dict[str, str] = {}
     if query_norm:
         candidate_paths = _keyword_match_paths(
             vault_root,
@@ -3592,12 +3652,24 @@ def _find_keyword(
         # arm uses instead of enumerating it; an offline reader keeps the walk,
         # which is its documented fallback.
         indexed = (
-            _index_resolved_scope_paths(vault_root, scope=scope, freshness=freshness_key)
+            _index_resolved_scope_rows(vault_root, scope=scope, freshness=freshness_key)
             if readiness.runtime_managed()
             else None
         )
         if indexed is not None:
-            walk = (vault_root / rel_path for rel_path in indexed)
+            # Ordered here rather than in SQL so the catalogue's sort is the
+            # SAME comparison the hit list is sorted by, instead of whatever
+            # collation the connection happens to carry.
+            ordered = sorted(
+                indexed,
+                key=lambda row: _browse_order_key(row[0], row[1]),
+                reverse=True,
+            )
+            browse_keys = {rel: updated for rel, updated, _parent in ordered}
+            browse_bound = _browse_hydration_limit(
+                indexed, limit=limit, pending=pending
+            )
+            walk = (vault_root / rel_path for rel_path, _u, _p in ordered)
             _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
         elif scope == "kb":
             kb = vault_root / kb_dirname()
@@ -3643,6 +3715,20 @@ def _find_keyword(
         page = _resolve_page(vault_root, rel_path, pending)
         if page is None:
             continue
+        if browse_bound is not None and _browse_order_key(
+            page.rel_path, page.updated or ""
+        ) != _browse_order_key(rel_path, browse_keys.get(rel_path, "")):
+            # The bound is only sound while the catalogue's key is the key this
+            # hit sorts by. Verified per page rather than assumed: a row that
+            # disagrees withdraws the bound for the rest of the request, which
+            # costs a full hydration and cannot cost a wrong answer. Reaching
+            # this at all means the freshness gate admitted a stale catalogue.
+            log.warning(
+                "browse ordering key disagreed with the catalogue for %s; "
+                "hydrating the resolved set",
+                rel_path,
+            )
+            browse_bound = None
         if eligible_paths is not None and page.rel_path not in eligible_paths:
             continue
         excerpt = _make_excerpt(page, query_norm)
@@ -3708,6 +3794,13 @@ def _find_keyword(
                 hit.scene_frame, hit.scene_frame_ts = nf
         by_path[page.rel_path] = hit
         hits.append((page.updated or "0000-00-00", hit))
+        if browse_bound is not None and len(hits) >= browse_bound:
+            # Candidates arrive in descending order of the very key the sort
+            # below uses, and that key has been proved equal to the catalogue's
+            # for every page hydrated so far, so nothing still unread can enter
+            # the top `limit`. Stopping here is what makes the browse read the
+            # pages it can return instead of the pages it can see.
+            break
 
     hits.sort(key=lambda t: (t[0], t[1].path), reverse=True)
     return [h for _, h in hits[:limit]]
@@ -3835,23 +3928,31 @@ def _find_semantic(
         _record_degradation("no_candidates")
         if failed_out is not None:
             failed_out.append("keyword")
-        fallback_hits = _find_keyword(
-            vault_root,
-            query_norm=query_norm,
-            types=types,
-            projects=projects,
-            tags=tags,
-            speakers=speakers,
-            file_types=file_types,
-            exclude_file_types=exclude_file_types,
-            limit=limit,
-            scope=scope,
-            eligible_paths=eligible_paths,
-            freshness_key=snapshot.for_scope(scope),
-            failed_out=failed_out,
-            pending=pending,
-            timings=timings,
-        )
+        # `collect_candidates` opened and closed its own `keyword` span above,
+        # so this hydration ran outside every span of that name and the sources
+        # it declared were written into `_pending_sources` and never read. The
+        # stage then reported the static default it was opened with, on the one
+        # path where a walk is MOST likely: both rankers produced nothing, and
+        # `_find_keyword` is about to enumerate whatever it can. Its own span
+        # here is what makes those declarations land.
+        with _span(timings, "keyword"):
+            fallback_hits = _find_keyword(
+                vault_root,
+                query_norm=query_norm,
+                types=types,
+                projects=projects,
+                tags=tags,
+                speakers=speakers,
+                file_types=file_types,
+                exclude_file_types=exclude_file_types,
+                limit=limit,
+                scope=scope,
+                eligible_paths=eligible_paths,
+                freshness_key=snapshot.for_scope(scope),
+                failed_out=failed_out,
+                pending=pending,
+                timings=timings,
+            )
         if retrieval_trace is not None:
             retrieval_trace.record_keyword_fallback(
                 fallback_hits,
@@ -3955,17 +4056,25 @@ def _find_semantic(
     seen: set[str] = set()
     with _span(timings, "filter_hits"):
         # Hit construction is one of the four stages the contract names, so it
-        # reports what it consumed rather than carrying the static `computed`
-        # default. `fused` is a resolved candidate list produced by the ranking
-        # lanes, so this is `index` whenever there is one; the label is derived
-        # from the input rather than written as a constant, so a future change
-        # that feeds this stage an enumeration relabels it instead of hiding
-        # inside a reassuring diagnostic.
-        _mark_source(
-            timings,
-            "filter_hits",
-            find_types.SOURCE_INDEX if fused is not None else find_types.SOURCE_COMPUTED,
-        )
+        # says `index` rather than carrying the static `computed` default.
+        #
+        # This label is a CONSTANT, and the previous version's claim that it
+        # "is derived from the input rather than written as a constant" was
+        # false: it read `SOURCE_INDEX if fused is not None else
+        # SOURCE_COMPUTED`, and `CandidateBundle.fused` is annotated
+        # `list[tuple[str, float]]`, `empty_bundle()` sets it to `[]`, and the
+        # loop three lines down iterates it unguarded — a None would raise
+        # before the else arm could ever be read. A ternary that cannot take
+        # its second branch is a constant wearing a derivation's clothes, and
+        # it makes the gate's watch list look stronger than it is.
+        #
+        # A constant is defensible here, which is why it stays. This stage
+        # resolves candidate paths the ranking lanes produced, through
+        # `_page_of`, and reaches no enumeration of its own on any branch. What
+        # it is NOT is evidence: a stage whose label cannot change cannot
+        # report a walk, so it contributes nothing to the walk sentinel, and
+        # `WALKER_STAGES` in the gate now says so instead of counting it.
+        _mark_source(timings, "filter_hits", find_types.SOURCE_INDEX)
         for rel_path, _score in fused:
             if rel_path in seen:
                 continue

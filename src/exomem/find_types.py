@@ -713,8 +713,26 @@ class FindTimings:
         catalogue or rebuilds a Python corpus; `recall_projection` reads a
         cache, a published projection or a cold scope snapshot. None of them
         knows which before it runs, and all of them must say so afterwards.
+
+        "From inside an open span" is enforced, not documented. The write is
+        consumed by the exit of a span of the SAME name on the SAME thread, so
+        a call with no such span open accumulates an entry nothing will ever
+        read: the stage keeps whatever static default it was opened with, and
+        the diagnostic reports that default as if the stage had declared it.
+        That fails in the reassuring direction — a lane that walked would be
+        reported as an index — which is the one direction this vocabulary
+        exists to close. `find._find_semantic`'s keyword fallback did exactly
+        this: it called `_find_keyword` after `collect_candidates` had already
+        closed the `keyword` span, and every source that hydration declared was
+        silently discarded.
         """
         _validated_source(source)
+        if name not in self._open_stages():
+            raise RuntimeError(
+                f"mark_source({name!r}) with no open span of that name on this "
+                "thread: the write would never be read, and the stage would "
+                "report its static default as a declaration"
+            )
         with self._intervals_lock:
             self._pending_sources[name] = source
 

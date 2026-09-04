@@ -31,13 +31,15 @@ measuring that would measure the wrong path.
 
 from __future__ import annotations
 
+import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from exomem import bm25, commands, semantic_writes
+from exomem import bm25, commands, find_corpus, semantic_writes
 from exomem import find as find_module
 from exomem.vault import kb_dirname
 
@@ -71,13 +73,78 @@ def _scope_roots(vault: Path) -> tuple[Path, ...]:
     return (vault, vault / kb_dirname())
 
 
-def _page(title: str, *, project: str) -> str:
+class _PageReadSentinel:
+    """Counts `.md` page-content reads of a scope on the reader thread.
+
+    The contract names three verbs — no stage "SHALL enumerate, read or parse
+    every page of the vault or of the knowledge-base scope on the reader
+    thread" — and `ScopeWalkSentinel` instruments only the first. That gap is
+    not theoretical: the empty-query browse was moved off `_walk_md` and onto a
+    catalogue query, the enumeration count went to zero, and the browse went on
+    reading 37 of 40 pages per request, because it still called `_resolve_page`
+    for every path the index handed it. `find_corpus.CACHE.get` opens and reads
+    the file bytes on EVERY call, hit or miss, since its signature
+    content-hashes; the cache saves the parse, never the read. So an
+    enumeration counter alone reports a fix that moved the walk rather than
+    removing it, and reports it as a pass.
+
+    Every page read on this interpreter bottoms out in
+    `find_corpus._read_page_snapshot` — `CACHE.get`, `_read_page_bytes` and
+    `parse_page` all route through it — so counting that one name catches a
+    read regardless of which caller reintroduces it.
+
+    Thread scoping matches `ScopeWalkSentinel`'s and exists for the same
+    reason: a governed write starts a graph rebuild on its own thread, and the
+    contract governs the reader.
+    """
+
+    def __init__(self, *scope_roots: Path, current_thread_only: bool = True) -> None:
+        self._roots = tuple(os.path.realpath(root) for root in scope_roots)
+        self._owner = threading.get_ident() if current_thread_only else None
+        self.read: list[str] = []
+
+    @property
+    def count(self) -> int:
+        return len(self.read)
+
+    def reset(self) -> None:
+        self.read.clear()
+
+    def report(self) -> str:
+        distinct = sorted(set(self.read))
+        return "\n".join(
+            [f"{len(self.read)} page reads ({len(distinct)} distinct)", *distinct]
+        )
+
+    def record(self, path: object) -> None:
+        if self._owner is not None and threading.get_ident() != self._owner:
+            return
+        try:
+            resolved = os.path.realpath(os.fspath(path))  # type: ignore[arg-type]
+        except (TypeError, ValueError, OSError):
+            return
+        for root in self._roots:
+            if resolved.startswith(root + os.sep):
+                self.read.append(resolved)
+                return
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        real = find_corpus._read_page_snapshot
+
+        def counting_read(path, vault_root):
+            self.record(path)
+            return real(path, vault_root)
+
+        monkeypatch.setattr(find_corpus, "_read_page_snapshot", counting_read)
+
+
+def _page(title: str, *, project: str, updated: str = "2026-08-20") -> str:
     return (
         "---\n"
         f"title: {title}\n"
         "type: note\n"
         "status: active\n"
-        "updated: 2026-08-20\n"
+        f"updated: {updated}\n"
         f"projects: [{project}]\n"
         "tags: [integration]\n"
         "---\n\n"
@@ -87,11 +154,13 @@ def _page(title: str, *, project: str) -> str:
     )
 
 
-def _seed_kb(vault: Path, rel: str, title: str, *, project: str) -> Path:
+def _seed_kb(
+    vault: Path, rel: str, title: str, *, project: str, updated: str = "2026-08-20"
+) -> Path:
     """Put a page on disk BEFORE the cell is warmed, so the catalogue holds it."""
     path = vault / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_page(title, project=project), encoding="utf-8")
+    path.write_text(_page(title, project=project, updated=updated), encoding="utf-8")
     return path
 
 
@@ -151,33 +220,56 @@ def _walking_stages(result: dict) -> list[str]:
     )
 
 
+#: The absolute cap that replaces the ratio below the contract's smallest
+#: stated scale. Set NEAR THE MEASUREMENT rather than at the contract's own
+#: smallest ceiling, because the allowance is a floor under a flake and not a
+#: budget. `unattributed_ms` is near-constant whatever the total: 2.25-3.83 ms
+#: over totals of 23 to 148 ms when the integration reviewer measured it on a
+#: loaded box, and 1.0-2.1 ms over totals of 10.4 to 66.0 across three runs of
+#: the node below on a quiet one. So 8 ms is roughly 2x the worst reading ever
+#: taken here and 4x the typical one.
+#:
+#: 18 ms was derived — the contract's own 15% at the contract's own 120 ms —
+#: and derived was not the same as tight. EVERY one of the eight shapes below
+#: falls under 120 ms and takes the fallback, and on the smallest of them 18 ms
+#: was 5.2x the ratio it replaced and 78% of the whole request, so a regression
+#: adding 15 ms of uninstrumented time — a 65% latency increase on that shape —
+#: passed in silence. An allowance the common case relies on is the rule, not a
+#: fallback, and it has to be sized like one.
+#:
+#: Pinned as a literal in
+#: `test_the_attribution_allowance_falls_back_only_below_the_contract_scale`
+#: rather than read back from here, for the reason the gate's ceilings are: a
+#: test that asserts a constant against itself blesses whatever the constant
+#: becomes.
+_FLAT_ATTRIBUTION_ALLOWANCE_MS = 8.0
+
+
 def _attribution_allowance(total_ms: float) -> float:
     """The 15% bound, with its premise stated rather than assumed.
 
     The spec's bound is a RATIO, and a ratio needs a denominator the contract
-    recognises. `unattributed_ms` is close to a fixed cost — measured at
-    roughly 2 ms across all six shapes here, from 1.6 to 6.9 — so on a
-    fixture-scale request the ratio is driven almost entirely by how small the
-    total is, not by how much time went unaccounted for. The unfiltered shape
-    at 18.9 ms total sits at 10.9%, and an earlier arrangement of this node
-    where it ran first after warm-up measured 2.7 ms of 17.2 ms, or 15.6%, and
-    breached. That is a flake waiting, and widening the bound to stop it would
+    recognises. `unattributed_ms` is close to a fixed cost — 2.25 to 3.83 ms
+    across every shape here — so on a fixture-scale request the ratio is driven
+    almost entirely by how small the total is, not by how much time went
+    unaccounted for. An earlier arrangement of this node where the unfiltered
+    shape ran first after warm-up measured 2.7 ms of 17.2 ms, or 15.6%, and
+    breached. That is a flake waiting, and widening the RATIO to stop it would
     retire the only guard the spec gives against uninstrumented time.
 
-    So the bound is not loosened. Below the smallest ceiling the contract
-    states anywhere — the 120 ms keyword p50 — the ratio is replaced by the
-    same 15% evaluated at that ceiling, which is 18 ms. That is the contract's
-    own number at the contract's own smallest scale, derived rather than
-    fitted to what this box happens to produce; a genuinely uninstrumented
-    stage costs far more than 18 ms and still fails.
+    So the ratio is not loosened. Below the smallest ceiling the contract
+    states anywhere — the 120 ms keyword p50 — it is replaced by an absolute
+    cap sized against what this actually costs. See
+    `_FLAT_ATTRIBUTION_ALLOWANCE_MS` for why that is 8 ms and not the 18 ms
+    the contract's own arithmetic produces at that scale.
 
     On the live cell the question does not arise: the 0.69.0 baseline puts
     unattributed at 12.8-16.0 ms against totals of 561-1037 ms, or 1.5-2.3%,
-    and every request clears 120 ms comfortably.
+    and every request clears 120 ms comfortably, so the ratio governs.
     """
     if total_ms >= gate.KEYWORD_P50_MS:
         return 0.15 * total_ms
-    return 0.15 * gate.KEYWORD_P50_MS
+    return _FLAT_ATTRIBUTION_ALLOWANCE_MS
 
 
 def _warm(vault: Path, warm_managed_cell) -> None:
@@ -416,6 +508,237 @@ def test_the_empty_query_browse_is_answered_from_the_index_not_a_walk(
     )
 
 
+#: A browse corpus big enough that "reads every page" and "reads only what the
+#: request can return" are different numbers by an order of magnitude.
+_BROWSE_CORPUS = 40
+_BROWSE_LIMIT = 5
+
+
+def _seed_browse_corpus(vault: Path) -> list[str]:
+    """`_BROWSE_CORPUS` pages with distinct `updated` dates, newest last.
+
+    Distinct dates matter: they give the browse a real ordering key to resolve
+    from the catalogue, so a fix that hydrates a bounded prefix has to resolve
+    the RIGHT prefix rather than an arbitrary one.
+    """
+    seeded: list[str] = []
+    for index in range(_BROWSE_CORPUS):
+        rel = f"{kb_dirname()}/Notes/Integration/integration-browse-{index:03d}.md"
+        _seed_kb(
+            vault,
+            rel,
+            f"Integration Browse {index:03d}",
+            project="project-alpha",
+            updated=f"2026-{1 + index // 28:02d}-{1 + index % 28:02d}",
+        )
+        seeded.append(rel)
+    return seeded
+
+
+def test_the_empty_query_browse_reads_only_the_pages_it_can_return(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The contract's second and third verbs, which no other instrument sees.
+
+    "No stage of a governed recall SHALL enumerate, READ OR PARSE every page of
+    the vault or of the knowledge-base scope on the reader thread." Moving path
+    discovery off `_walk_md` and onto a catalogue query answers the first verb
+    and leaves the other two exactly where they were: the hydration loop still
+    called `_resolve_page` for every path the index returned, and every one of
+    those calls reads the file bytes whether the page cache hits or misses.
+    Measured here at 37 of 40 pages for a `limit=5` browse, which is the same
+    corpus read the walk performed, in a request that reported zero
+    enumerations and `keyword: index`.
+
+    The bound is the request's own limit, not a tuned number: a browse that can
+    return at most `limit` pages has no business reading more than `limit` of
+    them. Pages rejected before hydration (navigation basenames, non-recall
+    candidates) cost no read at all, so the honest ceiling is exactly `limit`.
+    """
+    _seed_browse_corpus(vault)
+    _warm(vault, warm_managed_cell)
+
+    sentinel = _PageReadSentinel(*_scope_roots(vault))
+    sentinel.install(monkeypatch)
+    sentinel.reset()
+    result = _recall(vault, query="", limit=_BROWSE_LIMIT)
+
+    assert len(result["hits"]) == _BROWSE_LIMIT, (
+        "the premise failed: the browse must fill its limit for the bound to mean anything"
+    )
+    assert sentinel.count <= _BROWSE_LIMIT, (
+        f"the browse read {sentinel.count} of {_BROWSE_CORPUS} pages on the reader "
+        f"thread to return {_BROWSE_LIMIT}: {sentinel.report()}"
+    )
+
+
+#: The browse shapes the identity sweep runs. `after_a_governed_write` is the
+#: pending-custody case: between a durable commit and the catalogue's
+#: republication the reader's ordering key is the in-flight page's, not the
+#: catalogue row's, which is the one state the bound stands down for.
+_BROWSE_SHAPES: dict[str, dict[str, Any]] = {
+    "kb": {"scope": "kb"},
+    "kb_only": {"scope": "kb-only"},
+    "vault": {"scope": "vault"},
+    "widened": {"widen_outside_kb": True},
+    "widened_vault": {"scope": "vault", "widen_outside_kb": True},
+    "limit_3": {"limit": 3},
+    "limit_over_corpus": {"limit": _BROWSE_CORPUS + 10},
+}
+
+
+def _browse_answers(vault: Path, *, after_write: bool) -> dict[str, list[str]]:
+    if after_write:
+        _govern(
+            vault,
+            f"{kb_dirname()}/Notes/Integration/integration-browse-000.md",
+            "Integration Browse 000",
+            project="project-beta",
+        )
+    return {
+        name: _paths(_recall(vault, **{"query": "", "limit": _BROWSE_LIMIT, **kwargs}))
+        for name, kwargs in sorted(_BROWSE_SHAPES.items())
+    }
+
+
+@pytest.mark.parametrize("after_write", [False, True], ids=["warm", "after_a_governed_write"])
+def test_the_bounded_browse_returns_the_same_pages_the_unbounded_ones_do(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, after_write: bool
+) -> None:
+    """Bounding hydration must change the browse's COST, never its answer.
+
+    Two independent oracles, both reached by withdrawing a seam rather than by
+    relaxing a threshold, because a test that patches the number it asserts on
+    proves nothing about that number:
+
+    * the WALK — `_index_resolved_scope_rows` withdrawn, so control reaches
+      `_walk_md` and the reader hydrates and sorts the whole scope. This is the
+      behaviour that shipped before any of this change, so it is the reference
+      the contract's "cost, not answer" ruling is actually about.
+    * the UNBOUNDED INDEX — `_browse_hydration_limit` withdrawn, so the same
+      catalogue-resolved set is hydrated in full. This isolates the bound from
+      the index branch beneath it, so a disagreement names which of the two
+      moved.
+
+    Paths AND order are compared: a set-equal answer in a different order is
+    still a changed answer to a caller that reads the first hit.
+    """
+    _seed_browse_corpus(vault)
+    _seed_outside(vault, "integration-browse-outside.md")
+    _warm(vault, warm_managed_cell)
+
+    bounded = _browse_answers(vault, after_write=after_write)
+
+    monkeypatch.setattr(find_module, "_browse_hydration_limit", lambda *a, **k: None)
+    find_module.reset_page_and_result_caches()
+    unbounded = _browse_answers(vault, after_write=False)
+
+    monkeypatch.setattr(find_module, "_index_resolved_scope_rows", lambda *a, **k: None)
+    find_module.reset_page_and_result_caches()
+    walked = _browse_answers(vault, after_write=False)
+
+    disagreeing = {
+        name: {"bounded": bounded[name], "unbounded": unbounded[name], "walked": walked[name]}
+        for name in _BROWSE_SHAPES
+        if not bounded[name] == unbounded[name] == walked[name]
+    }
+    assert not disagreeing, (
+        "bounding hydration changed the answer, not only the cost: " f"{disagreeing}"
+    )
+
+
+def test_the_bound_stands_down_for_the_two_states_that_invalidate_the_key() -> None:
+    """The seam's own contract, asserted where a mutant can reach it.
+
+    Both conditions are decided from the catalogue alone, without reading a
+    page, and neither has a behavioural node of its own: the per-page key
+    verification in the hydration loop catches the same two cases a moment
+    later and repairs the answer, so removing either clause costs cost and not
+    correctness. Defence in depth is worth having and is not the same thing as
+    a pinned guard, so the guard is pinned here directly.
+    """
+    plain = [("a.md", "2026-01-01", None), ("b.md", "2026-01-02", None)]
+    frames = [*plain, ("v.frames/scene.jpg.md", "2026-03-01", "v.md")]
+
+    class _Pending:
+        def __init__(self, empty: bool) -> None:
+            self.empty = empty
+
+    assert find_module._browse_hydration_limit(plain, limit=5, pending=None) == 5
+    assert find_module._browse_hydration_limit(plain, limit=5, pending=_Pending(True)) == 5
+    assert find_module._browse_hydration_limit(frames, limit=5, pending=None) is None
+    assert (
+        find_module._browse_hydration_limit(plain, limit=5, pending=_Pending(False)) is None
+    )
+
+
+def test_a_catalogue_whose_ordering_key_is_wrong_costs_cost_and_not_the_answer(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The braces behind the belt: the key is verified per page, not trusted.
+
+    The bound works by trusting that a candidate ranked below the `limit`-th
+    accepted hit cannot enter the answer, which is only true while the
+    catalogue's `updated` IS the page's. The freshness gate is what makes that
+    so, and a gate that admitted a stale generation would otherwise turn a cost
+    saving into a silently different answer — the one outcome the ruling on
+    this fix forbids. Here the ordering key is deliberately corrupted to the
+    worst case, every row reversed, and the answer must not move.
+    """
+    _seed_browse_corpus(vault)
+    _warm(vault, warm_managed_cell)
+
+    honest = _paths(_recall(vault, query="", limit=_BROWSE_LIMIT))
+
+    real = find_module._index_resolved_scope_rows
+
+    def _lying_rows(*args: Any, **kwargs: Any):
+        rows = real(*args, **kwargs)
+        if rows is None:
+            return None
+        # Every date replaced by its reflection about 2026, so the catalogue's
+        # order is the exact reverse of the page's.
+        return [
+            (rel, f"{2026:04d}-{13 - int(updated[5:7]):02d}-{updated[8:]}", parent)
+            for rel, updated, parent in rows
+        ]
+
+    monkeypatch.setattr(find_module, "_index_resolved_scope_rows", _lying_rows)
+    find_module.reset_page_and_result_caches()
+    under_a_lie = _paths(_recall(vault, query="", limit=_BROWSE_LIMIT))
+
+    assert honest, "the premise failed: the browse returned nothing to compare"
+    assert under_a_lie == honest, (
+        "a wrong catalogue ordering key changed the browse's answer instead of only "
+        f"its cost: honest={honest} lied={under_a_lie}"
+    )
+
+
+def test_a_source_declared_outside_its_span_is_refused_not_discarded() -> None:
+    """A write nothing will read must not look like a declaration.
+
+    `mark_source` is consumed by the exit of a span of the same name on the
+    same thread. Called with no such span open it used to accumulate an entry
+    nobody would ever read, and the stage then reported the static default it
+    was opened with — as if that default had been declared. That is the one
+    failure direction this vocabulary exists to close, and `_find_semantic`'s
+    keyword fallback did exactly it: `collect_candidates` had already closed
+    the `keyword` span, so every source that hydration declared was discarded.
+    """
+    from exomem import find_types
+
+    timings = find_types.FindTimings()
+
+    with pytest.raises(RuntimeError, match="no open span"):
+        timings.mark_source("keyword", find_types.SOURCE_COMPUTED)
+
+    with timings.span("keyword", source=find_types.SOURCE_INDEX):
+        timings.mark_source("keyword", find_types.SOURCE_COMPUTED)
+    assert timings.as_dict()["stages"]["keyword"]["source"] == find_types.SOURCE_COMPUTED, (
+        "a source declared from inside its span did not reach the table"
+    )
+
+
 def test_the_index_served_browse_returns_the_same_answer_as_the_walk(
     vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -440,7 +763,7 @@ def test_the_index_served_browse_returns_the_same_answer_as_the_walk(
 
     # The same request with the index branch withdrawn, so control reaches the
     # walk the managed reader used to take.
-    monkeypatch.setattr(find_module, "_index_resolved_scope_paths", lambda *a, **k: None)
+    monkeypatch.setattr(find_module, "_index_resolved_scope_rows", lambda *a, **k: None)
     find_module.reset_page_and_result_caches()
     walked = _paths(_recall(vault, query="", limit=25))
 
@@ -473,6 +796,7 @@ def test_every_request_shape_attributes_its_time(
     table = ", ".join(
         f"{shape} unattributed={unattributed:.1f}/total={total:.1f}"
         f"={100 * unattributed / total if total else 0:.1f}%"
+        f" [{'ratio' if total >= gate.KEYWORD_P50_MS else 'flat'}]"
         for shape, (total, unattributed) in measured.items()
     )
     breaching = sorted(
@@ -481,6 +805,23 @@ def test_every_request_shape_attributes_its_time(
         if unattributed > _attribution_allowance(total) + 1e-6
     )
     assert not breaching, f"shapes over the attribution bound: {breaching} ({table})"
+
+    # The regime each shape actually reaches, measured rather than asserted.
+    # Most of them take the fallback, so the fallback is what this file's bound
+    # mostly IS, and a cap that the common case relies on has to be sized
+    # against the quantity rather than against the contract's arithmetic at a
+    # scale nothing here reaches. This is the assertion that makes 8 ms a cap
+    # near the measurement: whatever regime a shape fell into, its absolute
+    # unattributed time is inside it.
+    over_cap = {
+        shape: round(unattributed, 2)
+        for shape, (_total, unattributed) in measured.items()
+        if unattributed > _FLAT_ATTRIBUTION_ALLOWANCE_MS
+    }
+    assert not over_cap, (
+        f"shapes over the absolute attribution cap of {_FLAT_ATTRIBUTION_ALLOWANCE_MS} ms: "
+        f"{over_cap} ({table})"
+    )
 
 
 def test_every_stage_of_every_shape_carries_a_source(
@@ -510,13 +851,73 @@ def test_the_attribution_allowance_falls_back_only_below_the_contract_scale() ->
     """The fallback must not become the rule.
 
     At or above the contract's smallest stated ceiling the ratio applies
-    unchanged; below it, and only below it, the same 15% is evaluated at that
-    ceiling. A mutant that returns the flat allowance everywhere would let a
-    600 ms request hide 90 ms of unattributed time, and this is what catches it.
+    unchanged; below it, and only below it, an absolute cap sized against what
+    unattributed time actually costs here. A mutant that returns the flat
+    allowance everywhere would let a 600 ms request hide 90 ms, and a mutant
+    that widens the cap back towards the contract's own arithmetic at that
+    scale would let a 65% latency increase on the smallest shape pass in
+    silence.
+
+    The numbers are literals, not read back from the module. A test that
+    asserts a constant against itself blesses whatever the constant becomes,
+    and this lane's own history contains a backstop that monkeypatched the
+    threshold under test and let the mutant live.
     """
     assert _attribution_allowance(1000.0) == pytest.approx(150.0)
     assert _attribution_allowance(gate.KEYWORD_P50_MS) == pytest.approx(18.0)
-    assert _attribution_allowance(10.0) == pytest.approx(18.0)
+    assert _attribution_allowance(gate.KEYWORD_P50_MS - 0.01) == pytest.approx(8.0)
+    assert _attribution_allowance(10.0) == pytest.approx(8.0)
+
+
+def test_the_whitespace_nonce_defeats_the_cache_without_changing_the_answer(
+    vault: Path, warm_managed_cell
+) -> None:
+    """The gate's browse and keyword series rest on this, so it is pinned here.
+
+    Neither shape can spell its nonce in words. The browse IS `query.strip() ==
+    ""` — the test `find.py` routes on — and a keyword series has to match the
+    corpus, which a nonce token cannot do. Both carry the nonce in whitespace
+    instead, which works only because the two halves are keyed differently:
+    `find.py`'s `request_key` holds the RAW query and the read path branches
+    and matches on `query.lower().strip()`.
+
+    That is a claim about the product, not about the gate, so it is measured
+    against the product: without the nonce the second sample is served from
+    the result cache, which is not the read path the ceilings are about; with
+    it every sample misses, and the hits are identical either way.
+    """
+    _seed_browse_corpus(vault)
+    _warm(vault, warm_managed_cell)
+
+    nonce = gate.run_nonce()
+    for shape, mode, base in (("browse", "hybrid", ""), ("keyword", "keyword", TOKEN)):
+        find_module.reset_page_and_result_caches()
+        repeated = [_recall(vault, query=base, mode=mode) for _ in range(3)]
+        find_module.reset_page_and_result_caches()
+        varied = [
+            _recall(
+                vault,
+                query=base + gate._whitespace_nonce(nonce, index),
+                mode=mode,
+            )
+            for index in range(3)
+        ]
+
+        served = [bool(r["timings"].get("cache", {}).get("hit")) for r in repeated]
+        assert served == [False, True, True], (
+            f"{shape}: the premise failed — a repeated query must be cache-served: {served}"
+        )
+        fresh = [bool(r["timings"].get("cache", {}).get("hit")) for r in varied]
+        assert fresh == [False, False, False], (
+            f"{shape}: the whitespace nonce did not defeat the result cache: {fresh}"
+        )
+        assert [_paths(r) for r in varied] == [_paths(repeated[0])] * 3, (
+            f"{shape}: the whitespace nonce changed the answer, not only the cache key"
+        )
+        if shape == "browse":
+            assert all(r["hits"] for r in varied), (
+                "the premise failed: the browse returned nothing to compare"
+            )
 
 
 def test_the_gate_and_the_integration_suite_watch_the_same_stages() -> None:
