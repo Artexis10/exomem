@@ -131,6 +131,7 @@ def test_unavailable_fts5_keeps_primary_python_rung_but_marks_widening_unavailab
         query="terraform locking",
         mode="hybrid",
         limit=5,
+        widen_outside_kb=True,
         degraded_out=degraded,
         failed_out=failed,
     )

@@ -192,6 +192,7 @@ def test_exact_catalog_cold_and_hot_timings_are_measurable(
     assert hot_timing["stages"]["filter_eligibility"] == {
         "ms": 0.0,
         "cache_hit": True,
+        "source": "cache",
     }
     assert hot_timing["profile"]["catalog"] == {
         "capability": "semantic_catalog",

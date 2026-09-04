@@ -1367,6 +1367,49 @@ def _dispatch_upsert_components(
     return components
 
 
+def _apply_exact_path_custody(
+    vault_root: Path,
+    *,
+    changed: list[str],
+    deleted: list[str],
+    reason: str,
+) -> None:
+    """Hand this batch's committed path set to the read-side custody seams.
+
+    Design Decision 2's write half. The fan-out above already brought each
+    sidecar's rows current one path at a time; this tells the read-side caches
+    the SAME path set, so their rows move with it and no whole-scope key has to
+    stand in for a change it cannot describe. It also re-checks each seam
+    against the pages, so a component that degraded above cannot leave a row
+    that answers -- a path no seam can prove exact fails the scope closed.
+
+    It never fails a write that has already committed -- the caches are derived
+    -- but it does not fail OPEN either. An individual seam that raises is
+    already handled inside `apply_receipt_paths`, which names its paths as
+    mismatches and invalidates the scope; if the whole call fails, the batch's
+    custody is simply unknown, and unknown custody is exactly the state a
+    whole-scope invalidation exists for. Logging and returning would leave rows
+    that answer with nothing having checked them.
+    """
+    if not (changed or deleted):
+        return
+    from . import freshness
+
+    try:
+        freshness.apply_receipt_paths(
+            vault_root, changed=changed, deleted=deleted, reason=reason
+        )
+    except Exception:  # noqa: BLE001 - canonical bytes are already committed
+        log.warning("read-side exact custody could not be applied", exc_info=True)
+        try:
+            for scope in freshness.SCOPES:
+                freshness.invalidate_scope_for_drift(
+                    vault_root, scope=scope, reason=f"{reason}_custody_unavailable"
+                )
+        except Exception:  # noqa: BLE001 - the write itself must still return
+            log.warning("custody fallback invalidation failed", exc_info=True)
+
+
 @call_spans.timed("index.upsert_after_write")
 def upsert_after_write(
     vault_root: Path,
@@ -1564,6 +1607,17 @@ def upsert_after_write(
         semantic_index.reset_parent_states(token)
     if not batch.revalidate(vault_root):
         return stale_report()
+    _apply_exact_path_custody(
+        vault_root,
+        # `batch.identity_paths` rather than `identity_items`: the latter is
+        # narrowed to the knowledge base in watcher mode so the heavier derived
+        # components stay KB-only, and the read-side caches serve both scopes.
+        # This is the batch's whole markdown path set, which is what a receipt
+        # names.
+        changed=[item.rel_path for item in batch.identity_paths],
+        deleted=watcher_deleted_rels or [],
+        reason="governed_write",
+    )
     report = IndexSyncReport(
         "upsert",
         requested_report,
@@ -1677,6 +1731,9 @@ def delete_after_remove(
             scene_frames.clear_scene_frames(vault_root, vault_root / rel)
         except Exception:  # noqa: BLE001 - frame cleanup is best-effort
             log.warning("scene-frame cleanup failed for %s", rel, exc_info=True)
+    _apply_exact_path_custody(
+        vault_root, changed=[], deleted=md_rels, reason="governed_delete"
+    )
     report = IndexSyncReport(
         "delete",
         requested_report,

@@ -40,7 +40,8 @@ floor; this change removes the read-side one.
   freshness change no longer discards the lexical corpus or the eligibility
   catalogue.
 - Span accounting is made complete and enforced: every stage that reports time
-  registers an interval, `sum(stages) + unattributed_ms <= total_ms` holds for a
+  registers an interval, the sum of the root-level stages plus `unattributed_ms` stays within
+  `total_ms` for a
   real `op_find`, and `unattributed_ms` is bounded.
 - A live-cell recall latency contract replaces the catastrophic-blowup backstop:
   hybrid p50 at or below 300 ms and p95 at or below 600 ms on a quiescent cell
