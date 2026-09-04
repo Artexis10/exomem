@@ -1294,3 +1294,42 @@ def test_promote_refuses_a_half_present_openai_pair(monkeypatch, tmp_path) -> No
 
     with pytest.raises(SystemExit, match="artifact-openai.txt"):
         module.promote(argparse.Namespace(state_dir=tmp_path, dry_run=False))
+
+
+@pytest.mark.parametrize("command", ("preflight", "prepare", "run"))
+def test_main_refuses_a_profile_consuming_command_without_a_profile(
+    command: str, monkeypatch, tmp_path, capsys
+) -> None:
+    """`--profile` left argparse, so nothing self-enforcing guards it any more.
+
+    `required=True` needed no test because it enforced itself. The hand-written
+    guard that replaced it does: deleting that branch leaves this whole suite
+    green, and a missing `--profile` then surfaces as
+    `TypeError: unsupported operand type(s) for /: 'PosixPath' and 'NoneType'`
+    out of `_hosted_candidate_locks`, mid-run, instead of exit 2 before anything
+    is touched. This module exists to catch exactly that shape -- an option that
+    is still consumed after it stopped being declared.
+    """
+    module = _load_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "reviewer_bootstrap.py",
+            command,
+            "--candidate-id",
+            "c",
+            "--state-dir",
+            str(tmp_path),
+        ],
+    )
+    monkeypatch.setenv("EXOMEM_PUBLIC_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("EXOMEM_ADMIN_TOKEN", "token")
+
+    def _no_locks(*_a, **_k):
+        raise AssertionError("--profile must be refused before any lock file is read")
+
+    monkeypatch.setattr(module, "load_locks", _no_locks)
+
+    assert module.main() == 2
+    assert "--profile is required" in capsys.readouterr().err
