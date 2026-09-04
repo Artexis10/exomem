@@ -714,6 +714,41 @@ def test_a_catalogue_whose_ordering_key_is_wrong_costs_cost_and_not_the_answer(
     )
 
 
+def test_a_catalogue_that_cannot_answer_the_browse_declines_instead_of_walking(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, walk_sentinel
+) -> None:
+    """The spec's own remedy, on the branch that used to swallow it.
+
+    "A stage that cannot be answered from an index SHALL return the typed
+    warming outcome." The helper used to catch `RetrievalIndexWarming`, return
+    None, and let control fall through to `_walk_md` — so the one signal the
+    contract asks for was converted into the one behaviour it forbids, on a
+    managed cell, silently. The readiness gate two branches up has already
+    proved the catalogue current for this generation, so a query that then
+    declines is a race, not a licence.
+    """
+    from exomem import lexstore
+
+    _seed_browse_corpus(vault)
+    _warm(vault, warm_managed_cell)
+
+    monkeypatch.setattr(
+        lexstore,
+        "search_eligible_parent_rows_result",
+        lambda *a, **k: lexstore.CatalogQueryResult(
+            None, lexstore.CatalogReadiness("stale", False, "sqlite")
+        ),
+    )
+    find_module.reset_page_and_result_caches()
+
+    sentinel = walk_sentinel(*_scope_roots(vault), current_thread_only=True)
+    sentinel.reset()
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        _recall(vault, query="", limit=_BROWSE_LIMIT)
+
+    assert sentinel.count == 0, sentinel.report()
+
+
 def test_a_source_declared_outside_its_span_is_refused_not_discarded() -> None:
     """A write nothing will read must not look like a declaration.
 

@@ -416,6 +416,27 @@ def test_a_filtered_series_with_no_eligibility_duration_is_not_a_pass() -> None:
         gate.check(_report(filtered_eligibility_ms=None))
 
 
+def test_the_series_emits_no_eligibility_duration_when_the_stage_never_reported() -> None:
+    """What `run_series` emits, driven through the real series rather than a stub report.
+
+    The node above perturbs a hand-built report and so pins `check`'s reading
+    of None, not the production of it. `run_series` used to round an empty
+    collection to `0.0`, which is the same zero-default one layer up: a stage
+    that never ran, reported as the fastest eligibility lookup the cell has
+    ever performed. A mutant restoring that survived every other node here.
+    """
+    report = gate.run(
+        transport=_StubTransport(stage_ms={}),
+        load_source=_StubLoad([1.0] * 500),
+        quiescence_bound_seconds=1.0,
+        sleep=lambda _seconds: None,
+    )
+
+    assert report["series"]["filtered_hybrid"]["eligibility_ms"] is None
+    with pytest.raises(SystemExit, match="no filter_eligibility duration"):
+        gate.check(report)
+
+
 def test_a_qualified_eligibility_stage_name_is_still_held_to_its_source() -> None:
     """The rename hazard, guarded here the way `_is_walker` guards it elsewhere.
 
@@ -566,6 +587,34 @@ def test_a_series_whose_median_sample_is_empty_fails_even_with_hits_in_it() -> N
 def test_a_series_with_a_non_empty_median_passes() -> None:
     """The counter-case, so the guard above is a measurement and not a constant."""
     gate.check(_report(shape_hits_p50={shape: 1 for shape in gate.SERIES_SHAPES}))
+
+
+def test_the_series_reports_the_median_sample_and_the_total_separately() -> None:
+    """What `run_series` collects, driven through the real series rather than a stub report.
+
+    The nodes above perturb a hand-built report, so they pin `check`'s reading
+    and say nothing about what produced the number. This drives the series: one
+    sample in thirty carries forty hits and the other twenty-nine carry none,
+    which is exactly the shape a sum reads as measured and a median reads as
+    empty. A mutant that collected the total under the median's name survived
+    every other node in this file.
+    """
+    transport = _StubTransport(hits=0, hits_at={("keyword", 7): 40})
+
+    report = gate.run(
+        transport=transport,
+        load_source=_StubLoad([1.0] * 500),
+        quiescence_bound_seconds=1.0,
+        sleep=lambda _seconds: None,
+    )
+
+    keyword = report["series"]["keyword"]
+    assert keyword["hits"] == 40, "the run total is what the diagnostic column is for"
+    assert keyword["hits_p50"] == 0, (
+        "the guarded quantity is the median sample, and this run's median was empty"
+    )
+    with pytest.raises(SystemExit, match="keyword series' median sample returned no hits"):
+        gate.check(report)
 
 
 def test_a_sample_with_no_usable_total_is_a_warming_outcome() -> None:
@@ -724,11 +773,17 @@ class _StubTransport:
         warming_at: set[tuple[str, int]] | None = None,
         elapsed_ms: float = 100.0,
         warming_ms: float = 1.0,
+        hits: int = 4,
+        hits_at: dict[tuple[str, int], int] | None = None,
+        stage_ms: dict[str, float] | None = None,
     ) -> None:
         self.calls: list[dict] = []
         self._warming_at = warming_at or set()
         self._elapsed_ms = elapsed_ms
         self._warming_ms = warming_ms
+        self._hits = hits
+        self._hits_at = hits_at or {}
+        self._stage_ms = {"filter_eligibility": 3.0} if stage_ms is None else stage_ms
 
     def ask(self, *, shape: str, query: str, mode: str, projects: tuple[str, ...], limit: int):
         index = len([call for call in self.calls if call["shape"] == shape])
@@ -752,8 +807,8 @@ class _StubTransport:
             elapsed_ms=self._elapsed_ms,
             warming=False,
             stage_sources={"filter_eligibility": "index", "rerank": "computed"},
-            stage_ms={"filter_eligibility": 3.0},
-            hits=4,
+            stage_ms=dict(self._stage_ms),
+            hits=self._hits_at.get((shape, index), self._hits),
         )
 
 
