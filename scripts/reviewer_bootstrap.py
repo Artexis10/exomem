@@ -21,12 +21,26 @@ Design notes, each of which is a bug this script exists to prevent:
   registered on the IP literal can never authorize.
 * `POST /access/redeem` is a browser-shaped route: it needs an `Origin` header
   matching `Host` or it returns CSRF_REJECTED.
-* The token exchange accepts EXACTLY six form fields and an exact `resource`.
-  Any extra or missing field is `invalid_request`, not `invalid_grant`.
+* There is NO token exchange, and there cannot be one. `run` used to POST
+  `/oauth/token` for the redeemed authorization code, and the server refuses a
+  bootstrap grant for four independent reasons: the grant lookup carries an
+  explicit `NOT EXISTS` against the authorization transaction's
+  `reviewer_bootstrap_authority_id`; redemption disables the bootstrap's own
+  client in the same transaction, so the enabled-client arm can never match; the
+  authorization code is written with a NULL `candidate_id`, so the canary arm
+  cannot apply either; and the grant is created `refresh_allowed = false` while
+  the harness demanded a refresh token. The exchange aborted every run AFTER the
+  invite, the authority and the human's session were already spent. What the
+  bootstrap actually produces is the CONSUMED authority, whose
+  `outcome_tenant_id`, `outcome_assignment_id` and `outcome_assignment_generation`
+  are written inside the redeem transaction and read back from the admin surface.
 * The staged release owns the reviewer window. `run` retains the redeemed setup
-  session and OAuth token, waits for `CELL_READY` with a reserve, seeds and
-  exactly verifies the checked fixture through Hosted MCP, and only then issues
-  the two sibling credentials whose creation seals temporary setup access.
+  session, waits for `CELL_READY` with a reserve, and only then issues the
+  sibling credentials whose creation seals temporary setup access.
+* The OpenAI sibling is OPT-IN. `promoteExomemHostedCohort` takes
+  `openaiArtifactId` optionally and gates every OpenAI precondition behind it,
+  and the candidate reaches `state='live'` either way, so a Claude-only cohort
+  opens admission. Omit `--openai-connector` to bootstrap Claude alone.
 * Creating the authority is the irreversible step: it spends the invite whether
   it later succeeds, expires or is revoked. `prepare` therefore stops short of
   it, so the invite keeps its full 7-day life while a human fetches the token.
@@ -57,7 +71,6 @@ import hashlib
 import hmac
 import json
 import os
-import re
 import sys
 import time
 import urllib.error
@@ -68,7 +81,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from exomem.hosted_plugins import CANDIDATE_PROFILES, seed_marketplace_review_fixture
+from exomem.hosted_plugins import CANDIDATE_PROFILES
 
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -100,9 +113,6 @@ CLAUDE_CIMD_REDIRECT = "https://claude.ai/api/mcp/auth_callback"
 SCOPES = "exomem.read exomem.write offline_access"
 REVIEWER_STAGE_RESERVE = timedelta(minutes=10)
 OWNER_STATUS_POLL_SECONDS = 5.0
-MCP_TIMEOUT_SECONDS = 60.0
-MCP_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-MCP_MAX_SSE_EVENTS = 16
 
 #: ChatGPT identifies each connector with its own client-metadata document, so
 #: unlike claude.ai there is no single stable client id to hardcode. The redirect
@@ -446,158 +456,6 @@ class ControlPlane:
         return status, parsed
 
 
-class HostedMCPToolCaller:
-    """Authenticated Hosted MCP caller that keeps request and result bodies in memory."""
-
-    def __init__(self, base_url: str, bearer_token: str) -> None:
-        if not base_url.startswith("https://") and not base_url.startswith("http://localhost"):
-            raise SystemExit("Hosted MCP endpoint must use HTTPS")
-        if not bearer_token:
-            raise SystemExit("Hosted MCP bearer token is missing")
-        self._endpoint = f"{base_url.rstrip('/')}/api/exomem/mcp/v1"
-        self._bearer_token = bearer_token
-        self._request_count = 0
-
-    def __call__(self, name: str, arguments: Mapping[str, object]) -> Mapping[str, object]:
-        self._request_count += 1
-        request_id = f"reviewer-fixture-{self._request_count}"
-        payload = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": "tools/call",
-            "params": {"name": name, "arguments": dict(arguments)},
-        }
-        request = urllib.request.Request(
-            self._endpoint,
-            data=canonical_json(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self._bearer_token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
-            method="POST",
-        )
-        try:
-            with _OPENER.open(request, timeout=MCP_TIMEOUT_SECONDS) as response:
-                body = response.read(MCP_MAX_RESPONSE_BYTES + 1)
-                content_type = _mcp_content_type(response)
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as error:
-            raise SystemExit(
-                f"fixture MCP {name} transport failed: {type(error).__name__}"
-            ) from error
-        if len(body) > MCP_MAX_RESPONSE_BYTES:
-            raise SystemExit(f"fixture MCP {name} response exceeded the size limit")
-        envelope = _decode_mcp_http_response(body, content_type, request_id, name)
-        result = envelope.get("result")
-        if not isinstance(result, Mapping):
-            raise SystemExit(f"fixture MCP {name} response omitted its result")
-        if result.get("isError") is True:
-            return {
-                "success": False,
-                "error": {"code": _mcp_tool_error_code(result)},
-            }
-        structured = result.get("structuredContent")
-        if isinstance(structured, Mapping):
-            return _unwrap_mcp_domain_result(structured)
-        content = result.get("content")
-        if not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], Mapping):
-            raise SystemExit(f"fixture MCP {name} response omitted its domain result")
-        item = content[0]
-        if item.get("type") != "text" or not isinstance(item.get("text"), str):
-            raise SystemExit(f"fixture MCP {name} response omitted its JSON domain result")
-        try:
-            decoded = json.loads(item["text"])
-        except json.JSONDecodeError as error:
-            raise SystemExit(f"fixture MCP {name} domain result was invalid JSON") from error
-        if not isinstance(decoded, Mapping):
-            raise SystemExit(f"fixture MCP {name} domain result was not an object")
-        return _unwrap_mcp_domain_result(decoded)
-
-
-def _unwrap_mcp_domain_result(value: Mapping[str, object]) -> Mapping[str, object]:
-    nested = value.get("result")
-    if set(value) == {"result"} and isinstance(nested, Mapping):
-        return nested
-    return value
-
-
-def _mcp_tool_error_code(result: Mapping[str, object]) -> str:
-    content = result.get("content")
-    if isinstance(content, list):
-        for item in content:
-            if not isinstance(item, Mapping) or not isinstance(item.get("text"), str):
-                continue
-            match = re.search(r"\b([A-Z][A-Z0-9_]{2,})\b", item["text"])
-            if match:
-                return match.group(1).lower()
-    return "tool_error"
-
-
-def _mcp_content_type(response: object) -> str:
-    headers = getattr(response, "headers", None)
-    if headers is None:
-        raise SystemExit("fixture MCP response omitted Content-Type")
-    value = (
-        headers.get_content_type()
-        if hasattr(headers, "get_content_type")
-        else headers.get("Content-Type")
-    )
-    if not isinstance(value, str):
-        raise SystemExit("fixture MCP response omitted Content-Type")
-    return value.split(";", 1)[0].strip().lower()
-
-
-def _decode_mcp_http_response(
-    body: bytes, content_type: str, request_id: str, tool_name: str
-) -> Mapping[str, object]:
-    if content_type == "application/json":
-        return _decode_mcp_envelope(body, request_id, tool_name)
-    if content_type != "text/event-stream":
-        raise SystemExit(f"fixture MCP {tool_name} response used an unsupported Content-Type")
-    try:
-        text = body.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise SystemExit(f"fixture MCP {tool_name} SSE response was not UTF-8") from error
-    if not (text.endswith("\n\n") or text.endswith("\r\n\r\n")):
-        raise SystemExit(f"fixture MCP {tool_name} SSE response was truncated")
-    events = re.split(r"\r?\n\r?\n", text)[:-1]
-    if len(events) > MCP_MAX_SSE_EVENTS:
-        raise SystemExit(f"fixture MCP {tool_name} SSE response exceeded the event limit")
-    envelopes: list[Mapping[str, object]] = []
-    for event in events:
-        data: list[str] = []
-        for line in event.splitlines():
-            if line.startswith("data:"):
-                data.append(line[5:].lstrip(" "))
-            elif line.startswith(("event:", "id:", "retry:", ":")):
-                continue
-            else:
-                raise SystemExit(f"fixture MCP {tool_name} SSE framing was malformed")
-        if data:
-            envelopes.append(
-                _decode_mcp_envelope("\n".join(data).encode("utf-8"), request_id, tool_name)
-            )
-    if len(envelopes) != 1:
-        raise SystemExit(f"fixture MCP {tool_name} SSE response was ambiguous")
-    return envelopes[0]
-
-
-def _decode_mcp_envelope(
-    body: bytes, request_id: str, tool_name: str
-) -> Mapping[str, object]:
-    try:
-        decoded = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise SystemExit(f"fixture MCP {tool_name} response was not JSON") from error
-    if not isinstance(decoded, Mapping):
-        raise SystemExit(f"fixture MCP {tool_name} response was not an object")
-    if decoded.get("jsonrpc") != "2.0" or decoded.get("id") != request_id:
-        raise SystemExit(f"fixture MCP {tool_name} response did not match its request")
-    if "error" in decoded:
-        raise SystemExit(f"fixture MCP {tool_name} returned a protocol error")
-    return decoded
-
-
 def reusable_client_record(cp: ControlPlane, client_id: str) -> str:
     if not client_id.startswith("exomem-reviewer-bootstrap-") or len(client_id) > 256:
         raise SystemExit("--existing-client-id is not a reviewer bootstrap client ID")
@@ -743,7 +601,11 @@ def preflight(
         "\n  NOTE  A reviewer-purpose tenant with a bound or CELL_READY cell also blocks\n"
         "        the bootstrap, and is not visible through any admin endpoint. If the\n"
         "        authority call returns 400 with everything above green, that is almost\n"
-        "        certainly the cause; the stranded tenant must be deleted first."
+        "        certainly the cause -- and this operator token cannot clear it. Deleting\n"
+        "        a tenant needs an owner session plus an emailed confirmation token, so a\n"
+        "        stranded reviewer tenant has to be released out of band before retrying.\n"
+        "        A failed attempt is therefore NOT resumable; it costs an invite, an\n"
+        "        alias, a stage and a client as well."
     )
     return bool(ok)
 
@@ -880,10 +742,10 @@ def run(
     context: dict,
     token: str,
     locks: dict,
-    openai_connector: str,
+    openai_connector: str | None,
     openai_redirect_override: list[str] | None = None,
 ) -> None:
-    """Prepare and verify the reviewer fixture before sealing provider credentials."""
+    """Consume the authority and seal one sibling credential per promoted platform."""
     resource = f"{cp.base_url}/api/exomem/mcp/v1"
 
     # Resolve the connector BEFORE the authority exists. This reads a document
@@ -891,10 +753,15 @@ def run(
     # residential address outright; done in place at the sibling loop it would
     # abort with the invite already spent and the clock running. Nothing here
     # touches the control plane, so failing at this point costs nothing.
-    openai_client_id, openai_redirects = chatgpt_cimd_identity(
-        openai_connector, openai_redirect_override
-    )
-    print(f"  connector resolved: {openai_client_id}")
+    openai_client_id: str | None = None
+    openai_redirects: list[str] | None = None
+    if openai_connector is None:
+        print("  Claude-only cohort: no ChatGPT connector supplied")
+    else:
+        openai_client_id, openai_redirects = chatgpt_cimd_identity(
+            openai_connector, openai_redirect_override
+        )
+        print(f"  connector resolved: {openai_client_id}")
 
     status, authority = cp.call(
         "POST",
@@ -912,7 +779,12 @@ def run(
         raise SystemExit(
             f"create_reviewer_bootstrap failed: {status} {authority}\n"
             "If preflight was green this is most likely a stranded reviewer tenant "
-            "holding a bound/CELL_READY cell. Delete it and retry."
+            "holding a bound/CELL_READY cell, left by an earlier attempt.\n"
+            "There is no operator route to reclaim it: tenant deletion is gated on "
+            "an owner session plus a token emailed to the\ntenant owner, and no "
+            "admin endpoint can start one. The reviewer recovery controls on "
+            "/admin/contracts each repair a\ndeletion that was already requested "
+            "and confirmed, so none of them applies here."
         )
     print(f"  authority {authority['authority']['id'][:8]} active")
 
@@ -947,35 +819,12 @@ def run(
     )
     if status != 200 or not redeemed.get("destination"):
         raise SystemExit(f"redeem failed: {status} {redeemed}")
-    code = urllib.parse.parse_qs(urllib.parse.urlparse(redeemed["destination"]).query)["code"][0]
+    # The authorization code is checked for and then deliberately dropped. It can
+    # never be exchanged -- see the module docstring -- so its only remaining
+    # value is as proof that the redemption produced an authorization at all.
+    if "code" not in urllib.parse.parse_qs(urllib.parse.urlparse(redeemed["destination"]).query):
+        raise SystemExit(f"redeem returned no authorization code: {redeemed['destination']!r}")
     print("  invite redeemed, authorization code issued")
-
-    status, tokens = cp.call(
-        "POST",
-        "/api/exomem/oauth/token",
-        label="run-token",
-        admin=False,
-        form={
-            "grant_type": "authorization_code",
-            "code": code,
-            "client_id": context["clientId"],
-            "redirect_uri": LOOPBACK_REDIRECT,
-            "code_verifier": context["codeVerifier"],
-            "resource": resource,
-        },
-    )
-    access_token = tokens.get("access_token")
-    refresh_token = tokens.get("refresh_token")
-    if (
-        status != 200
-        or tokens.get("token_type") != "Bearer"
-        or not isinstance(access_token, str)
-        or not access_token
-        or not isinstance(refresh_token, str)
-        or not refresh_token
-    ):
-        raise SystemExit(f"token exchange failed: HTTP {status}")
-    print("  token exchange: ok")
 
     status, clients = cp.call(
         "GET", "/api/exomem/admin/oauth-clients", label="run-authority-outcome"
@@ -1010,33 +859,12 @@ def run(
     print(f"  outcome written to {outcome_path.name}")
 
     wait_for_reviewer_cell(cp, context)
-    fixture = locks.get("fixture")
-    if not isinstance(fixture, Mapping):
-        raise SystemExit("release locks omitted the marketplace reviewer fixture")
-    try:
-        seeded = seed_marketplace_review_fixture(
-            fixture,
-            HostedMCPToolCaller(cp.base_url, access_token),
-        )
-    except ValueError as error:
-        raise SystemExit(f"reviewer fixture seeding failed: {error}") from error
-    expected_seed = {
-        "fixture_version": locks["fixture_version"],
-        "payload_sha256": locks["fixture_digest"],
-        "note_count": len(fixture["payload"]["notes"]),
-        "verified": True,
-    }
-    if seeded != expected_seed:
-        raise SystemExit("reviewer fixture seed receipt did not match the release locks")
-    seed_path = cp.state_dir / "reviewer-fixture-seed.json"
-    _write_protected_json(seed_path, seeded)
-    print(f"  reviewer fixture {seeded['fixture_version']} seeded and exactly verified")
 
-    # The staged release owns the evidence lifetime. Only now, after exact
-    # fixture readback, may either provider credential seal setup access.
-    # Both platforms in this one pass: promote-cohort needs a claudeArtifactId AND
-    # an openaiArtifactId, and each canary credential is welded to this bootstrap's
-    # own assignment/generation, so a second pass later cannot supply the other one.
+    # The staged release owns the evidence lifetime. Only now, with the cell
+    # ready, may a provider credential seal setup access. Every platform being
+    # promoted has to be done in this one pass: each canary credential is welded
+    # to this bootstrap's own assignment and generation, so a second pass later
+    # cannot supply one that was skipped here.
     #
     # Both siblings are CIMD, built from the identity the real client presents.
     # OpenAI used to be registered `pinned` on a loopback redirect here, on the
@@ -1044,7 +872,7 @@ def run(
     # per connector, and the pinned digest could never be matched by the connector
     # that has to produce the evidence — see `chatgpt_cimd_identity`.
     sibling_stage_ids: dict[str, str] = {}
-    siblings = (
+    siblings = [
         (
             "claude",
             "cimd",
@@ -1053,17 +881,20 @@ def run(
             locks["claude_package"],
             locks["claude_archive"],
             None,
-        ),
-        (
-            "openai",
-            "cimd",
-            openai_client_id,
-            openai_redirects,
-            locks["openai_package"],
-            locks["openai_archive"],
-            locks["openai_registered_app"],
-        ),
-    )
+        )
+    ]
+    if openai_connector is not None:
+        siblings.append(
+            (
+                "openai",
+                "cimd",
+                openai_client_id,
+                openai_redirects,
+                locks["openai_package"],
+                locks["openai_archive"],
+                locks["openai_registered_app"],
+            )
+        )
     for platform, admission, sibling_client, redirects, package, archive, app_digest in siblings:
         config_sha = client_config_sha256(
             platform=platform,
@@ -1149,8 +980,9 @@ def run(
         )
         sibling_stage_ids[platform] = stage["stage"]["id"]
 
-    print("\n  Bootstrap complete. The cell is ready, the exact fixture is verified,")
-    print("  and both clean-client evidence runs can start.")
+    platforms = " and ".join(sibling_stage_ids)
+    print(f"\n  Bootstrap complete. The cell is ready and the {platforms} clean-client")
+    print("  evidence run(s) can start.")
 
     # The evidence must be signed against these sibling stages, never the bootstrap
     # stage in bootstrap-context.json. The two look alike, and passing the wrong one
@@ -1183,6 +1015,9 @@ def load_locks(repo: Path, profile: str) -> dict:
     claude_zip = read_lock(repo, profile, "claude.zip.lock.json")
     openai = read_lock(repo, profile, "openai.lock.json")
     openai_zip = read_lock(repo, profile, "openai.zip.lock.json")
+    # Still read, and still required to parse: `fixture_version` and
+    # `fixture_digest` below are sent verbatim in every canary credential body.
+    # The document itself is no longer carried -- nothing seeds it from here.
     fixture = json.loads(
         (repo / "plugins" / "hosted" / "marketplace-review-fixture-v2.json").read_text()
     )
@@ -1211,7 +1046,6 @@ def load_locks(repo: Path, profile: str) -> dict:
         "profile": profile,
         "fixture_version": fixture["fixture_version"],
         "fixture_digest": fixture["payload_sha256"],
-        "fixture": fixture,
         # `attach-openai-locks` stores these documents verbatim and re-validates
         # every key, so they are passed through rather than reduced to digests.
         "openai_package_lock": openai,
@@ -1253,9 +1087,11 @@ def main() -> int:
     parser.add_argument("--token", help="emailed invite token, required for run")
     parser.add_argument(
         "--openai-connector",
-        help="ChatGPT connector id, or the full client.json URL, required for run. "
-        "Create the connector in ChatGPT first: the OpenAI sibling stage is built "
-        "from the identity that connector actually presents.",
+        help="ChatGPT connector id, or the full client.json URL. OPTIONAL: omit it "
+        "to bootstrap a Claude-only cohort, which the control plane promotes and "
+        "admits on its own. Supply it to promote both platforms in this one pass, "
+        "and create the connector in ChatGPT first -- the OpenAI sibling stage is "
+        "built from the identity that connector actually presents.",
     )
     parser.add_argument(
         "--openai-redirect",
@@ -1320,19 +1156,13 @@ def main() -> int:
         print("  text/plain part (the tracked HTML link drops the URL fragment), then:")
         print(f"\n    {sys.argv[0]} run --candidate-id {args.candidate_id} \\")
         print(f"      --state-dir {args.state_dir} --profile {args.profile} \\")
-        print(f"      --repo {args.repo} --token <token> --openai-connector <id>")
+        print(f"      --repo {args.repo} --token <token>")
+        print("\n  Add --openai-connector <id> to promote the OpenAI sibling in the same")
+        print("  pass; without it this bootstraps a Claude-only cohort.")
         return 0
 
     if not args.token:
         print("--token is required for run", file=sys.stderr)
-        return 2
-    if not args.openai_connector:
-        print(
-            "--openai-connector is required for run. Create the ChatGPT connector\n"
-            "first and pass its id; the OpenAI sibling stage must carry the digest\n"
-            "that connector presents, or the evidence can never be imported.",
-            file=sys.stderr,
-        )
         return 2
     context = json.loads((args.state_dir / "bootstrap-context.json").read_text())
     print("run:")

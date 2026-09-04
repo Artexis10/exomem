@@ -124,13 +124,36 @@ client acceptance evidence stay in the approved secret-manager/provider handoff
 and out of Git and logs.
 
 Use `scripts/reviewer_bootstrap.py prepare` and then `run` for that handoff. The
-`run` command now requires the setup token exchange, polls the owner view to
-`CELL_READY`, creates and reads back every checked fixture note through normal
-Hosted MCP, and writes a mode-0600 content-free seed receipt before it asks the
-control plane for either provider credential. The later clean ChatGPT and Claude
-runs start from prepared state; they test natural recall and capture rather than
-manually reconstructing fixture Markdown. They still produce the genuine native
-client evidence—bootstrap does not stand in for provider acceptance.
+`run` command consumes the bootstrap authority, polls the owner view to
+`CELL_READY`, and writes the consumed authority's tenant, assignment and
+generation to a mode-0600 `bootstrap-outcome-final.json` before it asks the
+control plane for any provider credential. That file is the handoff
+`promotion_evidence.py observe` reads.
+
+`run` performs no OAuth token exchange and seeds no fixture. It cannot: the
+control plane refuses a bootstrap grant at the token endpoint for four
+independent reasons, so the harness never holds an access token and has nothing
+to write through Hosted MCP. Seeding the checked fixture is a separate step the
+operator performs with reviewer access; `seed_marketplace_review_fixture` in
+`exomem.hosted_plugins` remains the executable definition of it.
+
+The OpenAI sibling is opt-in. Omit `--openai-connector` and `run` bootstraps a
+Claude-only cohort — one sibling stage, one canary credential — which
+`promotion_evidence.py promote` then promotes without `openaiArtifactId` or
+`openaiEvidence`; the control plane gates every OpenAI precondition behind that
+artifact and admits the cohort either way. Pass `--openai-connector` to promote
+both platforms in the same pass, which is required because each canary
+credential is welded to this bootstrap's own assignment and generation.
+
+`run` is not yet resumable. Every failed attempt strands a reviewer tenant that
+blocks the retry, and no admin endpoint can reclaim one — deletion is gated on
+an owner session plus an emailed confirmation token, so it cannot be driven from
+the operator token. Budget for that before spending an invite.
+
+The later clean ChatGPT and Claude runs start from prepared state; they test
+natural recall and capture rather than manually reconstructing fixture Markdown.
+They still produce the genuine native client evidence—bootstrap does not stand
+in for provider acceptance.
 
 The signed, secret-free reviewer-access evidence is distinct from the provider
 credential. It binds the matching provider and deployment, enabled feature
