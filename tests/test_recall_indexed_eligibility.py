@@ -453,7 +453,7 @@ _IDENTITY_CASES: tuple[tuple[str, dict[str, Any] | None, dict[str, Any]], ...] =
 
 
 def test_index_result_equals_the_oracle_for_every_seeded_field(
-    vault: Path, warm_managed_cell
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The index answer IS the scan answer, field by field, on one generation.
 
@@ -469,6 +469,16 @@ def test_index_result_equals_the_oracle_for_every_seeded_field(
     # runs with the oracle withdrawn, so a comparison can never be satisfied by
     # both sides being the same walk.
     expected = {label: _oracle(vault, plan) for label, plan in plans}
+
+    def forbid_page_read(*args, **kwargs):
+        raise AssertionError("managed filter eligibility read page content")
+
+    # The oracle withdrawal above only catches directory traversal. Metadata
+    # evaluation must also survive an empty page cache without opening pages.
+    from exomem import find_corpus
+
+    find_module.reset_page_and_result_caches()
+    monkeypatch.setattr(find_corpus, "_read_page_snapshot", forbid_page_read)
 
     divergences: list[str] = []
     covered: set[str] = set()
@@ -518,10 +528,26 @@ def test_index_result_equals_the_oracle_for_every_seeded_field(
 # --------------------------------------------------------------------------- #
 
 
-def test_candidate_hydration_is_bounded_by_the_answer(
+def test_metadata_encoding_preserves_filter_results_for_recursive_yaml_lists() -> None:
+    from exomem import lexstore
+
+    recursive: list[Any] = ["retrieval"]
+    recursive.append(recursive)
+    original = {"tags": recursive}
+    restored = {"tags": lexstore._decode_filter_value(lexstore._encode_filter_value(recursive))}
+    for expression in (
+        {"page.tags": {"$in": ["retrieval"]}},
+        {"page.tags": {"$contains": "missing"}},
+        {"$not": {"page.tags": {"$all": ["retrieval", "missing"]}}},
+    ):
+        plan = _plan(expression)
+        assert structured_filters.page_matches(plan, page=restored, units=()) == structured_filters.page_matches(plan, page=original, units=())
+
+
+def test_eligibility_reads_no_page_or_unit_sources(
     vault: Path, warm_managed_cell
 ) -> None:
-    """The managed arm reads the pages it returns, never the corpus.
+    """Managed eligibility uses maintained views, not canonical source files.
 
     The walk sentinel counts directory enumerations; this counts page
     hydrations, which is what the spec sentence "SHALL NOT evaluate the plan by
@@ -529,10 +555,8 @@ def test_candidate_hydration_is_bounded_by_the_answer(
     that narrows nothing satisfies the sentinel and still parses every page in
     the scope — the same cost reached by a different road.
 
-    Every shape below is one the columns must decide in SQL: a negation, a
-    complement, a presence test, and a governed unit axis. The bound asserted
-    is `reads <= |answer|`, not a constant, so it stays meaningful as the
-    corpus grows.
+    Cover negation, complement, presence and unit-axis plans, including broad
+    matches. Returning many paths must not license reading their frontmatter.
     """
     for index in range(60):
         target = vault / kb_dirname() / f"Notes/Bulk/bulk-{index:03d}.md"
@@ -580,10 +604,10 @@ def test_candidate_hydration_is_bounded_by_the_answer(
             find_module._resolve_page = real_resolve  # type: ignore[assignment]
             semantic_index.current_parent_index_state = real_state  # type: ignore[assignment]
         report.append(f"{label}: reads={reads['pages']} units={reads['units']} n={len(answer)}")
-        assert reads["pages"] <= len(answer), report[-1]
-        assert reads["units"] <= len(answer), report[-1]
+        assert reads["pages"] == 0, report[-1]
+        assert reads["units"] == 0, report[-1]
     # Non-vacuity: one shape must really select a small slice of a big corpus.
-    assert report[0].endswith("n=12") or "reads=12" in report[0], report
+    assert report[0].endswith("n=12"), report
 
 
 def test_the_eligibility_stage_reports_its_candidate_count(
@@ -630,7 +654,9 @@ def test_stale_catalogue_generation_declines_with_warming(
     find_module.clear_cache()
     freshness.rebaseline(vault)
 
-    sentinel = walk_sentinel(*_scope_roots(vault))
+    # A refusal schedules background repair; only the requesting thread is
+    # forbidden to enumerate. Counting the worker makes this a scheduler race.
+    sentinel = walk_sentinel(*_scope_roots(vault), current_thread_only=True)
     sentinel.reset()
     with pytest.raises(find_module.RetrievalIndexWarming) as caught:
         _indexed(vault, plan)

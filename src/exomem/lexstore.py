@@ -65,6 +65,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
@@ -250,12 +251,63 @@ def _eligibility_columns(page: object) -> tuple[str | None, ...]:
         ("page.tags", "tags"),
         ("page.speakers", "speakers"),
     ):
-        row.append(
-            _canonical_members(axis, view.get(key), present=key in view, list_axis=True)
-        )
+        row.append(_canonical_members(axis, view.get(key), present=key in view, list_axis=True))
     row.append(_iso_day(recorded))
     row.append(_day_members(recorded, present="updated" in view))
     return tuple(row)
+
+
+def _encode_filter_value(value: Any, *, member: bool = False) -> list[Any]:
+    """Retain scalar types that coarse SQL candidate columns cannot decide."""
+    if isinstance(value, datetime):
+        return ["datetime", value.isoformat()]
+    if isinstance(value, date):
+        return ["date", value.isoformat()]
+    if isinstance(value, (list, tuple)) and not member:
+        # Membership operators compare scalar items only. Nested containers
+        # remain non-comparable, including recursive YAML aliases.
+        return ["list", [_encode_filter_value(item, member=True) for item in value]]
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return ["scalar", value]
+    # Mappings, sets and binary YAML values are not comparable on any indexed
+    # axis. Keep them non-scalar instead of turning them into matching strings.
+    return ["unsupported", {}]
+
+
+def _decode_filter_value(encoded: list[Any]) -> Any:
+    kind, value = encoded
+    if kind == "datetime":
+        return datetime.fromisoformat(value)
+    if kind == "date":
+        return date.fromisoformat(value)
+    if kind == "list":
+        return [_decode_filter_value(item) for item in value]
+    if kind == "scalar":
+        return value
+    if kind == "unsupported":
+        return {}
+    raise ValueError("unknown eligibility metadata value kind")
+
+
+def _eligibility_view_json(page: Any) -> str:
+    from . import structured_filters
+
+    # Arbitrary frontmatter pointers are not supported by the managed planner.
+    # Persist only its public axes, not a second copy of the whole document.
+    view = structured_filters.page_view(page)
+    return json.dumps(
+        {
+            "view": {
+                key: _encode_filter_value(value)
+                for key, value in view.items()
+                if key != "frontmatter"
+            },
+            "media_file": page.media_file,
+            "frame_ts": page.frame_ts,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _unit_eligibility_columns(unit: object) -> tuple[str | None, ...]:
@@ -434,7 +486,7 @@ def _eligibility_predicate(eligibility: Any, scope_column: str) -> tuple[str, li
     )
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 CATALOG_FOREGROUND_DELTA_CAP = 32
 
 # Publication-barrier timeouts. Every LIVE-sidecar mutation and journal-mode
@@ -2033,12 +2085,122 @@ def search_eligible_parent_rows_result(
 ) -> CatalogQueryResult[list[tuple[str, str, str | None]]]:
     """The eligible parent set with the two columns a browse needs to order it."""
     if not _catalog_usable():
-        return CatalogQueryResult(
-            None, CatalogReadiness("unsupported", False, backend())
-        )
-    return get_store(vault_root).search_eligible_parent_rows_result(
-        eligibility, scope, freshness
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    return get_store(vault_root).search_eligible_parent_rows_result(eligibility, scope, freshness)
+
+
+@dataclass(frozen=True)
+class EligibilityMetadata:
+    view: dict[str, Any] | None
+    parent: str | None
+    updated: str
+    media_file: str | None
+    frame_ts: float | None
+    units: tuple[dict[str, Any], ...] = ()
+
+
+def parent_children_result(
+    vault_root: Path,
+    parents: set[str],
+    *,
+    scope: str,
+    freshness: tuple | None,
+) -> CatalogQueryResult[set[str]]:
+    """Stable children whose emitted metadata a pending parent can change."""
+    if not _catalog_usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    column = "in_vault" if scope == "vault" else "in_kb"
+
+    def query(conn: sqlite3.Connection) -> set[str]:
+        rows = conn.execute(
+            f"SELECT path FROM pages WHERE {column} = 1 AND emitted_parent_path "
+            "IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(parents), ensure_ascii=False),),
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    return get_store(vault_root)._serve_from_ready_catalog_result(
+        scope, freshness, query,
+        "lexical parent-child query failed (%s); pending eligibility declines",
     )
+
+
+def eligibility_metadata_result(
+    vault_root: Path,
+    paths: set[str],
+    *,
+    scope: str,
+    freshness: tuple | None,
+    include_units: bool = False,
+) -> CatalogQueryResult[dict[str, EligibilityMetadata]]:
+    """Exact filter views and parent hints from one proven catalogue snapshot."""
+    if not _catalog_usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    return get_store(vault_root)._serve_from_ready_catalog_result(
+        scope,
+        freshness,
+        lambda conn: _eligibility_metadata_query(conn, paths, include_units=include_units),
+        "lexical eligibility metadata query failed (%s); filter eligibility declines",
+    )
+
+
+def _eligibility_metadata_query(
+    conn: sqlite3.Connection, paths: set[str], *, include_units: bool
+) -> dict[str, EligibilityMetadata]:
+    rows = conn.execute(
+        "WITH requested AS (SELECT value AS path FROM json_each(?)), "
+        "wanted AS (SELECT path FROM requested UNION "
+        "SELECT emitted_parent_path FROM pages WHERE path IN (SELECT path FROM requested)) "
+        "SELECT path, eligibility_view_json, emitted_parent_path, updated FROM pages "
+        "WHERE in_vault = 1 AND path IN (SELECT path FROM wanted)",
+        (json.dumps(sorted(paths), ensure_ascii=False),),
+    ).fetchall()
+    result = {}
+    try:
+        for path, payload, parent, updated in rows:
+            payload = None if payload is None else json.loads(payload)
+            view = (
+                None
+                if payload is None
+                else {key: _decode_filter_value(value) for key, value in payload["view"].items()}
+            )
+            result[str(path)] = EligibilityMetadata(
+                view,
+                parent,
+                updated,
+                None if payload is None else payload["media_file"],
+                None if payload is None else payload["frame_ts"],
+            )
+        if not include_units:
+            return result
+        unit_rows = conn.execute(
+            "SELECT parent_path, category, category_key, kind, tags_json, context, form, "
+            "verdict, check_by_day FROM semantic_units "
+            "WHERE parent_path IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(result), ensure_ascii=False),),
+        ).fetchall()
+        units: dict[str, list[dict[str, Any]]] = {}
+        for path, category, category_key, kind, tags, context, form, verdict, check_by in unit_rows:
+            unit = dict(
+                category=category,
+                category_key=category_key,
+                kind=kind,
+                tags=json.loads(tags),
+                context=context,
+                form=form,
+            )
+            if verdict is not None:
+                unit["verdict"] = verdict
+            if check_by is not None:
+                unit["check_by"] = date.fromisoformat(check_by)
+            units.setdefault(str(path), []).append(unit)
+        from dataclasses import replace
+
+        for path, values in units.items():
+            result[path] = replace(result[path], units=tuple(values))
+    except (ValueError, TypeError, KeyError, AttributeError) as error:
+        raise sqlite3.DatabaseError("invalid eligibility metadata snapshot") from error
+    return result
 
 
 def ensure_fresh(vault_root: Path) -> None:
@@ -3111,9 +3273,9 @@ class LexicalStore:
 
     # The current normal-table shape sentinels. An older `pages` table lacks
     # one or more of these, so it must be rebuilt before a new-column INSERT.
-    _CURRENT_PAGES_COLUMNS = frozenset({"emitted_parent_path", "title", "content_hash"}) | frozenset(
-        _ELIGIBILITY_COLUMNS
-    )
+    _CURRENT_PAGES_COLUMNS = frozenset(
+        {"emitted_parent_path", "title", "content_hash", "eligibility_view_json"}
+    ) | frozenset(_ELIGIBILITY_COLUMNS)
     #: The eligibility sentinels on `semantic_units`. A catalog missing any of
     #: them cannot answer a governed unit filter, so it is a legacy shape.
     _CURRENT_UNIT_COLUMNS = frozenset(
@@ -3194,6 +3356,7 @@ class LexicalStore:
             # any finer granularity; `updated_json` answers presence and `$in`.
             " updated_day TEXT,"
             " updated_json TEXT,"
+            " eligibility_view_json TEXT,"
             " content_hash TEXT)"
         )
         # Per-scope walk triples this sidecar was last VERIFIED against
@@ -3256,12 +3419,9 @@ class LexicalStore:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS pages_page_type ON pages(page_type, in_kb, in_vault)"
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS pages_status ON pages(status, in_kb, in_vault)")
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS pages_status ON pages(status, in_kb, in_vault)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS pages_updated_day "
-            "ON pages(updated_day, in_kb, in_vault)"
+            "CREATE INDEX IF NOT EXISTS pages_updated_day ON pages(updated_day, in_kb, in_vault)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS semantic_units_verdict "
@@ -3669,10 +3829,9 @@ class LexicalStore:
         try:
             with conn:
                 self._apply_delta_rows(conn, delta)
-                if (
-                    catalog_semantic_identity(self.vault_root) != captured_identity
-                    or not self._delta_target_still_current(scope, delta)
-                ):
+                if catalog_semantic_identity(
+                    self.vault_root
+                ) != captured_identity or not self._delta_target_still_current(scope, delta):
                     raise _DeltaReplayStale
                 conn.execute(
                     "INSERT INTO meta(key, value) VALUES(?, ?) "
@@ -3901,6 +4060,7 @@ class LexicalStore:
             # unparseable rows (page is None) stay NULL like ordinary pages.
             emitted_parent_path = page.parent_media + ".md" if page.parent_media else None
             eligibility = _eligibility_columns(page)
+            eligibility_view = _eligibility_view_json(page)
             content_hash = getattr(page, "snapshot_hash", None)
         else:
             try:
@@ -3915,12 +4075,15 @@ class LexicalStore:
             # NULL, which is exactly "matches no positive constraint" — the same
             # answer the scan oracle gives, since it cannot parse it either.
             eligibility = _EMPTY_ELIGIBILITY
+            eligibility_view = None
             content_hash = None
         is_nav = path.name.lower() in _NAV_BASENAMES
         cur = conn.execute(
             "INSERT INTO pages(path, title, mtime_ns, updated, in_kb, in_vault, is_nav, "
-            "emitted_parent_path, " + ", ".join(_ELIGIBILITY_COLUMNS) + ", content_hash) "
-            "VALUES(" + ", ".join("?" * (9 + len(_ELIGIBILITY_COLUMNS))) + ")",
+            "emitted_parent_path, "
+            + ", ".join(_ELIGIBILITY_COLUMNS)
+            + ", eligibility_view_json, content_hash) "
+            "VALUES(" + ", ".join("?" * (10 + len(_ELIGIBILITY_COLUMNS))) + ")",
             (
                 rel,
                 title,
@@ -3931,6 +4094,7 @@ class LexicalStore:
                 int(is_nav),
                 emitted_parent_path,
                 *eligibility,
+                eligibility_view,
                 content_hash,
             ),
         )
@@ -4297,10 +4461,9 @@ class LexicalStore:
                 # edit rolls the transaction back rather than false-emptying the
                 # recursive exact-category retry.
                 for path, _rel, signature, in_kb, in_vault in prepared:
-                    if (
-                        freshness_module.stat_signature(path) != signature
-                        or self._membership(path) != (in_kb, in_vault)
-                    ):
+                    if freshness_module.stat_signature(path) != signature or self._membership(
+                        path
+                    ) != (in_kb, in_vault):
                         raise OSError(f"source changed during bounded upsert: {path.name}")
             self._publish_live_witnesses(
                 conn,
@@ -4433,9 +4596,10 @@ class LexicalStore:
         witnessed: dict[str, tuple[object, bool]] = {}
         for scope in ("kb", "vault"):
             checkpoint, stored = targets[scope]
-            if checkpoint is None or freshness_module.recall_checkpoint(
-                self.vault_root, scope
-            ) != checkpoint:
+            if (
+                checkpoint is None
+                or freshness_module.recall_checkpoint(self.vault_root, scope) != checkpoint
+            ):
                 self._witnessed.pop(scope, None)
             elif stored == checkpoint:
                 self._witnessed[scope] = checkpoint
@@ -5562,15 +5726,11 @@ class LexicalStore:
                     continue
                 if hashlib.sha256(content).hexdigest() != digest:
                     continue
-                page = find_corpus.parse_page(
-                    target, mtime, self.vault_root, content=content
-                )
+                page = find_corpus.parse_page(target, mtime, self.vault_root, content=content)
                 if page is None:
                     continue
                 expected_title = page.title
-                expected_parent = (
-                    page.parent_media + ".md" if page.parent_media else None
-                )
+                expected_parent = page.parent_media + ".md" if page.parent_media else None
                 if (
                     row[1] != expected_title
                     or str(row[2]) != (page.updated or "0000-00-00")
@@ -5668,11 +5828,9 @@ class LexicalStore:
             conn = self._connect()
             try:
                 conn.execute("BEGIN")
-                if (
-                    not self._schema_is_current(conn)
-                    or _checkpoint_state(self._meta_checkpoint(conn, scope))
-                    != _checkpoint_state(checkpoint)
-                ):
+                if not self._schema_is_current(conn) or _checkpoint_state(
+                    self._meta_checkpoint(conn, scope)
+                ) != _checkpoint_state(checkpoint):
                     return None
                 col = "in_vault" if scope == "vault" else "in_kb"
                 rows = conn.execute(

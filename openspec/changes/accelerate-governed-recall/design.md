@@ -66,6 +66,22 @@ taken only over clauses the index answers exactly.
 The oracle stays. It becomes the identity test's reference and the offline
 (unmanaged) fallback, never a managed reader's path.
 
+The SQL candidate columns can conservatively narrow a timestamp or unusual
+YAML value without deciding it exactly. Final evaluation therefore consumes
+typed page views and semantic-unit metadata from the same maintained catalogue,
+not freshly opened Markdown. The snapshot preserves absent versus null fields,
+scalar versus list values, and date versus timestamp precision. A catalogue
+schema upgrade rebuilds this derived metadata through the existing background
+repair; missing or stale metadata yields typed warming, never a source scan.
+
+Empty-query browsing orders emitted identities using maintained dates and
+parent/frame metadata before opening page snapshots. It merges current pending
+metadata into that ordering, retaining the exhaustive browse's first-candidate
+excerpt and first-frame annotation for each parent. Only selected groups are
+hydrated: one page for an ordinary result, plus a frame snapshot when that
+frame supplies the selected parent's excerpt. Unavailable, incomplete or stale
+ordering yields typed warming rather than removing the read bound.
+
 **Alternative rejected: derive page eligibility from FTS5 columns.** The
 catalogue stores text for ranking, not typed metadata; encoding list fields
 into it makes `$in` and `$exists` semantics a text-matching approximation.

@@ -299,9 +299,8 @@ def _set_recall_projection_timing_outcome(
             # projection outcome from inside a different stage, and must not
             # relabel that stage.
             open_stage = timings.current_stage()
-            if open_stage is None or not open_stage.endswith("recall_projection"):
-                open_stage = "recall_projection"
-            timings.mark_source(open_stage, source)
+            if open_stage is not None and open_stage.endswith("recall_projection"):
+                timings.mark_source(open_stage, source)
 
 
 def _record_filter_eligibility_cache_hit(timings: FindTimings | None) -> None:
@@ -666,8 +665,8 @@ class FreshnessSnapshot:
                         scope,
                     )
                 else:
-                    checkpoint, entries, scope_triple = (
-                        freshness.recall_projection_scope_snapshot(self._root, scope)
+                    checkpoint, entries, scope_triple = freshness.recall_projection_scope_snapshot(
+                        self._root, scope
                     )
                     if scope == "vault":
                         self._vault = scope_triple
@@ -1166,6 +1165,7 @@ def find(
         if not pending.ready:
             if managed_runtime:
                 _set_recall_projection_timing_outcome(timings, "pending_unavailable")
+                _mark_source(timings, "pending_visibility", find_types.SOURCE_DECLINED)
                 raise RetrievalIndexWarming(
                     site="pending_visibility_incomplete",
                     status="temporarily_unavailable",
@@ -1366,11 +1366,7 @@ def find(
         degraded.append(_PENDING_VISIBILITY_COMPONENT)
     if effective_result_level == "unit":
         unit_algebra = structured_filters.plan_index_candidates(filter_plan)
-        cache_size = (
-            0
-            if retrieval_trace is not None or pending_active
-            else _find_cache_size()
-        )
+        cache_size = 0 if retrieval_trace is not None or pending_active else _find_cache_size()
         if timings is not None:
             timings.cache["enabled"] = cache_size > 0
         _set_rerank_timing_profile(
@@ -2924,6 +2920,12 @@ RETRIEVAL_WARMING_SITES = (
     "semantic_unit_index",
     "semantic_unit_seed",
     "filter_eligibility_unnarrowed",
+    "filter_metadata_incomplete",
+    "browse_ordering_unavailable",
+    "browse_ordering_incomplete",
+    "browse_ordering_stale",
+    "browse_snapshot_unavailable",
+    "browse_eligibility_stale",
     "catalog_outcome",
     "relation_graph",
     "relation_graph_rebuilding",
@@ -3298,22 +3300,150 @@ def _managed_eligible_filter_paths(
         # pending custody owns. Withdraw those rows and re-offer the proven
         # committed ones, so the plan is evaluated against the exact current
         # page rather than a stale row (Decision 2's overlay clause).
+        from . import lexstore
+
+        # Reconsider stable children when a pending parent newly matches or
+        # disappears, even when its previous catalogue metadata did not match.
+        children = lexstore.parent_children_result(
+            vault_root, set(pending.rows), scope=scope, freshness=snapshot.for_scope(scope),
+        )
+        if not children.readiness.complete:
+            _mark_source(timings, "filter_eligibility", find_types.SOURCE_DECLINED)
+            _raise_catalog_outcome(children.readiness)
+        candidate_parents.update(children.value or ())
         candidate_parents = _merge_pending_candidates(
             candidate_parents, pending=pending, scope=scope
         )
     _set_eligibility_timing_profile(timings, candidates=len(candidate_parents))
     _mark_source(timings, "filter_eligibility", find_types.SOURCE_INDEX)
-    return _indexed_eligible_filter_paths(
+    metadata = _managed_page_metadata(
+        vault_root,
+        candidate_parents,
+        scope=scope,
+        freshness_key=snapshot.for_scope(scope),
+        pending=pending,
+        include_units=plan.has_unit_predicate,
+    )
+    return _metadata_eligible_filter_paths(
         vault_root,
         plan=plan,
         candidate_parent_paths=candidate_parents,
-        pending=pending,
+        metadata=metadata,
     )
 
 
-def _merge_pending_candidates(
-    candidates: set[str], *, pending: Any, scope: str
+def _managed_page_metadata(
+    vault_root: Path,
+    paths: set[str],
+    *,
+    scope: str,
+    freshness_key: tuple[int, int, str] | None,
+    pending: Any | None,
+    include_units: bool = False,
+) -> dict[str, Any]:
+    """Resolve current page metadata without opening canonical page files.
+
+    The catalogue supplies stable rows and their emitted parents. Exact pending
+    snapshots replace only the identities whose committed bytes they own.
+    """
+    from . import lexstore, semantic_index, vault
+
+    requested = set(paths)
+    if pending is not None:
+        for row in pending.current_pages():
+            if row.rel_path in paths and row.page.parent_media:
+                requested.add(row.page.parent_media + ".md")
+    result = lexstore.eligibility_metadata_result(
+        vault_root,
+        requested,
+        scope=scope,
+        freshness=freshness_key,
+        include_units=include_units,
+    )
+    if not result.readiness.complete:
+        _raise_catalog_outcome(result.readiness)
+    metadata = dict(result.value or {})
+    if pending is not None and not pending.empty:
+        # A stable orphan can acquire a newly committed parent that has no
+        # catalogue row yet, including a parent outside this request's scope.
+        requested.update(row.parent for row in metadata.values() if row.parent is not None)
+        for rel in set(metadata) | requested:
+            if not pending.covers(rel):
+                continue
+            page = pending.page(rel)
+            if page is None:
+                metadata.pop(rel, None)
+                continue
+            units: tuple[dict[str, Any], ...] = ()
+            if include_units:
+                # Parsing bounded, already-proven pending bytes is permitted;
+                # reopening the file here could observe a later commit instead.
+                source = (
+                    "---\n" + vault.serialize_frontmatter(page.frontmatter) + "\n---\n" + page.body
+                )
+                state = semantic_index.build_parent_index_state(vault_root, rel, source=source)
+                units = tuple(structured_filters.unit_view(unit) for unit in state.document.units)
+            metadata[rel] = lexstore.EligibilityMetadata(
+                structured_filters.page_view(page),
+                page.parent_media + ".md" if page.parent_media else None,
+                page.updated,
+                page.media_file,
+                page.frame_ts,
+                units,
+            )
+    if any(
+        rel not in metadata and not (pending is not None and pending.covers(rel)) for rel in paths
+    ):
+        raise RetrievalIndexWarming(site="filter_metadata_incomplete")
+    return metadata
+
+
+def _metadata_eligible_filter_paths(
+    vault_root: Path,
+    *,
+    plan: structured_filters.FilterPlan,
+    candidate_parent_paths: set[str],
+    metadata: dict[str, Any],
 ) -> set[str]:
+    """Canonical filter evaluation over index views, including parent collapse."""
+    from . import access
+
+    def visible(rel: str) -> bool:
+        row = metadata.get(rel)
+        return (
+            row is not None
+            and row.view is not None
+            and recall_policy.is_recall_candidate(vault_root, vault_root / rel)
+            and access.is_indexable(vault_root, rel)
+        )
+
+    eligible: set[str] = set()
+    matches: dict[str, bool] = {}
+    for rel in candidate_parent_paths:
+        if rel.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES or not visible(rel):
+            continue
+        row = metadata[rel]
+        parent = metadata.get(row.parent)
+        emitted = (
+            row.parent
+            if parent is not None
+            and parent.view is not None
+            and recall_policy.is_recall_candidate(vault_root, vault_root / row.parent)
+            else rel
+        )
+        if not visible(emitted):
+            continue
+        if emitted not in matches:
+            value = metadata[emitted]
+            matches[emitted] = structured_filters.page_matches(
+                plan, page=value.view, units=value.units
+            )
+        if matches[emitted]:
+            eligible.update((rel, emitted))
+    return eligible
+
+
+def _merge_pending_candidates(candidates: set[str], *, pending: Any, scope: str) -> set[str]:
     """Withdraw shadowed rows and re-offer committed ones, within the scope.
 
     The scope test is the oracle's (`_merge_pending_walk`): a pending identity
@@ -3443,9 +3573,7 @@ def _indexed_eligible_filter_paths(
         if page is None or not _indexable(page):
             continue
         if page.parent_media:
-            emitted = (
-                _resolve_page(vault_root, page.parent_media + ".md", pending) or page
-            )
+            emitted = _resolve_page(vault_root, page.parent_media + ".md", pending) or page
         else:
             emitted = page
         if not _indexable(emitted):
@@ -3558,38 +3686,156 @@ def _managed_browse_reader() -> bool:
     return bool(readiness.runtime_managed())
 
 
-def _browse_hydration_limit(
-    rows: list[tuple[str, str, str | None]],
+def _find_managed_browse(
+    vault_root: Path,
     *,
+    scope: str,
     limit: int,
+    eligible_paths: set[str] | None,
+    freshness_key: tuple[int, int, str] | None,
     pending: Any | None,
-) -> int | None:
-    """How many hits the browse may stop at, or None to hydrate the whole set.
+    types: list[str] | None,
+    projects: list[str] | None,
+    tags: list[str] | None,
+    speakers: list[str] | None,
+    file_types: list[str] | None,
+    exclude_file_types: list[str] | None,
+) -> list[Hit]:
+    """Order emitted identities before hydrating a bounded answer.
 
-    Bounding is only sound while the catalogue's ordering key IS the request's,
-    because the bound works by trusting that a candidate ranked below the
-    `limit`-th accepted hit cannot enter the answer. Two states break that, and
-    both are decided here from the catalogue alone, without reading a page:
-
-    * a scene-frame child in the candidate set. `_find_keyword` reports such a
-      child under its parent video, and the parent's `updated` is its own, so
-      the child's catalogue key is not the key its hit sorts by. `pages
-      .emitted_parent_path` names exactly those rows.
-    * pending custody. Between a durable commit and the catalogue's
-      republication `_resolve_page` answers from the in-flight page and
-      `_merge_pending_walk` adds identities the catalogue does not carry yet,
-      so the catalogue key is stale for precisely the pages a reader most needs
-      current.
-
-    In both the browse hydrates the resolved set in full, which is what it did
-    before the bound existed: the same answer at the same cost, and never a
-    different answer at a lower one.
+    Scene children keep the first candidate's excerpt and the first frame's
+    annotation, as the exhaustive browse did. Group membership, parent dates
+    and frame hints come from metadata; unselected groups cost no page reads.
+    Pending snapshots supply their current dates before the final ordering.
     """
+    from . import access
+
+    rows = _index_resolved_scope_rows(vault_root, scope=scope, freshness=freshness_key)
+    if rows is None:
+        raise RetrievalIndexWarming(site="browse_ordering_unavailable")
+    keys = {rel: updated for rel, updated, _parent in rows}
+    candidates = set(keys)
     if pending is not None and not pending.empty:
-        return None
-    if any(parent is not None for _rel, _updated, parent in rows):
-        return None
-    return max(0, int(limit))
+        candidates = _merge_pending_candidates(candidates, pending=pending, scope=scope)
+    if eligible_paths is not None:
+        # Emitted parents can legitimately sit outside the candidate scope;
+        # arbitrary missing eligible identities cannot be silently dropped.
+        parents = {parent for _rel, _updated, parent in rows if parent}
+        if eligible_paths - candidates - parents:
+            raise RetrievalIndexWarming(site="browse_ordering_incomplete")
+        candidates &= eligible_paths
+    metadata = _managed_page_metadata(
+        vault_root,
+        candidates,
+        scope=scope,
+        freshness_key=freshness_key,
+        pending=pending,
+    )
+    for rel in candidates:
+        if pending is not None and pending.covers(rel):
+            continue
+        if metadata[rel].updated != keys[rel]:
+            raise RetrievalIndexWarming(site="browse_ordering_stale")
+
+    # Preserve the exhaustive index browse's encounter order within each
+    # group: sorted stable candidates followed by exact pending candidates.
+    ordered = sorted(
+        (rel for rel in candidates if pending is None or not pending.covers(rel)),
+        key=lambda rel: _browse_order_key(rel, metadata[rel].updated),
+        reverse=True,
+    )
+    if pending is not None:
+        ordered.extend(
+            row.rel_path for row in pending.current_pages() if row.rel_path in candidates
+        )
+    visible: dict[str, bool] = {}
+
+    def admitted(rel: str) -> bool:
+        if rel not in visible:
+            value = metadata.get(rel)
+            visible[rel] = bool(
+                value is not None
+                and value.view is not None
+                and recall_policy.is_recall_candidate(vault_root, vault_root / rel)
+                and access.is_indexable(vault_root, rel)
+            )
+        return visible[rel]
+
+    first: dict[str, str] = {}
+    frames: dict[str, Any] = {}
+    for rel in ordered:
+        if rel.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES or not admitted(rel):
+            continue
+        row = metadata[rel]
+        parent = metadata.get(row.parent)
+        emitted = (
+            row.parent
+            if parent is not None
+            and parent.view is not None
+            and recall_policy.is_recall_candidate(vault_root, vault_root / row.parent)
+            else rel
+        )
+        if not admitted(emitted):
+            continue
+        first.setdefault(emitted, rel)
+        if emitted != rel and row.media_file and emitted not in frames:
+            frames[emitted] = row
+
+    hits: list[Hit] = []
+    for emitted in sorted(
+        first, key=lambda rel: _browse_order_key(rel, metadata[rel].updated), reverse=True
+    ):
+        candidate = _resolve_page(vault_root, first[emitted], pending)
+        page = (
+            candidate if first[emitted] == emitted else _resolve_page(vault_root, emitted, pending)
+        )
+        if candidate is None or page is None:
+            raise RetrievalIndexWarming(site="browse_snapshot_unavailable")
+        for current in (candidate, page):
+            expected = metadata[current.rel_path]
+            if (
+                _browse_order_key(current.rel_path, current.updated)
+                != _browse_order_key(current.rel_path, expected.updated)
+                or (current.parent_media + ".md" if current.parent_media else None)
+                != expected.parent
+            ):
+                raise RetrievalIndexWarming(site="browse_ordering_stale")
+        if not _passes_filters(
+            page,
+            vault_root=vault_root,
+            types=types,
+            projects=projects,
+            tags=tags,
+            speakers=speakers,
+            file_types=file_types,
+            exclude_file_types=exclude_file_types,
+        ):
+            # The maintained eligibility query has already applied these
+            # predicates. A disagreement means its proof no longer holds.
+            if eligible_paths is not None:
+                raise RetrievalIndexWarming(site="browse_eligibility_stale")
+            continue
+        frame = frames.get(emitted)
+        hit = Hit(
+            path=page.rel_path,
+            type=page.page_type,
+            scope=page.scope,
+            title=page.title,
+            updated=page.updated,
+            excerpt=_make_excerpt(candidate, "") or "",
+            media_type=page.media_type,
+            media_file=page.media_file,
+            status=page.status,
+            superseded_by=page.superseded_by,
+            snapshot_hash=page.snapshot_hash,
+            scene_frame=None if frame is None else frame.media_file,
+            scene_frame_ts=None if frame is None else frame.frame_ts,
+        )
+        hit.transcript_ts = _transcript_ts_for_hit(page, None, "")
+        hits.append(hit)
+        if len(hits) >= limit:
+            break
+    return hits
 
 
 def _find_keyword(
@@ -3618,13 +3864,23 @@ def _find_keyword(
     decide its label from what it actually did. `index` when it consumed a
     resolved path set, `computed` when it enumerated.
     """
+    if not query_norm and _managed_browse_reader():
+        _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
+        return _find_managed_browse(
+            vault_root,
+            scope=scope,
+            limit=limit,
+            eligible_paths=eligible_paths,
+            freshness_key=freshness_key,
+            pending=pending,
+            types=types,
+            projects=projects,
+            tags=tags,
+            speakers=speakers,
+            file_types=file_types,
+            exclude_file_types=exclude_file_types,
+        )
     lexical_repair = _bounded_lexical_repair_allowed(freshness_key)
-    # Set only by the index-served browse below: the number of hits it may stop
-    # at, and the catalogue's ordering key per path so the loop can prove that
-    # key was the right one before it acts on it. Every other branch leaves the
-    # bound off and hydrates what it walks, exactly as before.
-    browse_bound: int | None = None
-    browse_keys: dict[str, str] = {}
     if query_norm:
         candidate_paths = _keyword_match_paths(
             vault_root,
@@ -3644,111 +3900,27 @@ def _find_keyword(
         walk: Iterable[Path] = (vault_root / rel_path for rel_path in candidate_paths)
         _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
     elif eligible_paths is not None:
-        # An empty query with a finite eligible set (a complete category/kind
-        # plan resolved through the maintained index) iterates those parents
-        # directly rather than walking the scope to rediscover them.
-        #
-        # It then read every one of them, which is the same defect the
-        # no-filter arm below was fixed for and the reason that fix was swept
-        # for elsewhere: 80 reads for `types`, 88 for `projects`, against a
-        # 71-page scope and a limit of 5. Resolving a path set from the index
-        # and then opening all of it is not a read path that consumes an
-        # index; it is the walk with its enumeration removed.
-        #
-        # Unlike that arm this one does NOT decline when the catalogue cannot
-        # supply the ordering. It is reached with a lexical repair in flight,
-        # where the readiness proof below has not been made, and the eligible
-        # set is already resolved — so a catalogue that cannot order it costs
-        # the bound and nothing else, and the browse hydrates the set in full
-        # exactly as before.
-        ordered_rows: list[tuple[str, str, str | None]] | None = None
-        if _managed_browse_reader():
-            try:
-                ordered_rows = _index_resolved_scope_rows(
-                    vault_root, scope=scope, freshness=freshness_key
-                )
-            except RetrievalIndexWarming:
-                ordered_rows = None
-        eligible_rows = (
-            [row for row in ordered_rows if row[0] in eligible_paths]
-            if ordered_rows is not None
-            else None
-        )
-        if eligible_rows is not None and len(eligible_rows) == len(eligible_paths):
-            ordered = sorted(
-                eligible_rows,
-                key=lambda row: _browse_order_key(row[0], row[1]),
-                reverse=True,
-            )
-            browse_keys = {rel: updated for rel, updated, _parent in ordered}
-            browse_bound = _browse_hydration_limit(
-                eligible_rows, limit=limit, pending=pending
-            )
-            walk = (vault_root / rel_path for rel_path, _u, _p in ordered)
-        else:
-            # A path the catalogue holds no row for has no ordering key, and a
-            # prefix taken without one is the wrong prefix. Relation
-            # intersection and the emitted-parent expansion can both put an
-            # identity in this set that the scope query did not return.
-            walk = (vault_root / rel_path for rel_path in eligible_paths)
+        # Only unmanaged callers reach this arm; they retain the exact oracle.
+        walk = (vault_root / rel_path for rel_path in eligible_paths)
         _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
-    elif not lexical_repair:
-        from . import lexstore
+    else:
+        if not lexical_repair:
+            from . import lexstore
 
-        if lexstore.maintained_content_index_enabled():
-            catalog = lexstore.get_store(vault_root).catalog_readiness(
-                scope,
-                freshness_key,
-            )
-            if not catalog.complete:
-                _raise_catalog_outcome(catalog)
-        # The empty-query browse shape with no structured filter. A managed
-        # reader resolves the scope from the same page catalogue the filtered
-        # arm uses instead of enumerating it; an offline reader keeps the walk,
-        # which is its documented fallback.
-        indexed = (
-            _index_resolved_scope_rows(vault_root, scope=scope, freshness=freshness_key)
-            if _managed_browse_reader()
-            else None
-        )
-        if indexed is not None:
-            # Ordered here rather than in SQL so the catalogue's sort is the
-            # SAME comparison the hit list is sorted by, instead of whatever
-            # collation the connection happens to carry.
-            ordered = sorted(
-                indexed,
-                key=lambda row: _browse_order_key(row[0], row[1]),
-                reverse=True,
-            )
-            browse_keys = {rel: updated for rel, updated, _parent in ordered}
-            browse_bound = _browse_hydration_limit(
-                indexed, limit=limit, pending=pending
-            )
-            walk = (vault_root / rel_path for rel_path, _u, _p in ordered)
-            _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
-        elif scope == "kb":
+            if lexstore.maintained_content_index_enabled():
+                catalog = lexstore.get_store(vault_root).catalog_readiness(scope, freshness_key)
+                if not catalog.complete:
+                    _raise_catalog_outcome(catalog)
+        if scope == "kb":
             kb = vault_root / kb_dirname()
             if not kb.is_dir():
                 log.error("KB directory missing: %s", kb)
                 return []
             walk = _walk_md(kb)
-            _mark_source(timings, "keyword", find_types.SOURCE_COMPUTED)
         else:
             from .vault import walk_vault_md
 
             walk = walk_vault_md(vault_root)
-            _mark_source(timings, "keyword", find_types.SOURCE_COMPUTED)
-    elif scope == "kb":
-        kb = vault_root / kb_dirname()
-        if not kb.is_dir():
-            log.error("KB directory missing: %s", kb)
-            return []
-        walk = _walk_md(kb)
-        _mark_source(timings, "keyword", find_types.SOURCE_COMPUTED)
-    else:
-        from .vault import walk_vault_md
-
-        walk = walk_vault_md(vault_root)
         _mark_source(timings, "keyword", find_types.SOURCE_COMPUTED)
 
     if pending is not None and not pending.empty and not query_norm:
@@ -3770,20 +3942,6 @@ def _find_keyword(
         page = _resolve_page(vault_root, rel_path, pending)
         if page is None:
             continue
-        if browse_bound is not None and _browse_order_key(
-            page.rel_path, page.updated or ""
-        ) != _browse_order_key(rel_path, browse_keys.get(rel_path, "")):
-            # The bound is only sound while the catalogue's key is the key this
-            # hit sorts by. Verified per page rather than assumed: a row that
-            # disagrees withdraws the bound for the rest of the request, which
-            # costs a full hydration and cannot cost a wrong answer. Reaching
-            # this at all means the freshness gate admitted a stale catalogue.
-            log.warning(
-                "browse ordering key disagreed with the catalogue for %s; "
-                "hydrating the resolved set",
-                rel_path,
-            )
-            browse_bound = None
         if eligible_paths is not None and page.rel_path not in eligible_paths:
             continue
         excerpt = _make_excerpt(page, query_norm)
@@ -3849,13 +4007,6 @@ def _find_keyword(
                 hit.scene_frame, hit.scene_frame_ts = nf
         by_path[page.rel_path] = hit
         hits.append((page.updated or "0000-00-00", hit))
-        if browse_bound is not None and len(hits) >= browse_bound:
-            # Candidates arrive in descending order of the very key the sort
-            # below uses, and that key has been proved equal to the catalogue's
-            # for every page hydrated so far, so nothing still unread can enter
-            # the top `limit`. Stopping here is what makes the browse read the
-            # pages it can return instead of the pages it can see.
-            break
 
     hits.sort(key=lambda t: (t[0], t[1].path), reverse=True)
     return [h for _, h in hits[:limit]]
@@ -3914,11 +4065,7 @@ def _find_semantic(
 
     lexical_freshness = snapshot.for_scope(scope)
     lexical_repair = _bounded_lexical_repair_allowed(lexical_freshness)
-    if (
-        mode != "vector"
-        and not lexical_repair
-        and lexstore.maintained_content_index_enabled()
-    ):
+    if mode != "vector" and not lexical_repair and lexstore.maintained_content_index_enabled():
         catalog = lexstore.get_store(vault_root).catalog_readiness(
             scope,
             lexical_freshness,
@@ -4087,9 +4234,7 @@ def _find_semantic(
     semantic_lanes_absent = not vector_paths and not clip_set
     # Loop-invariant for the relaxed gate: tokenize/classify the query's words
     # once per query, not once per candidate page.
-    degraded_query_words = (
-        _query_word_stem_groups(query_norm) if semantic_lanes_absent else []
-    )
+    degraded_query_words = _query_word_stem_groups(query_norm) if semantic_lanes_absent else []
 
     # Resolve fused paths back to ParsedPage, filter, build hits in fused order.
     # BM25-only candidates must still satisfy the keyword all-tokens-present
@@ -4247,7 +4392,9 @@ def _find_semantic(
                 # A localized match on a video — CLIP keyframe first (existing), else a
                 # timed-transcript match — attaches the nearest PERSISTED frame so the
                 # moment is viewable, not just timestamped.
-                anchor_ts = hit.clip_frame_ts if hit.clip_frame_ts is not None else hit.transcript_ts
+                anchor_ts = (
+                    hit.clip_frame_ts if hit.clip_frame_ts is not None else hit.transcript_ts
+                )
                 if anchor_ts is not None:
                     nf = scene_frames.nearest_frame(vault_root, page.media_file, anchor_ts)
                     if nf is not None:
@@ -4591,10 +4738,7 @@ def _find_outside_kb(
     try:
         lexical_repair = (not managed) and _bounded_lexical_repair_allowed(vault_freshness)
         bm25_hits: list[tuple[str, float]] | None
-        if (
-            not lexical_repair
-            and lexstore.maintained_content_index_enabled()
-        ):
+        if not lexical_repair and lexstore.maintained_content_index_enabled():
             catalog_result = lexstore.search_bm25_result(
                 vault_root,
                 query,

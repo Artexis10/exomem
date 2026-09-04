@@ -594,14 +594,8 @@ def test_the_empty_query_browse_reads_only_the_pages_it_can_return(
     them. Pages rejected before hydration (navigation basenames, non-recall
     candidates) cost no read at all, so the honest ceiling is exactly `limit`.
 
-    Charged to the hydration stage rather than to the whole request, because
-    the filtered arms have a SECOND stage that reads the corpus and it is not
-    this one: `_managed_eligible_filter_paths` parses 40 of 71 pages for
-    `types` and 44 for `projects` while `filter_eligibility` reports `index`.
-    That is older than this change, it is the spec's own "the reader thread
-    does not read page frontmatter to evaluate the filter", and it is reported
-    as a successor rather than fixed under a ruling about the browse. Folding
-    it into this bound would either hide this fix behind it or pin a defect.
+    Count the whole request as well as hydration: filter eligibility must not
+    open matching pages before the bounded browse reads its selected answer.
     """
     _seed_browse_corpus(vault)
     _warm(vault, warm_managed_cell)
@@ -621,19 +615,16 @@ def test_the_empty_query_browse_reads_only_the_pages_it_can_return(
         f"the {arm} browse hydrated {hydration} of {_BROWSE_CORPUS} pages on the "
         f"reader thread to return {_BROWSE_LIMIT}:\n{sentinel.report()}"
     )
-    if arm == "no_filter":
-        # The shape the ruling named carries no second reader, so on it the
-        # whole request is inside the bound and the stronger claim holds.
-        assert sentinel.count <= _BROWSE_LIMIT, (
-            f"the unfiltered browse read {sentinel.count} pages in total to return "
-            f"{_BROWSE_LIMIT}:\n{sentinel.report()}"
-        )
+    assert sentinel.count <= _BROWSE_LIMIT, (
+        f"the {arm} browse read {sentinel.count} pages in total to return "
+        f"{_BROWSE_LIMIT}:\n{sentinel.report()}"
+    )
 
 
 #: The browse shapes the identity sweep runs. `after_a_governed_write` is the
 #: pending-custody case: between a durable commit and the catalogue's
 #: republication the reader's ordering key is the in-flight page's, not the
-#: catalogue row's, which is the one state the bound stands down for.
+#: catalogue row's. Ordering must incorporate it without removing the bound.
 _BROWSE_SHAPES: dict[str, dict[str, Any]] = {
     "kb": {"scope": "kb"},
     "kb_only": {"scope": "kb-only"},
@@ -664,151 +655,60 @@ def _browse_answers(vault: Path, *, after_write: bool) -> dict[str, list[str]]:
 
 
 @pytest.mark.parametrize("after_write", [False, True], ids=["warm", "after_a_governed_write"])
-def test_the_bounded_browse_returns_the_same_pages_the_unbounded_ones_do(
+def test_the_bounded_browse_matches_the_offline_oracle(
     vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, after_write: bool
 ) -> None:
-    """Bounding hydration must change the browse's COST, never its answer.
-
-    Two independent oracles, both reached by withdrawing a seam rather than by
-    relaxing a threshold, because a test that patches the number it asserts on
-    proves nothing about that number:
-
-    * the WALK — `_index_resolved_scope_rows` withdrawn, so control reaches
-      `_walk_md` and the reader hydrates and sorts the whole scope. This is the
-      behaviour that shipped before any of this change, so it is the reference
-      the contract's "cost, not answer" ruling is actually about.
-    * the UNBOUNDED INDEX — `_browse_hydration_limit` withdrawn, so the same
-      catalogue-resolved set is hydrated in full. This isolates the bound from
-      the index branch beneath it, so a disagreement names which of the two
-      moved.
-
-    Paths AND order are compared: a set-equal answer in a different order is
-    still a changed answer to a caller that reads the first hit.
-    """
+    """Compare membership and order with exhaustive source-based browsing."""
     _seed_browse_corpus(vault)
     _seed_outside(vault, "integration-browse-outside.md")
     _warm(vault, warm_managed_cell)
-
     bounded = _browse_answers(vault, after_write=after_write)
-
-    monkeypatch.setattr(find_module, "_browse_hydration_limit", lambda *a, **k: None)
-    find_module.reset_page_and_result_caches()
-    unbounded = _browse_answers(vault, after_write=False)
-
-    monkeypatch.setattr(find_module, "_index_resolved_scope_rows", lambda *a, **k: None)
+    monkeypatch.setattr(find_module, "_managed_browse_reader", lambda: False)
     find_module.reset_page_and_result_caches()
     walked = _browse_answers(vault, after_write=False)
-
-    disagreeing = {
-        name: {"bounded": bounded[name], "unbounded": unbounded[name], "walked": walked[name]}
-        for name in _BROWSE_SHAPES
-        if not bounded[name] == unbounded[name] == walked[name]
-    }
-    assert not disagreeing, (
-        "bounding hydration changed the answer, not only the cost: " f"{disagreeing}"
-    )
+    assert bounded == walked
 
 
-def test_the_bound_stands_down_for_the_two_states_that_invalidate_the_key() -> None:
-    """The seam's own contract, asserted where a mutant can reach it.
-
-    Both conditions are decided from the catalogue alone, without reading a
-    page, and neither has a behavioural node of its own: the per-page key
-    verification in the hydration loop catches the same two cases a moment
-    later and repairs the answer, so removing either clause costs cost and not
-    correctness. Defence in depth is worth having and is not the same thing as
-    a pinned guard, so the guard is pinned here directly.
-    """
-    plain = [("a.md", "2026-01-01", None), ("b.md", "2026-01-02", None)]
-    frames = [*plain, ("v.frames/scene.jpg.md", "2026-03-01", "v.md")]
-
-    class _Pending:
-        def __init__(self, empty: bool) -> None:
-            self.empty = empty
-
-    assert find_module._browse_hydration_limit(plain, limit=5, pending=None) == 5
-    assert find_module._browse_hydration_limit(plain, limit=5, pending=_Pending(True)) == 5
-    assert find_module._browse_hydration_limit(frames, limit=5, pending=None) is None
-    assert (
-        find_module._browse_hydration_limit(plain, limit=5, pending=_Pending(False)) is None
-    )
-
-
-def test_a_catalogue_whose_ordering_key_is_wrong_costs_cost_and_not_the_answer(
+def test_a_stale_browse_ordering_key_declines_without_reading_pages(
     vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The braces behind the belt: the key is verified per page, not trusted.
-
-    The bound works by trusting that a candidate ranked below the `limit`-th
-    accepted hit cannot enter the answer, which is only true while the
-    catalogue's `updated` IS the page's. The freshness gate is what makes that
-    so, and a gate that admitted a stale generation would otherwise turn a cost
-    saving into a silently different answer — the one outcome the ruling on
-    this fix forbids. Here the ordering key is deliberately corrupted to the
-    worst case, every row reversed, and the answer must not move.
-    """
     _seed_browse_corpus(vault)
     _warm(vault, warm_managed_cell)
-
-    honest = _paths(_recall(vault, query="", limit=_BROWSE_LIMIT))
-
     real = find_module._index_resolved_scope_rows
 
-    def _lying_rows(*args: Any, **kwargs: Any):
-        rows = real(*args, **kwargs)
-        if rows is None:
-            return None
-        # Every date replaced by its reflection about 2026, so the catalogue's
-        # order is the exact reverse of the page's.
-        return [
-            (rel, f"{2026:04d}-{13 - int(updated[5:7]):02d}-{updated[8:]}", parent)
-            for rel, updated, parent in rows
-        ]
+    def lying_rows(*args: Any, **kwargs: Any):
+        return [(rel, "1900-01-01", parent) for rel, _updated, parent in real(*args, **kwargs)]
 
-    monkeypatch.setattr(find_module, "_index_resolved_scope_rows", _lying_rows)
+    monkeypatch.setattr(find_module, "_index_resolved_scope_rows", lying_rows)
     find_module.reset_page_and_result_caches()
-    under_a_lie = _paths(_recall(vault, query="", limit=_BROWSE_LIMIT))
+    reads = _PageReadSentinel(*_scope_roots(vault))
+    reads.install(monkeypatch)
+    with pytest.raises(find_module.RetrievalIndexWarming) as raised:
+        _recall(vault, query="", limit=_BROWSE_LIMIT)
+    assert raised.value.site == "browse_ordering_stale"
+    assert reads.count == 0, reads.report()
 
-    assert honest, "the premise failed: the browse returned nothing to compare"
-    assert under_a_lie == honest, (
-        "a wrong catalogue ordering key changed the browse's answer instead of only "
-        f"its cost: honest={honest} lied={under_a_lie}"
-    )
 
-
-def test_an_eligible_page_the_catalogue_has_no_row_for_stands_the_bound_down(
+def test_an_eligible_page_with_no_ordering_row_declines_without_reading(
     vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The filtered arm's own precondition, which the unfiltered arm does not have.
-
-    The filtered browse gets its paths from the eligibility plan and its
-    ordering key from the scope query, and those are two queries. Relation
-    intersection and the emitted-parent expansion can both put an identity in
-    the eligible set that the scope query did not return, and a page with no
-    key cannot be ranked — so a prefix taken over the rows that DO have one
-    silently drops it. The arm hydrates the whole eligible set instead.
-    """
     _seed_browse_corpus(vault)
     _warm(vault, warm_managed_cell)
-
     honest = _paths(_recall(vault, query="", limit=_BROWSE_LIMIT, types=["note"]))
-    assert honest, "the premise failed: the filtered browse returned nothing"
-
+    assert honest
     real = find_module._index_resolved_scope_rows
-    dropped = honest[0]
 
-    def _missing_a_row(*args: Any, **kwargs: Any):
-        rows = real(*args, **kwargs)
-        return None if rows is None else [row for row in rows if row[0] != dropped]
+    def missing_a_row(*args: Any, **kwargs: Any):
+        return [row for row in real(*args, **kwargs) if row[0] != honest[0]]
 
-    monkeypatch.setattr(find_module, "_index_resolved_scope_rows", _missing_a_row)
+    monkeypatch.setattr(find_module, "_index_resolved_scope_rows", missing_a_row)
     find_module.reset_page_and_result_caches()
-    with_a_gap = _paths(_recall(vault, query="", limit=_BROWSE_LIMIT, types=["note"]))
-
-    assert with_a_gap == honest, (
-        "an eligible page the catalogue held no ordering row for was dropped from the "
-        f"answer: honest={honest} with_a_gap={with_a_gap}"
-    )
+    reads = _PageReadSentinel(*_scope_roots(vault))
+    reads.install(monkeypatch)
+    with pytest.raises(find_module.RetrievalIndexWarming) as raised:
+        _recall(vault, query="", limit=_BROWSE_LIMIT, types=["note"])
+    assert raised.value.site == "browse_ordering_incomplete"
+    assert reads.count == 0, reads.report()
 
 
 def test_a_catalogue_that_cannot_answer_the_browse_declines_instead_of_walking(
@@ -844,6 +744,152 @@ def test_a_catalogue_that_cannot_answer_the_browse_declines_instead_of_walking(
         _recall(vault, query="", limit=_BROWSE_LIMIT)
 
     assert sentinel.count == 0, sentinel.report()
+
+
+def test_the_filtered_browse_declines_when_the_index_cannot_order(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, walk_sentinel
+) -> None:
+    """Resolved membership is not permission to read the corpus for ordering."""
+    from exomem import lexstore
+
+    _seed_browse_corpus(vault)
+    _warm(vault, warm_managed_cell)
+
+    honest = _paths(_recall(vault, query="", limit=_BROWSE_LIMIT, types=["note"]))
+    assert honest, "the premise failed: the filtered browse returned nothing"
+
+    monkeypatch.setattr(
+        lexstore,
+        "search_eligible_parent_rows_result",
+        lambda *a, **k: lexstore.CatalogQueryResult(
+            None, lexstore.CatalogReadiness("stale", False, "sqlite")
+        ),
+    )
+    find_module.reset_page_and_result_caches()
+
+    sentinel = walk_sentinel(*_scope_roots(vault), current_thread_only=True)
+    sentinel.reset()
+    reads = _PageReadSentinel(*_scope_roots(vault))
+    reads.install(monkeypatch)
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        _recall(vault, query="", limit=_BROWSE_LIMIT, types=["note"])
+    assert reads.count == 0, reads.report()
+    assert sentinel.count == 0, sentinel.report()
+
+
+def test_pending_coverage_unavailable_is_typed_warming(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import freshness, pending_recall
+
+    _seed_browse_corpus(vault)
+    _warm(vault, warm_managed_cell)
+    monkeypatch.setattr(
+        freshness,
+        "recall_pending_coverage",
+        lambda *_: pending_recall.PendingOverlay(
+            outcome="warming", failure_code="probe", snapshot_generation=1, rows={}
+        ),
+    )
+    with pytest.raises(find_module.RetrievalIndexWarming) as raised:
+        _recall(vault, query="", limit=_BROWSE_LIMIT)
+    assert raised.value.site == "pending_visibility_incomplete"
+
+
+def test_pending_metadata_does_not_withdraw_the_browse_read_bound(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import freshness, pending_recall
+
+    [rel, *_] = _seed_browse_corpus(vault)
+    _warm(vault, warm_managed_cell)
+    page = find_module._CACHE.get(vault / rel, vault)
+    assert page is not None
+    row = pending_recall.PendingRow(rel, "generation", "batch", page.snapshot_hash, page, None)
+    overlay = pending_recall.PendingOverlay("ready", None, 1, {rel: row})
+    monkeypatch.setattr(freshness, "recall_pending_coverage", lambda *_: overlay)
+    reads = _PageReadSentinel(*_scope_roots(vault))
+    reads.install(monkeypatch)
+    result = _recall(vault, query="", limit=_BROWSE_LIMIT)
+    assert len(result["hits"]) == _BROWSE_LIMIT
+    assert reads.count <= _BROWSE_LIMIT, reads.report()
+
+
+def test_pending_parent_new_filter_match_keeps_stable_frame(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import freshness, pending_recall
+
+    parent = f"{kb_dirname()}/Evidence/pending-clip.mp4.md"
+    child = f"{kb_dirname()}/Evidence/pending-clip.mp4.frames/frame.jpg.md"
+    old = (
+        "---\ntitle: Pending Clip\ntype: source\nsource_type: video\nstatus: active\n"
+        "project: old-project\nmedia_type: video\nevidence_file: pending-clip.mp4\n"
+        "updated: 2026-12-30\n---\n\nParent excerpt."
+    )
+    new = old.replace("project: old-project", "project: new-project")
+    for rel, source in (
+        (parent, old),
+        (child, f"---\nparent_media: {parent[:-3]}\nevidence_file: pending-clip.mp4.frames/frame.jpg\nframe_ts: 3.5\nupdated: 2026-12-29\n---\n\nFrame excerpt."),
+    ):
+        path = vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+    _warm(vault, warm_managed_cell)
+
+    (vault / parent).write_text(new, encoding="utf-8")
+    page = find_corpus.parse_page(vault / parent, (vault / parent).stat().st_mtime, vault)
+    assert page is not None
+    overlay = pending_recall.PendingOverlay(
+        "ready", None, 1,
+        {parent: pending_recall.PendingRow(parent, "generation", "batch", page.snapshot_hash, page, None)},
+    )
+    monkeypatch.setattr(freshness, "recall_pending_coverage", lambda *_: overlay)
+    plan = find_module.structured_filters.compile_filter(
+        None, shortcuts=find_module.structured_filters.FilterShortcuts(projects=("new-project",))
+    )
+    oracle = find_module._eligible_filter_paths(vault, scope="kb", plan=plan, pending=overlay)
+    managed = find_module._resolve_eligible_filter_paths(
+        vault, scope="kb", plan=plan, snapshot=find_module.FreshnessSnapshot(vault), pending=overlay
+    )
+    assert managed == oracle
+    result = _recall(vault, query="", limit=5, projects=["new-project"])
+    [hit] = [hit for hit in result["hits"] if hit["path"] == parent]
+    assert hit["scene_frame"] == "pending-clip.mp4.frames/frame.jpg"
+
+
+@pytest.mark.parametrize("child_newer", [False, True])
+def test_scene_grouping_reads_only_selected_hit_snapshots(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, child_newer: bool
+) -> None:
+    _seed_browse_corpus(vault)
+    parent = f"{kb_dirname()}/Evidence/clip.mp4.md"
+    child = f"{kb_dirname()}/Evidence/clip.mp4.frames/frame.jpg.md"
+    for rel, body in (
+        (
+            parent,
+            "---\ntitle: Clip\nmedia_type: video\nevidence_file: clip.mp4\nupdated: 2026-12-30\n---\n\nParent excerpt.",
+        ),
+        (
+            child,
+            f"---\nparent_media: {parent[:-3]}\nevidence_file: clip.mp4.frames/frame.jpg\nframe_ts: 3.5\nupdated: 2026-12-{'31' if child_newer else '29'}\n---\n\nFrame excerpt.",
+        ),
+    ):
+        path = vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    _warm(vault, warm_managed_cell)
+    reads = _PageReadSentinel(*_scope_roots(vault))
+    reads.install(monkeypatch)
+    result = _recall(vault, query="", limit=_BROWSE_LIMIT)
+    assert _paths(result)[0] == parent
+    assert child not in _paths(result)
+    [hit] = [hit for hit in result["hits"] if hit["path"] == parent]
+    assert hit["scene_frame"] == "clip.mp4.frames/frame.jpg"
+    assert ("Frame excerpt." if child_newer else "Parent excerpt.") in hit["excerpt"]
+    # A selected frame-first group needs both its excerpt and emitted parent;
+    # every ordinary selected hit needs one snapshot. Other frames need none.
+    assert reads.count <= _BROWSE_LIMIT + int(child_newer), reads.report()
 
 
 def test_a_source_declared_outside_its_span_is_refused_not_discarded() -> None:
@@ -895,7 +941,7 @@ def test_the_index_served_browse_returns_the_same_answer_as_the_walk(
 
     # The same request with the index branch withdrawn, so control reaches the
     # walk the managed reader used to take.
-    monkeypatch.setattr(find_module, "_index_resolved_scope_rows", lambda *a, **k: None)
+    monkeypatch.setattr(find_module, "_managed_browse_reader", lambda: False)
     find_module.reset_page_and_result_caches()
     walked = _paths(_recall(vault, query="", limit=25))
 
