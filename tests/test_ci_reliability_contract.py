@@ -814,6 +814,66 @@ def test_release_evidence_automation_removes_both_manual_cranks() -> None:
     }
 
 
+@pytest.mark.parametrize("job_name", ["dispatch-evidence", "rerun-evidence-check"])
+@pytest.mark.skipif(os.name != "posix", reason="executes the Ubuntu workflow's Bash step")
+def test_release_evidence_commands_work_without_a_checkout(tmp_path: Path, job_name: str) -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/release-evidence-automation.yml").read_text(encoding="utf-8")
+    )
+    job = workflow["jobs"][job_name]
+    step = next(step for step in job["steps"] if "run" in step)
+    executable = tmp_path / "gh"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "args = sys.argv[1:]\n"
+        "if args[0] == 'api':\n"
+        "    endpoint = args[1]\n"
+        "    if endpoint.endswith('/commits/main'):\n"
+        "        print('tested-base')\n"
+        "    elif '/pulls?' in endpoint:\n"
+        "        print(json.dumps({'base': {'sha': 'tested-base'}, 'head': {'sha': 'release-head'}}))\n"
+        "    elif 'event=pull_request' in endpoint:\n"
+        "        print('123')\n"
+        "    else:\n"
+        "        print('0')\n"
+        "elif args[:2] in (['workflow', 'run'], ['run', 'rerun']):\n"
+        "    if os.environ.get('GH_REPO') != 'example/project':\n"
+        "        sys.exit('fatal: not a git repository; explicit repository context is missing')\n"
+        "    print('submitted: ' + ' '.join(args))\n"
+        "else:\n"
+        "    sys.exit('unexpected gh command')\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+
+    def render(value: str) -> str:
+        return value.replace("${{ github.repository }}", "example/project").replace(
+            "${{ github.repository_owner }}", "example"
+        )
+
+    env = dict(os.environ)
+    env.pop("GH_REPO", None)
+    for scope in (workflow, job, step):
+        env.update({key: render(str(value)) for key, value in scope.get("env", {}).items()})
+    env.update({
+        "PATH": str(tmp_path) + os.pathsep + env["PATH"],
+        "BASE_SHA": "tested-base",
+        "EVIDENCE_SHA": "tested-base",
+    })
+    result = subprocess.run(
+        ["bash", "-e", "-c", render(step["run"])],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected = (
+        "workflow run ci.yml --ref main"
+        if job_name == "dispatch-evidence"
+        else "run rerun 123 --failed"
+    )
+    assert "submitted: " + expected in result.stdout
+
+
 #: The worst cross-platform session observed, in seconds. A floor rather than a
 #: maximum: three six-way Windows shards were censored at the 2700s cap they hit,
 #: so the true worst is at least this.

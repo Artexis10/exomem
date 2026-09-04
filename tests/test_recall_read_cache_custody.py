@@ -31,6 +31,7 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -252,6 +253,134 @@ def test_a_burst_of_distinct_writes_leaves_every_cache_row_current(
     )
     for rel in (_ALPHA, _BETA, _GAMMA):
         assert lexstore.page_content_hashes(vault, [rel])[rel] == _digest(vault, rel)
+
+
+@pytest.mark.parametrize("reconciler", ["graph", "watcher"])
+def test_reconciliation_waits_for_a_governed_writes_freshness_publication(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, reconciler: str
+) -> None:
+    """The disk/event gap is not evidence of a receipt-less external edit."""
+    from exomem import epistemic_graph, mutation_lock
+    from exomem import vault as vault_module
+
+    _seed(vault, _ALPHA, "Custody alpha", "alpha-seed")
+    _warm(vault, warm_managed_cell)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    watcher = file_watcher.FileWatcher(vault)
+    advanced = threading.Event()
+    registry_published = threading.Event()
+    errors: list[BaseException] = []
+    phases: list[str] = []
+    published_inside_write: list[bool] = []
+    worker: threading.Thread | None = None
+    writer_thread = threading.current_thread()
+    original_hold = mutation_lock.VaultMutationCoordinator.hold
+    original_walk = vault_module.walk_vault_md
+    original_watcher_walk = watcher._walk_entries
+    original_reconcile = freshness.reconcile
+    original_publish = index_sync.publish_corpus_delta
+
+    def our_thread() -> bool:
+        return threading.current_thread() is worker
+
+    @contextmanager
+    def hold(coordinator, **kwargs):
+        if our_thread() and kwargs.get("operation") in {
+            "epistemic_graph_reconcile_recall", "watcher_reconcile_freshness"
+        }:
+            phases.append("publication_attempt")
+            advanced.set()
+        with original_hold(coordinator, **kwargs):
+            yield
+
+    def walk(root):
+        yield from original_walk(root)
+        if our_thread():
+            phases.append("walk_complete")
+
+    def watcher_walk(scope):
+        yield from original_watcher_walk(scope)
+        if our_thread():
+            phases.append("walk_complete")
+
+    def reconcile_registry(*args, **kwargs):
+        result = original_reconcile(*args, **kwargs)
+        if our_thread():
+            phases.append("registry_published")
+            registry_published.set()
+            advanced.set()
+        return result
+
+    def publish_delta(root, **kwargs):
+        result = original_publish(root, **kwargs)
+        if threading.current_thread() is writer_thread and vault / _ALPHA in kwargs.get("changed", ()):
+            phases.append("receipt_published")
+        return result
+
+    def reconcile():
+        try:
+            if reconciler == "graph":
+                graph._reconcile_recall_publication()
+            else:
+                watcher._reconcile_once(seed=False)
+        except BaseException as error:  # noqa: BLE001 - assert thread failures in the parent
+            errors.append(error)
+        finally:
+            advanced.set()
+
+    def after_destination(path):
+        nonlocal worker
+        if path != vault / _ALPHA:
+            return
+        # The real writer still owns canonical authority and has not called
+        # publish_corpus_delta. Advance the other thread all the way through
+        # its walk to either publication contention or (incorrect) completion.
+        worker = threading.Thread(target=reconcile, daemon=True)
+        worker.start()
+        assert advanced.wait(10), "reconciliation did not reach its publication boundary"
+        published_inside_write.append(registry_published.is_set())
+
+    monkeypatch.setattr(mutation_lock.VaultMutationCoordinator, "hold", hold)
+    monkeypatch.setattr(vault_module, "walk_vault_md", walk)
+    monkeypatch.setattr(watcher, "_walk_entries", watcher_walk)
+    monkeypatch.setattr(freshness, "reconcile", reconcile_registry)
+    monkeypatch.setattr(index_sync, "publish_corpus_delta", publish_delta)
+    monkeypatch.setattr(vault_module, "_after_batch_destination_published", after_destination)
+    freshness.reset_custody_telemetry()
+    try:
+        _govern(vault, _ALPHA, "Custody alpha", "alpha-racing-reconcile")
+    finally:
+        if worker is not None:
+            worker.join(15)
+    assert worker is not None and not worker.is_alive()
+    assert errors == []
+    assert published_inside_write == [False], "reconcile published inside the disk/event gap"
+    assert phases.index("walk_complete") < phases.index("publication_attempt"), (
+        "the whole-vault walk must stay outside canonical authority"
+    )
+    assert phases.index("receipt_published") < phases.index("registry_published")
+    assert freshness.custody_scope_invalidations() == ()
+    assert freshness.custody_rebuilds() == {}
+    assert freshness.audit_custody(vault, [_ALPHA], reason="reconcile-race").mismatches == ()
+
+
+def test_superseded_graph_reconciliation_keeps_the_external_epoch_pending(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import epistemic_graph
+    from exomem import vault as vault_module
+
+    _seed(vault, _ALPHA, "Custody alpha", "alpha-seed")
+    pending = freshness.mark_external_pending(vault)
+    original_walk = vault_module.walk_vault_md
+
+    def invalidated_walk(root):
+        yield from original_walk(root)
+        freshness.invalidate(root)
+
+    monkeypatch.setattr(vault_module, "walk_vault_md", invalidated_walk)
+    epistemic_graph.EpistemicGraphIndex(vault)._reconcile_recall_publication()
+    assert freshness.external_pending_epoch(vault) == pending
 
 
 def test_a_move_retires_the_old_row_and_creates_the_new_one(

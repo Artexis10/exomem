@@ -549,7 +549,7 @@ def test_zero_live_cap_periodic_drain_progresses_without_overspending_drift(
     monkeypatch.setattr(
         file_watcher.freshness,
         "reconcile",
-        lambda *_a, **_kw: SimpleNamespace(drifted=True, changed=(), deleted=()),
+        lambda *_a, **_kw: file_watcher.freshness.ReconcileDelta(True, [], []),
     )
     monkeypatch.setattr(
         watcher,
@@ -674,7 +674,7 @@ def test_reconcile_drift_spends_budget_before_deferred_drain(
     monkeypatch.setattr(
         file_watcher.freshness,
         "reconcile",
-        lambda *_a, **_kw: SimpleNamespace(drifted=True, changed=(), deleted=()),
+        lambda *_a, **_kw: file_watcher.freshness.ReconcileDelta(True, [], []),
     )
     monkeypatch.setattr(
         file_watcher.media_processing, "reconcile_all_media", lambda *_a, **_kw: 0
