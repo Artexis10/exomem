@@ -571,18 +571,15 @@ def _stage_environment(plan: MemoryBenchRunPlan, controlled_path: str = os.defpa
     if value := os.environ.get("UV_CACHE_DIR"):
         values["UV_CACHE_DIR"] = value
     if plan.provider == "exomem":
+        from lme.adapter import lme_profile
+
         for variable in ("HF_HOME", "HF_HUB_CACHE"):
             if value := os.environ.get(variable):
                 values[variable] = value
         values.update({
             "EXOMEM_HOME": plan.provider_checkout.root,
             "EXOMEM_COMMIT": plan.provider_checkout.commit,
-            "EXOMEM_DISABLE_WARMUP": "1",
-            "EXOMEM_DISABLE_FILE_WATCHER": "1",
-            "EXOMEM_DISABLE_MODE_WATCH": "1",
-            "EXOMEM_DISABLE_CORPUS_CACHE": "1",
-            "EXOMEM_VEC_BACKEND": "numpy",
-            "EXOMEM_LEXICAL_BACKEND": "python",
+            **lme_profile().settings,
         })
     else:
         values["BASIC_MEMORY_HOME"] = plan.provider_checkout.root

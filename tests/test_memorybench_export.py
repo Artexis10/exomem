@@ -631,6 +631,22 @@ def test_exomem_stage_environment_preserves_explicit_model_cache_binding(
     assert environment["HF_HUB_CACHE"] == str(hub)
 
 
+def test_exomem_stage_environment_carries_the_canonical_cpu_profile(tmp_path, monkeypatch):
+    from lme.adapter import lme_profile
+    from memorybench.export import _stage_environment
+    from protocol.models import MemoryBenchRunPlan
+
+    for key in ("EXOMEM_DEVICE", "EXOMEM_EMBED_DEVICE", "EXOMEM_CLIP_DEVICE"):
+        monkeypatch.setenv(key, "cuda")
+    monkeypatch.setenv("EXOMEM_MODE", "performance")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    profile = lme_profile()
+    assert profile.settings.get("EXOMEM_DEVICE") == "cpu"
+    environment = _stage_environment(MemoryBenchRunPlan.model_validate(_plan_payload(tmp_path)))
+    assert {key: environment.get(key) for key in profile.settings} == profile.settings
+    assert environment["CUDA_VISIBLE_DEVICES"] == ""
+
+
 def test_stage_environment_preserves_explicit_uv_cache_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

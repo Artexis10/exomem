@@ -36,8 +36,14 @@ def lme_profile() -> Profile:
             "EXOMEM_DISABLE_CORPUS_CACHE": "1",
             "EXOMEM_VEC_BACKEND": "numpy",
             "EXOMEM_LEXICAL_BACKEND": "python",
+            "EXOMEM_MODE": "normal",
+            "EXOMEM_DEVICE": "cpu",
+            "EXOMEM_EMBED_DEVICE": "cpu",
+            "EXOMEM_CLIP_DEVICE": "cpu",
+            "CUDA_VISIBLE_DEVICES": "",
             # The canonical lane is CPU/numpy even on hosts that expose an
-            # unusable NVIDIA driver (for example GPU-blocked sandboxes).
+            # unusable NVIDIA driver. Device pins above select CPU; this
+            # separate doctor allowance alone does not select a device.
             "EXOMEM_ALLOW_CPU_TORCH": "1",
             # Model weights must already exist in the local cache. A cache
             # miss is the semantic environment fault above, never a network

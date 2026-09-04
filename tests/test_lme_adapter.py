@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,33 @@ def test_adapter_subclasses_product_core_and_keeps_default_capabilities_on() -> 
     assert settings["TRANSFORMERS_OFFLINE"] == "1"
     assert "EXOMEM_DISABLE_CLIP" not in settings
     assert "EXOMEM_DISABLE_MEDIA_EXTRACTION" not in settings
+
+
+def test_lme_profile_selects_cpu_without_probing_ambient_accelerators(monkeypatch) -> None:
+    from exomem import accel, mode
+
+    ambient = {
+        "EXOMEM_MODE": "performance", "EXOMEM_DEVICE": "cuda",
+        "EXOMEM_EMBED_DEVICE": "cuda:1", "EXOMEM_CLIP_DEVICE": "mps",
+        "CUDA_VISIBLE_DEVICES": "0",
+    }
+    for key, value in ambient.items():
+        monkeypatch.setenv(key, value)
+
+    def unexpected_probe(**kwargs):
+        pytest.fail("the CPU benchmark profile probed an accelerator")
+
+    monkeypatch.setattr(accel, "_auto_device", unexpected_probe)
+    adapter = LmeExomemAdapter()
+    adapter._set_env(lme_profile().settings)
+    try:
+        for override in (None, "EXOMEM_EMBED_DEVICE", "EXOMEM_CLIP_DEVICE"):
+            assert accel.select_device(override_env=override) == "cpu"
+        assert mode.resolve_mode() == "normal"
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
+    finally:
+        adapter._restore_env()
+    assert {key: os.environ[key] for key in ambient} == ambient
 
 
 def test_each_question_uses_an_isolated_vault_and_captures_session_time(

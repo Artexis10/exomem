@@ -756,6 +756,11 @@ def execute_run(
             if question.validation_warnings
         },
     }
+    if config.provider in (None, "exomem-source-only"):
+        profile = lme_profile()
+        environment["lme"]["requested_profile"] = {
+            "name": profile.name, "settings": profile.settings,
+        }
     _write_json(run_dir / "environment.json", environment)
 
     failures: list[dict[str, object]] = []

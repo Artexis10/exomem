@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { EXOMEM_LME_ENV } from "../_guest_transport"
 import type { UnifiedSession } from "../../types/unified"
 import { ExomemProvider, prepareExomemRetirement } from "../exomem"
 
@@ -65,6 +69,30 @@ function harness() {
 }
 
 describe("Exomem guest provider", () => {
+  test("provider evidence records its requested CPU environment", async () => {
+    const root = await mkdtemp(join(tmpdir(), "exomem-profile-evidence-"))
+    try {
+      const h = harness()
+      const service = { ...h.service, evidence_root: root }
+      const provider = new ExomemProvider({
+        ensureService: async () => service,
+        post: h.post,
+        doctor: h.doctor,
+        clearService: async () => {},
+      })
+      // Exercise real evidence persistence while replacing only service I/O.
+      ;(provider as unknown as { evidenceEnabled: boolean }).evidenceEnabled = true
+      await provider.ingest(sessions.slice(0, 1), { containerTag: "profile-evidence" })
+      const entries = await Promise.all((await readdir(root)).filter((name) => name.endsWith(".json"))
+        .map(async (name) => JSON.parse(await readFile(join(root, name), "utf8"))))
+      const manifest = entries.find((entry) => entry.event === "provider-manifest")
+      expect(manifest.data.deterministic_profile.requested_settings).toEqual(EXOMEM_LME_ENV)
+      expect(manifest.data.deterministic_profile.requested_settings.EXOMEM_DEVICE).toBe("cpu")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   test("declares sequential concurrency and accepts no API key", async () => {
     const h = harness()
     const provider = new ExomemProvider({

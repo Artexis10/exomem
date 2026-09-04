@@ -2,6 +2,15 @@
 
 ## Governing decisions
 
+CPU-profile repair: `lme_profile()` owns the explicit normal-mode, CPU device
+and empty CUDA visibility pins. The controlled export imports that profile;
+the TypeScript transport mirror is checked by executing it against the Python
+profile. Text and CLIP overrides are pinned because they outrank the global
+device selector. `EXOMEM_ALLOW_CPU_TORCH` only permits the doctor fallback and
+does not enforce a device. Run and provider evidence label these as requested
+settings, not observed model placement. Both equivalence halves require fresh
+artifacts at the repaired provider pin; old evidence is retained unchanged.
+
 1. **Inverted configuration authorship is the fairness answer.** The rescope
    retired comparison because the author configured the competitor. This
    programme makes competitor-side configuration competitor-authored:

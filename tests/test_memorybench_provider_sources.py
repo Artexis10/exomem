@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -38,6 +40,26 @@ EXPECTED_PROVIDER_FILES = {
 
 def _read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
+
+
+def test_guest_child_cpu_policy_matches_the_executed_python_profile() -> None:
+    from lme.adapter import lme_profile
+
+    bun = shutil.which("bun")
+    if bun is None:
+        pytest.skip("Bun is required for the cross-language profile check")
+    module = (PROVIDERS / "_guest_transport.ts").resolve().as_uri()
+    script = (
+        f"import {{buildExomemChildEnvironment}} from {json.dumps(module)};"
+        "console.log(JSON.stringify(buildExomemChildEnvironment({"
+        "EXOMEM_MODE:'performance',EXOMEM_DEVICE:'cuda',EXOMEM_EMBED_DEVICE:'cuda:1',"
+        "EXOMEM_CLIP_DEVICE:'mps',CUDA_VISIBLE_DEVICES:'0'},{})));"
+    )
+    result = subprocess.run([bun, "-e", script], capture_output=True, text=True, check=True, timeout=20)
+    environment = json.loads(result.stdout)
+    settings = lme_profile().settings
+    assert environment.get("EXOMEM_DEVICE") == "cpu"
+    assert {key: environment.get(key) for key in settings} == settings
 
 
 def _patch_paths(patch_text: str) -> set[str]:

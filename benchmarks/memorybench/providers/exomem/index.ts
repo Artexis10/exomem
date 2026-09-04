@@ -8,6 +8,7 @@ import type {
 } from "../../types/provider"
 import type { UnifiedSession } from "../../types/unified"
 import {
+  EXOMEM_LME_ENV,
   appendGuestEvidence,
   clearAllExomemServices,
   clearExomemService,
@@ -180,6 +181,7 @@ export class ExomemProvider implements Provider {
         checkout_root: service.checkout_root,
         deterministic_profile: {
           provenance: "benchmarks/lme/adapter.py::lme_profile",
+          requested_settings: EXOMEM_LME_ENV,
           embeddings_requested: true,
           warmup: "disabled",
           file_watcher: "disabled",

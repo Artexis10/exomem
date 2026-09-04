@@ -363,6 +363,10 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       carry, with expiry — they are not to be papered over before the gate runs.
 - [ ] 4.6c 25-case Exomem direct-vs-MemoryBench equivalence gate GREEN
       (mode=blocking) — prerequisite for every comparative run
+- [ ] 4.6c-CPU Enforce and record the canonical CPU profile in the direct
+      adapter, guest transport and controlled export environment; prove ambient
+      accelerator overrides cannot change text/CLIP device selection. Rerun
+      both halves at a fresh provider pin after the repair is delivered.
 - [ ] 4.7 Ratify and implement the native Supermemory vendor-hit projection
       (distinct from 4.5's flat guest-hit wire), then run the Supermemory
       direct-SDK vs MemoryBench-provider spot-check (mode=report)

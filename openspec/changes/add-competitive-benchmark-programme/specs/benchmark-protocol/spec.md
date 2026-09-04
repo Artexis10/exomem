@@ -1,5 +1,29 @@
 ## ADDED Requirements
 
+### Requirement: LME CPU Profile Is Enforced Across Both Execution Paths
+
+The Exomem LongMemEval direct adapter and MemoryBench guest SHALL enforce the
+same canonical CPU profile before model initialization and doctor execution.
+The profile SHALL override ambient performance mode, global and text/CLIP
+device overrides, and CUDA visibility without changing the operator's config.
+Embeddings and CLIP SHALL remain enabled. The export stage SHALL carry the
+canonical profile through its controlled child environment. Direct run evidence
+and guest provider evidence SHALL record the requested profile explicitly;
+declared settings SHALL NOT be presented as observed model-device measurements.
+A changed profile requires fresh direct and guest runs at the new provider pin.
+
+#### Scenario: Ambient GPU settings cannot change the benchmark device
+- **GIVEN** an operator selects performance mode and CUDA or MPS model overrides
+- **WHEN** either Exomem benchmark path initializes its models
+- **THEN** text and CLIP select CPU without accelerator probing
+- **AND** the child environment hides CUDA devices, including during doctor
+- **AND** the operator's persistent configuration remains unchanged
+
+#### Scenario: Export and transport retain the same declared CPU policy
+- **WHEN** the export creates its controlled environment and the guest launches
+- **THEN** both apply the canonical direct profile, including empty-valued pins
+- **AND** evidence identifies these values as requested configuration
+
 ### Requirement: Canonical Events Quarantine Gold
 Provider adapters SHALL receive dataset content only as canonical protocol
 events carrying neutralized public identity (ordinal session identity, a

@@ -50,6 +50,34 @@ def _manifest(run_dir: Path) -> dict:
     return json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
 
 
+def test_direct_exomem_run_records_the_requested_profile(tmp_path: Path, monkeypatch) -> None:
+    from lme.adapter import LmeExomemAdapter, lme_profile
+    from lme.runner import LmeRunInvalid
+    from membench.adapters.base import AdapterEnvironmentError
+
+    received = []
+
+    def stop_before_model_load(self, workdir, profile):
+        received.append(profile)
+        raise AdapterEnvironmentError("fixture stops before model initialization")
+
+    monkeypatch.setattr(LmeExomemAdapter, "setup", stop_before_model_load)
+    with pytest.raises(LmeRunInvalid) as rejected:
+        _execute(tmp_path, "requested-profile", provider="exomem-source-only")
+    environment = json.loads((rejected.value.run_dir / "environment.json").read_text())
+    profile = lme_profile()
+    assert received == [profile]
+    assert environment["lme"]["requested_profile"] == {
+        "name": profile.name, "settings": profile.settings,
+    }
+
+
+def test_other_provider_does_not_claim_the_exomem_cpu_profile(tmp_path: Path) -> None:
+    result = _execute(tmp_path, "control-profile")
+    environment = json.loads((result.run_dir / "environment.json").read_text())
+    assert "requested_profile" not in environment["lme"]
+
+
 def _direct_session(run_dir: Path, logical_question_id: str | None) -> str:
     environment = json.loads((run_dir / "environment.json").read_text(encoding="utf-8"))
     matches = [
