@@ -2166,8 +2166,15 @@ class EpistemicGraphIndex:
             (str(path), freshness.stat_signature(path))
             for path in vault_module.walk_vault_md(self.vault_root)
         )
-        freshness.reconcile(self.vault_root, "vault", entries)
-        if pending is not None:
+        result = freshness.reconcile(
+            self.vault_root,
+            "vault",
+            entries,
+            publication_guard=self._mutation_coordinator.hold(
+                operation="epistemic_graph_reconcile_recall", holder_kind="graph"
+            ),
+        )
+        if result.published and pending is not None:
             freshness.clear_external_pending(self.vault_root, through=pending)
 
     @staticmethod

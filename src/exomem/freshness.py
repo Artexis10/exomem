@@ -64,6 +64,7 @@ import threading
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple, overload
@@ -88,6 +89,9 @@ class ReconcileDelta(NamedTuple):
     drifted: bool
     changed: list[str]
     deleted: list[str]
+    # A walk superseded by invalidation did not establish a new baseline and
+    # must not acknowledge an external event merely because it found no drift.
+    published: bool = True
 
 
 FileSignature = tuple[int, int, int]
@@ -1104,7 +1108,11 @@ def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLik
 
 
 def reconcile(
-    vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLike]]
+    vault_root: Path,
+    scope: str,
+    entries: Iterable[tuple[str, SignatureLike]],
+    *,
+    publication_guard: AbstractContextManager[object] | None = None,
 ) -> ReconcileDelta:
     """Replace the map from a fresh walk; return the drift delta.
 
@@ -1114,15 +1122,25 @@ def reconcile(
     changed/deleted paths (this function holds both the old map and the fresh
     walk) so the caller can dispatch them through the event fan-out; the map is
     always fully replaced regardless of what the caller does with the delta.
+
+    Production callers supply the canonical writer's publication guard. The
+    walk and policy projection stay off-boundary; only the final map swap waits
+    for an in-flight writer's event. Its retained target state then wins over
+    any observation made between canonical replacement and event publication.
     """
+    from . import recall_policy
+
     key = _key(vault_root, scope)
     replacement_lock, replacement_epoch = _begin_replacement(key)
     try:
         fresh = {sp: _normalize_signature(signature) for sp, signature in entries}
         recall_fresh, recall_identity = _project_recall_entries(vault_root, fresh.items())
-        with _lock:
-            if not _replacement_is_current(key, replacement_epoch):
-                return ReconcileDelta(drifted=False, changed=[], deleted=[])
+        with (publication_guard if publication_guard is not None else nullcontext()), _lock:
+            if (
+                not _replacement_is_current(key, replacement_epoch)
+                or recall_policy.recall_policy_identity(vault_root) != recall_identity
+            ):
+                return ReconcileDelta(drifted=False, changed=[], deleted=[], published=False)
             _merge_replacement_pending(key, fresh, recall_fresh)
             old = _maps.get(key)
             # The map swap and the drift generation/history transition happen in ONE
