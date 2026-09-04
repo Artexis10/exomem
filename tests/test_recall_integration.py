@@ -34,6 +34,8 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import traceback
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -101,20 +103,44 @@ class _PageReadSentinel:
     def __init__(self, *scope_roots: Path, current_thread_only: bool = True) -> None:
         self._roots = tuple(os.path.realpath(root) for root in scope_roots)
         self._owner = threading.get_ident() if current_thread_only else None
-        self.read: list[str] = []
+        self.read: list[tuple[str, str]] = []
 
     @property
     def count(self) -> int:
         return len(self.read)
 
+    def count_from(self, *callers: str) -> int:
+        """Reads charged to these stages, so a bound can name what it bounds.
+
+        A whole-request count answers "did anything read the corpus" and cannot
+        say which stage did, which matters once more than one of them can:
+        `filter_eligibility` parses every candidate page to evaluate a filter it
+        could not resolve through the index, and that is a different defect,
+        older than this change and reported rather than fixed here.
+        """
+        return sum(1 for _path, caller in self.read if caller in callers)
+
     def reset(self) -> None:
         self.read.clear()
 
     def report(self) -> str:
-        distinct = sorted(set(self.read))
+        by_caller = Counter(caller for _path, caller in self.read)
         return "\n".join(
-            [f"{len(self.read)} page reads ({len(distinct)} distinct)", *distinct]
+            [
+                f"{len(self.read)} page reads, by stage:",
+                *(f"  {count:4d}x {caller}" for caller, count in by_caller.most_common()),
+            ]
         )
+
+    def _caller(self) -> str:
+        """The innermost `find.py` frame, which is the stage doing the reading."""
+        for frame in reversed(traceback.extract_stack()):
+            if frame.filename.endswith(os.sep + "find.py") and frame.name not in (
+                "_resolve_page",
+                "_page_of",
+            ):
+                return frame.name
+        return "(outside find.py)"
 
     def record(self, path: object) -> None:
         if self._owner is not None and threading.get_ident() != self._owner:
@@ -125,7 +151,7 @@ class _PageReadSentinel:
             return
         for root in self._roots:
             if resolved.startswith(root + os.sep):
-                self.read.append(resolved)
+                self.read.append((resolved, self._caller()))
                 return
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -535,8 +561,21 @@ def _seed_browse_corpus(vault: Path) -> list[str]:
     return seeded
 
 
+#: Every browse arm `_find_keyword` has, not only the one the review pointed
+#: at. The filtered arm resolves its paths from the index and then read all of
+#: them — 80 reads for `types` and 88 for `projects` against a 71-page scope at
+#: `limit=5` — which is the same defect with an eligibility plan in front of
+#: it. Parametrized so a single failing arm is named by the node id.
+_BROWSE_READ_ARMS: dict[str, dict[str, Any]] = {
+    "no_filter": {},
+    "types_filter": {"types": ["note"]},
+    "projects_filter": {"projects": ["project-alpha"]},
+}
+
+
+@pytest.mark.parametrize("arm", sorted(_BROWSE_READ_ARMS))
 def test_the_empty_query_browse_reads_only_the_pages_it_can_return(
-    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, arm: str
 ) -> None:
     """The contract's second and third verbs, which no other instrument sees.
 
@@ -554,6 +593,15 @@ def test_the_empty_query_browse_reads_only_the_pages_it_can_return(
     return at most `limit` pages has no business reading more than `limit` of
     them. Pages rejected before hydration (navigation basenames, non-recall
     candidates) cost no read at all, so the honest ceiling is exactly `limit`.
+
+    Charged to the hydration stage rather than to the whole request, because
+    the filtered arms have a SECOND stage that reads the corpus and it is not
+    this one: `_managed_eligible_filter_paths` parses 40 of 71 pages for
+    `types` and 44 for `projects` while `filter_eligibility` reports `index`.
+    That is older than this change, it is the spec's own "the reader thread
+    does not read page frontmatter to evaluate the filter", and it is reported
+    as a successor rather than fixed under a ruling about the browse. Folding
+    it into this bound would either hide this fix behind it or pin a defect.
     """
     _seed_browse_corpus(vault)
     _warm(vault, warm_managed_cell)
@@ -561,15 +609,25 @@ def test_the_empty_query_browse_reads_only_the_pages_it_can_return(
     sentinel = _PageReadSentinel(*_scope_roots(vault))
     sentinel.install(monkeypatch)
     sentinel.reset()
-    result = _recall(vault, query="", limit=_BROWSE_LIMIT)
+    result = _recall(
+        vault, **{"query": "", "limit": _BROWSE_LIMIT, **_BROWSE_READ_ARMS[arm]}
+    )
 
     assert len(result["hits"]) == _BROWSE_LIMIT, (
         "the premise failed: the browse must fill its limit for the bound to mean anything"
     )
-    assert sentinel.count <= _BROWSE_LIMIT, (
-        f"the browse read {sentinel.count} of {_BROWSE_CORPUS} pages on the reader "
-        f"thread to return {_BROWSE_LIMIT}: {sentinel.report()}"
+    hydration = sentinel.count_from("_find_keyword")
+    assert hydration <= _BROWSE_LIMIT, (
+        f"the {arm} browse hydrated {hydration} of {_BROWSE_CORPUS} pages on the "
+        f"reader thread to return {_BROWSE_LIMIT}:\n{sentinel.report()}"
     )
+    if arm == "no_filter":
+        # The shape the ruling named carries no second reader, so on it the
+        # whole request is inside the bound and the stronger claim holds.
+        assert sentinel.count <= _BROWSE_LIMIT, (
+            f"the unfiltered browse read {sentinel.count} pages in total to return "
+            f"{_BROWSE_LIMIT}:\n{sentinel.report()}"
+        )
 
 
 #: The browse shapes the identity sweep runs. `after_a_governed_write` is the
@@ -584,6 +642,10 @@ _BROWSE_SHAPES: dict[str, dict[str, Any]] = {
     "widened_vault": {"scope": "vault", "widen_outside_kb": True},
     "limit_3": {"limit": 3},
     "limit_over_corpus": {"limit": _BROWSE_CORPUS + 10},
+    "types_filter": {"types": ["note"]},
+    "projects_filter": {"projects": ["project-alpha"]},
+    "types_filter_kb_only": {"types": ["note"], "scope": "kb-only"},
+    "projects_filter_widened": {"projects": ["project-alpha"], "widen_outside_kb": True},
 }
 
 
@@ -711,6 +773,41 @@ def test_a_catalogue_whose_ordering_key_is_wrong_costs_cost_and_not_the_answer(
     assert under_a_lie == honest, (
         "a wrong catalogue ordering key changed the browse's answer instead of only "
         f"its cost: honest={honest} lied={under_a_lie}"
+    )
+
+
+def test_an_eligible_page_the_catalogue_has_no_row_for_stands_the_bound_down(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The filtered arm's own precondition, which the unfiltered arm does not have.
+
+    The filtered browse gets its paths from the eligibility plan and its
+    ordering key from the scope query, and those are two queries. Relation
+    intersection and the emitted-parent expansion can both put an identity in
+    the eligible set that the scope query did not return, and a page with no
+    key cannot be ranked — so a prefix taken over the rows that DO have one
+    silently drops it. The arm hydrates the whole eligible set instead.
+    """
+    _seed_browse_corpus(vault)
+    _warm(vault, warm_managed_cell)
+
+    honest = _paths(_recall(vault, query="", limit=_BROWSE_LIMIT, types=["note"]))
+    assert honest, "the premise failed: the filtered browse returned nothing"
+
+    real = find_module._index_resolved_scope_rows
+    dropped = honest[0]
+
+    def _missing_a_row(*args: Any, **kwargs: Any):
+        rows = real(*args, **kwargs)
+        return None if rows is None else [row for row in rows if row[0] != dropped]
+
+    monkeypatch.setattr(find_module, "_index_resolved_scope_rows", _missing_a_row)
+    find_module.reset_page_and_result_caches()
+    with_a_gap = _paths(_recall(vault, query="", limit=_BROWSE_LIMIT, types=["note"]))
+
+    assert with_a_gap == honest, (
+        "an eligible page the catalogue held no ordering row for was dropped from the "
+        f"answer: honest={honest} with_a_gap={with_a_gap}"
     )
 
 

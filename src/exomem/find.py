@@ -3546,6 +3546,18 @@ def _browse_order_key(rel_path: str, updated: str) -> tuple[str, str]:
     return (updated or "0000-00-00", rel_path)
 
 
+def _managed_browse_reader() -> bool:
+    """Whether the contract governs this reader's browse.
+
+    One name for the test both browse arms make, so a change of policy is a
+    change in one place. An offline/CLI caller keeps its documented scan
+    fallback and is not under the read-path contract.
+    """
+    from . import readiness
+
+    return bool(readiness.runtime_managed())
+
+
 def _browse_hydration_limit(
     rows: list[tuple[str, str, str | None]],
     *,
@@ -3635,10 +3647,53 @@ def _find_keyword(
         # An empty query with a finite eligible set (a complete category/kind
         # plan resolved through the maintained index) iterates those parents
         # directly rather than walking the scope to rediscover them.
-        walk = (vault_root / rel_path for rel_path in eligible_paths)
+        #
+        # It then read every one of them, which is the same defect the
+        # no-filter arm below was fixed for and the reason that fix was swept
+        # for elsewhere: 80 reads for `types`, 88 for `projects`, against a
+        # 71-page scope and a limit of 5. Resolving a path set from the index
+        # and then opening all of it is not a read path that consumes an
+        # index; it is the walk with its enumeration removed.
+        #
+        # Unlike that arm this one does NOT decline when the catalogue cannot
+        # supply the ordering. It is reached with a lexical repair in flight,
+        # where the readiness proof below has not been made, and the eligible
+        # set is already resolved — so a catalogue that cannot order it costs
+        # the bound and nothing else, and the browse hydrates the set in full
+        # exactly as before.
+        ordered_rows: list[tuple[str, str, str | None]] | None = None
+        if _managed_browse_reader():
+            try:
+                ordered_rows = _index_resolved_scope_rows(
+                    vault_root, scope=scope, freshness=freshness_key
+                )
+            except RetrievalIndexWarming:
+                ordered_rows = None
+        eligible_rows = (
+            [row for row in ordered_rows if row[0] in eligible_paths]
+            if ordered_rows is not None
+            else None
+        )
+        if eligible_rows is not None and len(eligible_rows) == len(eligible_paths):
+            ordered = sorted(
+                eligible_rows,
+                key=lambda row: _browse_order_key(row[0], row[1]),
+                reverse=True,
+            )
+            browse_keys = {rel: updated for rel, updated, _parent in ordered}
+            browse_bound = _browse_hydration_limit(
+                eligible_rows, limit=limit, pending=pending
+            )
+            walk = (vault_root / rel_path for rel_path, _u, _p in ordered)
+        else:
+            # A path the catalogue holds no row for has no ordering key, and a
+            # prefix taken without one is the wrong prefix. Relation
+            # intersection and the emitted-parent expansion can both put an
+            # identity in this set that the scope query did not return.
+            walk = (vault_root / rel_path for rel_path in eligible_paths)
         _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
     elif not lexical_repair:
-        from . import lexstore, readiness
+        from . import lexstore
 
         if lexstore.maintained_content_index_enabled():
             catalog = lexstore.get_store(vault_root).catalog_readiness(
@@ -3653,7 +3708,7 @@ def _find_keyword(
         # which is its documented fallback.
         indexed = (
             _index_resolved_scope_rows(vault_root, scope=scope, freshness=freshness_key)
-            if readiness.runtime_managed()
+            if _managed_browse_reader()
             else None
         )
         if indexed is not None:
