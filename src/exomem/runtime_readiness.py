@@ -496,7 +496,15 @@ def _unmeasured_coordination(reason: str) -> dict[str, Any]:
 
     `role` and `coordinator_healthy` derive from `enabled` the same way
     `LeaseManager.status()` derives them, so an unmeasured standalone cell
-    describes itself the way a measured one does. Hardcoding `unknown`/`False`
+    describes itself the way a measured one does. The parity is exact only for
+    the standalone branch: for an enabled cell `LeaseManager.status()` treats
+    `enabled` as an initial default and then overwrites it with a real
+    measurement, which this helper has no way to take — so `enabled=True` here
+    is a deliberate fail-closed approximation, not the same derivation.
+
+    Every read is stripped, matching `LeaseConfig.from_env()`. An unstripped
+    replica id would publish whitespace as an identity and suppress
+    `replica_identity_missing` on a config that `from_env()` rejects outright. Hardcoding `unknown`/`False`
     here made a standalone cell contradict its own successful payload — which
     was invisible while the response was a 503, and is not once it is a 200.
     """
@@ -504,7 +512,9 @@ def _unmeasured_coordination(reason: str) -> dict[str, Any]:
     return {
         "enabled": enabled,
         "role": "unknown" if enabled else "standalone",
-        "replica_id": os.environ.get("EXOMEM_WRITER_LEASE_REPLICA_ID") or None,
+        "replica_id": (
+            os.environ.get("EXOMEM_WRITER_LEASE_REPLICA_ID", "").strip() or None
+        ),
         "coordinator_healthy": not enabled,
         "mutation_boundary": {"state": "unknown", "reason": reason},
     }
