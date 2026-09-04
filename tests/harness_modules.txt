@@ -113,3 +113,4 @@ tests/test_report_offline.py
 tests/test_reviewer_bootstrap_cli.py
 tests/test_service_installers.py
 tests/test_transactional_writes.py
+tests/test_unsupported_platform_disclosure.py
