@@ -1,9 +1,15 @@
 """Recall latency gate for `recall-latency-contract`.
 
-Runs the contract's three series against a cell, reads the per-stage timing
-diagnostics, and compares the result with the fixed ceilings.
+Runs the contract's three series against a cell — plus a fourth the contract
+states no ceiling for — reads the per-stage timing diagnostics, and compares
+the result with the fixed ceilings.
 
-Three properties make the reading worth having, and each one is pinned by a
+The fourth is `browse`, the `query=""` shape the tool schema recommends. It is
+measured and reported and every structural rule applies to it, but no latency
+comparison is made, because the spec states no number for it. See
+`UNCEILINGED_SHAPES`.
+
+Four properties make the reading worth having, and each one is pinned by a
 node in `tests/test_recall_latency_gate.py`:
 
 * **The ceilings are the contract.** They are literals here because the spec
@@ -18,7 +24,14 @@ node in `tests/test_recall_latency_gate.py`:
   percentile carries the load it was produced under.
 * **The result cache cannot serve the series.** Every query in a run carries a
   nonce that is unique to the run and to the sample, so no request can be
-  answered from a previous one — within the run or across runs.
+  answered from a previous one — within the run or across runs. Two shapes
+  cannot spell that nonce in words — the browse is DEFINED by an empty query,
+  and a keyword series has to match the corpus — so they carry it in
+  whitespace, which the result cache distinguishes and the read path strips.
+* **Nothing measured is nothing certified.** Every series must return hits at
+  its median sample, the premise about the corpus must come from the cell the
+  series ran against, and a stage the check depends on that did not report at
+  all fails closed rather than defaulting into a pass.
 
 Output is content-free by construction: closed codes, counts, percentiles and
 load. No query text, no paths, no excerpts. A latency artifact gets stored
@@ -107,15 +120,29 @@ DEFAULT_LIMIT = 15
 #: widening, hydration and hit construction SHALL consume maintained indexes and
 #: exact receipts". `computed` on one of these is the corpus walk reappearing.
 #:
-#: All six now decide their source at runtime, and that is what makes this list
-#: worth anything. An earlier version named only the first four and claimed to
-#: cover the spec's four concepts; it did not. Hydration is `keyword` and hit
-#: construction is `filter_hits`, and both carried the static `computed`
-#: default, so both were excluded from the check — which is exactly how a real
-#: whole-scope walk in `keyword` on the empty-query browse went unreported by
-#: every instrument this change ships. `recall_projection` and
-#: `pending_visibility` report `index` unconditionally on every shape measured,
-#: so before that fix the check could only ever fire on two stages.
+#: Only two of the six decide their source at runtime, and saying otherwise was
+#: the last version's mistake. What each one actually does, because a watch list
+#: whose entries cannot report a walk is a longer list and not a stronger check:
+#:
+#: * `filter_eligibility` — RUNTIME. Marks `index`, `cache` or `declined` from
+#:   which arm answered (`find.py` 3150-3305), and is the one stage the spec
+#:   gives a second, narrower scenario of its own.
+#: * `outside_kb` — RUNTIME. `declined` on every refusal, `index` when the
+#:   reserve was answered from the catalogue (`find.py` 4393-4516).
+#: * `keyword` — RUNTIME in `find._find_keyword`, which is the branch that CAN
+#:   enumerate and marks `computed` when it does. STATIC `index` in
+#:   `find_candidates.py:472`, whose only source of paths is the injected
+#:   provider.
+#: * `recall_projection`, `pending_visibility` — STATIC `index`, written as the
+#:   span's opening default (`find.py:1164,1178,1192`).
+#: * `filter_hits` — STATIC `index` (`find.py:3967`).
+#:
+#: So four of the six report a constant. They stay on the list because the list
+#: is what the check reads, and a stage that later learns to walk must already
+#: be watched when it does — but the gate's walk sentinel can only ever fire on
+#: `filter_eligibility`, `outside_kb` and `find.py`'s `keyword`. That is a real
+#: bound on what a live run proves, and the in-suite `ScopeWalkSentinel` and
+#: `_PageReadSentinel` are what cover the rest.
 #:
 #: Deliberately still NOT every stage. `rerank`, `fusion` and `vector.search`
 #: really do compute — they read no index, the product marks none of them, and
@@ -131,6 +158,13 @@ WALKER_STAGES: tuple[str, ...] = (
     "filter_hits",
 )
 
+#: The sources the spec permits a stage to report: "every stage reports `index`,
+#: `cache` or `declined` as its source". Checked as an allowlist rather than by
+#: testing for the single word `computed`, because the gate reads this off a
+#: remote cell's JSON: a walk that arrived spelled anything else at all would
+#: have passed a denylist without a word.
+PERMITTED_SOURCES: frozenset[str] = frozenset({"index", "cache", "declined"})
+
 #: Severity order, matching `find_types._SOURCE_WIDTH`: when a stage reports
 #: different sources across a series, the report keeps the worst one, because a
 #: single walk in thirty is the finding.
@@ -140,7 +174,31 @@ _SOURCE_SEVERITY = {"cache": 0, "index": 1, "declined": 2, "computed": 3}
 #: field Lane 2 moved onto the page catalogue.
 FILTER_PROJECTS: tuple[str, ...] = ("exomem",)
 
-SERIES_SHAPES: tuple[str, ...] = ("hybrid", "keyword", "filtered_hybrid")
+#: The term the keyword series searches for. A keyword recall is pure lexical
+#: matching, so a query built only from a nonce matches nothing on any corpus,
+#: and thirty empty recalls are fast for reasons that have nothing to do with
+#: the read path — measured at 0 hits in 47.3 ms before this existed, under the
+#: tightest ceiling the contract states, measuring nothing.
+#:
+#: Like `FILTER_PROJECTS`, this is a property of the CELL BEING CERTIFIED and
+#: not of the contract, and the gate cannot verify it from here: on the fixture
+#: vault `exomem` matches 0 pages, as does `projects=["exomem"]`, because that
+#: fixture is not the cell either constant describes. What makes a wrong choice
+#: safe is the hits guard, which turns "this series matched nothing" into a
+#: failure instead of the fastest percentile the gate can emit. If a run fails
+#: on the keyword series' median hits, the term is wrong for that cell — change
+#: it here, where a reviewer sees it, and never the ceiling.
+KEYWORD_TERM = "exomem"
+
+#: `hybrid`, `keyword` and `filtered_hybrid` are the contract's three series.
+#: `browse` is the fourth and carries no ceiling of its own — see
+#: `_P50_CEILINGS`. It is here because this change ships a fix for a whole-scope
+#: walk on `ask_memory(query="")`, the shape the tool schema recommends for
+#: browsing, and the artifact that certifies the live cell did not exercise it:
+#: every other series passes a non-empty query, so `find.py` always took the
+#: `if query_norm:` arm and the branch that can report `computed` was
+#: unreachable from the gate.
+SERIES_SHAPES: tuple[str, ...] = ("hybrid", "keyword", "filtered_hybrid", "browse")
 
 
 @dataclass(frozen=True)
@@ -161,10 +219,14 @@ class Sample:
 
 
 class Transport(Protocol):
-    """What the gate needs from a cell: a name, a size, and a timed ask."""
+    """What the gate needs from a cell: a name, a size, and a timed ask.
+
+    `pages` is None when the transport could not derive the size of the cell it
+    measures, which is a different answer from zero and is refused by name.
+    """
 
     name: str
-    pages: int
+    pages: int | None
 
     def ask(
         self, *, shape: str, query: str, mode: str, projects: tuple[str, ...], limit: int
@@ -230,6 +292,24 @@ def run_nonce() -> str:
     return uuid.uuid4().hex[:12]
 
 
+def _whitespace_nonce(nonce: str, index: int) -> str:
+    """The run-and-sample nonce written in whitespace instead of words.
+
+    Two series need novelty without a word in the query. The browse shape IS
+    `query.strip() == ""` — that is the test `find.py` routes on — so any word
+    at all makes it a different request through a different lane; and the
+    keyword series has to match the corpus, which a nonce token cannot do.
+
+    Both work because the two halves are keyed differently: the result cache is
+    keyed on the RAW query (`find.py`'s `request_key`) and the read path
+    branches and matches on the STRIPPED one. So 64 bits of the run token and
+    the sample index, tab for one and space for zero, is a query no cell has
+    been asked before that is nonetheless the same request the read path sees.
+    """
+    value = ((int(nonce, 16) << 8) | (index & 0xFF)) & ((1 << 64) - 1)
+    return format(value, "064b").replace("0", " ").replace("1", "\t")
+
+
 def novel_query(shape: str, index: int, nonce: str) -> str:
     """A query no cell has been asked before.
 
@@ -239,9 +319,13 @@ def novel_query(shape: str, index: int, nonce: str) -> str:
     re-run of the same series be answered from memory.
 
     The prose around the nonce is fixed and generic on purpose: it makes the
-    three series comparable, and it is not vault content, so it can appear in a
-    log without disclosing anything.
+    series comparable, and it is not vault content, so it can appear in a log
+    without disclosing anything.
     """
+    if shape == "browse":
+        return _whitespace_nonce(nonce, index)
+    if shape == "keyword":
+        return KEYWORD_TERM + _whitespace_nonce(nonce, index)
     return f"governed recall latency probe {shape} {nonce} {index:02d}"
 
 
@@ -294,7 +378,7 @@ def run_series(
     warming = 0
     sources: dict[str, str] = {}
     eligibility: list[float] = []
-    hits = 0
+    hit_counts: list[int] = []
 
     for index in range(SAMPLES_PER_SERIES):
         sample = transport.ask(
@@ -310,7 +394,7 @@ def run_series(
             warming += 1
         else:
             measured.append(float(sample.elapsed_ms))
-            hits += int(sample.hits)
+            hit_counts.append(int(sample.hits))
         for stage, source in sample.stage_sources.items():
             sources[stage] = _widest(sources.get(stage), source)
         for stage, milliseconds in sample.stage_ms.items():
@@ -330,7 +414,7 @@ def run_series(
             loads.append(first)
         loads.append(load)
 
-    series = {
+    series: dict[str, Any] = {
         "samples": len(measured),
         "warming": warming,
         "p50_ms": round(_percentile(measured, 0.50), 1),
@@ -338,10 +422,19 @@ def run_series(
         "load_mean": round(statistics.fmean(loads), 2) if loads else 0.0,
         "load_max": round(max(loads), 2) if loads else 0.0,
         "stage_sources": sources,
-        "hits": hits,
+        # The total is kept because it is diagnostic — "120 hits across thirty
+        # samples but a median of nothing" says something a single number does
+        # not — but the guard is on the median, because the p50 is what the
+        # gate certifies. A sum lets one hit in thirty clear a check that is
+        # supposed to prove the p50 measured a real retrieval.
+        "hits": sum(hit_counts),
+        "hits_p50": int(_percentile([float(count) for count in hit_counts], 0.50)),
     }
     if shape == "filtered_hybrid":
-        series["eligibility_ms"] = round(max(eligibility), 1) if eligibility else 0.0
+        # None, not 0.0, when the stage never reported: a stage that did not run
+        # is not a stage that ran in no time, and 0.0 sails under every ceiling.
+        # `check` fails closed on the None.
+        series["eligibility_ms"] = round(max(eligibility), 1) if eligibility else None
     return series
 
 
@@ -353,7 +446,7 @@ def run(
     sleep=time.sleep,
     limit: int = DEFAULT_LIMIT,
 ) -> dict[str, Any]:
-    """Take all three series, or refuse before taking any sample at all."""
+    """Take every series, or refuse before taking any sample at all."""
     first, final, waited = await_quiescence(
         load_source, bound_seconds=quiescence_bound_seconds, sleep=sleep
     )
@@ -361,10 +454,14 @@ def run(
         raise _refuse(first, final, waited)
 
     nonce = run_nonce()
+    pages = transport.pages
     return {
         "refused": False,
         "transport": transport.name,
-        "pages": int(transport.pages),
+        # None when the transport could not derive the size of the cell it
+        # measured. Carried through as None rather than coerced to a number,
+        # because a printed integer reads as verified.
+        "pages": None if pages is None else int(pages),
         "limit": limit,
         "series": {
             shape: run_series(
@@ -389,6 +486,17 @@ _P50_CEILINGS = {
     "filtered_hybrid": FILTERED_HYBRID_P50_MS,
 }
 
+#: Series the contract states no latency ceiling for. `browse` is measured and
+#: reported — its percentiles go into the artifact beside the others, and every
+#: structural rule applies to it: the walk sentinel, the warming bound, the hits
+#: guard — but no p50 or p95 comparison is made, because there is no number in
+#: the spec to compare against. Inventing one would put a figure into a stored
+#: artifact that reads as the contract's and is not; a ceiling calibrated from
+#: this box is exactly what the spec's "not calibrated from any runner" forbids,
+#: and one calibrated from nothing is worse. If the browse should carry a
+#: ceiling, that is a change to `recall-latency-contract`, not to this file.
+UNCEILINGED_SHAPES: frozenset[str] = frozenset({"browse"})
+
 
 def check(report: dict[str, Any]) -> None:
     """Fail on any breach, naming it with the number actually measured."""
@@ -402,18 +510,23 @@ def check(report: dict[str, Any]) -> None:
             "not a verdict against them"
         )
 
-    pages = int(report.get("pages", 0))
-    if pages < MIN_CORPUS_PAGES:
+    pages = report.get("pages")
+    if pages is None:
         failures.append(
-            f"the cell holds {pages} governed pages, below the {MIN_CORPUS_PAGES} "
+            "the corpus size could not be derived from the cell that was measured, so "
+            f"the contract's premise of {MIN_CORPUS_PAGES} governed pages is unverified"
+        )
+    elif int(pages) < MIN_CORPUS_PAGES:
+        failures.append(
+            f"the cell holds {int(pages)} governed pages, below the {MIN_CORPUS_PAGES} "
             "pages the contract measures on"
         )
 
     for shape in SERIES_SHAPES:
         series = report["series"][shape]
         p50 = float(series["p50_ms"])
-        ceiling = _P50_CEILINGS[shape]
-        if p50 > ceiling:
+        ceiling = _P50_CEILINGS.get(shape)
+        if ceiling is not None and p50 > ceiling:
             failures.append(f"{shape} p50={p50:.1f}ms > {ceiling:.1f}ms")
         if shape == "hybrid":
             p95 = float(series["p95_ms"])
@@ -430,6 +543,23 @@ def check(report: dict[str, Any]) -> None:
                 f"{MAX_WARMING_SAMPLES} the contract allows"
             )
 
+        # EVERY shape, not the filtered one. An empty result set is fast for
+        # reasons that have nothing to do with the read path — no rerank, no
+        # fusion — and the series most likely to return nothing is `keyword`,
+        # which is pure lexical matching and carries the tightest ceiling the
+        # contract states. Measured at 0 hits in 47.3 ms against the fixture
+        # vault, which the gate certified as 2.5x inside 120 ms.
+        #
+        # The median, not the sum: the gate certifies a p50, so one hit across
+        # thirty samples clearing the guard would leave the very percentile
+        # being certified an empty recall.
+        if int(series.get("hits_p50", 0)) < 1:
+            failures.append(
+                f"the {shape} series' median sample returned no hits ("
+                f"{int(series.get('hits', 0))} across the whole run): its percentiles "
+                "measure empty-result recalls and not a read path"
+            )
+
         # Measured against the live 0.69.0 cell on 2026-09-03: 24 stages, and
         # NONE of them carried a `source`, because the stage-source vocabulary
         # ships with this change and that cell predates it. Read naively, the
@@ -443,27 +573,50 @@ def check(report: dict[str, Any]) -> None:
                 "read on this cell, so zero walks is silence and not proof"
             )
         for stage, source in sorted(stage_sources.items()):
-            if source == "computed" and _is_walker(stage):
-                failures.append(f"{shape} stage {stage} reported source computed: a walk")
+            if _is_walker(stage) and source not in PERMITTED_SOURCES:
+                failures.append(f"{shape} stage {stage} reported source {source}: a walk")
 
         if shape == "filtered_hybrid":
-            if int(series.get("hits", 0)) < 1:
+            eligibility = series.get("eligibility_ms")
+            if eligibility is None:
                 failures.append(
-                    "the filtered series returned no hits across the whole run: the "
-                    "filter matched nothing on this cell, so its percentiles measure "
-                    "empty-result recalls and not a filtered read path"
+                    f"{shape} reported no filter_eligibility duration at all: the "
+                    "20 ms index-outcome premise cannot be read on this cell, and an "
+                    "absent stage is not a stage that ran in no time"
                 )
-            eligibility = float(series.get("eligibility_ms", 0.0))
-            if eligibility > FILTERED_ELIGIBILITY_MS:
+            elif float(eligibility) > FILTERED_ELIGIBILITY_MS:
                 failures.append(
-                    f"{shape} stage filter_eligibility took {eligibility:.1f}ms > "
+                    f"{shape} stage filter_eligibility took {float(eligibility):.1f}ms > "
                     f"{FILTERED_ELIGIBILITY_MS:.1f}ms"
                 )
-            source = series.get("stage_sources", {}).get("filter_eligibility")
-            if source is not None and source not in ("index", "cache"):
+            # Matched the way `_is_walker` and the `eligibility_ms` collector
+            # already match, because Lane 1 moves stages under qualified names
+            # and a bare-key lookup stops watching on the day one is renamed:
+            # `filters.filter_eligibility: declined` passed a bare lookup while
+            # `filter_eligibility: declined` correctly failed.
+            #
+            # Absent fails closed. `FILTER_PROJECTS` emptied as the single
+            # mutation produced a recall with no `filter_eligibility` span at
+            # all — `find.py:1670` opens it only when `filter_plan.root is not
+            # None` — and the run PASSED: the hits guard cannot catch it either,
+            # because an unfiltered recall returns plenty of hits. The precedent
+            # is the empty-source-map rule above, for the same reason.
+            eligibility_sources = {
+                stage: source
+                for stage, source in stage_sources.items()
+                if stage.rsplit(".", 1)[-1] == "filter_eligibility"
+            }
+            if not eligibility_sources:
                 failures.append(
-                    f"{shape} stage filter_eligibility answered from {source}, not an index"
+                    f"{shape} reported no filter_eligibility stage: the series did not "
+                    "carry a structured filter the index was asked to answer, so this "
+                    "is not a measurement of a filtered read path"
                 )
+            for stage, source in sorted(eligibility_sources.items()):
+                if source not in ("index", "cache"):
+                    failures.append(
+                        f"{shape} stage {stage} answered from {source}, not an index"
+                    )
 
     if failures:
         raise SystemExit("recall latency gate failed: " + "; ".join(failures))
@@ -488,17 +641,17 @@ class ServedTransport:
     name = "served"
 
     def __init__(self, base_url: str, api_key: str, *, timeout: float = 120.0) -> None:
-        self._url = base_url.rstrip("/") + "/api/ask_memory"
+        self._base = base_url.rstrip("/")
         self._key = api_key
         self._timeout = timeout
-        self.pages = 0
+        self.pages: int | None = None
 
-    def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, payload: dict[str, Any], *, command: str = "ask_memory") -> dict[str, Any]:
         from urllib.error import HTTPError, URLError
         from urllib.request import Request, urlopen
 
         request = Request(
-            self._url,
+            f"{self._base}/api/{command}",
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "content-type": "application/json",
@@ -520,17 +673,46 @@ class ServedTransport:
             raise SystemExit("recall latency gate failed: the cell refused the read")
         return body.get("data") or {}
 
-    def measure_corpus(self) -> int:
-        """Ask the cell how many governed pages it holds, for the premise check."""
-        from exomem import vault as vault_module
+    def measure_corpus(self) -> int | None:
+        """Ask THE MEASURED CELL how many governed pages it holds.
 
-        root = os.environ.get("EXOMEM_VAULT_PATH", "").strip()
-        if not root:
-            return 0
+        This used to count `.md` files under the gate process's own
+        `EXOMEM_VAULT_PATH` while the series were timed against a cell over
+        HTTP. Nothing tied the two together, so the contract's 8,000-page
+        premise could be certified from vault A while every latency came from
+        cell B — and the artifact printed the number as if it had been
+        verified.
+
+        `browse_memory(mode="overview")` is read-only, on the REST surface, and
+        reports the counts the cell itself sees. Two calls: the root overview
+        names the cell's knowledge-base directory, and the second counts the
+        markdown pages under it, which is the scope every series is measured
+        at. The whole-vault markdown count would be a superset, and certifying
+        a MINIMUM from a superset fails open.
+
+        Returns None when the cell cannot be asked. `check` then refuses the
+        premise by name rather than reporting a zero that reads like a small
+        cell or an integer that reads like a measurement.
+        """
         try:
-            return sum(1 for _ in vault_module.walk_vault_md(Path(root)))
-        except Exception:  # noqa: BLE001 - an uncountable corpus is not a verdict
-            return 0
+            root_overview = self._post({"path": "", "mode": "overview"}, command="browse_memory")
+            knowledge_base = root_overview.get("kb") or {}
+            if not knowledge_base.get("present"):
+                return None
+            scope_path = str(knowledge_base.get("path") or "").strip()
+            if not scope_path:
+                return None
+            scoped = self._post(
+                {"path": scope_path, "mode": "overview"}, command="browse_memory"
+            )
+            markdown = (scoped.get("totals") or {}).get("markdown")
+        except SystemExit:
+            # A cell that will not answer the premise is not a cell that failed
+            # it; `check` says which of the two happened.
+            return None
+        if not isinstance(markdown, int):
+            return None
+        return markdown
 
     def ask(
         self, *, shape: str, query: str, mode: str, projects: tuple[str, ...], limit: int
@@ -563,7 +745,10 @@ class VaultTransport:
         from exomem import vault as vault_module
 
         self._root = vault_root
-        self.pages = sum(1 for _ in vault_module.walk_vault_md(vault_root))
+        # Counted locally, and here that IS the cell being measured: this
+        # transport runs the series in-process against this same vault. The
+        # served transport cannot do this and must ask the cell instead.
+        self.pages: int | None = sum(1 for _ in vault_module.walk_vault_md(vault_root))
 
     def warm(self) -> None:
         """Stand up the admission a served process has.

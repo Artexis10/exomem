@@ -348,6 +348,19 @@ def test_a_walker_stage_may_decline_without_failing_the_walk_check() -> None:
     gate.check(_report(stage_sources={"outside_kb": "declined"}))
 
 
+def test_a_walker_stage_reporting_an_unknown_source_is_not_a_pass() -> None:
+    """The spec names what a stage may report; anything else is not one of them.
+
+    "Every stage reports `index`, `cache` or `declined` as its source" is an
+    allowlist, and the gate reads this off a remote cell's JSON. Testing for
+    the single word `computed` meant a walk that arrived spelled `walked`,
+    `scan`, or `null` passed the sentinel without a word — on the one surface
+    where the value is not produced by code this repository controls.
+    """
+    with pytest.raises(SystemExit, match="outside_kb reported source walked"):
+        gate.check(_report(stage_sources={"outside_kb": "walked"}))
+
+
 def test_a_cell_that_reports_no_stage_sources_is_not_a_pass() -> None:
     """Silence is not proof, and this is not hypothetical.
 
@@ -374,6 +387,142 @@ def test_the_filtered_eligibility_stage_is_held_to_its_index_outcome() -> None:
         gate.check(_report(filtered_eligibility_ms=44.0))
 
 
+def test_a_filtered_series_with_no_eligibility_stage_at_all_is_not_a_pass() -> None:
+    """The premise cannot be certified from a stage that never ran.
+
+    Reproduced end to end with `FILTER_PROJECTS` emptied as the single
+    mutation: `eligibility_ms=0.0`, no `filter_eligibility` in `stage_sources`,
+    verdict PASSED. An unfiltered recall opens no `filter_eligibility` span at
+    all — `find.py:1670` opens it only when `filter_plan.root is not None` — so
+    the source check was skipped by `if source is not None` and the duration
+    check read the `0.0` default as a measurement comfortably under 20 ms. The
+    hits guard cannot catch it either: an unfiltered recall returns plenty.
+    """
+    report = _report()
+    report["series"]["filtered_hybrid"]["stage_sources"] = {"rerank": "computed"}
+
+    with pytest.raises(SystemExit, match="no filter_eligibility stage"):
+        gate.check(report)
+
+
+def test_a_filtered_series_with_no_eligibility_duration_is_not_a_pass() -> None:
+    """An absent duration is not a stage that ran in no time.
+
+    The same zero-default shape, two lines below the one above: `0.0` passes
+    `> 20.0` and reads in the artifact as the fastest eligibility lookup the
+    cell has ever performed.
+    """
+    with pytest.raises(SystemExit, match="no filter_eligibility duration"):
+        gate.check(_report(filtered_eligibility_ms=None))
+
+
+def test_a_qualified_eligibility_stage_name_is_still_held_to_its_source() -> None:
+    """The rename hazard, guarded here the way `_is_walker` guards it elsewhere.
+
+    `filters.filter_eligibility: declined` PASSED the bare-key lookup while
+    plain `filter_eligibility: declined` correctly failed — the one place in
+    the file undefended against a hazard the same file guards twice.
+    """
+    report = _report()
+    report["series"]["filtered_hybrid"]["stage_sources"] = {
+        "filters.filter_eligibility": "declined"
+    }
+
+    with pytest.raises(SystemExit, match="filters.filter_eligibility"):
+        gate.check(report)
+
+
+# --- The browse series the contract states no ceiling for -------------------
+
+
+def test_the_contract_states_no_ceiling_for_the_browse_shape() -> None:
+    """Read from the spec, not invented, and said out loud.
+
+    `recall-latency-contract` states three ceilings and names the shape each
+    belongs to: hybrid without filters (300/600 ms), keyword (120 ms), hybrid
+    with one structured filter (400 ms). It states nothing about the
+    `query=""` browse. So the gate measures that series, reports its
+    percentiles, and applies every structural rule to it — and makes no
+    latency comparison, because there is no number in the spec to compare
+    against and a number invented here would be stored in an artifact that
+    reads as the contract's.
+    """
+    assert "browse" in gate.SERIES_SHAPES
+    assert "browse" not in gate._P50_CEILINGS
+    assert gate.UNCEILINGED_SHAPES == frozenset({"browse"})
+    assert set(gate._P50_CEILINGS) | gate.UNCEILINGED_SHAPES == set(gate.SERIES_SHAPES)
+
+
+def test_a_slow_browse_does_not_fail_a_ceiling_it_was_never_given() -> None:
+    """The counter-case: no invented ceiling means no invented breach."""
+    gate.check(_report(browse_p50=5_000.0))
+
+
+def test_the_browse_series_is_still_held_to_every_structural_rule() -> None:
+    """No ceiling is not no check. It is the shape the walk fix was about."""
+    for perturbation, expected in (
+        ({"shape_hits_p50": {"browse": 0}}, "browse series' median sample"),
+        ({"stage_sources": {"keyword": "computed"}}, "stage keyword reported source computed"),
+    ):
+        with pytest.raises(SystemExit, match=expected):
+            gate.check(_report(**perturbation))
+
+    report = _report()
+    report["series"]["browse"]["warming"] = 2
+    with pytest.raises(SystemExit, match="browse returned 2 warming"):
+        gate.check(report)
+
+
+def test_the_browse_series_asks_the_empty_query_shape() -> None:
+    """`find.py` routes on `query.strip()`, so the shape IS an empty strip.
+
+    Every other series passes a non-empty nonce, which means `_find_keyword`
+    always took its `if query_norm:` arm and the branch that can report
+    `computed` was unreachable from any series the gate ran — while this change
+    ships a fix for a whole-scope walk on exactly that branch.
+    """
+    transport = _StubTransport()
+
+    gate.run(
+        transport=transport,
+        load_source=_StubLoad([1.0] * 500),
+        quiescence_bound_seconds=1.0,
+        sleep=lambda _seconds: None,
+    )
+
+    browse = [call for call in transport.calls if call["shape"] == "browse"]
+    assert len(browse) == gate.SAMPLES_PER_SERIES
+    for call in browse:
+        assert call["query"].strip() == "", repr(call["query"])
+        assert call["mode"] == "hybrid", "the browse shape is the schema default, not keyword"
+        assert not call["projects"]
+
+
+def test_the_keyword_series_asks_something_the_corpus_can_answer() -> None:
+    """A keyword query built only from a nonce matches nothing, on any cell.
+
+    Keyword recall is pure lexical matching, so the novelty that defeats the
+    result cache cannot live in a word. It lives in trailing whitespace, which
+    `find.py`'s `request_key` distinguishes and `query.lower().strip()` does
+    not — so every sample misses the cache and every sample asks the same thing
+    of the corpus.
+    """
+    transport = _StubTransport()
+
+    gate.run(
+        transport=transport,
+        load_source=_StubLoad([1.0] * 500),
+        quiescence_bound_seconds=1.0,
+        sleep=lambda _seconds: None,
+    )
+
+    keyword = [call for call in transport.calls if call["shape"] == "keyword"]
+    assert len(keyword) == gate.SAMPLES_PER_SERIES
+    assert len({call["query"] for call in keyword}) == gate.SAMPLES_PER_SERIES
+    for call in keyword:
+        assert call["query"].strip() == gate.KEYWORD_TERM, repr(call["query"])
+
+
 def test_a_verdict_taken_at_another_limit_is_refused() -> None:
     """The limit is part of the ceiling's definition, not a knob beside it.
 
@@ -387,16 +536,36 @@ def test_a_verdict_taken_at_another_limit_is_refused() -> None:
         gate.check(_report(limit=1))
 
 
-def test_a_filtered_series_that_matched_nothing_is_not_a_pass() -> None:
+@pytest.mark.parametrize("shape", sorted(gate.SERIES_SHAPES))
+def test_a_series_that_matched_nothing_is_not_a_pass(shape: str) -> None:
     """An empty result set is fast for reasons that have nothing to do with the read path.
 
-    If no page on the cell carries the gate's filter value, the filtered series
-    measures thirty empty-result recalls: no rerank, no fusion, comfortably
-    under 400 ms, and `filter_eligibility: index` throughout. Every ceiling
-    green, nothing measured.
+    Parametrized over EVERY series, because the guard used to sit inside `if
+    shape == "filtered_hybrid":` while `run_series` emitted `hits` for all of
+    them. The shape most likely to return nothing was the one outside the
+    branch: `keyword` is pure lexical matching and carries the tightest ceiling
+    the contract states, and it measured 0 hits in 47.3 ms against the fixture
+    vault — certified at 2.5x inside 120 ms.
     """
-    with pytest.raises(SystemExit, match="no hits"):
-        gate.check(_report(filtered_hits=0))
+    with pytest.raises(SystemExit, match=f"{shape} series' median sample returned no hits"):
+        gate.check(_report(shape_hits_p50={shape: 0}))
+
+
+def test_a_series_whose_median_sample_is_empty_fails_even_with_hits_in_it() -> None:
+    """The guard is on the percentile the gate certifies, not on a sum.
+
+    `hits` summed across thirty samples lets one hit clear a check whose whole
+    purpose is to prove the p50 measured a real retrieval — weaker than the
+    guard's own description of itself. Twenty-nine empty samples and one with
+    four hits is exactly the shape that reads as measured and is not.
+    """
+    with pytest.raises(SystemExit, match="median sample returned no hits"):
+        gate.check(_report(shape_hits_p50={"keyword": 0}, filtered_hits=4))
+
+
+def test_a_series_with_a_non_empty_median_passes() -> None:
+    """The counter-case, so the guard above is a measurement and not a constant."""
+    gate.check(_report(shape_hits_p50={shape: 1 for shape in gate.SERIES_SHAPES}))
 
 
 def test_a_sample_with_no_usable_total_is_a_warming_outcome() -> None:
@@ -480,6 +649,53 @@ def test_a_corpus_below_the_reference_size_is_not_a_verdict() -> None:
         gate.check(_report(pages=120))
 
 
+def test_a_corpus_size_that_could_not_be_derived_is_refused_by_name() -> None:
+    """"Unverified" and "too small" are different answers and must read differently.
+
+    `ServedTransport` used to count `.md` files under the gate process's own
+    `EXOMEM_VAULT_PATH` while the series ran against a cell over HTTP, so the
+    8,000-page premise could be certified from vault A while every latency came
+    from cell B. It now asks the measured cell, and says so when it cannot.
+    """
+    with pytest.raises(SystemExit, match="could not be derived from the cell"):
+        gate.check(_report(pages=None))
+
+
+def test_the_served_transport_derives_its_corpus_size_from_the_cell() -> None:
+    """The premise and the percentiles must come from the same cell.
+
+    Driven through the transport's own HTTP seam rather than asserted about it:
+    the recorded calls are what prove the count came from the cell that will
+    answer the series, and not from this process's environment.
+    """
+    transport = gate.ServedTransport("http://cell.invalid", "key")
+    posted: list[tuple[str, dict]] = []
+
+    def _fake_post(payload, *, command="ask_memory"):
+        posted.append((command, payload))
+        if payload.get("path") == "":
+            return {"kb": {"present": True, "path": "Knowledge Base"}}
+        return {"totals": {"markdown": 8_421}}
+
+    transport._post = _fake_post  # type: ignore[method-assign]
+
+    assert transport.measure_corpus() == 8_421
+    assert [command for command, _ in posted] == ["browse_memory", "browse_memory"]
+    assert posted[1][1]["path"] == "Knowledge Base"
+
+
+def test_a_cell_that_will_not_report_its_size_yields_no_number() -> None:
+    """A refusal to answer must not become a zero that reads like a small cell."""
+    transport = gate.ServedTransport("http://cell.invalid", "key")
+
+    def _refusing_post(payload, *, command="ask_memory"):
+        raise SystemExit("recall latency gate failed: the cell refused the read")
+
+    transport._post = _refusing_post  # type: ignore[method-assign]
+
+    assert transport.measure_corpus() is None
+
+
 # --- Stubs -----------------------------------------------------------------
 
 
@@ -541,53 +757,73 @@ class _StubTransport:
         )
 
 
+def _series(
+    *,
+    p50: float,
+    p95: float,
+    sources: dict[str, str],
+    warming: int = 0,
+    hits_p50: int = 4,
+    hits: int = 120,
+) -> dict:
+    return {
+        "samples": 30,
+        "warming": warming,
+        "p50_ms": p50,
+        "p95_ms": p95,
+        "load_mean": 1.0,
+        "load_max": 1.2,
+        "stage_sources": sources,
+        "hits": hits,
+        "hits_p50": hits_p50,
+    }
+
+
 def _report(
     *,
     hybrid_p50: float = 100.0,
     warming: int = 0,
     stage_sources: dict[str, str] | None = None,
-    filtered_eligibility_ms: float = 3.0,
-    pages: int = 8_192,
+    filtered_eligibility_ms: float | None = 3.0,
+    pages: int | None = 8_192,
     limit: int = gate.DEFAULT_LIMIT,
     filtered_hits: int = 120,
+    filtered_hits_p50: int = 4,
+    shape_hits_p50: dict[str, int] | None = None,
+    browse_p50: float = 90.0,
 ) -> dict:
     """A passing report, minimally perturbed by each node above."""
     sources = {"filter_eligibility": "index"}
     sources.update(stage_sources or {})
+    medians = {shape: 4 for shape in gate.SERIES_SHAPES}
+    medians.update(shape_hits_p50 or {})
+    filtered = _series(
+        p50=110.0,
+        p95=130.0,
+        sources=sources,
+        hits=filtered_hits,
+        hits_p50=medians.get("filtered_hybrid", filtered_hits_p50),
+    )
+    filtered["eligibility_ms"] = filtered_eligibility_ms
     return {
         "refused": False,
         "transport": "stub",
         "limit": limit,
         "pages": pages,
         "series": {
-            "hybrid": {
-                "samples": 30,
-                "warming": warming,
-                "p50_ms": hybrid_p50,
-                "p95_ms": 120.0,
-                "load_mean": 1.0,
-                "load_max": 1.2,
-                "stage_sources": sources,
-            },
-            "keyword": {
-                "samples": 30,
-                "warming": 0,
-                "p50_ms": 40.0,
-                "p95_ms": 60.0,
-                "load_mean": 1.0,
-                "load_max": 1.2,
-                "stage_sources": sources,
-            },
-            "filtered_hybrid": {
-                "samples": 30,
-                "warming": 0,
-                "p50_ms": 110.0,
-                "p95_ms": 130.0,
-                "load_mean": 1.0,
-                "load_max": 1.2,
-                "stage_sources": sources,
-                "hits": filtered_hits,
-                "eligibility_ms": filtered_eligibility_ms,
-            },
+            "hybrid": _series(
+                p50=hybrid_p50,
+                p95=120.0,
+                sources=sources,
+                warming=warming,
+                hits_p50=medians["hybrid"],
+            ),
+            "keyword": _series(
+                p50=40.0, p95=60.0, sources=sources, hits_p50=medians["keyword"]
+            ),
+            "filtered_hybrid": filtered,
+            "browse": _series(
+                p50=browse_p50, p95=140.0, sources=sources, hits_p50=medians["browse"]
+            ),
         },
     }
