@@ -3154,3 +3154,146 @@ def test_process_child_receives_wheel_owned_cuda_environment(tmp_path, monkeypat
     worker._launch_child()
 
     assert captured["env"]["LD_LIBRARY_PATH"].startswith("/wheel/cublas")
+
+
+# --- The idle supervisor must not take the mutation boundary forever ---
+#
+# `_supervise` loops on `self._wake.wait(0.5)` and called
+# `self._store.needs_worker()` on every pass.  Each of those opens the job
+# store, and opening it takes the reserved-identity boundary twice — once on
+# the gate, once on the `media-jobs-store` domain.  With nothing to do, that
+# is ~8 boundary acquisitions a second, forever, per service cell: the single
+# largest producer of log volume on a live box.
+#
+# The fix is a cheap freshness pre-check, NOT a longer poll: `idle_seconds`
+# (300) is the *child's* lifetime, not a supervisor cadence, and stretching
+# the poll would delay a newly-enqueued job by minutes.  A job can be enqueued
+# without ever setting `_wake` — `media_processing.reconcile_media` writes
+# straight to the store — so the safety-net poll has to keep its 0.5s
+# responsiveness while costing nothing when the store has not changed.
+
+
+def _count_reserved_identity_holds(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every mutation-boundary acquisition, by operation label."""
+    from exomem import mutation_lock as mutation_lock_module
+
+    taken: list[str] = []
+    original = mutation_lock_module.VaultMutationCoordinator.hold
+
+    def counting_hold(self, **kwargs):
+        taken.append(str(kwargs.get("operation")))
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(
+        mutation_lock_module.VaultMutationCoordinator, "hold", counting_hold
+    )
+    return taken
+
+
+def _run_supervisor_for(worker, seconds: float) -> None:
+    thread = threading.Thread(target=worker._supervise, daemon=True)
+    thread.start()
+    try:
+        time.sleep(seconds)
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive(), "supervisor thread did not stop"
+
+
+def test_idle_supervisor_stops_taking_the_mutation_boundary_twice_a_second(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty store must not be re-opened on every 0.5s pass.
+
+    This is the 87k-rows-an-hour producer.  Before the fix a two-second idle
+    window took roughly sixteen boundary acquisitions; after it, the store is
+    read once and the freshness signature answers every later pass for free.
+    """
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    assert worker._store is not None
+    assert worker._store.counts().get(media_jobs.PENDING, 0) == 0
+    monkeypatch.setattr(
+        worker, "_launch_child", lambda: pytest.fail("idle supervisor launched a child")
+    )
+
+    taken = _count_reserved_identity_holds(monkeypatch)
+    _run_supervisor_for(worker, 2.0)
+
+    boundary = [op for op in taken if op and op.startswith("reserved_identity")]
+    assert len(boundary) <= 4, (
+        f"an idle supervisor took the mutation boundary {len(boundary)} times in "
+        f"two seconds ({boundary}); this is the log flood"
+    )
+
+
+def test_a_store_write_is_still_seen_within_one_poll(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Promptness invariant: a job enqueued WITHOUT a wake still starts fast.
+
+    `media_processing.reconcile_media` enqueues straight into the store and
+    never touches `_wake`, so the cheap idle path must still notice a store
+    write on its next 0.5s pass.  A skip that never re-checks would strand
+    that job, which is why this is a separate test from the count above.
+    """
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    assert worker._store is not None
+    launched = threading.Event()
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", lambda: (launched.set(), None)[1])
+
+    thread = threading.Thread(target=worker._supervise, daemon=True)
+    thread.start()
+    try:
+        # Let the supervisor settle into its idle state first, so the enqueue
+        # below has to be noticed by the cheap path rather than the first pass.
+        time.sleep(1.0)
+        assert not launched.is_set()
+        result = _preserve_media_stub(vault, filename="unwoken.mp3")
+        worker._store.enqueue(
+            media_jobs.MediaJob(
+                binary_path=vault / result.path,
+                sidecar_path=vault / result.sidecar_path,
+                media_type="audio",
+                do_ocr=True,
+                do_clip=False,
+            )
+        )
+        assert launched.wait(timeout=5.0), (
+            "a job enqueued without a wake was never picked up — the idle "
+            "skip stranded work the 0.5s poll used to find"
+        )
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_an_in_process_enqueue_still_wakes_the_supervisor_immediately(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`MediaWorker.enqueue` sets `_wake`; that path must stay instant."""
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    launched = threading.Event()
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", lambda: (launched.set(), None)[1])
+
+    thread = threading.Thread(target=worker._supervise, daemon=True)
+    thread.start()
+    try:
+        time.sleep(1.0)
+        result = _preserve_media_stub(vault, filename="woken.mp3")
+        worker.enqueue(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+        assert launched.wait(timeout=5.0), "an in-process enqueue did not wake the supervisor"
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()

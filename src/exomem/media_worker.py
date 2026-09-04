@@ -117,6 +117,47 @@ _TRANSIENT_EXIT_CODE = 75
 _LOCK_UNAVAILABLE_EXIT_CODE = 76
 _TRANSIENT_RECHECK_SECONDS = 5.0
 _LOCK_UNAVAILABLE_RECHECK_SECONDS = 30.0
+#: How long the supervisor sleeps between passes.  Deliberately unchanged: the
+#: cost being removed below is the store open, not the wakeup, and stretching
+#: this is what would actually delay a job.
+_SUPERVISE_POLL_SECONDS = 0.5
+#: Backstop for the one thing a store signature cannot observe -- a foreign
+#: worker pid dying without writing anything.  Small enough that the worst case
+#: stays in seconds; every real enqueue is still seen on the next 0.5s pass,
+#: because writing to the store is what changes the signature.
+_SUPERVISE_FORCED_RECHECK_SECONDS = 5.0
+#: SQLite writes land in the WAL and SHM long before the main file is
+#: checkpointed, so a freshness signature that reads only the database file
+#: would miss every enqueue it exists to catch.
+_JOB_STORE_SUFFIXES = ("", "-wal", "-shm", "-journal")
+
+
+def _job_store_signature(store: MediaJobStore) -> tuple[object, ...] | None:
+    """Stat the job store's SQLite family without opening or locking anything.
+
+    `needs_worker()` opens the store, and opening it takes the reserved-identity
+    mutation boundary twice -- once on the gate, once on the `media-jobs-store`
+    domain.  On an idle cell that ran several times a second forever.  A store
+    that nobody has written to cannot have acquired work, and every writer in
+    every process moves this signature, so comparing it is a sound and lock-free
+    way to skip the open.
+
+    Returns `None` when the signature cannot be read, which callers must treat
+    as "unknown" and fall back to the real check -- never as "unchanged".
+    """
+    try:
+        signature: list[object] = []
+        for suffix in _JOB_STORE_SUFFIXES:
+            path = Path(f"{store.path}{suffix}")
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError:
+                signature.append(None)
+            else:
+                signature.append((info.st_mtime_ns, info.st_size, info.st_ino))
+        return tuple(signature)
+    except OSError:
+        return None
 
 
 def _writer_authority_available() -> bool:
@@ -907,6 +948,10 @@ class MediaWorker:
     def _supervise(self) -> None:
         assert self._store is not None
         relaunch_after = 0.0
+        # The store signature this supervisor last saw answer "no work", and
+        # when to stop trusting it.  `None` means "ask the store".
+        idle_signature: tuple[object, ...] | None = None
+        forced_recheck_at = 0.0
         try:
             while not self._stop_event.is_set():
                 child = self._child
@@ -938,21 +983,42 @@ class MediaWorker:
                     else:
                         delay = 0.5
                     relaunch_after = time.monotonic() + delay
-                if (
-                    self._child is None
-                    and time.monotonic() >= relaunch_after
-                    and self._store.needs_worker()
-                ):
-                    refusal = _probe_writer_authority()
-                    if refusal is not None:
-                        relaunch_after = time.monotonic() + _authority_recheck_seconds(refusal)
-                    else:
-                        try:
-                            self._child = self._launch_child()
-                        except OSError:
-                            log.exception("media worker: could not start child")
-                            relaunch_after = time.monotonic() + 5.0
-                self._wake.wait(0.5)
+                if self._child is None and time.monotonic() >= relaunch_after:
+                    now = time.monotonic()
+                    signature = _job_store_signature(self._store)
+                    settled = (
+                        idle_signature is not None
+                        and signature is not None
+                        and signature == idle_signature
+                        and now < forced_recheck_at
+                    )
+                    if not settled and self._store.needs_worker():
+                        idle_signature = None
+                        refusal = _probe_writer_authority()
+                        if refusal is not None:
+                            relaunch_after = time.monotonic() + _authority_recheck_seconds(
+                                refusal
+                            )
+                        else:
+                            try:
+                                self._child = self._launch_child()
+                            except OSError:
+                                log.exception("media worker: could not start child")
+                                relaunch_after = time.monotonic() + 5.0
+                    elif not settled:
+                        # Nothing to do.  Record the signature AFTER the check,
+                        # not the one read before it: `needs_worker()` opens the
+                        # store, and that open writes to the WAL, so a
+                        # before-signature would never match again and the skip
+                        # would never engage.
+                        idle_signature = _job_store_signature(self._store)
+                        forced_recheck_at = (
+                            time.monotonic() + _SUPERVISE_FORCED_RECHECK_SECONDS
+                        )
+                self._wake.wait(_SUPERVISE_POLL_SECONDS)
+                # Clearing after the wait can swallow an enqueue that lands in
+                # the gap; the signature check is what makes that survivable,
+                # since the write it announced is still visible on the store.
                 self._wake.clear()
         finally:
             child = self._child
