@@ -26,11 +26,14 @@ from __future__ import annotations
 import gc
 import logging
 import threading
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any, Final
 
 from . import call_spans, deferred_index, semantic_index
+from .derived_receipts import DerivedComponent, DerivedComponentStatus
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +75,116 @@ _DEFERRAL_TELEMETRY_LOCK = threading.Lock()
 #: paths. The disabled codes record nothing and are deliberately absent, so a
 #: stale queue entry naming the same path can never bless them.
 _GRAPH_COVERAGE_CODES = frozenset({"graph_repair_queued"})
+
+_FAST_ACK_PENDING_STATES = frozenset({"prepared", "ready", "claimed"})
+_FAST_ACK_FAILED_STATES = frozenset(
+    {
+        "retryable",
+        "aborted",
+        "superseded",
+        "reconcile_required",
+        "failed",
+    }
+)
+_FAST_ACK_NON_GRAPH_COMPONENTS = tuple(
+    component
+    for component in DerivedComponent
+    if component not in {DerivedComponent.GRAPH, DerivedComponent.WRITE_ADVISORY}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DerivedAcknowledgementSnapshot:
+    """Bounded acknowledgement-time view; never worker or replay authority.
+
+    Carries no graph outcome. The receipt store's graph component is reported
+    among ``diagnostics`` only -- the authoritative ``graph_sync`` field has
+    one author, and it is not this one.
+    """
+
+    derived_sync: str
+    derived_sync_components: tuple[str, ...]
+    advisory_sync: str
+    diagnostics: tuple[tuple[str, str, str | None], ...]
+
+
+def derived_acknowledgement_snapshot(
+    statuses: Iterable[DerivedComponentStatus],
+) -> DerivedAcknowledgementSnapshot:
+    """Separate non-graph, graph and advisory outcomes from one exact snapshot."""
+    by_component = {status.component: status for status in statuses}
+    if set(by_component) != set(DerivedComponent):
+        raise ValueError("derived acknowledgement requires every closed component")
+
+    def outcome(status: DerivedComponentStatus, *, advisory: bool = False) -> str:
+        if status.state == "not_required":
+            return "not_required" if advisory else "completed"
+        if status.state == "completed":
+            return "completed"
+        if status.state in _FAST_ACK_FAILED_STATES:
+            return "failed"
+        if status.state in _FAST_ACK_PENDING_STATES:
+            return "pending"
+        raise ValueError("unknown derived component state")
+
+    unfinished: list[str] = []
+    non_graph_outcomes: list[str] = []
+    for component in _FAST_ACK_NON_GRAPH_COMPONENTS:
+        component_outcome = outcome(by_component[component])
+        non_graph_outcomes.append(component_outcome)
+        if component_outcome != "completed":
+            unfinished.append(component.value)
+    derived_sync = (
+        "failed"
+        if "failed" in non_graph_outcomes
+        else "pending"
+        if "pending" in non_graph_outcomes
+        else "completed"
+    )
+    diagnostics = tuple(
+        sorted(
+            (
+                status.component.value,
+                status.state,
+                status.failure_code,
+            )
+            for status in by_component.values()
+        )
+    )
+    return DerivedAcknowledgementSnapshot(
+        derived_sync=derived_sync,
+        derived_sync_components=tuple(sorted(unfinished)),
+        advisory_sync=outcome(
+            by_component[DerivedComponent.WRITE_ADVISORY], advisory=True
+        ),
+        diagnostics=diagnostics,
+    )
+
+
+
+def superseded_acknowledgement_snapshot(
+    statuses: Iterable[DerivedComponentStatus],
+) -> DerivedAcknowledgementSnapshot:
+    """The bounded view of a batch a newer receipt superseded at proof time.
+
+    Convergence for these paths belongs to the newer batch that covers them, so
+    this batch names no unfinished component of its own, and the applicable
+    advisory job travels with that newer write's terminal rather than this one.
+    Reporting the as-prepared demand here would advertise pending work behind a
+    reference that already resolves to ``superseded``. The closed per-component
+    state read from the store stays visible in the diagnostics.
+    """
+    return DerivedAcknowledgementSnapshot(
+        derived_sync="pending",
+        derived_sync_components=(),
+        advisory_sync="not_required",
+        diagnostics=tuple(
+            sorted(
+                (status.component.value, status.state, status.failure_code)
+                for status in statuses
+            )
+        ),
+    )
 
 
 def _note_deferral(reason: str) -> None:
@@ -1252,6 +1365,49 @@ def _dispatch_upsert_components(
     return components
 
 
+def _apply_exact_path_custody(
+    vault_root: Path,
+    *,
+    changed: list[str],
+    deleted: list[str],
+    reason: str,
+) -> None:
+    """Hand this batch's committed path set to the read-side custody seams.
+
+    Design Decision 2's write half. The fan-out above already brought each
+    sidecar's rows current one path at a time; this tells the read-side caches
+    the SAME path set, so their rows move with it and no whole-scope key has to
+    stand in for a change it cannot describe. It also re-checks each seam
+    against the pages, so a component that degraded above cannot leave a row
+    that answers -- a path no seam can prove exact fails the scope closed.
+
+    It never fails a write that has already committed -- the caches are derived
+    -- but it does not fail OPEN either. An individual seam that raises is
+    already handled inside `apply_receipt_paths`, which names its paths as
+    mismatches and invalidates the scope; if the whole call fails, the batch's
+    custody is simply unknown, and unknown custody is exactly the state a
+    whole-scope invalidation exists for. Logging and returning would leave rows
+    that answer with nothing having checked them.
+    """
+    if not (changed or deleted):
+        return
+    from . import freshness
+
+    try:
+        freshness.apply_receipt_paths(
+            vault_root, changed=changed, deleted=deleted, reason=reason
+        )
+    except Exception:  # noqa: BLE001 - canonical bytes are already committed
+        log.warning("read-side exact custody could not be applied", exc_info=True)
+        try:
+            for scope in freshness.SCOPES:
+                freshness.invalidate_scope_for_drift(
+                    vault_root, scope=scope, reason=f"{reason}_custody_unavailable"
+                )
+        except Exception:  # noqa: BLE001 - the write itself must still return
+            log.warning("custody fallback invalidation failed", exc_info=True)
+
+
 @call_spans.timed("index.upsert_after_write")
 def upsert_after_write(
     vault_root: Path,
@@ -1456,6 +1612,17 @@ def upsert_after_write(
         semantic_index.reset_parent_states(token)
     if not batch.revalidate(vault_root):
         return stale_report()
+    _apply_exact_path_custody(
+        vault_root,
+        # `batch.identity_paths` rather than `identity_items`: the latter is
+        # narrowed to the knowledge base in watcher mode so the heavier derived
+        # components stay KB-only, and the read-side caches serve both scopes.
+        # This is the batch's whole markdown path set, which is what a receipt
+        # names.
+        changed=[item.rel_path for item in batch.identity_paths],
+        deleted=watcher_deleted_rels or [],
+        reason="governed_write",
+    )
     report = IndexSyncReport(
         "upsert",
         requested_report,
@@ -1569,6 +1736,9 @@ def delete_after_remove(
             scene_frames.clear_scene_frames(vault_root, vault_root / rel)
         except Exception:  # noqa: BLE001 - frame cleanup is best-effort
             log.warning("scene-frame cleanup failed for %s", rel, exc_info=True)
+    _apply_exact_path_custody(
+        vault_root, changed=[], deleted=md_rels, reason="governed_delete"
+    )
     report = IndexSyncReport(
         "delete",
         requested_report,
@@ -1577,3 +1747,150 @@ def delete_after_remove(
         paths_truncated,
     )
     return report
+
+
+# --------------------------------------------------------------------------- #
+# Receipt-owned convergence for the non-advisory derived components
+# --------------------------------------------------------------------------- #
+
+#: Which reported component proves each closed receipt component. ``freshness``
+#: maps to no report row because it is proven by the fan-out's own corpus-change
+#: publication rather than by a sidecar; ``write_advisory`` is absent because
+#: Lane 4 owns it and this seam must never claim to have converged it.
+_DERIVED_COMPONENT_REPORT_KEY: Final[dict[str, str | None]] = {
+    DerivedComponent.FRESHNESS.value: None,
+    DerivedComponent.MEMORY_REFS.value: "memory_refs",
+    DerivedComponent.RESOLVER.value: "resolver",
+    DerivedComponent.SEMANTIC_PURGE.value: "semantic_purge",
+    DerivedComponent.LEXSTORE.value: "lexstore",
+    DerivedComponent.GRAPH.value: "epistemic_graph",
+    DerivedComponent.EMBEDDINGS.value: "embeddings",
+    DerivedComponent.CLAIMS.value: "claims",
+}
+
+#: Outcomes that prove a component's own convergence for this batch. A graph
+#: handoff that is ``registered`` or ``deferred`` has reached the graph
+#: pipeline, which is that component's own scheduling owner and the sole author
+#: of ``graph_sync``; holding receipt custody open behind a rebuild this seam
+#: does not run would make one lane's queue depth another lane's pending state.
+_DERIVED_CONVERGENT_OUTCOMES: Final[frozenset[str]] = frozenset(
+    {"completed", "accepted", "not_required", "registered", "deferred"}
+)
+
+#: Components the existing fan-out omits from its report entirely when their
+#: capability is switched off. For these, and only these, an absent row means
+#: the work is not required in this configuration rather than unproven -- the
+#: same soft-fail rule the synchronous path has always applied. Holding receipt
+#: custody open for a disabled model would keep the pending overlay shadowing
+#: for ever, which is a worse answer than the disclosed one.
+_DERIVED_OPTIONAL_COMPONENTS: Final[frozenset[str]] = frozenset(
+    {
+        DerivedComponent.EMBEDDINGS.value,
+        DerivedComponent.CLAIMS.value,
+    }
+)
+
+#: One successful fan-out proves every component it reported, so the batch is
+#: memoized rather than refanned once per claimed component. Bounded, and only
+#: successful reports are kept: a degraded fan-out must be retried, never
+#: replayed from a memo.
+_DERIVED_FANOUT_MEMO_LIMIT: Final = 64
+_DERIVED_FANOUT_MEMO_TTL_SECONDS: Final = 300.0
+_derived_fanout_memo: dict[tuple[str, str, str], tuple[float, IndexSyncReport]] = {}
+_derived_fanout_lock = threading.Lock()
+
+
+def _derived_memo_get(key: tuple[str, str, str]) -> IndexSyncReport | None:
+    now = time.time()
+    with _derived_fanout_lock:
+        stale = [
+            item
+            for item, (at, _report) in _derived_fanout_memo.items()
+            if now - at > _DERIVED_FANOUT_MEMO_TTL_SECONDS
+        ]
+        for item in stale:
+            _derived_fanout_memo.pop(item, None)
+        entry = _derived_fanout_memo.get(key)
+    return None if entry is None else entry[1]
+
+
+def _derived_memo_put(key: tuple[str, str, str], report: IndexSyncReport) -> None:
+    with _derived_fanout_lock:
+        if len(_derived_fanout_memo) >= _DERIVED_FANOUT_MEMO_LIMIT:
+            oldest = min(_derived_fanout_memo, key=lambda item: _derived_fanout_memo[item][0])
+            _derived_fanout_memo.pop(oldest, None)
+        _derived_fanout_memo[key] = (time.time(), report)
+
+
+def reset_derived_fanout_memo() -> None:
+    """Drop every memoized batch fan-out. Durable custody is untouched."""
+    with _derived_fanout_lock:
+        _derived_fanout_memo.clear()
+
+
+def converge_derived_component(
+    vault_root: Path,
+    receipt: Any,
+    component: DerivedComponent,
+) -> bool:
+    """Converge one non-advisory component of an exactly proven batch.
+
+    This is the existing writer fan-out, re-owned by the receipt rather than by
+    the request thread: the same ``upsert_after_write`` the synchronous path
+    called, over this batch's own paths only. No new scheduler and no second
+    implementation of any component -- the drain decides *when*, and the
+    existing owner still decides *how*.
+
+    One fan-out proves every component it reports, so a successful report is
+    memoized for the batch generation and the remaining components of that
+    batch complete from it. A degraded or failed report is never memoized; the
+    claim rotates and the fan-out runs again under the store's own backoff.
+    """
+    key = DerivedComponent(component).value
+    if key not in _DERIVED_COMPONENT_REPORT_KEY:
+        return False
+    root = Path(vault_root)
+    memo_key = (
+        str(root),
+        str(receipt.batch_id),
+        str(receipt.canonical_generation),
+    )
+    report = _derived_memo_get(memo_key)
+    if report is None:
+        written: list[Path] = []
+        created: list[Path] = []
+        for path in receipt.paths:
+            if path.after_hash is None:
+                # A tombstone is a removal, and removal has its own fan-out.
+                continue
+            target = root.joinpath(*path.rel_path.split("/"))
+            written.append(target)
+            if path.before_hash is None:
+                created.append(target)
+        if not written:
+            # Nothing this fan-out can publish: a tombstone-only batch is
+            # converged by the removal path the deleting writer already ran.
+            return True
+        report = upsert_after_write(
+            root,
+            written,
+            created_paths=created,
+            publish_corpus_change=True,
+        )
+        if report.reconcile_required:
+            return False
+        _derived_memo_put(memo_key, report)
+    report_key = _DERIVED_COMPONENT_REPORT_KEY[key]
+    if report_key is None:
+        # Freshness is proven by the corpus-change publication the fan-out
+        # performs, not by a sidecar row, so a non-degraded report is its proof.
+        return True
+    outcome = next(
+        (item for item in report.components if item.component == report_key), None
+    )
+    if outcome is None:
+        # A required component the fan-out never reached is a real absence of
+        # proof. An optional one is simply switched off, and its absence is the
+        # configuration, not a gap.
+        return key in _DERIVED_OPTIONAL_COMPONENTS
+    return outcome.outcome in _DERIVED_CONVERGENT_OUTCOMES

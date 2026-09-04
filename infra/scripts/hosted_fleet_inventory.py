@@ -1738,6 +1738,15 @@ def _parser() -> argparse.ArgumentParser:
     collect.add_argument("--facts-output", type=Path, required=True)
     collect.add_argument("--timeout-seconds", type=float, default=15)
     collect.add_argument("--provisioner-bootstrap-image")
+    collect.add_argument(
+        "--kubectl",
+        default=os.environ.get("EXOMEM_KUBECTL", "kubectl"),
+        help=(
+            "kubectl executable used for the read-only provisioner and Kubernetes "
+            "observations. A k3s node has no bare kubectl; point this at a wrapper "
+            "that execs `k3s kubectl`. Defaults to $EXOMEM_KUBECTL, else kubectl."
+        ),
+    )
     return parser
 
 
@@ -1764,12 +1773,14 @@ def main(argv: list[str] | None = None) -> int:
             ),
             "provisioner": collect_provisioner(
                 timeout_seconds=args.timeout_seconds,
+                kubectl=args.kubectl,
                 bootstrap_image=args.provisioner_bootstrap_image,
             ),
             "kubernetes": collect_kubernetes(
                 runtime_catalog=runtime_catalog,
                 observed_at=args.observed_at,
                 timeout_seconds=args.timeout_seconds,
+                kubectl=args.kubectl,
             ),
         }
         inventory = reconcile_inventory(sources, target=target)

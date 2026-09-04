@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -10,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from exomem_provisioner.config import ProvisionerSettings
+from exomem_provisioner.conflict_reason import ConflictReason
 from exomem_provisioner.crypto import AesGcmEnvelopeCodec
 from exomem_provisioner.database import ProvisionerDatabase
 from exomem_provisioner.driver import (
@@ -29,8 +31,10 @@ from exomem_provisioner.lifecycle import (
     RecordedVolume,
     VolumeLifecycleWorker,
     VolumeRegistrationDriver,
+    _conflict_reason,
     _fixed_helm_values,
 )
+from exomem_provisioner.live import LiveLifecyclePlane
 from exomem_provisioner.models import OperationState
 from exomem_provisioner.provider_identity import (
     ProviderIdentityConflict,
@@ -1236,6 +1240,67 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
 
 
 @pytest.mark.asyncio
+async def test_retargeted_stranded_provision_migrates_before_runtime_admission() -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    source_target = _runtime_target(
+        releaseVersion="0.21.0",
+        gatewayContractDigest="e" * 64,
+        schemaDigest="f" * 64,
+    )
+    target = _runtime_target()
+    source_config = replace(
+        _config(),
+        image="registry.invalid/exomem@sha256:" + "e" * 64,
+        release_version="0.21.0",
+        runtime_target=source_target,
+    )
+    config = replace(
+        _config(),
+        runtime_target=target,
+        migration_mode="state-root-v1",
+        legacy_runtime_units={
+            ("0.21.0", "1"): {
+                **source_target,
+                "runtimeImage": "registry.invalid/exomem@sha256:" + "e" * 64,
+                "sourceCommit": "e" * 40,
+            }
+        },
+    )
+    source_request = _v2_request(runtimeTarget=source_target)
+    target_request = _v2_request(runtimeTarget=target)
+    await plane.seed_ready_cell(_metadata(), source_request, source_config)
+    cell = plane._cells[plane._key(_metadata())]
+    cell.runtime_admitted = False
+    cell.control_route = False
+    cell.transfer_route = False
+    before_volume = plane.bound_handle(_metadata())
+    before_fingerprint = plane.vault_fingerprint(_metadata())
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+
+    final, checkpoints = await _run_action(
+        driver,
+        "provision",
+        target_request,
+        _context(checkpoint="volume-owned", wire_protocol=WIRE_PROTOCOL_V2),
+    )
+
+    assert checkpoints[:5] == [
+        "retarget-runtime-stop-wait",
+        "retarget-runtime-stopped",
+        f"retarget-vault-fingerprinted-{before_fingerprint}",
+        f"retarget-migration-complete-{before_fingerprint}",
+        "initialized",
+    ]
+    assert final.result["providerRef"] == plane.provider_reference(_metadata())
+    assert plane.bound_handle(_metadata()) == before_volume
+    assert plane.vault_fingerprint(_metadata()) == before_fingerprint
+    assert plane.helm_values(_metadata())["image"] == config.image
+    assert plane.helm_values(_metadata())["expectedRelease"] == "0.22.0"
+    assert plane.runtime_admitted(_metadata()) is True
+    assert plane.routes_enabled(_metadata()) == (True, True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "policy",
     [
@@ -1810,3 +1875,263 @@ async def test_destroy_revokes_online_resources_waits_without_attempts_then_prov
         "tenantResourcesDestroyed": True,
     }
     assert plane.tenant_absent("tenant-alpha") is True
+
+
+@pytest.mark.asyncio
+async def test_volume_registration_conflict_names_the_condition_that_fired() -> None:
+    """One terminal code covers a dozen conditions; the label says which fired.
+
+    A bound CSI volume that is not yet discoverable and an HCloud volume whose
+    identity differs are the same `PROVISIONER_PROVIDER_METADATA_CONFLICT` on the
+    wire and in the operation row. Diagnosing the live alpha failure took three
+    hours and still could not separate them, because nothing recorded the cause.
+    """
+    plane = HighFidelityProviderPlane(location="fsn1")
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    volume_driver = VolumeRegistrationDriver(
+        VolumeLifecycleWorker(plane, plane, identity_codec=codec),
+        identity_verifier=codec.verifier(),
+    )
+
+    with pytest.raises(DriverTerminal) as raised:
+        await volume_driver.execute(
+            "provision",
+            _request_with_provider_identity(),
+            _context(checkpoint="volume-registration-required"),
+        )
+
+    assert raised.value.code == "PROVISIONER_PROVIDER_METADATA_CONFLICT"
+    assert raised.value.reason is ConflictReason.BOUND_VOLUME_NOT_DISCOVERABLE
+
+
+@pytest.mark.asyncio
+async def test_provision_dispatch_conflict_names_the_condition_that_fired() -> None:
+    """The whole-dispatch `except MetadataConflict` must carry the cause forward."""
+    plane = HighFidelityProviderPlane(location="fsn1")
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=_config())
+    request = _request_with_provider_identity(
+        workerPolicy={"workerCount": 0, "semantic": False, "media": False}
+    )
+
+    prepared = await driver.execute("provision", request, _context())
+    assert isinstance(prepared, DriverPending)
+    with pytest.raises(DriverTerminal) as raised:
+        await driver.execute("provision", request, _context(checkpoint=prepared.checkpoint))
+
+    assert raised.value.code == "PROVISIONER_PROVIDER_METADATA_CONFLICT"
+    assert raised.value.reason is ConflictReason.WORKER_POLICY_INCOMPLETE
+
+
+@pytest.mark.asyncio
+async def test_provider_metadata_conflict_code_is_unchanged_by_the_reason() -> None:
+    """`operation_recovery` and the runbook match this code verbatim.
+
+    The reason rides alongside it. If the code string ever moves, the supported
+    init-retry recovery path stops recognising the operations it exists to reopen.
+    """
+    plane = HighFidelityProviderPlane(location="fsn1")
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    volume_driver = VolumeRegistrationDriver(
+        VolumeLifecycleWorker(plane, plane, identity_codec=codec),
+        identity_verifier=codec.verifier(),
+    )
+
+    with pytest.raises(DriverTerminal) as raised:
+        await volume_driver.execute(
+            "provision",
+            _request_with_provider_identity(),
+            _context(checkpoint="volume-registration-required"),
+        )
+
+    assert str(raised.value) == "PROVISIONER_PROVIDER_METADATA_CONFLICT"
+    assert raised.value.code == "PROVISIONER_PROVIDER_METADATA_CONFLICT"
+    assert raised.value.args == ("PROVISIONER_PROVIDER_METADATA_CONFLICT",)
+
+
+def test_an_unauthenticated_recovery_envelope_resolves_its_own_label() -> None:
+    """`ProviderIdentityConflict` crosses the same boundary and is its own condition."""
+    assert _conflict_reason(ProviderIdentityConflict("forged envelope")) is (
+        ConflictReason.PROVIDER_RECOVERY_ENVELOPE_UNAUTHENTICATED
+    )
+
+
+def test_conflict_reason_labels_are_a_closed_bounded_vocabulary() -> None:
+    """Every label is an internal condition name, not a value from anywhere else.
+
+    Two names sharing one value is the defect worth guarding: `StrEnum` turns the
+    second into a silent alias that iteration never yields, so two distinguishable
+    conditions collapse onto one label -- the exact ambiguity this change exists to
+    remove -- while every assertion over `list(ConflictReason)` still passes.
+    `__members__` counts the aliases; iteration does not.
+    """
+    values = [reason.value for reason in ConflictReason]
+
+    assert len(ConflictReason.__members__) == len(values)
+    for value in values:
+        assert re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", value), value
+        assert len(value) <= 64
+
+
+@pytest.mark.asyncio
+async def test_a_conflict_reason_can_never_carry_tenant_cell_or_operation_identity() -> None:
+    """This is a multi-tenant control plane: the label is closed, not free text.
+
+    A conflict raised with anything but a member of the closed set degrades to
+    `unclassified` at the constructor and again at the terminal boundary, so no
+    tenant, cell, operation, volume handle, or provider payload can ride it into
+    an operation row or a log line.
+    """
+    identity = "tenant-alpha/cell-alpha/operation-alpha"
+
+    assert MetadataConflict("conflict", reason=identity).reason is (  # type: ignore[arg-type]
+        ConflictReason.UNCLASSIFIED
+    )
+    overwritten = MetadataConflict("conflict")
+    overwritten.reason = identity  # type: ignore[assignment]
+    assert _conflict_reason(overwritten) is ConflictReason.UNCLASSIFIED
+    terminal = DriverTerminal(
+        "PROVISIONER_PROVIDER_METADATA_CONFLICT",
+        reason=identity,  # type: ignore[arg-type]
+    )
+    assert terminal.reason is ConflictReason.UNCLASSIFIED
+
+    class ForgingPlane(HighFidelityProviderPlane):
+        async def observe_operation(self, context, request):
+            del context, request
+            error = MetadataConflict("provider identity metadata is immutable")
+            error.reason = identity  # type: ignore[assignment]
+            raise error
+
+    plane = ForgingPlane(location="fsn1")
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=_config())
+
+    with pytest.raises(DriverTerminal) as raised:
+        await driver.execute("provision", _request_with_provider_identity(), _context())
+
+    assert raised.value.code == "PROVISIONER_PROVIDER_METADATA_CONFLICT"
+    assert raised.value.reason is ConflictReason.UNCLASSIFIED
+    assert identity not in str(raised.value.reason)
+
+
+class _QuiescentRegistry:
+    """The one collaborator a dispatch reaches before it authenticates anything."""
+
+    async def observed_fence(self, tenant_id: str) -> int:
+        del tenant_id
+        return 0
+
+
+def _live_plane(verifier: ProviderRecoveryIdentityVerifier) -> LiveLifecyclePlane:
+    """Build the production plane class with only the collaborators this path uses.
+
+    `execute` reads the observed fence, then `observe_operation` authenticates the
+    recovery envelope set before it touches the repository or any adapter, and
+    `_snapshot` reads an in-process dict. The Helm, runtime, routing, maintenance
+    and capacity collaborators are never reached. Passing `None` keeps the test
+    honest about that: if a future change reaches one of them on this path, the
+    test fails loudly rather than quietly exercising a stub.
+    """
+    return LiveLifecyclePlane(
+        repository=None,  # type: ignore[arg-type]
+        registry=_QuiescentRegistry(),  # type: ignore[arg-type]
+        cell=None,  # type: ignore[arg-type]
+        helm=None,  # type: ignore[arg-type]
+        runtime=None,  # type: ignore[arg-type]
+        routes=None,  # type: ignore[arg-type]
+        maintenance=None,  # type: ignore[arg-type]
+        capacity=None,
+        identity_verifier=verifier,
+        config=_config(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_production_plane_labels_the_conflicts_an_operator_actually_meets() -> None:
+    """`HighFidelityProviderPlane` is not the plane that runs on the cluster.
+
+    `production.py` builds `CellLifecycleDriver(plane=LiveLifecyclePlane(...))`, so
+    every conflict a real provision raises comes from `live.py`. A dispatch test
+    driven by the in-memory fake agrees with the labelling by construction and
+    proves nothing about production -- the first version of this change labelled
+    only the fake, and its tests passed while all 50 production sites stayed
+    `unclassified`.
+
+    This drives the real class, through the real dispatch, on the condition that
+    cost an evening to diagnose by hand: recovery envelopes that do not
+    authenticate for this cell.
+    """
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    driver = CellLifecycleDriver(
+        plane=_live_plane(codec.verifier()), volume_worker=None, config=_config()
+    )
+
+    # Envelopes correctly signed, but for a different cell than the one dispatched.
+    request = _request_with_provider_identity()
+    impostor = _metadata(
+        tenant_id="tenant-alpha",
+        subject_id="cell-somebody-else",
+        operation_id="operation-alpha",
+        fence_generation=7,
+    )
+    request["_providerRecoveryEnvelopes"] = cell_provider_recovery_envelopes(
+        codec,
+        tenant_id=impostor.tenant_id,
+        cell_id=impostor.subject_id,
+        operation_id=impostor.operation_id,
+        fence_generation=impostor.fence_generation,
+        resource_name=impostor.resource_name,
+        operation_resource_name=provider_operation_resource_name(impostor.operation_id),
+    )
+
+    with pytest.raises(DriverTerminal) as raised:
+        await driver.execute("provision", request, _context())
+
+    assert raised.value.code == "PROVISIONER_PROVIDER_METADATA_CONFLICT"
+    assert raised.value.reason is ConflictReason.PROVIDER_RECOVERY_ENVELOPE_UNAUTHENTICATED
+
+
+def test_the_production_plane_labels_a_second_structurally_different_condition() -> None:
+    """One label surviving could be a single wired site; two is a labelled module."""
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    plane = _live_plane(codec.verifier())
+
+    with pytest.raises(MetadataConflict) as raised:
+        plane.has_namespace(
+            _metadata(
+                tenant_id="tenant-alpha",
+                subject_id="cell-alpha",
+                operation_id="operation-alpha",
+                fence_generation=7,
+            )
+        )
+
+    assert raised.value.reason is ConflictReason.PROVIDER_STATE_NOT_OBSERVED
+
+
+def test_every_provider_conflict_on_the_provision_path_names_its_condition() -> None:
+    """The gap this change exists to close, guarded against reopening.
+
+    An unlabelled raise fails nothing: it degrades to `unclassified` and the
+    operator gets the same bare code that cost an evening. Nothing else in this
+    suite can catch one being added, because the omission is silent by design.
+
+    These three modules are what a live provision executes -- the plane class and
+    the Kubernetes/Helm/runtime adapters and authorization-membership code it calls.
+    """
+    import ast
+    import inspect
+
+    from exomem_provisioner import adapters, authorization_membership, live
+
+    unlabelled: list[str] = []
+    for module in (live, adapters, authorization_membership):
+        tree = ast.parse(inspect.getsource(module))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call):
+                continue
+            if getattr(node.exc.func, "id", None) != "MetadataConflict":
+                continue
+            if not any(keyword.arg == "reason" for keyword in node.exc.keywords):
+                unlabelled.append(f"{module.__name__}:{node.lineno}")
+
+    assert unlabelled == [], f"MetadataConflict raised without a condition label: {unlabelled}"

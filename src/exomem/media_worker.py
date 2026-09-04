@@ -29,13 +29,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import (
+    asr_runtime,
     deferred_index,
     embeddings,
     extract,
     graph_sync,
     index_sync,
+    media_jobs,
     preserve,
     recall_policy,
+    runtime_resources,
     scene_frames,
     semantic_segments,
 )
@@ -86,6 +89,9 @@ _STALE = "stale"
 _BLOCKED_ACTION = "install the required media dependency, then retry"
 _RENDERER_ACTION = "check the timestamp renderer, then retry"
 _FAILED_ACTION = "repair or replace the media artifact, then retry"
+_COMPUTE_RUNTIME_ACTION = (
+    "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
+)
 _TRANSIENT_OPERATION_CODES = frozenset(
     {
         "MUTATION_BUSY",
@@ -111,6 +117,51 @@ _TRANSIENT_EXIT_CODE = 75
 _LOCK_UNAVAILABLE_EXIT_CODE = 76
 _TRANSIENT_RECHECK_SECONDS = 5.0
 _LOCK_UNAVAILABLE_RECHECK_SECONDS = 30.0
+#: How long the supervisor sleeps between passes.  Deliberately unchanged: the
+#: cost being removed below is the store open, not the wakeup, and stretching
+#: this is what would actually delay a job.
+_SUPERVISE_POLL_SECONDS = 0.5
+#: Backstop for the writes a signature comparison cannot separate from its own.
+#: Two of them: a foreign worker pid dying without writing anything at all, and
+#: a commit that lands between `needs_worker()`'s read and the signature taken
+#: after it -- or within the filesystem's mtime tick of it, measured at ~3.9ms
+#: here -- which is then folded into the recorded signature and looks settled.
+#: Neither can starve a job; both are bounded by this interval rather than by
+#: the 0.5s pass.  It is a real net, not a formality: with the signature
+#: defeated, this is the only thing that starts a worker at all.
+_SUPERVISE_FORCED_RECHECK_SECONDS = 5.0
+#: SQLite writes land in the WAL and SHM long before the main file is
+#: checkpointed, so a freshness signature that reads only the database file
+#: would miss every enqueue it exists to catch.
+_JOB_STORE_SUFFIXES = ("", "-wal", "-shm", "-journal")
+
+
+def _job_store_signature(store: MediaJobStore) -> tuple[object, ...] | None:
+    """Stat the job store's SQLite family without opening or locking anything.
+
+    `needs_worker()` opens the store, and opening it takes the reserved-identity
+    mutation boundary twice -- once on the gate, once on the `media-jobs-store`
+    domain.  On an idle cell that ran several times a second forever.  A store
+    that nobody has written to cannot have acquired work, and every writer in
+    every process moves this signature, so comparing it is a sound and lock-free
+    way to skip the open.
+
+    Returns `None` when the signature cannot be read, which callers must treat
+    as "unknown" and fall back to the real check -- never as "unchanged".
+    """
+    try:
+        signature: list[object] = []
+        for suffix in _JOB_STORE_SUFFIXES:
+            path = Path(f"{store.path}{suffix}")
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError:
+                signature.append(None)
+            else:
+                signature.append((info.st_mtime_ns, info.st_size, info.st_ino))
+        return tuple(signature)
+    except OSError:
+        return None
 
 
 def _writer_authority_available() -> bool:
@@ -206,6 +257,7 @@ class MediaWorker:
         self._wake = threading.Event()
         self._stop_event = threading.Event()
         self._child: subprocess.Popen | None = None
+        self._asr_runtime_failure: str | None = None
 
     def start(self) -> None:
         with self._lock:
@@ -396,6 +448,18 @@ class MediaWorker:
         if expected_sidecar is None or expected_binary is None:
             log.warning("extraction skip %s: input identity unavailable", job.binary_path.name)
             return _ProcessOutcome(_STALE, "input identity unavailable")
+        if job.media_type in {"audio", "video"} and self._asr_runtime_failure is not None:
+            committed = self._block_compute_runtime_failure(
+                job,
+                expected_sidecar=expected_sidecar,
+                expected_binary=expected_binary,
+                error=self._asr_runtime_failure,
+            )
+            return (
+                _ProcessOutcome(BLOCKED, self._asr_runtime_failure)
+                if committed
+                else _ProcessOutcome(_STALE)
+            )
         try:
             kwargs = {"media_type": job.media_type, "vault_root": self._vault_root}
             signature = inspect.signature(extract.extract_text)
@@ -428,6 +492,20 @@ class MediaWorker:
                 next_action=_BLOCKED_ACTION,
             )
             return _ProcessOutcome(BLOCKED, error) if committed else _ProcessOutcome(_STALE)
+        except runtime_resources.ModelBusyError:
+            raise
+        except asr_runtime.ASRComputeRuntimeError as e:
+            error = f"{type(e).__name__}: {e}"
+            # Ledger first: a crash can leave only a stale sidecar, never a job
+            # that starts ASR again before the runtime is repaired or CPU is explicit.
+            self._asr_runtime_failure = error
+            committed = self._block_compute_runtime_failure(
+                job,
+                expected_sidecar=expected_sidecar,
+                expected_binary=expected_binary,
+                error=error,
+            )
+            return _ProcessOutcome(BLOCKED, error) if committed else _ProcessOutcome(_STALE)
         except Exception as e:  # noqa: BLE001 — a corrupt file shouldn't re-loop forever
             error = f"{type(e).__name__}: {e}"
             log.exception("extraction failed for %s", job.binary_path.name)
@@ -443,15 +521,21 @@ class MediaWorker:
         text = result.text.strip() or "(no text detected)"
         committed = False
         for commit_attempt in range(3):
-            committed = self._commit_sidecar_extraction(
-                job,
-                expected_sidecar=expected_sidecar,
-                expected_binary=expected_binary,
-                text=text,
-                engine=result.engine,
-                speakers=result.speakers,
-                speaker_verification=result.speaker_verification or "unavailable",
-            )
+            try:
+                committed = self._commit_sidecar_extraction(
+                    job,
+                    expected_sidecar=expected_sidecar,
+                    expected_binary=expected_binary,
+                    text=text,
+                    engine=result.engine,
+                    speakers=result.speakers,
+                    speaker_verification=result.speaker_verification or "unavailable",
+                )
+            except preserve.PreserveError as exc:
+                if exc.code != "AMBIGUOUS_SIDECAR_BOUNDARY":
+                    raise
+                error = f"{exc.code}: {exc.reason}"
+                return _ProcessOutcome(BLOCKED, error)
             if committed:
                 break
             if (
@@ -482,6 +566,47 @@ class MediaWorker:
             "extracted %s via %s (%d chars)", job.binary_path.name, result.engine, len(result.text)
         )
         return _ProcessOutcome(_COMPLETE)
+
+    def _block_compute_runtime_failure(
+        self,
+        job: _Job,
+        *,
+        expected_sidecar: str,
+        expected_binary: tuple[tuple[int, int, int, int, int], str | None],
+        error: str,
+    ) -> bool:
+        if self._store is not None and job.id is not None:
+            self._store.mark(job.id, BLOCKED, error)
+        try:
+            self._commit_processing_failure(
+                job,
+                expected_sidecar=expected_sidecar,
+                expected_binary=expected_binary,
+                state=BLOCKED,
+                error=error,
+                next_action=_COMPUTE_RUNTIME_ACTION,
+            )
+            # The ledger was persisted first. A false sidecar precondition is
+            # presentation lag, never permission to overwrite authority as FAILED.
+            return True
+        except Exception:  # noqa: BLE001 - durable ledger authority must survive sidecar lag
+            log.warning("compute failure sidecar publish deferred for %s", job.binary_path, exc_info=True)
+            return True
+
+    def converge_compute_runtime_blocked(self, job: _Job) -> bool:
+        """Repair blocked compute presentation without constructing an ASR model."""
+        if job.state != BLOCKED or not media_jobs.is_compute_runtime_error(job.last_error):
+            return False
+        expected_sidecar = _content_digest(job.sidecar_path)
+        expected_binary = _binary_identity(job.binary_path)
+        if expected_sidecar is None or expected_binary is None:
+            return False
+        return self._block_compute_runtime_failure(
+            job,
+            expected_sidecar=expected_sidecar,
+            expected_binary=expected_binary,
+            error=str(job.last_error),
+        )
 
     def _commit_sidecar_extraction(
         self,
@@ -525,6 +650,12 @@ class MediaWorker:
                     job.sidecar_path.name,
                 )
                 return False
+            if preserve._has_ambiguous_legacy_preserved_notes(current_content):
+                raise preserve.PreserveError(
+                    code="AMBIGUOUS_SIDECAR_BOUNDARY",
+                    missing=[],
+                    reason="unmarked nonempty preserved notes have no machine-owned boundary",
+                )
             receipts = deferred_index.add_full_receipts(
                 self._vault_root,
                 [job.sidecar_path.relative_to(self._vault_root).as_posix()],
@@ -698,6 +829,8 @@ class MediaWorker:
         except embeddings.ClipUnavailable as e:
             log.warning("CLIP unavailable for %s: %s", job.binary_path.name, e)
             return
+        except runtime_resources.ModelBusyError:
+            raise
         except Exception:  # noqa: BLE001 — a bad image must not kill the worker
             log.exception("CLIP embedding failed for %s", job.binary_path.name)
             return
@@ -811,11 +944,18 @@ class MediaWorker:
             str(self._idle_seconds),
         ]
         log.info("media worker: starting disposable child")
-        return subprocess.Popen(args)  # noqa: S603 - fixed interpreter/module command
+        return subprocess.Popen(  # noqa: S603 - fixed interpreter/module command
+            args,
+            env=asr_runtime.cuda_runtime_child_env(os.environ),
+        )
 
     def _supervise(self) -> None:
         assert self._store is not None
         relaunch_after = 0.0
+        # The store signature this supervisor last saw answer "no work", and
+        # when to stop trusting it.  `None` means "ask the store".
+        idle_signature: tuple[object, ...] | None = None
+        forced_recheck_at = 0.0
         try:
             while not self._stop_event.is_set():
                 child = self._child
@@ -847,21 +987,42 @@ class MediaWorker:
                     else:
                         delay = 0.5
                     relaunch_after = time.monotonic() + delay
-                if (
-                    self._child is None
-                    and time.monotonic() >= relaunch_after
-                    and self._store.needs_worker()
-                ):
-                    refusal = _probe_writer_authority()
-                    if refusal is not None:
-                        relaunch_after = time.monotonic() + _authority_recheck_seconds(refusal)
-                    else:
-                        try:
-                            self._child = self._launch_child()
-                        except OSError:
-                            log.exception("media worker: could not start child")
-                            relaunch_after = time.monotonic() + 5.0
-                self._wake.wait(0.5)
+                if self._child is None and time.monotonic() >= relaunch_after:
+                    now = time.monotonic()
+                    signature = _job_store_signature(self._store)
+                    settled = (
+                        idle_signature is not None
+                        and signature is not None
+                        and signature == idle_signature
+                        and now < forced_recheck_at
+                    )
+                    if not settled and self._store.needs_worker():
+                        idle_signature = None
+                        refusal = _probe_writer_authority()
+                        if refusal is not None:
+                            relaunch_after = time.monotonic() + _authority_recheck_seconds(
+                                refusal
+                            )
+                        else:
+                            try:
+                                self._child = self._launch_child()
+                            except OSError:
+                                log.exception("media worker: could not start child")
+                                relaunch_after = time.monotonic() + 5.0
+                    elif not settled:
+                        # Nothing to do.  Record the signature AFTER the check,
+                        # not the one read before it: `needs_worker()` opens the
+                        # store, and that open writes to the WAL, so a
+                        # before-signature would never match again and the skip
+                        # would never engage.
+                        idle_signature = _job_store_signature(self._store)
+                        forced_recheck_at = (
+                            time.monotonic() + _SUPERVISE_FORCED_RECHECK_SECONDS
+                        )
+                self._wake.wait(_SUPERVISE_POLL_SECONDS)
+                # Clearing after the wait can swallow an enqueue that lands in
+                # the gap; the signature check is what makes that survivable,
+                # since the write it announced is still visible on the store.
                 self._wake.clear()
         finally:
             child = self._child
@@ -1014,6 +1175,9 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
     """Claim and process durable jobs until idle or the parent disappears."""
     store = MediaJobStore(vault_root)
     store.recover_interrupted()
+    recovered_compute = store.recover_compute_runtime_failures()
+    if recovered_compute:
+        log.info("media worker: marked %d retained CUDA runtime failure(s) blocked", recovered_compute)
     if not _writer_authority_available():
         log.info("media worker: writer authority unavailable; leaving work queued")
         return _TRANSIENT_EXIT_CODE
@@ -1021,10 +1185,18 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
     # Process mode makes scene-frame follow-up enqueue durable in this same ledger;
     # the nested supervisor is never started because the child calls _process directly.
     worker = MediaWorker(vault_root, execution_mode="process", idle_seconds=idle_seconds)
+    for blocked in store.blocked_compute_presentations_needing_convergence(limit=100):
+        if blocked.state == BLOCKED and media_jobs.is_compute_runtime_error(blocked.last_error):
+            try:
+                worker.converge_compute_runtime_blocked(blocked)
+            except Exception:  # noqa: BLE001 - presentation lag must not resume ASR
+                log.warning("media worker: blocked compute sidecar convergence deferred", exc_info=True)
     last_work = time.monotonic()
     try:
         if extract.asr_prewarm_enabled():
-            extract.prewarm()
+            prewarm_error = extract.prewarm()
+            if isinstance(prewarm_error, asr_runtime.ASRComputeRuntimeError):
+                worker._asr_runtime_failure = f"{type(prewarm_error).__name__}: {prewarm_error}"
         extract.log_diarization_readiness(vault_root)
         while _parent_alive(parent_pid):
             job = store.claim_next()
@@ -1037,6 +1209,11 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
             last_work = time.monotonic()
             try:
                 outcome = worker._process(job)
+            except runtime_resources.ModelBusyError:
+                assert job.id is not None
+                store.defer(job.id)
+                log.info("media worker: deferred %s after model admission refusal", job.binary_path)
+                return _TRANSIENT_EXIT_CODE
             except OpError as exc:
                 assert job.id is not None
                 if exc.code in _TRANSIENT_OPERATION_CODES:

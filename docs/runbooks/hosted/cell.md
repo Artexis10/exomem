@@ -122,7 +122,7 @@ The recovery helper runs only in a short-lived, non-network-published operator
 Pod. Use the exact digest selected by the deployment lock; do not use a tag or
 substitute the API/worker ServiceAccount. The chart renders the dedicated
 `exomem-init-retry-recovery` ServiceAccount and read-only ClusterRole. It can
-observe only namespaces, PVCs/PVs, ConfigMaps, StatefulSets, Jobs, and
+observe only namespaces, PVCs/PVs, ConfigMaps, Pods, StatefulSets, Jobs, and
 IngressRoutes. It cannot read Secrets or create, update, patch, or delete any
 Kubernetes object. Stop if that rendered role differs; do not widen the routine
 provisioner role.
@@ -138,8 +138,11 @@ file.
 set -euo pipefail
 operator_pod=exomem-init-retry-recovery
 helm_release=exomem-platform
+# Select only the chart-managed lock. The name label alone also matches an
+# orphaned ConfigMap left by an earlier manual apply, and under `set -e` the
+# count assertion below then aborts this procedure before it starts.
 mapfile -t lock_names < <(kubectl -n exomem-platform get configmap \
-  -l app.kubernetes.io/name=exomem-hosted-deployment-lock \
+  -l app.kubernetes.io/name=exomem-hosted-deployment-lock,app.kubernetes.io/managed-by=Helm \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
 test "${#lock_names[@]}" -eq 1
 lock_name="${lock_names[0]}"
@@ -193,6 +196,7 @@ spec:
         - {name: EXOMEM_RECOVERY_PROVIDER_RECOVERY_PUBLIC_KEY, valueFrom: {secretKeyRef: {name: exomem-provider-recovery-verifier, key: public-key}}}
         - {name: EXOMEM_RECOVERY_HCLOUD_TOKEN, valueFrom: {secretKeyRef: {name: exomem-hcloud-capacity-reader, key: token}}}
         - {name: EXOMEM_RECOVERY_DEPLOYMENT_LOCK_JSON, valueFrom: {configMapKeyRef: {name: $lock_name, key: $lock_key}}}
+        - {name: EXOMEM_RECOVERY_SOURCE_DEPLOYMENT_LOCK_JSON, valueFrom: {configMapKeyRef: {name: $lock_name, key: $lock_key}}}
         - {name: EXOMEM_RECOVERY_RUNTIME_SELECTION, value: $runtime_selection}
         - {name: EXOMEM_RECOVERY_DATABASE_SCHEMA, value: exomem_provisioner}
         - {name: EXOMEM_RECOVERY_DATABASE_ROLE, value: exomem_provisioner_runtime}
@@ -201,6 +205,27 @@ spec:
 EOF
 kubectl -n exomem-platform wait --for=condition=Ready "pod/$operator_pod" --timeout=60s
 ```
+
+`load_recovery_settings` requires the `EXOMEM_RECOVERY_*` set above **exactly** --
+it compares the set of supplied names for equality and refuses on any missing or
+extra one, and it also refuses if any `EXOMEM_PROVISIONER_*` or `EXOMEM_PROVIDER_*`
+name is present (`recovery_settings.py`). A pod that is short one variable does not
+degrade; every recovery mode fails with `recovery environment is invalid`.
+
+`EXOMEM_RECOVERY_SOURCE_DEPLOYMENT_LOCK_JSON` names the lock the stuck operation was
+created under. It is the currently selected lock above whenever the cell was
+provisioned under it, which is the ordinary case. When starting an **initial**
+retarget (`retarget-preflight` or `successor-retarget-preflight`) for a cell whose
+operation was created under a **superseded** lock, supply that older lock's JSON
+instead: those two match the operation's runtime request against the source lock, so
+the current one would compare against the wrong runtime. The resume and retry
+preflights match against the target lock by then -- the stored request has already
+been rewritten -- so this variable is unused there and a stale value is harmless.
+
+Whichever lock you supply must itself contain the selected runtime:
+`validate_selected_runtime` resolves `EXOMEM_RECOVERY_RUNTIME_SELECTION` against **both**
+locks, so an older lock that predates that runtime name fails with the same
+`recovery environment is invalid` and no further explanation.
 
 Before the preflight, scale the routine provisioner worker to zero and leave it
 there through reopen and recovery verification. This is not a global database

@@ -74,6 +74,17 @@ or `abandoned` — and is filterable as `unit.verdict`. Both appear on unit hits
 when present and are omitted when absent, so an unjudged unit is distinguishable
 from a judged one.
 
+Both are answered from the maintained catalogue rather than by reading pages, so
+a due-date query costs an index read on a served cell. The one filter field with
+no index answer is `page.frontmatter:/<pointer>`, which is open-ended by
+construction; a served request naming it is refused with `UNSUPPORTED_FILTER_FIELD`
+rather than silently falling back to a corpus scan, while an offline CLI caller
+keeps the exact scan. A date bound is answered exactly when it names a whole
+day, so `updated_after`, `updated_before`, `recency_days` and a bare ISO date can
+all be negated with `$not`; a bound carrying a timestamp is refused under the same
+code when nothing else in the filter narrows it, because a day column cannot
+decide the hour and a wrong negation would silently drop pages.
+
 `verdict` is state, not supersession, and not a score. A refuted unit keeps its
 page's active standing and its ordinary rank: nothing replaced it, the question
 simply got an answer, and the negative result stays retrievable with the

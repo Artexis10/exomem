@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import logging
 import re
 import sqlite3
 import threading
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,6 +18,8 @@ from urllib.parse import unquote
 from . import reserved_paths
 from . import vault as vault_module
 from .kbdir import kb_dirname
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 3
 REF_PREFIX = "exomem://memory/"
@@ -80,6 +85,79 @@ def sidecar_path(vault_root: Path) -> Path:
     return state_paths.vault_state_dir(vault_root) / ".refs.sqlite"
 
 
+def _pending_reference_projection(vault_root: Path):
+    """Pending ref/path state to consult before the persistent sidecar.
+
+    None when no committed mutation is still awaiting derived convergence, so
+    the settled path stays exactly as it was.
+    """
+    try:
+        from . import pending_recall
+
+        return pending_recall.reference_projection(Path(vault_root))
+    except Exception:  # noqa: BLE001 - identity resolution must not depend on it
+        return None
+
+
+def _note_pending_reference_publication(vault_root: Path, rel_paths: list[str]) -> None:
+    """Report an exact identity publication to the pending-recall overlay."""
+    try:
+        from . import pending_recall
+
+        pending_recall.note_persistent_publication(
+            Path(vault_root), "memory_refs", rel_paths
+        )
+    except Exception as exc:  # noqa: BLE001 - custody bookkeeping is best-effort
+        del exc
+
+
+def _vault_rel_paths(vault_root: Path, paths: Iterable[Path]) -> list[str]:
+    """Normalize through the one shared helper every pending consumer uses."""
+    from . import pending_recall
+
+    rels: list[str] = []
+    for path in paths:
+        rel = pending_recall.vault_rel_path(vault_root, path)
+        if rel is not None:
+            rels.append(rel)
+    return rels
+
+
+def holds_content_identities(
+    vault_root: Path, expected: dict[str, str | None]
+) -> dict[str, bool]:
+    """Whether the identity sidecar holds each path at exactly that identity.
+
+    ``expected`` maps a vault-relative Markdown identity to the sha256 of the
+    canonical bytes it must be indexed at, or ``None`` for proven absence. The
+    sidecar already stores that digest per row (`source_hash`), so this is one
+    read-only query and no corpus walk. An absent or incompatible sidecar
+    answers ``False`` for everything, which keeps pending custody in place
+    rather than clearing it on state nothing can prove.
+    """
+    if not expected:
+        return {}
+    answers = dict.fromkeys(expected, False)
+    index = ReferenceIndex(Path(vault_root))
+    conn = index._current_readonly_connection()
+    if conn is None:
+        return answers
+    try:
+        for rel, digest in expected.items():
+            row = conn.execute(
+                "SELECT source_hash FROM identities WHERE path = ?", (rel,)
+            ).fetchone()
+            if digest is None:
+                answers[rel] = row is None
+            else:
+                answers[rel] = row is not None and str(row[0]) == digest
+    except sqlite3.Error:
+        return dict.fromkeys(expected, False)
+    finally:
+        conn.close()
+    return answers
+
+
 #: How many paths one identity lookup binds at a time. SQLite's compiled-in
 #: `SQLITE_MAX_VARIABLE_NUMBER` is the hard ceiling — measured on this build at
 #: 32,766 fine and 32,767 raising `OperationalError: too many SQL variables` —
@@ -87,6 +165,182 @@ def sidecar_path(vault_root: Path) -> Path:
 #: far below the ceiling and far above any realistic single batch, so the loop
 #: costs one extra query only on inputs that would otherwise have failed.
 REFS_QUERY_CHUNK = 500
+
+_CUSTODY_SEAM = "reference_sidecar"
+#: Vaults whose single background sidecar rebuild is already in flight.
+_REBUILDS_IN_FLIGHT: set[str] = set()
+_REBUILDS_LOCK = threading.Lock()
+
+
+def request_rebuild(vault_root: Path) -> bool:
+    """Start at most one background sidecar rebuild per vault.
+
+    The non-walking retry seam for a managed reader that declined. Exactly the
+    shape the lexical repair worker already has: the reader gets a retryable
+    answer now, one thread pays the scan once, and every later reader is served
+    from the sidecar.
+    """
+    key = str(Path(vault_root).resolve())
+    with _REBUILDS_LOCK:
+        if key in _REBUILDS_IN_FLIGHT:
+            return False
+        _REBUILDS_IN_FLIGHT.add(key)
+
+    def _run() -> None:
+        try:
+            ReferenceIndex(Path(vault_root)).rebuild_all()
+        except Exception:  # noqa: BLE001 - best effort; the next reader retries
+            log.warning("background reference sidecar rebuild failed", exc_info=True)
+        finally:
+            with _REBUILDS_LOCK:
+                _REBUILDS_IN_FLIGHT.discard(key)
+
+    threading.Thread(
+        target=_run, name="exomem-refs-rebuild", daemon=True
+    ).start()
+    return True
+
+
+def rebuild_in_flight(vault_root: Path) -> bool:
+    """Whether a background sidecar rebuild is running for this vault."""
+    with _REBUILDS_LOCK:
+        return str(Path(vault_root).resolve()) in _REBUILDS_IN_FLIGHT
+
+
+#: Set by the recall serializer for the duration of its own ref lookup.
+#: The keyword below is the explicit API; this is how the recall path supplies
+#: it WITHOUT the call site having to pass a keyword through a method other
+#: code doubles. `tests/test_memory_refs.py` replaces `refs_for_paths` with a
+#: two-positional-argument stub to count calls, and a keyword at the call site
+#: would break that double rather than the code under test -- an intercepted
+#: method cannot be relied on to forward an argument it does not know about.
+_RECALL_READER: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "exomem_refs_recall_reader", default=False
+)
+
+
+@contextlib.contextmanager
+def recall_serializer() -> Iterator[None]:
+    """Mark this scope as the recall serializer's own ref resolution."""
+    token = _RECALL_READER.set(True)
+    try:
+        yield
+    finally:
+        _RECALL_READER.reset(token)
+
+
+def _managed_runtime() -> bool:
+    from . import readiness
+
+    return bool(readiness.runtime_managed())
+
+
+def _sidecar_prefix() -> str:
+    """The one prefix `rebuild_all` can reach, resolved at call time.
+
+    `kb_dirname()` is configurable per vault, so this cannot be a module
+    constant without freezing the first vault a process sees.
+    """
+    return f"{kb_dirname()}/"
+
+
+def _decline_if_managed(vault_root: Path) -> None:
+    """A managed RECALL reader never rebuilds this sidecar on the request thread.
+
+    The reference sidecar is a maintained index like the lexical catalogue, and
+    the read-path contract is about the reader thread rather than about one
+    stage: a managed recall that needs an index no generation has built owes
+    the typed warming outcome and one background repair, not a corpus scan
+    charged to whoever asked first.
+
+    Reached only from a `recall_reader=True` call. The contract governs the
+    recall serializer, not this module: review, attention and due-state callers
+    have no warming outcome to hand back and no latency budget waiting on them,
+    so they keep the inline build. An offline/CLI caller keeps it too -- it has
+    no background worker to wait for.
+    """
+    if not _managed_runtime():
+        return
+    from . import find as find_module
+
+    request_rebuild(vault_root)
+    raise find_module.RetrievalIndexWarming(site="reference_sidecar")
+
+
+def register_path_custody() -> None:
+    """Register the reference sidecar's per-path invalidation seam."""
+    from . import freshness
+
+    freshness.register_custody_seam(
+        freshness.CustodySeam(
+            name=_CUSTODY_SEAM,
+            apply=_custody_apply,
+            verify=_custody_verify,
+        )
+    )
+
+
+def _custody_expected(vault_root: Path, rel: str) -> tuple[str | None, bool]:
+    """`(expected source hash, whether a row is owed)` for one path."""
+    row = _read_identity(Path(vault_root), Path(vault_root).joinpath(*rel.split("/")))
+    if row is None:
+        return None, False
+    return row[3], True
+
+
+def _custody_verify(
+    vault_root: Path,
+    rel_paths: tuple[str, ...],
+    _digests: Mapping[str, str | None] | None = None,
+) -> tuple[str, ...]:
+    index = ReferenceIndex(Path(vault_root))
+    conn = index._current_readonly_connection()
+    if conn is None:
+        # No current sidecar is not drift in these paths: it is the cold case,
+        # which the decline above already answers. Reporting every path as a
+        # mismatch here would fail the scope closed on a warming cell.
+        return ()
+    try:
+        stale: list[str] = []
+        for rel in rel_paths:
+            expected, owed = _custody_expected(vault_root, rel)
+            row = conn.execute(
+                "SELECT source_hash FROM identities WHERE path = ?", (rel,)
+            ).fetchone()
+            held = None if row is None else str(row[0])
+            if owed and held != expected:
+                stale.append(rel)
+            elif not owed and held is not None:
+                stale.append(rel)
+        return tuple(stale)
+    except sqlite3.Error:
+        return tuple(rel_paths)
+    finally:
+        conn.close()
+
+
+def _custody_apply(
+    vault_root: Path,
+    changed: tuple[str, ...],
+    deleted: tuple[str, ...],
+    _digests: Mapping[str, str | None] | None = None,
+) -> None:
+    """Bring exactly these paths' identity rows current; touch nothing else."""
+    root = Path(vault_root)
+    index = ReferenceIndex(root)
+    if not index.available():
+        # Cold sidecar: the decline seam owns this case. Rebuilding here would
+        # put the corpus scan back on whichever thread committed the write.
+        return
+    stale = _custody_verify(root, (*changed, *deleted))
+    if not stale:
+        return
+    refresh = [root.joinpath(*rel.split("/")) for rel in stale if _custody_expected(root, rel)[1]]
+    retire = [rel for rel in stale if not _custody_expected(root, rel)[1]]
+    if refresh:
+        index.refresh_paths(refresh)
+    if retire:
+        index.delete_paths(retire)
 
 
 class ReferenceIndex:
@@ -200,6 +454,11 @@ class ReferenceIndex:
                         raise
 
     def rebuild_all(self) -> dict[str, int]:
+        from . import freshness
+
+        # A full corpus scan. Exact receipts exist so an ordinary governed
+        # write never moves this counter.
+        freshness.note_custody_rebuild(_CUSTODY_SEAM)
         entries = _scan_pages(self.vault_root)
         conn = self._connect()
         try:
@@ -296,6 +555,7 @@ class ReferenceIndex:
             rows = self._paths_for_id(normalized)
         if not rows:
             rows = self._scan_paths_for_id(normalized)
+        rows = _apply_pending_identity(self.vault_root, normalized, rows)
         if len(rows) > 1:
             # A COUNT, never the paths. Merging or duplicating identities is
             # what manufactures a collision, so a caller can manufacture one
@@ -331,15 +591,26 @@ class ReferenceIndex:
             if row[1] == exomem_id and row[4] == "valid"
         )
 
-    def ref_for_path(self, path: str) -> str | None:
+    def ref_for_path(self, path: str, *, recall_reader: bool = False) -> str | None:
         clean = str(path or "").replace("\\", "/").lstrip("/")
-        return self.refs_for_paths([clean]).get(clean)
+        return self.refs_for_paths([clean], recall_reader=recall_reader).get(clean)
 
-    def refs_for_paths(self, paths: list[str]) -> dict[str, str | None]:
+    def refs_for_paths(
+        self, paths: list[str], *, recall_reader: bool = False
+    ) -> dict[str, str | None]:
         """Resolve many paths with one sidecar query per chunk, or one scan.
 
         The returned dict is keyed by the caller's own cleaned spelling; callers
         index it by the string they passed in.
+
+        `recall_reader` says this call is the recall serializer, which is the
+        ONLY caller the no-walk contract governs. It is opt-in because the
+        contract is not "nobody may ever build this sidecar": a review, an
+        attention pass or a due-state recompute has no retryable warming
+        outcome to offer a caller and no reader waiting on a latency budget, so
+        those keep today's behaviour — build once, answer. Declining for all of
+        them made the first `review_memory` after a restart an error, which is
+        a worse answer than a slow one.
 
         Chunked because the lookup below binds one SQL variable per path, and
         SQLite refuses past `SQLITE_MAX_VARIABLE_NUMBER` — measured on this
@@ -348,6 +619,7 @@ class ReferenceIndex:
         point: every caller of this method inherits the bound, including the
         ones that hand it a list whose length is a function of the vault.
         """
+        recall_reader = recall_reader or _RECALL_READER.get()
         clean = [str(path or "").replace("\\", "/").lstrip("/") for path in paths]
         wanted = list(dict.fromkeys(path for path in clean if path))
         if not wanted:
@@ -355,19 +627,38 @@ class ReferenceIndex:
         if len(wanted) > REFS_QUERY_CHUNK:
             out: dict[str, str | None] = {}
             for start in range(0, len(wanted), REFS_QUERY_CHUNK):
-                out.update(self._refs_for_paths_batch(wanted[start : start + REFS_QUERY_CHUNK]))
-            return out
-        return self._refs_for_paths_batch(wanted)
+                out.update(
+                    self._refs_for_paths_batch(
+                        wanted[start : start + REFS_QUERY_CHUNK],
+                        recall_reader=recall_reader,
+                    )
+                )
+        else:
+            out = self._refs_for_paths_batch(wanted, recall_reader=recall_reader)
+        # Pending custody owns the current mapping for the identities it covers,
+        # so it answers ahead of the sidecar's previous generation.
+        projection = _pending_reference_projection(self.vault_root)
+        if projection is not None and not projection.empty:
+            for path in wanted:
+                if path in projection.refs_by_path:
+                    out[path] = projection.refs_by_path[path]
+        return out
 
-    def _refs_for_paths_batch(self, wanted: list[str]) -> dict[str, str | None]:
+    def _refs_for_paths_batch(
+        self, wanted: list[str], *, recall_reader: bool = False
+    ) -> dict[str, str | None]:
         """One bounded batch: at most `REFS_QUERY_CHUNK` paths, already cleaned."""
         conn = self._current_readonly_connection()
         if conn is None:
+            if recall_reader:
+                _decline_if_managed(self.vault_root)
             # Schema upgrades and first use rebuild once. The lock prevents a
             # burst of concurrent reads from all scanning the corpus together.
             with _REFERENCE_REBUILD_LOCK:
                 conn = self._current_readonly_connection()
                 if conn is None:
+                    if recall_reader:
+                        _decline_if_managed(self.vault_root)
                     try:
                         self.rebuild_all()
                     except (OSError, sqlite3.Error):
@@ -396,6 +687,25 @@ class ReferenceIndex:
         # that. Retry those exact paths only; never turn a negative lookup
         # into a corpus scan.
         missing = [path for path in wanted if path not in indexed_paths]
+        if missing and recall_reader and _managed_runtime():
+            # The sidecar indexes the knowledge base only, so an out-of-KB hit
+            # from a widened recall is ALWAYS missing here — and the retry
+            # below costs `canonical_vault_rel`, whose casefold probe
+            # enumerates the containing directory. One walk per widened
+            # request, on a warm cell, for a page the sidecar is never going to
+            # hold. A recall hit does not need a stable ref to be a correct
+            # hit, so the managed serializer takes the sidecar's answer as
+            # final and leaves the ref absent.
+            #
+            # The repair is scheduled only for a path the sidecar is SUPPOSED
+            # to hold. `rebuild_all` scans the knowledge base, so scheduling it
+            # for an out-of-KB path asks a worker to fix something it cannot
+            # reach: the path is still missing when the rebuild lands, the next
+            # widened request schedules another, and a warm cell walks its
+            # whole knowledge base once per recall for ever.
+            if any(path.startswith(_sidecar_prefix()) for path in missing):
+                request_rebuild(self.vault_root)
+            return resolved
         if missing:
             canonical = {
                 path: vault_module.canonical_vault_rel(self.vault_root, path)
@@ -493,6 +803,27 @@ class ReferenceIndex:
         return sorted(issues, key=lambda item: (item["kind"], item["value"], item["path"]))
 
 
+def _apply_pending_identity(
+    vault_root: Path, exomem_id: str, rows: list[str]
+) -> list[str]:
+    """Resolve one identity against pending custody before the persistent rows.
+
+    A committed page that has not reached the sidecar yet resolves here, and a
+    committed tombstone withdraws the sidecar's now-dead row rather than handing
+    back a path the canonical tree no longer has. Both are exact: the projection
+    only holds generations whose after state was proven.
+    """
+    projection = _pending_reference_projection(vault_root)
+    if projection is None or projection.empty:
+        return rows
+    surviving = [path for path in rows if path not in projection.absent_paths]
+    pending_paths = projection.paths_by_id.get(memory_ref(exomem_id), ())
+    for path in pending_paths:
+        if path not in surviving:
+            surviving.append(path)
+    return sorted(surviving)
+
+
 def paths_for_ids_read_only(
     vault_root: Path, ids: Iterable[Any]
 ) -> dict[str, tuple[str, ...]]:
@@ -574,7 +905,11 @@ def resolve_identifier_read_only(vault_root: Path, value: str) -> str:
     if raw.lower().startswith(REF_PREFIX):
         if memory_id is None:
             raise ReferenceError("INVALID_REFERENCE", f"invalid memory reference: {raw!r}")
-        rows = ReferenceIndex(vault_root)._scan_paths_for_id(memory_id)
+        rows = _apply_pending_identity(
+            Path(vault_root),
+            memory_id,
+            ReferenceIndex(vault_root)._scan_paths_for_id(memory_id),
+        )
         if len(rows) > 1:
             # Content-free, for the reason given at `ReferenceIndex.resolve`.
             raise ReferenceError(
@@ -681,6 +1016,9 @@ def upsert_after_write(vault_root: Path, paths: list[Path]) -> bool:
         ReferenceIndex(vault_root).refresh_paths(markdown)
     except Exception:  # noqa: BLE001 - derived sidecar failure must not break a write
         return False
+    _note_pending_reference_publication(
+        vault_root, _vault_rel_paths(vault_root, markdown)
+    )
     return True
 
 
@@ -689,6 +1027,9 @@ def delete_after_remove(vault_root: Path, paths: list[str]) -> bool:
         ReferenceIndex(vault_root).delete_paths(paths)
     except Exception:  # noqa: BLE001 - derived sidecar failure must not break a delete
         return False
+    _note_pending_reference_publication(
+        vault_root, [str(path).replace("\\", "/").lstrip("/") for path in paths]
+    )
     return True
 
 

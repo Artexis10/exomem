@@ -800,6 +800,7 @@ def _render_sidecar(
     # invalid source. Describing the artifact is also the only thing this page
     # can honestly say about bytes it does not inline.
     if not description and not text and binary_sha256:
+        lines.append(SIDECAR_ARTIFACT_SENTINEL)
         lines.append("## Artifact")
         lines.append("")
         lines.append(f"- Original filename: `{artifact_name}`")
@@ -919,6 +920,43 @@ def ensure_artifact_page(
 
 
 _EXTRACTED_HEADING = "## Extracted text"
+SIDECAR_ARTIFACT_SENTINEL = "<!-- exomem:sidecar-artifact -->"
+SIDECAR_PRESERVED_NOTES_SENTINEL = "<!-- exomem:sidecar-preserved-notes -->"
+_LEGACY_ARTIFACT_BLOCK_RE = re.compile(
+    r"(?m)^## Artifact\n\n- Original filename: `[^`\n]+`\n"
+    r"- SHA-256: `[0-9a-f]{64}`(?:\n- Bytes: \d+)?\n?\Z"
+)
+
+
+def _has_ambiguous_legacy_preserved_notes(content: str) -> bool:
+    """Whether a nonempty legacy notes block lacks an ownership boundary."""
+    extraction = content.find(_EXTRACTED_HEADING)
+    if extraction == -1:
+        return False
+    start = extraction + len(_EXTRACTED_HEADING)
+    if any(
+        content.rfind(f"\n{sentinel}\n", start) != -1
+        for sentinel in (SIDECAR_PRESERVED_NOTES_SENTINEL, SIDECAR_ARTIFACT_SENTINEL)
+    ) or _LEGACY_ARTIFACT_BLOCK_RE.search(content, start) is not None:
+        return False
+    notes = content.find("\n## Preserved notes\n", start)
+    return notes != -1 and bool(content[start:notes].strip())
+
+
+def _is_repeated_extraction_residual(boundary: str, text: str) -> bool:
+    """Whether a trusted notes section is only repeated fresh extraction output."""
+    marker = f"{SIDECAR_PRESERVED_NOTES_SENTINEL}\n"
+    if boundary.startswith(marker):
+        boundary = boundary.removeprefix(marker)
+    prefix = "## Preserved notes\n\n"
+    if not boundary.startswith(prefix):
+        return False
+    extraction = text.strip()
+    if not extraction:
+        return False
+    residual = boundary.removeprefix(prefix).strip()
+    copy = re.escape(extraction)
+    return re.fullmatch(rf"{copy}(?:\s+{copy}){{2,}}", residual) is not None
 
 
 def update_sidecar_extraction(
@@ -944,6 +982,12 @@ def update_sidecar_extraction(
     existing call site is unaffected.
     """
     before = sidecar_path.read_text(encoding="utf-8")
+    if _has_ambiguous_legacy_preserved_notes(before):
+        raise PreserveError(
+            code="AMBIGUOUS_SIDECAR_BOUNDARY",
+            missing=[],
+            reason="unmarked nonempty preserved notes have no machine-owned boundary",
+        )
     content = _set_frontmatter_field(before, "extracted_by", engine)
     content = _set_frontmatter_field(content, "processing_state", "completed")
     content = _set_frontmatter_field(content, "processing_error", "null")
@@ -1142,15 +1186,40 @@ def _set_frontmatter_field(content: str, field: str, value: str) -> str:
 
 
 def _set_extracted_text(content: str, text: str) -> str:
-    """Replace the body under `## Extracted text` (to the next `## ` or EOF), or append."""
+    """Replace extracted text through a sidecar-owned boundary, or EOF."""
     block = f"{_EXTRACTED_HEADING}\n\n{text}\n"
     idx = content.find(_EXTRACTED_HEADING)
     if idx == -1:
         return content.rstrip("\n") + "\n\n" + block
-    after = content.find("\n## ", idx + len(_EXTRACTED_HEADING))
+    start = idx + len(_EXTRACTED_HEADING)
+    boundaries = (
+        content.rfind(f"\n{SIDECAR_PRESERVED_NOTES_SENTINEL}\n", start),
+        content.rfind(f"\n{SIDECAR_ARTIFACT_SENTINEL}\n", start),
+    )
+    after = max((boundary for boundary in boundaries if boundary != -1), default=-1)
+    legacy_preserved = False
+    if after == -1:
+        legacy_artifact = _LEGACY_ARTIFACT_BLOCK_RE.search(content, start)
+        if legacy_artifact is not None:
+            after = legacy_artifact.start() - 1
+        else:
+            legacy_preserved = content.find("\n## Preserved notes\n", start)
+            if legacy_preserved != -1:
+                if not content[start:legacy_preserved].strip():
+                    after = legacy_preserved
+                else:
+                    # A nonempty, unmarked notes title has no ownership proof.
+                    return content
     if after == -1:
         return content[:idx] + block
-    return content[:idx] + block + "\n" + content[after + 1 :]
+    boundary = content[after + 1 :]
+    if (after == boundaries[0] or legacy_preserved) and _is_repeated_extraction_residual(
+        boundary, text
+    ):
+        return content[:idx] + block
+    if legacy_preserved:
+        boundary = f"{SIDECAR_PRESERVED_NOTES_SENTINEL}\n{boundary}"
+    return content[:idx] + block + "\n" + boundary
 
 
 def _prepend_log_entry(

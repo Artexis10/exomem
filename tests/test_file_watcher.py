@@ -1570,6 +1570,28 @@ def test_reconcile_seed_completion_is_observable(vault, monkeypatch: pytest.Monk
     assert not thread.is_alive()
 
 
+def test_stop_unblocks_an_inflight_seed_wait(vault) -> None:
+    watcher = file_watcher.FileWatcher(vault)
+    waiting = threading.Event()
+    result: list[bool] = []
+
+    def wait_for_seed() -> None:
+        waiting.set()
+        result.append(watcher.wait_until_seeded(timeout=60.0))
+
+    thread = threading.Thread(target=wait_for_seed)
+    thread.start()
+    try:
+        assert waiting.wait(timeout=1.0)
+        watcher.stop()
+        thread.join(timeout=0.5)
+        assert not thread.is_alive()
+        assert result == [False]
+    finally:
+        watcher._seed_complete.set()
+        thread.join(timeout=1.0)
+
+
 def test_reconcile_no_drift_dispatches_nothing(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     file_watcher.clear_self_write_registry()
     calls = _spy_reconcile_fanout(monkeypatch)

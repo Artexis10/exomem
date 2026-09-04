@@ -128,6 +128,10 @@ def _is_cli_only_invocation(raw: list[str]) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .runtime_resources import bootstrap, preload_local_dotenv_policy
+
+    preload_local_dotenv_policy()
+    bootstrap()
     # Wrapped so *every* exit drains, including the early returns above
     # `_run_cli`. A graph rebuild no longer blocks the write that caused it, and
     # it runs on a daemon thread. That is right for the long-lived server and
@@ -161,6 +165,10 @@ def _run_cli(argv: list[str] | None = None) -> int:
         # `find` was the original friendly retrieval command.  Keep existing
         # scripts useful while the current product language calls it `ask`.
         raw[0] = "ask"
+    refusal = _unsupported_platform_refusal(raw)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
     if _is_cli_only_invocation(raw):
         from .logging_config import configure_logging, resolve_log_dir
 
@@ -171,6 +179,33 @@ def _run_cli(argv: list[str] | None = None) -> int:
     finally:
         for name in introduced:
             os.environ.pop(name, None)
+
+
+#: Commands that must keep working where exomem cannot serve a vault. A user
+#: on an unsupported platform has to be able to ask what is wrong and get an
+#: answer, so diagnosis and identification stay reachable; everything else
+#: touches a vault and would otherwise fail per-operation, deep in a write,
+#: describing a permanent platform fact as an unavailable filesystem route.
+_PLATFORM_INDEPENDENT_COMMANDS = frozenset({"doctor", "install-info"})
+
+
+def _unsupported_platform_refusal(raw: list[str]) -> str | None:
+    """One clear refusal for a host with no held-filesystem backend, or None."""
+    # A bare invocation prints usage, and a bare flag identifies or explains.
+    # Neither touches a vault, and a user who cannot run exomem still needs to
+    # be able to read what it would have done.
+    if not raw or raw[0] in _PLATFORM_INDEPENDENT_COMMANDS or raw[0].startswith("-"):
+        return None
+    from . import held_fs
+
+    support = held_fs.platform_support()
+    if support.supported:
+        return None
+    command = raw[0] if raw else "exomem"
+    return (
+        f"exomem: {command} cannot run here. {support.reason}. "
+        "Run `exomem doctor` for the full report."
+    )
 
 
 def _dispatch_main(raw: list[str]) -> int:

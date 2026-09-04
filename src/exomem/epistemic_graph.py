@@ -2263,8 +2263,15 @@ class EpistemicGraphIndex:
             (str(path), freshness.stat_signature(path))
             for path in vault_module.walk_vault_md(self.vault_root)
         )
-        freshness.reconcile(self.vault_root, "vault", entries)
-        if pending is not None:
+        result = freshness.reconcile(
+            self.vault_root,
+            "vault",
+            entries,
+            publication_guard=self._mutation_coordinator.hold(
+                operation="epistemic_graph_reconcile_recall", holder_kind="graph"
+            ),
+        )
+        if result.published and pending is not None:
             freshness.clear_external_pending(self.vault_root, through=pending)
 
     @staticmethod
@@ -3356,13 +3363,36 @@ class EpistemicGraphIndex:
         ).fetchone()
         return _checkpoint_from_value(str(row[0])) if row is not None else None
 
-    def _graph_sync_predecessor_available(
+    def _graph_sync_predecessor_state(
         self, checkpoint: graph_sync.GraphSyncCheckpoint
-    ) -> bool:
-        """Whether this sidecar can atomically advance the exact next epoch."""
+    ) -> str:
+        """Whether this sidecar can atomically advance the exact next epoch, and why not.
+
+        Split out of `_graph_sync_predecessor_available` so the dispatch layer
+        can name the gate. This is the *tenth* door onto a whole-vault rebuild:
+        `_FALLBACK_DISPOSITIONS` declares nine bail-out reasons and `fallback()`
+        logs which one fired, but this gate fires **before** `refresh_paths` is
+        ever called, so a write that rebuilds the whole vault through here
+        emits only "graph rebuild published" and "graph rebuild finished" and
+        never says which condition chose the expensive path.
+
+        The two failing states are operationally opposite and must not collapse
+        into one `False`:
+
+        * `graph_sync_predecessor_unreadable` -- the probe's read snapshot was
+          declined. `freshness.external_pending` alone is enough for that, and
+          `_open_read_snapshot` documents that guard as "an optimization for
+          public readers, not a correctness fence". Nothing about the sidecar's
+          lineage is known, or broken; the same sidecar answers `available` the
+          moment the flag clears. While it is set, every governed write pays a
+          whole-vault rebuild.
+        * `graph_sync_predecessor_mismatch` / `..._absent` -- the sidecar was
+          read and its acknowledgement genuinely is not this checkpoint's
+          predecessor. That is a real lineage gap and a rebuild is the repair.
+        """
         snapshot = self._open_read_snapshot(require_current_projection=False)
         if snapshot is None:
-            return False
+            return "graph_sync_predecessor_unreadable"
         try:
             values = dict(
                 snapshot.execute(
@@ -3374,12 +3404,24 @@ class EpistemicGraphIndex:
             snapshot.close()
         predecessor = checkpoint.generation - 1
         if predecessor == 0:
-            return (
+            if (
                 "graph_sync_generation" not in values
                 and "graph_sync_digest" not in values
-            )
+            ):
+                return "available"
+            return "graph_sync_predecessor_present_at_genesis"
         acknowledged = _graph_sync_acknowledgement(values)
-        return acknowledged is not None and acknowledged.generation == predecessor
+        if acknowledged is None:
+            return "graph_sync_acknowledgement_absent"
+        if acknowledged.generation != predecessor:
+            return "graph_sync_predecessor_mismatch"
+        return "available"
+
+    def _graph_sync_predecessor_available(
+        self, checkpoint: graph_sync.GraphSyncCheckpoint
+    ) -> bool:
+        """Whether this sidecar can atomically advance the exact next epoch."""
+        return self._graph_sync_predecessor_state(checkpoint) == "available"
 
     def _delta_target_still_current(self, delta: freshness.RecallDelta) -> bool:
         """Prove files parsed for a bounded refresh still name ``delta.to``."""
@@ -6721,7 +6763,22 @@ def upsert_after_write(
             )
             return GraphDispatchResult("deferred", "graph_scheduling_disabled", required)
         if required is not None and not index.available():
-            if not index._graph_sync_predecessor_available(required):
+            predecessor_state = index._graph_sync_predecessor_state(required)
+            if predecessor_state != "available":
+                # #576 F3, applied to the gate the incremental table does not
+                # cover. `fallback()` logs which of the nine bail-out reasons
+                # fired; this door precedes `refresh_paths` entirely, so
+                # without this line a cell rebuilding its whole graph on every
+                # ordinary write reports only that a rebuild ran, never which
+                # condition chose it -- the same silence that made the last
+                # incident take a code read instead of a log read.
+                log.info(
+                    "graph dispatch registered a whole-vault rebuild reason=%s "
+                    "external_pending=%s generation=%s",
+                    predecessor_state,
+                    freshness.external_pending(vault_root),
+                    required.generation,
+                )
                 result = _registered_or_failure(
                     vault_root, required, index, mutation_coordinator
                 )

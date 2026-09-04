@@ -516,12 +516,22 @@ extensions:
     )
     pages = {
         "old-core.md": "---\ncreated: 2020-01-10\ntype: insight\n---\n- supports [[Target]]\n",
-        "old-canonical-extension.md": "---\ncreated: 2020-02-01\ntype: procedure\n---\n- vault.applies_to [[Target]]\n",
-        "old-extension.md": "---\ncaptured: 2020-02-10\ntype: procedure\n---\n- applies_to [[Target]]\n",
-        "old-deprecated.md": "---\ncreated: 2020-03-10\ntype: insight\n---\n- vault.legacy_applies [[Target]]\n",
+        "old-canonical-extension.md": (
+            "---\ncreated: 2020-02-01\ntype: procedure\n---\n- vault.applies_to [[Target]]\n"
+        ),
+        "old-extension.md": (
+            "---\ncaptured: 2020-02-10\ntype: procedure\n---\n- applies_to [[Target]]\n"
+        ),
+        "old-deprecated.md": (
+            "---\ncreated: 2020-03-10\ntype: insight\n---\n- vault.legacy_applies [[Target]]\n"
+        ),
         "old-generic.md": "---\ncreated: 2020-04-10\ntype: insight\n---\n- relates_to [[Target]]\n",
-        "current-unregistered.md": "---\ncreated: 2026-01-10\ntype: insight\n---\n- unregistered.label: [[Target]]\n",
-        "current-body-only.md": "---\ncreated: 2026-02-10\ntype: insight\n---\nA body-only [[Target]] connection.\n",
+        "current-unregistered.md": (
+            "---\ncreated: 2026-01-10\ntype: insight\n---\n- unregistered.label: [[Target]]\n"
+        ),
+        "current-body-only.md": (
+            "---\ncreated: 2026-02-10\ntype: insight\n---\nA body-only [[Target]] connection.\n"
+        ),
         "undated.md": (
             "---\nupdated: 1999-01-01\ntype: insight\n---\n"
             "Synthetic disconnected page.\n\n"

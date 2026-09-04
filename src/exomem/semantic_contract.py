@@ -35,6 +35,7 @@ from . import (
     vault,
 )
 from . import find as find_module
+from .cli_ops import OpError
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
 
@@ -1302,6 +1303,12 @@ class _CorpusContextFlight:
 
 
 _CORPUS_CONTEXT_FLIGHTS: dict[tuple[str, str], _CorpusContextFlight] = {}
+
+#: A waiter owns an interactive request budget, not the owner's vault-sized
+#: build duration.  Two seconds is fixed and deliberately non-configurable: it
+#: is far below the measured 103.6-second median post-commit interval and the
+#: 15-second connector timeout while leaving room for ordinary scheduling noise.
+_CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2657,7 +2664,19 @@ def build_corpus_context_with_census(
                 and flight.registry_identity == registry_identity
                 and flight.language_identity == language_identity
             )
-            flight.done.wait()
+            completed = flight.done.is_set()
+            if not completed:
+                completed = flight.done.wait(timeout=_CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS)
+            if not completed:
+                raise OpError(
+                    "MUTATION_WARMING",
+                    "semantic corpus context is still being built",
+                    details={
+                        "status": "retryable",
+                        "committed": False,
+                        "retry_after_ms": 2000,
+                    },
+                )
             if not same_inputs:
                 return build_corpus_context_with_census(
                     root,

@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from exomem import (
+    asr_runtime,
     deferred_index,
     embeddings,
     extract,
@@ -20,6 +21,7 @@ from exomem import (
     media_jobs,
     media_worker,
     preserve,
+    runtime_resources,
     server_runtime,
 )
 from exomem import find as find_module
@@ -2000,6 +2002,78 @@ def test_child_defers_transient_writer_failure_without_poisoning_job(
     assert status["error"] is None
 
 
+def test_child_defers_model_admission_refusal_without_sidecar_failure(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="model-busy.mp3")
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            runtime_resources.ModelBusyError("model compute is busy; retry shortly")
+        ),
+    )
+
+    assert (
+        media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+        == media_worker._TRANSIENT_EXIT_CODE
+    )
+    [pending] = media_jobs.status(vault)["jobs"]
+    assert pending["state"] == media_jobs.PENDING
+    assert pending["attempts"] == 0
+    assert pending["error"] is None
+    assert "extracted_by: pending" in sidecar.read_text(encoding="utf-8")
+
+
+def test_clip_model_admission_refusal_reaches_child_defer(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="clip-busy.mp3")
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
+    monkeypatch.setattr(
+        media_worker.MediaWorker,
+        "_run_clip",
+        lambda _self, _job: (_ for _ in ()).throw(
+            runtime_resources.ModelBusyError("model compute is busy; retry shortly")
+        ),
+    )
+
+    assert (
+        media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+        == media_worker._TRANSIENT_EXIT_CODE
+    )
+    [pending] = media_jobs.status(vault)["jobs"]
+    assert pending["state"] == media_jobs.PENDING
+    assert pending["attempts"] == 0
+    assert pending["error"] is None
+    assert "extracted_by: pending" in sidecar.read_text(encoding="utf-8")
+
+
 def test_child_requeues_guarded_sidecar_sharing_violation_then_succeeds(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2221,6 +2295,292 @@ def test_child_marks_unavailable_engine_blocked(vault, monkeypatch: pytest.Monke
     assert store.counts()["blocked"] == 1
 
 
+def test_child_marks_cuda_runtime_failure_blocked_with_runtime_remediation(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="cublas-blocked.m4a")
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            asr_runtime.ASRComputeRuntimeError("ASR CUDA runtime failed: cuBLAS failed")
+        ),
+    )
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.BLOCKED
+    assert "runtime" in status["next_action"]
+    assert "replace" not in status["next_action"]
+
+
+def test_child_marks_explicit_cuda_refusal_blocked_with_runtime_remediation(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="refused-cuda.m4a")
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            asr_runtime.ASRRuntimeRefusal("no CTranslate2 CUDA device")
+        ),
+    )
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.BLOCKED
+    assert "runtime" in status["next_action"]
+
+
+def test_child_blocks_ambiguous_sidecar_boundary_without_writing_it(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="ambiguous-boundary.m4a")
+    sidecar = vault / result.sidecar_path
+    sidecar.write_text(
+        sidecar.read_text(encoding="utf-8")
+        + "# Existing document heading\n\n## Preserved notes\n\nAuthored note.\n",
+        encoding="utf-8",
+    )
+    deferred_index.clear_full_receipts(vault, deferred_index.snapshot_full(vault))
+    assert deferred_index.full_status(vault)["count"] == 0
+    before = sidecar.read_bytes()
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="[0:00] Fresh transcript.",
+            media_type="audio",
+            engine="faster-whisper:test",
+        ),
+    )
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.BLOCKED
+    assert status["retryable"] is True
+    assert status["error"].startswith("AMBIGUOUS_SIDECAR_BOUNDARY:")
+    assert status["next_action"] == "review the sidecar's preserved-notes boundary, then retry"
+    assert sidecar.read_bytes() == before
+    assert deferred_index.full_status(vault)["count"] == 0
+
+
+def test_child_keeps_other_preserve_errors_as_failed_extraction(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="other-preserve-error.m4a")
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="[0:00] Fresh transcript.",
+            media_type="audio",
+            engine="faster-whisper:test",
+        ),
+    )
+
+    def _other_preserve_error(*_args, **_kwargs):
+        raise preserve.PreserveError("OTHER_PRESERVE_ERROR", [], "unexpected write refusal")
+
+    monkeypatch.setattr(preserve, "update_sidecar_extraction", _other_preserve_error)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.FAILED
+    assert status["error"].startswith("PreserveError:")
+
+
+def test_child_circuit_breaks_following_asr_jobs_after_cuda_failure(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    first = _preserve_media_stub(vault, filename="first.m4a")
+    second = _preserve_media_stub(vault, filename="second.m4a")
+    calls = 0
+
+    def _broken(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise asr_runtime.ASRComputeRuntimeError("ASR CUDA runtime failed: cuBLAS failed")
+
+    monkeypatch.setattr(extract, "extract_text", _broken)
+    store = media_jobs.MediaJobStore(vault)
+    for result in (first, second):
+        store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert calls == 1
+    assert store.counts()[media_jobs.BLOCKED] == 2
+
+
+def test_compute_ledger_remains_blocked_when_sidecar_publish_faults(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="ledger-first.m4a")
+    source_before = (vault / result.path).read_bytes()
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            asr_runtime.ASRComputeRuntimeError("ASR CUDA runtime failed: cuBLAS failed")
+        ),
+    )
+    monkeypatch.setattr(
+        media_worker.MediaWorker,
+        "_commit_processing_failure",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("sidecar disk full")),
+    )
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert store.counts()[media_jobs.BLOCKED] == 1
+    assert (vault / result.path).read_bytes() == source_before
+
+
+def test_compute_ledger_remains_blocked_when_sidecar_publish_returns_false(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="ledger-false.m4a")
+    monkeypatch.setattr(extract, "extract_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(asr_runtime.ASRComputeRuntimeError("cuBLAS failed")))
+    monkeypatch.setattr(media_worker.MediaWorker, "_commit_processing_failure", lambda *_a, **_kw: False)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert store.counts()[media_jobs.BLOCKED] == 1
+
+
+def test_prewarm_compute_failure_arms_child_circuit_breaker(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: True)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(
+        extract,
+        "prewarm",
+        lambda: asr_runtime.ASRComputeRuntimeError("ASR CUDA runtime failed: driver mismatch"),
+    )
+    result = _preserve_media_stub(vault, filename="prewarm-failure.m4a")
+    monkeypatch.setattr(extract, "extract_text", lambda *_args, **_kwargs: pytest.fail("ASR must not retry"))
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert store.counts()[media_jobs.BLOCKED] == 1
+
+
+def test_blocked_compute_sidecar_converges_without_asr(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _preserve_media_stub(vault, filename="recover-cublas.m4a")
+    monkeypatch.setattr(extract, "extract_text", lambda *_args, **_kwargs: pytest.fail("no ASR"))
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+    job = store.claim_next()
+    assert job is not None
+    store.mark(job.id, media_jobs.BLOCKED, "RuntimeError: cuBLAS failed")
+    blocked = store.get(job.id)
+    assert blocked is not None
+
+    assert media_worker.MediaWorker(vault, execution_mode="process").converge_compute_runtime_blocked(blocked)
+    frontmatter = _parsed_frontmatter(vault / result.sidecar_path)
+    assert frontmatter["processing_state"] == "blocked"
+
+
+def test_child_converges_stale_blocked_sidecar_after_canonical_limit(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(extract, "extract_text", lambda *_args, **_kwargs: pytest.fail("no ASR"))
+    store = media_jobs.MediaJobStore(vault)
+    error = "ASRRuntimeRefusal: no CTranslate2 CUDA device"
+    action = "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
+    canonical = (
+        "---\nprocessing_state: blocked\nprocessing_retryable: true\n"
+        f"processing_error: {vault_module.yaml_scalar(error)}\n"
+        f"processing_next_action: {vault_module.yaml_scalar(action)}\n---\n"
+    )
+    stale_sidecar = None
+    evidence = vault / "Knowledge Base" / "Evidence"
+    evidence.mkdir(parents=True, exist_ok=True)
+    for index in range(101):
+        binary = evidence / f"blocked-limit-{index}.m4a"
+        sidecar = binary.with_name(binary.name + ".md")
+        binary.write_bytes(b"FAKEBYTES")
+        sidecar.write_text("---\nmedia_type: audio\n---\n", encoding="utf-8")
+        job_id = store.enqueue(
+            media_jobs.MediaJob(
+                binary_path=binary,
+                sidecar_path=sidecar,
+                media_type="audio",
+            )
+        )
+        job = store.claim_next()
+        assert job is not None and job.id == job_id
+        store.mark(job.id, media_jobs.BLOCKED, error)
+        if index < 100:
+            sidecar.write_text(canonical, encoding="utf-8")
+        else:
+            stale_sidecar = sidecar
+    assert stale_sidecar is not None
+    assert store.needs_worker() is True
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
+    assert _parsed_frontmatter(stale_sidecar)["processing_state"] == "blocked"
+    assert store.needs_worker() is False
+
+
+def test_child_recovers_failed_cuda_only_vault_without_asr(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="failed-only-cublas.m4a")
+    monkeypatch.setattr(extract, "extract_text", lambda *_args, **_kwargs: pytest.fail("no ASR"))
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+    job = store.claim_next()
+    assert job is not None
+    store.mark(job.id, media_jobs.FAILED, "RuntimeError: cuBLAS failed")
+
+    assert store.needs_worker() is True
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert store.counts()[media_jobs.BLOCKED] == 1
+    assert _parsed_frontmatter(vault / result.sidecar_path)["processing_state"] == "blocked"
+
+
 def test_child_retains_actionable_asr_dependency_failure(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2424,6 +2784,52 @@ def test_claimed_job_skips_asr_when_sidecar_completed_before_worker_runs(
     assert "extracted_by: external-asr+timed" in after
     store.complete(claimed)
     assert media_jobs.status(vault)["jobs"] == []
+
+
+def test_claimed_document_job_skips_extraction_for_h2_first_completed_text(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="claim-race.xlsx")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=sidecar,
+            media_type="xlsx",
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    completed = sidecar.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: markitdown"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed = completed.replace(
+        "## Extracted text\n",
+        "## Extracted text\n\n"
+        "## Requirements\n\n"
+        "| Requirement | Owner |\n"
+        "| --- | --- |\n"
+        "| Bound CPU | Runtime |\n",
+        1,
+    )
+    sidecar.write_text(completed, encoding="utf-8")
+    before = sidecar.read_bytes()
+
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_a, **_kw: pytest.fail(
+            "document extraction must not rerun for a completed transcript"
+        ),
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+
+    outcome = worker._process(claimed)
+
+    assert outcome.state == "complete"
+    assert sidecar.read_bytes() == before
 
 
 def test_external_completed_transcript_written_during_asr_wins_final_commit_race(
@@ -2732,3 +3138,300 @@ def test_the_boolean_probe_is_derived_from_the_code_probe(monkeypatch) -> None:
 
     monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
     assert media_worker._writer_authority_available() is True
+
+
+def test_process_child_receives_wheel_owned_cuda_environment(tmp_path, monkeypatch) -> None:
+    worker = media_worker.MediaWorker(tmp_path, execution_mode="process")
+    captured = {}
+
+    monkeypatch.setattr(
+        asr_runtime,
+        "cuda_runtime_child_env",
+        lambda parent: {**parent, "LD_LIBRARY_PATH": "/wheel/cublas:/system"},
+    )
+    monkeypatch.setattr(media_worker.subprocess, "Popen", lambda args, env: captured.update(args=args, env=env))
+
+    worker._launch_child()
+
+    assert captured["env"]["LD_LIBRARY_PATH"].startswith("/wheel/cublas")
+
+
+# --- The idle supervisor must not take the mutation boundary forever ---
+#
+# `_supervise` loops on `self._wake.wait(0.5)` and called
+# `self._store.needs_worker()` on every pass.  Each of those opens the job
+# store, and opening it takes the reserved-identity boundary twice — once on
+# the gate, once on the `media-jobs-store` domain.  With nothing to do, that
+# is ~8 boundary acquisitions a second, forever, per service cell: the single
+# largest producer of log volume on a live box.
+#
+# The fix is a cheap freshness pre-check, NOT a longer poll: `idle_seconds`
+# (300) is the *child's* lifetime, not a supervisor cadence, and stretching
+# the poll would delay a newly-enqueued job by minutes.  A job can be enqueued
+# without ever setting `_wake` — `media_processing.reconcile_media` writes
+# straight to the store — so the safety-net poll has to keep its 0.5s
+# responsiveness while costing nothing when the store has not changed.
+
+
+def _count_reserved_identity_holds(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every mutation-boundary acquisition, by operation label."""
+    from exomem import mutation_lock as mutation_lock_module
+
+    taken: list[str] = []
+    original = mutation_lock_module.VaultMutationCoordinator.hold
+
+    def counting_hold(self, **kwargs):
+        taken.append(str(kwargs.get("operation")))
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(
+        mutation_lock_module.VaultMutationCoordinator, "hold", counting_hold
+    )
+    return taken
+
+
+def _run_supervisor_for(worker, seconds: float) -> None:
+    thread = threading.Thread(target=worker._supervise, daemon=True)
+    thread.start()
+    try:
+        time.sleep(seconds)
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive(), "supervisor thread did not stop"
+
+
+def test_idle_supervisor_stops_taking_the_mutation_boundary_twice_a_second(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty store must not be re-opened on every 0.5s pass.
+
+    This is the 87k-rows-an-hour producer.  Before the fix a two-second idle
+    window took roughly sixteen boundary acquisitions; after it, the store is
+    read once and the freshness signature answers every later pass for free.
+    """
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    assert worker._store is not None
+    assert worker._store.counts().get(media_jobs.PENDING, 0) == 0
+    monkeypatch.setattr(
+        worker, "_launch_child", lambda: pytest.fail("idle supervisor launched a child")
+    )
+
+    taken = _count_reserved_identity_holds(monkeypatch)
+    _run_supervisor_for(worker, 2.0)
+
+    boundary = [op for op in taken if op and op.startswith("reserved_identity")]
+    assert len(boundary) <= 4, (
+        f"an idle supervisor took the mutation boundary {len(boundary)} times in "
+        f"two seconds ({boundary}); this is the log flood"
+    )
+
+
+def test_a_store_write_is_still_seen_within_one_poll(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Promptness invariant: a job enqueued WITHOUT a wake still starts fast.
+
+    `media_processing.reconcile_media` enqueues straight into the store and
+    never touches `_wake`, so the cheap idle path must still notice a store
+    write on its next 0.5s pass.  A skip that never re-checks would strand
+    that job, which is why this is a separate test from the count above.
+    """
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    assert worker._store is not None
+    launched = threading.Event()
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", lambda: (launched.set(), None)[1])
+
+    # The stub is built BEFORE the supervisor thread starts, deliberately, and
+    # the placement is load-bearing rather than tidiness.  The deadline below
+    # is measured from the enqueue, but the backstop's clock is anchored at the
+    # supervisor's first idle pass -- so everything that happens after that
+    # pass and before the enqueue is subtracted from this test's margin.  A
+    # SLOWER fixture therefore shrinks its power rather than growing it, which
+    # is the inverse of the usual intuition, and at an enqueue 3.0s past the
+    # anchor the test reverts silently to passing on the backstop it exists to
+    # exclude.  Measured under a blinded signature: stub inside that window,
+    # blind latency 2.539s (margin +0.539s); stub outside it, 4.055s (+2.055s).
+    # Above `time.sleep(1.0)` is NOT far enough -- the thread is already
+    # running by then and the stub's ~1.7s still lands on the anchor's clock.
+    result = _preserve_media_stub(vault, filename="unwoken.mp3")
+    thread = threading.Thread(target=worker._supervise, daemon=True)
+    thread.start()
+    try:
+        # Let the supervisor settle into its idle state first, so the enqueue
+        # below has to be noticed by the cheap path rather than the first pass.
+        time.sleep(1.0)
+        assert not launched.is_set()
+        worker._store.enqueue(
+            media_jobs.MediaJob(
+                binary_path=vault / result.path,
+                sidecar_path=vault / result.sidecar_path,
+                media_type="audio",
+                do_ocr=True,
+                do_clip=False,
+            )
+        )
+        # WELL under `_SUPERVISE_FORCED_RECHECK_SECONDS`, and that gap is the
+        # whole point.  At the backstop's own value this test passed on the
+        # backstop rather than on the signature, so a signature that had
+        # stopped detecting writes at all still looked healthy -- dropping
+        # `st_mtime_ns` (which alone moves on 40/40 real enqueues, where size
+        # and inode move on 1/40) left it green at a 3.8s launch delay.
+        deadline = media_worker._SUPERVISE_FORCED_RECHECK_SECONDS / 2.5
+        assert launched.wait(timeout=deadline), (
+            f"a job enqueued without a wake was not picked up within {deadline}s "
+            "— the store signature did not detect the write, and only the "
+            "forced re-check backstop can still be covering for it"
+        )
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_an_in_process_enqueue_still_wakes_the_supervisor_immediately(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`MediaWorker.enqueue` sets `_wake`; that path must stay instant."""
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    launched = threading.Event()
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", lambda: (launched.set(), None)[1])
+
+    # Built before the thread starts, for the reason set out in the sibling
+    # above: everything between the supervisor's first idle pass and the
+    # enqueue is subtracted from the backstop's remaining time, so keeping the
+    # stub off that clock is what stops a slower fixture from silently
+    # reverting this test to the backstop it exists to exclude.  Measured under
+    # a blinded signature: 2.539s blind latency with the stub on the clock,
+    # 4.055s with it off -- against a 2.0s deadline.
+    result = _preserve_media_stub(vault, filename="woken.mp3")
+    thread = threading.Thread(target=worker._supervise, daemon=True)
+    thread.start()
+    try:
+        time.sleep(1.0)
+        worker.enqueue(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+        # Derived, not a literal: a plain 5.0 is exactly
+        # `_SUPERVISE_FORCED_RECHECK_SECONDS`, so the backstop alone satisfied
+        # it and this test stayed green with the signature frozen blind
+        # (measured 2.555s against a live 0.059s).  Four polls is a wall the
+        # wake path clears by two orders of magnitude and the backstop cannot.
+        deadline = media_worker._SUPERVISE_POLL_SECONDS * 4
+        assert launched.wait(timeout=deadline), (
+            f"an in-process enqueue did not wake the supervisor within {deadline}s"
+        )
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_the_forced_recheck_still_starts_a_worker_when_the_signature_is_blind(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backstop is a real net, and nothing else was testing it.
+
+    The signature and the forced re-check are each other's only guard: with the
+    signature working the backstop never fires, and with the backstop present a
+    broken signature is invisible.  So each was individually mutable without a
+    single test going red -- stretching the backstop to an hour survived the
+    whole media suite.
+
+    Here the signature is deliberately frozen, so the supervisor can only ever
+    see a settled store, and the backstop is the sole remaining path to a
+    worker.  A job enqueued with no wake and no signature movement must still
+    get one.
+    """
+    # NOT monkeypatched: patching `_SUPERVISE_FORCED_RECHECK_SECONDS` here is
+    # what let this very mutant survive the first time. A test that supplies
+    # its own value for the constant under test proves the mechanism works and
+    # says nothing about the number that ships, so the backstop could be
+    # stretched to an hour with this test still green. The ceiling below is an
+    # absolute wall-clock bound instead: it encodes the actual requirement,
+    # which is that the backstop is short enough to be a net at all.
+    assert media_worker._SUPERVISE_FORCED_RECHECK_SECONDS <= 10.0, (
+        "the forced re-check has drifted long enough to stop being a backstop"
+    )
+    # Independent of the pin above: a value that drifted into the band just
+    # under the ceiling would otherwise surface as an intermittent failure on
+    # a loaded box instead of a clean red.
+    backstop_ceiling = 10.0 + 2 * media_worker._SUPERVISE_POLL_SECONDS
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    assert worker._store is not None
+    monkeypatch.setattr(media_worker, "_job_store_signature", lambda _store: ("frozen",))
+    launched = threading.Event()
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", lambda: (launched.set(), None)[1])
+
+    thread = threading.Thread(target=worker._supervise, daemon=True)
+    thread.start()
+    try:
+        # Settle first: the supervisor must have recorded the frozen signature
+        # and decided there is nothing to do, or the launch below would come
+        # from the ordinary path rather than from the backstop.
+        time.sleep(0.3)
+        assert not launched.is_set()
+        result = _preserve_media_stub(vault, filename="blind-signature.mp3")
+        worker._store.enqueue(
+            media_jobs.MediaJob(
+                binary_path=vault / result.path,
+                sidecar_path=vault / result.sidecar_path,
+                media_type="audio",
+                do_ocr=True,
+                do_clip=False,
+            )
+        )
+        assert launched.wait(timeout=backstop_ceiling), (
+            f"with the store signature blind, no worker started within "
+            f"{backstop_ceiling}s — the forced re-check is not a net, and a "
+            "write the signature cannot see would strand the job"
+        )
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_the_signature_moves_on_a_real_enqueue(vault) -> None:
+    """`st_mtime_ns` does the work, and is pinned separately from the backstop.
+
+    Rows land in existing pages, so file size and inode usually do not move on
+    an enqueue at all.  Dropping the timestamp from the signature therefore
+    breaks detection while leaving something that still looks like a signature,
+    which is exactly the mutant the backstop used to hide.
+    """
+    store = media_jobs.MediaJobStore(vault)
+    before = media_worker._job_store_signature(store)
+    assert before is not None
+
+    result = _preserve_media_stub(vault, filename="signature-moves.mp3")
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+            do_ocr=True,
+            do_clip=False,
+        )
+    )
+
+    after = media_worker._job_store_signature(store)
+    assert after is not None
+    assert after != before, "an enqueue did not move the store signature"
+    # And it must be the timestamp doing it, not an incidental size change:
+    # strip the mtime from both and the remainder is allowed to be identical,
+    # which is precisely why the mtime cannot be dropped.
+    assert any(
+        entry is not None and other is not None and entry[0] != other[0]
+        for entry, other in zip(before, after, strict=True)
+        if entry is not None and other is not None
+    ), "no st_mtime_ns component moved; the signature is relying on size alone"

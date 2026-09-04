@@ -489,6 +489,33 @@ def _check_python() -> DoctorCheck:
     return _check("python.version", "pass", f"Python {version} satisfies >=3.11.")
 
 
+def _check_held_filesystem_platform() -> DoctorCheck:
+    """Report a host with no held-filesystem backend as a platform fact.
+
+    This is deliberately a `fail` rather than a `warn`: every governed write
+    acquires a reserved-path root through this substrate, so where it has no
+    backend the vault is not degraded, it is unusable. Reporting it here is
+    what makes the CLI's one-line refusal answerable.
+    """
+    from . import held_fs
+
+    support = held_fs.platform_support()
+    if support.supported:
+        return _check(
+            "platform.held_filesystem",
+            "pass",
+            f"The held-filesystem substrate has a backend for {sys.platform!r}.",
+        )
+    return _check(
+        "platform.held_filesystem",
+        "fail",
+        f"{support.reason}.",
+        "Run exomem on Linux or Windows. Nothing about this vault can repair it: "
+        "the substrate has no implementation for this platform, so every governed "
+        "write would refuse.",
+    )
+
+
 def _check_uv() -> DoctorCheck:
     uv = shutil.which("uv")
     if uv:
@@ -671,6 +698,7 @@ def _check_resource_posture(profile: Profile) -> DoctorCheck:
     if runtime.get("variant"):
         runtime_label += f"({runtime['variant']})"
     gpu = posture["gpu"]
+    asr = posture["asr"]
     mode_name = posture["mode"]
     if gpu.get("usable") is False:
         status: Status = "pass" if profile == "lean" else "warn"
@@ -679,7 +707,7 @@ def _check_resource_posture(profile: Profile) -> DoctorCheck:
             "resource.posture",
             status,
             f"Runtime is {runtime_label}; resource mode is {mode_name}; CPU is the "
-            f"supported baseline. {reason}.",
+            f"supported baseline. ASR policy is {asr['effective_policy']}. {reason}.",
             "Use `exomem mode quiet` before foreground GPU work, or `exomem mode "
             "performance` only when enough free VRAM is available.",
             details=posture,
@@ -689,15 +717,15 @@ def _check_resource_posture(profile: Profile) -> DoctorCheck:
             "resource.posture",
             "pass",
             f"Runtime is {runtime_label}; resource mode is {mode_name}; GPU headroom "
-            "probe is capable, but GPU use remains explicit policy opt-in.",
+            f"probe is capable; ASR policy is {asr['effective_policy']}.",
             details=posture,
         )
     return _check(
         "resource.posture",
         "pass",
         f"Runtime is {runtime_label}; resource mode is {mode_name}; CPU is the "
-        "supported baseline and GPU headroom is unknown without an available "
-        "non-torch probe.",
+        f"supported baseline; ASR policy is {asr['effective_policy']}; GPU headroom is "
+        "unknown without an available non-torch probe.",
         details=posture,
     )
 
@@ -1650,12 +1678,17 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
     blocked = int(counts.get("blocked", 0))
     failed = int(counts.get("failed", 0))
     if blocked or failed:
+        compute_blocked = int(status.get("compute_runtime_count", 0)) > 0
+        remediation = (
+            "Repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry."
+            if compute_blocked
+            else "Install the missing media engine or fix the failed input, then restart the service to retry blocked work."
+        )
         return _check(
             "media.runtime",
             "warn",
             f"Media work needs attention: {blocked} blocked, {failed} failed.",
-            "Install the missing media engine or fix the failed input, then restart the "
-            "service to retry blocked work.",
+            remediation,
             details=status,
         )
     queued = int(counts.get("pending", 0)) + int(counts.get("running", 0))
@@ -3114,6 +3147,7 @@ def doctor(
     lock_parity = _check_editable_lock_parity(profile)
     checks: list[DoctorCheck] = [
         _check_python(),
+        _check_held_filesystem_platform(),
         _check_uv(),
         *([lock_parity] if lock_parity is not None else []),
         _check_console_scripts(),

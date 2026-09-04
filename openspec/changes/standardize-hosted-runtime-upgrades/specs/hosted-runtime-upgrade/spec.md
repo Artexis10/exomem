@@ -207,3 +207,60 @@ Rollback SHALL choose the last safe action from the execution phase. Before any 
 - **WHEN** a cell already recorded at the target fails after the transition completed
 - **THEN** automatic rollback preserves that cell, its volume, vault, binding, and target record
 - **AND** an operator must invoke a separately governed recovery or restore path
+
+### Requirement: Stranded private-alpha provisions may retarget forward in place
+
+An explicitly authorized recovery MAY retarget a never-routed unfinished provision from a
+reviewed source runtime to the selected forward runtime only after the signed helper proves both
+the source and target deployment locks and
+existing init-retry receipt, exact request and request hash, tenant fence, operation and provider
+identity, four authenticated durable resources, one unreleased reservation, no result, no route,
+no admitted runtime, two stable live observations, and no unexpired worker claim. The transaction
+SHALL change only a v1 request's release/protocol pair or a v2 request's complete `runtimeTarget`,
+encrypted request, canonical request hash,
+claim fields, availability timestamp, and append-only content-free retarget receipt while
+preserving every operation, tenant, cell, fence, resource, volume, credential, policy, and caller
+checkpoint identity. Repetition SHALL verify the existing receipt without a second mutation.
+
+#### Scenario: Exact stranded provision advances to the reviewed target
+
+- **WHEN** the operator authorizes a recovered `volume-owned` provision with no route, result, admitted runtime, conflicting operation, or active claim
+- **THEN** one compare-and-swap transaction retargets that same operation to the selected runtime and makes it claimable without replacing its cell or volume
+
+#### Scenario: A retargeted stranded provision resumes through the declared migration
+
+- **WHEN** the retargeted operation resumes while its never-routed source-runtime Helm release and retained volume still exist
+- **THEN** the worker proves the runtime stopped, fingerprints the same vault, runs the deployment lock's declared migration, upgrades the existing release in place, proves the fingerprint unchanged and exact target health, and only then admits the runtime and opens routes
+
+#### Scenario: A failed retarget resume is recovered once without weakening authorization
+
+- **WHEN** that exact retargeted operation fails closed before tenant mutation because its source authorization bundle is stale
+- **THEN** a separately invoked signed recovery validates both prior recovery receipts, the selected target request, the unchanged four-resource identity, active reservation, stable unrouted live state, and absence of conflicts before making the same operation claimable once; the offline migration may read the stale bundle only to render its non-serving Job, and serving still requires a freshly transitioned target-version bundle
+
+#### Scenario: Offline migration replay identity is bound to the selected target request
+
+- **WHEN** a recovered retarget runs its target-image migration after an earlier initialization proof exists for the same provider operation lineage
+- **THEN** the migration initialization identity is derived from the durable operation and canonical selected-target request digest, so retries of that exact request are byte-stable and a different target request cannot collide with its proof
+
+#### Scenario: Target migration replays an unchanged stable credential authority
+
+- **WHEN** target-image initialization uses its selected-target migration identity and the existing security authority is stable with the same active credential version and digest
+- **THEN** it atomically records a bootstrap result for the new operation identity and returns the unchanged durable security snapshot without rotating, replacing, or exposing credential material
+- **AND** a non-stable authority, changed active version, or mismatched projected credential fails closed without recording the new operation
+
+#### Scenario: A failed resumed retarget receives one separately attributed retry
+
+- **WHEN** that resumed retarget fails closed with a provider-metadata conflict before migration while the same four resources remain stopped, unrouted, reserved, and conflict-free
+- **THEN** a separately invoked signed retry validates the original recovery, retarget, and resume receipts plus the unchanged selected-target request and live identity before appending one content-free retry receipt and making the same operation claimable once more
+
+#### Scenario: A broken immutable target is superseded without replacing the provision
+
+- **WHEN** a never-routed recovered provision is still pending at `volume-owned` or the exact pre-driver `capacity-live-observation-mismatch` retry checkpoint, or exhausted its separately attributed retry with the same provider-metadata failure, and a signed patch runtime supersedes its immutable target
+- **THEN** a separately invoked signed successor retarget validates the full append-only recovery receipt chain, source and target deployment locks, exact encrypted request, unchanged four-resource identity, active reservation, stable unrouted live state, and absence of conflicts before atomically selecting the patch target and making the same operation claimable
+- **AND** it appends one content-free successor receipt bound to the complete prior receipt chain, source request, target request, target runtime, and live preflight evidence
+- **AND** any missing, reordered, mismatched, or already-superseded receipt, active claim, route, result, resource, reservation, fence, request, runtime, or live identity refuses without changing the operation, cell, PVC, PV, or provider volume
+
+#### Scenario: Retarget mismatch is a no-op
+
+- **WHEN** any request, receipt, claim, fence, resource, reservation, live identity, runtime, route, result, or compare-and-swap invariant differs
+- **THEN** recovery refuses without changing the operation, request, resource, reservation, PVC, PV, or provider volume

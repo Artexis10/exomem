@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +16,7 @@ from .ranking_config import LANE_ORDER, RankingConfig
 
 log = logging.getLogger(__name__)
 _span = find_types.timing_span
+_mark_source = find_types.timing_mark_source
 
 PageOf = Callable[[str], ParsedPage | None]
 
@@ -90,6 +91,7 @@ def collapse_frame_children(
     page_of: PageOf,
     attribution: dict[str, tuple[str, float | None]],
     *aux_maps: dict,
+    parent_hints: Mapping[str, str | None] | None = None,
     recall_paths: AbstractSet[str] | None = None,
 ) -> list[str]:
     """Remap scene-frame sidecar candidates onto their parent video sidecar."""
@@ -109,7 +111,16 @@ def collapse_frame_children(
     for rel in ranking:
         if not admitted(rel):
             continue
-        page = page_of(rel)
+        # A ready catalog's explicit NULL proves this is an ordinary page, so
+        # avoid its otherwise pointless Markdown hydration. A non-NULL hint is
+        # only a hydration selector: the parsed child remains authoritative if
+        # it was deleted, became malformed, or changed parent_media after the
+        # catalog snapshot.
+        page = (
+            None
+            if parent_hints is not None and parent_hints.get(rel) is None and rel in parent_hints
+            else page_of(rel)
+        )
         parent = page.parent_media if page is not None else None
         if parent:
             parent_sidecar = parent + ".md"
@@ -159,9 +170,19 @@ def collect_candidates(
     lexical_repair: bool = True,
     eligible_paths: set[str] | None = None,
     capture_trace: bool = False,
+    query_vector_provider: Callable[[], Any] | None = None,
+    shadow: Callable[[list[str]], list[str]] | None = None,
 ) -> CandidateBundle:
-    """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them."""
-    from . import bm25, embeddings, epistemic_graph, fusion, lexstore, readiness
+    """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them.
+
+    `shadow` optionally removes identities no lane may attest -- the caller's
+    exact pending-visibility overlay owns those generations -- and is applied to
+    every lane this collector builds itself, at its source, before rank lookups,
+    frame collapsing, eligibility, graph seeding, fusion and every lane cap
+    consume it. The keyword lane is excluded because it arrives from the
+    caller's own provider already shadowed. Default None is a strict no-op.
+    """
+    from . import bm25, embeddings, epistemic_graph, fusion, lexstore, readiness, runtime_resources
 
     usage_map: dict[str, float] = {}
     if prefer_used:
@@ -212,10 +233,14 @@ def collect_candidates(
     else:
         try:
             with _span(timings, "vector"):
-                with _span(timings, "vector.index"):
+                with _span(timings, "vector.index", source=find_types.SOURCE_INDEX):
                     idx = embeddings.get_embedding_index(vault_root)
                 with _span(timings, "vector.embed"):
-                    query_vec = embeddings.embed_texts([query], is_query=True)[0]
+                    query_vec = (
+                        query_vector_provider()
+                        if query_vector_provider is not None
+                        else embeddings.embed_texts([query], is_query=True)[0]
+                    )
                 with _span(timings, "vector.search"):
                     chunk_hits = idx.search(
                         query_vec,
@@ -254,6 +279,8 @@ def collect_candidates(
             log.info("vector search unavailable (%s); keyword/BM25-only ranking", e)
             if timings is not None:
                 timings.error("vector", e)
+        except runtime_resources.ModelBusyError:
+            raise
         except Exception as e:  # noqa: BLE001 - vector search is best-effort
             if capture_trace:
                 lane_statuses["vector"] = {
@@ -267,17 +294,6 @@ def collect_candidates(
                 failed_out.append("vector")
             if timings is not None:
                 timings.error("vector", e)
-    vector_ranking = collapse_frame_children(
-        vector_ranking,
-        vault_root,
-        page_of,
-        frame_attribution,
-        chunk_text_by_path,
-        vector_score_by_path,
-        recall_paths=recall_paths,
-    )
-    vector_ranking = _eligible(vector_ranking)
-
     clip_ranking: list[str] = []
     clip_score_by_path: dict[str, float] = {}
     clip_frame_ts_by_path: dict[str, float | None] = {}
@@ -340,6 +356,8 @@ def collect_candidates(
                 failed_out.append("clip")
             if timings is not None:
                 timings.error("clip", e)
+        except runtime_resources.ModelBusyError:
+            raise
         except Exception as e:  # noqa: BLE001 - image search is best-effort
             if capture_trace:
                 lane_statuses["clip"] = {
@@ -361,17 +379,6 @@ def collect_candidates(
             "reason": "clip_disabled",
             "model": embeddings.CLIP_MODEL_NAME,
         }
-    clip_ranking = collapse_frame_children(
-        clip_ranking,
-        vault_root,
-        page_of,
-        frame_attribution,
-        clip_score_by_path,
-        clip_frame_ts_by_path,
-        recall_paths=recall_paths,
-    )
-    clip_ranking = _eligible(clip_ranking)
-
     bm25_ranking: list[str] = []
     bm25_score_by_path: dict[str, float] = {}
     keyword_ranking: list[str] = []
@@ -402,9 +409,14 @@ def collect_candidates(
                         allowed_paths=eligible_paths,
                     )
                     if not catalog_result.readiness.complete:
+                        _mark_source(timings, "bm25", find_types.SOURCE_DECLINED)
                         raise lexstore.CatalogUnavailable(catalog_result.readiness)
+                    _mark_source(timings, "bm25", find_types.SOURCE_INDEX)
                     bm25_hits = list(catalog_result.value or [])
                 else:
+                    # The in-process corpus path: it builds from the scope when
+                    # cold, so it is `computed`, never `index`.
+                    _mark_source(timings, "bm25", find_types.SOURCE_COMPUTED)
                     bm25_hits = bm25.search(
                         vault_root,
                         query,
@@ -448,17 +460,16 @@ def collect_candidates(
             log.warning("BM25 search failed: %s; using vector-only", e)
             if timings is not None:
                 timings.error("bm25", e)
-        bm25_ranking = collapse_frame_children(
-            bm25_ranking,
-            vault_root,
-            page_of,
-            frame_attribution,
-            bm25_score_by_path,
-            recall_paths=recall_paths,
-        )
-        bm25_ranking = _eligible(bm25_ranking)
-
         with _span(timings, "keyword"):
+            # Hydration is one of the four stages the contract names, so this
+            # lane reports its source instead of carrying the static `computed`
+            # default. `index` is the basis, not a courtesy: this lane's only
+            # source of paths is the injected `keyword_match_paths` provider,
+            # which resolves from the maintained lexical index and never
+            # enumerates the scope. The branch that CAN enumerate is the
+            # empty-query one in `find._find_keyword`, which marks itself
+            # `computed` when it takes the walk.
+            _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
             # Over-fetch by the same factor the BM25 lane uses, and for the same
             # reason: `collapse_frame_children` and `_eligible` below can drop
             # members, so a lane that supplied exactly the fused depth could
@@ -472,23 +483,85 @@ def collect_candidates(
                 repair=lexical_repair,
                 k=candidate_k * 3,
             )
-        keyword_ranking = collapse_frame_children(
-            keyword_ranking,
+    if shadow is not None:
+        # Before anything downstream reads a lane: a shadowed identity must not
+        # seed the graph lane, reach the parent-hint seam, occupy a bounded lane
+        # window, or take a fused position derived from its stale rank.
+        #
+        # Deliberately not `keyword_ranking`: that lane comes from the caller's
+        # own `keyword_match_paths` provider, which has already suppressed the
+        # identities the caller shadows AND merged back the generations only it
+        # can attest. Shadowing it again here would delete that attestation.
+        vector_ranking = shadow(vector_ranking)
+        clip_ranking = shadow(clip_ranking)
+        bm25_ranking = shadow(bm25_ranking)
+    raw_rankings = (vector_ranking, clip_ranking, bm25_ranking, keyword_ranking)
+    admitted_raw_paths = set().union(*raw_rankings) & recall_paths
+    parent_hints: Mapping[str, str | None] | None = None
+    if admitted_raw_paths:
+        recall_checkpoint = snapshot.recall_checkpoint(scope)
+        hint_result = lexstore.emitted_parent_hints_result(
             vault_root,
-            page_of,
-            frame_attribution,
-            recall_paths=recall_paths,
+            admitted_raw_paths,
+            scope=scope,
+            freshness=snapshot.for_scope(scope),
+            recall_checkpoint=recall_checkpoint,
         )
-        keyword_ranking = _eligible(keyword_ranking)
-        if capture_trace:
-            lane_statuses["keyword"] = {
-                "status": "participated" if keyword_ranking else "available_nonmatching",
-                "backend": "case_insensitive_substring",
-                "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
-            }
-        rankings = [
-            r for r in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking) if r
-        ]
+        if hint_result.readiness.complete:
+            parent_hints = hint_result.value
+
+    vector_ranking = collapse_frame_children(
+        vector_ranking,
+        vault_root,
+        page_of,
+        frame_attribution,
+        chunk_text_by_path,
+        vector_score_by_path,
+        parent_hints=parent_hints,
+        recall_paths=recall_paths,
+    )
+    vector_ranking = _eligible(vector_ranking)
+    clip_ranking = collapse_frame_children(
+        clip_ranking,
+        vault_root,
+        page_of,
+        frame_attribution,
+        clip_score_by_path,
+        clip_frame_ts_by_path,
+        parent_hints=parent_hints,
+        recall_paths=recall_paths,
+    )
+    clip_ranking = _eligible(clip_ranking)
+    bm25_ranking = collapse_frame_children(
+        bm25_ranking,
+        vault_root,
+        page_of,
+        frame_attribution,
+        bm25_score_by_path,
+        parent_hints=parent_hints,
+        recall_paths=recall_paths,
+    )
+    bm25_ranking = _eligible(bm25_ranking)
+    keyword_ranking = collapse_frame_children(
+        keyword_ranking,
+        vault_root,
+        page_of,
+        frame_attribution,
+        parent_hints=parent_hints,
+        recall_paths=recall_paths,
+    )
+    keyword_ranking = _eligible(keyword_ranking)
+    if capture_trace and mode != "vector":
+        lane_statuses["keyword"] = {
+            "status": "participated" if keyword_ranking else "available_nonmatching",
+            "backend": "case_insensitive_substring",
+            "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
+        }
+    rankings = [
+        r
+        for r in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking)
+        if r
+    ]
 
     graph_ranking: list[str] = []
     graph_in_degree_by_path: dict[str, int] = {}
@@ -532,7 +605,7 @@ def collect_candidates(
                 # at all, so typed expansion alone would silently drop them. Those
                 # seeds fall back to the legacy 1-hop wikilink expansion instead,
                 # preserving pre-change recall for out-of-KB seeds.
-                with _span(timings, "graph.sidecar"):
+                with _span(timings, "graph.sidecar", source=find_types.SOURCE_INDEX):
                     indexed = graph_index.indexed_paths(graph_seeds)
                     typed_seeds = [s for s in graph_seeds if s in indexed]
                     legacy_seeds = [s for s in graph_seeds if s not in indexed]
@@ -695,6 +768,9 @@ def collect_candidates(
     with _span(timings, "fusion"):
         intent_label = intent or find_policy.classify_intent(query)
         weights = config.intent_weights(intent_label)
+        if shadow is not None:
+            graph_ranking = shadow(graph_ranking)
+            temporal_ranking = shadow(temporal_ranking)
         lane_rankings = [
             vector_ranking,
             bm25_ranking,

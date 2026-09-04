@@ -53,6 +53,7 @@ from . import contradiction_stance as contradiction_stance_module
 from . import corpus_aware as corpus_aware_module
 from . import create_directory as create_directory_module
 from . import create_file as create_file_module
+from . import deferred_write_advisory as deferred_write_advisory_module
 from . import delete_directory as delete_directory_module
 from . import delete_file as delete_file_module
 from . import edit as edit_module
@@ -63,6 +64,7 @@ from . import envelope as envelope_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
+from . import find_types, query_log, retrieval_models, semantic_census, upload_tokens, vault
 from . import get_page as get_page_module
 from . import knowledge_packs as knowledge_packs_module
 from . import link as link_module
@@ -82,7 +84,6 @@ from . import plan_memory as plan_memory_module
 from . import plan_progress as plan_progress_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
-from . import query_log, retrieval_models, semantic_census, upload_tokens, vault
 from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import record_memory as record_memory_module
@@ -1384,6 +1385,7 @@ def _require_supported_projected_find_request(
     prefer_compiled: bool,
     prefer_active: bool,
     prefer_used: bool,
+    widen_outside_kb: bool,
     pack: bool,
     graph_enrich: bool,
     include_timings: bool,
@@ -1419,6 +1421,7 @@ def _require_supported_projected_find_request(
         or not prefer_compiled
         or not prefer_active
         or prefer_used
+        or widen_outside_kb
         or pack
         or graph_enrich
         or explain
@@ -1456,6 +1459,7 @@ def op_find(
     prefer_compiled: bool = True,
     prefer_active: bool = True,
     prefer_used: bool = False,
+    widen_outside_kb: bool = False,
     pack: bool = False,
     graph_enrich: bool = False,
     detail: str = "full",
@@ -1506,21 +1510,16 @@ def op_find(
         continuation: Opaque governed-projection continuation returned by a prior page.
             It is bound to the same principal, authorization session, purpose, request,
             and retained projected snapshot. Omit for the first page.
-        scope: "kb" (default) searches Knowledge Base/ first and
-            AUTO-WIDENS to the whole vault when the KB doesn't fill
-            `limit` — so content in sibling folders (Tracking/,
-            Reference/, Finance/, ... and curated, read-only trees kept
-            outside Knowledge Base/) is never silently invisible. Widened
-            hits carry `outside_kb: true`. "vault" always walks the
-            whole vault. "kb-only" is the strict opt-out: KB only,
-            never widens. Outside-KB recall is BM25/keyword (the
-            vector sidecar is KB-scoped), with a relaxed gate so terse
-            files (e.g. a numbers-heavy tracker) surface on a partial
-            token match. `_Schema/`, `_trash/`, `_attachments/`, and
+        scope: "kb" (default) searches Knowledge Base/ only. "vault"
+            searches the whole vault, including sibling folders
+            (Tracking/, Reference/, Finance/, ... and curated,
+            read-only trees kept outside Knowledge Base/). "kb-only" is
+            the strict form of "kb": it can never widen even on
+            request. `_Schema/`, `_trash/`, `_attachments/`, and
             `.obsidian/` are excluded under every scope. NOTE: an
             empty result means "not found in what I searched," NOT
-            "doesn't exist" — say so, and try "vault" before
-            concluding absence.
+            "doesn't exist" — say so, and try `widen_outside_kb` or
+            "vault" before concluding absence.
         mode: Ranker. "hybrid" (default) fuses BM25 + local vector
             embeddings via reciprocal rank fusion — best recall on
             natural-language queries. "keyword" preserves the original
@@ -1573,6 +1572,17 @@ def op_find(
             no separate feedback call exists or is needed. Use for "what
             have I been working with lately" recall; leave off for
             neutral knowledge lookup.
+        widen_outside_kb: When true (OFF by default), scope="kb" also
+            RESERVES up to `limit - 1` slots for pages outside
+            Knowledge Base/, so content in sibling folders is not
+            silently invisible; reserved hits carry `outside_kb: true`.
+            Out-of-KB recall is BM25/keyword (the vector sidecar is
+            KB-scoped) over the maintained catalogue, with a relaxed
+            gate so terse files (e.g. a numbers-heavy tracker) surface
+            on a partial token match. Ignored for "vault" (already
+            searching everything) and "kb-only" (the strict opt-out).
+            Off, scope="kb" costs nothing for callers who never read
+            the reserve.
         pack: When true (off by default), ALSO assemble a reasoning-ready
             context pack from the top hits and change the return to
             {"hits": [...], "pack": {...}} (with pack off, the return is the
@@ -1687,6 +1697,7 @@ def op_find(
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
             prefer_used=prefer_used,
+            widen_outside_kb=widen_outside_kb,
             pack=pack,
             graph_enrich=graph_enrich,
             include_timings=include_timings,
@@ -1821,6 +1832,7 @@ def op_find(
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
             prefer_used=prefer_used,
+            widen_outside_kb=widen_outside_kb,
             timings=timings,
             degraded_out=degraded,
             failed_out=failed,
@@ -1880,7 +1892,15 @@ def op_find(
         )
         if projection_runtime is None:
             ref_index = memory_refs_module.ReferenceIndex(vault_root)
-            refs = ref_index.refs_for_paths([str(hit.get("path") or "") for hit in hit_dicts])
+            # The recall serializer is the one caller the no-walk contract
+            # governs: a cold sidecar here declines with the retryable warming
+            # outcome and one background rebuild instead of scanning the corpus
+            # on the request. Every other `refs_for_paths` caller keeps the
+            # inline build (see `ReferenceIndex.refs_for_paths`).
+            with memory_refs_module.recall_serializer():
+                refs = ref_index.refs_for_paths(
+                    [str(hit.get("path") or "") for hit in hit_dicts]
+                )
             for hit in hit_dicts:
                 ref = refs.get(str(hit.get("path") or ""))
                 if ref:
@@ -2226,10 +2246,16 @@ def op_fetch(
 
 
 def _timing_log_summary(timings_dict: dict | None) -> dict | None:
-    """Query-log-safe slice of a timings envelope: totals + per-stage ms only
-    (never content; stage entries drop skip/error detail to stay compact)."""
+    """Query-log-safe slice of a timings envelope: totals, per-stage ms and
+    per-stage source only (never content; stage entries drop skip/error detail
+    to stay compact)."""
     if timings_dict is None:
         return None
+    timed_stages = {
+        name: entry
+        for name, entry in timings_dict.get("stages", {}).items()
+        if isinstance(entry, dict) and "ms" in entry
+    }
     return {
         "total_ms": timings_dict.get("total_ms"),
         # Carried deliberately. This projection is closed, so a field it does
@@ -2238,10 +2264,18 @@ def _timing_log_summary(timings_dict: dict | None) -> dict | None:
         # which is the thing #283 spent a month unable to see.
         "unattributed_ms": timings_dict.get("unattributed_ms"),
         "cache_hit": bool(timings_dict.get("cache", {}).get("hit")),
-        "stage_ms": {
-            name: entry["ms"]
-            for name, entry in timings_dict.get("stages", {}).items()
-            if isinstance(entry, dict) and "ms" in entry
+        "stage_ms": {name: entry["ms"] for name, entry in timed_stages.items()},
+        # Same closure argument, one level up: a corpus walk that reappears is
+        # a stage that stops saying `index` and starts saying `computed`, and
+        # across many requests the query log is the only place that is visible
+        # without re-running a benchmark. Drawn from the same filtered set as
+        # `stage_ms`, so the log cannot report a stage's time without also
+        # reporting where it came from, and closed to the known vocabulary so
+        # only those four tokens can ever reach the durable record.
+        "stage_source": {
+            name: entry["source"]
+            for name, entry in timed_stages.items()
+            if entry.get("source") in find_types.STAGE_SOURCES
         },
     }
 
@@ -4725,6 +4759,7 @@ def op_ask_memory(
     prefer_compiled: bool = True,
     prefer_active: bool = True,
     prefer_used: bool = False,
+    widen_outside_kb: bool = False,
     graph_enrich: bool = False,
     include_timings: bool = False,
     explain: bool = False,
@@ -4775,6 +4810,11 @@ def op_ask_memory(
         prefer_compiled: Prefer compiled notes over raw sources by default.
         prefer_active: Prefer active conclusions over superseded ones.
         prefer_used: Apply usage boost when explicitly requested.
+        widen_outside_kb: With scope="kb", also reserve up to limit-1 slots for
+            curated vault pages OUTSIDE the knowledge base. Off by default:
+            scope="kb" means the knowledge base and nothing else. Turn it on
+            when a terse out-of-KB file (a tracker, a handbook) is what you are
+            looking for, or use scope="vault" to search everything equally.
         graph_enrich: With deep mode, include typed graph neighborhood data.
         include_timings: Include retrieval timings for diagnostics.
         explain: Add bounded retrieval-plan and per-hit ranking evidence.
@@ -4812,6 +4852,7 @@ def op_ask_memory(
         prefer_compiled=prefer_compiled,
         prefer_active=prefer_active,
         prefer_used=prefer_used,
+        widen_outside_kb=widen_outside_kb,
         pack=deep,
         graph_enrich=graph_enrich,
         detail=detail,
@@ -5903,7 +5944,14 @@ def op_review_memory(
     Args:
         mode: attention, activation, item, audit, dispositions, provenance,
             evolution, compilation, stale, contradiction, unprocessed-sources,
-            relation-debt, relation-queue, adoption, or plan-progress.
+            relation-debt, relation-queue, adoption, plan-progress, or
+            write-advisory-result. `write-advisory-result` resolves exactly one
+            opaque `exomem://write-advisory-result/<id>` reference returned by a
+            committed write and reports only that job's current `pending`,
+            `ready`, `failed`, or `superseded` state; it requires `ref`, has no
+            list, browse, search, rank, count, continuation, or
+            implicit-current form, and a malformed, unknown, unauthorized, or
+            expired reference returns the shared not-found outcome.
             `plan-progress` reports, for each committed Planning item declaring
             `progress_evidence`, the counts its bound Records views return; it is
             derived and read-only, and it scores nothing. `dispositions` lists every
@@ -5937,7 +5985,9 @@ def op_review_memory(
             `chain_id` is always the active head. An unresolvable path raises an
             explicit error.
         state: For attention/activation, open (default), all, snoozed, or dismissed.
-        ref: Stable `exomem://review/<id>` reference for item mode.
+        ref: Stable `exomem://review/<id>` reference for item mode, or the
+            opaque `exomem://write-advisory-result/<id>` reference for
+            write-advisory-result mode. Required by both.
         detail: Audit output detail: actionable (default) or full.
         legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
 
@@ -5967,6 +6017,8 @@ def op_review_memory(
         if not ref:
             raise ValueError("INVALID_REVIEW: item mode requires `ref`")
         return attention_module.item_by_ref(vault_root, ref).as_dict()
+    if mode == "write-advisory-result":
+        return deferred_write_advisory_module.resolve_result(vault_root, ref)
     if mode == "dispositions":
         return _dispositions_view(vault_root)
     if mode == "audit":
@@ -6016,7 +6068,8 @@ def op_review_memory(
     raise ValueError(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "dispositions, provenance, evolution, compilation, stale, contradiction, "
-        "unprocessed-sources, relation-debt, relation-queue, adoption, or plan-progress"
+        "unprocessed-sources, relation-debt, relation-queue, adoption, plan-progress, "
+        "or write-advisory-result"
     )
 
 

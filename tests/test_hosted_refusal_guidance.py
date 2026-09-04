@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from temporary_vault import temporary_vault
 
 from exomem import commands, find, schema, semantic_authoring, server_hosted
-from exomem.cli_ops import error_dict
+from exomem.cli_ops import OpError, error_dict
 from exomem.init import init_vault
 
 
@@ -51,6 +51,20 @@ def test_relation_disposition_refusal_carries_remediation() -> None:
         error = _error_block(code)
         assert error["remediation"], f"{code} must carry remediation"
         assert error["message"] != "hosted command failed", code
+
+
+def test_record_recovery_refusal_carries_operator_remediation() -> None:
+    error = _error_block("RECORD_RECOVERY_REQUIRED")
+
+    expected = OpError(
+        "RECORD_RECOVERY_REQUIRED",
+        "private transaction residue blocks safe publication",
+    )
+    assert error == {
+        "code": "RECORD_RECOVERY_REQUIRED",
+        "message": "private transaction residue blocks safe record publication",
+        "remediation": expected.remediation,
+    }
 
 
 def test_unknown_code_stays_generic_and_redacted() -> None:

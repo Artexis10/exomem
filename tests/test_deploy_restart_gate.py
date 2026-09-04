@@ -309,12 +309,28 @@ _LIVE_ACCEPTANCE_DRIVER = """
         [string]$Common,
         [int]$WorkerPid,
         [int]$ListenerPid,
+        [switch]$ListenerIsDescendant,
+        [int]$CurrentWorkerPid = 0,
+        [switch]$ListenerChangesAfterProof,
         [string]$ExpectedVersion,
         [string]$ServedVersion
     )
     $ErrorActionPreference = "Stop"
     . $Common
-    function Get-ExomemConfiguredListenerPids { return @($ListenerPid) }
+    if (-not $CurrentWorkerPid) { $CurrentWorkerPid = $WorkerPid }
+    $script:ListenerReads = 0
+    function Get-ExomemConfiguredListenerPids {
+        $script:ListenerReads += 1
+        if ($ListenerChangesAfterProof -and $script:ListenerReads -gt 1) {
+            return @($ListenerPid + 1)
+        }
+        return @($ListenerPid)
+    }
+    function Get-ExomemServiceWorkerPid { return $CurrentWorkerPid }
+    function Test-ExomemProcessTreeMembership {
+        param([int]$RootPid, [int]$CandidatePid)
+        return $RootPid -eq $CandidatePid -or [bool]$ListenerIsDescendant
+    }
     function Invoke-RestMethod {
         return [pscustomobject]@{ version = $ServedVersion }
     }
@@ -329,6 +345,46 @@ _LIVE_ACCEPTANCE_DRIVER = """
         exit 1
     }
     Write-Host "DRIVER-COMPLETED"
+"""
+
+_PROCESS_TREE_DRIVER = """
+    param(
+        [string]$Common,
+        [int]$RootPid,
+        [int]$CandidatePid,
+        [string]$ParentMap = "",
+        [switch]$RootIsNewer
+    )
+    $ErrorActionPreference = "Stop"
+    . $Common
+    $script:Parents = @{}
+    foreach ($entry in @($ParentMap -split ",") | Where-Object { $_ }) {
+        $pair = $entry -split ":", 2
+        $script:Parents[[int]$pair[0]] = [int]$pair[1]
+    }
+    function Get-CimInstance {
+        param([string]$ClassName, [string]$Filter, [string]$ErrorAction)
+        if ($ClassName -ne "Win32_Process" -or $Filter -notmatch '^ProcessId=(\\d+)$') {
+            throw "unexpected process query"
+        }
+        $processId = [int]$Matches[1]
+        if (-not $script:Parents.ContainsKey($processId)) { return $null }
+        $created = ([datetime]"2026-01-01T00:00:00Z").AddSeconds($processId)
+        if ($RootIsNewer -and $processId -eq $RootPid) {
+            $created = [datetime]"2030-01-01T00:00:00Z"
+        }
+        return [pscustomobject]@{
+            ProcessId = $processId
+            ParentProcessId = [int]$script:Parents[$processId]
+            CreationDate = $created
+        }
+    }
+    if (Test-ExomemProcessTreeMembership -RootPid $RootPid -CandidatePid $CandidatePid) {
+        Write-Host "MEMBER"
+        exit 0
+    }
+    Write-Host "NOT-MEMBER"
+    exit 1
 """
 
 _INSTALL_MCP_FAILURE_CLEANUP_DRIVER = r"""
@@ -759,6 +815,13 @@ def failed_start_receipt_driver(tmp_path: Path) -> Path:
 def live_acceptance_driver(tmp_path: Path) -> Path:
     script = tmp_path / "live-acceptance-driver.ps1"
     _write_executable(script, _LIVE_ACCEPTANCE_DRIVER)
+    return script
+
+
+@pytest.fixture()
+def process_tree_driver(tmp_path: Path) -> Path:
+    script = tmp_path / "process-tree-driver.ps1"
+    _write_executable(script, _PROCESS_TREE_DRIVER)
     return script
 
 
@@ -1347,6 +1410,74 @@ class TestStoppedGate:
 
 
 class TestInstallerLiveAcceptance:
+    def test_process_tree_membership_accepts_a_nested_listener(
+        self, process_tree_driver: Path
+    ) -> None:
+        result = _run(
+            process_tree_driver,
+            "-Common",
+            str(COMMON),
+            "-RootPid",
+            "4101",
+            "-CandidatePid",
+            "4103",
+            "-ParentMap",
+            "4103:4102,4102:4101,4101:100",
+        )
+        assert result.returncode == 0, _flat(result)
+
+    def test_process_tree_membership_refuses_an_unrelated_listener(
+        self, process_tree_driver: Path
+    ) -> None:
+        result = _run(
+            process_tree_driver,
+            "-Common",
+            str(COMMON),
+            "-RootPid",
+            "4101",
+            "-CandidatePid",
+            "4103",
+            "-ParentMap",
+            "4103:4102,4102:9999",
+        )
+        assert result.returncode == 1, _flat(result)
+        assert "NOT-MEMBER" in _flat(result)
+
+    def test_process_tree_membership_refuses_a_missing_root(
+        self, process_tree_driver: Path
+    ) -> None:
+        result = _run(
+            process_tree_driver,
+            "-Common",
+            str(COMMON),
+            "-RootPid",
+            "4101",
+            "-CandidatePid",
+            "4103",
+            "-ParentMap",
+            "4103:4102,4102:4101",
+        )
+        assert result.returncode == 1, _flat(result)
+        assert "NOT-MEMBER" in _flat(result)
+
+    def test_process_tree_membership_refuses_a_reused_root_pid(
+        self, process_tree_driver: Path
+    ) -> None:
+        result = _run(
+            process_tree_driver,
+            "-Common",
+            str(COMMON),
+            "-RootPid",
+            "4101",
+            "-CandidatePid",
+            "4103",
+            "-ParentMap",
+            "4103:4102,4102:4101,4101:100",
+            "-RootIsNewer",
+        )
+        assert result.returncode == 1, _flat(result)
+        assert "NOT-MEMBER" in _flat(result)
+
     def test_fresh_doctor_failure_leaves_no_autostart_service_and_retry_is_fresh(
         self, tmp_path: Path
     ) -> None:
@@ -1512,6 +1643,68 @@ class TestInstallerLiveAcceptance:
         )
         assert mismatch.returncode == 1, _flat(mismatch)
         assert "listener" in _flat(mismatch).lower()
+
+    def test_descendant_listener_belongs_to_the_new_worker_tree(
+        self, live_acceptance_driver: Path
+    ) -> None:
+        accepted = _run(
+            live_acceptance_driver,
+            "-Common",
+            str(COMMON),
+            "-WorkerPid",
+            "4101",
+            "-ListenerPid",
+            "4102",
+            "-ListenerIsDescendant",
+            "-ExpectedVersion",
+            "1.2.3",
+            "-ServedVersion",
+            "1.2.3",
+        )
+        assert accepted.returncode == 0, _flat(accepted)
+
+    def test_listener_refuses_a_stale_service_worker_root(
+        self, live_acceptance_driver: Path
+    ) -> None:
+        refused = _run(
+            live_acceptance_driver,
+            "-Common",
+            str(COMMON),
+            "-WorkerPid",
+            "4101",
+            "-ListenerPid",
+            "4102",
+            "-ListenerIsDescendant",
+            "-CurrentWorkerPid",
+            "4999",
+            "-ExpectedVersion",
+            "1.2.3",
+            "-ServedVersion",
+            "1.2.3",
+        )
+        assert refused.returncode == 1, _flat(refused)
+        assert "listener" in _flat(refused).lower()
+
+    def test_listener_identity_is_rechecked_after_ancestry_proof(
+        self, live_acceptance_driver: Path
+    ) -> None:
+        refused = _run(
+            live_acceptance_driver,
+            "-Common",
+            str(COMMON),
+            "-WorkerPid",
+            "4101",
+            "-ListenerPid",
+            "4102",
+            "-ListenerIsDescendant",
+            "-ListenerChangesAfterProof",
+            "-ExpectedVersion",
+            "1.2.3",
+            "-ServedVersion",
+            "1.2.3",
+        )
+        assert refused.returncode == 1, _flat(refused)
+        assert "listener" in _flat(refused).lower()
 
     def test_health_must_equal_the_target_interpreter_version(
         self, live_acceptance_driver: Path

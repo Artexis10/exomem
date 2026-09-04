@@ -508,6 +508,7 @@ def test_auto_widened_hit_has_outside_lane_and_final_merge_evidence(
         graph=False,
         rerank=False,
         scope="kb",
+        widen_outside_kb=True,
         limit=2,
         detail="compact",
         explain=True,
@@ -1281,20 +1282,36 @@ def test_mixed_explanation_preserves_divergent_page_and_unit_plans(
     _prepare_semantic_catalog(tmp_path, [tmp_path / page_path])
 
     class FakeIndex:
-        def search(self, _query_vector, *, k: int, allowed_paths=None):
+        def __init__(self) -> None:
+            self.page_query_vectors: list[object] = []
+            self.unit_query_vectors: list[object] = []
+
+        def search(self, query_vector, *, k: int, allowed_paths=None):
             assert k > 0
             assert allowed_paths == {page_path}
+            self.page_query_vectors.append(query_vector)
             return [(page_path, 0, "Session lifetime is thirty days", 0.82)]
 
-        def search_semantic_units(self, *_args, **_kwargs):
+        def search_semantic_units(self, query_vector, **_kwargs):
+            self.unit_query_vectors.append(query_vector)
             raise RuntimeError("unit vector backend failed")
 
+    index = FakeIndex()
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
-    monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: FakeIndex())
-    monkeypatch.setattr(
-        embeddings, "embed_texts", lambda _texts, *, is_query: [[0.1, 0.2]]
-    )
+    monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: index)
+    embed_calls = 0
+    embedded_vectors: list[object] = []
+
+    def embed_texts(_texts, *, is_query: bool):
+        nonlocal embed_calls
+        assert is_query is True
+        embed_calls += 1
+        vector = [0.1, 0.2]
+        embedded_vectors.append(vector)
+        return [vector]
+
+    monkeypatch.setattr(embeddings, "embed_texts", embed_texts)
 
     explained = commands.op_ask_memory(
         tmp_path,
@@ -1328,6 +1345,62 @@ def test_mixed_explanation_preserves_divergent_page_and_unit_plans(
     assert "fusion" not in plans["unit"]
     assert plans["unit"]["rerank"]["reason"] == "result_level_unit"
     assert plans["page"]["final_ordering"] != plans["unit"]["final_ordering"]
+    assert embed_calls == 1
+    assert index.unit_query_vectors[0] is embedded_vectors[0]
+    assert index.page_query_vectors[0] is embedded_vectors[0]
+
+
+def test_mixed_vector_embedding_failure_is_retried_for_page_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page_path = _write_unit_page(tmp_path)
+    _prepare_semantic_catalog(tmp_path, [tmp_path / page_path])
+
+    class FakeIndex:
+        def search(self, _query_vector, *, k: int, allowed_paths=None):
+            assert k > 0
+            assert allowed_paths == {page_path}
+            return [(page_path, 0, "Session lifetime is thirty days", 0.82)]
+
+        def search_semantic_units(self, *_args, **_kwargs):
+            raise AssertionError("unit search must not run after embedding fails")
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: FakeIndex())
+    embed_calls = 0
+
+    def embed_texts(_texts, *, is_query: bool):
+        nonlocal embed_calls
+        assert is_query is True
+        embed_calls += 1
+        if embed_calls == 1:
+            raise RuntimeError("transient unit embedding failure")
+        return [[0.1, 0.2]]
+
+    monkeypatch.setattr(embeddings, "embed_texts", embed_texts)
+
+    explained = commands.op_ask_memory(
+        tmp_path,
+        query="session lifetime",
+        result_level="mixed",
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+        scope="kb-only",
+        detail="compact",
+        explain=True,
+    )
+
+    plans = explained["retrieval_profile"]["result_plans"]
+    assert embed_calls == 2
+    assert plans["unit"]["lanes"]["vector"] == {
+        "status": "failed",
+        "reason": "search_failed",
+        "model": "BAAI/bge-base-en-v1.5",
+    }
+    assert plans["page"]["lanes"]["vector"]["status"] == "participated"
 
 
 def test_disabled_vector_mode_explains_its_useful_keyword_fallback(

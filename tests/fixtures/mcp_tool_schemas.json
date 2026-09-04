@@ -658,6 +658,11 @@
           "description": "Apply usage boost when explicitly requested.",
           "type": "boolean"
         },
+        "widen_outside_kb": {
+          "default": false,
+          "description": "With scope=\"kb\", also reserve up to limit-1 slots for curated vault pages OUTSIDE the knowledge base. Off by default: scope=\"kb\" means the knowledge base and nothing else. Turn it on when a terse out-of-KB file (a tracker, a handbook) is what you are looking for, or use scope=\"vault\" to search everything equally.",
+          "type": "boolean"
+        },
         "graph_enrich": {
           "default": false,
           "description": "With deep mode, include typed graph neighborhood data.",
@@ -5497,7 +5502,7 @@
       "properties": {
         "mode": {
           "default": "attention",
-          "description": "attention, activation, item, audit, dispositions, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, or plan-progress. `plan-progress` reports, for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; it is derived and read-only, and it scores nothing. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
+          "description": "attention, activation, item, audit, dispositions, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, plan-progress, or write-advisory-result. `write-advisory-result` resolves exactly one opaque `exomem://write-advisory-result/<id>` reference returned by a committed write and reports only that job's current `pending`, `ready`, `failed`, or `superseded` state; it requires `ref`, has no list, browse, search, rank, count, continuation, or implicit-current form, and a malformed, unknown, unauthorized, or expired reference returns the shared not-found outcome. `plan-progress` reports, for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; it is derived and read-only, and it scores nothing. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
           "type": "string"
         },
         "categories": {
@@ -5615,7 +5620,7 @@
             }
           ],
           "default": null,
-          "description": "Stable `exomem://review/<id>` reference for item mode."
+          "description": "Stable `exomem://review/<id>` reference for item mode, or the opaque `exomem://write-advisory-result/<id>` reference for write-advisory-result mode. Required by both."
         },
         "detail": {
           "default": "actionable",

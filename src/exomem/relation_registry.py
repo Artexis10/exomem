@@ -489,13 +489,34 @@ def _semantic_continuity_findings(
             )
             continue
         if any(getattr(old, field_name) != getattr(new, field_name) for field_name in fields):
-            findings.append(_finding("immutable_meaning", f"extensions.{key}", "meaning fields are immutable", relation=key))
+            findings.append(
+                _finding(
+                    "immutable_meaning",
+                    f"extensions.{key}",
+                    "meaning fields are immutable",
+                    relation=key,
+                )
+            )
         if not set(old.aliases) <= set(new.aliases):
-            findings.append(_finding("immutable_aliases", f"extensions.{key}.aliases", "aliases may only be added", relation=key))
+            findings.append(
+                _finding(
+                    "immutable_aliases",
+                    f"extensions.{key}.aliases",
+                    "aliases may only be added",
+                    relation=key,
+                )
+            )
         if old.status == "deprecated" and (
             new.status != "deprecated" or new.replaced_by != old.replaced_by
         ):
-            findings.append(_finding("immutable_replacement", f"extensions.{key}.replaced_by", "deprecated status and immediate replacement are immutable", relation=key))
+            findings.append(
+                _finding(
+                    "immutable_replacement",
+                    f"extensions.{key}.replaced_by",
+                    "deprecated status and immediate replacement are immutable",
+                    relation=key,
+                )
+            )
     return findings
 
 

@@ -24,6 +24,7 @@ from . import (
     semantic_language_registry,
     vault,
 )
+from .cli_ops import OpError
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, new_id, normalize_id
 
@@ -3244,9 +3245,19 @@ def _attempt(
     )
 
 
-def _translate(error: Exception) -> RelationReviewError:
+def _translate(error: Exception) -> Exception:
     if isinstance(error, RelationReviewError):
         return error
+    if isinstance(error, OpError) and error.code == "MUTATION_WARMING":
+        # Preserve the pre-commit retry contract.  Converting this to a
+        # RelationReviewError would discard retryable/committed/retry_after_ms
+        # and make a bounded corpus join look like semantic validation failed.
+        return OpError(
+            error.code,
+            error.message,
+            error.remediation,
+            details=error.details,
+        )
     if isinstance(error, vault.VaultLockTimeout):
         return RelationReviewError(
             "SEMANTIC_CREATION_LOCK_TIMEOUT", "timed out acquiring semantic creation lock"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -8,19 +10,30 @@ import pytest
 
 from exomem_provisioner.capacity import CapacityIdentityConflict
 from exomem_provisioner.config import ProvisionerSettings
+from exomem_provisioner.conflict_reason import ConflictReason
 from exomem_provisioner.crypto import AesGcmEnvelopeCodec
 from exomem_provisioner.database import ProvisionerDatabase
 from exomem_provisioner.driver import (
     DriverFinal,
     DriverPending,
+    DriverResource,
     DriverRetryable,
+    DriverTerminal,
     EffectContext,
     FakeDriver,
 )
-from exomem_provisioner.models import OperationAction, OperationState
-from exomem_provisioner.repository import OperationRepository
+from exomem_provisioner.lifecycle import _digest
+from exomem_provisioner.logging import ContentFreeFormatter
+from exomem_provisioner.models import (
+    CapacityLedger,
+    OperationAction,
+    OperationState,
+    ResourceKind,
+)
+from exomem_provisioner.repository import ImmutableMetadataConflict, OperationRepository
 from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2
 from exomem_provisioner.worker import ProvisionerWorker
+from exomem_provisioner.worker_ownership import DELETION_OPERATION_ACTIONS
 
 
 def _settings(path: Path) -> ProvisionerSettings:
@@ -634,6 +647,135 @@ async def test_expected_capacity_identity_conflict_fails_closed_without_crashing
 
 
 @pytest.mark.asyncio
+async def test_immutable_resource_conflict_fails_closed_without_crashing_worker(
+    worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],
+) -> None:
+    """A destroyed provider resource must fail its operation, never kill the worker.
+
+    A recorded resource is immutable. When the provider reference behind it is
+    destroyed, the driver reports a different one on the next attempt and
+    record_resource raises ImmutableMetadataConflict. If that escapes run_once the
+    process dies, the pod restarts, re-claims the same operation and crashes again --
+    an unbounded loop that also re-drives the effect it is stuck on.
+    """
+
+    _, repository, _ = worker_context
+    operation = await repository.submit(
+        "provision",
+        "immutable-resource-conflict",
+        _request(operationId="operation-immutable-resource-conflict"),
+    )
+
+    class DriftingResourceDriver:
+        """Report a different recoverable reference on each attempt."""
+
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def observed_fence(self, tenant_id: str) -> int:
+            del tenant_id
+            return 0
+
+        async def execute(self, action, request, context):
+            del action, request, context
+            self.attempts += 1
+            return DriverPending(
+                checkpoint="volume-registration-required",
+                retry_after_seconds=1,
+                resources=(
+                    DriverResource(
+                        kind=ResourceKind.KUBERNETES_NAMESPACE,
+                        recoverable_reference=f"namespace-attempt-{self.attempts}",
+                    ),
+                ),
+            )
+
+    driver = DriftingResourceDriver()
+    worker = ProvisionerWorker(
+        repository,
+        driver,
+        worker_id="immutable-resource-conflict-worker",
+        capacity_admission=_AllowingAdmission(),
+    )
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    # First attempt records the resource and leaves the operation pending.
+    assert await worker.run_once(now=now) is True
+    pending = await repository.get_by_id(operation.id)
+    assert pending is not None and pending.state is OperationState.PENDING
+
+    # Second attempt reports a different reference for the same recorded resource.
+    # Advance past the pending retry interval so the operation is claimable again.
+    later = now + timedelta(seconds=2)
+    assert await worker.run_once(now=later) is True
+    assert driver.attempts == 2
+    failed = await repository.get_by_id(operation.id)
+    assert failed is not None and failed.state is OperationState.ERROR
+    assert failed.error_code == "PROVISIONER_PROVIDER_METADATA_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_capacity_ledger_conflict_on_discard_is_never_relabelled(
+    worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],
+) -> None:
+    """Only record_resource conflicts convert; complete()'s must still propagate.
+
+    `_release_completed_capacity` raises the same ImmutableMetadataConflict for
+    capacity-ledger integrity violations, and it is reachable only for DISCARD and
+    DESTROY. Converting those would park a destructive operation under a
+    provider-metadata code, and `operation_recovery.reopen()` admits only PROVISION --
+    so the operator helper could never recover it. A loud crash is the correct outcome
+    for a cause this handler cannot substantiate.
+
+    This drives the real raise site on the real deletion worker rather than stubbing
+    `complete`, so it still fails if that raise moves or changes type.
+    """
+
+    database, repository, _ = worker_context
+    operation = await repository.submit(
+        "discard",
+        "discard-ledger-conflict",
+        _request(operationId="operation-discard-ledger-conflict"),
+    )
+    async with database.session_factory() as session:
+        ledger = await session.get(CapacityLedger, 1)
+        if ledger is not None:
+            await session.delete(ledger)
+            await session.commit()
+
+    class DestroyingDriver:
+        """Return the exact discard proof that reaches the capacity ledger."""
+
+        async def observed_fence(self, tenant_id: str) -> int:
+            del tenant_id
+            return 0
+
+        async def execute(self, action, request, context):
+            del action, request, context
+            return DriverFinal(
+                result={
+                    "computeDestroyed": True,
+                    "storageDestroyed": True,
+                    "keysDestroyed": True,
+                }
+            )
+
+    worker = ProvisionerWorker(
+        repository,
+        DestroyingDriver(),
+        worker_id="discard-ledger-conflict-worker",
+        allowed_actions=DELETION_OPERATION_ACTIONS,
+    )
+
+    with pytest.raises(ImmutableMetadataConflict, match="capacity ledger"):
+        await worker.run_once(now=datetime(2030, 1, 1, tzinfo=UTC))
+
+    untouched = await repository.get_by_id(operation.id)
+    assert untouched is not None
+    assert untouched.error_code is None
+
+
+@pytest.mark.asyncio
 async def test_non_provision_action_does_not_invoke_capacity_admission(
     worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],
 ) -> None:
@@ -763,3 +905,132 @@ async def test_worker_rejects_malformed_protocol_selected_health_final(
     saved = await repository.get_by_id(operation.id)
     assert saved is not None and saved.state is OperationState.ERROR
     assert saved.error_code == code
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_logs_its_stable_code_and_condition_label(
+    worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The worker logged nothing at all on this path.
+
+    An operator reading pod logs after a terminal provider-metadata conflict had
+    only the stored error code, which a dozen distinct conditions share. Emit the
+    code and the closed-set condition label, and keep the line content-free.
+    """
+    _, repository, _ = worker_context
+    operation = await repository.submit("provision", "conflict-log-key", _request())
+
+    class ConflictingDriver:
+        async def observed_fence(self, _tenant_id: str) -> int:
+            return 0
+
+        async def execute(self, *_args: object) -> DriverFinal:
+            raise DriverTerminal(
+                "PROVISIONER_PROVIDER_METADATA_CONFLICT",
+                reason=ConflictReason.BOUND_VOLUME_NOT_DISCOVERABLE,
+            )
+
+    worker = ProvisionerWorker(
+        repository,
+        ConflictingDriver(),
+        worker_id="conflict-log-worker",
+        capacity_admission=_AllowingAdmission(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="exomem_provisioner.worker"):
+        assert await worker.run_once(now=datetime(2030, 1, 1, tzinfo=UTC)) is True
+
+    failures = [
+        record for record in caplog.records if getattr(record, "event", "") == "operation_failed"
+    ]
+    assert len(failures) == 1
+    rendered = ContentFreeFormatter().format(failures[0])
+    payload = json.loads(rendered)
+    assert payload["code"] == "PROVISIONER_PROVIDER_METADATA_CONFLICT"
+    assert payload["reason"] == "bound-volume-not-discoverable"
+    assert str(_request()["tenantId"]) not in rendered
+    assert str(_request()["cellId"]) not in rendered
+
+    # The recovery runbook admits the internal operation ID only through an
+    # operator-owned mode-0600 file and forbids it in any log. The line carries a
+    # digest, which correlates against the operations table without publishing it.
+    assert "operation_id" not in payload
+    assert operation.id not in rendered
+    assert payload["operation_digest"] == _digest(operation.id)
+
+    failed = await repository.get_by_id(operation.id)
+    assert failed is not None and failed.state is OperationState.ERROR
+    assert failed.error_code == "PROVISIONER_PROVIDER_METADATA_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_a_forged_reason_neither_reaches_the_log_nor_strands_the_operation(
+    worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`DriverTerminal` is public: any driver raises it, and `reason` is writable.
+
+    Reading `error.reason.value` raw would raise `AttributeError` inside the
+    `except DriverTerminal` handler -- before `repository.fail()` -- leaving the
+    operation claimed and unfailed, and a provision stuck rather than diagnosable.
+    The label is re-validated at the boundary, so a non-member degrades to
+    `unclassified` and the failure still lands.
+    """
+    _, repository, _ = worker_context
+    operation = await repository.submit("provision", "forged-reason-key", _request())
+    identity = "tenant-alpha/cell-alpha/operation-alpha"
+
+    class ForgingDriver:
+        async def observed_fence(self, _tenant_id: str) -> int:
+            return 0
+
+        async def execute(self, *_args: object) -> DriverFinal:
+            error = DriverTerminal("PROVISIONER_PROVIDER_METADATA_CONFLICT")
+            error.reason = identity  # type: ignore[assignment]
+            raise error
+
+    worker = ProvisionerWorker(
+        repository,
+        ForgingDriver(),
+        worker_id="forged-reason-worker",
+        capacity_admission=_AllowingAdmission(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="exomem_provisioner.worker"):
+        assert await worker.run_once(now=datetime(2030, 1, 1, tzinfo=UTC)) is True
+
+    failures = [
+        record for record in caplog.records if getattr(record, "event", "") == "operation_failed"
+    ]
+    rendered = ContentFreeFormatter().format(failures[0])
+    assert json.loads(rendered)["reason"] == "unclassified"
+    assert identity not in rendered
+
+    failed = await repository.get_by_id(operation.id)
+    assert failed is not None and failed.state is OperationState.ERROR
+    assert failed.error_code == "PROVISIONER_PROVIDER_METADATA_CONFLICT"
+
+
+def test_the_content_free_formatter_admits_only_closed_set_reasons() -> None:
+    """The formatter carries `uvicorn` and every library record on the root handler.
+
+    `reason` is a common attribute name -- HTTP responses, SSL errors, Kubernetes
+    API exceptions and websocket close frames all set one -- so an allowlist entry
+    alone would let arbitrary free text through the one formatter whose entire
+    purpose is content-freedom. Membership is enforced, not documented.
+    """
+    formatter = ContentFreeFormatter()
+
+    def rendered(value: object) -> dict[str, object]:
+        record = logging.LogRecord(
+            "uvicorn.error", logging.WARNING, __file__, 1, "boom", None, None
+        )
+        record.reason = value  # type: ignore[attr-defined]
+        return json.loads(formatter.format(record))
+
+    assert rendered(ConflictReason.PVC_TERMINATING)["reason"] == "pvc-terminating"
+    assert "reason" not in rendered("tenant=acme cell=c1 secret=hunter2")
+    assert "reason" not in rendered(b"tenant=acme")
+    assert "reason" not in rendered(417)
+    assert "reason" not in rendered(None)
