@@ -133,9 +133,18 @@ control plane for any provider credential. That file is the handoff
 `run` performs no OAuth token exchange and seeds no fixture. It cannot: the
 control plane refuses a bootstrap grant at the token endpoint for four
 independent reasons, so the harness never holds an access token and has nothing
-to write through Hosted MCP. Seeding the checked fixture is a separate step the
-operator performs with reviewer access; `seed_marketplace_review_fixture` in
-`exomem.hosted_plugins` remains the executable definition of it.
+to write through Hosted MCP.
+
+**Open gap: seeding the reviewer vault has no tooling.**
+`seed_marketplace_review_fixture` in `exomem.hosted_plugins` is the executable
+definition of the fixture contract and is tested against a real local vault, but
+it currently has no production caller. The reviewer credential is a
+username/password, not a bearer token, and the only authenticated Hosted MCP
+caller was removed with the impossible exchange, so nothing in this repo can
+drive that definition against a live reviewer cell. Until that is built, the
+checked fixture must be entered by hand through a real client signed in with the
+reviewer credential, and the fixture version and payload digest bound into the
+canary credential are what tie that manual work to a release.
 
 The OpenAI sibling is opt-in. Omit `--openai-connector` and `run` bootstraps a
 Claude-only cohort — one sibling stage, one canary credential — which
@@ -145,10 +154,29 @@ artifact and admits the cohort either way. Pass `--openai-connector` to promote
 both platforms in the same pass, which is required because each canary
 credential is welded to this bootstrap's own assignment and generation.
 
-`run` is not yet resumable. Every failed attempt strands a reviewer tenant that
-blocks the retry, and no admin endpoint can reclaim one — deletion is gated on
-an owner session plus an emailed confirmation token, so it cannot be driven from
-the operator token. Budget for that before spending an invite.
+A failed attempt can strand a reviewer tenant, and `reset` releases it.
+A failure at or before invite redemption creates no tenant at all, and a tenant
+whose cell never bound does not block anything; what blocks the next attempt is
+a reviewer tenant holding a bound, `CELL_READY` cell. `reset` clears exactly
+that, driving substrate's operator-only expired-reviewer-cleanup escape hatch
+(`fail-assignment` when the assignment is still live, then
+`preflight-recover-expired-reviewer-cleanup`, then
+`recover-expired-reviewer-cleanup`) with the same admin token the rest of the
+script uses. No owner session and no emailed confirmation token are involved.
+
+Two identifiers it needs are exposed by no admin route, so you supply them:
+`--expected-fence`, the tenant's current fence generation, and
+`--assignment-version` when the reviewer assignment has not yet expired. The
+cleanup preflight is read-only and its refusal is deliberately non-diagnostic,
+so a wrong fence costs a stop rather than damage — inspect the state privately
+rather than retrying with altered selectors.
+
+`reset` reclaims the tenant only. The invite, the email alias, the staged
+release and the OAuth client from the failed attempt are still spent, and the
+operator client partition does not reclaim slots. Two tenant shapes are also out
+of scope: the bound branch requires `tenant.status='active'`, and the unbound
+branch requires `bound_cell_id IS NULL` at `checkpoint='candidate-cleanup'`, so
+a tenant stranded between those two shapes is not covered by either.
 
 The later clean ChatGPT and Claude runs start from prepared state; they test
 natural recall and capture rather than manually reconstructing fixture Markdown.

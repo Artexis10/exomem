@@ -801,7 +801,6 @@ def test_run_writes_the_outcome_file_promotion_evidence_reads(monkeypatch, tmp_p
                 "clientId": "cid",
                 "state": "st",
                 "codeChallenge": "ch",
-                "codeVerifier": "cv",
                 "stageExpiresAt": "2999-01-01T00:00:00.000Z",
             },
             "tok",
@@ -832,7 +831,6 @@ def _run_context() -> dict[str, str]:
         "clientId": "bootstrap-client-1",
         "state": "state-1",
         "codeChallenge": "challenge-1",
-        "codeVerifier": "verifier-1",
         "stageExpiresAt": "2999-01-01T00:00:00.000Z",
     }
 
@@ -913,7 +911,6 @@ def test_owner_status_polling_records_only_content_free_progress(monkeypatch, tm
     assert "tenant" not in json.dumps(progress).lower()
 
 
-@pytest.mark.parametrize("content_type", ["application/json", "text/event-stream"])
 def _run_responses_complete() -> dict:
     """Every call a whole successful `run` makes, all green.
 
@@ -987,6 +984,12 @@ def test_run_never_attempts_the_impossible_token_exchange(monkeypatch, tmp_path)
         "assignmentId": "assignment-1",
         "generation": 3,
     }
+    # Every stage in the review shares the one hard window recorded at `prepare`.
+    # Recomputing it from a CLI default here silently shortened a long bootstrap
+    # to the 55-minute default, and this expiry gates both the canary credential
+    # and the evidence window.
+    stage = next(c for c in cp.calls if c["label"] == "run-sibling-stage-claude")
+    assert stage["body"]["expiresAt"] == _run_context()["stageExpiresAt"]
 
 
 def test_run_without_a_connector_bootstraps_a_claude_only_cohort(monkeypatch, tmp_path) -> None:
@@ -1105,3 +1108,189 @@ def test_promote_omits_the_openai_keys_for_a_claude_only_cohort(monkeypatch, tmp
     assert sent["body"]["claudeArtifactId"] == "artifact-claude-1"
     assert "openaiArtifactId" not in sent["body"]
     assert "openaiEvidence" not in sent["body"]
+
+
+AUTHORITY_ID = "11111111-1111-4111-8111-111111111111"
+SOURCE_OPERATION_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def _reset_authorities(*, state: str = "consumed", operation_id: str | None = SOURCE_OPERATION_ID):
+    return {
+        "bootstrapAuthorities": [
+            {
+                "id": AUTHORITY_ID,
+                "state": state,
+                "outcomeTenantId": "tenant-1",
+                "outcomeAssignmentId": "33333333-3333-4333-8333-333333333333",
+                "outcomeAssignmentGeneration": 3,
+                "outcomeOperationId": operation_id,
+            }
+        ]
+    }
+
+
+def test_reset_releases_a_stranded_reviewer_tenant(tmp_path, capsys) -> None:
+    """`reset` drives the one operator-only escape hatch, in the runbook's order.
+
+    `recover-expired-reviewer-cleanup` accepts a `provision` that already
+    succeeded at `bound` with the tenant's sole cell active, routable and
+    `CELL_READY` -- exactly the stranded shape that blocks a retry -- and its
+    mutation moves the tenant to `deletion_pending`, advances the fence and
+    enqueues a target-free delete. It joins no `exomem_access_tokens`, so the
+    emailed deletion-confirmation token is not on this path.
+    """
+    module = _load_module()
+    cp = _RecordingControlPlane(
+        {
+            "reset-authorities": (200, _reset_authorities()),
+            "reset-preflight-cleanup": (200, {"eligible": True}),
+            "reset-cleanup": (200, {"outcome": "enqueued", "operationId": "delete-op-1"}),
+        }
+    )
+    cp.state_dir = tmp_path
+
+    module.reset(cp, expected_fence=7)
+
+    calls = [call for call in cp.calls if call["label"].startswith("reset-")]
+    assert [call["label"] for call in calls] == [
+        "reset-authorities",
+        "reset-preflight-cleanup",
+        "reset-cleanup",
+    ]
+    # Exactly three keys, or the route refuses the body outright. And the only
+    # selector is the opaque source operation id read off the authority record:
+    # the runbook forbids naming a tenant, cell, owner or capacity identifier.
+    for call in calls[1:]:
+        assert set(call["body"]) == {"action", "sourceOperationId", "expectedFence"}
+        assert call["body"]["sourceOperationId"] == SOURCE_OPERATION_ID
+        assert call["body"]["expectedFence"] == 7
+    printed = capsys.readouterr().out
+    assert "tenant-1" in printed and SOURCE_OPERATION_ID in printed
+    assert "delete-op-1" in printed
+
+
+def test_reset_refuses_an_authority_that_bound_no_tenant(tmp_path) -> None:
+    """Nothing but a consumed bootstrap authority can name a target.
+
+    `reset` takes no tenant, cell or operation id from the operator. It reads the
+    source operation off the authority record, so an authority that never
+    consumed -- and therefore never created a reviewer tenant -- has nothing to
+    release and must stop before the preflight.
+    """
+    module = _load_module()
+    cp = _RecordingControlPlane(
+        {"reset-authorities": (200, _reset_authorities(state="revoked", operation_id=None))}
+    )
+    cp.state_dir = tmp_path
+
+    with pytest.raises(SystemExit, match="no consumed reviewer-bootstrap authority"):
+        module.reset(cp, expected_fence=7)
+
+    assert [call["label"] for call in cp.calls] == ["reset-authorities"]
+
+
+def test_reset_stops_when_the_preflight_refuses(tmp_path) -> None:
+    """A refusal is deliberately non-diagnostic; do not retry with altered selectors."""
+    module = _load_module()
+    cp = _RecordingControlPlane(
+        {
+            "reset-authorities": (200, _reset_authorities()),
+            "reset-preflight-cleanup": (200, {"eligible": False}),
+        }
+    )
+    cp.state_dir = tmp_path
+
+    with pytest.raises(SystemExit, match="preflight refused"):
+        module.reset(cp, expected_fence=7)
+
+    assert "reset-cleanup" not in [call["label"] for call in cp.calls]
+
+
+def test_reset_ends_a_live_assignment_before_the_preflight(tmp_path) -> None:
+    """Cleanup needs an expired or terminal-failed assignment.
+
+    `fail-assignment` is the exact existing transition that ends one without
+    extending its immutable expiry, and it is admin-token only. Its version is
+    exposed by no admin route, so the operator supplies it.
+    """
+    module = _load_module()
+    cp = _RecordingControlPlane(
+        {
+            "reset-authorities": (200, _reset_authorities()),
+            "reset-fail-assignment": (200, {"failed": True}),
+            "reset-preflight-cleanup": (200, {"eligible": True}),
+            "reset-cleanup": (200, {"outcome": "enqueued", "operationId": "delete-op-1"}),
+        }
+    )
+    cp.state_dir = tmp_path
+
+    module.reset(cp, expected_fence=7, assignment_version=2)
+
+    labels = [call["label"] for call in cp.calls]
+    assert labels.index("reset-fail-assignment") < labels.index("reset-preflight-cleanup")
+    body = next(c["body"] for c in cp.calls if c["label"] == "reset-fail-assignment")
+    assert body == {
+        "action": "fail-assignment",
+        "assignmentId": "33333333-3333-4333-8333-333333333333",
+        "expectedVersion": 2,
+    }
+
+
+def test_reset_refuses_while_a_bootstrap_authority_is_still_active(tmp_path) -> None:
+    """Cleanup eligibility requires no live bootstrap authority anywhere."""
+    module = _load_module()
+    cp = _RecordingControlPlane(
+        {
+            "reset-authorities": (
+                200,
+                {
+                    "bootstrapAuthorities": [
+                        _reset_authorities()["bootstrapAuthorities"][0],
+                        {"id": "other", "state": "active", "outcomeOperationId": None},
+                    ]
+                },
+            )
+        }
+    )
+    cp.state_dir = tmp_path
+
+    with pytest.raises(SystemExit, match="still active"):
+        module.reset(cp, expected_fence=7)
+
+    assert [call["label"] for call in cp.calls] == ["reset-authorities"]
+
+
+def test_promote_refuses_a_half_present_openai_pair(monkeypatch, tmp_path) -> None:
+    """One OpenAI file without the other is an operator mistake, not Claude-only."""
+    module = _load_promotion_module()
+    (tmp_path / "bootstrap-context.json").write_text(json.dumps({"candidateId": "cand-1"}))
+    (tmp_path / "artifact-claude.txt").write_text("artifact-claude-1\n")
+    (tmp_path / "evidence-claude.json").write_text(json.dumps({"platform": "claude"}))
+    (tmp_path / "evidence-openai.json").write_text(json.dumps({"platform": "openai"}))
+
+    monkeypatch.setattr(
+        module,
+        "get",
+        lambda _path: (
+            200,
+            {
+                "rolloutStatus": [
+                    {
+                        "candidateId": "cand-1",
+                        "routableSetDigest": "ab" * 32,
+                        "routableCellCount": 1,
+                        "routableObservationFresh": True,
+                    }
+                ],
+                "liveCohortCandidateId": None,
+            },
+        ),
+    )
+
+    def _never(*_a, **_k):
+        raise AssertionError("a half-present OpenAI pair must not reach promote-cohort")
+
+    monkeypatch.setattr(module, "call", _never)
+
+    with pytest.raises(SystemExit, match="artifact-openai.txt"):
+        module.promote(argparse.Namespace(state_dir=tmp_path, dry_run=False))

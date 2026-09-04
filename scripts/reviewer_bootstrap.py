@@ -13,6 +13,8 @@ This encodes the whole sequence. Three subcommands:
     preflight   Report every known blocker before anything is consumed.
     prepare     Create the stage, pinned client and invite. Nothing is spent yet.
     run         Given the emailed invite token, run the rest with no gaps.
+    reset       Release the reviewer tenant a failed attempt stranded, so the
+                next attempt is not blocked by it.
 
 Design notes, each of which is a bug this script exists to prevent:
 
@@ -44,6 +46,11 @@ Design notes, each of which is a bug this script exists to prevent:
 * Creating the authority is the irreversible step: it spends the invite whether
   it later succeeds, expires or is revoked. `prepare` therefore stops short of
   it, so the invite keeps its full 7-day life while a human fetches the token.
+* A failure after that point can strand the reviewer tenant, and a stranded
+  tenant holding a bound/CELL_READY cell blocks the next attempt. `reset` clears
+  it through `recover-expired-reviewer-cleanup`, the operator-only escape hatch,
+  using this same admin token. The invite, alias, stage and client are still
+  spent; only the tenant is reclaimable.
 * The locks are read from `--repo` at `--profile`, and they must be the ones the
   candidate was cut from, NOT whatever this repo's HEAD generates. A change that
   touches the schema contract moves `schema_contract_sha256` and
@@ -601,11 +608,10 @@ def preflight(
         "\n  NOTE  A reviewer-purpose tenant with a bound or CELL_READY cell also blocks\n"
         "        the bootstrap, and is not visible through any admin endpoint. If the\n"
         "        authority call returns 400 with everything above green, that is almost\n"
-        "        certainly the cause -- and this operator token cannot clear it. Deleting\n"
-        "        a tenant needs an owner session plus an emailed confirmation token, so a\n"
-        "        stranded reviewer tenant has to be released out of band before retrying.\n"
-        "        A failed attempt is therefore NOT resumable; it costs an invite, an\n"
-        "        alias, a stage and a client as well."
+        "        certainly the cause. `reset` releases it with this same admin token;\n"
+        "        it needs the tenant's fence generation, which no admin route reports.\n"
+        "        Note a failed attempt still costs the invite, the alias, the stage and\n"
+        "        the client -- reset reclaims the tenant, not those."
     )
     return bool(ok)
 
@@ -645,7 +651,10 @@ def prepare(
     existing_client_record_id = (
         reusable_client_record(cp, client_id) if existing_client_id is not None else None
     )
-    verifier, challenge = pkce_pair()
+    # Generated and discarded: `/oauth/authorize` requires an S256 challenge, and
+    # nothing can ever present the verifier for it, because the exchange the
+    # verifier exists for is unreachable.
+    _, challenge = pkce_pair()
     config_sha = client_config_sha256(
         platform="claude",
         admission_mode="pinned",
@@ -727,7 +736,6 @@ def prepare(
         "clientId": client_id,
         "inviteId": invite["inviteId"],
         "email": email,
-        "codeVerifier": verifier,
         "codeChallenge": challenge,
         "state": base64.urlsafe_b64encode(os.urandom(24)).decode().rstrip("="),
     }
@@ -780,11 +788,10 @@ def run(
             f"create_reviewer_bootstrap failed: {status} {authority}\n"
             "If preflight was green this is most likely a stranded reviewer tenant "
             "holding a bound/CELL_READY cell, left by an earlier attempt.\n"
-            "There is no operator route to reclaim it: tenant deletion is gated on "
-            "an owner session plus a token emailed to the\ntenant owner, and no "
-            "admin endpoint can start one. The reviewer recovery controls on "
-            "/admin/contracts each repair a\ndeletion that was already requested "
-            "and confirmed, so none of them applies here."
+            "`reset` releases exactly that: it drives the operator-only "
+            "expired-reviewer-cleanup escape hatch with this admin token.\n"
+            "You will need the tenant's current fence generation, which no admin "
+            "route reports."
         )
     print(f"  authority {authority['authority']['id'][:8]} active")
 
@@ -819,12 +826,12 @@ def run(
     )
     if status != 200 or not redeemed.get("destination"):
         raise SystemExit(f"redeem failed: {status} {redeemed}")
-    # The authorization code is checked for and then deliberately dropped. It can
-    # never be exchanged -- see the module docstring -- so its only remaining
-    # value is as proof that the redemption produced an authorization at all.
-    if "code" not in urllib.parse.parse_qs(urllib.parse.urlparse(redeemed["destination"]).query):
-        raise SystemExit(f"redeem returned no authorization code: {redeemed['destination']!r}")
-    print("  invite redeemed, authorization code issued")
+    # The authorization code is not read at all. It can never be exchanged -- see
+    # the module docstring -- and the authority reaching `consumed` below is the
+    # same fact from the authoritative source, written in the very transaction
+    # that inserts the code row. Re-deriving it from the destination could only
+    # abort a one-shot run for a reason the next check already covers.
+    print("  invite redeemed")
 
     status, clients = cp.call(
         "GET", "/api/exomem/admin/oauth-clients", label="run-authority-outcome"
@@ -1003,6 +1010,139 @@ def run(
         )
 
 
+def reset(
+    cp: ControlPlane,
+    expected_fence: int,
+    authority_id: str | None = None,
+    assignment_version: int | None = None,
+) -> None:
+    """Release the stranded reviewer tenant a failed attempt leaves behind.
+
+    This drives `recover-expired-reviewer-cleanup`, which substrate's runbook
+    calls "the one operator-only escape hatch for a reviewer-purpose tenant whose
+    immutable reviewer assignment expired or was ended through the exact existing
+    `fail-assignment` transition". Its second eligibility branch is written for
+    precisely the shape that blocks a retry: a `provision` that already succeeded
+    at `bound`, with the tenant's sole cell active, routable, provider-backed and
+    `CELL_READY`. The mutation moves the tenant to `deletion_pending`, advances
+    its fence, revokes the whole access lineage and enqueues a target-free
+    delete. It joins no `exomem_access_tokens`, so the emailed
+    deletion-confirmation token is not on this path -- the admin bearer this
+    script already holds is the whole authority needed.
+
+    Two identifiers it needs are exposed by no admin route, so the operator
+    supplies them: `--expected-fence` (the tenant's current fence generation) and
+    `--assignment-version`. The preflight is read-only and its refusal is
+    deliberately non-diagnostic, so a wrong fence costs nothing but a stop.
+
+    The only selector this sends is the opaque source operation id read off the
+    bootstrap authority record. The runbook forbids naming a tenant, cell, owner,
+    provider operation or capacity identifier, and taking the target from the
+    authority rather than from an argument is what makes that structural: there
+    is no way to point this at something that is not a reviewer bootstrap.
+    """
+    status, clients = cp.call(
+        "GET", "/api/exomem/admin/oauth-clients", label="reset-authorities"
+    )
+    if status != 200:
+        raise SystemExit(f"could not read bootstrap authorities: {status} {clients}")
+    authorities = clients.get("bootstrapAuthorities", [])
+
+    # Cleanup eligibility requires no live bootstrap authority anywhere, not just
+    # on this tenant. Refuse here rather than spending a blind preflight on it.
+    live = [a for a in authorities if a.get("state") == "active"]
+    if live:
+        raise SystemExit(
+            f"{len(live)} bootstrap authority/authorities are still active; cleanup "
+            "eligibility requires none. Let them expire or revoke them "
+            "(`revoke_reviewer_bootstrap`) before resetting."
+        )
+
+    candidates = [
+        a
+        for a in authorities
+        if a.get("state") == "consumed"
+        and isinstance(a.get("outcomeOperationId"), str)
+        and (authority_id is None or a.get("id") == authority_id)
+    ]
+    if not candidates:
+        raise SystemExit(
+            "no consumed reviewer-bootstrap authority with a recorded outcome operation; "
+            "there is nothing this can release. An attempt that failed at or before "
+            "redeem never created a tenant."
+        )
+    if len(candidates) > 1:
+        raise SystemExit(
+            f"{len(candidates)} consumed authorities are present; name one with "
+            "--authority-id rather than guessing which attempt to release."
+        )
+    target = candidates[0]
+    source_operation_id = target["outcomeOperationId"]
+
+    print("  will release:")
+    print(f"    authority   {target['id']}")
+    print(f"    tenant      {target.get('outcomeTenantId')}")
+    print(
+        f"    assignment  {target.get('outcomeAssignmentId')} "
+        f"gen {target.get('outcomeAssignmentGeneration')}"
+    )
+    print(f"    operation   {source_operation_id}")
+    print(f"    fence       {expected_fence} (operator-supplied; no admin route reports it)")
+
+    if assignment_version is not None:
+        status, failed = cp.call(
+            "POST",
+            "/api/exomem/admin/contracts",
+            label="reset-fail-assignment",
+            body={
+                "action": "fail-assignment",
+                "assignmentId": target["outcomeAssignmentId"],
+                "expectedVersion": assignment_version,
+            },
+        )
+        if status != 200 or failed.get("failed") is not True:
+            raise SystemExit(
+                f"fail-assignment refused: {status} {failed}. It matches only "
+                "`preparing` or `active` at the exact version given; an assignment "
+                "that already expired needs no --assignment-version at all."
+            )
+        print("  assignment ended")
+
+    # Exactly three keys. The route refuses a body carrying any extra selector
+    # rather than acting on the one the caller did not name.
+    cleanup_body = {
+        "action": "preflight-recover-expired-reviewer-cleanup",
+        "sourceOperationId": source_operation_id,
+        "expectedFence": expected_fence,
+    }
+    status, preflight_result = cp.call(
+        "POST", "/api/exomem/admin/contracts", label="reset-preflight-cleanup", body=cleanup_body
+    )
+    if status != 200 or preflight_result.get("eligible") is not True:
+        raise SystemExit(
+            "cleanup preflight refused. The refusal is deliberately non-diagnostic: "
+            "stop and inspect the state privately rather than retrying with altered "
+            "selectors. Common causes are a wrong --expected-fence, an assignment "
+            "that is neither expired nor terminal-failed (see --assignment-version), "
+            "more than one non-deleted cell, or a conflicting lifecycle operation."
+        )
+    print("  preflight eligible")
+
+    status, recovered = cp.call(
+        "POST",
+        "/api/exomem/admin/contracts",
+        label="reset-cleanup",
+        body={**cleanup_body, "action": "recover-expired-reviewer-cleanup"},
+    )
+    if status != 200 or not recovered.get("operationId"):
+        raise SystemExit(f"cleanup failed: {status} {recovered}")
+    print(
+        f"  released: tenant {target.get('outcomeTenantId')} is deletion_pending; "
+        f"delete operation {recovered['operationId']} {recovered.get('outcome')}"
+    )
+    print("  The delete runs on the normal reconciler. Re-run `preflight` before preparing again.")
+
+
 def load_locks(repo: Path, profile: str) -> dict:
     # Scoped to the candidate's profile. This read was fixed at the generated
     # root, which holds only the default candidate, so every later candidate was
@@ -1055,18 +1195,18 @@ def load_locks(repo: Path, profile: str) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("preflight", "prepare", "run"))
+    parser.add_argument("command", choices=("preflight", "prepare", "run", "reset"))
     parser.add_argument("--candidate-id", required=True)
     parser.add_argument("--state-dir", required=True, type=Path)
     parser.add_argument("--repo", default=".", type=Path)
     parser.add_argument(
         "--profile",
-        required=True,
         choices=tuple(CANDIDATE_PROFILES),
         help="candidate profile whose generated locks --repo should be read from. "
         "Required, and deliberately not defaulted: a default is silently wrong for "
         "every candidate that does not happen to match it, and the digests it "
-        "produces fail server-side rather than here.",
+        "produces fail server-side rather than here. Not needed by `reset`, which "
+        "reads no locks.",
     )
     parser.add_argument(
         "--stage-minutes",
@@ -1085,6 +1225,27 @@ def main() -> int:
         help="explicit disabled pinned reviewer-bootstrap client ID to reuse; never auto-selected",
     )
     parser.add_argument("--token", help="emailed invite token, required for run")
+    parser.add_argument(
+        "--expected-fence",
+        type=int,
+        help="tenant fence generation, required for reset. No admin route reports "
+        "it, so it is operator-supplied; the cleanup preflight is read-only and "
+        "refuses non-diagnostically, so a wrong value costs only a stop.",
+    )
+    parser.add_argument(
+        "--authority-id",
+        help="which consumed bootstrap authority reset should release, when more "
+        "than one is present. reset takes no tenant, cell or operation id: the "
+        "target is read off the authority record.",
+    )
+    parser.add_argument(
+        "--assignment-version",
+        type=int,
+        help="current version of the reviewer assignment, for reset. Supply it only "
+        "when the assignment has not yet expired: reset then ends it with the exact "
+        "existing `fail-assignment` transition, which does not extend its immutable "
+        "expiry. No admin route reports the version.",
+    )
     parser.add_argument(
         "--openai-connector",
         help="ChatGPT connector id, or the full client.json URL. OPTIONAL: omit it "
@@ -1119,6 +1280,20 @@ def main() -> int:
         return 2
 
     cp = ControlPlane(base_url, admin_token, args.state_dir)
+
+    if args.command == "reset":
+        if args.expected_fence is None:
+            print("--expected-fence is required for reset", file=sys.stderr)
+            return 2
+        print("reset:")
+        reset(cp, args.expected_fence, args.authority_id, args.assignment_version)
+        return 0
+
+    # Deliberately not defaulted: a default profile is silently wrong for every
+    # candidate that does not happen to match it.
+    if not args.profile:
+        print(f"--profile is required for {args.command}", file=sys.stderr)
+        return 2
     locks = load_locks(args.repo, args.profile)
 
     if args.command == "preflight":

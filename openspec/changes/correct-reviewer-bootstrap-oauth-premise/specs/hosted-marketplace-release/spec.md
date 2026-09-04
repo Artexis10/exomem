@@ -50,11 +50,11 @@ The reviewer bootstrap SHALL NOT attempt an OAuth token exchange for the redeeme
 - **THEN** the bootstrap fails closed without calling the reviewer-credential issuance endpoint
 - **AND** it does not print bootstrap completion
 
-#### Scenario: Fixture seeding is a separate operator step
+#### Scenario: Fixture seeding is not performed by the bootstrap
 
 - **WHEN** the checked reviewer fixture must be present in the reviewer vault
-- **THEN** it is seeded through reviewer access rather than by the bootstrap
-- **AND** the executable fixture definition remains the contract that seeding satisfies
+- **THEN** the bootstrap neither seeds nor verifies it, and does not report it as seeded
+- **AND** the executable fixture definition remains the contract any future seeding must satisfy, with no production caller driving it against a live reviewer cell today
 
 ### Requirement: Claude-only cohort promotion
 
@@ -78,18 +78,42 @@ The promotion harness SHALL support promoting a Claude-only cohort. Supplying an
 - **THEN** promotion refuses and names the missing file
 - **AND** it does not silently promote a Claude-only cohort in place of the operator's intent
 
-### Requirement: Reviewer bootstrap failure strands a tenant
+### Requirement: Reviewer bootstrap is resumable after a stranded tenant
 
-A failed reviewer bootstrap SHALL be documented as non-resumable for as long as no operator-authenticated capability can reclaim a stranded reviewer tenant. The harness MUST NOT offer a reset command that cannot actually release the tenant blocking the retry.
+The harness SHALL provide a `reset` command that releases a reviewer tenant stranded by a failed attempt, using the operator bearer token alone. It MUST drive the existing expired-reviewer-cleanup control, ending a still-live reviewer assignment through the exact existing `fail-assignment` transition first, and MUST take its target from the consumed bootstrap authority record rather than from any operator-supplied tenant, cell or operation identifier. It MUST print what it will release before releasing it.
 
-#### Scenario: An attempt fails after the authority is created
+#### Scenario: Stranded tenant holds a bound, ready cell
 
-- **WHEN** a bootstrap attempt fails after the reviewer tenant exists
-- **THEN** the stranded tenant blocks a subsequent attempt
-- **AND** the operator documentation states this before an invite is spent
+- **WHEN** a failed attempt leaves a reviewer tenant whose sole cell is bound, active, routable and `CELL_READY`
+- **THEN** `reset` obtains eligibility from the read-only cleanup preflight and then enqueues the cleanup
+- **AND** the tenant moves to `deletion_pending` with its fence advanced and its access lineage revoked, with no owner session and no emailed confirmation token involved
 
-#### Scenario: Operator seeks to reclaim the tenant
+#### Scenario: Reviewer assignment has not yet expired
 
-- **WHEN** an operator holds only the admin bearer token
-- **THEN** no admin endpoint can initiate deletion of the stranded reviewer tenant, because deletion is gated on an owner session plus an emailed confirmation token
-- **AND** the existing reviewer recovery controls do not apply, because each one requires a delete operation that has already been requested, confirmed, and reached a specific terminal failure
+- **WHEN** the reviewer assignment is still `preparing` or `active`
+- **THEN** `reset` ends it through `fail-assignment` at the operator-supplied version before the cleanup preflight
+- **AND** that transition does not extend the assignment's immutable expiry
+
+#### Scenario: Nothing to release
+
+- **WHEN** no consumed bootstrap authority carries a recorded outcome operation
+- **THEN** `reset` refuses before calling the preflight
+- **AND** it cannot be pointed at a tenant that is not a reviewer bootstrap, because it accepts no tenant, cell or operation identifier
+
+#### Scenario: Cleanup preflight refuses
+
+- **WHEN** the read-only cleanup preflight reports the source operation ineligible
+- **THEN** `reset` stops without calling the mutation
+- **AND** it does not retry with altered selectors, because the refusal is deliberately non-diagnostic
+
+#### Scenario: Identifiers absent from every admin route
+
+- **WHEN** `reset` needs the tenant fence generation or the reviewer assignment version
+- **THEN** the operator supplies them, because no admin route reports either
+- **AND** a wrong value costs only a refused read-only preflight
+
+#### Scenario: What reset does not reclaim
+
+- **WHEN** an attempt has failed
+- **THEN** the spent invite, email alias, staged release and OAuth client remain spent
+- **AND** a tenant that is neither `active` with a bound cell nor at `candidate-cleanup` with no bound cell is outside both cleanup branches

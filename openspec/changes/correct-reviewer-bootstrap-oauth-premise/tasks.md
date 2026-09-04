@@ -15,11 +15,18 @@
 - [x] 2.4 Make `--openai-connector` optional and build the sibling list from it.
 - [x] 2.5 Build the promote body from what the state directory holds, refusing a half-present OpenAI pair.
 
-## 3. Non-resumability
+## 3. Make a failed attempt recoverable
 
-- [x] 3.1 Establish whether an operator-authenticated capability can reclaim a stranded reviewer tenant.
-- [x] 3.2 Record the finding in the spec and in operator documentation instead of shipping a `reset` that cannot release the tenant.
-- [ ] 3.3 BLOCKED: add `reset` once the control plane exposes operator-authenticated reviewer-tenant reclamation. Needs a substrate change; out of scope here.
+- [x] 3.1 Verify `recover-expired-reviewer-cleanup`'s successful-bound branch, its operator-token dispatch, and the absence of any `exomem_access_tokens` join, against substrate's source and runbook.
+- [x] 3.2 Add red tests for release, for the refusal when nothing is releasable, for a non-diagnostic preflight refusal, for the `fail-assignment` ordering, and for a still-active authority.
+- [x] 3.3 Implement `reset` as `fail-assignment` -> `preflight-recover-expired-reviewer-cleanup` -> `recover-expired-reviewer-cleanup`, taking its target from the consumed authority record and printing the release plan first.
+- [x] 3.4 Make `--profile` per-command rather than global, so `reset` does not demand a matching release checkout mid-incident.
+- [ ] 3.5 GAP: no admin route reports `fence_generation` or the reviewer assignment version, so both are operator-supplied and the preflight is blind. Exposing them read-only is a substrate change, out of scope here.
+- [ ] 3.6 GAP: a tenant stranded between the two cleanup branches -- neither `active` with a bound cell nor at `candidate-cleanup` with no bound cell -- is covered by neither. Out of scope here.
+
+## 3b. Reviewer vault seeding
+
+- [ ] 3b.1 GAP: `seed_marketplace_review_fixture` has no production caller. The reviewer credential is username/password rather than a bearer token, and the authenticated Hosted MCP caller was removed with the impossible exchange, so nothing drives the executable fixture definition against a live reviewer cell. Seeding is manual until this is built.
 
 ## 4. Documentation and closure
 

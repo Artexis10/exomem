@@ -11,7 +11,7 @@ Two further defects sit in the same harness. Both it and `promotion_evidence.py`
 - Remove the impossible OAuth token exchange from `reviewer_bootstrap.run`, together with the fixture seeding it existed to authenticate and the Hosted MCP caller that carried it. The bootstrap's real product is the consumed authority, whose `outcome_tenant_id`, `outcome_assignment_id` and `outcome_assignment_generation` are written inside the redeem transaction and read back from the admin surface.
 - Keep fixture seeding as an executable definition (`seed_marketplace_review_fixture`) exercised against a real local vault, and stop asserting that the bootstrap performs it.
 - Make the OpenAI sibling opt-in in both harnesses: `--openai-connector` becomes optional, and `promote` omits `openaiArtifactId`/`openaiEvidence` entirely rather than sending null when there is no OpenAI artifact.
-- Record that the bootstrap is NOT resumable and why: reclaiming a stranded reviewer tenant needs a server capability that does not exist.
+- Add a `reset` subcommand that releases the reviewer tenant a failed attempt strands, driving substrate's operator-only expired-reviewer-cleanup escape hatch with the admin bearer the harness already holds. This is what lets an operator rehearse instead of burning an invite, an alias, a stage and a client per attempt.
 
 ## Capabilities
 
@@ -29,6 +29,6 @@ None.
 - `scripts/reviewer_bootstrap.py`: token exchange, fixture seeding, `HostedMCPToolCaller` and its decode tail removed; `--openai-connector` made optional.
 - `scripts/promotion_evidence.py`: `promote` builds a Claude-only or paired body.
 - `tests/test_reviewer_bootstrap_cli.py`: five tests asserting the impossible behaviour deleted; helpers trimmed; new coverage for the three corrections.
-- `docs/hosted-client-plugins.md`: the reviewer handoff description.
+- `docs/hosted-client-plugins.md`: the reviewer handoff description, the `reset` procedure and its two operator-supplied identifiers, and an explicit open gap — seeding the reviewer vault has no production caller.
 
 No server change is proposed. All three defects are harness-side; the control plane is correct in each case.
