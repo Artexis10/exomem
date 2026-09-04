@@ -274,10 +274,14 @@ def test_exactly_one_warming_outcome_is_tolerated() -> None:
 def test_a_walker_stage_that_reports_computed_fails_the_gate() -> None:
     """`computed` on an index-backed stage is the walk reappearing.
 
-    The spec names the four stages that must consume maintained indexes:
-    eligibility, widening, hydration and hit construction. Those are the
-    stages whose source is decided at runtime, and the only ones where
-    `computed` means the corpus was walked.
+    The spec names four concepts — eligibility, widening, hydration and hit
+    construction — and the list now actually covers them. It did not before:
+    hydration is `keyword` and hit construction is `filter_hits`, both of which
+    carried the static `computed` default and were therefore excluded from this
+    very check, while `recall_projection` and `pending_visibility` report
+    `index` unconditionally. So the walk check could only ever fire on two
+    stages, and a real whole-scope walk in `keyword` went unreported by every
+    instrument here. All six now decide their source at runtime.
 
     The stage here is `outside_kb`, NOT `filter_eligibility`, and that is the
     whole point of the node. An earlier version used `filter_eligibility` and
@@ -368,6 +372,58 @@ def test_the_filtered_eligibility_stage_is_held_to_its_index_outcome() -> None:
     """The spec's second scenario: an index outcome under 20 ms."""
     with pytest.raises(SystemExit, match="filter_eligibility"):
         gate.check(_report(filtered_eligibility_ms=44.0))
+
+
+def test_a_verdict_taken_at_another_limit_is_refused() -> None:
+    """The limit is part of the ceiling's definition, not a knob beside it.
+
+    `rerank` scales with the candidate count, so a smaller limit buys a smaller
+    p50 directly. A stub cell costing 1200 ms per request passes every ceiling
+    at `--limit 1` while failing four of them at the default; the flag stays
+    for exploratory runs, and `check` refuses to certify anything but the
+    limit the ceilings are defined at.
+    """
+    with pytest.raises(SystemExit, match="limit"):
+        gate.check(_report(limit=1))
+
+
+def test_a_filtered_series_that_matched_nothing_is_not_a_pass() -> None:
+    """An empty result set is fast for reasons that have nothing to do with the read path.
+
+    If no page on the cell carries the gate's filter value, the filtered series
+    measures thirty empty-result recalls: no rerank, no fusion, comfortably
+    under 400 ms, and `filter_eligibility: index` throughout. Every ceiling
+    green, nothing measured.
+    """
+    with pytest.raises(SystemExit, match="no hits"):
+        gate.check(_report(filtered_hits=0))
+
+
+def test_a_sample_with_no_usable_total_is_a_warming_outcome() -> None:
+    """Thirty missing totals must not become thirty 0.0 ms samples.
+
+    An absent `timings` dict is already read as warming. A timings dict whose
+    `total_ms` is missing, null or zero says exactly as little, and reading it
+    as a 0.0 ms recall produces the best p50 the gate can emit from a cell that
+    reported nothing at all.
+    """
+    for payload in (
+        {"hits": [], "timings": {"stages": {}}},
+        {"hits": [], "timings": {"total_ms": None, "stages": {}}},
+        {"hits": [], "timings": {"total_ms": 0.0, "stages": {}}},
+    ):
+        assert gate._sample_from_envelope(payload).warming is True, payload
+
+
+def test_a_real_total_is_not_read_as_warming() -> None:
+    """The counter-case, so the guard above is a test and not a constant."""
+    sample = gate._sample_from_envelope(
+        {"hits": [1, 2, 3], "timings": {"total_ms": 42.5, "stages": {}}}
+    )
+
+    assert sample.warming is False
+    assert sample.elapsed_ms == 42.5
+    assert sample.hits == 3
 
 
 # --- The report is content-free and carries its load ------------------------
@@ -481,6 +537,7 @@ class _StubTransport:
             warming=False,
             stage_sources={"filter_eligibility": "index", "rerank": "computed"},
             stage_ms={"filter_eligibility": 3.0},
+            hits=4,
         )
 
 
@@ -491,6 +548,8 @@ def _report(
     stage_sources: dict[str, str] | None = None,
     filtered_eligibility_ms: float = 3.0,
     pages: int = 8_192,
+    limit: int = gate.DEFAULT_LIMIT,
+    filtered_hits: int = 120,
 ) -> dict:
     """A passing report, minimally perturbed by each node above."""
     sources = {"filter_eligibility": "index"}
@@ -498,6 +557,7 @@ def _report(
     return {
         "refused": False,
         "transport": "stub",
+        "limit": limit,
         "pages": pages,
         "series": {
             "hybrid": {
@@ -526,6 +586,7 @@ def _report(
                 "load_mean": 1.0,
                 "load_max": 1.2,
                 "stage_sources": sources,
+                "hits": filtered_hits,
                 "eligibility_ms": filtered_eligibility_ms,
             },
         },

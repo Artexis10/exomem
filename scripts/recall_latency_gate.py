@@ -95,26 +95,40 @@ MAX_WARMING_SAMPLES = 1
 #: "a quiescent cell of at least 8,000 governed pages"
 MIN_CORPUS_PAGES = 8_000
 
-#: The default request limit. `rerank` scales with the candidate count, so this
-#: moves the p50 directly; it is fixed here so two runs are comparable, and it
-#: matches the product default rather than a flattering small number.
+#: The request limit the verdict is defined at. `rerank` scales with the
+#: candidate count — about 103-120 ms at 15 candidates and 217 ms at 30 — so
+#: the limit moves the p50 directly, and a verdict taken at a different limit
+#: is not a verdict against these ceilings. `--limit` stays for exploratory
+#: runs, and `check` refuses to certify anything but this value: a stub cell
+#: costing 1200 ms per request passes every ceiling at `--limit 1`.
 DEFAULT_LIMIT = 15
 
 #: The stages the contract requires to consume maintained indexes: "Eligibility,
 #: widening, hydration and hit construction SHALL consume maintained indexes and
-#: exact receipts". These are the stages whose source is decided at runtime, so
-#: `computed` on one of them is the corpus walk reappearing.
+#: exact receipts". `computed` on one of these is the corpus walk reappearing.
 #:
-#: Deliberately NOT every stage. `rerank`, `fusion` and `vector.search` really
-#: do compute — they read no index, the product marks none of them, and a gate
-#: that called those walks would fail every run for a reason unrelated to the
-#: corpus. `test_a_computing_stage_that_is_not_a_walker_is_not_a_walk` is the
-#: counter-case that keeps this list honest.
+#: All six now decide their source at runtime, and that is what makes this list
+#: worth anything. An earlier version named only the first four and claimed to
+#: cover the spec's four concepts; it did not. Hydration is `keyword` and hit
+#: construction is `filter_hits`, and both carried the static `computed`
+#: default, so both were excluded from the check — which is exactly how a real
+#: whole-scope walk in `keyword` on the empty-query browse went unreported by
+#: every instrument this change ships. `recall_projection` and
+#: `pending_visibility` report `index` unconditionally on every shape measured,
+#: so before that fix the check could only ever fire on two stages.
+#:
+#: Deliberately still NOT every stage. `rerank`, `fusion` and `vector.search`
+#: really do compute — they read no index, the product marks none of them, and
+#: a gate that called those walks would fail every run for a reason unrelated
+#: to the corpus. `test_a_computing_stage_that_is_not_a_walker_is_not_a_walk`
+#: is the counter-case that keeps this list honest.
 WALKER_STAGES: tuple[str, ...] = (
     "filter_eligibility",
     "outside_kb",
     "recall_projection",
     "pending_visibility",
+    "keyword",
+    "filter_hits",
 )
 
 #: Severity order, matching `find_types._SOURCE_WIDTH`: when a stage reports
@@ -131,12 +145,19 @@ SERIES_SHAPES: tuple[str, ...] = ("hybrid", "keyword", "filtered_hybrid")
 
 @dataclass(frozen=True)
 class Sample:
-    """One request's closed outcome. Carries no content, by construction."""
+    """One request's closed outcome. Carries no content, by construction.
+
+    `hits` is a COUNT, never the hits. Without it the filtered series can
+    measure empty-result recalls — no rerank, no fusion — sail under 400 ms and
+    report `filter_eligibility: index`, which is a green verdict for a filter
+    that matched nothing on this cell.
+    """
 
     elapsed_ms: float
     warming: bool
     stage_sources: dict[str, str] = field(default_factory=dict)
     stage_ms: dict[str, float] = field(default_factory=dict)
+    hits: int = 0
 
 
 class Transport(Protocol):
@@ -273,6 +294,7 @@ def run_series(
     warming = 0
     sources: dict[str, str] = {}
     eligibility: list[float] = []
+    hits = 0
 
     for index in range(SAMPLES_PER_SERIES):
         sample = transport.ask(
@@ -288,6 +310,7 @@ def run_series(
             warming += 1
         else:
             measured.append(float(sample.elapsed_ms))
+            hits += int(sample.hits)
         for stage, source in sample.stage_sources.items():
             sources[stage] = _widest(sources.get(stage), source)
         for stage, milliseconds in sample.stage_ms.items():
@@ -315,6 +338,7 @@ def run_series(
         "load_mean": round(statistics.fmean(loads), 2) if loads else 0.0,
         "load_max": round(max(loads), 2) if loads else 0.0,
         "stage_sources": sources,
+        "hits": hits,
     }
     if shape == "filtered_hybrid":
         series["eligibility_ms"] = round(max(eligibility), 1) if eligibility else 0.0
@@ -370,6 +394,14 @@ def check(report: dict[str, Any]) -> None:
     """Fail on any breach, naming it with the number actually measured."""
     failures: list[str] = []
 
+    limit = int(report.get("limit", -1))
+    if limit != DEFAULT_LIMIT:
+        failures.append(
+            f"the series ran at limit={limit}, and the ceilings are defined at "
+            f"{DEFAULT_LIMIT}; rerank scales with the candidate count, so this is "
+            "not a verdict against them"
+        )
+
     pages = int(report.get("pages", 0))
     if pages < MIN_CORPUS_PAGES:
         failures.append(
@@ -415,6 +447,12 @@ def check(report: dict[str, Any]) -> None:
                 failures.append(f"{shape} stage {stage} reported source computed: a walk")
 
         if shape == "filtered_hybrid":
+            if int(series.get("hits", 0)) < 1:
+                failures.append(
+                    "the filtered series returned no hits across the whole run: the "
+                    "filter matched nothing on this cell, so its percentiles measure "
+                    "empty-result recalls and not a filtered read path"
+                )
             eligibility = float(series.get("eligibility_ms", 0.0))
             if eligibility > FILTERED_ELIGIBILITY_MS:
                 failures.append(
@@ -601,11 +639,19 @@ def _sample_from_envelope(data: Any) -> Sample:
         value = stage.get("ms")
         if isinstance(value, (int, float)):
             milliseconds[name] = float(value)
+    total = timings.get("total_ms")
+    if not isinstance(total, (int, float)) or float(total) <= 0.0:
+        # Thirty of these would be thirty 0.0 ms samples and a green verdict.
+        # An absent `timings` dict is already treated as warming three lines
+        # up; a timings dict with no usable total says exactly as little.
+        return Sample(elapsed_ms=0.0, warming=True)
+    hit_list = data.get("hits")
     return Sample(
-        elapsed_ms=float(timings.get("total_ms") or 0.0),
+        elapsed_ms=float(total),
         warming=False,
         stage_sources=sources,
         stage_ms=milliseconds,
+        hits=len(hit_list) if isinstance(hit_list, list) else 0,
     )
 
 
