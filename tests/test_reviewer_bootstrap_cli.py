@@ -12,6 +12,7 @@ future option that is consumed but not declared fails here instead of live.
 
 from __future__ import annotations
 
+import argparse
 import ast
 import hashlib
 import hmac
@@ -25,6 +26,7 @@ import pytest
 from benchmark_capabilities import has_posix_file_modes
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "reviewer_bootstrap.py"
+PROMOTION_SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "promotion_evidence.py"
 
 
 def _load_module():
@@ -230,11 +232,6 @@ def _locks() -> dict:
         "profile": OPENAI_PACKAGE_LOCK["profile"],
         "fixture_version": "v2",
         "fixture_digest": "ff" * 32,
-        "fixture": {
-            "fixture_version": "v2",
-            "payload_sha256": "ff" * 32,
-            "payload": {"notes": [{"key": "fixture-note"}], "absent_notes": [{}]},
-        },
         "openai_package_lock": OPENAI_PACKAGE_LOCK,
         "openai_archive_lock": OPENAI_ARCHIVE_LOCK,
     }
@@ -769,14 +766,6 @@ def test_run_writes_the_outcome_file_promotion_evidence_reads(monkeypatch, tmp_p
             "run-authority": (200, {"authority": {"id": authority_id}}),
             "run-authorize": (303, {}),
             "run-redeem": (200, {"destination": "https://x/cb?code=abc"}),
-            "run-token": (
-                200,
-                {
-                    "access_token": "setup-access-token",
-                    "refresh_token": "setup-refresh-token",
-                    "token_type": "Bearer",
-                },
-            ),
             "run-authority-outcome": (
                 200,
                 {
@@ -800,18 +789,6 @@ def test_run_writes_the_outcome_file_promotion_evidence_reads(monkeypatch, tmp_p
         }
     )
     cp.state_dir = tmp_path
-    monkeypatch.setattr(
-        module,
-        "seed_marketplace_review_fixture",
-        lambda fixture, call_tool: {
-            "fixture_version": fixture["fixture_version"],
-            "payload_sha256": fixture["payload_sha256"],
-            "note_count": 1,
-            "verified": True,
-        },
-        raising=False,
-    )
-    monkeypatch.setattr(module, "HostedMCPToolCaller", lambda *_: object(), raising=False)
 
     with pytest.raises(SystemExit):
         module.run(
@@ -824,7 +801,6 @@ def test_run_writes_the_outcome_file_promotion_evidence_reads(monkeypatch, tmp_p
                 "clientId": "cid",
                 "state": "st",
                 "codeChallenge": "ch",
-                "codeVerifier": "cv",
                 "stageExpiresAt": "2999-01-01T00:00:00.000Z",
             },
             "tok",
@@ -855,29 +831,16 @@ def _run_context() -> dict[str, str]:
         "clientId": "bootstrap-client-1",
         "state": "state-1",
         "codeChallenge": "challenge-1",
-        "codeVerifier": "verifier-1",
         "stageExpiresAt": "2999-01-01T00:00:00.000Z",
     }
 
 
-def _run_responses(*, token_status: int = 200, owner_status: tuple[int, dict] | None = None):
+def _run_responses(*, owner_status: tuple[int, dict] | None = None):
     authority_id = "11111111-1111-4111-8111-111111111111"
     return {
         "run-authority": (200, {"authority": {"id": authority_id}}),
         "run-authorize": (303, {}),
         "run-redeem": (200, {"destination": "https://x/cb?code=abc"}),
-        "run-token": (
-            token_status,
-            (
-                {
-                    "access_token": "setup-access-token",
-                    "refresh_token": "setup-refresh-token",
-                    "token_type": "Bearer",
-                }
-                if token_status == 200
-                else {"error": "invalid_grant"}
-            ),
-        ),
         "run-authority-outcome": (
             200,
             {
@@ -898,24 +861,6 @@ def _run_responses(*, token_status: int = 200, owner_status: tuple[int, dict] | 
     }
 
 
-def test_run_requires_successful_setup_token_before_any_credential_call(
-    monkeypatch, tmp_path
-) -> None:
-    module = _load_module()
-    monkeypatch.setattr(
-        module, "chatgpt_cimd_identity", lambda *_: ("https://c/x.json", ["https://c/cb"])
-    )
-    cp = _RecordingControlPlane(_run_responses(token_status=400))
-    cp.state_dir = tmp_path
-
-    with pytest.raises(SystemExit, match="token exchange failed"):
-        module.run(cp, _run_context(), "invite-token", _locks(), "CONN")
-
-    labels = [call["label"] for call in cp.calls]
-    assert "run-authority-outcome" not in labels
-    assert not any(label.startswith("run-canary-") for label in labels)
-
-
 def test_run_readiness_failure_makes_zero_reviewer_credential_calls(
     monkeypatch, tmp_path
 ) -> None:
@@ -933,85 +878,6 @@ def test_run_readiness_failure_makes_zero_reviewer_credential_calls(
 
     labels = [call["label"] for call in cp.calls]
     assert not any(label.startswith("run-canary-") for label in labels)
-
-
-def test_run_seeds_exact_fixture_after_cell_ready_and_before_credentials(
-    monkeypatch, tmp_path
-) -> None:
-    module = _load_module()
-    monkeypatch.setattr(
-        module, "chatgpt_cimd_identity", lambda *_: ("https://c/x.json", ["https://c/cb"])
-    )
-    events: list[str] = []
-
-    class _OrderedControlPlane(_RecordingControlPlane):
-        def call(self, method, path, *, label, body=None, **kwargs):
-            events.append(label)
-            return super().call(method, path, label=label, body=body, **kwargs)
-
-    cp = _OrderedControlPlane(_run_responses())
-    cp.state_dir = tmp_path
-
-    class _Caller:
-        def __init__(self, base_url, bearer_token):
-            assert base_url == cp.base_url
-            assert bearer_token == "setup-access-token"
-
-        def __call__(self, name, arguments):
-            raise AssertionError("the shared seeder is stubbed in this order test")
-
-    def seed(fixture, call_tool):
-        events.append("seed-fixture")
-        assert fixture is _locks()["fixture"] or fixture == _locks()["fixture"]
-        assert isinstance(call_tool, _Caller)
-        return {
-            "fixture_version": "v2",
-            "payload_sha256": "ff" * 32,
-            "note_count": 1,
-            "verified": True,
-        }
-
-    monkeypatch.setattr(module, "HostedMCPToolCaller", _Caller, raising=False)
-    monkeypatch.setattr(module, "seed_marketplace_review_fixture", seed, raising=False)
-
-    with pytest.raises(SystemExit, match="claude sibling stage failed"):
-        module.run(cp, _run_context(), "invite-token", _locks(), "CONN")
-
-    assert events.index("run-owner-status") < events.index("seed-fixture")
-    assert events.index("seed-fixture") < events.index("run-sibling-stage-claude")
-    sibling = next(call for call in cp.calls if call["label"] == "run-sibling-stage-claude")
-    assert sibling["body"]["expiresAt"] == _run_context()["stageExpiresAt"]
-    receipt = json.loads((tmp_path / "reviewer-fixture-seed.json").read_text())
-    assert receipt == {
-        "fixture_version": "v2",
-        "payload_sha256": "ff" * 32,
-        "note_count": 1,
-        "verified": True,
-    }
-
-
-def test_run_fixture_failure_makes_zero_reviewer_credential_calls(
-    monkeypatch, tmp_path
-) -> None:
-    module = _load_module()
-    monkeypatch.setattr(
-        module, "chatgpt_cimd_identity", lambda *_: ("https://c/x.json", ["https://c/cb"])
-    )
-    monkeypatch.setattr(module, "HostedMCPToolCaller", lambda *_: object())
-    monkeypatch.setattr(
-        module,
-        "seed_marketplace_review_fixture",
-        lambda *_: (_ for _ in ()).throw(ValueError("fixture rejected")),
-    )
-    cp = _RecordingControlPlane(_run_responses())
-    cp.state_dir = tmp_path
-
-    with pytest.raises(SystemExit, match="reviewer fixture seeding failed"):
-        module.run(cp, _run_context(), "invite-token", _locks(), "CONN")
-
-    labels = [call["label"] for call in cp.calls]
-    assert not any(label.startswith("run-canary-") for label in labels)
-    assert not any(label.startswith("run-sibling-") for label in labels)
 
 
 def test_owner_status_polling_records_only_content_free_progress(monkeypatch, tmp_path) -> None:
@@ -1045,87 +911,425 @@ def test_owner_status_polling_records_only_content_free_progress(monkeypatch, tm
     assert "tenant" not in json.dumps(progress).lower()
 
 
-@pytest.mark.parametrize("content_type", ["application/json", "text/event-stream"])
-def test_hosted_mcp_caller_uses_bearer_header_and_decodes_json_or_sse(
-    content_type: str, monkeypatch
-) -> None:
+def _run_responses_complete() -> dict:
+    """Every call a whole successful `run` makes, all green.
+
+    The tables above stop the run early with a 500 on the first sibling stage,
+    which cannot show what `run` does after the credentials. Deliberately absent:
+    `run-token`. `_RecordingControlPlane` answers an unknown label `(200, {})`,
+    so a run that still attempts the exchange fails on the missing access token
+    rather than silently passing.
+    """
+    authority_id = "11111111-1111-4111-8111-111111111111"
+    return {
+        "run-authority": (200, {"authority": {"id": authority_id}}),
+        "run-authorize": (303, {}),
+        "run-redeem": (200, {"destination": "https://x/cb?code=abc"}),
+        "run-authority-outcome": (
+            200,
+            {
+                "bootstrapAuthorities": [
+                    {
+                        "id": authority_id,
+                        "state": "consumed",
+                        "outcomeTenantId": "tenant-1",
+                        "outcomeAssignmentId": "assignment-1",
+                        "outcomeAssignmentGeneration": 3,
+                    }
+                ]
+            },
+        ),
+        "run-owner-status": (
+            200,
+            {"success": True, "status": {"state": "ready", "code": "CELL_READY"}},
+        ),
+        "run-sibling-stage-claude": (200, {"stage": {"id": "stage-claude"}}),
+        "run-sibling-client-claude": (200, {"id": "client-claude"}),
+        "run-canary-claude": (201, {}),
+        "run-sibling-stage-openai": (200, {"stage": {"id": "stage-openai"}}),
+        "run-sibling-client-openai": (200, {"id": "client-openai"}),
+        "run-canary-openai": (201, {}),
+    }
+
+
+def test_run_never_attempts_the_impossible_token_exchange(monkeypatch, tmp_path) -> None:
+    """`run` must not POST /oauth/token; the server can never answer it.
+
+    `redeemExomemOAuthBootstrapAuthorization` marks the authorization transaction
+    with a `reviewer_bootstrap_authority_id`, and the token exchange's grant
+    lookup carries an explicit `NOT EXISTS` against exactly that column. Three
+    further independent bars agree: redemption disables the bootstrap's own
+    client, the authorization code is written with a NULL `candidate_id`, and the
+    grant is created `refresh_allowed = false` while the harness demanded a
+    refresh token. The exchange was unreachable code that aborted every run
+    AFTER the invite, the authority and the human's session had been spent.
+    """
     module = _load_module()
+    monkeypatch.setattr(
+        module, "chatgpt_cimd_identity", lambda *_: ("https://c/x.json", ["https://c/cb"])
+    )
+    cp = _RecordingControlPlane(_run_responses_complete())
+    cp.state_dir = tmp_path
+
+    module.run(cp, _run_context(), "invite-token", _locks(), "CONN")
+
+    labels = [call["label"] for call in cp.calls]
+    assert "run-token" not in labels
+    assert [label for label in labels if label.startswith("run-canary-")] == [
+        "run-canary-claude",
+        "run-canary-openai",
+    ]
+    assert json.loads((tmp_path / "bootstrap-outcome-final.json").read_text()) == {
+        "tenantId": "tenant-1",
+        "assignmentId": "assignment-1",
+        "generation": 3,
+    }
+    # Every stage in the review shares the one hard window recorded at `prepare`.
+    # Recomputing it from a CLI default here silently shortened a long bootstrap
+    # to the 55-minute default, and this expiry gates both the canary credential
+    # and the evidence window.
+    stage = next(c for c in cp.calls if c["label"] == "run-sibling-stage-claude")
+    assert stage["body"]["expiresAt"] == _run_context()["stageExpiresAt"]
+
+
+def test_run_without_a_connector_bootstraps_a_claude_only_cohort(monkeypatch, tmp_path) -> None:
+    """`promoteExomemHostedCohort` takes `openaiArtifactId` optionally.
+
+    Every OpenAI precondition sits behind `promoteOpenai`, and the candidate
+    reaches `state='live'` either way, so a Claude-only cohort opens admission.
+    The harness forced the pair regardless, which made a ChatGPT connector a
+    precondition of promoting Claude at all.
+    """
+    module = _load_module()
+
+    def _refuse(*_a, **_k):
+        raise AssertionError("a Claude-only run must not resolve a ChatGPT connector")
+
+    monkeypatch.setattr(module, "chatgpt_cimd_identity", _refuse)
+    cp = _RecordingControlPlane(_run_responses_complete())
+    cp.state_dir = tmp_path
+
+    module.run(cp, _run_context(), "invite-token", _locks(), None)
+
+    labels = [call["label"] for call in cp.calls]
+    assert [label for label in labels if label.startswith("run-sibling-stage-")] == [
+        "run-sibling-stage-claude"
+    ]
+    assert [label for label in labels if label.startswith("run-canary-")] == ["run-canary-claude"]
+    assert json.loads((tmp_path / "sibling-stage-ids.json").read_text()) == {
+        "claude": "stage-claude"
+    }
+
+
+def test_main_accepts_run_without_an_openai_connector(monkeypatch, tmp_path) -> None:
+    """`--openai-connector` is opt-in, not required, now Claude-only promotes."""
+    module = _load_module()
+    (tmp_path / "bootstrap-context.json").write_text(json.dumps(_run_context()))
+    monkeypatch.setattr(module, "ControlPlane", lambda *a, **k: object())
+    monkeypatch.setattr(module, "load_locks", lambda *a, **k: _locks())
     captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        module,
+        "run",
+        lambda cp, context, token, locks, connector, *a: captured.update(connector=connector),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "reviewer_bootstrap.py",
+            "run",
+            "--candidate-id",
+            "c",
+            "--state-dir",
+            str(tmp_path),
+            "--profile",
+            "hosted-alpha-agent-v1",
+            "--token",
+            "t",
+        ],
+    )
+    monkeypatch.setenv("EXOMEM_PUBLIC_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("EXOMEM_ADMIN_TOKEN", "token")
 
-    class _Headers:
-        def get_content_type(self):
-            return content_type
+    assert module.main() == 0
+    assert captured == {"connector": None}
 
-    class _Response:
-        headers = _Headers()
 
-        def __enter__(self):
-            return self
+def _load_promotion_module():
+    spec = importlib.util.spec_from_file_location("promotion_evidence", PROMOTION_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
-        def __exit__(self, *_args):
-            return None
 
-        def read(self, _size=-1):
-            request_id = captured["payload"]["id"]
-            envelope = {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {"structuredContent": {"path": "verified.md"}},
-            }
-            encoded = json.dumps(envelope).encode()
-            return encoded if content_type == "application/json" else b"data: " + encoded + b"\n\n"
+def test_promote_omits_the_openai_keys_for_a_claude_only_cohort(monkeypatch, tmp_path) -> None:
+    """Omit the keys entirely rather than sending them null.
 
-    class _Opener:
-        def open(self, request, timeout):
-            captured["timeout"] = timeout
-            captured["headers"] = dict(request.header_items())
-            captured["payload"] = json.loads(request.data)
-            return _Response()
+    `promoteExomemHostedCohort` gates on `typeof openaiArtifactId === "string"`,
+    so an explicit null is the Claude-only path too -- but `openaiEvidence` is
+    then read by the paired evidence equality only when that gate is open, and
+    sending a null artifact alongside a real evidence record describes a cohort
+    that does not exist. Sending neither key is the honest shape.
+    """
+    module = _load_promotion_module()
+    (tmp_path / "bootstrap-context.json").write_text(json.dumps({"candidateId": "cand-1"}))
+    (tmp_path / "artifact-claude.txt").write_text("artifact-claude-1\n")
+    (tmp_path / "evidence-claude.json").write_text(json.dumps({"platform": "claude"}))
 
-    monkeypatch.setattr(module, "_OPENER", _Opener())
-    token = "secret-bearer-value"
-
-    result = module.HostedMCPToolCaller("https://example.invalid", token)(
-        "read_memory", {"path": "verified.md"}
+    monkeypatch.setattr(
+        module,
+        "get",
+        lambda _path: (
+            200,
+            {
+                "rolloutStatus": [
+                    {
+                        "candidateId": "cand-1",
+                        "routableSetDigest": "ab" * 32,
+                        "routableCellCount": 1,
+                        "routableObservationFresh": True,
+                    }
+                ],
+                "liveCohortCandidateId": None,
+            },
+        ),
+    )
+    sent: dict[str, dict] = {}
+    monkeypatch.setattr(
+        module,
+        "call",
+        lambda _path, body, _label, _state: (sent.update(body=body), (200, {"result": "ok"}))[1],
     )
 
-    assert result == {"path": "verified.md"}
-    headers = captured["headers"]
-    assert headers["Authorization"] == f"Bearer {token}"
-    assert headers["Accept"] == "application/json, text/event-stream"
-    assert token not in json.dumps(captured["payload"])
+    assert module.promote(argparse.Namespace(state_dir=tmp_path, dry_run=False)) == 0
+
+    assert sent["body"]["claudeArtifactId"] == "artifact-claude-1"
+    assert "openaiArtifactId" not in sent["body"]
+    assert "openaiEvidence" not in sent["body"]
 
 
-def test_hosted_mcp_caller_redacts_protocol_response_content(monkeypatch) -> None:
+AUTHORITY_ID = "11111111-1111-4111-8111-111111111111"
+SOURCE_OPERATION_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def _reset_authorities(*, state: str = "consumed", operation_id: str | None = SOURCE_OPERATION_ID):
+    return {
+        "bootstrapAuthorities": [
+            {
+                "id": AUTHORITY_ID,
+                "state": state,
+                "outcomeTenantId": "tenant-1",
+                "outcomeAssignmentId": "33333333-3333-4333-8333-333333333333",
+                "outcomeAssignmentGeneration": 3,
+                "outcomeOperationId": operation_id,
+            }
+        ]
+    }
+
+
+def test_reset_releases_a_stranded_reviewer_tenant(tmp_path, capsys) -> None:
+    """`reset` drives the one operator-only escape hatch, in the runbook's order.
+
+    `recover-expired-reviewer-cleanup` accepts a `provision` that already
+    succeeded at `bound` with the tenant's sole cell active, routable and
+    `CELL_READY` -- exactly the stranded shape that blocks a retry -- and its
+    mutation moves the tenant to `deletion_pending`, advances the fence and
+    enqueues a target-free delete. It joins no `exomem_access_tokens`, so the
+    emailed deletion-confirmation token is not on this path.
+    """
     module = _load_module()
-    secret_body = "do-not-echo-this-fixture-content"
+    cp = _RecordingControlPlane(
+        {
+            "reset-authorities": (200, _reset_authorities()),
+            "reset-preflight-cleanup": (200, {"eligible": True}),
+            "reset-cleanup": (200, {"outcome": "enqueued", "operationId": "delete-op-1"}),
+        }
+    )
+    cp.state_dir = tmp_path
 
-    class _Headers:
-        def get_content_type(self):
-            return "application/json"
+    module.reset(cp, expected_fence=7)
 
-    class _Response:
-        headers = _Headers()
+    calls = [call for call in cp.calls if call["label"].startswith("reset-")]
+    assert [call["label"] for call in calls] == [
+        "reset-authorities",
+        "reset-preflight-cleanup",
+        "reset-cleanup",
+    ]
+    # Exactly three keys, or the route refuses the body outright. And the only
+    # selector is the opaque source operation id read off the authority record:
+    # the runbook forbids naming a tenant, cell, owner or capacity identifier.
+    for call in calls[1:]:
+        assert set(call["body"]) == {"action", "sourceOperationId", "expectedFence"}
+        assert call["body"]["sourceOperationId"] == SOURCE_OPERATION_ID
+        assert call["body"]["expectedFence"] == 7
+    printed = capsys.readouterr().out
+    assert "tenant-1" in printed and SOURCE_OPERATION_ID in printed
+    assert "delete-op-1" in printed
 
-        def __enter__(self):
-            return self
 
-        def __exit__(self, *_args):
-            return None
+def test_reset_refuses_an_authority_that_bound_no_tenant(tmp_path) -> None:
+    """Nothing but a consumed bootstrap authority can name a target.
 
-        def read(self, _size=-1):
-            return json.dumps({"error": {"message": secret_body}}).encode()
+    `reset` takes no tenant, cell or operation id from the operator. It reads the
+    source operation off the authority record, so an authority that never
+    consumed -- and therefore never created a reviewer tenant -- has nothing to
+    release and must stop before the preflight.
+    """
+    module = _load_module()
+    cp = _RecordingControlPlane(
+        {"reset-authorities": (200, _reset_authorities(state="revoked", operation_id=None))}
+    )
+    cp.state_dir = tmp_path
 
-    class _Opener:
-        def open(self, request, timeout):
-            return _Response()
+    with pytest.raises(SystemExit, match="no consumed reviewer-bootstrap authority"):
+        module.reset(cp, expected_fence=7)
 
-    monkeypatch.setattr(module, "_OPENER", _Opener())
+    assert [call["label"] for call in cp.calls] == ["reset-authorities"]
 
-    with pytest.raises(SystemExit) as raised:
-        module.HostedMCPToolCaller("https://example.invalid", "secret-token")(
-            "remember", {"content": secret_body}
-        )
 
-    assert secret_body not in str(raised.value)
-    assert "secret-token" not in str(raised.value)
+def test_reset_stops_when_the_preflight_refuses(tmp_path) -> None:
+    """A refusal is deliberately non-diagnostic; do not retry with altered selectors."""
+    module = _load_module()
+    cp = _RecordingControlPlane(
+        {
+            "reset-authorities": (200, _reset_authorities()),
+            "reset-preflight-cleanup": (200, {"eligible": False}),
+        }
+    )
+    cp.state_dir = tmp_path
+
+    with pytest.raises(SystemExit, match="preflight refused"):
+        module.reset(cp, expected_fence=7)
+
+    assert "reset-cleanup" not in [call["label"] for call in cp.calls]
+
+
+def test_reset_ends_a_live_assignment_before_the_preflight(tmp_path) -> None:
+    """Cleanup needs an expired or terminal-failed assignment.
+
+    `fail-assignment` is the exact existing transition that ends one without
+    extending its immutable expiry, and it is admin-token only. Its version is
+    exposed by no admin route, so the operator supplies it.
+    """
+    module = _load_module()
+    cp = _RecordingControlPlane(
+        {
+            "reset-authorities": (200, _reset_authorities()),
+            "reset-fail-assignment": (200, {"failed": True}),
+            "reset-preflight-cleanup": (200, {"eligible": True}),
+            "reset-cleanup": (200, {"outcome": "enqueued", "operationId": "delete-op-1"}),
+        }
+    )
+    cp.state_dir = tmp_path
+
+    module.reset(cp, expected_fence=7, assignment_version=2)
+
+    labels = [call["label"] for call in cp.calls]
+    assert labels.index("reset-fail-assignment") < labels.index("reset-preflight-cleanup")
+    body = next(c["body"] for c in cp.calls if c["label"] == "reset-fail-assignment")
+    assert body == {
+        "action": "fail-assignment",
+        "assignmentId": "33333333-3333-4333-8333-333333333333",
+        "expectedVersion": 2,
+    }
+
+
+def test_reset_refuses_while_a_bootstrap_authority_is_still_active(tmp_path) -> None:
+    """Cleanup eligibility requires no live bootstrap authority anywhere."""
+    module = _load_module()
+    cp = _RecordingControlPlane(
+        {
+            "reset-authorities": (
+                200,
+                {
+                    "bootstrapAuthorities": [
+                        _reset_authorities()["bootstrapAuthorities"][0],
+                        {"id": "other", "state": "active", "outcomeOperationId": None},
+                    ]
+                },
+            )
+        }
+    )
+    cp.state_dir = tmp_path
+
+    with pytest.raises(SystemExit, match="still active"):
+        module.reset(cp, expected_fence=7)
+
+    assert [call["label"] for call in cp.calls] == ["reset-authorities"]
+
+
+def test_promote_refuses_a_half_present_openai_pair(monkeypatch, tmp_path) -> None:
+    """One OpenAI file without the other is an operator mistake, not Claude-only."""
+    module = _load_promotion_module()
+    (tmp_path / "bootstrap-context.json").write_text(json.dumps({"candidateId": "cand-1"}))
+    (tmp_path / "artifact-claude.txt").write_text("artifact-claude-1\n")
+    (tmp_path / "evidence-claude.json").write_text(json.dumps({"platform": "claude"}))
+    (tmp_path / "evidence-openai.json").write_text(json.dumps({"platform": "openai"}))
+
+    monkeypatch.setattr(
+        module,
+        "get",
+        lambda _path: (
+            200,
+            {
+                "rolloutStatus": [
+                    {
+                        "candidateId": "cand-1",
+                        "routableSetDigest": "ab" * 32,
+                        "routableCellCount": 1,
+                        "routableObservationFresh": True,
+                    }
+                ],
+                "liveCohortCandidateId": None,
+            },
+        ),
+    )
+
+    def _never(*_a, **_k):
+        raise AssertionError("a half-present OpenAI pair must not reach promote-cohort")
+
+    monkeypatch.setattr(module, "call", _never)
+
+    with pytest.raises(SystemExit, match="artifact-openai.txt"):
+        module.promote(argparse.Namespace(state_dir=tmp_path, dry_run=False))
+
+
+@pytest.mark.parametrize("command", ("preflight", "prepare", "run"))
+def test_main_refuses_a_profile_consuming_command_without_a_profile(
+    command: str, monkeypatch, tmp_path, capsys
+) -> None:
+    """`--profile` left argparse, so nothing self-enforcing guards it any more.
+
+    `required=True` needed no test because it enforced itself. The hand-written
+    guard that replaced it does: deleting that branch leaves this whole suite
+    green, and a missing `--profile` then surfaces as
+    `TypeError: unsupported operand type(s) for /: 'PosixPath' and 'NoneType'`
+    out of `_hosted_candidate_locks`, mid-run, instead of exit 2 before anything
+    is touched. This module exists to catch exactly that shape -- an option that
+    is still consumed after it stopped being declared.
+    """
+    module = _load_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "reviewer_bootstrap.py",
+            command,
+            "--candidate-id",
+            "c",
+            "--state-dir",
+            str(tmp_path),
+        ],
+    )
+    monkeypatch.setenv("EXOMEM_PUBLIC_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("EXOMEM_ADMIN_TOKEN", "token")
+
+    def _no_locks(*_a, **_k):
+        raise AssertionError("--profile must be refused before any lock file is read")
+
+    monkeypatch.setattr(module, "load_locks", _no_locks)
+
+    assert module.main() == 2
+    assert "--profile is required" in capsys.readouterr().err
