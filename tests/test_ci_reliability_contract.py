@@ -811,12 +811,19 @@ def test_release_evidence_automation_removes_both_manual_cranks() -> None:
     }
 
 
-#: How much slower a cross-platform shard runs than `.test_durations.json`
-#: predicts. The durations are recorded on Linux and this is the lane that does
-#: not run on Linux, so the prediction understates it by a constant that has to
-#: be measured rather than derived: Windows sessions of 2481s, 2449s and 2595s
-#: against a predicted busiest four-way shard of 1385s give 1.81.
-CROSS_PLATFORM_SLOWDOWN = 1.81
+#: The worst cross-platform session observed, in seconds. A floor rather than a
+#: maximum: three six-way Windows shards were censored at the 2700s cap they hit,
+#: so the true worst is at least this.
+#:
+#: Measured rather than predicted, and the measurement is why. `.test_durations.json`
+#: is Linux-recorded and this lane does not run on Linux, so a prediction from it
+#: needs a platform factor -- and the factor is not a constant. Four-way sessions
+#: ran 2482s, 2449s and 2595s; six-way ran 2184s, 2250s and 2644s. Fifty percent
+#: more shards bought six percent of runtime, so most of a shard here is not test
+#: execution that splits, and no linear model over the durations file describes it.
+#: Finding that fixed cost is its own change; until then the cap clears the
+#: measurement.
+MEASURED_WORST_CROSS_PLATFORM_SESSION = 2705
 
 _FOLDED_RUN_RE = re.compile(
     r"^(?P<indent>\s*)-?\s*run:\s*>[-+]?\s*$(?P<body>(?:\n(?:(?P=indent)\s+.*|\s*))*)",
@@ -824,42 +831,37 @@ _FOLDED_RUN_RE = re.compile(
 )
 
 
-def test_the_cross_platform_lane_carries_headroom_on_the_platform_it_runs_on() -> None:
-    """The same 1.5x rule as the PR tiers, corrected for the platform.
+def test_the_cross_platform_cap_clears_the_runtime_actually_measured() -> None:
+    """The cap must sit above what a healthy shard takes, not above a prediction.
 
-    `test_session_timeouts_carry_headroom_over_predicted_tier_runtime` applies
-    that rule to lanes whose runtime the durations file predicts directly. Here
-    it does not: the file is Linux-recorded and this lane is Windows and macOS.
-    Applying the rule uncorrected passed while the lane was failing -- the
-    prediction said 1385s against a 2700s cap, and the shards were really taking
-    upwards of 2400s and crossing it.
+    At 2700s it sat below: shards reported clean summaries -- `2929 passed, 0
+    failed in 45:02` -- and then exit 1, so a green suite read as a red lane.
 
-    The correction is what makes the split count fall out. At four shards a 1.5x
-    headroom needs 3763s, which does not fit the 60 minute job at all, so the
-    cap was never the adjustable part; at six it needs 2509s and the existing cap
-    already holds.
+    Deliberately not derived from `.test_durations.json` the way the pull-request
+    tiers are. Applying that rule here passed while the lane was failing, because
+    the file records Linux times and this lane runs on Windows and macOS. The
+    correction is not a constant either: six shards ran only six percent faster
+    than four, so the runtime does not scale with the split and a linear model
+    over the durations would keep being wrong in a new way.
     """
-    durations = json.loads((ROOT / ".test_durations.json").read_text(encoding="utf-8"))
     workflow = _cross_platform_workflow()
     job = workflow["jobs"]["suite"]
     command = _run_step(job)["run"]
 
-    splits = int(re.search(r"--splits=(\d+)", command).group(1))
     timeout = int(re.search(r"--session-timeout=(\d+)", command).group(1))
     job_seconds = job["timeout-minutes"] * 60
 
-    ignored = set(re.findall(r"--ignore=(tests/[\w.]+)", command)) | {NIGHTLY_OWNED_MODULE}
-    members = {node.split("::", 1)[0] for node in durations} - ignored
-    predicted = _predicted_max_shard_seconds(durations, members, splits) * CROSS_PLATFORM_SLOWDOWN
-
-    assert timeout >= 1.5 * predicted, (
-        f"--session-timeout={timeout}s is under 1.5x the predicted busiest shard on "
-        f"the slowest platform ({predicted:.0f}s); add shards or raise the timeout"
+    assert timeout > MEASURED_WORST_CROSS_PLATFORM_SESSION, (
+        f"--session-timeout={timeout}s is at or below the worst session measured "
+        f"({MEASURED_WORST_CROSS_PLATFORM_SESSION}s), so a healthy shard reports as a failure"
     )
-    assert timeout < job_seconds, "the session timeout must stay inside the job budget"
-    assert 1.5 * predicted < job_seconds, (
-        f"{splits} shards cannot hold the headroom rule inside a {job_seconds}s job; "
-        "this lane needs more shards, not a longer timeout"
+    assert timeout >= 1.15 * MEASURED_WORST_CROSS_PLATFORM_SESSION, (
+        f"--session-timeout={timeout}s leaves no margin over the worst measured "
+        "session; runner variance will cross it again"
+    )
+    assert timeout < job_seconds, (
+        "the session cap must stay inside the job budget, so a hang is reported by "
+        "pytest rather than killed silently by the runner"
     )
 
 
