@@ -80,6 +80,38 @@ RECONCILE_INTERVAL_SECONDS = 300.0
 # explicit `reconcile`.
 RECONCILE_MAX_EMBED_FILES = 500
 RECONCILE_MAX_MEDIA_FILES = media_processing.DEFAULT_RECONCILE_LIMIT
+# How long the compare-and-ack withdrawal keeps asking a busy mutation boundary
+# before giving the epoch back to periodic recovery.
+#
+# The withdrawal contends with `epistemic_graph_drain_paths` -- the incremental
+# drain, holding the same vault boundary while it repairs the very pages this
+# dispatch is reacting to. Losing that race is the *expected* outcome on a cell
+# whose queue is working, and it is explicitly retryable: the refusal carries
+# `status: "retryable"` and a `retry_after_ms`.
+#
+# Abandoning it on the first refusal is what made a healthy drain disable the
+# incremental path. `ack_ready` goes false, `clear_external_pending` is skipped,
+# and the in-memory flag stays set -- which declines the graph read snapshot,
+# which fails the dispatch's predecessor probe, which sends *every* subsequent
+# write down a whole-vault rebuild until a reconcile cycle finds the boundary
+# free. Measured on a live cell: a 4.9 s drain hold cost 43 s rebuilds on every
+# write for the rest of the window.
+#
+# Bounded rather than unbounded because this runs on the debounce thread, and a
+# boundary that stays busy this long is sustained contention -- a different
+# condition, which periodic recovery and the exhaustion log below both report.
+#
+# This is the retry budget, NOT the wall-clock bound a caller waits. The
+# deadline is only consulted after an attempt has already been refused, and
+# each attempt first spends the mutation coordinator's own timeout waiting for
+# the lock (`_DEFAULT_TIMEOUT_SECONDS`, 5.0 s today). So the real bound is this
+# budget plus one coordinator timeout -- about 20 s at today's defaults, and
+# measured at 20.00 s. `suspend_reads()` takes no timeout parameter to pass a
+# shortened one through, so the honest thing is to state the number rather than
+# imply a tighter one. Size this against watcher latency accordingly, and note
+# that `test_a_permanently_busy_boundary_gives_up_within_a_bounded_wall_time`
+# pins the bound against an absolute ceiling that does not scale with it.
+GRAPH_WITHDRAWAL_RETRY_SECONDS = 15.0
 
 
 def _background_deferred_limit(
@@ -873,6 +905,73 @@ class FileWatcher:
             policy=policy,
         )
 
+    def _suspend_reads_for_acknowledgement(self, candidate) -> None:
+        """Withdraw graph availability for compare-and-ack, waiting out a busy boundary.
+
+        The withdrawal has to happen before `clear_external_pending`: a
+        same-metadata edit can leave the projection identity unchanged, so the
+        epoch must not be retired while stale edges are still publicly
+        readable. That ordering is correct and is not what is being changed
+        here -- a failed withdrawal must still keep the epoch pending.
+
+        What changes is treating a *retryable* refusal as a refusal at all. The
+        boundary this contends for is usually held by
+        `epistemic_graph_drain_paths`, the incremental drain repairing the very
+        pages this dispatch is reacting to, and the refusal says so: it carries
+        `status: "retryable"` and a `retry_after_ms` that nothing was reading.
+        Honouring it costs a few seconds on a background thread; abandoning it
+        cost every subsequent write a whole-vault rebuild, because the epoch
+        stayed pending, the flag declined the graph's read snapshot, and the
+        dispatch's predecessor probe could no longer prove anything.
+
+        A non-retryable failure still propagates unchanged, and exhausting the
+        budget still leaves the epoch pending for periodic recovery -- but it
+        says so, because sustained contention is a different condition from
+        losing one race and should not look like it in a log.
+
+        The wall-clock bound is `GRAPH_WITHDRAWAL_RETRY_SECONDS` plus one
+        mutation-coordinator timeout, roughly 20 s at today's defaults, because
+        the deadline is checked only after an attempt has already spent that
+        timeout being refused. See the constant for why it is stated rather
+        than tightened.
+        """
+        from .cli_ops import OpError
+
+        deadline = time.monotonic() + GRAPH_WITHDRAWAL_RETRY_SECONDS
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                candidate.suspend_reads()
+                if attempts > 1:
+                    log.info(
+                        "file watcher: graph availability withdrawal succeeded after "
+                        "waiting out a busy boundary attempts=%s",
+                        attempts,
+                    )
+                return
+            except OpError as error:
+                if error.details.get("status") != "retryable":
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    holder = error.details.get("holder") or {}
+                    log.warning(
+                        "file watcher: graph availability withdrawal gave up on a busy "
+                        "boundary attempts=%s holder=%s; epoch stays pending for "
+                        "periodic recovery",
+                        attempts,
+                        holder.get("operation") if isinstance(holder, dict) else None,
+                    )
+                    raise
+                advised_ms = error.details.get("retry_after_ms")
+                advised = (
+                    float(advised_ms) / 1000.0
+                    if isinstance(advised_ms, (int, float))
+                    else 0.25
+                )
+                time.sleep(max(0.01, min(remaining, advised)))
+
     def _dispatch_batch(
         self,
         ups: list[Path],
@@ -992,7 +1091,7 @@ class FileWatcher:
             candidate = epistemic_graph.EpistemicGraphIndex(self._vault_root)
             if candidate.path.exists():
                 try:
-                    candidate.suspend_reads()
+                    self._suspend_reads_for_acknowledgement(candidate)
                 except Exception:  # noqa: BLE001 - retain pending for periodic recovery
                     ack_ready = False
                     log.exception("file watcher: graph availability withdrawal failed")

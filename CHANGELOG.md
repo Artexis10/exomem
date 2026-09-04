@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.69.1](https://github.com/Artexis10/exomem/compare/v0.69.0...v0.69.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* **acceptance:** measure the product, not the acceptance harness ([#1057](https://github.com/Artexis10/exomem/issues/1057)) ([5867999](https://github.com/Artexis10/exomem/commit/5867999904e44a423189714aab137b2608180f76))
+* **graph:** stop a busy boundary latching the epoch that disables incremental repair ([#1059](https://github.com/Artexis10/exomem/issues/1059)) ([b71593a](https://github.com/Artexis10/exomem/commit/b71593a63b05fdfe94ee5c5a18592153368b6f8d))
+
+## [0.69.0](https://github.com/Artexis10/exomem/compare/v0.68.3...v0.69.0) (2026-09-02)
+
+
+### Features
+
+* **writes:** acknowledge governed writes at durable commit behind EXOMEM_FAST_DURABLE_ACK ([#1051](https://github.com/Artexis10/exomem/issues/1051)) ([e4d42fe](https://github.com/Artexis10/exomem/commit/e4d42fe73a1a3e66cffebd932e820c9c672c25e9))
+
+
+### Bug Fixes
+
+* **hosted:** fail the operation on an immutable resource conflict ([#1054](https://github.com/Artexis10/exomem/issues/1054)) ([abb7a28](https://github.com/Artexis10/exomem/commit/abb7a281936361ae252a5d6099b3b48c0ce3cddc))
+* **hosted:** let the fleet collector name its kubectl ([#1050](https://github.com/Artexis10/exomem/issues/1050)) ([76bf1f5](https://github.com/Artexis10/exomem/commit/76bf1f5efe1c258b3cbe0dd5d664e50b3ecce5ae))
+* **hosted:** retarget failed immutable runtime forward ([#1043](https://github.com/Artexis10/exomem/issues/1043)) ([044eec2](https://github.com/Artexis10/exomem/commit/044eec2ffd5ecd476b3bb33e9d784d41dbc77868))
+
 ## [0.68.3](https://github.com/Artexis10/exomem/compare/v0.68.2...v0.68.3) (2026-09-02)
 
 

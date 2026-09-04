@@ -118,8 +118,8 @@ Compose the pair with `hosted_composition_lock.py`, using the derived legacy fil
 the exact signed runtime/provisioner inputs, and both coupled trust inputs:
 
 ```text
---runtime-upgrade <runtime-upgrade.json>:<sha256>
---substrate-trust <substrate-trust.json>:<sha256>
+--runtime-upgrade <runtime-upgrade.json>=<sha256>
+--substrate-trust <substrate-trust.json>=<sha256>
 ```
 
 The composer requires exact agreement on target, Substrate consumer commit,

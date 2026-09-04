@@ -38,6 +38,7 @@ import contextlib
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -334,6 +335,30 @@ def test_concurrent_scan_excludes_its_own_ancestor_chain_but_not_a_genuine_third
         executable="/bin/sleep",
     )
     try:
+        # `Popen` returns once the fork succeeds, not once the child has exec'd,
+        # so `/proc/<pid>/cmdline` can still be empty (or the parent's argv) when
+        # the scan below reads it. Scanning immediately therefore races the exec
+        # and reports a genuine third party as absent -- observed three times in
+        # CI on a loaded runner, never on an idle one. Wait for the premise, then
+        # assert the contract: the scan is still being asked whether it reports a
+        # process that demonstrably exists with a matching argv, so the wait
+        # cannot make the assertion below vacuous.
+        deadline = time.monotonic() + 10.0
+        marker_argv = b""
+        while time.monotonic() < deadline:
+            try:
+                marker_argv = Path(f"/proc/{marker.pid}/cmdline").read_bytes()
+            except OSError:  # the child may not have a /proc entry yet
+                marker_argv = b""
+            if b"fake-pytest-marker-should-be-reported" in marker_argv:
+                break
+            time.sleep(0.02)
+        assert b"fake-pytest-marker-should-be-reported" in marker_argv, (
+            "precondition: the marker child never exec'd into an argv the scan "
+            f"could match within 10s (pid {marker.pid}); the assertion below "
+            "would prove nothing about the exclusion logic"
+        )
+
         matches = _matching_processes(ancestors | {own_pid})
         matched_pids = {pid for pid, _cmdline in matches}
         assert marker.pid in matched_pids, (

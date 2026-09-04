@@ -48,13 +48,17 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import managed_recall  # noqa: E402
 
 from exomem import (  # noqa: E402
     deferred_index,
     derived_drain,
     derived_receipts,
-    lexstore,
     memory_refs,
+    mode,
     pending_recall,
     readiness,
     semantic_writes,
@@ -235,32 +239,224 @@ def _reconciliation_demanded(vault_root: Path) -> int:
     return derived_receipts.recoverable_batch_count(vault_root)
 
 
+#: A component this many attempts deep has stopped being a transient retry.
+#: `retry_component` backs off 5s * 2**(attempts-1) capped at 120s, so the
+#: third attempt is the first one whose next window is a minute away; below it
+#: the drain is retrying, which is ordinary, not held back.
+STUCK_ATTEMPT_THRESHOLD = 3
+
+
+def _drain_observation(vault_root: Path) -> dict[str, int]:
+    """What the store says about components a burst has not settled yet.
+
+    Content-free by construction: counts, a mode name and ages -- no batch id,
+    component name, path or failure text.
+
+    The dueness test is the product's own, character for character
+    (`derived_receipts.due_component_count`), because the two counters must not
+    disagree about a row. They did: `retry_component` stamps a `failure_code`
+    and bumps `attempt_count` on every transient retry and leaves the row
+    `retryable`, and nothing clears that code until the component completes. A
+    predicate reading "attempted, and carrying a code" therefore called the
+    ordinary first retry of a lease that outlived its dispatch *stuck* -- while
+    `due_component_count` counted the same row as due and
+    `claim_ready_components` would have claimed it on the very next pass.
+
+    So the counters are split by what an operator would do about them:
+
+    * `retrying` -- due, and attempted before. The drain will pick it up. This
+      is the common case on a real corpus and it is not a fault.
+    * `stuck` -- NOT due (backing off into the future, or held under an
+      unexpired claim) and at least `STUCK_ATTEMPT_THRESHOLD` attempts deep.
+      More draining will not clear this inside any window worth waiting.
+    * `failed` -- carrying a failure code while not due. Reported, but not on
+      its own a reason to stop: the backoff is exactly the mechanism that
+      clears it.
+    * `claimed` -- held under a live lease. `drain_once` leaves one behind when
+      a batch's committed proof is not `ready`, and neither `due` nor `stuck`
+      can see it, so a run could otherwise report "converged" with work
+      parked under a claim nobody is working.
+
+    An unreadable store reports -1 rather than zero, because a counter that
+    cannot be read has not proved anything.
+    """
+    try:
+        due = int(derived_receipts.due_component_count(vault_root))
+    except Exception:  # noqa: BLE001 - an unreadable counter cannot prove zero
+        due = -1
+
+    unreadable = {
+        "due": due,
+        "claimed": -1,
+        "retrying": -1,
+        "stuck": -1,
+        "failed": -1,
+        "max_attempt_count": -1,
+    }
+    rows: list[tuple[Any, ...]] = []
+    try:
+        if deferred_index.store_path(vault_root).exists():
+            connection = deferred_index._connect_readonly(vault_root)
+            try:
+                # `is_due` is `due_component_count`'s WHERE clause verbatim,
+                # evaluated per row and against the same `now`.
+                rows = connection.execute(
+                    "SELECT c.state, c.attempt_count, c.claim_expires_at, "
+                    "c.failure_code, "
+                    "(CASE WHEN (c.state = 'ready' OR "
+                    "(c.state = 'retryable' AND c.next_attempt_at <= :now) OR "
+                    "(c.state = 'claimed' AND c.claim_expires_at <= :now)) "
+                    "AND NOT EXISTS (SELECT 1 FROM pending_recall_rows AS p "
+                    "WHERE p.batch_id = c.batch_id AND p.state = 'prepared') "
+                    "THEN 1 ELSE 0 END) AS is_due "
+                    "FROM derived_batch_components AS c "
+                    "JOIN derived_batches AS b ON b.batch_id = c.batch_id "
+                    "WHERE b.state = 'ready' "
+                    "AND c.state IN ('ready', 'claimed', 'retryable')",
+                    {"now": time.time()},
+                ).fetchall()
+            finally:
+                connection.close()
+    except Exception:  # noqa: BLE001 - same
+        return unreadable
+
+    now = time.time()
+    claimed = 0
+    retrying = 0
+    stuck = 0
+    failed = 0
+    max_attempt_count = 0
+    for state, attempt_count, claim_expires_at, failure_code, is_due in rows:
+        attempts = int(attempt_count or 0)
+        max_attempt_count = max(max_attempt_count, attempts)
+        if state == "claimed" and (
+            claim_expires_at is None or float(claim_expires_at) > now
+        ):
+            claimed += 1
+        if int(is_due or 0):
+            if attempts > 0:
+                retrying += 1
+            continue
+        if attempts >= STUCK_ATTEMPT_THRESHOLD:
+            stuck += 1
+        if failure_code is not None:
+            failed += 1
+    return {
+        "due": due,
+        "claimed": claimed,
+        "retrying": retrying,
+        "stuck": stuck,
+        "failed": failed,
+        "max_attempt_count": max_attempt_count,
+    }
+
+
 def _converge(
     vault_root: Path, *, bound_seconds: float = CONVERGENCE_BOUND_SECONDS
-) -> tuple[float, bool]:
-    """Drain the burst on the wall clock and report whether it settled.
+) -> tuple[float, bool, dict[str, Any]]:
+    """Drain the burst in bounded passes and report what the drain did.
 
     The wall clock is the point: the store's retry backoff is a wall-clock
     deadline, so a burst's real convergence window is a real wait. Between
     passes it yields rather than spinning, because a hot loop competes with the
     very workers it is waiting on.
+
+    A pass claims `derived_drain.progress_limit()` -- whatever the scheduler's
+    own allowance for this cell's mode is, which is what a served drain would
+    use. That is a per-machine number, not a constant: `mode.resolve_mode()`
+    reads `EXOMEM_MODE`, then `~/.exomem/config.json` (or `EXOMEM_CONFIG_PATH`),
+    so a box configured `performance` claims 32 and a default one claims 16.
+    Both the mode and the limit are reported, because a convergence number
+    measured at 32 and a convergence number measured at 16 are not comparable
+    and nothing else in the report would say which was which.
+
+    **The bound is a checkpoint between passes, not a hard stop.** There is no
+    intra-pass timeout: `drain_once` dispatches its whole claim synchronously,
+    so a bound of 120s is routinely overrun by a pass that takes 200 -- the
+    reported `bound_overrun_seconds` says by how much. A `drain_once` that
+    wedges outright is therefore not survivable here; the caller's own
+    `timeout` is the only thing that ends such a run.
+
+    What the drain saw is reported alongside whether it finished, because
+    "did not converge" cannot distinguish the two outcomes an operator acts on
+    differently -- a deep backlog that is draining and wants a longer window,
+    and a drain that is stuck and wants a person. It stops early only on the
+    second of those: `stuck` (not due and several attempts deep) or two
+    consecutive passes that completed nothing. An ordinary retry is neither.
     """
     dispatch = derived_drain.component_dispatcher()
     observe = derived_drain.canonical_generation_observer()
+    limit = derived_drain.progress_limit()
+    mode_name = mode.resolve_mode()
     started = time.monotonic()
     deadline = started + float(bound_seconds)
+    passes = 0
+    completed = 0
+    stalled_passes = 0
     while True:
-        derived_drain.drain_once(
+        passes += 1
+        moved = derived_drain.drain_once(
             vault_root,
             dispatch=dispatch,
             observe_current_generation=observe,
             visibility_publisher=pending_recall.publish,
-            limit=32,
+            limit=limit,
         )
-        if not derived_receipts.due_component_count(vault_root):
-            return round(time.monotonic() - started, 3), True
+        completed += int(moved)
+        stalled_passes = 0 if moved else stalled_passes + 1
+        observation = _drain_observation(vault_root)
+        try:
+            last_pass = derived_drain.last_pass_observation(vault_root)
+        except Exception:  # noqa: BLE001 - a report is worth more than a crash
+            last_pass = {}
+        # After the observation reads, not before: they are part of the pass a
+        # rate is being computed over.
+        elapsed = time.monotonic() - started
+        due = observation["due"]
+        drain = {
+            "mode": mode_name,
+            "limit": limit,
+            "passes": passes,
+            "completed": completed,
+            "due": due,
+            "claimed": observation["claimed"],
+            "retrying": observation["retrying"],
+            "failed": observation["failed"],
+            "stuck": observation["stuck"],
+            "max_attempt_count": observation["max_attempt_count"],
+            "stalled_passes": stalled_passes,
+            "rate_components_per_min": (
+                round(completed / elapsed * 60.0, 2) if elapsed > 0 else 0.0
+            ),
+            "projected_seconds_to_converge": None,
+            "bound_overrun_seconds": round(
+                max(0.0, elapsed - float(bound_seconds)), 3
+            ),
+            "oldest_due_age_seconds": last_pass.get("oldest_due_age_seconds"),
+        }
+        if due > 0 and completed > 0 and elapsed > 0:
+            drain["projected_seconds_to_converge"] = round(
+                due * elapsed / completed, 1
+            )
+        # Convergence is an empty queue, not merely an empty DUE queue. A final
+        # pass in which every remaining component fails transiently leaves
+        # `due == 0` for the length of the backoff, and a row parked under a
+        # live lease is invisible to `due` entirely. Reporting "converged" over
+        # either is the exact outcome these counters exist to prevent, so they
+        # gate the verdict rather than only appearing in the report.
+        if due == 0 and observation["stuck"] == 0 and observation["claimed"] == 0:
+            return round(elapsed, 3), True, drain
+        # Stopping early is for the two states more waiting cannot fix: work
+        # that is neither due nor shallow, and passes that move nothing. A row
+        # backing off after one failed attempt is not either of them -- it is
+        # what a drain doing its job looks like. An unreadable count (-1) stops
+        # too, because a counter that cannot be read has proved nothing.
+        if observation["stuck"] > 0 or observation["stuck"] < 0:
+            return round(elapsed, 3), False, drain
+        if stalled_passes >= 2:
+            return round(elapsed, 3), False, drain
         if time.monotonic() >= deadline:
-            return round(time.monotonic() - started, 3), False
+            return round(elapsed, 3), False, drain
         time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
 
 
@@ -289,22 +485,27 @@ def measure(
 
     os.environ["EXOMEM_FAST_DURABLE_ACK"] = "1"
     # Managed admission, because the pending overlay is scoped to managed
-    # recall and an offline caller keeps its source-walk fallback. Whether the
-    # catalogue proof is actually admitted is recorded rather than asserted:
-    # `warming` is a truthful outcome under the contract, and a reader has to
-    # be able to tell a real warm answer from a harness that never had an
-    # admitted catalogue to answer from.
-    lexstore.ensure_fresh(root)
-    readiness.manage_runtime()
-    readiness.begin_warm()
-    readiness.finish_warm()
-    admission = readiness.retrieval_admission(root)
-    recall_admission = str(admission.get("state", "unknown"))
-
-    full_receipts_before = _full_receipt_count(root)
+    # recall and an offline caller keeps its source-walk fallback -- and
+    # asserted, not merely recorded. `warming` is a truthful outcome of the
+    # read contract, but a harness that never had an admitted catalogue answers
+    # `warming` to everything and measures an unwarmed corpus-context build on
+    # every write. Measured on a 3,789-page copy, that was the difference
+    # between a 377ms edit median with exact reads and a 2,623ms one with a
+    # 27.7s first sample and no exact read at all. The acceptance would have
+    # been reporting the harness.
+    #
+    # This is the served process's own warm-up, shared with the deterministic
+    # gate as one object: see `scripts/managed_recall.py`.
     durations: dict[str, list[float]] = {name: [] for name in OPERATIONS}
     outcomes = {"exact": 0, "warming": 0, "stale": 0}
+    # The warm-up manages the runtime, so it belongs inside the same `finally`
+    # that gives it back: a warm-up that raises after managing would otherwise
+    # leave this process managed for good.
     try:
+        recall_admission = str(
+            managed_recall.enter_managed_recall(root).get("state", "unknown")
+        )
+        full_receipts_before = _full_receipt_count(root)
         for index in range(samples_per_operation):
             identity = str(uuid.UUID(int=index + 1))
             # An entity page belongs under Entities/: the semantic contract
@@ -333,7 +534,7 @@ def measure(
     finally:
         readiness.unmanage_runtime()
 
-    convergence_seconds, converged = _converge(
+    convergence_seconds, converged, drain = _converge(
         root, bound_seconds=convergence_bound_seconds
     )
     full_receipts_after = _full_receipt_count(root)
@@ -361,9 +562,73 @@ def measure(
         "read_your_write": outcomes,
         "uncovered_full_receipts": uncovered,
         "post_burst_convergence_seconds": convergence_seconds,
+        "post_burst_convergence_bound_seconds": round(
+            float(convergence_bound_seconds), 1
+        ),
         "post_burst_converged": converged,
+        "drain": drain,
         "reconciliation_demanded": _reconciliation_demanded(root),
     }
+
+
+def _convergence_failure(report: dict[str, Any]) -> str:
+    """Say which non-convergence this was, because they are not one thing.
+
+    A deep backlog that is draining wants a longer window and a look at what a
+    single dispatch costs. A drain that is stuck wants a person: a component
+    that is not due and is several attempts deep will not clear by waiting. A
+    counter that could not be read is a third thing and must never be rendered
+    as either -- "the backlog is draining" is a claim, and an unreadable store
+    has not earned it. "Did not converge" is true of all of them and
+    actionable for none, and it is what the first live run said.
+    """
+    bound = float(
+        report.get(
+            "post_burst_convergence_bound_seconds", CONVERGENCE_BOUND_SECONDS
+        )
+    )
+    headline = f"the post-burst backlog did not converge within {bound:.0f}s"
+    drain = report.get("drain")
+    if not isinstance(drain, dict):
+        return headline
+    passes = int(drain.get("passes", 0))
+    stuck = int(drain.get("stuck", 0))
+    failed = int(drain.get("failed", 0))
+    due = int(drain.get("due", 0))
+    if stuck < 0 or failed < 0 or due < 0:
+        return f"{headline}: the drain observation was unreadable"
+    if stuck:
+        held = (
+            f"{stuck} component(s) held back at "
+            f"{int(drain.get('max_attempt_count', 0))} attempt(s)"
+        )
+        if failed:
+            held += f", {failed} carrying a failure code"
+        return f"{headline}: drain stuck ({held}) after {passes} pass(es)"
+    if int(drain.get("stalled_passes", 0)) >= 2:
+        return (
+            f"{headline}: drain stuck (no component completed in the last "
+            f"2 of {passes} pass(es))"
+        )
+    rate = float(drain.get("rate_components_per_min") or 0.0)
+    if rate <= 0.0:
+        return (
+            f"{headline}: drain stuck (no component completed in "
+            f"{passes} pass(es))"
+        )
+    projected = drain.get("projected_seconds_to_converge")
+    detail = (
+        "" if projected is None else f", projected {float(projected):.0f}s to drain"
+    )
+    retrying = int(drain.get("retrying", 0))
+    if retrying:
+        # Ordinary, and worth saying: it is the visible half of a lease that
+        # did not outlive its dispatch.
+        detail += f", {retrying} retrying"
+    return (
+        f"{headline}: deep backlog draining at {rate:g} component(s)/min"
+        f"{detail}"
+    )
 
 
 def check(report: dict[str, Any]) -> None:
@@ -394,10 +659,7 @@ def check(report: dict[str, Any]) -> None:
             + ("unreadable" if uncovered < 0 else f"{uncovered} above zero")
         )
     if not report["post_burst_converged"]:
-        failures.append(
-            "the post-burst backlog did not converge within "
-            f"{CONVERGENCE_BOUND_SECONDS:.0f}s"
-        )
+        failures.append(_convergence_failure(report))
     demanded = int(report.get("reconciliation_demanded", 0))
     if demanded:
         failures.append(
@@ -423,6 +685,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--connector-url")
+    parser.add_argument(
+        "--convergence-bound",
+        type=float,
+        default=CONVERGENCE_BOUND_SECONDS,
+        help="seconds the post-burst backlog is given to drain; the design's "
+        "own oldest-required-component alarm is the default, and a shorter "
+        "one narrows the window rather than the assertion -- the run still "
+        "fails, and still says which non-convergence it was",
+    )
     args = parser.parse_args(argv)
 
     if args.vault is None:
@@ -444,6 +715,7 @@ def main(argv: list[str] | None = None) -> int:
         state_dir=args.state_dir or (args.vault.parent / "acceptance-state"),
         connector_url=connector_url,
         connector_token=os.environ.get("EXOMEM_CONNECTOR_TOKEN"),
+        convergence_bound_seconds=args.convergence_bound,
     )
     print(json.dumps(report, sort_keys=True))
     if args.check:
