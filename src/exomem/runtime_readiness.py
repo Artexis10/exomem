@@ -363,9 +363,16 @@ def build_runtime_readiness(
     reasons: list[str] = []
     if mcp_tool_surface_sha256 is None:
         reasons.append("mcp_tool_surface_unavailable")
-    if coordination.get("status_timed_out") is True:
-        reasons.append("coordination_status_timeout")
     if enabled:
+        # A blocked status probe leaves the lease state unmeasured, and an
+        # unmeasured lease is exactly what takeover must not be attempted on.
+        # It says nothing about a standalone cell: with no coordinator there is
+        # no lease to confirm, and the contract is that standalone stays ready
+        # without multi-host coordination.  `enabled` is safe to trust in the
+        # timed-out payload because it is read from the environment rather than
+        # from the probe that failed.
+        if coordination.get("status_timed_out") is True:
+            reasons.append("coordination_status_timeout")
         if not healthy:
             reasons.append("coordinator_unavailable")
         if role not in {"writer", "follower"}:
