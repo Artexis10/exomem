@@ -1113,3 +1113,42 @@ def test_a_malformed_bucket_does_not_cost_a_page_write_its_delta(vault: Path) ->
     assert updated["emission"]["writes"] == before + 1
     assert due_state_module._unbucket(["not", "a", "bucket"]) == []
     assert due_state_module.load(vault)["emission"]["writes"] == before + 1
+
+
+def test_a_kb_relative_supersession_pointer_resolves(vault: Path) -> None:
+    """`[[Notes/...]]` is the spelling the vault's own pages use.
+
+    Supersession pointers are written as KB-relative wikilinks, without the
+    `Knowledge Base/` prefix — the form the write tools document as tolerated.
+    The resolver tries the raw target, the target plus `.md`, an unambiguous bare
+    stem, and the filesystem at `vault_root / target`, and none of those reach a
+    page stored under the prefix.
+
+    Every other test in this module writes the prefixed spelling, which is why
+    the gap went unmeasured: on a real vault it reported 145 intact chains as
+    broken, and a reader cannot distinguish that from the rot the check exists
+    to find.
+    """
+    real = _prediction(vault, "successor", check_by="2026-12-01")
+    kb_relative = real.removeprefix("Knowledge Base/").removesuffix(".md")
+    assert not kb_relative.startswith("Knowledge Base/")
+
+    _dangling(vault, "old", target=kb_relative)
+    due_state_module.reconcile(vault, today=TODAY)
+
+    served = _served(vault)
+    # `served` is None when nothing is due at all, which is the outcome here:
+    # the chain resolves, so the projection has no row to publish.
+    counted = 0 if served is None else served["categories"].get("supersession_integrity", 0)
+    assert counted == 0, (
+        "a pointer naming an existing page KB-relative was reported as dangling"
+    )
+
+
+def test_a_genuinely_dangling_pointer_is_still_reported(vault: Path) -> None:
+    """The control: accepting the prefix must not blind the check to real rot."""
+    _dangling(vault, "old", target="Notes/Insights/nowhere-at-all")
+    due_state_module.reconcile(vault, today=TODAY)
+
+    served = _served(vault)
+    assert served["categories"]["supersession_integrity"] == 1

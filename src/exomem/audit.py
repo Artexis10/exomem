@@ -4550,7 +4550,14 @@ def _check_supersession_integrity(
         target = _supersession_link_target(raw)
         if not target:
             return None
-        for candidate in (target, f"{target}.md"):
+        # `known` holds vault-relative paths, while a supersession pointer is
+        # normally written KB-relative -- `[[Notes/Insights/x]]`, the spelling the
+        # write tools document as tolerated and the one the vault's own pages
+        # use. Without the prefixed candidate every such pointer resolves to
+        # nothing and an intact chain is reported as rot, which is indis-
+        # tinguishable from the rot this check exists to find.
+        prefixed = target if target.startswith(kb_prefix()) else f"{kb_prefix()}{target}"
+        for candidate in (target, f"{target}.md", prefixed, f"{prefixed}.md"):
             if candidate in known:
                 return candidate if candidate.endswith(".md") else f"{candidate}.md"
         # A bare name is a legitimate Obsidian spelling; resolve it only when it
@@ -4563,7 +4570,7 @@ def _check_supersession_integrity(
                 return matches[0]
         # Last resort: the page may live outside the walked set (a curated tree),
         # so believe the filesystem before calling a pointer broken.
-        for candidate in (target, f"{target}.md"):
+        for candidate in (target, f"{target}.md", prefixed, f"{prefixed}.md"):
             if (vault_root / candidate).exists():
                 return candidate if candidate.endswith(".md") else f"{candidate}.md"
         return None
