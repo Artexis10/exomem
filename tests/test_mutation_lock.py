@@ -1966,10 +1966,14 @@ def test_refusal_is_logged_at_warning_even_when_the_caller_swallows_it(
 def test_the_refusal_row_and_the_raised_error_cannot_drift_apart(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The logged row is built FROM the payload, so it can never lag it.
+    """Every key the row carries is read out of the payload, value for value.
 
-    Pinned as a relationship rather than a field list: a future key added to
-    `MUTATION_BUSY` should not need a second edit here to reach the log.
+    This is a field list, not a relationship, and it cannot be anything else:
+    `_refused` selects its keys explicitly so an error payload is never copied
+    into the log wholesale.  What is pinned is per-key provenance for the named
+    keys -- a row that invented, stale-cached or mistyped one of them goes red
+    here.  A new `MUTATION_BUSY` key does need a second edit, in `_refused` and
+    then in this list; `last_holder` and `committed` both showed that.
     """
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -2069,13 +2073,16 @@ def test_an_overdue_hold_still_warns_and_logs_its_long_hold_event(
     """
     vault = tmp_path / "vault"
     vault.mkdir()
+    # Both numbers are under `_QUIET_HOLD_MS`, deliberately: a 50ms hold trips
+    # the slow-hold arm of `_boundary_event_level` on its own, so the release
+    # row reached INFO whether or not the overdue escalation existed at all.
     coordinator = VaultMutationCoordinator(
-        tmp_path / "state", vault, long_holder_seconds=0.01
+        tmp_path / "state", vault, long_holder_seconds=0.001
     )
 
     with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
         with _reserved_state_hold(coordinator):
-            time.sleep(0.05)
+            time.sleep(0.002)
 
     long_holds = _events(caplog, "mutation_lock_long_hold")
     assert long_holds, "an overdue hold emitted no mutation_lock_long_hold event"
@@ -2197,9 +2204,7 @@ def test_a_genuinely_routine_hold_is_still_demoted(
     assert released.levelno == logging.DEBUG
 
 
-def test_the_acquire_threshold_tracks_the_coordinator_poll_interval(
-    tmp_path: Path,
-) -> None:
+def test_the_acquire_threshold_tracks_the_coordinator_poll_interval() -> None:
     """The acquire bar IS the poll interval, not a constant that resembles it.
 
     Pinning the derivation rather than a number: a wait that outlasted one

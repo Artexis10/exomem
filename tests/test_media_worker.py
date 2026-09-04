@@ -3299,7 +3299,15 @@ def test_an_in_process_enqueue_still_wakes_the_supervisor_immediately(
             sidecar_path=vault / result.sidecar_path,
             media_type="audio",
         )
-        assert launched.wait(timeout=5.0), "an in-process enqueue did not wake the supervisor"
+        # Derived, not a literal: a plain 5.0 is exactly
+        # `_SUPERVISE_FORCED_RECHECK_SECONDS`, so the backstop alone satisfied
+        # it and this test stayed green with the signature frozen blind
+        # (measured 2.555s against a live 0.059s).  Four polls is a wall the
+        # wake path clears by two orders of magnitude and the backstop cannot.
+        deadline = media_worker._SUPERVISE_POLL_SECONDS * 4
+        assert launched.wait(timeout=deadline), (
+            f"an in-process enqueue did not wake the supervisor within {deadline}s"
+        )
     finally:
         worker._stop_event.set()
         worker._wake.set()
@@ -3333,7 +3341,10 @@ def test_the_forced_recheck_still_starts_a_worker_when_the_signature_is_blind(
     assert media_worker._SUPERVISE_FORCED_RECHECK_SECONDS <= 10.0, (
         "the forced re-check has drifted long enough to stop being a backstop"
     )
-    backstop_ceiling = 10.0
+    # Independent of the pin above: a value that drifted into the band just
+    # under the ceiling would otherwise surface as an intermittent failure on
+    # a loaded box instead of a clean red.
+    backstop_ceiling = 10.0 + 2 * media_worker._SUPERVISE_POLL_SECONDS
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     assert worker._store is not None
     monkeypatch.setattr(media_worker, "_job_store_signature", lambda _store: ("frozen",))

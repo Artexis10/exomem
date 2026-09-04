@@ -2138,10 +2138,13 @@ class VaultMutationCoordinator:
         # where a caller happened to log what it caught, and a caller that
         # retried quietly left the refusal invisible.
         #
-        # The row is built FROM the payload rather than beside it, so the log
-        # and the raised error cannot drift apart: every key a diagnosis read
-        # off `exomem.log.4` is here because it is in `details`, not because
-        # somebody remembered to copy it.  The contention counters matter more
+        # Every value is read out of `details`, so the row and the raised error
+        # cannot disagree about a key they share.  The key list stays explicit
+        # rather than splatting `details`: a log row that copies an error
+        # payload wholesale is how unbounded content reaches the log.  So the
+        # list is a deliberate selection -- `committed` is boilerplate and is
+        # left out -- and adding a `MUTATION_BUSY` key that a diagnosis would
+        # read means adding it here too.  The contention counters matter more
         # now than they did, not less: `_contention_view` is the only part of
         # this payload that can show a bounded waiter losing to a stream of
         # short holds, and those short holds no longer log at INFO themselves.
@@ -2154,6 +2157,11 @@ class VaultMutationCoordinator:
             holder_kind=holder.get("holder_kind"),
             age_seconds=holder.get("age_seconds"),
             overdue=holder.get("overdue"),
+            # The starvation case is exactly the one this row exists for: the
+            # boundary was free at the instant of the probe, so every `holder`
+            # key above is null, and `last_holder` is the only thing that can
+            # still name what the bounded acquire lost to.
+            last_holder=details.get("last_holder"),
             status=details.get("status"),
             retry_after_ms=details.get("retry_after_ms"),
             wait_ms=details.get("wait_ms"),
