@@ -2094,6 +2094,15 @@ def test_an_overdue_hold_still_warns_and_logs_its_long_hold_event(
     # An overdue hold is interesting by construction: its release row is never
     # demoted, whatever the holder kind.
     [released] = _events(caplog, "mutation_lock_released")
+    # The hold has to stay inside the band for the escalation to be the thing
+    # under test: past `_QUIET_HOLD_MS` the slow-hold arm reaches INFO on its
+    # own and this assertion would pass with the escalation deleted.  The row
+    # already carries its own measurement, so an overshoot on a loaded box is
+    # a visible red here rather than a silent loss of power.
+    assert released.fields["hold_ms"] < mutation_lock_module._QUIET_HOLD_MS, (
+        "the hold outran the quiet band; the release row reached INFO through "
+        "the slow-hold arm, not through the overdue escalation"
+    )
     assert released.levelno == logging.INFO
 
 

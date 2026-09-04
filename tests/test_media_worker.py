@@ -3244,6 +3244,19 @@ def test_a_store_write_is_still_seen_within_one_poll(
     monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
     monkeypatch.setattr(worker, "_launch_child", lambda: (launched.set(), None)[1])
 
+    # The stub is built BEFORE the supervisor thread starts, deliberately, and
+    # the placement is load-bearing rather than tidiness.  The deadline below
+    # is measured from the enqueue, but the backstop's clock is anchored at the
+    # supervisor's first idle pass -- so everything that happens after that
+    # pass and before the enqueue is subtracted from this test's margin.  A
+    # SLOWER fixture therefore shrinks its power rather than growing it, which
+    # is the inverse of the usual intuition, and at an enqueue 3.0s past the
+    # anchor the test reverts silently to passing on the backstop it exists to
+    # exclude.  Measured under a blinded signature: stub inside that window,
+    # blind latency 2.539s (margin +0.539s); stub outside it, 4.055s (+2.055s).
+    # Above `time.sleep(1.0)` is NOT far enough -- the thread is already
+    # running by then and the stub's ~1.7s still lands on the anchor's clock.
+    result = _preserve_media_stub(vault, filename="unwoken.mp3")
     thread = threading.Thread(target=worker._supervise, daemon=True)
     thread.start()
     try:
@@ -3251,7 +3264,6 @@ def test_a_store_write_is_still_seen_within_one_poll(
         # below has to be noticed by the cheap path rather than the first pass.
         time.sleep(1.0)
         assert not launched.is_set()
-        result = _preserve_media_stub(vault, filename="unwoken.mp3")
         worker._store.enqueue(
             media_jobs.MediaJob(
                 binary_path=vault / result.path,
@@ -3289,11 +3301,18 @@ def test_an_in_process_enqueue_still_wakes_the_supervisor_immediately(
     monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
     monkeypatch.setattr(worker, "_launch_child", lambda: (launched.set(), None)[1])
 
+    # Built before the thread starts, for the reason set out in the sibling
+    # above: everything between the supervisor's first idle pass and the
+    # enqueue is subtracted from the backstop's remaining time, so keeping the
+    # stub off that clock is what stops a slower fixture from silently
+    # reverting this test to the backstop it exists to exclude.  Measured under
+    # a blinded signature: 2.539s blind latency with the stub on the clock,
+    # 4.055s with it off -- against a 2.0s deadline.
+    result = _preserve_media_stub(vault, filename="woken.mp3")
     thread = threading.Thread(target=worker._supervise, daemon=True)
     thread.start()
     try:
         time.sleep(1.0)
-        result = _preserve_media_stub(vault, filename="woken.mp3")
         worker.enqueue(
             binary_path=vault / result.path,
             sidecar_path=vault / result.sidecar_path,
