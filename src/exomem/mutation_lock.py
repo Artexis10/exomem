@@ -42,6 +42,32 @@ _BUSY_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN, errno.EDEADLK})
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 _DEFAULT_LONG_HOLDER_SECONDS = 30.0
 _STATUS_TIMEOUT_SECONDS = 0.25
+# Boundary log volume.  Reserved-state identity coordination takes and releases
+# this boundary several times a second per cell, for holds measured in
+# fractions of a millisecond, and logging that pair at INFO wrote roughly
+# 87,000 rows an hour -- enough to rotate a 5 MB log every eight minutes and
+# destroy the retention an operator needs to diagnose anything an hour old.
+#
+# The routine pair is therefore demoted to DEBUG, and only while it is
+# genuinely routine.  The test is measured, not per-kind: a hold that waited,
+# ran long, went overdue, or was refused stays at INFO or louder whatever its
+# holder kind, because those are the rows a real diagnosis reads.  Quieting the
+# boring case must never quiet the interesting one.
+#
+# The acquire side is NOT a constant.  It derives from the coordinator's own
+# `poll_interval_seconds`, because that interval is what makes "contended"
+# measurable: an acquire that outlasted one poll went round the retry loop, so
+# the boundary was genuinely held by somebody else rather than merely missed.
+# Deriving it keeps the two in step if the interval is ever tuned, and it puts
+# the visible band at 25ms by default instead of a number picked by hand.
+#
+# The hold side has no such derivation, so it is a constant -- but a small one.
+# Measured over 5,000 uncontended reserved-state holds on a loaded box, one
+# exceeded 1ms and none exceeded 5ms, so 5ms costs nothing in volume while
+# leaving a 5ms hold (roughly 10x the uncontended median) visible.  An earlier
+# 100ms pair demoted the entire band below it, which hid a 55ms contended
+# acquire -- exactly the signal these thresholds exist to preserve.
+_QUIET_HOLD_MS = 5.0
 _HOLDER_SCHEMA = 1
 # Contention attribution window.  A boundary flag can never explain a stream of
 # short holds starving a bounded waiter: every one-shot probe lands in a gap and
@@ -91,13 +117,54 @@ def _windows_last_error(ctypes_module: Any) -> int:
     return int(getattr(ctypes_module, "get_last_error")())
 
 
-def _log_mutation_lock_event(event: str, **fields: Any) -> None:
+def _log_mutation_lock_event(
+    event: str, *, level: int = logging.INFO, **fields: Any
+) -> None:
     try:
+        # Checked before anything is built: on the reserved-state path this
+        # runs several times a second per cell, and a demoted event should
+        # cost nothing at all rather than merely costing less.
+        if not logger.isEnabledFor(level):
+            return
         from .log_events import log_event
 
-        log_event(logger, logging.INFO, event, fields=fields)
+        log_event(logger, level, event, fields=fields)
     except Exception:  # noqa: BLE001 - observability must never break a mutation
         pass
+
+
+def _boundary_event_level(
+    *,
+    publish_holder_metadata: bool,
+    wait_ms: float,
+    hold_ms: float | None,
+    poll_interval_seconds: float,
+) -> int:
+    """Return DEBUG only for a short, uncontended, metadata-free reserved hold.
+
+    Three separate things have to be true before a boundary row is demoted, and
+    each of them is the reason one of the escalations survives:
+
+    * `publish_holder_metadata` is False -- the synthetic reserved-state class
+      the coordinator already carves out for high-frequency filesystem-identity
+      work.  A command or lifecycle boundary publishes a holder sidecar, runs at
+      human frequency, and keeps its INFO audit row.
+    * the acquire did not outlast one acquisition poll, so a contended acquire
+      still reports itself.  An acquire that waited longer than
+      `poll_interval_seconds` went round the retry loop at least once, which is
+      the cheapest honest definition of contention this code can measure.
+    * the hold was short, so a slow hold still reports itself.
+
+    Anything else is INFO.  `hold_ms` is `None` at acquire time, where the wait
+    is the only thing measured yet.
+    """
+    if publish_holder_metadata:
+        return logging.INFO
+    if wait_ms >= poll_interval_seconds * 1000.0:
+        return logging.INFO
+    if hold_ms is not None and hold_ms >= _QUIET_HOLD_MS:
+        return logging.INFO
+    return logging.DEBUG
 
 
 def _bump_boundary_metric(name: str, labels: dict[str, str] | None = None) -> None:
@@ -1937,6 +2004,12 @@ class VaultMutationCoordinator:
                 state.long_warning_emitted = False
             _log_mutation_lock_event(
                 "mutation_lock_acquired",
+                level=_boundary_event_level(
+                    publish_holder_metadata=publish_holder_metadata,
+                    wait_ms=wait_ms,
+                    hold_ms=None,
+                    poll_interval_seconds=self.poll_interval_seconds,
+                ),
                 operation=operation,
                 holder_kind=holder_kind,
                 wait_ms=wait_ms,
@@ -2001,8 +2074,13 @@ class VaultMutationCoordinator:
                         _safe_label(holder_kind, fallback="unknown"),
                         hold_ms,
                     )
+                    # WARNING, matching the human line immediately above it:
+                    # the structured twin of the loudest thing this boundary
+                    # says should not be the one level that a quieted log
+                    # might be filtered below.
                     _log_mutation_lock_event(
                         "mutation_lock_long_hold",
+                        level=logging.WARNING,
                         operation=operation,
                         holder_kind=holder_kind,
                         hold_ms=hold_ms,
@@ -2011,8 +2089,23 @@ class VaultMutationCoordinator:
                     _bump_boundary_metric("exomem_boundary_overdue_total")
                 _log_mutation_lock_event(
                     "mutation_lock_released",
+                    # An overdue hold is interesting by construction, whatever
+                    # its measurements say about the routine case.
+                    level=(
+                        logging.INFO
+                        if overdue
+                        else _boundary_event_level(
+                            publish_holder_metadata=publish_holder_metadata,
+                            wait_ms=wait_ms,
+                            hold_ms=hold_ms,
+                            poll_interval_seconds=self.poll_interval_seconds,
+                        )
+                    ),
                     operation=operation,
                     holder_kind=holder_kind,
+                    # Carried so an INFO release row stands on its own: its
+                    # paired acquire row may legitimately have been demoted.
+                    wait_ms=wait_ms,
                     hold_ms=hold_ms,
                 )
                 _observe_boundary_ms("exomem_boundary_hold_ms", hold_ms)
@@ -2038,7 +2131,46 @@ class VaultMutationCoordinator:
         probed = self._probe(state)
         _note_busy_refusal(state, probed)
         probed["contention"] = _contention_view(state)
-        return _mutation_busy(probed, wait_ms=(time.monotonic() - wait_start) * 1000)
+        wait_ms = (time.monotonic() - wait_start) * 1000
+        error = _mutation_busy(probed, wait_ms=wait_ms)
+        # A refusal is the loudest thing this boundary can say, and until now it
+        # said it only through the raised OpError -- so it reached the log only
+        # where a caller happened to log what it caught, and a caller that
+        # retried quietly left the refusal invisible.
+        #
+        # Every value is read out of `details`, so the row and the raised error
+        # cannot disagree about a key they share.  The key list stays explicit
+        # rather than splatting `details`: a log row that copies an error
+        # payload wholesale is how unbounded content reaches the log.  So the
+        # list is a deliberate selection -- `committed` is boilerplate and is
+        # left out -- and adding a `MUTATION_BUSY` key that a diagnosis would
+        # read means adding it here too.  The contention counters matter more
+        # now than they did, not less: `_contention_view` is the only part of
+        # this payload that can show a bounded waiter losing to a stream of
+        # short holds, and those short holds no longer log at INFO themselves.
+        details = error.details
+        holder = details.get("holder") or {}
+        _log_mutation_lock_event(
+            "mutation_lock_refused",
+            level=logging.WARNING,
+            operation=holder.get("operation"),
+            holder_kind=holder.get("holder_kind"),
+            age_seconds=holder.get("age_seconds"),
+            overdue=holder.get("overdue"),
+            # The starvation case is exactly the one this row exists for: the
+            # boundary was free at the instant of the probe, so every `holder`
+            # key above is null, and `last_holder` is the only thing that can
+            # still name what the bounded acquire lost to.
+            last_holder=details.get("last_holder"),
+            status=details.get("status"),
+            retry_after_ms=details.get("retry_after_ms"),
+            wait_ms=details.get("wait_ms"),
+            acquire_attempts=details.get("acquire_attempts"),
+            busy_refusals=details.get("busy_refusals"),
+            busy_refusals_recent=details.get("busy_refusals_recent"),
+            contention_scope=details.get("contention_scope"),
+        )
+        return error
 
     def _probe(self, state: _LocalLockState) -> dict[str, object]:
         local = _snapshot_state(state, emit_warning=True)
