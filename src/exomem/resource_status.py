@@ -208,8 +208,22 @@ def _min_free_vram_mb() -> int:
     return int(gb * 1024)
 
 
-def _probe_nvidia_smi() -> dict[str, Any]:
+#: WSL exposes the host driver here but does not put it on a login shell's PATH.
+#: Without this fallback `which` misses it, the probe reports `unknown`, and
+#: `auto_quiet.decide()` answers "pressure probe unavailable" forever — the
+#: detector fails silent rather than loud.
+_EXTRA_NVIDIA_SMI_PATHS = ("/usr/lib/wsl/lib/nvidia-smi",)
+
+
+def _find_nvidia_smi() -> str | None:
     exe = shutil.which("nvidia-smi")
+    if exe:
+        return exe
+    return next((p for p in _EXTRA_NVIDIA_SMI_PATHS if os.access(p, os.X_OK)), None)
+
+
+def _probe_nvidia_smi() -> dict[str, Any]:
+    exe = _find_nvidia_smi()
     if not exe:
         return {"status": "unavailable", "reason": "nvidia-smi not found"}
     try:

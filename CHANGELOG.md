@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.69.1](https://github.com/Artexis10/exomem/compare/v0.69.0...v0.69.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* **acceptance:** measure the product, not the acceptance harness ([#1057](https://github.com/Artexis10/exomem/issues/1057)) ([5867999](https://github.com/Artexis10/exomem/commit/5867999904e44a423189714aab137b2608180f76))
+* **graph:** stop a busy boundary latching the epoch that disables incremental repair ([#1059](https://github.com/Artexis10/exomem/issues/1059)) ([b71593a](https://github.com/Artexis10/exomem/commit/b71593a63b05fdfe94ee5c5a18592153368b6f8d))
+
 ## [0.69.0](https://github.com/Artexis10/exomem/compare/v0.68.3...v0.69.0) (2026-09-02)
 
 
