@@ -461,6 +461,15 @@ def collect_candidates(
             if timings is not None:
                 timings.error("bm25", e)
         with _span(timings, "keyword"):
+            # Hydration is one of the four stages the contract names, so this
+            # lane reports its source instead of carrying the static `computed`
+            # default. `index` is the basis, not a courtesy: this lane's only
+            # source of paths is the injected `keyword_match_paths` provider,
+            # which resolves from the maintained lexical index and never
+            # enumerates the scope. The branch that CAN enumerate is the
+            # empty-query one in `find._find_keyword`, which marks itself
+            # `computed` when it takes the walk.
+            _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
             # Over-fetch by the same factor the BM25 lane uses, and for the same
             # reason: `collapse_frame_children` and `_eligible` below can drop
             # members, so a lane that supplied exactly the fused depth could

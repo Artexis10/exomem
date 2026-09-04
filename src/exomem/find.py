@@ -1704,6 +1704,7 @@ def find(
                 freshness_key=snapshot.for_scope(walk_scope),
                 failed_out=failed,
                 pending=pending,
+                timings=timings,
             )
     else:
         with _span(timings, "semantic.search"):
@@ -3479,6 +3480,52 @@ def _indexed_eligible_filter_paths(
     return eligible
 
 
+def _index_resolved_scope_paths(
+    vault_root: Path,
+    *,
+    scope: str,
+    freshness: tuple[int, int, str] | None,
+) -> set[str] | None:
+    """Every governed page in `scope`, resolved from the maintained index.
+
+    The empty-query browse shape is the schema default — `ask_memory.query`
+    ships `"default": ""` with "Empty means recent/filtered recall" — and it
+    has neither keyword candidates nor a structured filter, so it used to fall
+    through to `_walk_md`/`walk_vault_md` and enumerate the whole scope on the
+    reader thread. Measured at 19 scope enumerations on a warm managed cell,
+    which is precisely what "The Read Path Never Walks The Corpus" forbids.
+    `query=""` with any filter already avoided it, so the walk was reachable
+    only on the shape the tool surface recommends for browsing.
+
+    A tautology eligibility plan asks the page catalogue for the same set the
+    walk would have produced. `_widening_allowed_paths` already does this at
+    vault scope; this is the same call at the requested scope, without the
+    out-of-KB restriction.
+
+    Returns None when the index cannot answer — warming, stale, or an
+    incomplete catalogue — and the caller then keeps today's behaviour. An
+    offline/CLI reader is unaffected by design: the scan oracle is its
+    documented fallback, and only the MANAGED reader is under the contract.
+    """
+    from . import lexstore
+
+    try:
+        empty = structured_filters.compile_filter(None)
+        result = lexstore.search_eligible_parent_paths_result(
+            vault_root,
+            structured_filters.plan_index_eligibility(empty),
+            scope=scope,
+            freshness=freshness,
+        )
+    except RetrievalIndexWarming:
+        return None
+    except structured_filters.FilterError:
+        return None
+    if not result.readiness.complete or result.value is None:
+        return None
+    return set(result.value)
+
+
 def _find_keyword(
     vault_root: Path,
     *,
@@ -3495,8 +3542,16 @@ def _find_keyword(
     freshness_key: tuple[int, int, str] | None = None,
     failed_out: list[str] | None = None,
     pending: Any | None = None,
+    timings: FindTimings | None = None,
 ) -> list[Hit]:
-    """Keyword-mode recall, hydrating only maintained-index matches."""
+    """Keyword-mode recall, hydrating only maintained-index matches.
+
+    Reports its own source at runtime rather than accepting the static
+    `computed` default: this stage is the hydration lane, it is one of the
+    stages that CAN enumerate the scope, and a stage that can walk has to
+    decide its label from what it actually did. `index` when it consumed a
+    resolved path set, `computed` when it enumerated.
+    """
     lexical_repair = _bounded_lexical_repair_allowed(freshness_key)
     if query_norm:
         candidate_paths = _keyword_match_paths(
@@ -3515,13 +3570,15 @@ def _find_keyword(
             # the structured filter already excludes.
             candidate_paths = [rel for rel in candidate_paths if rel in eligible_paths]
         walk: Iterable[Path] = (vault_root / rel_path for rel_path in candidate_paths)
+        _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
     elif eligible_paths is not None:
         # An empty query with a finite eligible set (a complete category/kind
         # plan resolved through the maintained index) iterates those parents
         # directly rather than walking the scope to rediscover them.
         walk = (vault_root / rel_path for rel_path in eligible_paths)
+        _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
     elif not lexical_repair:
-        from . import lexstore
+        from . import lexstore, readiness
 
         if lexstore.maintained_content_index_enabled():
             catalog = lexstore.get_store(vault_root).catalog_readiness(
@@ -3530,26 +3587,42 @@ def _find_keyword(
             )
             if not catalog.complete:
                 _raise_catalog_outcome(catalog)
-        if scope == "kb":
+        # The empty-query browse shape with no structured filter. A managed
+        # reader resolves the scope from the same page catalogue the filtered
+        # arm uses instead of enumerating it; an offline reader keeps the walk,
+        # which is its documented fallback.
+        indexed = (
+            _index_resolved_scope_paths(vault_root, scope=scope, freshness=freshness_key)
+            if readiness.runtime_managed()
+            else None
+        )
+        if indexed is not None:
+            walk = (vault_root / rel_path for rel_path in indexed)
+            _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
+        elif scope == "kb":
             kb = vault_root / kb_dirname()
             if not kb.is_dir():
                 log.error("KB directory missing: %s", kb)
                 return []
             walk = _walk_md(kb)
+            _mark_source(timings, "keyword", find_types.SOURCE_COMPUTED)
         else:
             from .vault import walk_vault_md
 
             walk = walk_vault_md(vault_root)
+            _mark_source(timings, "keyword", find_types.SOURCE_COMPUTED)
     elif scope == "kb":
         kb = vault_root / kb_dirname()
         if not kb.is_dir():
             log.error("KB directory missing: %s", kb)
             return []
         walk = _walk_md(kb)
+        _mark_source(timings, "keyword", find_types.SOURCE_COMPUTED)
     else:
         from .vault import walk_vault_md
 
         walk = walk_vault_md(vault_root)
+        _mark_source(timings, "keyword", find_types.SOURCE_COMPUTED)
 
     if pending is not None and not pending.empty and not query_norm:
         # The query branch already merged through `_keyword_match_paths`; the
@@ -3777,6 +3850,7 @@ def _find_semantic(
             freshness_key=snapshot.for_scope(scope),
             failed_out=failed_out,
             pending=pending,
+            timings=timings,
         )
         if retrieval_trace is not None:
             retrieval_trace.record_keyword_fallback(
@@ -3880,6 +3954,18 @@ def _find_semantic(
     hits: list[Hit] = []
     seen: set[str] = set()
     with _span(timings, "filter_hits"):
+        # Hit construction is one of the four stages the contract names, so it
+        # reports what it consumed rather than carrying the static `computed`
+        # default. `fused` is a resolved candidate list produced by the ranking
+        # lanes, so this is `index` whenever there is one; the label is derived
+        # from the input rather than written as a constant, so a future change
+        # that feeds this stage an enumeration relabels it instead of hiding
+        # inside a reassuring diagnostic.
+        _mark_source(
+            timings,
+            "filter_hits",
+            find_types.SOURCE_INDEX if fused is not None else find_types.SOURCE_COMPUTED,
+        )
         for rel_path, _score in fused:
             if rel_path in seen:
                 continue
