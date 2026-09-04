@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
+from .conflict_reason import ConflictReason
 from .lifecycle import MetadataConflict
 
 AUTHORIZATION_SESSION_SECRET_NAME: Final = "exomem-authorization-session"
@@ -118,7 +119,10 @@ def _control_basis_digest(control: Mapping[str, object]) -> str:
 def _attestation_mac_input(value: Mapping[str, object]) -> bytes:
     accepted = value["accepted_key_ids"]
     if not isinstance(accepted, list):
-        raise MetadataConflict("authorization membership attestation is invalid")
+        raise MetadataConflict(
+            "authorization membership attestation is invalid",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_ATTESTATION_IS_INVALID,
+        )
     return _framed(
         _ATTESTATION_MAC_DOMAIN,
         (
@@ -189,34 +193,52 @@ def _control_mac_input(value: Mapping[str, object]) -> bytes:
 
 def _required_identifier(value: object) -> str:
     if not isinstance(value, str) or _IDENTIFIER.fullmatch(value) is None:
-        raise MetadataConflict("authorization membership identity is invalid")
+        raise MetadataConflict(
+            "authorization membership identity is invalid",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_IDENTITY_IS_INVALID,
+        )
     return value
 
 
 def _required_time(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_INTEGER:
-        raise MetadataConflict("authorization membership time is invalid")
+        raise MetadataConflict(
+            "authorization membership time is invalid",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TIME_IS_INVALID,
+        )
     return value
 
 
 def _closed_json(raw: bytes, fields: frozenset[str], *, label: str) -> dict[str, object]:
     if not isinstance(raw, bytes) or not 1 <= len(raw) <= MAX_BUNDLE_FILE_BYTES:
-        raise MetadataConflict(f"authorization {label} is invalid")
+        raise MetadataConflict(
+            f"authorization {label} is invalid",
+            reason=ConflictReason.AUTHORIZATION_BUNDLE_DOCUMENT_INVALID,
+        )
 
     def closed(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
         for name, value in pairs:
             if name in result:
-                raise MetadataConflict(f"authorization {label} is invalid")
+                raise MetadataConflict(
+                    f"authorization {label} is invalid",
+                    reason=ConflictReason.AUTHORIZATION_BUNDLE_DOCUMENT_INVALID,
+                )
             result[name] = value
         return result
 
     try:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=closed)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as error:
-        raise MetadataConflict(f"authorization {label} is invalid") from error
+        raise MetadataConflict(
+            f"authorization {label} is invalid",
+            reason=ConflictReason.AUTHORIZATION_BUNDLE_DOCUMENT_INVALID,
+        ) from error
     if not isinstance(value, dict) or set(value) != fields or _canonical(value) != raw:
-        raise MetadataConflict(f"authorization {label} is invalid")
+        raise MetadataConflict(
+            f"authorization {label} is invalid",
+            reason=ConflictReason.AUTHORIZATION_BUNDLE_DOCUMENT_INVALID,
+        )
     return value
 
 
@@ -245,10 +267,16 @@ def build_initial_hosted_authorization_bundle(
         or not recovery_envelope
         or not 1 <= ttl_seconds <= MAX_ATTESTATION_TTL_SECONDS
     ):
-        raise MetadataConflict("authorization membership bootstrap input is invalid")
+        raise MetadataConflict(
+            "authorization membership bootstrap input is invalid",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_BOOTSTRAP_INPUT_IS_INVALID,
+        )
     key = entropy(32)
     if not isinstance(key, bytes) or len(key) != 32:
-        raise MetadataConflict("authorization membership entropy is invalid")
+        raise MetadataConflict(
+            "authorization membership entropy is invalid",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_ENTROPY_IS_INVALID,
+        )
     identity_fields = (key, cell.encode("utf-8"), vault.encode("utf-8"))
     keyring_id = _digest_identifier(
         _KEYRING_ID_DOMAIN, identity_fields, prefix="hosted-keyring-v1-"
@@ -366,7 +394,10 @@ def inspect_hosted_authorization_bundle(
     """Authenticate one exact singleton Hosted authorization generation."""
 
     if set(files) != AUTHORIZATION_SESSION_FILES:
-        raise MetadataConflict("authorization session bundle shape is invalid")
+        raise MetadataConflict(
+            "authorization session bundle shape is invalid",
+            reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_SHAPE_IS_INVALID,
+        )
     keyring_raw = files["keyring.json"]
     control_raw = files["control.json"]
     membership_raw = files["serving-membership.json"]
@@ -386,17 +417,29 @@ def inspect_hosted_authorization_bundle(
     )
     entries = keyring["accepted_keys"]
     if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
-        raise MetadataConflict("authorization keyring is invalid")
+        raise MetadataConflict(
+            "authorization keyring is invalid",
+            reason=ConflictReason.AUTHORIZATION_KEYRING_IS_INVALID,
+        )
     entry = entries[0]
     if set(entry) != {"key_id", "key", "not_before", "not_after"}:
-        raise MetadataConflict("authorization keyring is invalid")
+        raise MetadataConflict(
+            "authorization keyring is invalid",
+            reason=ConflictReason.AUTHORIZATION_KEYRING_IS_INVALID,
+        )
     encoded_key = entry["key"]
     if not isinstance(encoded_key, str) or len(encoded_key) != 43:
-        raise MetadataConflict("authorization keyring is invalid")
+        raise MetadataConflict(
+            "authorization keyring is invalid",
+            reason=ConflictReason.AUTHORIZATION_KEYRING_IS_INVALID,
+        )
     try:
         key = base64.b64decode(encoded_key.encode("ascii") + b"=", altchars=b"-_", validate=True)
     except (UnicodeEncodeError, ValueError) as error:
-        raise MetadataConflict("authorization keyring is invalid") from error
+        raise MetadataConflict(
+            "authorization keyring is invalid",
+            reason=ConflictReason.AUTHORIZATION_KEYRING_IS_INVALID,
+        ) from error
     current = _required_time(now)
     cell = _required_identifier(expected_cell_id)
     vault = _required_identifier(expected_logical_vault_id)
@@ -408,7 +451,10 @@ def inspect_hosted_authorization_bundle(
     )
     schema = _required_time(expected_schema_version)
     if not isinstance(expected_recovery_envelope, str) or not expected_recovery_envelope:
-        raise MetadataConflict("authorization Secret provider authority is absent")
+        raise MetadataConflict(
+            "authorization Secret provider authority is absent",
+            reason=ConflictReason.AUTHORIZATION_SECRET_PROVIDER_AUTHORITY_IS_ABSENT,
+        )
     key_id = _required_identifier(entry["key_id"])
     if (
         keyring["version"] != 1
@@ -419,7 +465,10 @@ def inspect_hosted_authorization_bundle(
         or base64.urlsafe_b64encode(key).rstrip(b"=").decode("ascii") != encoded_key
         or not _required_time(entry["not_before"]) <= current < _required_time(entry["not_after"])
     ):
-        raise MetadataConflict("authorization keyring is invalid")
+        raise MetadataConflict(
+            "authorization keyring is invalid",
+            reason=ConflictReason.AUTHORIZATION_KEYRING_IS_INVALID,
+        )
     control = _closed_json(
         control_raw,
         frozenset(
@@ -496,7 +545,10 @@ def inspect_hosted_authorization_bundle(
         > MAX_ATTESTATION_TTL_SECONDS
         or supplied_control_mac != _mac(key, _control_mac_input(control))
     ):
-        raise MetadataConflict("authorization control is invalid")
+        raise MetadataConflict(
+            "authorization control is invalid",
+            reason=ConflictReason.AUTHORIZATION_CONTROL_IS_INVALID,
+        )
     membership = _closed_json(
         membership_raw,
         frozenset(
@@ -517,7 +569,10 @@ def inspect_hosted_authorization_bundle(
     )
     replicas = membership["replicas"]
     if not isinstance(replicas, list) or len(replicas) != 1 or not isinstance(replicas[0], dict):
-        raise MetadataConflict("authorization membership is invalid")
+        raise MetadataConflict(
+            "authorization membership is invalid",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_IS_INVALID,
+        )
     attestation = replicas[0]
     if set(attestation) != {
         "version",
@@ -538,7 +593,10 @@ def inspect_hosted_authorization_bundle(
         "signing_key_id",
         "mac",
     }:
-        raise MetadataConflict("authorization membership is invalid")
+        raise MetadataConflict(
+            "authorization membership is invalid",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_IS_INVALID,
+        )
     supplied_attestation_mac = attestation.get("mac")
     supplied_membership_mac = membership.pop("mac")
     expected_membership_mac = _mac(key, _membership_mac_input(membership))
@@ -599,7 +657,10 @@ def inspect_hosted_authorization_bundle(
         or attestation.get("control_digest") != _control_basis_digest(control)
         or attestation.get("keyring_digest") != _keyring_digest(keyring)
     ):
-        raise MetadataConflict("authorization membership is invalid")
+        raise MetadataConflict(
+            "authorization membership is invalid",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_IS_INVALID,
+        )
     return HostedAuthorizationBundle(
         keyring=keyring_raw,
         control=control_raw,
@@ -643,7 +704,10 @@ def transition_hosted_authorization_bundle(
         or (runtime_attestation is not None and not isinstance(runtime_attestation, bytes))
         or not 1 <= ttl_seconds <= MAX_ATTESTATION_TTL_SECONDS
     ):
-        raise MetadataConflict("authorization membership transition is invalid")
+        raise MetadataConflict(
+            "authorization membership transition is invalid",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
+        )
     current = _required_time(now)
     source = inspect_hosted_authorization_bundle(
         files,
@@ -669,15 +733,27 @@ def transition_hosted_authorization_bundle(
     if source.expires_at <= current and not (
         source.replica_state == "DRAINING" and source.no_in_flight and target_state == "SERVING"
     ):
-        raise MetadataConflict("stale authorization membership cannot be renewed")
+        raise MetadataConflict(
+            "stale authorization membership cannot be renewed",
+            reason=ConflictReason.STALE_AUTHORIZATION_MEMBERSHIP_CANNOT_BE_RENEWED,
+        )
     if source.replica_state == "SERVING" and target_state == "DRAINING":
         if not target_no_in_flight:
-            raise MetadataConflict("authorization drain acknowledgement is incomplete")
+            raise MetadataConflict(
+                "authorization drain acknowledgement is incomplete",
+                reason=ConflictReason.AUTHORIZATION_DRAIN_ACKNOWLEDGEMENT_IS_INCOMPLETE,
+            )
     elif source.replica_state == "DRAINING" and target_state == "SERVING":
         if not source.no_in_flight:
-            raise MetadataConflict("authorization membership is not fully drained")
+            raise MetadataConflict(
+                "authorization membership is not fully drained",
+                reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_IS_NOT_FULLY_DRAINED,
+            )
     elif source.replica_state != target_state:
-        raise MetadataConflict("authorization membership transition is invalid")
+        raise MetadataConflict(
+            "authorization membership transition is invalid",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
+        )
 
     keyring_raw = files["keyring.json"]
     keyring = _closed_json(
@@ -696,7 +772,10 @@ def transition_hosted_authorization_bundle(
     )
     entries = keyring["accepted_keys"]
     if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
-        raise MetadataConflict("authorization keyring is invalid")
+        raise MetadataConflict(
+            "authorization keyring is invalid",
+            reason=ConflictReason.AUTHORIZATION_KEYRING_IS_INVALID,
+        )
     entry = entries[0]
     try:
         encoded_key = entry["key"]
@@ -704,9 +783,15 @@ def transition_hosted_authorization_bundle(
             raise ValueError
         key = base64.b64decode(encoded_key.encode("ascii") + b"=", altchars=b"-_", validate=True)
     except (KeyError, UnicodeEncodeError, ValueError) as error:
-        raise MetadataConflict("authorization keyring is invalid") from error
+        raise MetadataConflict(
+            "authorization keyring is invalid",
+            reason=ConflictReason.AUTHORIZATION_KEYRING_IS_INVALID,
+        ) from error
     if len(key) != 32:
-        raise MetadataConflict("authorization keyring is invalid")
+        raise MetadataConflict(
+            "authorization keyring is invalid",
+            reason=ConflictReason.AUTHORIZATION_KEYRING_IS_INVALID,
+        )
     control = _closed_json(
         files["control.json"],
         frozenset(
@@ -738,7 +823,10 @@ def transition_hosted_authorization_bundle(
         _required_identifier(item["key_id"]) for item in entries if isinstance(item, dict)
     )
     if accepted_key_ids != [key_id]:
-        raise MetadataConflict("authorization keyring is invalid")
+        raise MetadataConflict(
+            "authorization keyring is invalid",
+            reason=ConflictReason.AUTHORIZATION_KEYRING_IS_INVALID,
+        )
     if runtime_attestation is None:
         expires_at = current + ttl_seconds
         attestation: dict[str, object] = {
@@ -815,9 +903,15 @@ def transition_hosted_authorization_bundle(
                     _mac(key, _attestation_mac_input(attestation)),
                 )
             ):
-                raise MetadataConflict("authorization runtime attestation is invalid")
+                raise MetadataConflict(
+                    "authorization runtime attestation is invalid",
+                    reason=ConflictReason.AUTHORIZATION_RUNTIME_ATTESTATION_IS_INVALID,
+                )
         except (KeyError, TypeError, ValueError):
-            raise MetadataConflict("authorization runtime attestation is invalid") from None
+            raise MetadataConflict(
+                "authorization runtime attestation is invalid",
+                reason=ConflictReason.AUTHORIZATION_RUNTIME_ATTESTATION_IS_INVALID,
+            ) from None
     membership: dict[str, object] = {
         "version": 1,
         "epoch": epoch,
