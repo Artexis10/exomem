@@ -971,31 +971,42 @@ class MediaJobStore:
         self, *, limit: int = STATUS_JOB_LIMIT
     ) -> list[MediaJob]:
         """Return only stale/missing compute-blocked presentations, bounded after filtering."""
+        conn = self._connect()
+        try:
+            return self._blocked_compute_presentations(conn, limit=limit)
+        finally:
+            conn.close()
+
+    def _blocked_compute_presentations(
+        self, conn: sqlite3.Connection, *, limit: int
+    ) -> list[MediaJob]:
+        """Same query on a caller-owned connection, so `needs_worker` reuses one.
+
+        The sidecar reads below happen with the connection open but no boundary
+        held: `_connect()` releases the reserved-identity guard as it returns,
+        keeping the file reads out of anyone's critical section.
+        """
         selected: list[MediaJob] = []
         clauses = " OR ".join("lower(last_error) LIKE ?" for _ in COMPUTE_RUNTIME_MARKERS)
         clauses += " OR last_error LIKE 'ASRRuntimeRefusal:%'"
-        conn = self._connect()
-        try:
-            rows = conn.execute(
-                f"SELECT * FROM jobs WHERE state = 'blocked' AND ({clauses}) ORDER BY id",
-                tuple(f"%{marker}%" for marker in COMPUTE_RUNTIME_MARKERS),
-            )
-            for row in rows:
-                if not is_compute_runtime_error(row["last_error"]):
-                    continue
-                job = self._row_to_job(row)
-                try:
-                    content = job.sidecar_path.read_text(encoding="utf-8")
-                except (OSError, UnicodeError):
-                    content = ""
-                if _blocked_presentation_is_current(content, job.last_error):
-                    continue
-                selected.append(job)
-                if len(selected) == limit:
-                    break
-            return selected
-        finally:
-            conn.close()
+        rows = conn.execute(
+            f"SELECT * FROM jobs WHERE state = 'blocked' AND ({clauses}) ORDER BY id",
+            tuple(f"%{marker}%" for marker in COMPUTE_RUNTIME_MARKERS),
+        )
+        for row in rows:
+            if not is_compute_runtime_error(row["last_error"]):
+                continue
+            job = self._row_to_job(row)
+            try:
+                content = job.sidecar_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                content = ""
+            if _blocked_presentation_is_current(content, job.last_error):
+                continue
+            selected.append(job)
+            if len(selected) == limit:
+                break
+        return selected
 
     def pending_jobs(self, *, limit: int | None = None) -> list[MediaJob]:
         """Return a bounded snapshot for runtime-unavailable state convergence."""
@@ -1041,7 +1052,14 @@ class MediaJobStore:
             conn.close()
 
     def needs_worker(self) -> bool:
-        """Whether work exists without another live child already owning the vault."""
+        """Whether work exists without another live child already owning the vault.
+
+        One connection answers every arm.  The stale-blocked rescue used to run
+        on a second `_connect()` after this one had closed, which made the
+        cheapest possible answer -- "nothing to do", the supervisor's steady
+        state -- the most expensive one to reach: two store opens, and each open
+        takes the reserved-identity boundary twice.
+        """
         conn = self._connect()
         try:
             clauses = " OR ".join("lower(last_error) LIKE ?" for _ in COMPUTE_RUNTIME_MARKERS)
@@ -1057,14 +1075,14 @@ class MediaJobStore:
                     if is_compute_runtime_error(candidate["last_error"]):
                         work = candidate
                         break
+            if work is None:
+                stale = self._blocked_compute_presentations(conn, limit=1)
+                work = stale[0] if stale else None
             row = conn.execute(
                 "SELECT worker_pid FROM runtime WHERE singleton = 1"
             ).fetchone()
         finally:
             conn.close()
-        if work is None:
-            stale = self.blocked_compute_presentations_needing_convergence(limit=1)
-            work = stale[0] if stale else None
         active_pid = int(row[0]) if row and row[0] else None
         return work is not None and not pid_alive(active_pid)
 
