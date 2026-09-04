@@ -1114,10 +1114,15 @@ def warm_managed_cell(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
         monkeypatch.setattr(embeddings, "ranking_enabled", lambda: True)
         monkeypatch.setattr(readiness, "should_defer", lambda _component: False)
+        # Keep the real internal event consistent with the admitted request
+        # surface below, without inheriting or leaking another test's ready bit.
+        monkeypatch.setitem(readiness._events, "retrieval_catalog", threading.Event())
 
         file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
         assert lexstore.get_store(vault).rebuild_atomic() is True
+        proof_generation = readiness.retrieval_proof_generation()
         assert lexstore.runtime_retrieval_catalog_proof(vault, schedule_repair=False) is not None
+        assert readiness.admit_retrieval_proof(proof_generation) is True
         # The reference sidecar is a maintained index too: `refs_for_paths`
         # scans the corpus exactly once, on first use or a schema upgrade, and
         # a live cell paid that long before any measured request. `prebuild_refs

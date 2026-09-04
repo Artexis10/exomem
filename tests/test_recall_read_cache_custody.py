@@ -45,6 +45,7 @@ from exomem import (
     index_sync,
     lexstore,
     memory_refs,
+    readiness,
     recall_policy,
     review_state,
     semantic_writes,
@@ -133,6 +134,16 @@ def _warm(vault_root: Path, warm_managed_cell) -> None:
         graph=False,
         include_timings=True,
     )
+
+
+def test_warm_cell_admission_agrees_with_its_catalog_ready_event(
+    vault: Path, warm_managed_cell
+) -> None:
+    _seed(vault, _ALPHA, "Custody alpha", "alpha-seed")
+    _warm(vault, warm_managed_cell)
+
+    assert readiness.retrieval_admission(vault)["admitted"] is True
+    assert readiness.is_ready("retrieval_catalog") is True
 
 
 def test_one_governed_write_updates_only_its_rows_in_every_substrate_cache(
