@@ -470,8 +470,13 @@ artifacts at the repaired provider pin; old evidence is retained unchanged.
     its derived graph current with a reconcile barrier, then proves its owned
     process group and secure descriptor absent before spawning.  The exact
     transient `GRAPH_SYNC_STABILIZATION_EXHAUSTED` result may be retried with
-    fresh mutation identities, bounded to three total attempts; every other
+    fresh attempt identities, bounded to three total attempts; every other
     non-current result fails closed without retirement.
+    Reconcile uses the pinned checkout's local CLI with the owned vault/state
+    environment and canonical CPU profile. Remote write-mode maintenance is
+    operator-only and refuses REST; the CLI selects the vault through
+    `EXOMEM_VAULT_PATH` because `maintain --vault` is reserved for migration.
+    Request/response evidence identifies each local attempt and its exit code.
     Residency eviction preserves the container's owned vault and work root so
     the later indexing or search process can restart against the same corpus;
     terminal container cleanup still proves process, descriptor, guest-process,

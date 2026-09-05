@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
 import { EventEmitter, once } from "node:events"
-import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink } from "node:fs/promises"
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -497,6 +497,53 @@ describe("guest transport", () => {
     expect(() => parse!({ status: 0, stdout: "not-json" })).toThrow(
       "Exomem doctor returned non-JSON output"
     )
+  })
+
+  test("retirement reconciliation uses the owned CLI and rejects unsuccessful process envelopes", async () => {
+    const transport = await import("../_guest_transport") as Record<string, unknown>
+    const reconcile = transport.runExomemReconcile as undefined |
+      ((service: Record<string, unknown>, attemptId: string) => Promise<unknown>)
+    expect(typeof reconcile).toBe("function")
+    const work = await root()
+    const bin = join(work, "bin")
+    const evidence = join(work, "evidence")
+    await mkdir(bin)
+    await mkdir(evidence)
+    const observed = join(work, "observed.json")
+    const outcome = join(work, "outcome.json")
+    const fakeUv = join(bin, "uv")
+    await writeFile(fakeUv, `#!${process.execPath}\n` +
+      `import {readFileSync,writeFileSync} from "node:fs";\n` +
+      `writeFileSync(${JSON.stringify(observed)},JSON.stringify({args:process.argv.slice(2),` +
+      `cwd:process.cwd(),vault:process.env.EXOMEM_VAULT_PATH,state:process.env.EXOMEM_STATE_ROOT,` +
+      `device:process.env.EXOMEM_DEVICE,work:process.env.MEMORYBENCH_GUEST_WORK_ROOT}));\n` +
+      `const r=JSON.parse(readFileSync(${JSON.stringify(outcome)},"utf8"));\n` +
+      `console.log(JSON.stringify(r.envelope));process.exit(r.exit);\n`)
+    await chmod(fakeUv, 0o700)
+    const oldPath = process.env.PATH
+    const oldHome = process.env.EXOMEM_HOME
+    process.env.PATH = `${bin}:${oldPath ?? ""}`
+    process.env.EXOMEM_HOME = join(work, "checkout")
+    const service = { provider: "exomem", work_root: work, evidence_root: evidence,
+      vault_root: join(work, "vault"), instance_id: "test-reconcile-instance" }
+    try {
+      await writeFile(outcome, JSON.stringify({exit: 0, envelope: {success: true, data: {graph_status: "current"}}}))
+      expect(await reconcile!(service, crypto.randomUUID())).toEqual({graph_status: "current"})
+      expect(JSON.parse(await readFile(observed, "utf8"))).toEqual({
+        args: ["run", "--project", process.env.EXOMEM_HOME, "--no-sync", "exomem", "maintain", "--reconcile", "--json"],
+        cwd: work, vault: service.vault_root, state: join(work, "state"), device: "cpu", work,
+      })
+      await writeFile(outcome, JSON.stringify({exit: 1, envelope: {success: true, data: {graph_status: "current"}}}))
+      await expect(reconcile!(service, crypto.randomUUID())).rejects.toThrow("reconcile failed")
+      await writeFile(outcome, JSON.stringify({exit: 0, envelope: {success: false, data: {graph_status: "current"}}}))
+      await expect(reconcile!(service, crypto.randomUUID())).rejects.toThrow("reconcile failed")
+      const records = await Promise.all((await readdir(evidence)).filter((name) => name.startsWith("operation-")).map(
+        async (name) => JSON.parse(await readFile(join(evidence, name), "utf8"))))
+      expect(records.some((record) => record.event === "reconcile-request" && record.data.transport === "owned-local-cli")).toBe(true)
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath
+      if (oldHome === undefined) delete process.env.EXOMEM_HOME; else process.env.EXOMEM_HOME = oldHome
+    }
   })
 
   test("Exomem machine and writer-lease state are bound inside the owned service root", async () => {

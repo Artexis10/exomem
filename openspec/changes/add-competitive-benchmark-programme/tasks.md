@@ -367,6 +367,9 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       adapter, guest transport and controlled export environment; prove ambient
       accelerator overrides cannot change text/CLIP device selection. Rerun
       both halves at a fresh provider pin after the repair is delivered.
+- [ ] 4.6c-Lifecycle Use owned local-CLI reconciliation before guest eviction;
+      verify the actual two-case staged pipeline, including cross-case
+      retirement, export, projection and comparison, before the full cohort.
 - [ ] 4.7 Ratify and implement the native Supermemory vendor-hit projection
       (distinct from 4.5's flat guest-hit wire), then run the Supermemory
       direct-SDK vs MemoryBench-provider spot-check (mode=report)

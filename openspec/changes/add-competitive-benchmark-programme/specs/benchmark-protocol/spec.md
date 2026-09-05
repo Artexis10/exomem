@@ -207,13 +207,20 @@ SHALL first reconcile its derived state and require `graph_status` to be
 `current|refreshed`, then retire it and prove its owned process group and secure
 descriptor absent before a replacement is spawned.  Only
 `GRAPH_SYNC_STABILIZATION_EXHAUSTED` with `graph_status: unavailable` MAY retry
-the reconcile, with fresh request/idempotency identities and at most three
+the reconcile, with fresh attempt identities and at most three
 total attempts; every other non-current response and exhaustion of that bound
 SHALL fail admission and clear all live services.  Residency retirement MAY
 preserve the owned vault and work root needed by a later stage; terminal
 container cleanup SHALL additionally prove owned guest-process and work-root
 absence.  A completed indexing step SHALL retire its now-idle service, and a
 search attempt SHALL clear its finished container on both success and failure.
+
+The retirement reconcile SHALL invoke the pinned checkout's local
+`exomem maintain --reconcile --json` command, with the owned vault and machine
+state bound through the child environment and the canonical CPU profile.
+It SHALL NOT request write-mode maintenance through REST. Each attempt SHALL
+record its identity, local-CLI transport, process exit and parsed response;
+a nonzero process exit or unsuccessful envelope SHALL fail admission.
 
 Ingest, indexing, and search exceptions SHALL clear every live service owned by
 that stage instance before the exception escapes.  SIGINT, SIGTERM, uncaught
@@ -233,7 +240,7 @@ absent
 #### Scenario: Transient graph stabilization exhaustion is bounded
 - **WHEN** residency reconciliation returns exact
   `GRAPH_SYNC_STABILIZATION_EXHAUSTED` before a later attempt proves current
-- **THEN** the provider retries with fresh mutation identities up to three total
+- **THEN** the provider retries with fresh attempt identities up to three total
   attempts, retires only after proof, and fails closed if the bound is exhausted
 
 #### Scenario: Indexing and search retire as they go

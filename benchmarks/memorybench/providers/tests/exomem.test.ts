@@ -255,22 +255,16 @@ describe("Exomem guest provider", () => {
 
   test("the default retirement barrier performs and verifies a graph-current reconcile", async () => {
     const h = harness()
-    const calls: Array<{ path: string; body: Record<string, unknown> }> = []
+    const calls: Array<{ service: unknown; attemptId: string }> = []
 
-    await prepareExomemRetirement(h.service, async (_service, path, body) => {
-      calls.push({ path, body })
+    await prepareExomemRetirement(h.service, async (service, attemptId) => {
+      calls.push({ service, attemptId })
       return { graph_status: "refreshed" }
     })
 
     expect(calls).toHaveLength(1)
-    expect(calls[0].path).toBe("/api/maintain_memory")
-    expect(calls[0].body).toMatchObject({
-      mode: "reconcile",
-      dry_run: false,
-      rebuild_graph: false,
-    })
-    expect(calls[0].body.request_id).toMatch(/^[0-9a-f-]{36}$/)
-    expect(calls[0].body.idempotency_key).toBe(calls[0].body.request_id)
+    expect(calls[0].service).toBe(h.service)
+    expect(calls[0].attemptId).toMatch(/^[0-9a-f-]{36}$/)
 
     await expect(
       prepareExomemRetirement(h.service, async () => ({ graph_status: "unavailable" }))
@@ -282,9 +276,9 @@ describe("Exomem guest provider", () => {
     const requestIds: string[] = []
     let attempts = 0
 
-    await prepareExomemRetirement(h.service, async (_service, _path, body) => {
+    await prepareExomemRetirement(h.service, async (_service, attemptId) => {
       attempts += 1
-      requestIds.push(body.request_id as string)
+      requestIds.push(attemptId)
       if (attempts === 1) {
         return {
           graph_status: "unavailable",

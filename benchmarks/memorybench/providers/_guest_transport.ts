@@ -1318,6 +1318,42 @@ export async function runExomemDoctor(service: ServiceDescriptor): Promise<unkno
   return parseExomemDoctorProcessResult({ status: result.status, stdout: result.stdout })
 }
 
+export async function runExomemReconcile(service: ServiceDescriptor, attemptId: string): Promise<unknown> {
+  if (!service.vault_root) throw new Error("Exomem vault binding missing")
+  const exomemHome = requireAbsoluteRoot("EXOMEM_HOME", process.env.EXOMEM_HOME)
+  await appendGuestEvidence(service, "reconcile-request", {
+    attempt_id: attemptId, transport: "owned-local-cli", mode: "reconcile",
+  })
+  // Write-mode maintenance is operator-only. The maintain CLI selects its
+  // vault through the environment; its --vault flag belongs to state migration.
+  const result = spawnSync(
+    "uv",
+    ["run", "--project", exomemHome, "--no-sync", "exomem", "maintain", "--reconcile", "--json"],
+    {
+      cwd: service.work_root,
+      env: buildExomemChildEnvironment(process.env, {
+        ...exomemOwnedStateEnvironment(service.work_root),
+        EXOMEM_VAULT_PATH: service.vault_root,
+        MEMORYBENCH_GUEST_WORK_ROOT: service.work_root,
+        MEMORYBENCH_GUEST_PROVIDER: "exomem",
+        MEMORYBENCH_GUEST_INSTANCE_ID: service.instance_id ?? "invalid-missing-instance",
+      }),
+      encoding: "utf8",
+      timeout: GUEST_TIMEOUTS_MS.search,
+    }
+  )
+  let envelope: unknown = null
+  try { envelope = JSON.parse(result.stdout) } catch { /* Refused below. */ }
+  await appendGuestEvidence(service, "reconcile-response", {
+    attempt_id: attemptId, exit_code: result.status, response: envelope,
+  })
+  if (result.status !== 0 || !envelope || typeof envelope !== "object" ||
+      (envelope as { success?: unknown }).success !== true || !("data" in envelope)) {
+    throw new Error("Exomem reconcile failed")
+  }
+  return (envelope as { data: unknown }).data
+}
+
 async function processIsLive(pid: number): Promise<boolean> {
   try {
     const contents = await readFile(`/proc/${pid}/stat`, "utf8")

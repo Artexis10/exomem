@@ -18,6 +18,7 @@ import {
   postExomem,
   retireExomemService,
   runExomemDoctor,
+  runExomemReconcile,
   sha256Hex,
   type ServiceDescriptor,
 } from "../_guest_transport"
@@ -36,10 +37,9 @@ type PrepareRetirement = (service: ServiceDescriptor) => Promise<void>
 type ClearService = (containerTag: string) => Promise<void>
 type RetireService = (service: ServiceDescriptor) => Promise<void>
 type ClearAllServices = () => Promise<void>
-type RetirementRequest = (
+type RetirementReconcile = (
   service: ServiceDescriptor,
-  path: string,
-  body: Record<string, unknown>
+  attemptId: string
 ) => Promise<unknown>
 
 interface DoctorResult {
@@ -61,17 +61,10 @@ const EXOMEM_RETIREMENT_RECONCILE_ATTEMPTS = 3
 
 export async function prepareExomemRetirement(
   service: ServiceDescriptor,
-  request: RetirementRequest
+  reconcile: RetirementReconcile = runExomemReconcile
 ): Promise<void> {
   for (let attempt = 0; attempt < EXOMEM_RETIREMENT_RECONCILE_ATTEMPTS; attempt += 1) {
-    const requestId = crypto.randomUUID()
-    const raw = await request(service, "/api/maintain_memory", {
-      mode: "reconcile",
-      dry_run: false,
-      rebuild_graph: false,
-      request_id: requestId,
-      idempotency_key: requestId,
-    })
+    const raw = await reconcile(service, crypto.randomUUID())
     if (!raw || typeof raw !== "object") {
       throw new Error("Exomem retirement barrier response is invalid")
     }
@@ -120,10 +113,7 @@ export class ExomemProvider implements Provider {
     this.doctor = dependencies.doctor ?? runExomemDoctor
     this.prepareRetirement = dependencies.prepareRetirement ??
       (this.defaultTransport
-        ? async (service) => prepareExomemRetirement(
-            service,
-            (bound, path, body) => this.request(bound, path, body)
-          )
+        ? prepareExomemRetirement
         : async () => {})
     this.clearService = dependencies.clearService ?? clearExomemService
     this.retireService = dependencies.retireService ??
