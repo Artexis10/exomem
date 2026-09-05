@@ -20,7 +20,7 @@ and index updates are determined by the operation, not the caller.
 
 | Op | Intent | Writes to |
 |---|---|---|
-| **bootstrap** | Return a portable, versioned operating contract for generic MCP clients. Skill-aware agents can skip routine calls after reading this file; use diagnostics profile for timing/performance interpretation | — |
+| **bootstrap** | Return a portable, versioned operating contract for generic MCP clients. A skill-aware agent fetches session state when current policy or capabilities are absent, with compact fallback when its exposed schema or server cannot accept the skill contract; use diagnostics profile for timing/performance interpretation | — |
 | **add** | Capture raw input as immutable source | `Sources/<Kind>/[<Domain>/]` |
 | **note** | Compile a structured note from raw input or thinking | `Notes/<type>/` |
 | **link** | Create or update an entity, wire backlinks | `Entities/<type>/` |
