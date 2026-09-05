@@ -61,6 +61,17 @@ def test_successful_recall_with_graph_warming_passes_and_keeps_lag_separate() ->
     }
 
 
+def test_recall_gate_does_not_accept_a_diagnostic_path_without_a_real_hit() -> None:
+    recall = {
+        "hits": [],
+        "diagnostics": {"pending_overlay": {"path": "Knowledge Base/Notes/Insights/new-note.md"}},
+    }
+
+    assert benchmark.recall_has_exact_hit(
+        recall, "Knowledge Base/Notes/Insights/new-note.md", "unique marker"
+    ) is False
+
+
 def test_overlapping_ledger_calls_keep_sum_and_union_distinct() -> None:
     timings = benchmark.summarize_ledger_calls(
         [
@@ -102,6 +113,16 @@ def test_ledger_utc_completion_and_total_duration_form_a_measured_interval() -> 
     assert rows == [{"started_ms": 1788609600750.0, "ended_ms": 1788609601000.0}]
 
 
+def test_utc_ledger_step_invalidates_cross_call_occupancy() -> None:
+    calls = [{"ended_ms": 100.0}, {"ended_ms": 200.0}]
+    rows = [
+        {"ts_utc": "2026-09-05T12:00:01.000+00:00", "total_ms": 5.0},
+        {"ts_utc": "2026-09-05T12:00:02.500+00:00", "total_ms": 5.0},
+    ]
+
+    assert benchmark.ledger_clock_continuous(calls, rows) is False
+
+
 def test_malformed_ledger_row_invalidates_the_measurement(tmp_path: Path) -> None:
     ledger = tmp_path / "ledger"
     ledger.mkdir()
@@ -113,6 +134,24 @@ def test_malformed_ledger_row_invalidates_the_measurement(tmp_path: Path) -> Non
         assert "malformed" in str(error)
     else:
         raise AssertionError("malformed ledger rows must not be silently skipped")
+
+
+def test_instrumentation_error_invalidates_benchmark_measurement(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "instrumentation.json").write_text(
+        '{"graph_drain_attempts":0,"graph_drain_completed":0,"graph_rebuild_attempts":0,'
+        '"graph_rebuild_completed":0,"source_scan_pages":0,"source_scan_bytes":0,'
+        '"wrapper_status":"installed","instrumentation_error":"ImportError"}',
+        encoding="utf-8",
+    )
+
+    try:
+        benchmark.read_instrumentation(state)
+    except RuntimeError as error:
+        assert "error" in str(error)
+    else:
+        raise AssertionError("instrumentation errors must not be reported as measured zeroes")
 
 
 def test_workflow_wall_excludes_transport_shutdown_and_postprocessing() -> None:
@@ -185,6 +224,32 @@ def test_artifact_receipt_requires_each_expected_hash_before_evidence_can_be_cit
     assert benchmark.validated_evidence_paths(artifacts, files) is None
 
 
+def test_process_media_uses_one_selected_batch_only_when_registered_schema_exposes_paths() -> None:
+    paths = ["Knowledge Base/Evidence/a.pdf", "Knowledge Base/Evidence/a.png", "Knowledge Base/Evidence/b.png"]
+    batch_tool = {"inputSchema": {"properties": {"path": {}, "paths": {"type": "array"}}}}
+    legacy_tool = {"inputSchema": {"properties": {"path": {}}}}
+
+    assert benchmark.process_media_requests(batch_tool, paths) == [
+        {"operation": "process", "paths": paths}
+    ]
+    assert benchmark.process_media_requests(legacy_tool, paths) == [
+        {"operation": "process", "path": path} for path in paths
+    ]
+
+
+def test_projected_media_results_and_legacy_single_result_feed_extraction_reads() -> None:
+    batch = {
+        "media_results": [
+            {"path": "a.pdf", "outcome": "processed", "state": "pending", "sidecar_path": "a.pdf.md"},
+            {"path": "a.png", "outcome": "processed", "state": "pending", "sidecar_path": "a.png.md"},
+        ]
+    }
+    legacy = {"path": "b.png", "state": "pending", "sidecar_path": "b.png.md"}
+
+    assert benchmark.media_result_rows(batch) == batch["media_results"]
+    assert benchmark.media_result_rows(legacy) == [{**legacy, "outcome": "processed"}]
+
+
 def test_real_extraction_requires_unique_expected_text_and_named_engines() -> None:
     artifacts = [
         {"expected_text": "pdf unique"},
@@ -244,7 +309,8 @@ def test_small_model_free_smoke_uses_one_registered_stdio_product_session(
         assert report["verification"] == {
             "direct_marker": True,
             "tracker_marker": True,
-            "recall_path": True,
+            "recall_hit": True,
+            "evidence_citations": True,
             "stale_relation_absent": True,
             "mutations_succeeded": True,
         }

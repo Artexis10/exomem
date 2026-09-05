@@ -92,6 +92,37 @@ def validated_evidence_paths(
     return paths if len(paths) == len(artifacts) else None
 
 
+def _tool_input_schema(tool: Any) -> Mapping[str, Any]:
+    if isinstance(tool, Mapping):
+        schema = tool.get("inputSchema") or tool.get("input_schema")
+    else:
+        schema = getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None)
+        if schema is None and hasattr(tool, "to_mcp_tool"):
+            mcp_tool = tool.to_mcp_tool()
+            schema = getattr(mcp_tool, "inputSchema", None) or getattr(mcp_tool, "input_schema", None)
+    return schema if isinstance(schema, Mapping) else {}
+
+
+def process_media_requests(tool: Any, paths: Sequence[str]) -> list[dict[str, Any]]:
+    """Select the registered batch surface when it is actually advertised."""
+    properties = _tool_input_schema(tool).get("properties")
+    if isinstance(properties, Mapping) and "paths" in properties:
+        return [{"operation": "process", "paths": list(paths)}]
+    return [{"operation": "process", "path": path} for path in paths]
+
+
+def media_result_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Normalize compact batch projection and legacy single-path media output."""
+    rows = payload.get("media_results")
+    if isinstance(rows, list):
+        return [dict(row) for row in rows if isinstance(row, Mapping)]
+    sidecar = payload.get("sidecar_path")
+    path = payload.get("path")
+    if isinstance(sidecar, str) and sidecar and isinstance(path, str) and path:
+        return [{**payload, "outcome": str(payload.get("outcome") or "processed")}]
+    return []
+
+
 def extraction_proof(
     artifacts: Sequence[Mapping[str, Any]], reads: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any] | None:
@@ -253,6 +284,23 @@ def ledger_intervals(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, float]
     return intervals
 
 
+def ledger_clock_continuous(calls: Sequence[Mapping[str, Any]], rows: Sequence[Mapping[str, Any]]) -> bool:
+    """Reject UTC occupancy when its deltas disagree with the client trace."""
+    if len(calls) != len(rows) or len(calls) < 2:
+        return True
+    intervals = ledger_intervals(rows)
+    previous_offset: float | None = None
+    for call, interval in zip(calls, intervals, strict=True):
+        ended = call.get("ended_ms")
+        if not isinstance(ended, (int, float)):
+            return False
+        offset = interval["ended_ms"] - float(ended)
+        if previous_offset is not None and abs(offset - previous_offset) > 250.0:
+            return False
+        previous_offset = offset
+    return True
+
+
 def lifecycle_timings(*, workflow_started: float, closure_finished: float, shutdown_finished: float) -> dict[str, float]:
     """Keep public-workflow wall time distinct from transport teardown."""
     return {
@@ -330,41 +378,97 @@ def install_subprocess_instrumentation(state: Path) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     hook = directory / "sitecustomize.py"
     hook.write_text(
-        '''import atexit, json, os
+        '''import atexit, json, os, threading
 from pathlib import Path
 
 out = Path(os.environ["DURABLE_CLOSURE_INSTRUMENTATION"])
-data = {"graph_incremental_calls": 0, "graph_rebuild_calls": 0, "source_scan_pages": 0, "source_scan_bytes": 0}
+control_value = os.environ.get("DURABLE_CLOSURE_INSTRUMENTATION_CONTROL", "")
+control = Path(control_value) if control_value else None
+data = {"wrapper_status": "installed", "graph_drain_attempts": 0, "graph_drain_completed": 0, "graph_rebuild_attempts": 0, "graph_rebuild_completed": 0, "source_scan_pages": 0, "source_scan_bytes": 0, "snapshots": {}, "scan_coverage": "find._walk_md only; other scan consumers are unmeasured"}
+lock = threading.RLock()
+last_command = None
+stopping = threading.Event()
 
-def wrap(module, name, counter):
+def publish():
+    with lock:
+        temporary = out.with_suffix(".tmp")
+        temporary.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, out)
+
+def command():
+    global last_command
+    if control is None or not control.is_file():
+        return
+    try:
+        payload = json.loads(control.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    command_id = payload.get("id") if isinstance(payload, dict) else None
+    if not isinstance(command_id, str) or command_id == last_command:
+        return
+    with lock:
+        action = payload.get("action")
+        phase = str(payload.get("phase") or "")
+        if action == "reset":
+            for key in ("graph_drain_attempts", "graph_drain_completed", "graph_rebuild_attempts", "graph_rebuild_completed", "source_scan_pages", "source_scan_bytes"):
+                data[key] = 0
+            data["snapshots"] = {}
+        elif action == "snapshot" and phase:
+            data["snapshots"][phase] = {key: data[key] for key in ("graph_drain_attempts", "graph_drain_completed", "graph_rebuild_attempts", "graph_rebuild_completed", "source_scan_pages", "source_scan_bytes")}
+        else:
+            data["instrumentation_error"] = "InvalidControl"
+        data["acknowledged_command"] = command_id
+        last_command = command_id
+    publish()
+
+def controller():
+    while not stopping.wait(0.01):
+        command()
+
+def wrap(module, name, attempts, completed):
     original = getattr(module, name, None)
     if original is None:
         return
     def counted(*args, **kwargs):
-        data[counter] += 1
-        return original(*args, **kwargs)
+        command()
+        with lock:
+            data[attempts] += 1
+        publish()
+        result = original(*args, **kwargs)
+        with lock:
+            data[completed] += 1
+        publish()
+        return result
     setattr(module, name, counted)
 
 try:
     from exomem import index_sync, epistemic_graph, find
-    wrap(index_sync, "epistemic_graph_drain_paths", "graph_incremental_calls")
-    wrap(epistemic_graph.EpistemicGraphIndex, "rebuild_all", "graph_rebuild_calls")
+    wrap(epistemic_graph.EpistemicGraphIndex, "drain_paths", "graph_drain_attempts", "graph_drain_completed")
+    wrap(epistemic_graph.EpistemicGraphIndex, "_rebuild_all_off_boundary", "graph_rebuild_attempts", "graph_rebuild_completed")
     original_walk = find._walk_md
     def walk(root):
         for path in original_walk(root):
-            data["source_scan_pages"] += 1
-            try:
-                data["source_scan_bytes"] += path.stat().st_size
-            except OSError:
-                pass
+            command()
+            with lock:
+                data["source_scan_pages"] += 1
+                try:
+                    data["source_scan_bytes"] += path.stat().st_size
+                except OSError:
+                    pass
+            publish()
             yield path
     find._walk_md = walk
 except Exception as error:
     data["instrumentation_error"] = type(error).__name__
 
+publish()
+threading.Thread(target=controller, name="durable-closure-instrumentation", daemon=True).start()
+
 @atexit.register
 def save():
-    out.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+    stopping.set()
+    command()
+    publish()
 ''',
         encoding="utf-8",
     )
@@ -379,9 +483,33 @@ def read_instrumentation(state: Path) -> dict[str, Any]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError("benchmark instrumentation is malformed") from error
-    if not isinstance(data, dict) or any(key not in data for key in ("graph_incremental_calls", "graph_rebuild_calls", "source_scan_pages", "source_scan_bytes")):
+    if not isinstance(data, dict) or any(key not in data for key in ("graph_drain_attempts", "graph_drain_completed", "graph_rebuild_attempts", "graph_rebuild_completed", "source_scan_pages", "source_scan_bytes", "wrapper_status")):
         raise RuntimeError("benchmark instrumentation is incomplete")
+    if data.get("wrapper_status") != "installed":
+        raise RuntimeError("benchmark instrumentation wrapper is unavailable")
+    if data.get("instrumentation_error"):
+        raise RuntimeError("benchmark instrumentation reported an error")
     return data
+
+
+async def instrumentation_command(state: Path, *, action: str, phase: str, timeout: float) -> dict[str, Any]:
+    """Synchronize a child-only counter reset/snapshot through its control file."""
+    command_id = uuid.uuid4().hex
+    control = state / "instrumentation-control.json"
+    control.write_text(
+        json.dumps({"id": command_id, "action": action, "phase": phase}, sort_keys=True),
+        encoding="utf-8",
+    )
+    deadline = time.perf_counter() + timeout
+    while time.perf_counter() < deadline:
+        try:
+            data = read_instrumentation(state)
+        except RuntimeError:
+            data = {}
+        if data.get("acknowledged_command") == command_id:
+            return data
+        await asyncio.sleep(0.01)
+    raise RuntimeError(f"benchmark instrumentation did not acknowledge {action}:{phase}")
 
 
 def materialize_corpus(vault: Path, *, pages: int) -> dict[str, Any]:
@@ -404,21 +532,25 @@ def materialize_corpus(vault: Path, *, pages: int) -> dict[str, Any]:
         tracker: (
             "---\ntype: insight\ntitle: Active tracker\nstatus: active\nupdated: 2026-09-05\n"
             "exomem_id: 00000000-0000-4000-8000-000000000101\n---\n\n"
-            "# Active tracker\n\n## Observations\n- [constraint] Keep workflow evidence durable #benchmark ^tracker\n"
+            "# Active tracker\n\n## Observations\n- [constraint] Keep workflow evidence durable #benchmark ^tracker\n\n"
+            + ("## Workstream\nThe active tracker carries bounded operational context, owner handoffs, and a durable acceptance record. \n" * 8)
         ),
         archived: (
             "---\ntype: insight\ntitle: Archived operational note\nstatus: archived\nupdated: 2026-08-01\n"
             "exomem_id: 00000000-0000-4000-8000-000000000102\n---\n\n"
-            "# Archived operational note\n\n## Observations\n- [history] Previous recovery sequence is retained #operations ^archived\n"
+            "# Archived operational note\n\n## Observations\n- [history] Previous recovery sequence is retained #operations ^archived\n\n"
+            + ("## Historical context\nThis archived runbook remains searchable as historical evidence but is not an active instruction. \n" * 11)
         ),
         critique: (
             "---\ntype: insight\ntitle: Workflow critique\nstatus: active\nupdated: 2026-09-04\n"
             "exomem_id: 00000000-0000-4000-8000-000000000103\n---\n\n"
-            "# Workflow critique\n\n## Observations\n- [finding] Retrieval must survive writes #benchmark ^critique\n"
+            "# Workflow critique\n\n## Observations\n- [finding] Retrieval must survive writes #benchmark ^critique\n\n"
+            + ("## Critique\nA useful closure benchmark distinguishes canonical durability from optional projection convergence. \n" * 14)
         ),
         stale_relation: (
             "---\ntype: entity\ntitle: Stale relation fixture\nstatus: active\n---\n\n"
-            "# Stale relation fixture\n\n- supports [[Knowledge Base/Notes/Insights/archived-runbook]]\n"
+            "# Stale relation fixture\n\n- supports [[Knowledge Base/Notes/Insights/archived-runbook]]\n\n"
+            + ("## Repair context\nThis relation is intentionally stale and is repaired through the public edit operation. \n" * 9)
         ),
     }
     for index in range(max(0, pages - len(documents))):
@@ -495,7 +627,14 @@ def _result_outcome(payload: Mapping[str, Any]) -> tuple[str, str | None]:
     error = payload.get("error")
     if isinstance(error, Mapping):
         return "refused", str(error.get("code") or "UNKNOWN")
+    terminal = payload.get("outcome")
+    if isinstance(terminal, str) and terminal.lower() in {"failed", "refused", "rejected", "error"}:
+        return "refused", str(payload.get("code") or terminal.upper())
     return "ok", None
+
+
+def _outcome_ok(payload: Mapping[str, Any]) -> bool:
+    return _result_outcome(payload)[0] == "ok"
 
 
 def _contains_marker(payload: Any, marker: str) -> bool:
@@ -512,6 +651,28 @@ def _contains_path(payload: Any, path: str) -> bool:
         return any(_contains_path(value, path) for value in payload.values())
     if isinstance(payload, list):
         return any(_contains_path(value, path) for value in payload)
+    return False
+
+
+def recall_has_exact_hit(payload: Mapping[str, Any], path: str, marker: str) -> bool:
+    """Require a returned recall hit, never a diagnostic/overlay echo."""
+    candidates: list[Any] = []
+    for key in ("hits", "results", "items", "result"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            candidates.extend(value)
+    for hit in candidates:
+        if not isinstance(hit, Mapping):
+            continue
+        if hit.get("path") != path and hit.get("parent_path") != path:
+            continue
+        visible = [
+            hit.get(key)
+            for key in ("snippet", "excerpt", "content", "body", "text")
+            if isinstance(hit.get(key), str)
+        ]
+        if not visible or any(marker in value for value in visible):
+            return True
     return False
 
 
@@ -577,6 +738,7 @@ async def _call(client: Any, calls: list[dict[str, Any]], tool: str, arguments: 
             "client_elapsed_ms": (ended - started) * 1000.0,
             "mutation_ack": is_mutation_ack(tool, arguments),
             "request_shape": request_shape,
+            "response_keys": sorted(map(str, payload.keys())),
         }
     )
     return payload
@@ -702,6 +864,7 @@ async def run_public_workflow(
     env = benchmark_environment(state, vault)
     instrumentation_dir = install_subprocess_instrumentation(state)
     env["DURABLE_CLOSURE_INSTRUMENTATION"] = str(state / "instrumentation.json")
+    env["DURABLE_CLOSURE_INSTRUMENTATION_CONTROL"] = str(state / "instrumentation-control.json")
     env["PYTHONPATH"] = os.pathsep.join((str(instrumentation_dir), env["PYTHONPATH"]))
     if profile == MODEL_FREE_PROFILE:
         env.update({"EXOMEM_DISABLE_MEDIA_EXTRACTION": "1", "EXOMEM_DISABLE_CLIP": "1"})
@@ -734,22 +897,27 @@ async def run_public_workflow(
     tracker_read: dict[str, Any] = {"success": False}
     stale_relation_read: dict[str, Any] = {"success": False}
     recall: dict[str, Any] = {"success": False}
+    extraction_enqueue_started: float | None = None
+    extraction_sidecar_paths: list[str] = []
+    full_convergence_ms: float | None = None
     client = Client(transport, timeout=timeout, init_timeout=timeout)
     async with client:
-        tools = {tool.name for tool in await client.list_tools()}
+        registered_tools = {tool.name: tool for tool in await client.list_tools()}
         _permit_refusal_envelopes(client)
-        missing = required_tools_missing(tools)
+        missing = required_tools_missing(registered_tools)
         if missing:
             raise RuntimeError(f"registered product MCP surface missing: {missing}")
         await _warm_public_recall(client, timeout=timeout)
+        await instrumentation_command(state, action="reset", phase="timed", timeout=timeout)
         # Store the shared monotonic origin once before append-only call records.
         workflow_started = time.perf_counter()
         ledger_before = len(_read_ledger(state / "ledger", workflow_started))
         calls.append({"_origin": workflow_started})
         marker = f"durable-closure-{uuid.uuid4().hex}"
 
-        async def workflow_call(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        async def workflow_call(tool: str, arguments: dict[str, Any], *, phase: str = "workflow") -> dict[str, Any]:
             payload = await _call(client, calls, tool, arguments)
+            calls[-1].update({"phase": phase, "probe": False})
             if variant == "stress" and calls[-1]["mutation_ack"]:
                 await _call(
                     client,
@@ -757,6 +925,7 @@ async def run_public_workflow(
                     "ask_memory",
                     {"query": marker, "mode": "hybrid", "graph": True, "rerank": False, "limit": 5},
                 )
+                calls[-1].update({"phase": "probe", "probe": True})
             return payload
 
         await workflow_call("bootstrap", {"profile": "compact"})
@@ -773,63 +942,38 @@ async def run_public_workflow(
                         {key: item[key] for key in ("file_id", "download_url", "mime_type", "file_name")}
                         for item in artifacts
                     ],
-                },
+                }, phase="media-enqueue",
             )
             files = preserved.get("files") if isinstance(preserved.get("files"), list) else []
             evidence_paths = validated_evidence_paths(
                 artifacts, [item for item in files if isinstance(item, Mapping)]
             ) or []
             hashes_match = len(evidence_paths) == len(artifacts)
-            process_results = [
-                await workflow_call("process_media", {"path": evidence_path, "operation": "process"})
-                for evidence_path in evidence_paths
-                if evidence_path
+            process_requests = process_media_requests(registered_tools["process_media"], evidence_paths)
+            extraction_enqueue_started = time.perf_counter()
+            process_payloads = [
+                await workflow_call("process_media", request, phase="media-enqueue") for request in process_requests
             ]
-            process_ok = len(process_results) == 3 and all(result.get("success") is not False for result in process_results)
+            media_rows = [row for payload in process_payloads for row in media_result_rows(payload)]
+            process_ok = (
+                all(_outcome_ok(payload) for payload in process_payloads)
+                and len(media_rows) == len(evidence_paths)
+                and all(str(row.get("outcome") or "").lower() in {"processed", "retried"} for row in media_rows)
+            )
+            extraction_sidecar_paths = [
+                str(row.get("sidecar_path") or "") for row in media_rows if isinstance(row.get("sidecar_path"), str)
+            ]
             media = {
                 "status": "ready" if hashes_match and len(evidence_paths) == 3 and process_ok else "fail",
                 "fixture_provenance": [{key: item[key] for key in item} for item in artifacts],
                 "preserved_hashes_match": hashes_match,
                 "evidence_paths": evidence_paths,
-                "process_calls": len(process_results),
+                "process_calls": len(process_payloads),
+                "process_selection": "paths" if len(process_requests) == 1 else "legacy-single-path",
+                "media_results": media_rows,
                 "extraction_convergence_ms": None,
                 "engine_versions": None,
             }
-            # Model-free only demonstrates custody. A real-extraction run
-            # polls public exact reads until all distinct fixture text and named
-            # engines are observable, otherwise keeps the row explicitly blocked.
-            if profile == REAL_EXTRACTION_PROFILE:
-                sidecar_paths = [
-                    str(result.get("sidecar_path") or "")
-                    for result in process_results
-                    if result.get("success") is not False
-                ]
-                extraction_started = time.perf_counter()
-                proof: dict[str, Any] | None = None
-                while sidecar_paths and time.perf_counter() < extraction_started + timeout:
-                    reads = [
-                        await workflow_call("read_memory", {"path": sidecar_path})
-                        for sidecar_path in sidecar_paths
-                    ]
-                    proof = extraction_proof(artifacts, reads)
-                    if proof is not None:
-                        break
-                    await asyncio.sleep(0.2)
-                if proof is None:
-                    media.update(
-                        {
-                            "status": "blocked",
-                            "reason": "public extraction-content and engine-version verification did not converge",
-                        }
-                    )
-                else:
-                    media.update(
-                        {
-                            "status": "ready",
-                            "extraction_convergence_ms": (time.perf_counter() - extraction_started) * 1000.0,
-                            **proof,
-                        }
-                    )
         remember_arguments = {
             "title": "Durable closure benchmark result",
             "note_type": "insight",
@@ -902,27 +1046,68 @@ async def run_public_workflow(
 
         recall = await workflow_call(
             "ask_memory",
-            {"query": marker, "mode": "hybrid", "graph": True, "rerank": False, "limit": 10},
+            {"query": marker, "mode": "hybrid", "graph": True, "rerank": False, "limit": 10}, phase="verification",
         )
-        direct = await workflow_call("read_memory", {"path": path}) if path else {"success": False}
-        tracker_read = await workflow_call("read_memory", {"path": tracker_path})
-        stale_relation_read = await workflow_call("read_memory", {"path": corpus["stale_relation"]})
+        direct = await workflow_call("read_memory", {"path": path}, phase="verification") if path else {"success": False}
+        tracker_read = await workflow_call("read_memory", {"path": tracker_path}, phase="verification")
+        stale_relation_read = await workflow_call("read_memory", {"path": corpus["stale_relation"]}, phase="verification")
 
+        closure_instrumentation = await instrumentation_command(
+            state, action="snapshot", phase="closure", timeout=timeout
+        )
+
+        # Continue with independent note/relation closure before awaiting media.
+        # The media convergence clock starts at its earlier public enqueue.
+        if profile == REAL_EXTRACTION_PROFILE and artifacts is not None:
+            proof: dict[str, Any] | None = None
+            deadline = time.perf_counter() + timeout
+            while extraction_sidecar_paths and time.perf_counter() < deadline:
+                reads = [
+                    await workflow_call("read_memory", {"path": sidecar_path}, phase="convergence-poll")
+                    for sidecar_path in extraction_sidecar_paths
+                ]
+                proof = extraction_proof(artifacts, reads)
+                if proof is not None:
+                    break
+                await asyncio.sleep(0.2)
+            if proof is None:
+                media.update(
+                    {
+                        "status": "blocked",
+                        "reason": "public extraction-content and engine-version verification did not converge",
+                    }
+                )
+            else:
+                media.update(
+                    {
+                        "status": "ready",
+                        "extraction_convergence_ms": (time.perf_counter() - extraction_enqueue_started) * 1000.0
+                        if extraction_enqueue_started is not None
+                        else None,
+                        **proof,
+                    }
+                )
+                full_convergence_ms = (time.perf_counter() - workflow_started) * 1000.0
+
+        convergence_instrumentation = await instrumentation_command(
+            state, action="snapshot", phase="convergence", timeout=timeout
+        )
         closure_finished = time.perf_counter()
     shutdown_finished = time.perf_counter()
 
     # Drop the private clock anchor before persisting/reporting measurements.
     call_records = calls[1:]
     required_payloads = (remembered, remembered_observation, tracker_observation, critique_observation, tracker_correction, archived_read)
-    mutation_success = all(payload.get("success") is not False for payload in required_payloads)
+    mutation_success = all(_outcome_ok(payload) for payload in required_payloads)
     final_exact = bool(
         path
         and mutation_success
-        and direct.get("success") is not False
-        and tracker_read.get("success") is not False
+        and _outcome_ok(direct)
+        and _outcome_ok(tracker_read)
         and _contains_marker(direct, marker)
+        and all(_contains_marker(direct, evidence_path) for evidence_path in evidence_paths)
         and _contains_marker(tracker_read, marker)
-        and _contains_path(recall, path)
+        and recall_has_exact_hit(recall, path, marker)
         and not _contains_marker(stale_relation_read, stale_line)
     )
     closure = evaluate_useful_closure(
@@ -931,11 +1116,18 @@ async def run_public_workflow(
         graph_warming_components=_warming_components(recall),
     )
     ledger_rows = _read_ledger(state / "ledger", workflow_started)[ledger_before:]
+    ledger_clock_ok = ledger_clock_continuous(call_records, ledger_rows)
     call_records = attach_ledger_measurements(call_records, ledger_rows)
     ledger_measurements = summarize_ledger_calls(
         [{**row, **interval} for row, interval in zip(ledger_rows, ledger_intervals(ledger_rows), strict=True)]
     )
+    if not ledger_clock_ok:
+        for key in ("ledger_observation_span_ms", "server_occupied_union_ms", "server_idle_within_observed_span_ms"):
+            ledger_measurements[key] = None
+        ledger_measurements["occupancy_reason"] = "invalid: UTC ledger clock discontinuity against client trace"
     instrumentation = read_instrumentation(state)
+    closure_snapshot = closure_instrumentation["snapshots"]["closure"]
+    convergence_snapshot = convergence_instrumentation["snapshots"]["convergence"]
     return {
         "variant": variant,
         "profile": profile,
@@ -947,13 +1139,24 @@ async def run_public_workflow(
             shutdown_finished=shutdown_finished,
         ),
         "public_call_count": len(call_records),
+        "call_counts": {
+            "probes": sum(1 for call in call_records if call.get("probe")),
+            "verification": sum(1 for call in call_records if call.get("phase") == "verification"),
+            "convergence_polls": sum(1 for call in call_records if call.get("phase") == "convergence-poll"),
+            "retries": sum(
+                1
+                for call in call_records
+                if call.get("request_shape", {}).get("operation") == "retry"
+            ),
+        },
         "calls": call_records,
         "write_ack": _ack_percentiles(call_records),
         "useful_closure": closure,
         "verification": {
             "direct_marker": _contains_marker(direct, marker),
             "tracker_marker": _contains_marker(tracker_read, marker),
-            "recall_path": _contains_path(recall, path),
+            "recall_hit": recall_has_exact_hit(recall, path, marker),
+            "evidence_citations": all(_contains_marker(direct, evidence_path) for evidence_path in evidence_paths),
             "stale_relation_absent": not _contains_marker(stale_relation_read, stale_line),
             "mutations_succeeded": mutation_success,
         },
@@ -961,19 +1164,53 @@ async def run_public_workflow(
         "connector_overhead_ms": None,
         "connector_overhead_reason": "stdio client wall and server ledger are independently measured but not request-correlated",
         "graph_invocations": {
-            "incremental": instrumentation["graph_incremental_calls"],
-            "rebuild": instrumentation["graph_rebuild_calls"],
+            "at_closure": {
+                "drain_attempts": closure_snapshot["graph_drain_attempts"],
+                "drain_completed": closure_snapshot["graph_drain_completed"],
+                "rebuild_attempts": closure_snapshot["graph_rebuild_attempts"],
+                "rebuild_completed": closure_snapshot["graph_rebuild_completed"],
+            },
+            "at_convergence": {
+                "drain_attempts": convergence_snapshot["graph_drain_attempts"],
+                "drain_completed": convergence_snapshot["graph_drain_completed"],
+                "rebuild_attempts": convergence_snapshot["graph_rebuild_attempts"],
+                "rebuild_completed": convergence_snapshot["graph_rebuild_completed"],
+            },
+            "after_shutdown": {
+                "drain_attempts": instrumentation["graph_drain_attempts"],
+                "drain_completed": instrumentation["graph_drain_completed"],
+                "rebuild_attempts": instrumentation["graph_rebuild_attempts"],
+                "rebuild_completed": instrumentation["graph_rebuild_completed"],
+            },
         },
         "source_scans": {
-            "pages": instrumentation["source_scan_pages"],
-            "bytes": instrumentation["source_scan_bytes"],
+            "coverage": instrumentation["scan_coverage"],
+            "at_closure": {
+                "pages": closure_snapshot["source_scan_pages"],
+                "bytes": closure_snapshot["source_scan_bytes"],
+            },
+            "at_convergence": {
+                "pages": convergence_snapshot["source_scan_pages"],
+                "bytes": convergence_snapshot["source_scan_bytes"],
+            },
+            "after_shutdown": {
+                "pages": instrumentation["source_scan_pages"],
+                "bytes": instrumentation["source_scan_bytes"],
+            },
         },
         "instrumentation": {
             "method": "child-process sitecustomize wrappers",
             "error": instrumentation.get("instrumentation_error"),
         },
         "media": media,
-        "full_convergence_ms": None,
+        "full_convergence_ms": full_convergence_ms,
+        "full_convergence_reason": (
+            None
+            if full_convergence_ms is not None
+            else "model-free profile proves enqueue/custody only"
+            if profile == MODEL_FREE_PROFILE
+            else "public extraction proof did not converge"
+        ),
     }
 
 
