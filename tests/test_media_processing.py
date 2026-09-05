@@ -1759,6 +1759,180 @@ def test_process_media_selected_batch_replays_without_reconciliation(
     ]
 
 
+def test_selected_media_retry_without_canonical_commit_has_a_settled_terminal(
+    vault: Path,
+) -> None:
+    """A queue-only retry still has one validated, replayable public result."""
+    from exomem import writer_lease
+
+    binary = _drop_media(vault, "selected-queue-retry.m4a")
+    relative = binary.relative_to(vault).as_posix()
+    processed = commands_module.op_process_media(vault, path=relative, operation="process")
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == processed["job_id"]
+    store.mark(claimed.id, media_jobs.FAILED, "InvalidDataError: retryable")
+
+    command = next(item for item in commands_module.PRODUCT_COMMANDS if item.name == "process_media")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "selected-queue-retry-state")
+    )
+    compact = manager.invoke(
+        command,
+        (vault,),
+        {
+            "paths": [relative],
+            "operation": "retry",
+        },
+        idempotency_key="selected-queue-retry",
+    )
+    first = manager.invoke(
+        command,
+        (vault,),
+        {
+            "paths": [relative],
+            "operation": "retry",
+            "response_detail": "full",
+        },
+        idempotency_key="selected-queue-retry",
+    )
+    replay = manager.invoke(
+        command,
+        (vault,),
+        {"paths": [relative], "operation": "retry"},
+        idempotency_key="selected-queue-retry",
+    )
+
+    assert replay == compact
+    assert first["ok"] is True
+    assert first["state"] == "settled"
+    assert first["status"] == "settled"
+    assert first["terminal"] is True
+    assert first["mutated"] is False
+    assert isinstance(first["request_id"], str)
+    assert first["media_results"] == [
+        {
+            "path": relative,
+            "outcome": "retried",
+            "state": media_jobs.PENDING,
+            "media_type": "audio",
+            "sidecar_path": f"{relative}.md",
+            "job_id": processed["job_id"],
+            "requeued": 1,
+        }
+    ]
+    assert "diagnostics" not in compact
+    assert compact["media_results"] == first["media_results"]
+    assert first["diagnostics"]["results"] == [
+        {
+            "path": relative,
+            "outcome": "retried",
+            "state": media_jobs.PENDING,
+            "media_type": "audio",
+            "sidecar_path": f"{relative}.md",
+            "job_id": processed["job_id"],
+            "requeued": 1,
+        }
+    ]
+
+
+def test_selected_media_batch_reports_policy_and_disappearance_failures_per_item(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import writer_lease
+
+    media_processing = _media_processing()
+    first = _drop_media(vault, "selected-policy-first.m4a")
+    readonly = _drop_media(vault, "selected-policy-readonly.m4a")
+    vanished = _drop_media(vault, "selected-policy-vanished.m4a")
+    first_relative = first.relative_to(vault).as_posix()
+    readonly_relative = readonly.relative_to(vault).as_posix()
+    vanished_relative = vanished.relative_to(vault).as_posix()
+    original = media_processing.reconcile_media
+
+    def reconcile(root: Path, binary: Path, **kwargs: object):
+        name = Path(binary).name
+        if name == readonly.name:
+            raise ValueError("WRITE_REFUSED")
+        if name == vanished.name:
+            raise FileNotFoundError(binary)
+        return original(root, binary, **kwargs)
+
+    monkeypatch.setattr(media_processing, "reconcile_media", reconcile)
+    command = next(item for item in commands_module.PRODUCT_COMMANDS if item.name == "process_media")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "selected-policy-state")
+    )
+
+    result = manager.invoke(
+        command,
+        (vault,),
+        {"paths": [first_relative, readonly_relative, vanished_relative], "operation": "process"},
+        idempotency_key="selected-policy-races",
+    )
+
+    assert result["terminal"] is True
+    assert result["media_results"][0]["outcome"] == "processed"
+    assert result["media_results"][1:] == [
+        {
+            "path": readonly_relative,
+            "outcome": "failed",
+            "state": media_jobs.FAILED,
+            "code": "WRITE_REFUSED",
+            "remediation": "Restore write access to the governed media path, then retry processing.",
+        },
+        {
+            "path": vanished_relative,
+            "outcome": "failed",
+            "state": media_jobs.FAILED,
+            "code": "MEDIA_NOT_FOUND",
+            "remediation": "Select an existing governed media artifact, then retry processing.",
+        },
+    ]
+
+
+@pytest.mark.parametrize("state", [media_jobs.BLOCKED, media_jobs.FAILED])
+def test_selected_media_batch_makes_existing_terminal_jobs_actionable(
+    vault: Path, state: str
+) -> None:
+    from exomem import writer_lease
+
+    media_processing = _media_processing()
+    fresh = _drop_media(vault, f"selected-actionable-fresh-{state}.m4a")
+    terminal = _drop_media(vault, f"selected-actionable-{state}.m4a")
+    terminal_result = media_processing.reconcile_media(vault, terminal)
+    assert terminal_result is not None and terminal_result.job_id is not None
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == terminal_result.job_id
+    store.mark(claimed.id, state, "ExtractionUnavailable: engine absent")
+
+    command = next(item for item in commands_module.PRODUCT_COMMANDS if item.name == "process_media")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / f"selected-actionable-{state}-state")
+    )
+    result = manager.invoke(
+        command,
+        (vault,),
+        {
+            "paths": [fresh.relative_to(vault).as_posix(), terminal.relative_to(vault).as_posix()],
+            "operation": "process",
+        },
+        idempotency_key=f"selected-actionable-{state}",
+    )
+
+    assert result["media_results"][0]["outcome"] == "processed"
+    assert result["media_results"][1] == {
+        "path": terminal.relative_to(vault).as_posix(),
+        "outcome": "failed",
+        "state": state,
+        "code": "MEDIA_BLOCKED" if state == media_jobs.BLOCKED else "MEDIA_FAILED",
+        "remediation": "install the required media dependency, then retry"
+        if state == media_jobs.BLOCKED
+        else "repair or replace the media artifact, then retry",
+    }
+
+
 def test_process_media_product_status_is_stably_bounded(vault: Path) -> None:
     store = media_jobs.MediaJobStore(vault)
     total = media_jobs.STATUS_JOB_LIMIT + 7

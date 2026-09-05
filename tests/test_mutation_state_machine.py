@@ -46,8 +46,9 @@ def test_states_are_closed_and_terminality_is_explicit():
         "rejected",
         "retryable",
         "indeterminate",
+        "settled",
     }
-    assert mt.TERMINAL_STATES == {"committed", "rejected"}
+    assert mt.TERMINAL_STATES == {"committed", "rejected", "settled"}
     assert "needs_review" not in mt.TERMINAL_STATES
 
 

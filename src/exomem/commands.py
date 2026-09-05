@@ -5866,6 +5866,61 @@ def _process_media(
     if selected_paths is not None:
         from . import media_processing
 
+        def public_code(value: object, *, fallback: str) -> str:
+            if (
+                isinstance(value, str)
+                and 0 < len(value) <= 128
+                and all(character.isupper() or character.isdigit() or character == "_" for character in value)
+            ):
+                return value
+            return fallback
+
+        def failure_row(relative: str, code: str, *, state: str = media_jobs.FAILED) -> dict[str, object]:
+            code = public_code(code, fallback="MEDIA_PROCESSING_FAILED")
+            return {
+                "path": relative,
+                "outcome": "failed",
+                "state": state,
+                "code": code,
+                "remediation": _media_remediation(code),
+            }
+
+        def terminal_job_row(relative: str, result: object) -> dict[str, object] | None:
+            state = getattr(result, "state", None)
+            if state not in {media_jobs.BLOCKED, media_jobs.FAILED}:
+                return None
+            reported = next(
+                (
+                    job
+                    for job in media_jobs.status(vault_root)["jobs"]
+                    if job.get("path") == relative
+                ),
+                None,
+            )
+            fallback_code = "MEDIA_BLOCKED" if state == media_jobs.BLOCKED else "MEDIA_FAILED"
+            code = public_code(
+                reported.get("failure_code")
+                if isinstance(reported, dict) and isinstance(reported.get("failure_code"), str)
+                else fallback_code,
+                fallback=fallback_code,
+            )
+            remediation = (
+                reported.get("next_action")
+                if (
+                    isinstance(reported, dict)
+                    and isinstance(reported.get("next_action"), str)
+                    and 0 < len(reported["next_action"]) <= 300
+                )
+                else _media_remediation(code)
+            )
+            return {
+                "path": relative,
+                "outcome": "failed",
+                "state": state,
+                "code": code,
+                "remediation": remediation,
+            }
+
         results: list[dict[str, object]] = []
         for binary, relative in selected_paths:
             try:
@@ -5886,15 +5941,19 @@ def _process_media(
                 if result is None:
                     raise OpError("UNSUPPORTED_MEDIA", "media processing did not return a result")
             except media_processing.MediaProcessingError as error:
-                results.append(
-                    {
-                        "path": relative,
-                        "outcome": "failed",
-                        "state": media_jobs.FAILED,
-                        "code": error.code,
-                        "remediation": _media_remediation(error.code),
-                    }
-                )
+                results.append(failure_row(relative, error.code))
+                continue
+            except ValueError as error:
+                if str(error).partition(":")[0] != "WRITE_REFUSED":
+                    raise
+                results.append(failure_row(relative, "WRITE_REFUSED"))
+                continue
+            except FileNotFoundError:
+                results.append(failure_row(relative, "MEDIA_NOT_FOUND"))
+                continue
+            terminal_row = terminal_job_row(relative, result)
+            if terminal_row is not None:
+                results.append(terminal_row)
                 continue
             row: dict[str, object] = {
                 "path": relative,
@@ -6048,6 +6107,8 @@ def _media_remediation(code: str) -> str:
         return "Restore access to the governed media path, then retry processing."
     if code in {"MEDIA_NOT_FOUND", "MEDIA_PATH_OUTSIDE_KB"}:
         return "Select an existing governed media artifact, then retry processing."
+    if code == "WRITE_REFUSED":
+        return "Restore write access to the governed media path, then retry processing."
     if code == "UNSUPPORTED_MEDIA":
         return "Select a supported governed media artifact."
     return "Inspect the media artifact and retry processing."
