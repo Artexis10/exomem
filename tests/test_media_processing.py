@@ -1836,6 +1836,33 @@ def test_selected_media_retry_without_canonical_commit_has_a_settled_terminal(
     ]
 
 
+def test_single_media_retry_preserves_the_legacy_leaf_result(vault: Path) -> None:
+    from exomem import writer_lease
+
+    binary = _drop_media(vault, "legacy-queue-retry.m4a")
+    relative = binary.relative_to(vault).as_posix()
+    processed = commands_module.op_process_media(vault, path=relative, operation="process")
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == processed["job_id"]
+    store.mark(claimed.id, media_jobs.FAILED, "InvalidDataError: retryable")
+
+    command = next(item for item in commands_module.PRODUCT_COMMANDS if item.name == "process_media")
+    result = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "legacy-queue-retry-state")
+    ).invoke(
+        command,
+        (vault,),
+        {"path": relative, "operation": "retry"},
+        idempotency_key="legacy-queue-retry",
+    )
+
+    assert result["state"] == media_jobs.PENDING
+    assert result["requeued"] == 1
+    assert "terminal" not in result
+    assert "media_state" not in result
+
+
 def test_selected_media_batch_reports_policy_and_disappearance_failures_per_item(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1889,6 +1916,108 @@ def test_selected_media_batch_reports_policy_and_disappearance_failures_per_item
             "remediation": "Select an existing governed media artifact, then retry processing.",
         },
     ]
+
+
+@pytest.mark.parametrize(
+    ("error_type", "code", "remediation"),
+    [
+        (
+            PermissionError,
+            "MEDIA_PATH_ACCESS_DENIED",
+            "Restore access to the governed media path, then retry processing.",
+        ),
+        (
+            FileNotFoundError,
+            "MEDIA_NOT_FOUND",
+            "Select an existing governed media artifact, then retry processing.",
+        ),
+        (
+            NotADirectoryError,
+            "MEDIA_NOT_FOUND",
+            "Select an existing governed media artifact, then retry processing.",
+        ),
+        (
+            IsADirectoryError,
+            "MEDIA_NOT_FOUND",
+            "Select an existing governed media artifact, then retry processing.",
+        ),
+    ],
+)
+def test_selected_media_batch_reports_provenance_open_races_per_item(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[OSError],
+    code: str,
+    remediation: str,
+) -> None:
+    from exomem import writer_lease
+
+    first = _drop_media(vault, "selected-provenance-first.m4a")
+    denied = _drop_media(vault, "selected-provenance-denied.m4a")
+    first_relative = first.relative_to(vault).as_posix()
+    denied_relative = denied.relative_to(vault).as_posix()
+    original_open = Path.open
+
+    def open_for_provenance(self: Path, *args: object, **kwargs: object):
+        if self == denied.resolve():
+            raise error_type("provenance read refused")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_for_provenance)
+    command = next(item for item in commands_module.PRODUCT_COMMANDS if item.name == "process_media")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "selected-provenance-state")
+    )
+
+    result = manager.invoke(
+        command,
+        (vault,),
+        {"paths": [first_relative, denied_relative], "operation": "process"},
+        idempotency_key="selected-provenance-race",
+    )
+
+    assert result["terminal"] is True
+    assert result["media_results"][0]["outcome"] == "processed"
+    assert result["media_results"][1] == {
+        "path": denied_relative,
+        "outcome": "failed",
+        "state": media_jobs.FAILED,
+        "code": code,
+        "remediation": remediation,
+    }
+
+
+def test_selected_media_batch_keeps_unexpected_provenance_oserrors_uncertain(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import writer_lease
+
+    first = _drop_media(vault, "selected-provenance-unexpected-first.m4a")
+    broken = _drop_media(vault, "selected-provenance-unexpected-broken.m4a")
+    first_relative = first.relative_to(vault).as_posix()
+    broken_relative = broken.relative_to(vault).as_posix()
+    original_open = Path.open
+
+    def open_for_provenance(self: Path, *args: object, **kwargs: object):
+        if self == broken.resolve():
+            raise OSError("unexpected device fault")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_for_provenance)
+    command = next(item for item in commands_module.PRODUCT_COMMANDS if item.name == "process_media")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "selected-provenance-unexpected-state")
+    )
+
+    with pytest.raises(OpError) as uncertain:
+        manager.invoke(
+            command,
+            (vault,),
+            {"paths": [first_relative, broken_relative], "operation": "process"},
+            idempotency_key="selected-provenance-unexpected",
+        )
+
+    assert uncertain.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
 
 
 @pytest.mark.parametrize("state", [media_jobs.BLOCKED, media_jobs.FAILED])

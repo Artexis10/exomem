@@ -3543,7 +3543,7 @@ class LeaseManager:
                         receipt_id=receipt,
                         idempotency_key=effective_public_idempotency_key,
                     )
-                if command.name == "process_media":
+                if command.name == "process_media" and kwargs.get("paths") is not None:
                     terminal = settled_media_terminal(
                         leaf_result,
                         request_id=request_id,

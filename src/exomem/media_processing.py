@@ -1050,21 +1050,28 @@ def _read_provenance(
                 "MEDIA_NOT_FOUND", "media artifact does not exist"
             ) from None
     digest = hashlib.sha256()
-    with resolved_binary.open("rb") as stream:
-        before = os.fstat(stream.fileno())
-        if (
-            before.st_dev != expected_identity.device
-            or before.st_ino != expected_identity.inode
-            or not stat.S_ISREG(before.st_mode)
-            or before.st_nlink != 1
-        ):
-            raise MediaProcessingError(
-                "MEDIA_CHANGED_DURING_RECONCILIATION",
-                "media changed while provenance was being recorded",
-            )
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-        after = os.fstat(stream.fileno())
+    try:
+        with resolved_binary.open("rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (
+                before.st_dev != expected_identity.device
+                or before.st_ino != expected_identity.inode
+                or not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+            ):
+                raise MediaProcessingError(
+                    "MEDIA_CHANGED_DURING_RECONCILIATION",
+                    "media changed while provenance was being recorded",
+                )
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+            after = os.fstat(stream.fileno())
+    except PermissionError:
+        raise MediaProcessingError(
+            "MEDIA_PATH_ACCESS_DENIED", "media artifact cannot be read"
+        ) from None
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+        raise MediaProcessingError("MEDIA_NOT_FOUND", "media artifact does not exist") from None
     identity_before = (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
     identity_after = (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
     if identity_after != identity_before or after.st_nlink != 1:
