@@ -38,6 +38,7 @@ import os
 import stat
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -169,6 +170,8 @@ class _PublicationIntent:
 # Kept through the normal suppression window after finalization so a hash that
 # started before commit completion still resolves against the same token.
 _PUBLICATION_INTENTS: dict[tuple[str, str], _PublicationIntent] = {}
+_WATCHERS_LOCK = threading.Lock()
+_WATCHERS: dict[str, weakref.WeakSet[FileWatcher]] = {}
 
 
 def _canon_root(vault_root: Path) -> str:
@@ -385,7 +388,27 @@ def finalize_publication_intents(
 
 
 def abort_publication_intents(intents: Iterable[_PublicationIntent]) -> None:
+    intents = tuple(intents)
     finalize_publication_intents(intents)
+    with _SUPPRESS_LOCK:
+        remnants = [
+            intent
+            for intent in intents
+            if intent.disposition in {"aborted", "expired"}
+        ]
+    by_root: dict[str, list[Path]] = {}
+    for intent in remnants:
+        root, rel = intent.key
+        by_root.setdefault(root, []).append(Path(root) / rel)
+    for root, paths in by_root.items():
+        with _WATCHERS_LOCK:
+            watchers = tuple(_WATCHERS.get(root, ()))
+        if not watchers:
+            freshness.mark_external_pending(Path(root))
+            continue
+        for watcher in watchers:
+            for path in paths:
+                watcher._replay_publication_remnant(path)
 
 
 def _prune_locked(now: float) -> None:
@@ -638,6 +661,8 @@ class FileWatcher:
         self._seed_succeeded = False
         self._startup_recovery_started = False
         self._dispatch_waits_for_seed = False
+        with _WATCHERS_LOCK:
+            _WATCHERS.setdefault(_canon_root(vault_root), weakref.WeakSet()).add(self)
 
     def _watcher_policy(self) -> mode.WatcherPolicy:
         return mode.watcher_policy()
@@ -689,6 +714,15 @@ class FileWatcher:
             self._pending_publication_intents.pop(path, None)
             if disposition != "succeeded":
                 self._record_external_locked(path, deleted=False)
+        self._wake.set()
+
+    def _replay_publication_remnant(self, path: Path) -> None:
+        """Fence a failed transaction even if watchdog never delivered its echo."""
+        with self._lock:
+            self._pending_publication_intents.pop(path, None)
+            if path in self._pending_upsert or path in self._pending_delete:
+                return
+            self._record_external_locked(path, deleted=False)
         self._wake.set()
 
     def _hold_publication_intent(self, path: Path, intent: _PublicationIntent) -> None:
@@ -775,6 +809,14 @@ class FileWatcher:
                 return
             if disposition == "held" and intent is not None:
                 self._hold_publication_intent(path, intent)
+                return
+            if intent is not None:
+                # An exact-intent mismatch is external by definition. It must
+                # not fall through to the legacy stat signature, which cannot
+                # distinguish foreign bytes with restored metadata.
+                with self._lock:
+                    self._record_external_locked(path, deleted=False)
+                self._wake.set()
                 return
         if _is_self_write_event(self._vault_root, path, deleted=deleted):
             log.debug("file watcher: suppressed self-write echo for %s", path)
