@@ -210,6 +210,10 @@ def _content_digest(path: Path) -> str | None:
         return None
 
 
+def _target_digest(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
 def _stat_identity(path: Path) -> tuple[int, int, int, int, int] | None:
     """Cheap parent-media identity that is safe to revalidate while locked."""
     try:
@@ -530,6 +534,11 @@ class MediaWorker:
             )
             return self._publication_outcome(committed, FAILED, error)
         text = result.text.strip() or "(no text detected)"
+        if preserve._has_ambiguous_legacy_preserved_notes(claimed_content):
+            return _ProcessOutcome(
+                BLOCKED,
+                "AMBIGUOUS_SIDECAR_BOUNDARY: unmarked nonempty preserved notes have no machine-owned boundary",
+            )
         committed = False
         for commit_attempt in range(3):
             try:
@@ -578,12 +587,13 @@ class MediaWorker:
                         },
                     ):
                         return _ProcessOutcome(_HANDOFF)
-                preserve.update_sidecar_processing_pending(
-                    self._vault_root,
-                    job.sidecar_path,
-                    attempts=max(1, job.attempts),
-                    expected_hash=expected_sidecar_text_hash,
-                )
+                if self._store is None:
+                    preserve.update_sidecar_processing_pending(
+                        self._vault_root,
+                        job.sidecar_path,
+                        attempts=max(1, job.attempts),
+                        expected_hash=expected_sidecar_text_hash,
+                    )
             detail = ", ".join(stale_parts) or "commit precondition changed"
             return _ProcessOutcome(_STALE, f"stale extraction: {detail}")
         log.info(
@@ -609,7 +619,7 @@ class MediaWorker:
         error: str,
     ) -> bool:
         try:
-            self._commit_processing_failure(
+            committed = self._commit_processing_failure(
                 job,
                 expected_sidecar=expected_sidecar,
                 expected_binary=expected_binary,
@@ -617,12 +627,10 @@ class MediaWorker:
                 error=error,
                 next_action=_COMPUTE_RUNTIME_ACTION,
             )
-            # The ledger was persisted first. A false sidecar precondition is
-            # presentation lag, never permission to overwrite authority as FAILED.
-            return True
+            return committed
         except Exception:  # noqa: BLE001 - durable ledger authority must survive sidecar lag
             log.warning("compute failure sidecar publish deferred for %s", job.binary_path, exc_info=True)
-            return True
+            return False
 
     def converge_compute_runtime_blocked(self, job: _Job) -> bool:
         """Repair blocked compute presentation without constructing an ASR model."""
@@ -657,7 +665,7 @@ class MediaWorker:
                 sidecar_before_hash=expected_sidecar,
                 binary_identity=_result_binary_identity(expected_binary),
                 payload={
-                    "text": text,
+                    "text": preserve._cap_extracted_text(text),
                     "engine": engine,
                     "speakers": speakers or [],
                     "speaker_verification": speaker_verification or "unavailable",
@@ -796,8 +804,12 @@ class MediaWorker:
         self,
         token: DeferredGraphCompletion,
         receipts: list[deferred_index.DeferredReceipt],
+        *,
+        publication_intents: tuple[object, ...] | list[object] = (),
+        recover_on_mismatch: bool = False,
     ) -> bool:
         try:
+            needs_recovery = False
             with get_manager().mutation_guard(
                 self._vault_root,
                 operation="background_media_graph_completion",
@@ -812,49 +824,59 @@ class MediaWorker:
                         vault_root=self._vault_root,
                     )
                 except FileNotFoundError:
-                    index_sync.recover_full_receipt_graph_epoch(self._vault_root, build=False)
-                    return False
-                floor = graph_sync.GraphSyncGenerationFloor.parse(floor_raw)
-                if floor is None or floor.generation != token.checkpoint.generation:
-                    index_sync.recover_full_receipt_graph_epoch(self._vault_root, build=False)
-                    return False
-                floor_content = floor_raw.decode("utf-8")
-                try:
-                    checkpoint_raw = graph_sync._read_bounded_bytes(
-                        checkpoint_path,
-                        limit=graph_sync._CHECKPOINT_READ_LIMIT,
-                        vault_root=self._vault_root,
-                    )
-                except FileNotFoundError:
-                    predecessor = None
-                    checkpoint_hash = MISSING_CONTENT_HASH
+                    needs_recovery = True
                 else:
-                    predecessor = graph_sync.GraphSyncCheckpoint.parse(checkpoint_raw)
-                    if predecessor is None:
-                        index_sync.recover_full_receipt_graph_epoch(self._vault_root, build=False)
-                        return False
-                    checkpoint_hash = content_hash(checkpoint_raw.decode("utf-8"))
-                if predecessor != token.predecessor or checkpoint_hash is None:
-                    index_sync.recover_full_receipt_graph_epoch(self._vault_root, build=False)
+                    floor = graph_sync.GraphSyncGenerationFloor.parse(floor_raw)
+                    if floor is None or floor.generation != token.checkpoint.generation:
+                        needs_recovery = True
+                    else:
+                        floor_content = floor_raw.decode("utf-8")
+                        try:
+                            checkpoint_raw = graph_sync._read_bounded_bytes(
+                                checkpoint_path,
+                                limit=graph_sync._CHECKPOINT_READ_LIMIT,
+                                vault_root=self._vault_root,
+                            )
+                        except FileNotFoundError:
+                            predecessor = None
+                            checkpoint_hash = MISSING_CONTENT_HASH
+                        else:
+                            predecessor = graph_sync.GraphSyncCheckpoint.parse(checkpoint_raw)
+                            checkpoint_hash = (
+                                content_hash(checkpoint_raw.decode("utf-8"))
+                                if predecessor is not None
+                                else None
+                            )
+                        if predecessor != token.predecessor or checkpoint_hash is None:
+                            needs_recovery = True
+                        else:
+                            batch_atomic_write(
+                                [
+                                    PlannedWrite(
+                                        floor_path,
+                                        floor_content,
+                                        expected_hash=content_hash(floor_content),
+                                    ),
+                                    PlannedWrite(
+                                        checkpoint_path,
+                                        token.checkpoint.render(),
+                                        expected_hash=checkpoint_hash,
+                                    )
+                                ],
+                                vault_root=self._vault_root,
+                                post_commit_fanout=False,
+                            )
+            if needs_recovery:
+                if not recover_on_mismatch or not index_sync.recover_full_receipt_graph_epoch(
+                    self._vault_root, build=False
+                ):
                     return False
-                batch_atomic_write(
-                    [
-                        PlannedWrite(
-                            floor_path,
-                            floor_content,
-                            expected_hash=content_hash(floor_content),
-                        ),
-                        PlannedWrite(
-                            checkpoint_path,
-                            token.checkpoint.render(),
-                            expected_hash=checkpoint_hash,
-                        )
-                    ],
-                    vault_root=self._vault_root,
-                    post_commit_fanout=False,
-                )
             completed = post_commit_batch_fanout(
-                self._vault_root, list(token.replaced), None, None
+                self._vault_root,
+                list(token.replaced),
+                None,
+                None,
+                publication_intents=publication_intents,
             )
             if completed is True:
                 deferred_index.clear_full_receipts(self._vault_root, receipts)
@@ -1096,6 +1118,16 @@ class MediaWorker:
     def _drain_parent_results(self) -> None:
         """Publish bounded child results while the disposable child remains alive."""
         assert self._store is not None
+        for blocked in self._store.blocked_compute_presentations_needing_convergence(
+            limit=32
+        ):
+            if blocked.state == BLOCKED and media_jobs.is_compute_runtime_error(
+                blocked.last_error
+            ):
+                try:
+                    self.converge_compute_runtime_blocked(blocked)
+                except Exception:  # noqa: BLE001 - retained for the next parent pass
+                    log.warning("media parent blocked presentation deferred", exc_info=True)
         for result in self._store.pending_results(limit=32):
             try:
                 self._publish_parent_result(result)
@@ -1104,62 +1136,130 @@ class MediaWorker:
 
     def _publish_parent_result(self, result: media_jobs.MediaJobResult) -> None:
         job = result.job
+        publication_intents: list[object] = []
+        if job.claim_revision != result.claim_revision:
+            # A prior version could retry a terminal result. Never let an old
+            # packet publish into its successor's claim, but do release it so
+            # it cannot starve the new work indefinitely.
+            self._store.discard_result(result)
+            return
         current_binary = _binary_identity(job.binary_path)
+        current_sidecar = _content_digest(job.sidecar_path)
+        prepared_target = (
+            result.target_hash is not None
+            and result.target_size is not None
+            and result.receipt_revision is not None
+            and current_sidecar == result.target_hash
+        )
+        if prepared_target:
+            try:
+                if job.sidecar_path.stat().st_size != result.target_size:
+                    return
+            except OSError:
+                return
+            if (
+                current_binary is None
+                or _result_binary_identity(current_binary) != result.binary_identity
+            ):
+                return
+            if not index_sync.recover_full_receipt_graph_epoch(
+                self._vault_root, build=False
+            ):
+                return
+            completed = post_commit_batch_fanout(
+                self._vault_root, [job.sidecar_path], None, None
+            )
+            if completed is not True:
+                return
+            deferred_index.clear_full_receipts(
+                self._vault_root,
+                [deferred_index.DeferredReceipt(
+                    job.sidecar_path.relative_to(self._vault_root).as_posix(),
+                    result.receipt_revision,
+                )],
+            )
+            self._store.finalize_result(
+                result, requeue_remaining=result.kind in {"extraction", "pending"}
+            )
+            return
         if (
             current_binary is None
             or _result_binary_identity(current_binary) != result.binary_identity
-            or _content_digest(job.sidecar_path) != result.sidecar_before_hash
+            or current_sidecar != result.sidecar_before_hash
         ):
             # A third value is foreign/stale. It is never a license to replace
-            # canonical bytes; release only this result and let reconciliation
-            # mint a fresh claim from current input.
-            self._store.finalize_result(result, requeue_remaining=True)
+            # canonical bytes. Keep the fenced durable result for a later
+            # reconciliation decision; never erase an OCR result merely because
+            # a sidecar now needs a distinct stale/foreign disposition.
             return
+        terminal_error: str | None = None
         with get_manager().mutation_guard(
             self._vault_root,
             operation="background_media_parent_publication",
             holder_kind="background",
         ):
             before = job.sidecar_path.read_text(encoding="utf-8")
-            if content_hash(before) != result.sidecar_before_hash:
+            if _content_digest(job.sidecar_path) != result.sidecar_before_hash:
                 return
             if _result_binary_identity(_binary_identity(job.binary_path) or ((-1,) * 5, None)) != result.binary_identity:
                 return
-            if result.kind == "extraction":
-                target = preserve.render_sidecar_extraction(
-                    before,
-                    text=str(result.payload["text"]),
-                    engine=str(result.payload["engine"]),
-                    speakers=list(result.payload.get("speakers", [])),
-                    speaker_verification=str(result.payload.get("speaker_verification", "unavailable")),
-                    attempts=max(1, job.attempts),
-                )
+            try:
+                if result.kind == "extraction":
+                    target = preserve.render_sidecar_extraction(
+                        before,
+                        text=str(result.payload["text"]),
+                        engine=str(result.payload["engine"]),
+                        speakers=list(result.payload.get("speakers", [])),
+                        speaker_verification=str(result.payload.get("speaker_verification", "unavailable")),
+                        attempts=max(1, job.attempts),
+                    )
+                else:
+                    target = preserve.render_sidecar_processing_failure(
+                        before,
+                        state=media_jobs.PENDING if result.kind == "pending" else job.state,
+                        attempts=max(1, job.attempts),
+                        error=str(result.payload["error"]),
+                        retryable=True,
+                        next_action=str(result.payload["next_action"]),
+                    )
+            except preserve.PreserveError as exc:
+                if exc.code != "AMBIGUOUS_SIDECAR_BOUNDARY":
+                    raise
+                terminal_error = f"{exc.code}: {exc.reason}"
+                handoff = None
+            if terminal_error is not None:
+                pass
             else:
-                target = preserve.render_sidecar_processing_failure(
-                    before,
-                    state=media_jobs.PENDING if result.kind == "pending" else job.state,
-                    attempts=max(1, job.attempts),
-                    error=str(result.payload["error"]),
-                    retryable=True,
-                    next_action=str(result.payload["next_action"]),
+                rel = job.sidecar_path.relative_to(self._vault_root).as_posix()
+                [receipt] = deferred_index.add_full_receipts(self._vault_root, [rel])
+                if not self._store.persist_prepared_result(
+                    result,
+                    target_hash=_target_digest(target),
+                    target_size=len(target.encode("utf-8")),
+                    receipt_revision=receipt.revision,
+                ):
+                    deferred_index.clear_full_receipts(self._vault_root, [receipt])
+                    return
+                handoff = preserve.commit_media_sidecar_writes(
+                    self._vault_root,
+                    (PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before)),),
+                    post_commit_fanout=False,
+                    defer_graph_completion=True,
+                    publication_intents_out=publication_intents,
                 )
-            rel = job.sidecar_path.relative_to(self._vault_root).as_posix()
-            [receipt] = deferred_index.add_full_receipts(self._vault_root, [rel])
-            if not self._store.persist_prepared_result(
-                result,
-                target_hash=content_hash(target),
-                target_size=len(target.encode("utf-8")),
-                receipt_revision=receipt.revision,
-            ):
-                return
-            handoff = preserve.commit_media_sidecar_writes(
-                self._vault_root,
-                (PlannedWrite(job.sidecar_path, target, expected_hash=result.sidecar_before_hash),),
-                post_commit_fanout=False,
-                defer_graph_completion=True,
+                assert isinstance(handoff, DeferredGraphCompletion)
+        if terminal_error is not None:
+            self._store.terminalize_result(
+                result, state=media_jobs.BLOCKED, error=terminal_error
             )
-            assert isinstance(handoff, DeferredGraphCompletion)
-        if not self._complete_deferred_graph_completion(handoff, [receipt]):
+            return
+        assert handoff is not None
+        if not self._complete_deferred_graph_completion(
+            handoff,
+            [receipt],
+            publication_intents=publication_intents,
+            recover_on_mismatch=True,
+        ):
             return
         self._store.finalize_result(
             result, requeue_remaining=result.kind in {"extraction", "pending"}
@@ -1317,12 +1417,6 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
     # Process mode makes scene-frame follow-up enqueue durable in this same ledger;
     # the nested supervisor is never started because the child calls _process directly.
     worker = MediaWorker(vault_root, execution_mode="process", idle_seconds=idle_seconds)
-    for blocked in store.blocked_compute_presentations_needing_convergence(limit=100):
-        if blocked.state == BLOCKED and media_jobs.is_compute_runtime_error(blocked.last_error):
-            try:
-                worker.converge_compute_runtime_blocked(blocked)
-            except Exception:  # noqa: BLE001 - presentation lag must not resume ASR
-                log.warning("media worker: blocked compute sidecar convergence deferred", exc_info=True)
     last_work = time.monotonic()
     try:
         if extract.asr_prewarm_enabled():
@@ -1343,13 +1437,13 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                 outcome = worker._process(job)
             except runtime_resources.ModelBusyError:
                 assert job.id is not None
-                store.defer(job.id)
+                store.defer(job)
                 log.info("media worker: deferred %s after model admission refusal", job.binary_path)
                 return _TRANSIENT_EXIT_CODE
             except OpError as exc:
                 assert job.id is not None
                 if exc.code in _TRANSIENT_OPERATION_CODES:
-                    store.defer(job.id)
+                    store.defer(job)
                     log.info(
                         "media worker: deferred %s after transient %s",
                         job.binary_path,
@@ -1359,12 +1453,12 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                         return _LOCK_UNAVAILABLE_EXIT_CODE
                     return _TRANSIENT_EXIT_CODE
                 log.exception("media child job crashed: %s", job.binary_path)
-                store.mark(job.id, FAILED, f"{type(exc).__name__}: {exc}")
+                store.mark(job, FAILED, f"{type(exc).__name__}: {exc}")
             except PermissionError as exc:
                 assert job.id is not None
                 error = f"{type(exc).__name__}: {exc}"
                 if is_guarded_sidecar_sharing_violation(exc, job.sidecar_path):
-                    if store.defer_sharing_violation(job.id, error):
+                    if store.defer_sharing_violation(job, error):
                         log.info(
                             "media worker: deferred %s after Windows sidecar sharing denial",
                             job.binary_path,
@@ -1376,11 +1470,11 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                     )
                 else:
                     log.exception("media child job crashed: %s", job.binary_path)
-                store.mark(job.id, FAILED, error)
+                store.mark(job, FAILED, error)
             except Exception as exc:  # noqa: BLE001 - preserve worker availability
                 log.exception("media child job crashed: %s", job.binary_path)
                 assert job.id is not None
-                store.mark(job.id, FAILED, f"{type(exc).__name__}: {exc}")
+                store.mark(job, FAILED, f"{type(exc).__name__}: {exc}")
             else:
                 assert job.id is not None
                 if outcome.state == _HANDOFF:
@@ -1389,9 +1483,9 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                     # complete this claim in the disposable process.
                     continue
                 if outcome.state == BLOCKED:
-                    store.mark(job.id, BLOCKED, outcome.error)
+                    store.mark(job, BLOCKED, outcome.error)
                 elif outcome.state == FAILED:
-                    store.mark(job.id, FAILED, outcome.error)
+                    store.mark(job, FAILED, outcome.error)
                 elif outcome.state == _STALE:
                     try:
                         current_content = job.sidecar_path.read_text(encoding="utf-8")
@@ -1409,7 +1503,7 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                         store.discard(job)
                     else:
                         store.mark(
-                            job.id,
+                            job,
                             FAILED,
                             outcome.error or "stale extraction commit",
                         )

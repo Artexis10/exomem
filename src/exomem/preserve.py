@@ -1052,6 +1052,7 @@ def commit_media_sidecar_writes(
     *,
     post_commit_fanout: bool = True,
     defer_graph_completion: bool = False,
+    publication_intents_out: list[object] | None = None,
     batch_writer: Callable[..., list[Path] | DeferredGraphCompletion] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Publish machine-owned Markdown through the active catalog tuple."""
@@ -1077,12 +1078,14 @@ def commit_media_sidecar_writes(
             str(error),
         ) from error
     writer = batch_atomic_write if batch_writer is None else batch_writer
-    written = writer(
-        list(writes),
-        vault_root=vault_root,
-        post_commit_fanout=post_commit_fanout,
-        defer_graph_completion=defer_graph_completion,
-    )
+    writer_kwargs: dict[str, object] = {
+        "vault_root": vault_root,
+        "post_commit_fanout": post_commit_fanout,
+        "defer_graph_completion": defer_graph_completion,
+    }
+    if publication_intents_out is not None:
+        writer_kwargs["publication_intents_out"] = publication_intents_out
+    written = writer(list(writes), **writer_kwargs)
     try:
         catalog_publication.publish_markdown_batch(prepared)
     except catalog_publication.CatalogPublicationError as error:

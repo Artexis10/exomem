@@ -4543,6 +4543,7 @@ def batch_atomic_write(
     post_commit_fanout: bool = True,
     commit_point: bool = True,
     defer_graph_completion: bool = False,
+    publication_intents_out: list[Any] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -4568,6 +4569,7 @@ def batch_atomic_write(
             post_commit_fanout=post_commit_fanout,
             commit_point=commit_point,
             defer_graph_completion=defer_graph_completion,
+            publication_intents_out=publication_intents_out,
         )
 
 
@@ -4582,6 +4584,7 @@ def _batch_atomic_write_locked(
     post_commit_fanout: bool = True,
     commit_point: bool = True,
     defer_graph_completion: bool = False,
+    publication_intents_out: list[Any] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -4610,7 +4613,7 @@ def _batch_atomic_write_locked(
     deferred_predecessor: GraphSyncCheckpoint | None = None
     publication_intents: list[Any] = []
     publication_intents_enabled = False
-    if vault_root is not None and post_commit_fanout:
+    if vault_root is not None and (post_commit_fanout or publication_intents_out is not None):
         from .writer_lease import active_derived_batch_custody
 
         publication_intents_enabled = not active_derived_batch_custody(Path(vault_root))
@@ -5258,6 +5261,8 @@ def _batch_atomic_write_locked(
             target_summary,
             True,
         )
+    if not post_commit_fanout and publication_intents_out is not None:
+        publication_intents_out.extend(publication_intents)
     if deferred_checkpoint is not None:
         return DeferredGraphCompletion(
             tuple(path for path in replaced if path != graph_floor_path),

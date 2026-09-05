@@ -101,6 +101,109 @@ def test_failed_result_remains_join_pending_until_parent_finalizes(vault: Path) 
     assert store.pending_result_count() == 1
 
 
+def test_failed_result_prepares_and_finalizes_against_its_terminal_claim(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+    claimed = store.claim_next()
+    assert claimed is not None
+    assert store.record_result(
+        claimed,
+        kind="failure",
+        sidecar_before_hash="a" * 64,
+        binary_identity={"stat": [1, 2, 3, 4, 5], "sha256": "b" * 64},
+        payload={"error": "broken input", "next_action": "replace it"},
+        terminal_state=media_jobs.FAILED,
+    )
+    [result] = store.pending_results()
+    assert store.persist_prepared_result(
+        result, target_hash="c" * 64, target_size=1, receipt_revision=1
+    )
+    assert store.finalize_result(result, requeue_remaining=False)
+    assert store.pending_result_count() == 0
+    current = store.get(claimed.id)
+    assert current is not None and current.state == media_jobs.FAILED
+
+
+def test_result_bearing_failure_cannot_retry_or_finalize_after_claim_aba(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+    first = store.claim_next()
+    assert first is not None
+    assert store.record_result(
+        first,
+        kind="failure",
+        sidecar_before_hash="a" * 64,
+        binary_identity={"stat": [1, 2, 3, 4, 5], "sha256": "b" * 64},
+        payload={"error": "broken", "next_action": "replace it"},
+        terminal_state=media_jobs.FAILED,
+    )
+    assert store.retry(include_failed=True) == 0
+
+    # Simulate the pre-fence retry bug: the old result is now attached to a
+    # new claim. Parent preparation/finalization must refuse it transactionally.
+    conn = store._connect()
+    try:
+        with conn:
+            conn.execute("UPDATE jobs SET state = 'pending' WHERE id = ?", (first.id,))
+    finally:
+        conn.close()
+    second = store.claim_next()
+    assert second is not None and second.claim_revision > first.claim_revision
+    [old] = store.pending_results()
+    assert old.claim_revision == first.claim_revision
+    assert old.job.claim_revision == second.claim_revision
+    assert not store.persist_prepared_result(
+        old, target_hash="c" * 64, target_size=1, receipt_revision=1
+    )
+    assert not store.finalize_result(old, requeue_remaining=False)
+    assert store.pending_result_count() == 1
+
+
+def test_discard_cascades_a_result_row(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+    claimed = store.claim_next()
+    assert claimed is not None
+    assert store.record_result(
+        claimed,
+        kind="extraction",
+        sidecar_before_hash="a" * 64,
+        binary_identity={"stat": [1, 2, 3, 4, 5], "sha256": "b" * 64},
+        payload={"text": "ready", "engine": "test"},
+    )
+    assert store.discard(claimed) == 1
+    assert store.pending_result_count() == 0
+    assert store.pending_results() == []
+
+
+def test_malformed_oldest_result_is_quarantined_without_starving_later_result(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    for name in ("bad.mp4", "good.mp4"):
+        store.enqueue(_job(vault, name=name))
+        claimed = store.claim_next()
+        assert claimed is not None
+        assert store.record_result(
+            claimed,
+            kind="extraction",
+            sidecar_before_hash="a" * 64,
+            binary_identity={"stat": [1, 2, 3, 4, 5], "sha256": "b" * 64},
+            payload={"text": name, "engine": "test"},
+        )
+    conn = store._connect()
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE media_job_results SET schema_version = 2, payload_json = '{' "
+                "WHERE job_id = (SELECT min(job_id) FROM media_job_results)"
+            )
+    finally:
+        conn.close()
+
+    [good] = store.pending_results()
+    assert good.payload["text"] == "good.mp4"
+    assert store.pending_result_count() == 1
+
+
 def _rollback_incomplete_error(
     *,
     targets: tuple[str, ...] = ("Knowledge Base/Evidence/item.mp3.md",),

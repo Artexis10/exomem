@@ -12,6 +12,7 @@ import pytest
 from exomem import preserve as preserve_module
 from exomem import vault as vault_module
 from exomem.governance import companions
+from exomem.vault import PlannedWrite, content_hash
 
 TODAY = dt.date(2026, 5, 25)
 _ARTIFACT_SENTINEL = "<!-- exomem:sidecar-artifact -->"
@@ -113,6 +114,29 @@ def test_capped_sidecar_keeps_corpus_small(vault: Path, monkeypatch: pytest.Monk
     assert vault_module.parse_frontmatter(body, strict=True)[0][
         "governance_companion"
     ] == descriptor_before
+
+
+def test_media_sidecar_commit_passes_explicit_publication_intent_collector(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = vault / "Knowledge Base" / "Evidence" / "receipt.jpg.md"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text("---\n---\n", encoding="utf-8")
+    captured: list[object] = []
+
+    def writer(writes, **kwargs):  # noqa: ANN001
+        kwargs["publication_intents_out"].append("intent")
+        return [write.path for write in writes]
+
+    preserve_module.commit_media_sidecar_writes(
+        vault,
+        (PlannedWrite(sidecar, "---\n---\nbody\n", expected_hash=content_hash("---\n---\n")),),
+        post_commit_fanout=False,
+        publication_intents_out=captured,
+        batch_writer=writer,
+    )
+
+    assert captured == ["intent"]
 
 
 def test_update_sidecar_extraction_replaces_internal_headings_before_preserved_notes(

@@ -155,6 +155,40 @@ def test_process_child_hands_extraction_to_parent_without_sidecar_write(
     assert pending.payload["text"] == "parent-only transcript"
 
 
+def test_process_handoff_projects_diarization_turns_and_caps_extraction_text(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="long-diarized.mp3")
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio"
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    turns = [
+        {"speaker": f"S{index % 2}", "start": float(index), "end": float(index + 1), "text": "turn"}
+        for index in range(80)
+    ]
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="x" * (600 * 1024), media_type="audio", engine="test", speakers=turns
+        ),
+    )
+
+    outcome = media_worker.MediaWorker(vault, execution_mode="process")._process(claimed)
+
+    assert outcome.state == "handoff"
+    [pending] = store.pending_results()
+    assert pending.payload["speakers"] == [{"speaker": "S0"}, {"speaker": "S1"}]
+    assert "truncated:" in str(pending.payload["text"])
+    assert len(str(pending.payload["text"]).encode("utf-8")) < 768 * 1024
+
+
 def test_parent_publishes_handed_result_and_requeues_only_remaining_stages(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -183,14 +217,114 @@ def test_parent_publishes_handed_result_and_requeues_only_remaining_stages(
         payload={"text": "published by parent", "engine": "test"},
     )
     worker = media_worker.MediaWorker(vault, execution_mode="process")
-    monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_args: True)
+    publication_intents: list[object] = []
+    monkeypatch.setattr(
+        worker,
+        "_complete_deferred_graph_completion",
+        lambda *_args, **kwargs: publication_intents.extend(kwargs["publication_intents"]) or True,
+    )
 
     worker._publish_parent_result(store.pending_results()[0])
 
     assert "published by parent" in sidecar.read_text(encoding="utf-8")
+    assert publication_intents
     assert store.pending_result_count() == 0
     remaining = store.get(claimed.id)
     assert remaining is not None and not remaining.do_ocr and remaining.do_clip
+
+
+def test_parent_recovers_prepared_target_without_replacing_sidecar(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="prepared-target.mp3")
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio"
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    before = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+    identity = media_worker._binary_identity(claimed.binary_path)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="extraction",
+        sidecar_before_hash=before,
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"text": "crash target", "engine": "test"},
+    )
+    pending = store.pending_results()[0]
+    target = preserve.render_sidecar_extraction(
+        sidecar.read_text(encoding="utf-8"), text="crash target", engine="test", attempts=1
+    )
+    assert store.persist_prepared_result(
+        pending,
+        target_hash=hashlib.sha256(target.encode("utf-8")).hexdigest(),
+        target_size=len(target.encode("utf-8")),
+        receipt_revision=1,
+    )
+    sidecar.write_text(target, encoding="utf-8")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    recovered: list[bool] = []
+    fanned_out: list[bool] = []
+    monkeypatch.setattr(
+        media_worker.index_sync,
+        "recover_full_receipt_graph_epoch",
+        lambda *_a, **_k: recovered.append(True) or True,
+    )
+    monkeypatch.setattr(
+        media_worker,
+        "post_commit_batch_fanout",
+        lambda *_a, **_k: fanned_out.append(True) or True,
+    )
+
+    worker._publish_parent_result(store.pending_results()[0])
+
+    assert sidecar.read_text(encoding="utf-8") == target
+    assert recovered == [True]
+    assert fanned_out == [True]
+    assert store.pending_result_count() == 0
+
+
+def test_parent_terminalizes_ambiguous_preserved_notes_handoff(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="ambiguous-parent.mp3")
+    sidecar = vault / result.sidecar_path
+    sidecar.write_text(
+        sidecar.read_text(encoding="utf-8")
+        + "# Existing document heading\n\n## Preserved notes\n\nuser-owned text\n",
+        encoding="utf-8",
+    )
+    before = sidecar.read_text(encoding="utf-8")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio"
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    identity = media_worker._binary_identity(claimed.binary_path)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="extraction",
+        sidecar_before_hash=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"text": "new transcript", "engine": "test"},
+    )
+
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 0
+    current = store.get(claimed.id)
+    assert current is not None and current.state == media_jobs.BLOCKED
+    assert current.last_error is not None and "AMBIGUOUS_SIDECAR_BOUNDARY" in current.last_error
 
 
 def test_extraction_compute_stays_outside_guard_and_sidecar_commit_is_inside(
