@@ -285,14 +285,53 @@ def test_the_pin_resolves_annotations_in_the_leaf_s_own_namespace() -> None:
     assert list(inspect.signature(pinned.leaf).parameters) == ["vault_root", "kept"]
 
 
-def test_the_pin_source_revision_matches_the_manifest_it_was_cut_with() -> None:
-    """Two pins, one moment. Say so, rather than leaving it to inspection."""
-    manifest = json.loads(
-        (REPO_ROOT / "tests/fixtures/hosted_v1_v4_immutability_manifest.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert hosted_legacy_schemas.SOURCE_REVISION == manifest["source_revision"]
+def test_the_pin_survives_a_release_regeneration_of_its_own_source() -> None:
+    """The pin reads a file the release automation rewrites. It must not restale.
+
+    `hosted_legacy_profile_schemas.json` is derived from each candidate's
+    committed `compatibility.json`, and those are regenerated on every release
+    that moves the schema contract. What the pin takes from them is the ordered
+    *parameter names* each profile published, and a contract move that adds a
+    mode or rewords a description leaves those untouched -- so a release must
+    not require the pin to be re-cut.
+
+    Simulated here rather than asserted in prose: a descriptor is regenerated
+    the way #1051 and #1068 regenerated it -- new digests, a reworded parameter
+    -- and the names the pin derives from it are unchanged.
+    """
+    profile = "hosted-alpha-agent-v2"
+    relative = json.loads(
+        (REPO_ROOT / "src/exomem/hosted_legacy_profile_schemas.json").read_text(encoding="utf-8")
+    )["sources"][profile]
+    descriptor = json.loads((REPO_ROOT / relative).read_text(encoding="utf-8"))
+
+    descriptor["compatibility_sha256"] = "0" * 64
+    descriptor["schema_contract_sha256"] = "1" * 64
+    descriptor["agent_contract"]["digest"]["value"] = "2" * 64
+    for entry in descriptor["agent_contract"]["commands"]:
+        for param in entry["params"]:
+            param["description"] = f"{param['description']} A release reworded this."
+
+    derived = {
+        entry["name"]: tuple(param["name"] for param in entry["params"])
+        for entry in descriptor["agent_contract"]["commands"]
+    }
+    assert derived == hosted_legacy_schemas.LEGACY_PROFILE_PARAMS[profile]
+
+
+def test_the_pin_records_where_it_was_read_from_without_coupling_to_another_pin() -> None:
+    """`source_revision` is provenance, not a second guard.
+
+    It used to be asserted equal to the immutability manifest's own revision.
+    The two are cut for different reasons -- one from descriptors the release
+    rewrites, one from source bytes it does not -- so tying them made either
+    one moving restale the other, for no property anybody was checking. What
+    is actually checked is the pin's content, by the test below.
+    """
+    revision = hosted_legacy_schemas.SOURCE_REVISION
+
+    assert isinstance(revision, str) and len(revision) == 40
+    assert all(character in "0123456789abcdef" for character in revision)
 
 
 def test_the_pin_names_the_descriptor_each_profile_was_read_from() -> None:
