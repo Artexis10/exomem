@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.70.0](https://github.com/Artexis10/exomem/compare/v0.69.1...v0.70.0) (2026-09-04)
+
+
+### Features
+
+* **recall:** serve governed recall from maintained indexes ([#1068](https://github.com/Artexis10/exomem/issues/1068)) ([6823cb6](https://github.com/Artexis10/exomem/commit/6823cb650ad6b3cc4b371361fe7355b63c625480))
+
+
+### Bug Fixes
+
+* **ci:** clear the measured cross-platform runtime, not a predicted one ([#769](https://github.com/Artexis10/exomem/issues/769)) ([940eb7d](https://github.com/Artexis10/exomem/commit/940eb7d04eac6920687123d9d0d0cfc75be187ba))
+* find nvidia-smi where WSL actually puts it ([#1062](https://github.com/Artexis10/exomem/issues/1062)) ([454337c](https://github.com/Artexis10/exomem/commit/454337c8953dfce1cb836aa6269290bf2c065e05))
+* **hosted:** name the provider conflict that fired ([#1065](https://github.com/Artexis10/exomem/issues/1065)) ([6a69bd9](https://github.com/Artexis10/exomem/commit/6a69bd9c5e5cc1618b8eb1ae87fbc132acd9c8db))
+* **hosted:** remove an OAuth exchange the server always refuses, and make the bootstrap resumable ([#1066](https://github.com/Artexis10/exomem/issues/1066)) ([2122d4a](https://github.com/Artexis10/exomem/commit/2122d4adac619f87791d031eda7d60492949a85f))
+* **platform:** refuse once where exomem has no held-filesystem backend ([#768](https://github.com/Artexis10/exomem/issues/768)) ([39f115c](https://github.com/Artexis10/exomem/commit/39f115c9e95e8bf994098bd15bb292850d7867d6))
+* **recall:** preserve write custody during reconciliation ([#1072](https://github.com/Artexis10/exomem/issues/1072)) ([5520ce8](https://github.com/Artexis10/exomem/commit/5520ce8c1d73adada27ea5cf5d418e8ac0dcc489))
+* reduce idle mutation-lock logging and media-store polling ([#1067](https://github.com/Artexis10/exomem/issues/1067)) ([41afa40](https://github.com/Artexis10/exomem/commit/41afa40c8c102f1d0a4ea7b70d16e4eed330a197))
+* stop a disabled coordinator's status timeout blocking standalone readiness ([#1061](https://github.com/Artexis10/exomem/issues/1061)) ([5629f80](https://github.com/Artexis10/exomem/commit/5629f801464d74a26ed93d1de8b1fad09fdb02ff))
+
 ## [0.69.1](https://github.com/Artexis10/exomem/compare/v0.69.0...v0.69.1) (2026-09-04)
 
 
