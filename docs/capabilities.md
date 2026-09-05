@@ -38,7 +38,7 @@ See [hosted-operations.md](hosted-operations.md) and the
 | Command | Tier | Surfaces | Mode | Destructive | CLI positional | Routes | Parameters | Summary |
 | --- | ---: | --- | --- | --- | --- | --- | --- | --- |
 | coordination_status | 1 | MCP, REST, CLI | read | no | - | coordination_status | - | Report this replica's writer-lease role and coordinator health. |
-| bootstrap | 1 | MCP, REST, CLI | read | no | - | bootstrap | profile, workflow | Return Exomem's versioned operating contract for generic MCP clients. |
+| bootstrap | 1 | MCP, REST, CLI | read | no | - | bootstrap | profile, workflow, skill_contract | Return Exomem's versioned operating contract and live session state. |
 | ask_memory | 1 | MCP, REST, CLI | read | no | query | search, find | query, types, projects, tags, speakers, file_types, exclude_file_types, categories, kinds, source_kinds, domains, relations, relation_of, relation_direction, filters, result_level, limit, continuation, scope, mode, detail, deep, graph, rerank, rerank_max_candidates, prefer_compiled, prefer_active, prefer_used, widen_outside_kb, graph_enrich, include_timings, explain, purpose | Recall durable knowledge from Exomem with product defaults. |
 | read_memory | 1 | MCP, REST, CLI | read | no | path | fetch, get | path*, frontmatter_only, include_history, links, include_raw, unit_ref, purpose | Read one memory page or one exact semantic unit by reference. |
 | browse_memory | 1 | MCP, REST, CLI | read | no | path | overview, list_directory | path, mode, max_depth, include_hidden, samples, recursive | Browse vault structure without reading many files. |
