@@ -7095,6 +7095,21 @@ def _file_node(
         source_hash=vault_module.content_hash(raw_text),
         metadata=metadata,
         page_type=page.page_type,
+        lifecycle_status=page.status,
+        tags=tuple(str(tag) for tag in page.tags),
+        project=_page_project(frontmatter),
+        origin_date=str(origin_date) if origin_date not in (None, "") else None,
+        updated_date=str(updated) if updated not in (None, "") else None,
+        access_tier=access.access_tier(vault_root, page.rel_path),
+        review_eligible=activation.is_eligible_governed_page(vault_root, page),
+        activation_signal_version=activation._signal_version(page),
+        exomem_id=memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD)),
+        activation_priority=activation_priority,
+        activation_connected=bool(measurement["connected"]),
+        activation_typed_relations=int(measurement["typed_relations"]),
+        activation_assertion_blocks=int(measurement["assertion_blocks"]),
+        activation_provenance_relations=int(measurement["provenance_relations"]),
+        activation_unregistered=len(measurement["unregistered"]),
     )
 
 

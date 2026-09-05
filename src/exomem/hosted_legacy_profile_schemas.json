@@ -30,6 +30,7 @@
         "prefer_compiled",
         "prefer_active",
         "prefer_used",
+        "widen_outside_kb",
         "graph_enrich",
         "include_timings",
         "explain",
@@ -37,7 +38,8 @@
       ],
       "bootstrap": [
         "profile",
-        "workflow"
+        "workflow",
+        "skill_contract"
       ],
       "browse_memory": [
         "path",
@@ -72,6 +74,8 @@
         "path",
         "target",
         "query",
+        "requested_relation",
+        "continuation",
         "unit_ref",
         "categories",
         "kinds",
@@ -217,6 +221,7 @@
         "until",
         "why",
         "expected_fingerprint",
+        "source_path",
         "response_detail"
       ]
     },
@@ -250,6 +255,7 @@
         "prefer_compiled",
         "prefer_active",
         "prefer_used",
+        "widen_outside_kb",
         "graph_enrich",
         "include_timings",
         "explain",
@@ -257,7 +263,8 @@
       ],
       "bootstrap": [
         "profile",
-        "workflow"
+        "workflow",
+        "skill_contract"
       ],
       "browse_memory": [
         "path",
@@ -292,6 +299,8 @@
         "path",
         "target",
         "query",
+        "requested_relation",
+        "continuation",
         "unit_ref",
         "categories",
         "kinds",
@@ -470,6 +479,7 @@
         "until",
         "why",
         "expected_fingerprint",
+        "source_path",
         "response_detail"
       ]
     },
@@ -503,6 +513,7 @@
         "prefer_compiled",
         "prefer_active",
         "prefer_used",
+        "widen_outside_kb",
         "graph_enrich",
         "include_timings",
         "explain",
@@ -510,7 +521,8 @@
       ],
       "bootstrap": [
         "profile",
-        "workflow"
+        "workflow",
+        "skill_contract"
       ],
       "browse_memory": [
         "path",
@@ -545,6 +557,8 @@
         "path",
         "target",
         "query",
+        "requested_relation",
+        "continuation",
         "unit_ref",
         "categories",
         "kinds",
@@ -803,6 +817,7 @@
         "until",
         "why",
         "expected_fingerprint",
+        "source_path",
         "response_detail"
       ]
     },
@@ -860,6 +875,7 @@
         "prefer_compiled",
         "prefer_active",
         "prefer_used",
+        "widen_outside_kb",
         "graph_enrich",
         "include_timings",
         "explain",
@@ -867,7 +883,8 @@
       ],
       "bootstrap": [
         "profile",
-        "workflow"
+        "workflow",
+        "skill_contract"
       ],
       "browse_memory": [
         "path",
@@ -902,6 +919,8 @@
         "path",
         "target",
         "query",
+        "requested_relation",
+        "continuation",
         "unit_ref",
         "categories",
         "kinds",
@@ -1265,6 +1284,10 @@
         "why",
         "include_model_suggestions",
         "context",
+        "date_from",
+        "date_to",
+        "continuation",
+        "limit",
         "response_detail"
       ],
       "triage_memory": [
@@ -1273,12 +1296,13 @@
         "until",
         "why",
         "expected_fingerprint",
+        "source_path",
         "response_detail"
       ]
     }
   },
   "schema_version": 1,
-  "source_revision": "18bb516e4906fa028d4696ee1ad30a0cdd1952dc",
+  "source_revision": "9187a72ad83a2a560c9cca0f5b53a246e0680cb2",
   "sources": {
     "hosted-alpha-agent-v1": "plugins/hosted/generated/compatibility.json",
     "hosted-alpha-agent-v2": "plugins/hosted/generated/candidates/hosted-alpha-agent-v2/compatibility.json",

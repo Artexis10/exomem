@@ -728,28 +728,34 @@ def test_edit_and_supersede_use_real_leaves_with_exact_postimages(vault: Path) -
 def test_accept_relation_uses_the_real_review_queue_leaf_and_exact_postimage(
     vault: Path,
 ) -> None:
-    from exomem import curation, find
+    from exomem import curation, epistemic_graph, find
 
-    birch = _seed_note(vault, "curation-relation-birch", "A measured fact.")
-    linked_arguments = {
-        "title": "Curation relation acorn",
-        "slug": "curation-relation-acorn",
-        "content": (
-            "## Observations\n\n- [finding] Body mentions "
-            f"[[{birch.removesuffix('.md')}]] inline. ^curation-relation-acorn\n"
-        ),
-        "note_type": "insight",
-    }
-    validation = commands.op_remember(vault, validate_only=True, **linked_arguments)
-    linked = commands.op_remember(
-        vault,
-        **linked_arguments,
-        draft_id=validation["draft_id"],
-        draft_hash=validation["draft_hash"],
-        draft_token=validation["draft_token"],
+    # Seeded by direct write and one explicit graph build, the way the relation
+    # queue's own tests seed it. Relation review is graph-native, and a product
+    # write schedules the build instead of performing it inline, so seeding
+    # through `remember` here would be testing the scheduler rather than the
+    # accept-relation leaf this test is about.
+    def _page(slug: str, body: str) -> str:
+        rel = f"Knowledge Base/Notes/Insights/{slug}.md"
+        path = vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: insight\ntitle: Curation {slug}\nstatus: active\n---\n"
+            f"# Curation {slug}\n\n{body}\n",
+            encoding="utf-8",
+        )
+        return rel
+
+    birch = _page("curation-relation-birch", "A measured fact.")
+    acorn = _page(
+        "curation-relation-acorn",
+        "## Observations\n\n- [finding] Body cites the measured fact."
+        " ^curation-relation-acorn\n\n## Relations\n\n"
+        f"See [[{birch.removesuffix('.md')}]].",
     )
-    acorn = linked["path"]
     find.clear_cache()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
     review = commands.op_review_memory(vault, mode="relation-queue")
     candidate = next(
         item

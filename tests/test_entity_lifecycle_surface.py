@@ -925,8 +925,11 @@ def test_every_carrier_file_states_the_cadence_bounds_on_its_own() -> None:
     told something the tests never checked.
     """
     for path in (
-        Path("src/exomem/_scaffold/_Schema/SKILL.md"),
-        Path("plugins/claude-code/skills/exomem/SKILL.md"),
+        # The intent-router restructure moved the cadence bullet out of SKILL.md
+        # into the engagement reference the router points at; operations.md still
+        # carries the operation detail. Both distributions ship both files.
+        Path("src/exomem/_scaffold/_Schema/references/engagement.md"),
+        Path("plugins/claude-code/skills/exomem/references/engagement.md"),
         Path("src/exomem/_scaffold/_Schema/references/operations.md"),
         Path("plugins/claude-code/skills/exomem/references/operations.md"),
     ):
@@ -944,9 +947,11 @@ def test_portable_skill_and_operation_reference_carry_the_same_lifecycle() -> No
         Path("plugins/claude-code/skills/exomem"),
     )
     for root in roots:
-        skill = (root / "SKILL.md").read_text(encoding="utf-8")
+        # Same move as above: the engagement reference now carries what the
+        # router used to state inline.
+        engagement = (root / "references/engagement.md").read_text(encoding="utf-8")
         operations = (root / "references/operations.md").read_text(encoding="utf-8")
-        combined = skill + "\n" + operations
+        combined = engagement + "\n" + operations
         prose = " ".join(combined.split())
         assert "entity_recurrence" in combined
         assert "after primary work" in prose
@@ -1159,6 +1164,13 @@ def test_ninth_binding_rebuilt_from_the_closure_response_is_not_proposable(
 
 
 def _relation_candidate(root: Path, *, source: str, target: str):  # noqa: ANN202
+    # Relation review became graph-native with the governed relation vocabulary,
+    # so the queue projects the built graph rather than rescanning files. These
+    # fixtures write markdown directly instead of going through a product write,
+    # so nothing has built the graph for them yet.
+    from exomem import epistemic_graph
+
+    epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
     review = commands.op_review_memory(root, mode="relation-queue")
     candidate = next(
         row
@@ -1185,7 +1197,7 @@ def _hydration_with_relation(root: Path, identity: str = "cobalt workshop") -> s
         root,
         "Knowledge Base/Notes/context-00.md",
         "---\ntype: insight\ntitle: Context 0\nstatus: active\n---\n"
-        f"# Context 0\n\nI work with {identity}.\n\nSee also [[{stem}]] for the roster.\n",
+        f"# Context 0\n\nI work with {identity}.\n\n## Relations\n\nSee [[{stem}]].\n",
     )
     for index, body in enumerate((f"I use {identity}.", f"I attend {identity}."), start=1):
         _note(root, index, body)
@@ -1246,7 +1258,7 @@ def test_hydration_refuses_a_relation_to_a_different_entity(tmp_path: Path) -> N
         tmp_path,
         "Knowledge Base/Notes/context-03.md",
         "---\ntype: insight\ntitle: Context 3\nstatus: active\n---\n"
-        f"# Context 3\n\nI work with cobalt workshop.\n\nSee also [[{stem}]] elsewhere.\n",
+        f"# Context 3\n\nI work with cobalt workshop.\n\n## Relations\n\nSee [[{stem}]].\n",
     )
     item = curation.work_item(tmp_path, review_ref=_candidate(tmp_path).ref)
     binding = item["entity_candidate"]

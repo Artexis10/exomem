@@ -24,9 +24,11 @@ def _active_capture_carriers(vault: Path) -> dict[str, str]:
         "bootstrap": json.dumps(commands.op_bootstrap(vault), ensure_ascii=False).lower(),
         "prominence-balanced": prominence.CONTRACTS["balanced"].capture.lower(),
         "prominence-maximal": prominence.CONTRACTS["maximal"].capture.lower(),
-        "scaffold": _text("src/exomem/_scaffold/_Schema/SKILL.md"),
+        # The router delegates the engagement rules to this reference, so it is
+        # the carrier that must teach adoption in each distribution.
+        "scaffold": _text("src/exomem/_scaffold/_Schema/references/engagement.md"),
         "capture-hook": exomem_capture_nudge.REMINDER.lower(),
-        "plugin-skill": _text("plugins/claude-code/skills/exomem/SKILL.md"),
+        "plugin-skill": _text("plugins/claude-code/skills/exomem/references/engagement.md"),
         "plugin-hook": _text("plugins/claude-code/hooks/exomem_capture_nudge.py"),
     }
 

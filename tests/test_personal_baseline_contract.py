@@ -567,7 +567,15 @@ def _assert_baseline_authority_mapping(name: str, block: str) -> None:
 def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
     scaffold = ROOT / "src" / "exomem" / "_scaffold" / "_Schema"
     blocks = {
-        "scaffold": _markdown_block(scaffold / "SKILL.md", "- A **durable personal baseline**", "- Capture whether"),
+        # The intent-router restructure moved the proactive-capture rules out of
+        # SKILL.md into references/engagement.md, which the router points at for
+        # "the detailed engagement rules ... before proactive capture". The
+        # doctrine and its assertions are unchanged; only its file moved.
+        "scaffold": _markdown_block(
+            scaffold / "references" / "engagement.md",
+            "- A **durable personal baseline**",
+            "- Capture whether",
+        ),
         "capture workflow": _markdown_block(
             scaffold / "workflow-skills" / "exomem-capture" / "SKILL.md",
             "## Durable personal baselines",
@@ -612,9 +620,9 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
 
 
 def test_executed_method_cases_remain_a_separate_predicate() -> None:
-    skill = (ROOT / "src" / "exomem" / "_scaffold" / "_Schema" / "SKILL.md").read_text(
-        encoding="utf-8"
-    ).lower()
+    skill = (
+        ROOT / "src" / "exomem" / "_scaffold" / "_Schema" / "references" / "engagement.md"
+    ).read_text(encoding="utf-8").lower()
     method = " ".join(
         skill.split("- a carried-out method", 1)[1].split("- a **stated intent", 1)[0].split()
     )
