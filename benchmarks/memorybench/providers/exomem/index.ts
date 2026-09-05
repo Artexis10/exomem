@@ -58,6 +58,36 @@ interface ReadResponse {
 }
 
 const EXOMEM_RETIREMENT_RECONCILE_ATTEMPTS = 3
+export const CAPTURE_CONTRACT = "exomem.lme.capture/v2"
+export const NAMESPACE_PATTERN = "exomem-container-tag-sha256-24hex"
+
+// Python authority: benchmarks/lme/exomem_capture.py. A cross-language test
+// compares the actual product payload, including metadata and Unicode bytes.
+export async function capturePayload(session: UnifiedSession, position: number): Promise<Record<string, unknown>> {
+  if (!Number.isSafeInteger(position) || position < 0 || !session.messages.length) {
+    throw new Error("capture requires a nonempty session and neutral ordinal")
+  }
+  const date = session.metadata?.date
+  if (typeof date !== "string" || !date) throw new Error("capture requires session date")
+  const parsed = new Date(date)
+  if (!Number.isFinite(parsed.getTime())) throw new Error("capture session date is invalid")
+  const stamp = parsed.toISOString().replace(/\.\d{3}Z$/, "Z")
+  const ordinal = position + 1
+  const lines = [`Session timestamp: ${stamp}`, `Session ordinal: ${ordinal}`, ""]
+  for (const message of session.messages) {
+    if (!["user", "assistant", "system"].includes(message.role) || typeof message.content !== "string") {
+      throw new Error("unsupported session message")
+    }
+    lines.push(`${message.role}: ${message.content.normalize("NFC")}`)
+  }
+  const content = lines.join("\n")
+  const digest = (await sha256Hex(content)).slice(0, 12)
+  return {
+    content, title: `LongMemEval session ${ordinal} ${digest}`,
+    slug: `lme-session-${String(ordinal).padStart(4, "0")}-${digest}`,
+    source_type: "session", tags: ["longmemeval"], compile_guidance: false,
+  }
+}
 
 export async function prepareExomemRetirement(
   service: ServiceDescriptor,
@@ -164,6 +194,10 @@ export class ExomemProvider implements Provider {
       await appendGuestEvidence(service, "provider-manifest", {
         provider: this.name,
         protocol_version: 1,
+        session_normalization: CAPTURE_CONTRACT,
+        product_input_contract: CAPTURE_CONTRACT,
+        namespace_pattern: NAMESPACE_PATTERN,
+        namespace: (await sha256Hex(containerTag)).slice(0, 24),
         concurrency: this.concurrency,
         exomem_authored_transport: true,
         latency_publishable: false,
@@ -218,21 +252,19 @@ export class ExomemProvider implements Provider {
     try {
       const service = await this.getService(options.containerTag)
       const documentIds: string[] = []
-      for (const [position, session] of sessions.entries()) {
-        const sessionString = JSON.stringify(session.messages).replace(/</g, "&lt;").replace(/>/g, "&gt;")
-        const formattedDate = session.metadata?.formattedDate
-        const content = typeof formattedDate === "string" && formattedDate.length > 0
-          ? `Here is the date the following session took place: ${formattedDate}\n\nHere is the session as a stringified JSON:\n${sessionString}`
-          : `Here is the session as a stringified JSON:\n${sessionString}`
-        const digest = await sha256Hex(JSON.stringify({ container: options.containerTag, position, content }))
-        const neutral = `mb-session-${digest.slice(0, 24)}`
+      for (const session of sessions) {
+        // The pinned LongMemEval converter generates `<question>-session-N`.
+        // MemoryBench calls ingest([session]) and may resume in a fresh process,
+        // so neither batch position nor a mutable counter is the ordinal.
+        const ordinal = /-session-(0|[1-9][0-9]*)$/.exec(session.sessionId)
+        if (!ordinal || !Number.isSafeInteger(Number(ordinal[1])) || Number(ordinal[1]) >= Number.MAX_SAFE_INTEGER) {
+          throw new Error("capture requires the upstream-generated session ordinal")
+        }
+        const position = Number(ordinal[1])
+        const payload = await capturePayload(session, position)
         const requestId = crypto.randomUUID()
         const response = await this.request(service, "/api/capture_source", {
-          content,
-          title: neutral,
-          slug: neutral,
-          source_type: "session",
-          compile_guidance: false,
+          ...payload,
           request_id: requestId,
           idempotency_key: requestId,
         })

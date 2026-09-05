@@ -69,6 +69,17 @@ recorded and blocks cross-provider tables.
   namespace
 - **THEN** the affected case is INVALID and the run records contamination
 
+#### Scenario: Isolation diagnostics cannot alter scored retrieval
+- **WHEN** the runner probes a scored case's namespace
+- **THEN** it first retrieves and reads the unchanged dataset corpus, then
+  ingests the separately scanned presence canary into that same namespace
+- **AND** no diagnostic document can displace a dataset hit or enter reader
+  context, including when the corpus contains fewer documents than top-k
+- **AND** the trace records each presence, foreign-case and never-ingested
+  probe's query, limit, returned hit identities and content digests, and which
+  returned hits contain the exact token; absence of a prior case is explicit
+- **AND** failed presence remains unverifiable, never an inferred pass
+
 ### Requirement: Readiness Fails Closed With Positive Verification
 A run SHALL verify every requested retrieval lane (lexical, semantic,
 reranker) by positive evidence — index counts, configuration state, or a
@@ -305,6 +316,13 @@ both zero live owned processes and an unbound listener. Raw process IDs, ports,
 and bearer tokens SHALL NOT be serialized into cleanup evidence. The quarantine
 caveat above is scoped to the in-process model and SHALL NOT be read as
 extending to this one.
+
+The guest transport SHALL inspect every decoded response before retry,
+response evidence or provider return. The actual service bearer token and its
+UTF-8 base64, base64url and hexadecimal encodings SHALL refuse in keys, values
+or bounded nested JSON with a constant diagnostic and normal failure cleanup.
+This check SHALL run while the transport owns the credential; export SHALL NOT
+depend on descriptors that normal retirement has already deleted.
 
 #### Scenario: Sidecar row proves process absence
 - **WHEN** a provider declaring owned-subprocess-terminated-at-cleanup returns
@@ -746,6 +764,14 @@ its keys and values plus all surrounding capture text. Invalid or incomplete
 embedded JSON SHALL refuse export. JSON escaping SHALL neither fabricate a
 local-path finding from ordinary message text nor hide an actual private path.
 Opaque runtime identifiers and gold-field checks SHALL remain enforced.
+Exact question text and complete capture/v2 source bodies MAY retain public
+filesystem examples only when case-local provenance matches the repository's
+canonical source identity, actual dataset bytes and exact frozen 25-case
+selection. A caller-declared digest alone SHALL NOT authorize an exception.
+The exception SHALL apply only to the exact question or hit-content field;
+changed, truncated, concatenated or cross-case bodies SHALL remain scanned.
+Private runtime identifiers, the HMAC key and all plan runtime roots SHALL
+always refuse export, including when JSON escaped or present in public source.
 The runner SHALL then
 re-read the persisted artifact and invoke the full shared artifact validator
 before terminal `VALID`; a model dump or in-memory projection is insufficient.
@@ -756,6 +782,12 @@ before terminal `VALID`; a model dump or in-memory projection is insufficient.
 - **THEN** export scans the decoded message and permits the ordinary text
 - **AND** actual private drive, UNC and home paths in capture prefixes,
   message values or message keys still refuse persistence
+
+#### Scenario: Public source examples do not authorize runtime leakage
+- **WHEN** an exact canonical case source body contains a public path example
+- **THEN** export preserves the body after verifying its frozen source provenance
+- **AND** the same body in another case or field, altered content, and private
+  runtime values anywhere still refuse export
 
 The runner SHALL write a started manifest before provider work, export complete
 or partial evidence before cleanup, invoke cleanup from one `finally` path on

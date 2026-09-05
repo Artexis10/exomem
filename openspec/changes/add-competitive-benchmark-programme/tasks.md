@@ -382,10 +382,12 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       reader context in both reduced-session cases; the guest corpus contained
       only dataset sessions. Verify this boundary through both real runners
       before treating their output as a quality comparison. The unchanged
-      55-session direct probe also completed its question but could not verify
-      presence-canary retrieval; preserve that INVALID result and establish
-      per-case probe/readiness evidence before attributing the failure to
-      ranking, indexing or isolation.
+      55-session direct probe also completed its question but returned an
+      aggregate unverifiable verdict without individual probe evidence.
+      Instrumented replay established presence at rank one, an empty deferred
+      queue and current graph: the singleton was unverifiable because it could
+      not exercise cross-case isolation. Preserve both artifacts, make that
+      reason explicit, and use at least two cases for the next validity gate.
 - [ ] 4.7 Ratify and implement the native Supermemory vendor-hit projection
       (distinct from 4.5's flat guest-hit wire), then run the Supermemory
       direct-SDK vs MemoryBench-provider spot-check (mode=report)

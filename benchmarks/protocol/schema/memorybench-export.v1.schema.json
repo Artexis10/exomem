@@ -290,6 +290,19 @@
           "type": "array",
           "uniqueItems": true
         },
+        "namespace_pattern": {
+          "anyOf": [
+            {
+              "const": "exomem-container-tag-sha256-24hex",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Namespace Pattern"
+        },
         "phases": {
           "$ref": "#/$defs/MemoryBenchPhases"
         },
@@ -305,6 +318,21 @@
         },
         "question": {
           "$ref": "#/$defs/MemoryBenchQuestion"
+        },
+        "readiness": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/LaneReadiness"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Readiness"
         },
         "search": {
           "anyOf": [
@@ -390,6 +418,22 @@
     "MemoryBenchIngestObservation": {
       "additionalProperties": false,
       "properties": {
+        "product_payload_sha256": {
+          "anyOf": [
+            {
+              "items": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Product Payload Sha256"
+        },
         "transmitted_payload_sha256": {
           "items": {
             "type": "string"

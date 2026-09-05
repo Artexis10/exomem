@@ -1146,6 +1146,8 @@ def _build_export(
         # model refuses any disagreement between the two.
         search_observation: dict[str, Any] | None = None
         ingest_observation: dict[str, Any] | None = None
+        case_namespace_pattern: str | None = None
+        case_readiness: list[dict[str, Any]] | None = None
         if plan.provider == "exomem" and isinstance(container_tag, str) and container_tag:
             observed = project_guest_evidence(
                 Path(plan.guest_evidence_root) / "exomem" / _sha256_text(container_tag)[:24]
@@ -1153,6 +1155,8 @@ def _build_export(
             case_failures.update(observed.problems)
             search_observation = observed.search
             ingest_observation = observed.ingest
+            case_namespace_pattern = observed.namespace_pattern
+            case_readiness = observed.readiness
             missing -= observed.resolved_labels()
             if observed.readiness is not None and run_readiness is None:
                 run_readiness = observed.readiness
@@ -1178,6 +1182,8 @@ def _build_export(
             "missing_fields": sorted(missing),
             "search": search_observation,
             "ingest": ingest_observation,
+            "namespace_pattern": case_namespace_pattern,
+            "readiness": case_readiness,
         })
 
     try:
@@ -1413,6 +1419,8 @@ def _privacy_forbidden_values(plan: MemoryBenchRunPlan) -> tuple[set[str], set[s
     opaque = {
         plan.privacy_hmac_key_hex,
         "questionId", "containerTag", "groundTruth",
+        plan.dataset_path, plan.memorybench_home, plan.provider_checkout.root,
+        plan.output_root, plan.guest_work_root, plan.guest_evidence_root,
     }
     content: set[str] = set()
     try:
@@ -1484,27 +1492,96 @@ def _privacy_scan_strings(value: str, *, provider: str):
     yield from _json_string_leaves(messages, include_keys=True)
 
 
+def _json_string_paths(value: Any, path: tuple = ()):
+    """Keep field identity so source content cannot authorize another field."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield path + (key, None), key
+            yield from _json_string_paths(child, path + (key,))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from _json_string_paths(child, path + (index,))
+    elif isinstance(value, str):
+        yield path, value
+
+
+def _canonical_public_source_fields(plan: MemoryBenchRunPlan, decoded: Any) -> dict[tuple, set[str]]:
+    """Authorize exact case-local documents from repository-pinned public bytes.
+
+    A caller-supplied dataset digest alone is never provenance. This exception
+    is bounded to the canonical 25-case cohort and capture/v2 source bodies.
+    Runtime secrets and paths are checked separately and always take priority.
+    """
+    from lme.dataset import load_dataset_bytes
+    from lme.exomem_capture import CAPTURE_CONTRACT, capture_read_body
+    from lme.normalize import neutralize
+
+    if (plan.provider != "exomem" or not isinstance(decoded, dict)
+            or decoded.get("session_normalization") != CAPTURE_CONTRACT):
+        return {}
+    if (plan.dataset.source != CANONICAL_LME_S_SOURCE["repository"]
+            or plan.dataset.revision != CANONICAL_LME_S_SOURCE["revision"]
+            or plan.dataset.sha256 != CANONICAL_LME_S_SOURCE["sha256"]
+            or plan.dataset.case_count != CANONICAL_LME_S_SOURCE["row_count"]):
+        return {}
+    raw, rows = _native_dataset(plan)
+    if len(raw) != CANONICAL_LME_S_SOURCE["byte_count"] or not _canonical_selection_pins(plan, rows):
+        return {}
+    selected = set(plan.selection.target_question_ids or [])
+    by_hmac = {
+        privacy_hmac_sha256(plan.privacy_hmac_key_hex, "case-id", row["question_id"]): row
+        for row in rows if row["question_id"] in selected
+    }
+    allowed: dict[tuple, set[str]] = {}
+    cases = decoded.get("cases")
+    if not isinstance(cases, list):
+        return {}
+    for index, case in enumerate(cases):
+        if not isinstance(case, dict):
+            continue
+        row = by_hmac.get(case.get("case_id_hmac_sha256"))
+        if row is None:
+            continue
+        question = load_dataset_bytes(json.dumps([row]).encode()).questions[0]
+        grouped: dict[int, list] = {}
+        for event in neutralize(question, plan.dataset):
+            grouped.setdefault(event.session_ordinal, []).append(event)
+        bodies = {capture_read_body(events) for events in grouped.values()}
+        allowed[("cases", index, "question", "text")] = {question.question}
+        hits = case.get("hits", [])
+        if isinstance(hits, list):
+            for hit_index in range(len(hits)):
+                allowed[("cases", index, "hits", hit_index, "content")] = bodies
+    return allowed
+
+
 def _validate_public_privacy(payload: bytes, plan: MemoryBenchRunPlan) -> None:
-    text = payload.decode("utf-8")
     from exomem.public_artifact_privacy import _scan_text
+    from lme.exomem_capture import CAPTURE_CONTRACT
 
     decoded = _load_json_bytes(payload, "public export")
-    if any(
-        _scan_text(candidate, "memorybench-export.v1.json")
-        for value in _json_string_leaves(decoded, include_keys=True)
-        for candidate in _privacy_scan_strings(value, provider=plan.provider)
-    ):
-        # Scan semantic strings at both known serialization layers. Requiring a
-        # serialized-text match first also misses real paths after escaped
-        # newlines, whose encoded n incorrectly looks like a word character.
-        raise ValueError("public export failed shared privacy validation")
+    strings = list(_json_string_paths(decoded))
+    # capture/v2 is plain text. Only legacy bodies contain this JSON envelope.
+    provider = plan.provider
+    if isinstance(decoded, dict) and decoded.get("session_normalization") == CAPTURE_CONTRACT:
+        provider = "plain-text"
+    semantic = [(path, value, list(_privacy_scan_strings(value, provider=provider))) for path, value in strings]
     opaque, content = _privacy_forbidden_values(plan)
-    if any(value and value in text for value in opaque):
+    candidates = [payload.decode("utf-8")]
+    candidates.extend(value for _, value in strings)
+    candidates.extend(candidate for _, _, leaves in semantic for candidate in leaves)
+    if any(value and any(value in candidate for candidate in candidates) for value in opaque):
         raise ValueError("public export contains private runtime material")
     # Answers can be quoted by required public question text and retrieved hit
     # content. Equality still rejects carrying a gold value as a public field.
     if any(value in content for value in _json_string_leaves(decoded)):
         raise ValueError("public export contains private runtime material")
+    findings = [(path, value) for path, value, leaves in semantic
+                if any(_scan_text(candidate, "memorybench-export.v1.json") for candidate in leaves)]
+    if findings:
+        allowed = _canonical_public_source_fields(plan, decoded)
+        if any(value not in allowed.get(path, set()) for path, value in findings):
+            raise ValueError("public export failed shared privacy validation")
 
 
 def _current_utc() -> datetime:

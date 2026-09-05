@@ -2,6 +2,65 @@
 
 ## Governing decisions
 
+### 2026-09-05 Exomem transport parity correction
+
+The real preflight exposed different capture renderers, payload hash domains,
+namespace descriptions, read hydration and privileged clocks. Both Exomem
+paths use `exomem.lme.capture/v2`: UTC session timestamps at second precision,
+dataset-order ordinals, NFC message text and the neutral session renderer.
+Guest ordinals come from the pinned converter's generated `-session-N` suffix,
+not an ingest batch position: MemoryBench calls `ingest([session])` separately
+and can resume with a new provider. Only the numeric suffix enters the payload.
+The complete product payload includes content, content-derived neutral title
+and slug, source type, tags and compilation guidance. Compare its canonical
+JSON digest; retain the complete transmitted-body digest separately, including
+fresh request and idempotency identities. Only those two transport fields may
+be omitted from the product digest. Unknown product fields refuse projection.
+Competitor-authored renderers are unchanged.
+
+Both paths use the normal public product clock and read selected content via
+`read_memory`. Session time remains evidence inside captured content. Both
+derive Exomem's internal namespace from the first 24 hex characters of SHA-256
+of MemoryBench's external `case-id + '-' + run-id` tag, contained below a
+separate run root. The guest records the scheme and actual namespace; export
+checks that namespace against the case's evidence-directory basename before
+projecting the scheme. Existing guest directory names stay intact.
+
+The current case's hybrid doctor report supplies readiness, including its live
+embedding-sidecar probe. A successful probe in another vault cannot promote a
+failed current-case doctor report. Typed traces retain the actual check IDs,
+statuses and normalized lane evidence; free-form doctor messages and private
+runtime paths are omitted. Scored retrieval and reading finish before diagnostic canary
+ingestion in the same namespace; typed traces retain probe identities, content
+digests and exact-token matches. Single-case diagnostics explicitly report
+that cross-case isolation needs at least two cases. The observed 55-session
+singleton returned its presence canary at rank one; its aggregate verdict was
+unverifiable because there was no second case.
+
+Old exports retain their original renderer and hash meanings. New evidence
+uses a fresh frozen source pin and run IDs. This repairs the existing
+equivalence prerequisite; it changes no cohort, threshold, exception predicate,
+or ratified Epistemic State Bench family, assertion or gate.
+
+The pinned public dataset includes example filesystem paths. Export permits
+these only in exact complete capture/v2 source bodies or exact question text
+bound to the same case HMAC, after verifying the repository-owned source tuple,
+actual bytes and frozen ordered 25-case selection. A run plan's own SHA does
+not establish public provenance. Other fields, altered or partial bodies and
+unrecognized datasets receive the unchanged shared privacy scan. All private
+runtime identifiers, the HMAC key and every run-plan runtime root are rejected
+first, including decoded strings, even if they also occur in canonical source
+text. No content is redacted or replaced to make an export pass.
+The guest transport also refuses responses containing its actual bearer or
+canonical encodings before evidence, retries or provider return. It inspects
+keys, values and bounded nested JSON, reports a constant error and uses normal
+failure cleanup. This boundary still owns the secret; normal search retirement
+removes service descriptors before export, so no plaintext credential ledger
+is introduced. The public provider marker is named `product_input_contract`
+so the generic evidence scrubber preserves it without a broad key exception.
+
+### CPU profile and programme decisions
+
 CPU-profile repair: `lme_profile()` owns the explicit normal-mode, CPU device
 and empty CUDA visibility pins. The controlled export imports that profile;
 the TypeScript transport mirror is checked by executing it against the Python

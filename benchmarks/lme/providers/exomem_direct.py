@@ -9,6 +9,7 @@ from membench.adapters.base import Profile
 from membench.adapters.base import AdapterEnvironmentError
 from protocol.custody import retire_child_directory
 from protocol.models import CaseHandle, LaneReadiness, ProtocolEvent
+from protocol.readiness import semantic_doctor_readiness
 
 from ..adapter import LmeExomemAdapter, lme_profile
 from .base import ProviderHit, ProviderSessionContext, RetrievalPurpose, require_neutral
@@ -19,7 +20,7 @@ class ExomemDirectProvider:
 
     The adapter remains the only code that writes and searches the product
     vault.  This wrapper merely supplies its workdir/profile requirements and
-    retains the neutral case clock required for retrieval.
+    retains neutral case metadata without overriding the product clock.
     """
 
     def __init__(self) -> None:
@@ -27,6 +28,7 @@ class ExomemDirectProvider:
         self._context: ProviderSessionContext | None = None
         self._question_date: dt.datetime | None = None
         self._profile: Profile | None = None
+        self.last_doctor_report: dict | None = None
 
     def setup(self, profile: Profile | None, context: ProviderSessionContext) -> None:
         self._profile = profile or lme_profile()
@@ -87,10 +89,12 @@ class ExomemDirectProvider:
     def readiness(self) -> list[LaneReadiness]:
         profile = self._profile or lme_profile()
         disabled = bool(profile.settings.get("EXOMEM_DISABLE_EMBEDDINGS"))
-        return [LaneReadiness(
-            lane="semantic",
-            requested=not disabled,
-            verified=False,
-            method="readiness-unverifiable",
-            evidence="semantic readiness is established by recorded known-answer probes",
-        )]
+        if disabled:
+            return [LaneReadiness(lane="semantic", requested=False, verified=False, method="doctor-check", evidence="semantic lane not requested")]
+        if self._adapter._vault is None:
+            raise RuntimeError("readiness called before setup")
+        from exomem import doctor
+
+        report = doctor.doctor(vault=str(self._adapter._vault), profile="hybrid").as_dict()
+        self.last_doctor_report = report
+        return [semantic_doctor_readiness(report)]

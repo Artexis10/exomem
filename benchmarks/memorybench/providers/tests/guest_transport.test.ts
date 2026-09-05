@@ -268,7 +268,7 @@ describe("guest transport", () => {
     const envelope = { protocol_version: 1, request_id: requestId, operation: "same" }
     const result = await postJsonWithRetry<{ value: number }>({
       url: "http://127.0.0.1:9/v1/ingest",
-      token: "private",
+      token: "fixture-retry-credential-0123456789abcdef",
       envelope,
       timeoutMs: 1_000,
       fetcher,
@@ -704,7 +704,7 @@ describe("guest transport", () => {
       server.close()
       await once(server, "close")
     }
-    expect(thrown).toMatch(/Exomem request refused|remote_failure/)
+    expect(thrown).toMatch(/Exomem request refused|remote_failure|guest response contains private runtime material/)
     expect(thrown).not.toContain(token)
     expect(thrown).not.toContain(privatePath)
     expect(thrown).not.toContain(encoded)
@@ -1081,4 +1081,39 @@ describe("guest transport", () => {
     await expect(lstat(work)).rejects.toThrow()
     expect(() => process.kill(child.pid!, 0)).toThrow()
   })
+})
+
+test("successful guest responses refuse the actual service secret before checkpointing", async () => {
+  const token = "fixture-credential-" + "x".repeat(24)
+  const variants = [token, Buffer.from(token).toString("base64"), Buffer.from(token).toString("hex"), [...token].map(char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`).join("")]
+  variants.push(JSON.stringify({ nested: JSON.stringify({ content: variants[3] }) }))
+  variants.push(Buffer.from(token).toString("hex").toUpperCase())
+  variants.push(Buffer.from(token).toString("hex").replace(/a/g, "A"))
+  let leak = ""
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" })
+    response.end(JSON.stringify({ success: true, data: { body: `retrieved text ${leak}` } }))
+  })
+  server.listen(0, "127.0.0.1")
+  await once(server, "listening")
+  const address = server.address()
+  if (!address || typeof address === "string") throw new Error("fixture server address missing")
+  const work = await root()
+  const service = { protocol_version: 1 as const, provider: "exomem" as const, base_url: `http://127.0.0.1:${address.port}`, bearer_token: token, pid: process.pid, process_start_identity: await processStartIdentity(process.pid), checkout_pin: "fixture", work_root: work, evidence_root: join(work, "evidence") }
+  try {
+    for (const variant of variants) {
+      leak = variant
+      await expect(postExomem(service, "/api/read_memory", { path: "source.md" })).rejects.toThrow("private runtime material")
+      const requestId = crypto.randomUUID()
+      await expect(postJsonWithRetry({ url: service.base_url, token, envelope: { request_id: requestId }, timeoutMs: 1000, fetcher: (async () => new Response(JSON.stringify({ protocol_version: 1, request_id: requestId, ok: true, data: { [variant]: "value" }, error: null }), { headers: { "content-type": "application/json" } })) as typeof fetch })).rejects.toThrow("private runtime material")
+    }
+    const { ExomemProvider } = await import("../exomem")
+    let cleanupCalls = 0
+    const provider = new ExomemProvider({ ensureService: async () => service, clearAllServices: async () => { cleanupCalls++ } })
+    await expect(provider.search("query", { containerTag: "fixture", limit: 1 })).rejects.toThrow("private runtime material")
+    expect(cleanupCalls).toBe(1)
+  } finally {
+    server.close()
+    await once(server, "close")
+  }
 })

@@ -292,7 +292,15 @@ def test_the_canary_is_a_harness_authored_filler_event_that_passes_the_scanner(
 
     _install(monkeypatch, _Recording)
     _execute(tmp_path, "canary-authorship")
-    case_batches = [batch for batch in seen if not batch[0].case_id.startswith("__probe__")]
+    actual_batches = [batch for batch in seen if not batch[0].case_id.startswith("__probe__")]
+    assert len(actual_batches) == CASE_COUNT * 2
+    case_batches = []
+    for dataset_batch, diagnostic_batch in zip(actual_batches[::2], actual_batches[1::2]):
+        assert all(event.provenance.converter != "harness-canary" for event in dataset_batch)
+        assert len(diagnostic_batch) == 1
+        assert diagnostic_batch[0].provenance.converter == "harness-canary"
+        assert diagnostic_batch[0].case_id == dataset_batch[0].case_id
+        case_batches.append([*dataset_batch, *diagnostic_batch])
     assert len(case_batches) == CASE_COUNT
     for batch in case_batches:
         planted = [event for event in batch if event.provenance.converter == "harness-canary"]
@@ -332,6 +340,84 @@ def test_the_canary_is_a_harness_authored_filler_event_that_passes_the_scanner(
         )
         offending = [finding.detector for finding in findings if finding.detector != "question-text"]
         assert offending == [], f"the harness canary tripped {offending}"
+
+
+def test_isolation_canary_is_planted_only_after_scored_retrieval_and_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lme.providers.hybrid_rag_direct import HybridRagDirectProvider
+    from lme.providers.base import RetrievalPurpose
+
+    class Recording(HybridRagDirectProvider):
+        def retrieve(self, question_text, top_k, purpose):
+            if purpose is RetrievalPurpose.SCORED_RETRIEVAL:
+                assert all("canary-presence-" not in chunk.text for chunk in self._chunks)
+            return super().retrieve(question_text, top_k, purpose)
+
+    _install(monkeypatch, Recording)
+    result = _execute(tmp_path, "no-diagnostic-context")
+    for trace_path in (result.run_dir / "traces").glob("*.jsonl"):
+        rows = _rows(trace_path)
+        if not any(row["record"] == "answer" for row in rows):
+            continue
+        answer_index = next(i for i, row in enumerate(rows) if row["record"] == "answer")
+        probes = [row for row in rows if row["record"] == "isolation-probe"]
+        assert {row["kind"] for row in probes} == {"presence", "cross_case", "never_ingested"}
+        assert all(rows.index(row) > answer_index for row in probes)
+        presence = next(row for row in probes if row["kind"] == "presence")
+        assert presence["matched_hit_ids"]
+        assert set(presence["matched_hit_ids"]) <= set(presence["normalized_hit_ids"])
+        assert len(presence["normalized_hit_shas"]) == len(presence["normalized_hit_ids"])
+        assert all(len(digest) == 64 for digest in presence["normalized_hit_shas"])
+
+
+def test_failed_presence_retains_returned_hit_evidence(tmp_path: Path, monkeypatch) -> None:
+    from lme.providers.hybrid_rag_direct import HybridRagDirectProvider
+    from lme.providers.base import ProviderHit, RetrievalPurpose
+    from lme.runner import LmeRunInvalid
+
+    class MissedPresence(HybridRagDirectProvider):
+        def retrieve(self, question_text, top_k, purpose):
+            if purpose is RetrievalPurpose.POSITIVE_PROBE and question_text.startswith("canary-presence-"):
+                return [ProviderHit("unrelated", "diagnostic returned another document", 1.0)]
+            return super().retrieve(question_text, top_k, purpose)
+
+    _install(monkeypatch, MissedPresence)
+    with pytest.raises(LmeRunInvalid, match="unverifiable") as rejected:
+        _execute(tmp_path, "presence-evidence")
+    rows = [row for path in (rejected.value.run_dir / "traces").glob("*.jsonl") for row in _rows(path)]
+    probes = [row for row in rows if row["record"] == "isolation-probe" and row["kind"] == "presence"]
+    assert len(probes) == CASE_COUNT
+    for row in probes:
+        assert row["normalized_hit_ids"] == ["unrelated"]
+        assert row["normalized_hit_shas"] == [hashlib.sha256(b"diagnostic returned another document").hexdigest()]
+        assert row["matched_hit_ids"] == []
+    assert _manifest(rejected.value.run_dir)["contamination"] == "unverifiable"
+
+
+def test_single_case_names_unexercised_cross_case_check_instead_of_failed_presence(tmp_path):
+    from lme.runner import LmeRunInvalid, RunConfig, execute_run
+
+    dataset = tmp_path / "single.json"
+    dataset.write_text(json.dumps(json.loads(FIXTURE.read_text())[:1]))
+    with mock.patch.dict(os.environ, _fixture_env()), pytest.raises(LmeRunInvalid, match="at least two cases") as rejected:
+        execute_run(RunConfig(dataset=dataset, dataset_sha256=hashlib.sha256(dataset.read_bytes()).hexdigest(), dataset_revision="single-fixture", out=tmp_path, run_id="single-case-diagnostic", provider="hybrid-rag-control", pilot=1))
+    rows = [row for path in (rejected.value.run_dir / "traces").glob("*.jsonl") for row in _rows(path)]
+    presence = next(row for row in rows if row["record"] == "isolation-probe" and row["kind"] == "presence")
+    assert presence["matched_hit_ids"]
+
+
+def test_artifacts_record_the_executed_clock_and_search_timestamp(clean_run):
+    import datetime as dt
+
+    environment = json.loads((clean_run.run_dir / "environment.json").read_text())
+    run = json.loads((clean_run.run_dir / "run.json").read_text())
+    assert environment["lme"]["retrieval_clock"] == run["retrieval_clock"] == "product-wall-clock"
+    searches = [row for path in (clean_run.run_dir / "traces").glob("*.jsonl") for row in _rows(path) if row["record"] == "search"]
+    assert len(searches) == CASE_COUNT
+    for search in searches:
+        assert search["clock"] == "product-wall-clock"
+        assert dt.datetime.fromisoformat(search["started_at_utc"].replace("Z", "+00:00")).tzinfo == dt.UTC
 
 
 def test_the_null_control_floors_every_metric_end_to_end(tmp_path: Path) -> None:

@@ -8,12 +8,12 @@ import { ExomemProvider, prepareExomemRetirement } from "../exomem"
 
 const sessions: UnifiedSession[] = [
   {
-    sessionId: "answer_session_abs",
+    sessionId: "answer_session_abs-session-0",
     messages: [{ role: "user", content: "Tea < coffee." }],
     metadata: { date: "2025-01-02", formattedDate: "January 2, 2025" },
   },
   {
-    sessionId: "filler_session",
+    sessionId: "answer_session_abs-session-1",
     messages: [{ role: "assistant", content: "Coffee is available." }],
     metadata: { date: "2025-01-03" },
   },
@@ -69,6 +69,20 @@ function harness() {
 }
 
 describe("Exomem guest provider", () => {
+  test("singleton ingest calls and resumed providers preserve the upstream session ordinal", async () => {
+    const h = harness()
+    const create = () => new ExomemProvider({ ensureService: async () => h.service, post: h.post, doctor: h.doctor })
+    const provider = create()
+    await provider.ingest([sessions[0]], { containerTag: "case-run" })
+    await provider.ingest([sessions[1]], { containerTag: "case-run" })
+    await create().ingest([sessions[1]], { containerTag: "case-run" })
+    expect(String(h.posts[0].body.content)).toContain("Session ordinal: 1")
+    expect(String(h.posts[1].body.content)).toContain("Session ordinal: 2")
+    for (const field of ["content", "title", "slug", "tags", "source_type", "compile_guidance"]) {
+      expect(h.posts[2].body[field]).toEqual(h.posts[1].body[field])
+    }
+  })
+
   test("provider evidence records its requested CPU environment", async () => {
     const root = await mkdtemp(join(tmpdir(), "exomem-profile-evidence-"))
     try {
@@ -324,16 +338,16 @@ describe("Exomem guest provider", () => {
     expect(ensured).toEqual(["container-b"])
   })
 
-  test("capture content matches the pinned MemoryBench vendor session projection", async () => {
+  test("capture content uses canonical neutral sessions without changing dataset text", async () => {
     const h = harness()
     const provider = new ExomemProvider({ ensureService: async () => h.service, post: h.post, doctor: h.doctor })
     await provider.ingest(sessions, { containerTag: "container" })
     const captures = h.posts.filter((call) => call.path === "/api/capture_source")
     expect(captures[0].body.content).toBe(
-      'Here is the date the following session took place: January 2, 2025\n\nHere is the session as a stringified JSON:\n[{"role":"user","content":"Tea &lt; coffee."}]'
+      'Session timestamp: 2025-01-02T00:00:00Z\nSession ordinal: 1\n\nuser: Tea < coffee.'
     )
     expect(captures[1].body.content).toBe(
-      'Here is the session as a stringified JSON:\n[{"role":"assistant","content":"Coffee is available."}]'
+      'Session timestamp: 2025-01-03T00:00:00Z\nSession ordinal: 2\n\nassistant: Coffee is available.'
     )
   })
 

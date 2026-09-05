@@ -514,6 +514,7 @@ export async function postJsonWithRetry<T>({
       } catch {
         throw new Error("guest response is invalid JSON")
       }
+      refuseGuestSecrets(parsed, token)
       const responseEnvelope = validateGuestResponseEnvelope(parsed, requestId)
       if (!responseEnvelope.ok && response.status >= 500 && responseEnvelope.retryable && attempt === 0) {
         await sleep(responseEnvelope.retryAfterMs ?? 250)
@@ -602,6 +603,7 @@ export async function postExomem<T>(
       }
       let envelope: unknown
       try { envelope = await response.json() } catch { throw new Error("Exomem response is invalid JSON") }
+      refuseGuestSecrets(envelope, service.bearer_token)
       if (!envelope || typeof envelope !== "object") throw new Error("Exomem response envelope is invalid")
       const result = envelope as {
         success?: unknown
@@ -630,6 +632,39 @@ export async function postExomem<T>(
     }
   }
   throw new Error("Exomem request retry budget exhausted")
+}
+
+function refuseGuestSecrets(value: unknown, secret: string): void {
+  const bytes = Buffer.from(secret, "utf8")
+  const variants = [secret, bytes.toString("base64"), bytes.toString("base64url"), bytes.toString("hex")].filter(Boolean)
+  const visit = (item: unknown, depth: number): void => {
+    if (depth > 32) throw new Error("guest response nesting exceeds privacy inspection limit")
+    if (Array.isArray(item)) {
+      for (const child of item) visit(child, depth + 1)
+    } else if (item && typeof item === "object") {
+      for (const [key, child] of Object.entries(item)) {
+        visit(key, depth + 1)
+        visit(child, depth + 1)
+      }
+    } else if (typeof item === "string") {
+      let decoded = item
+      for (let layer = 0; layer <= 32; layer++) {
+        if (variants.some(variant => decoded.includes(variant)) || (secret && decoded.toLowerCase().includes(bytes.toString("hex")))) {
+          throw new Error("guest response contains private runtime material")
+        }
+        const next = decoded.replace(/\\+u([0-9a-f]{4})/gi, (_match, code) => String.fromCharCode(parseInt(code, 16)))
+        if (next === decoded) break
+        if (layer === 32) throw new Error("guest response nesting exceeds privacy inspection limit")
+        decoded = next
+      }
+      // A provider can embed another JSON object or string in a text field.
+      // Parse only complete valid JSON; ordinary prose is unchanged.
+      let nested: unknown
+      try { nested = JSON.parse(item) } catch { return }
+      if (typeof nested === "string" || (nested && typeof nested === "object")) visit(nested, depth + 1)
+    }
+  }
+  visit(value, 0)
 }
 
 function canonicalValue(value: unknown): unknown {
