@@ -114,3 +114,41 @@ The primary review loop SHALL be usable with keyboard navigation and programmati
 - **WHEN** a user navigates the worklist and workspace using only the keyboard
 - **THEN** focus order, visible focus, labels, dialogs, and confirmation controls allow the user to inspect and complete a triage action
 - **AND** returning to the list restores the selected item's context where possible
+
+### Requirement: Relation worklist preserves bounded server semantics
+
+The Studio relation worklist SHALL preserve the server-provided group and candidate order, source-path hints, source content hashes, stable refs, fingerprints, coverage, and truncation. It MUST NOT recompute relation candidates or activation coverage in the browser. A graph `warming`, `pending`, or `unavailable` response SHALL render as a distinct retryable state rather than an empty completed queue or an indefinite loading indicator.
+
+#### Scenario: Relation queue warming is visible
+- **WHEN** the Studio requests the relation worklist while the graph is not current
+- **THEN** it renders the server's state and retry guidance and leaves prior review decisions untouched
+- **AND** it does not issue per-page suggestion calls as a fallback
+
+#### Scenario: Truncated queue remains honest
+- **WHEN** the server caps candidate pages or evidence
+- **THEN** the Studio displays the returned coverage and truncation indicators
+- **AND** it does not label the shown prefix as the complete vault backlog
+
+### Requirement: Studio relation decisions echo source hints
+
+The Studio SHALL include the selected item's source path, fingerprint, and required content hash when accepting a relation candidate, and SHALL include the source path and fingerprint when triaging it. It SHALL update the worklist only after a successful governed response and SHALL render stale-source or stale-fingerprint refusals as refresh-required states.
+
+#### Scenario: Accept uses bounded revalidation inputs
+- **WHEN** a user confirms one relation candidate
+- **THEN** the Studio sends the stable ref, source path, source content hash, fingerprint, and audit reason to the governed accept operation
+- **AND** a drift refusal preserves the unmodified visible item until refresh
+
+### Requirement: Studio batched queue panel
+
+The Studio SHALL group the relation worklist by source page with explicit
+per-candidate accept, dismiss, and snooze actions. Acceptance SHALL require an
+audit reason and the server's current source hint, hash, and fingerprint. The
+client SHALL preserve server ordering without local ranking and refresh only
+after successful governed actions. Committed-but-pending graph state SHALL
+remain visible until a current response can remove handled candidates.
+
+#### Scenario: Batch accept and reject in one session
+- **WHEN** a user accepts two candidates and dismisses one through the panel
+- **THEN** two canonical bullets are committed through governed acceptance and
+  one fingerprint-bound dismissal is recorded
+- **AND** after graph convergence the refreshed panel omits the handled items

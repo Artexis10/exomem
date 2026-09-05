@@ -18,6 +18,7 @@ from . import (
     vault,
 )
 from .kbdir import kb_dirname, kb_prefix
+from .memory_refs import ID_FIELD, normalize_id
 
 DEFAULT_MAX_FILES = 512
 DEFAULT_MAX_BYTES = 8 * 1024 * 1024
@@ -380,6 +381,14 @@ def _governance_report(
         state for state in states if state.path.startswith(kb_prefix())
     )
     try:
+        # Reference lookup can use a path when an ID is malformed; a governance
+        # audit must still report that raw identity error, without another scan.
+        for state in kb_states:
+            raw_identity = state.frontmatter.get(ID_FIELD)
+            if raw_identity is not None and (
+                not isinstance(raw_identity, str) or normalize_id(raw_identity) is None
+            ):
+                raise ValueError(f"stable identity is invalid at {state.path}")
         identity_census = semantic_contract.StableIdentityCensus.from_states(kb_states)
     except ValueError as error:
         unavailable["saved_contracts"].update(
@@ -475,49 +484,68 @@ def _safe_next_actions(
         actions.append(
             {
                 "action": "review-malformed-candidates",
-                "description": "Review the bounded path/span examples; edit originals only after human confirmation.",
+                "description": (
+                    "Review the bounded path/span examples; edit originals only "
+                    "after human confirmation."
+                ),
             }
         )
     if category_collisions or alias_collisions or registry_findings:
         actions.append(
             {
                 "action": "review-category-governance",
-                "description": "Review raw/canonical/resolved frequencies before proposing aliases; open categories remain valid.",
+                "description": (
+                    "Review raw/canonical/resolved frequencies before proposing "
+                    "aliases; open categories remain valid."
+                ),
             }
         )
     if contract_debt:
         actions.append(
             {
                 "action": "review-saved-contract-debt",
-                "description": "Inspect saved-contract findings through the normal read-only audit/review surface.",
+                "description": (
+                    "Inspect saved-contract findings through the normal read-only "
+                    "audit/review surface."
+                ),
             }
         )
     if relation_debt:
         actions.append(
             {
                 "action": "review-relation-dispositions",
-                "description": "Review missing or stale dispositions without fabricating relations or review decisions.",
+                "description": (
+                    "Review missing or stale dispositions without fabricating "
+                    "relations or review decisions."
+                ),
             }
         )
     if truncated:
         actions.append(
             {
                 "action": "rescan-narrower-subtree",
-                "description": "Scan a narrower subtree or deliberately raise the bounded census limits.",
+                "description": (
+                    "Scan a narrower subtree or deliberately raise the bounded census limits."
+                ),
             }
         )
     if not kb_present:
         actions.append(
             {
                 "action": "initialize-kb",
-                "description": "Initialize the governed Knowledge Base only when ready; the census does not require it.",
+                "description": (
+                    "Initialize the governed Knowledge Base only when ready; "
+                    "the census does not require it."
+                ),
             }
         )
     if not actions:
         actions.append(
             {
                 "action": "review-census",
-                "description": "Use the census as a read-only adoption baseline; no migration is implied.",
+                "description": (
+                    "Use the census as a read-only adoption baseline; no migration is implied."
+                ),
             }
         )
     return actions

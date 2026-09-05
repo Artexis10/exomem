@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
+import pytest
 import yaml
 
 from exomem import semantic_authoring, workflow_skills
@@ -98,6 +100,10 @@ def test_core_and_standalone_authoring_skills_embed_the_canonical_contract() -> 
     core_text = core.read_text(encoding="utf-8")
     assert core_text.count(concise) == 1
     workflow_skills.validate_contract_projection("exomem", core.parent, core=True)
+    core_text = core.read_text(encoding="utf-8")
+    operating_rules = core_text.split("## Portable operating rules\n", 1)[1].split(
+        "\n## ", 1
+    )[0].strip()
 
     authoring = [
         str(skill["name"])
@@ -112,6 +118,9 @@ def test_core_and_standalone_authoring_skills_embed_the_canonical_contract() -> 
         skill_dir = workflow_skills.source_dir(name)
         text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
         assert text.count(concise) == 1, f"{name} must carry the standalone contract"
+        assert text.count(operating_rules) == 1, (
+            f"{name} must carry the core's portable startup/retry rules"
+        )
         assert "repository checkout" not in concise.lower()
         # A reference to the core skill is not a substitute for the embedding.
         workflow_skills.validate_contract_projection(name, skill_dir)
@@ -167,6 +176,88 @@ def test_workflow_skill_frontmatter_is_valid_yaml() -> None:
         assert isinstance(parsed["description"], str)
 
 
+def test_skill_contract_stamps_cover_the_canonical_skill_sources(tmp_path: Path) -> None:
+    schema = tmp_path / "_Schema"
+    shutil.copytree(workflow_skills.WORKFLOW_SKILLS_DIR.parent, schema)
+    expected = workflow_skills.skill_contract(schema)
+
+    assert len(expected) == 64
+    for _, source in workflow_skills.contract_sources(schema):
+        if source.name == "SKILL.md":
+            frontmatter = source.read_text(encoding="utf-8").split("\n---\n", 1)[0]
+            assert yaml.safe_load(frontmatter.removeprefix("---\n"))["metadata"][
+                "skill_contract"
+            ] == expected
+
+    for index, (source, old, new) in enumerate((
+        (schema / "SKILL.md", "Never recommend", "Always recommend"),
+        (schema / "references" / "engagement.md", "bootstrap()", "bootstrap-now()"),
+        (
+            schema / "workflow-skills" / "exomem-capture" / "SKILL.md",
+            "Save durable conclusions",
+            "Preserve durable conclusions",
+        ),
+    )):
+        copied = tmp_path / f"changed-{index}"
+        shutil.copytree(schema, copied)
+        changed = copied / source.relative_to(schema)
+        changed.write_text(changed.read_text(encoding="utf-8").replace(old, new, 1), encoding="utf-8")
+        assert workflow_skills.skill_contract(copied) != expected
+        with pytest.raises(ValueError, match="skill contract stamp"):
+            workflow_skills.validate_skill_contract(copied)
+
+
+def test_skill_contract_normalizes_crlf_and_refreshes_stamps(tmp_path: Path) -> None:
+    schema = tmp_path / "_Schema"
+    shutil.copytree(workflow_skills.WORKFLOW_SKILLS_DIR.parent, schema)
+    expected = workflow_skills.skill_contract(schema)
+    core = schema / "SKILL.md"
+    core.write_bytes(core.read_bytes().replace(b"\n", b"\r\n"))
+
+    assert workflow_skills.skill_contract(schema) == expected
+    workflow_skills.refresh_skill_contract_stamps(schema)
+    workflow_skills.validate_skill_contract(schema)
+
+
+def test_skill_contract_hashes_body_examples_without_rewriting_them(tmp_path: Path) -> None:
+    schema = tmp_path / "_Schema"
+    shutil.copytree(workflow_skills.WORKFLOW_SKILLS_DIR.parent, schema)
+    expected = workflow_skills.skill_contract(schema)
+    body_example = "\nContract example:\n  skill_contract: first-version\n"
+    core = schema / "SKILL.md"
+    reference = schema / "references" / "engagement.md"
+
+    core.write_text(core.read_text(encoding="utf-8") + body_example, encoding="utf-8")
+    first_body_digest = workflow_skills.skill_contract(schema)
+    assert first_body_digest != expected
+    core.write_text(
+        core.read_text(encoding="utf-8").replace("first-version", "second-version"),
+        encoding="utf-8",
+    )
+    assert workflow_skills.skill_contract(schema) != first_body_digest
+    core.write_text(
+        core.read_text(encoding="utf-8").replace(
+            f"  skill_contract: {expected}\n", "", 1
+        ),
+        encoding="utf-8",
+    )
+    workflow_skills.refresh_skill_contract_stamps(schema)
+    assert "  skill_contract: second-version" in core.read_text(encoding="utf-8")
+
+    stamped = workflow_skills.skill_contract(schema)
+    reference.write_text(
+        reference.read_text(encoding="utf-8") + body_example,
+        encoding="utf-8",
+    )
+    first_reference_digest = workflow_skills.skill_contract(schema)
+    assert first_reference_digest != stamped
+    reference.write_text(
+        reference.read_text(encoding="utf-8").replace("first-version", "second-version"),
+        encoding="utf-8",
+    )
+    assert workflow_skills.skill_contract(schema) != first_reference_digest
+
+
 def test_workflow_skill_docs_route_through_product_commands() -> None:
     for name in EXPECTED_WORKFLOW_SKILLS:
         skill_md = workflow_skills.source_dir(name) / "SKILL.md"
@@ -183,7 +274,7 @@ def test_workflow_skill_docs_route_through_product_commands() -> None:
             )
 
 
-def test_core_skill_tool_loading_mentions_current_product_surface() -> None:
+def test_core_skill_routes_tool_loading_by_current_intent() -> None:
     skill_md = workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md"
     text = skill_md.read_text(encoding="utf-8")
     loading_section = text.split("## Loading the tools", maxsplit=1)[1].split(
@@ -216,21 +307,34 @@ def test_core_skill_tool_loading_mentions_current_product_surface() -> None:
         "read_media",
     ]:
         assert command in loading_section
-    assert (
-        'ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,'
-        'observe_memory,edit_memory,replace_memory,capture_source,compile_source,'
-        'preserve_evidence,preserve_artifacts,transfer_artifact,record_memory,review_memory,triage_memory,'
-        'connect_memory,adopt_vault,maintain_memory,schema_memory,govern_memory,'
-        'process_media,query_dataset,read_media")'
-    ) in loading_section
+    # Discovery must not turn a lookup into a load of every mutation/media schema.
+    assert 'ToolSearch("select:ask_memory")' in loading_section
+    assert "Load only" in loading_section
+    assert "available_product_tools" in loading_section
+    assert "Load the product surface up front" not in loading_section
+    assert "select:bootstrap,ask_memory,read_memory,browse_memory,remember" not in text
+
+
+def test_core_skill_reference_routes_resolve_inside_every_distribution() -> None:
+    """Native installs and uploads must carry the router's actual destinations."""
+    from exomem import package_skills
+
+    root = workflow_skills.WORKFLOW_SKILLS_DIR.parent
+    text = (root / "SKILL.md").read_text(encoding="utf-8")
+    targets = set(re.findall(r"\]\((references/[^)#]+\.md)(?:#[^)]*)?\)", text))
+    assert targets, "conditional workflows need explicit local routes"
+    payload = package_skills._core_payload(None)
+    for target in targets:
+        assert (root / target).is_file(), target
+        assert payload[target] == (root / target).read_text(encoding="utf-8")
 
 
 def test_shipped_records_guidance_routes_observed_state_without_magic_verbs() -> None:
     """Both generic skill copies teach the same safe Records routing contract."""
     repo_root = Path(__file__).resolve().parents[1]
     skill_copies = (
-        workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md",
-        repo_root / "plugins" / "claude-code" / "skills" / "exomem" / "SKILL.md",
+        workflow_skills.WORKFLOW_SKILLS_DIR.parent / "references" / "planning-records.md",
+        repo_root / "plugins" / "claude-code" / "skills" / "exomem" / "references" / "planning-records.md",
     )
     operation_copies = (
         workflow_skills.WORKFLOW_SKILLS_DIR.parent / "references" / "operations.md",

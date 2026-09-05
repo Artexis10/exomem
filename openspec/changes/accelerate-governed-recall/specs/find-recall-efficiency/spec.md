@@ -94,7 +94,8 @@ is computed from real intervals, and each stage SHALL carry its source (`index`,
 
 - **WHEN** a timed `find` runs through the public leaf
 - **THEN** every stage entry carries a duration produced by a registered interval and a source value
-- **AND** `sum(stage.ms) + unattributed_ms` does not exceed `total_ms`
+- **AND** the sum of the root-level stages plus `unattributed_ms` does not exceed `total_ms`,
+  nested stages being reported under their parent rather than counted again at the root
 
 ## ADDED Requirements
 

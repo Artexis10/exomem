@@ -1,7 +1,9 @@
 ---
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
-version: 0.1.0
+metadata:
+  skill_contract: a4a7b34c81cd8f718ec52d5efe6b07a71c5461aed4f5eaef743624fa50aaff69
+  version: "0.1.0"
 ---
 
 # exomem-capture
@@ -12,6 +14,22 @@ Save durable conclusions and recurring entities at the right epistemic layer.
 ## When to use
 Use when the user asks to save or the session lands on durable reusable knowledge, including stable context about a recurring entity.
 
+## Portable operating rules
+
+Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
+
+Sources/Evidence are immutable, and content outside the managed Knowledge Base
+is read-only. Before a compiled write: search/read for duplicates, draft, run
+`connect_memory(operation="suggest-links")`, and include known source references
+and reviewed connections in the first write. Honor the live confirmation ceiling;
+a workflow or standing capture preference does not grant restructure authority.
+
+Inspect mutation results before reporting success. On `success: false`, follow
+the structured error. For warming, busy, pending, or
+`MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, preserve the same mutation identity
+and unchanged payload; wait/reconcile/retry only as instructed, never with a new
+identity after an uncertain commit.
+
 ## Workflow
 1. Decide whether the material is raw evidence or a compiled conclusion.
 2. Use `capture_source` for raw captured text or source material. Classify it on
@@ -19,9 +37,10 @@ Use when the user asks to save or the session lands on durable reusable knowledg
    is about), plus `projects` for the work it serves. Use `other` only when the
    kind genuinely cannot be determined, never because no familiar label matches.
 3. Pick the lane before the transport. Raw material stays with `capture_source`, which takes `files` for attachments as well as `content` for text. Proof-bearing material takes `preserve_evidence` for factual text, `preserve_artifacts` when file handles are available, and `transfer_artifact` only as the binary-upload fallback.
-4. Use `remember` for distilled conclusions: `research-note`, `insight`, `failure`, or `pattern`. Pass any path captured in steps 2-3 as `sources:` so the conclusion links to its provenance and the source leaves the unprocessed queue.
-5. Run `connect_memory(operation="suggest-links")` before writing compiled notes;
-   prefer `edit_memory` or `replace_memory` for near-duplicates.
+4. Draft distilled conclusions as: `research-note`, `insight`, `failure`, or `pattern`. Pass any path captured in steps 2-3 as `sources:` so the conclusion links to its provenance and the source leaves the unprocessed queue.
+5. Run `connect_memory(operation="suggest-links")` on the draft. Then write with
+   `remember`, carrying the sources and accepted links in the first write; prefer
+   `edit_memory` or `replace_memory` for near-duplicates.
 6. For an entity, consult the active entity registry and selected knowledge packs,
    then call `connect_memory(operation="resolve-entity", name=...)` before writing.
 7. When one active entity matches, use `edit_memory` for a small stable-fact
@@ -31,6 +50,12 @@ Use when the user asks to save or the session lands on durable reusable knowledg
 
 ## Lifecycle
 Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `record_memory(action="append")`; when collections compete ask one focused question, and when none fits propose one rather than creating it silently. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome.
+
+## Relation governance
+Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`; corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
 After writing, report exactly `Saved -> <path>` plus one short phrase if needed. If nothing durable was saved, say why. Report a lifecycle consequence in the user's own vocabulary and cite the collection the way recall cites a page; the words Planning, Records, collection, schema and natural key never lead the report.

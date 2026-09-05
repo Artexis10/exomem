@@ -1,7 +1,9 @@
 ---
 name: exomem-defrag
 description: Reconcile duplicate, stale, or conflicting Exomem memory while preserving history through review, merge, or supersession.
-version: 0.1.0
+metadata:
+  skill_contract: a4a7b34c81cd8f718ec52d5efe6b07a71c5461aed4f5eaef743624fa50aaff69
+  version: "0.1.0"
 ---
 
 # exomem-defrag
@@ -12,6 +14,22 @@ Reduce duplicate, stale, or conflicting memory without losing provenance.
 ## When to use
 Use when the user asks to defrag a topic, reconcile notes, resolve contradictions, merge duplicates, or inspect what is stale.
 
+## Portable operating rules
+
+Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
+
+Sources/Evidence are immutable, and content outside the managed Knowledge Base
+is read-only. Before a compiled write: search/read for duplicates, draft, run
+`connect_memory(operation="suggest-links")`, and include known source references
+and reviewed connections in the first write. Honor the live confirmation ceiling;
+a workflow or standing capture preference does not grant restructure authority.
+
+Inspect mutation results before reporting success. On `success: false`, follow
+the structured error. For warming, busy, pending, or
+`MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, preserve the same mutation identity
+and unchanged payload; wait/reconcile/retry only as instructed, never with a new
+identity after an uncertain commit.
+
 ## Workflow
 1. Search the topic with `ask_memory`, using `ask_memory(deep=true)`, `connect_memory`, or `review_memory` when graph, stale, audit, or evolution context matters.
 2. Group findings into keep, merge, supersede, or leave alone.
@@ -19,6 +37,12 @@ Use when the user asks to defrag a topic, reconcile notes, resolve contradiction
 4. Use `replace_memory` for changed conclusions and `edit_memory` only for minor corrections.
 5. Preserve raw sources and evidence; keep superseded history visible.
 6. When you supersede or merge, carry the merged notes' `sources:` and outbound links onto the survivor — a merge that drops edges loses graph value the superseded page can no longer carry. Check `review_memory(mode="relation-debt")` on the survivor afterwards.
+
+## Relation governance
+Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`; corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
 Return the reconciliation decision for each candidate and the paths changed or left alone.

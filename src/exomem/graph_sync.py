@@ -1511,14 +1511,45 @@ def _admit_epoch_inputs(
     raise GraphEpochUnreadable()
 
 
+def registry_epoch_writes(
+    vault_root: Path,
+) -> tuple[PlannedWrite, PlannedWrite, GraphSyncCheckpoint | None]:
+    """Build the full-scope epoch owned by an exact registry replacement."""
+    from .vault import PlannedWrite
+
+    root = Path(vault_root)
+    epoch = _admit_epoch_inputs(root)
+    checkpoint = next_checkpoint(
+        current=epoch.checkpoint,
+        acknowledged_generation=(
+            epoch.acknowledgement.generation
+            if epoch.acknowledgement is not None
+            else 0
+        ),
+        floor_generation=epoch.floor.generation if epoch.floor is not None else 0,
+        mutation_id=_checkpoint_mutation_id(),
+        paths=[],
+        created_paths=[],
+        force_full_scope=True,
+    )
+    return (
+        PlannedWrite(
+            floor_path(root),
+            GraphSyncGenerationFloor.create(checkpoint.generation).render(),
+        ),
+        PlannedWrite(checkpoint_path(root), checkpoint.render()),
+        epoch.checkpoint,
+    )
+
+
 def _epoch_writes_with_predecessor(
     vault_root: Path, writes: Iterable[PlannedWrite]
 ) -> tuple[PlannedWrite, PlannedWrite, GraphSyncCheckpoint | None] | None:
-    """Build ordered internal epoch replacements for canonical Markdown writes.
+    """Build ordered internal epoch replacements for canonical graph inputs.
 
     The import stays here to keep the vault writer free of a module cycle.
     """
-    from . import recall_policy
+    from . import recall_policy, relation_registry
     from .kbdir import kb_dirname
     from .vault import PlannedWrite, content_hash, in_excluded_scan_dir
 
@@ -1528,9 +1559,25 @@ def _epoch_writes_with_predecessor(
     # directory census treat the epoch artifacts as unrelated changes.
     root = Path(vault_root)
     resolved_root = root.resolve()
+    caller_writes = tuple(writes)
+    registry_target = relation_registry.extension_registry_path(root).resolve(
+        strict=False
+    )
+    registry_write = next(
+        (
+            write
+            for write in caller_writes
+            if write.path.resolve(strict=False) == registry_target
+        ),
+        None,
+    )
+    if registry_write is not None and not isinstance(registry_write.content, str):
+        raise GraphEpochIncoherent("relation registry batch content is not textual")
+    if registry_write is not None:
+        return registry_epoch_writes(root)
     paths: list[tuple[str, str | None]] = []
     created_paths: list[str] = []
-    for write in writes:
+    for write in caller_writes:
         try:
             relative = write.path.resolve().relative_to(resolved_root).as_posix()
         except (OSError, ValueError):
@@ -1550,7 +1597,7 @@ def _epoch_writes_with_predecessor(
         paths.append((relative, content_hash(write.content)))
         if not write.path.exists():
             created_paths.append(relative)
-    if not paths:
+    if registry_write is None and not paths:
         return None
     mutation_id = _checkpoint_mutation_id()
     epoch = _admit_epoch_inputs(root)
@@ -1563,7 +1610,7 @@ def _epoch_writes_with_predecessor(
         mutation_id=mutation_id,
         paths=paths,
         created_paths=created_paths,
-        force_full_scope=epoch.requires_full_recovery,
+        force_full_scope=(registry_write is not None or epoch.requires_full_recovery),
     )
     return (
         PlannedWrite(floor_path(root), GraphSyncGenerationFloor.create(checkpoint.generation).render()),
@@ -1575,7 +1622,14 @@ def _epoch_writes_with_predecessor(
 def epoch_writes(
     vault_root: Path, writes: Iterable[PlannedWrite]
 ) -> tuple[PlannedWrite, PlannedWrite] | None:
-    """Build ordered internal epoch replacements for canonical Markdown writes."""
+    """Build ordered internal epoch replacements for canonical graph inputs.
+
+    In addition to ordinary admitted Markdown, the exact governed relation
+    registry target is a graph input.  It always receives a full checkpoint:
+    changing relation meaning can affect every stored raw observation even
+    though no Markdown path changed.  Detection lives here so callers provide
+    only registry YAML and cannot omit or handcraft the recovery epoch.
+    """
     result = _epoch_writes_with_predecessor(vault_root, writes)
     return None if result is None else result[:2]
 

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import uuid
+from itertools import count
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from exomem import commands, freshness, lexstore
+from exomem import commands, find_types, freshness, lexstore
 from exomem import find as find_module
 
 _PROFILE_KEYS = {
@@ -151,8 +153,12 @@ def test_incomplete_catalog_outcomes_are_typed_and_not_cached(
 
 
 @pytest.mark.parametrize("result_level", ["page", "unit"])
+@pytest.mark.parametrize("tick_seconds", [0.125, 0.25])
 def test_exact_catalog_cold_and_hot_timings_are_measurable(
-    tmp_path: Path, result_level: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    result_level: str,
+    tick_seconds: float,
 ) -> None:
     paths = [_write_note(tmp_path, "alpha"), _write_note(tmp_path, "beta")]
     _seed(tmp_path, paths)
@@ -172,6 +178,13 @@ def test_exact_catalog_cold_and_hot_timings_are_measurable(
         "include_timings": True,
     }
     cold = commands.op_find(tmp_path, **request)
+    # A cached lookup still records its real interval. Give the timing collector
+    # a deterministic clock so this does not depend on host speed or rounding.
+    # Replace only its module binding, not the process-wide time module.
+    ticks = count(step=tick_seconds)
+    monkeypatch.setattr(
+        find_types, "time", SimpleNamespace(perf_counter=lambda: next(ticks))
+    )
     hot = commands.op_find(tmp_path, **request)
 
     assert len(cold["hits"]) == 2
@@ -190,8 +203,9 @@ def test_exact_catalog_cold_and_hot_timings_are_measurable(
     }
     assert hot_timing["cache"]["hit"] is True
     assert hot_timing["stages"]["filter_eligibility"] == {
-        "ms": 0.0,
+        "ms": tick_seconds * 1000.0,
         "cache_hit": True,
+        "source": "cache",
     }
     assert hot_timing["profile"]["catalog"] == {
         "capability": "semantic_catalog",

@@ -658,6 +658,11 @@
           "description": "Apply usage boost when explicitly requested.",
           "type": "boolean"
         },
+        "widen_outside_kb": {
+          "default": false,
+          "description": "With scope=\"kb\", also reserve up to limit-1 slots for curated vault pages OUTSIDE the knowledge base. Off by default: scope=\"kb\" means the knowledge base and nothing else. Turn it on when a terse out-of-KB file (a tracker, a handbook) is what you are looking for, or use scope=\"vault\" to search everything equally.",
+          "type": "boolean"
+        },
         "graph_enrich": {
           "default": false,
           "description": "With deep mode, include typed graph neighborhood data.",
@@ -702,13 +707,13 @@
     }
   },
   "bootstrap": {
-    "description": "Return Exomem's versioned operating contract for generic MCP clients.\n\nCall this once at the start of a session when the client does not have the\nExomem Claude Skill loaded. It teaches the agent how to use the tools: when\nto search, when to save, how to interpret scoped misses, which `find` knobs\nare cheap vs diagnostic, how compiled notes differ from raw sources/evidence,\nand how Exomem differs from built-in AI memory. The payload is deterministic\ninstruction plus local compute policy and product-surface metadata; it does\nnot inspect or summarize vault content.",
+    "description": "Return Exomem's versioned operating contract and live session state.\n\nCall this when current live state is missing. A client with the installed\nExomem skill uses session with its metadata skill-contract digest; generic\nclients or those missing the rules use compact, full, or diagnostics to\nlearn tool use: when to search, when to save, how to interpret scoped\nmisses, which `find` knobs are cheap vs diagnostic, how compiled notes\ndiffer from raw sources/evidence, and how Exomem differs from built-in AI\nmemory. The payload is deterministic instruction plus local compute policy\nand product-surface metadata; it does not inspect or summarize vault content.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "profile": {
           "default": "compact",
-          "description": "\"compact\" (default), \"full\", or \"diagnostics\". Compact is enough for normal clients. Full adds examples. Diagnostics adds performance interpretation guidance.",
+          "description": "\"compact\" (default), \"full\", \"diagnostics\", or \"session\". Session supplies live state to a client that has loaded the installed skill operating rules and presents its current skill contract digest.",
           "type": "string"
         },
         "workflow": {
@@ -722,6 +727,18 @@
           ],
           "default": null,
           "description": "Optional caller-selected workflow label. Returned as context only; it does not change server behavior."
+        },
+        "skill_contract": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Installed skill metadata digest required for the session profile. An absent or stale digest returns compact in this call with a closed unavailable reason."
         },
         "authorization_session_credential": {
           "anyOf": [
@@ -1033,7 +1050,7 @@
       "properties": {
         "operation": {
           "default": "suggest-links",
-          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, resolve-entity, create-entity, or accept-relation.",
+          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, resolve-relation, resolve-entity, create-entity, or accept-relation.",
           "type": "string"
         },
         "path": {
@@ -1046,7 +1063,7 @@
             }
           ],
           "default": null,
-          "description": "Existing page path for link, graph, or relation context."
+          "description": "Existing page path for link, graph, or relation context; resolve-relation\nreports it unchanged as optional source context without reading the page."
         },
         "target": {
           "anyOf": [
@@ -1058,7 +1075,7 @@
             }
           ],
           "default": null,
-          "description": "Target path for inbound-links; defaults to path."
+          "description": "Target path for inbound-links; resolve-relation reports it unchanged\nas optional target context without reading the page."
         },
         "query": {
           "anyOf": [
@@ -1070,7 +1087,31 @@
             }
           ],
           "default": null,
-          "description": "Query seed for graph-context."
+          "description": "Query seed for graph-context or plain-language resolve-relation intent."
+        },
+        "requested_relation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional clean, canonical, or alias label for\nresolve-relation. At least query or requested_relation is required."
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque continuation returned by resolve-relation."
         },
         "unit_ref": {
           "anyOf": [
@@ -1140,8 +1181,10 @@
         },
         "limit": {
           "default": 8,
-          "description": "Candidate cap for suggestion modes.",
-          "type": "integer"
+          "maximum": 64,
+          "minimum": 1,
+          "type": "integer",
+          "description": "Candidate cap for suggestion and relation-resolution modes."
         },
         "scope": {
           "default": "kb",
@@ -5629,7 +5672,7 @@
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "For `workflow-contracts`, exactly one of: inventory (no workflow fields); inspect (name); validate (exactly one of name or proposal); resolve (context plus at most one of name or proposal); preview (proposal, optional name); save (proposal and why, optional name plus expected_hash for updates); or refresh (name, expected_hash, and why). Other subjects retain their existing operations.",
+          "description": "For `relations`, `propose-relation` returns a reviewed delta without writing and `save-relations` commits that delta with expected_hash and why. For `workflow-contracts`, exactly one of: inventory (no workflow fields); inspect (name); validate (exactly one of name or proposal); resolve (context plus at most one of name or proposal); preview (proposal, optional name); save (proposal and why, optional name plus expected_hash for updates); or refresh (name, expected_hash, and why). Other subjects retain their existing operations.",
           "type": "string"
         },
         "name": {
@@ -5688,7 +5731,7 @@
             }
           ],
           "default": null,
-          "description": "Required for workflow save updates and refresh; rejected by every other workflow operation."
+          "description": "Current relation registry hash required by save-relations, or\ncurrent workflow hash required for workflow save updates and refresh."
         },
         "strict": {
           "default": false,
@@ -5710,7 +5753,6 @@
         "proposal": {
           "anyOf": [
             {
-              "additionalProperties": true,
               "type": "object"
             },
             {
@@ -5718,7 +5760,7 @@
             }
           ],
           "default": null,
-          "description": "Required for workflow preview/save; validate and resolve accept it as the exact alternative to `name`."
+          "description": "Reviewed relation definition for propose-relation, reviewed delta\nfor save-relations, or workflow proposal for workflow modes."
         },
         "why": {
           "anyOf": [
@@ -5730,7 +5772,7 @@
             }
           ],
           "default": null,
-          "description": "Required audit reason for workflow save/refresh and entity-type saves."
+          "description": "Required audit reason for relation delta save, workflow save/refresh,\nand entity-type saves."
         },
         "include_model_suggestions": {
           "default": false,
@@ -5781,6 +5823,49 @@
           ],
           "default": null,
           "description": "Exact optional workflow resolve mapping. Its only keys are project,\ndomain, and activity; omit a key for unknown or set it null for known absent."
+        },
+        "date_from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional inclusive ISO origin-date bound for relation evidence."
+        },
+        "date_to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional inclusive ISO origin-date bound for relation evidence."
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque relation candidate continuation."
+        },
+        "limit": {
+          "default": 20,
+          "maximum": 64,
+          "minimum": 1,
+          "type": "integer",
+          "description": "Relation extension and observation candidate budget."
         },
         "response_detail": {
           "default": "compact",
@@ -5900,6 +5985,18 @@
           ],
           "default": null,
           "description": "Optional reviewed fingerprint; a mismatch refuses the write and asks the caller to refresh."
+        },
+        "source_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Source-page hint returned by relation review. Required for\nnewly returned relation items; omitted legacy requests use only the\nbounded compatibility prefix."
         },
         "response_detail": {
           "default": "compact",
