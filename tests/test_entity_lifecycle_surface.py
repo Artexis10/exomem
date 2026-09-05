@@ -1197,7 +1197,7 @@ def _hydration_with_relation(root: Path, identity: str = "cobalt workshop") -> s
         root,
         "Knowledge Base/Notes/context-00.md",
         "---\ntype: insight\ntitle: Context 0\nstatus: active\n---\n"
-        f"# Context 0\n\nI work with {identity}.\n\n## Relations\n\nSee [[{stem}]].\n",
+        f"# Context 0\n\nI work with {identity}.\n\nSee also [[{stem}]] for the roster.\n",
     )
     for index, body in enumerate((f"I use {identity}.", f"I attend {identity}."), start=1):
         _note(root, index, body)
@@ -1258,7 +1258,7 @@ def test_hydration_refuses_a_relation_to_a_different_entity(tmp_path: Path) -> N
         tmp_path,
         "Knowledge Base/Notes/context-03.md",
         "---\ntype: insight\ntitle: Context 3\nstatus: active\n---\n"
-        f"# Context 3\n\nI work with cobalt workshop.\n\n## Relations\n\nSee [[{stem}]].\n",
+        f"# Context 3\n\nI work with cobalt workshop.\n\nSee also [[{stem}]] elsewhere.\n",
     )
     item = curation.work_item(tmp_path, review_ref=_candidate(tmp_path).ref)
     binding = item["entity_candidate"]
