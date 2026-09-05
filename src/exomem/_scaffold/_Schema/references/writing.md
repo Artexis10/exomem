@@ -35,8 +35,9 @@ Use this loop whenever a durable conclusion should enter Exomem:
    conclusion came from live work with nothing external captured, `sources: []`
    is honest and valid.
 4. Draft the typed page at the right layer: `capture_source` for raw source, `remember` for a compiled conclusion, `connect_memory` for entity/link work, `edit_memory` for small correction, `replace_memory` for supersession.
-5. Run `connect_memory(operation="suggest-links")` on the draft before writing;
-   use `suggest-relations` when directional meaning matters. Accept only links
+5. Reuse meaningful links established by the current search/read context. When
+   connections remain unknown, use `connect_memory(operation="suggest-links")`
+   on the draft; use `suggest-relations` when direction remains unresolved. Accept only links
    that genuinely clarify provenance or context, and write accepted note-level
    edges under `## Relations` as `- relation_type [[Target]]`. Carry accepted
    links into the *first* write; do not defer them to a follow-up `edit_memory`.
@@ -53,6 +54,33 @@ Use this loop whenever a durable conclusion should enter Exomem:
 7. If a near-duplicate warning fires, prefer `edit_memory` or `replace_memory` over a parallel page. If suggestions are useful, add them with a follow-up `edit_memory`.
 8. If the write returned a `structure_suggestion`, handle it as below.
 9. Report one line: `Saved -> <path>`.
+
+## Closing a multi-step workflow
+
+Group work by dependencies, not by one tool call per reasoning turn. Read
+independent known pages together when the client supports parallel calls. Preserve
+several artifacts with one `preserve_artifacts` call, then use the discovered
+`process_media(paths=[...])` selector when available. Its ordered item results
+acknowledge durable work; extraction finishes asynchronously. Do not claim to have
+read extracted content before public status/read proves it exists.
+
+Author related observations and accepted connections in the initial note where
+possible. On an existing page, `edit_memory` with `operation.kind="batch_replace"`
+can combine known string changes into one guarded mutation. It is not an atomic
+multi-page transaction. Keep conflicting canonical edits ordered; run independent
+reads or artifact work concurrently only within the active client's capabilities.
+When a compiled note cites a media sidecar that extraction can still change,
+complete the relevant extraction before validating that dependent write. Do
+source-independent tracker, background-note or unrelated capture work while it
+runs. Never bypass a source-version guard or reuse a stale staged backlink.
+
+Inspect each terminal and handle actionable warnings, but do not reread the page
+after every committed edit or poll until every projection is current. Chain a
+returned `after_hash` into the next supported `expected_hash`; use returned
+`unit_ref` for exact semantic edits. Finish with a bounded check of the requested
+state and citations. If the next operation explicitly needs current graph edges,
+honor its freshness refusal; optional graph lag does not invalidate a successful
+ordinary lookup.
 
 **When a write says the page has outgrown its scope.** A compiled write may return
 `structure_suggestion` — the runtime's observation that recurring durable material

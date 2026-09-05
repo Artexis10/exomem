@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
@@ -1251,6 +1252,8 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
     artifact_receipt = _artifact_receipt_projection(leaf)
     compact.update(artifact_receipt)
+    if result.get("state") == "committed":
+        compact.update(_commit_metadata_projection(leaf))
     compact.update(_media_result_projection(leaf))
     # `pending` (#576) is the fourth outcome: canonical bytes committed, the
     # registered derived-graph rebuild has not converged yet. It has to survive
@@ -1328,6 +1331,45 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         else:
             compact["diagnostics"] = leaf
     return compact
+
+
+def _commit_metadata_projection(leaf: Any) -> dict[str, str]:
+    """Preserve exact bounded identities, never page/unit bodies or diagnostics.
+
+    Portable receipt recovery intentionally supplies no leaf; it cannot invent
+    these identities. Semantic hashes are copied only from the same committed
+    primary path, not an auxiliary page or a preflight preview.
+    """
+    if not isinstance(leaf, Mapping) or not isinstance(leaf.get("path"), str):
+        return {}
+    projection = {
+        key: leaf[key] for key in ("before_hash", "after_hash") if _hash(leaf.get(key))
+    }
+    semantic = leaf.get("semantic")
+    if (
+        "after_hash" not in projection
+        and isinstance(semantic, Mapping)
+        and semantic.get("path") == leaf["path"]
+        and semantic.get("mutated") is True
+        and _hash(semantic.get("after_hash"))
+    ):
+        projection["after_hash"] = semantic["after_hash"]
+    for key in ("unit_ref", "removed_unit_ref"):
+        value = leaf.get(key)
+        if not isinstance(value, str) or len(value) > 128:
+            continue
+        parent, separator, fragment = value.partition("#")
+        if (
+            separator
+            and parent.startswith("exomem://memory/")
+            and _normalized_uuid(parent.removeprefix("exomem://memory/"))
+            and (
+                re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?", fragment)
+                or re.fullmatch(r"unit-[0-9a-f]{64}", fragment)
+            )
+        ):
+            projection[key] = value
+    return projection
 
 
 def valid_record_receipt(value: Any) -> bool:
