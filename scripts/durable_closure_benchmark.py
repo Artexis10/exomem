@@ -48,6 +48,14 @@ def validate_server_root(server_root: Path) -> Path:
     return target
 
 
+def normalize_python_launcher(python: Path, runner_cwd: Path) -> Path:
+    """Anchor a relative launcher to the harness cwd without dereferencing it."""
+    launcher = Path(python)
+    if not launcher.is_absolute():
+        launcher = Path(runner_cwd) / launcher
+    return Path(os.path.abspath(launcher))
+
+
 def _target_source_environment(server_root: Path) -> dict[str, str]:
     """Import only the selected source tree; never install benchmark hooks here."""
     environment = {
@@ -84,7 +92,7 @@ def runtime_provenance(server_root: Path, python: Path) -> dict[str, Any]:
     """Record content-free identity for the exact target runtime before timing."""
     target = validate_server_root(server_root)
     source_root = target / "src"
-    python_path = Path(python).absolute()
+    python_path = normalize_python_launcher(python, Path.cwd())
     environment = _target_source_environment(target)
     package_origin = _command_output(
         [str(python_path), "-c", "import exomem, pathlib; print(pathlib.Path(exomem.__file__).resolve())"],
@@ -528,6 +536,7 @@ def invalid_measurement_report(
 def benchmark_environment(state: Path, vault: Path, *, server_root: Path = ROOT) -> dict[str, str]:
     """Create hermetic process state without disabling watchers or scheduling."""
     target = validate_server_root(server_root)
+    launcher = normalize_python_launcher(python, Path.cwd())
     env = {
         key: value
         for key, value in os.environ.items()
@@ -1159,7 +1168,7 @@ async def run_public_workflow(
     workflow_plan(variant)
     state.mkdir(parents=True, exist_ok=True)
     vault.mkdir(parents=True, exist_ok=True)
-    provenance = runtime_provenance(target, python)
+    provenance = runtime_provenance(target, launcher)
     corpus = materialize_corpus(vault, pages=pages, server_root=target)
     artifacts = load_artifact_manifest(artifacts_manifest) if artifacts_manifest else None
     env = benchmark_environment(state, vault, server_root=target)
@@ -1170,7 +1179,7 @@ async def run_public_workflow(
     if profile == MODEL_FREE_PROFILE:
         env.update({"EXOMEM_DISABLE_MEDIA_EXTRACTION": "1", "EXOMEM_DISABLE_CLIP": "1"})
     transport = StdioTransport(
-        command=str(python),
+        command=str(launcher),
         args=["-m", "exomem", "--transport", "stdio"],
         env=env,
         cwd=str(target),

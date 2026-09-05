@@ -658,6 +658,22 @@ def test_runtime_provenance_distinguishes_clean_git_from_unavailable_git(tmp_pat
     assert benchmark.runtime_provenance(non_git_root, Path(sys.executable))["git"]["dirty"] is None
 
 
+def test_relative_python_launcher_is_anchored_once_to_runner_cwd_not_server_root(tmp_path: Path) -> None:
+    runner_cwd = tmp_path / "runner"
+    server_root = tmp_path / "server"
+    runner_launcher = runner_cwd / ".venv" / "bin" / "python"
+    server_launcher = server_root / ".venv" / "bin" / "python"
+    runner_launcher.parent.mkdir(parents=True)
+    server_launcher.parent.mkdir(parents=True)
+    runner_launcher.symlink_to(Path(sys.executable))
+    server_launcher.symlink_to(Path(sys.executable))
+
+    launcher = benchmark.normalize_python_launcher(Path(".venv/bin/python"), runner_cwd)
+
+    assert launcher == runner_launcher.absolute()
+    assert launcher != server_launcher.absolute()
+
+
 def test_small_model_free_smoke_uses_one_registered_stdio_product_session(
     tmp_path: Path,
 ) -> None:
