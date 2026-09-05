@@ -475,13 +475,37 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 
 ## 9. Reports + CI (W11)
 
-- [ ] 9.1 `reports/` renderer (per-ability × variant; no aggregate; INVALID
+- [x] 9.1 `reports/` renderer (per-ability × variant; no aggregate; INVALID
       renders INVALID; refuses cross-provider latency from this host)
-- [ ] 9.2 Fairness matrix + compat matrix (declared-vs-observed divergence a
+      Landed 2026-09-02 (`benchmarks/reports/render.py`, `latency.py`): composes the
+      LME and epistemic renderers under the shared offline guard; per-ability by
+      per-variant only; non-terminal and unknown-schema manifests refused by
+      inheriting the manifest loader; latency renders one indicative block per
+      provider and never a column spanning providers. Fresh review + integration
+      review APPROVE; reports test set 123 passed, 0 failed.
+- [x] 9.2 Fairness matrix + compat matrix (declared-vs-observed divergence a
       first-class finding)
-- [ ] 9.3 Adversarial packet generator (assumptions, confounds,
+      Landed 2026-09-02 (`benchmarks/reports/fairness.py`, `compat.py`): the eight
+      contract fields read from `docs/benchmark-fairness-contract.md` at assert time;
+      rendering refuses an incomplete matrix; declared-vs-observed variant and
+      provider divergences are first-class findings; non-VALID status invalidates.
+      Residual 2.3c (basic-memory-direct identity vs the design vocabulary) tracked
+      in §2. Reachability from a one-command path is owed by 9.5/9.6.
+- [x] 9.3 Adversarial packet generator (assumptions, confounds,
       suspicious-win flags, challenge paths, pre-registration hash)
-- [ ] 9.4 `consolidate.py` + offline guard (import-closure test)
+      Landed 2026-09-02 (`benchmarks/reports/adversarial.py`): pre-registration
+      binding (ratified + effective sha256, ordered amendment chain with
+      acknowledgment status), assumptions/confounds from projector declarations,
+      suspicious-win flags where a control also passes, the ten reviewer
+      questions bound to artifact paths, and a review disposition bound to the
+      packet hash; unreviewed or stale renders internal-diagnostic.
+- [x] 9.4 `consolidate.py` + offline guard (import-closure test)
+      Landed 2026-09-02 (`benchmarks/reports/consolidate.py`,
+      `tests/test_reports_import_closure.py`): artifact-only, re-derives the
+      pre-registration identity before rendering, validates every MemoryBench
+      export through its model, writes the identity before the report; the
+      import-closure test scans the package at every scope and its transitive
+      imports at load-time scope.
 - [ ] 9.5 Additive `benchmark-protocol` CI job (offline only; guarded
       `retrieval-eval` untouched); README lane map updated
 - [ ] 9.6 One-command smoke / per-lane run / report-regeneration documented
