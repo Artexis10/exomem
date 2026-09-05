@@ -391,14 +391,21 @@ def abort_publication_intents(
     intents: Iterable[_PublicationIntent], *, force_paths: Iterable[Path] = ()
 ) -> None:
     intents = tuple(intents)
+    force_paths = tuple(force_paths)
     finalize_publication_intents(intents)
-    forced = {str(Path(path).absolute()) for path in force_paths}
+    roots = {intent.key[0] for intent in intents}
+    forced = {
+        key
+        for root in roots
+        for path in force_paths
+        if (key := _publication_key(Path(root), Path(path))) is not None
+    }
     with _SUPPRESS_LOCK:
         remnants = [
             intent
             for intent in intents
             if intent.disposition in {"aborted", "expired"}
-            and str((Path(intent.key[0]) / intent.key[1]).absolute()) in forced
+            and intent.key in forced
         ]
     by_root: dict[str, list[Path]] = {}
     for intent in remnants:

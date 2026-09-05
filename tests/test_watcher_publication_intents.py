@@ -236,6 +236,19 @@ def test_unbound_published_remnant_is_fenced_without_watcher(
     assert freshness.external_pending(vault) is True
 
 
+def test_forced_remnant_replay_uses_canonical_symlink_root_key(
+    vault: Path, tmp_path: Path
+) -> None:
+    linked_root = tmp_path / "linked-vault"
+    linked_root.symlink_to(vault, target_is_directory=True)
+    target = linked_root / "Knowledge Base" / "Notes" / "symlink-remnant.md"
+    intent = _register_active_intent(linked_root, target, b"new")
+
+    file_watcher.abort_publication_intents([intent], force_paths=[target])
+
+    assert freshness.external_pending(vault) is True
+
+
 def test_expired_held_intent_replays_without_another_event(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
