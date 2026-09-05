@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.72.0](https://github.com/Artexis10/exomem/compare/v0.71.0...v0.72.0) (2026-09-05)
+
+
+### Features
+
+* **bootstrap:** avoid repeating installed skill instructions ([#1078](https://github.com/Artexis10/exomem/issues/1078)) ([ee79e01](https://github.com/Artexis10/exomem/commit/ee79e01ac993141a3936bbe98e9ff1f3e96f5227))
+
+
+### Bug Fixes
+
+* **audit:** resolve KB-relative supersession pointers ([#1070](https://github.com/Artexis10/exomem/issues/1070)) ([97e7549](https://github.com/Artexis10/exomem/commit/97e7549819706ff85fd64b1251b6acb860f8ee4e))
+* **ci:** raise the cross-platform cap over the true worst session ([#1071](https://github.com/Artexis10/exomem/issues/1071)) ([9ee485d](https://github.com/Artexis10/exomem/commit/9ee485df9f4f414387879e6fd36fdc752f8d974e))
+* **hosted:** let a first provision answer "no retarget needed" ([#1080](https://github.com/Artexis10/exomem/issues/1080)) ([c4a1977](https://github.com/Artexis10/exomem/commit/c4a1977913424a253224a74a40d8c49e6a033fc1))
+* **hosted:** re-mint an expired authorization bundle before the cell serves ([#1082](https://github.com/Artexis10/exomem/issues/1082)) ([fdc9ab4](https://github.com/Artexis10/exomem/commit/fdc9ab4df7651bffd9f3ede01a363b1d113b18d0))
+
 ## [0.71.0](https://github.com/Artexis10/exomem/compare/v0.70.0...v0.71.0) (2026-09-05)
 
 
