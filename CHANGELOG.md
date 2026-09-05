@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.71.0](https://github.com/Artexis10/exomem/compare/v0.70.0...v0.71.0) (2026-09-05)
+
+
+### Features
+
+* activate governed relation vocabulary and graph-native review ([#1074](https://github.com/Artexis10/exomem/issues/1074)) ([49772b5](https://github.com/Artexis10/exomem/commit/49772b51e11dd0e3496b9157a804f43da036de06))
+
 ## [0.70.0](https://github.com/Artexis10/exomem/compare/v0.69.1...v0.70.0) (2026-09-04)
 
 
