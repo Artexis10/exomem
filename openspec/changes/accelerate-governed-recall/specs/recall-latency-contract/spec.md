@@ -69,7 +69,8 @@ difference written into the table.
 #### Scenario: A real recall satisfies the attribution bound
 
 - **WHEN** an opt-in timed hybrid recall runs through the public leaf, not a hand-built timing object
-- **THEN** `sum(stage.ms) + unattributed_ms <= total_ms` holds
+- **THEN** the sum of the root-level stages plus `unattributed_ms` does not exceed `total_ms`,
+  nested stages being reported under their parent rather than counted again at the root
 - **AND** `unattributed_ms <= 0.15 * total_ms` holds
 
 #### Scenario: A manual timing write fails the completeness check

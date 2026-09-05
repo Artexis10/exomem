@@ -585,6 +585,10 @@ def test_graph_swap_waits_for_a_real_lease_manager_writer(
     )
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
     index = epistemic_graph.EpistemicGraphIndex(vault_root)
+    # This test targets the private build/final sidecar swap. Establish its
+    # recall baseline first: cold registry publication itself now correctly
+    # waits for a writer's canonical-bytes/freshness-event boundary.
+    index._reconcile_recall_publication()
     writer_entered = threading.Event()
     release_writer = threading.Event()
     private_build_finished = threading.Event()

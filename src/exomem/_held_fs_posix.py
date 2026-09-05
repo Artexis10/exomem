@@ -734,9 +734,28 @@ class PosixHeldFilesystem(HeldFilesystem):
                 _close(child)
 
 
+#: Why this backend serves only Linux. The primitives it needs -- mount-aware
+#: descriptor-relative operations with a no-replace rename -- have no portable
+#: POSIX spelling. Darwin has `openat`/`renameat`/`unlinkat` and `linkat`, but
+#: no `renameat2`, no `O_PATH`, and no `/proc/self/fd`, so a correct backend
+#: there is a separate implementation rather than a relaxed predicate.
+_UNSUPPORTED_PLATFORM_REASON = "mount-aware relative operations are unavailable"
+
+
+def platform_supported() -> bool:
+    """Whether this platform has a backend at all, asked without a root.
+
+    Distinct from `probe`, which asks whether one particular root can support
+    the primitives. A platform with no backend can never be repaired by
+    choosing a different vault, so callers that want to refuse early -- rather
+    than fail per-operation deep in a write -- need this question separately.
+    """
+    return sys.platform.startswith("linux")
+
+
 def _probe(root: Path) -> Capabilities:
-    if not sys.platform.startswith("linux"):
-        return Capabilities.disabled("mount-aware relative operations are unavailable")
+    if not platform_supported():
+        return Capabilities.disabled(_UNSUPPORTED_PLATFORM_REASON)
     if not all(
         (
             getattr(os, "O_NOFOLLOW", 0),

@@ -11,6 +11,7 @@ from exomem.governance import authorization_custody, authorization_serving_membe
 from pydantic import ValidationError
 
 from exomem_provisioner.authorization_membership import (
+    AUTHORIZATION_SESSION_SCHEMA_VERSION,
     build_initial_hosted_authorization_bundle,
     inspect_hosted_authorization_bundle,
 )
@@ -20,6 +21,7 @@ from exomem_provisioner.config import (
     load_deployment_lock,
     load_hosted_release_manifest,
 )
+from exomem_provisioner.conflict_reason import ConflictReason
 from exomem_provisioner.driver import DriverPending, EffectContext
 from exomem_provisioner.lifecycle import (
     CellLifecycleDriver,
@@ -29,6 +31,7 @@ from exomem_provisioner.lifecycle import (
 )
 from exomem_provisioner.live import (
     KubernetesProviderRegistry,
+    KubernetesProviderSnapshot,
     LiveLifecyclePlane,
 )
 from exomem_provisioner.models import CapacityReservationClass, ResourceKind
@@ -2007,3 +2010,374 @@ async def test_live_plane_publishes_authorization_custody_before_helm_and_reuses
         "helm",
     ]
     assert len(set(helm.revisions)) == 1
+
+
+def _retarget_config(target: dict[str, object], **overrides: object) -> LifecycleConfig:
+    values: dict[str, object] = {
+        "image": "ghcr.io/artexis10/exomem@sha256:" + "d" * 64,
+        "chart_path": "chart",
+        "chart_version": "0.1.0",
+        "helm_version": "3.19.4",
+        "control_hostname": "control.example.invalid",
+        "transfer_hostname": "transfer.example.invalid",
+        "browser_origin": "https://substratesystems.io",
+        "release_version": "0.68.3",
+        "protocol_version": "1",
+        "contract_digest": "a" * 64,
+        "location": "fsn1",
+        "runtime_target": target,
+        "compatibility_digest": "e" * 64,
+        "migration_mode": "state-root-v1",
+    }
+    values.update(overrides)
+    return LifecycleConfig(**values)  # type: ignore[arg-type]
+
+
+def _retarget_plane(
+    metadata: OpaqueProviderMetadata,
+    request: dict[str, object],
+    config: LifecycleConfig,
+    current_values: dict[str, object],
+    *,
+    progress: dict[str, object],
+) -> LiveLifecyclePlane:
+    """A live plane whose cell already carries `current_values` in Helm.
+
+    The operation row is the one the reconciler is actually working: same
+    action, external id, tenant, cell and fence, and a canonical request digest
+    computed the way the repository computes it -- so the only thing under test
+    is the retarget decision itself.
+    """
+
+    class Helm:
+        async def current_release_values(self, owner: OpaqueProviderMetadata) -> dict[str, object]:
+            return dict(current_values)
+
+    class Repository:
+        async def get_by_id(self, operation_id: str) -> object:
+            assert operation_id == "internal-operation-alpha"
+            return SimpleNamespace(
+                action=SimpleNamespace(value="provision"),
+                external_operation_id=metadata.operation_id,
+                tenant_id=metadata.tenant_id,
+                cell_id=metadata.subject_id,
+                fence_generation=metadata.fence_generation,
+                canonical_request_sha256=canonical_request_sha256(request),
+                progress=dict(progress),
+            )
+
+    plane = LiveLifecyclePlane(
+        repository=Repository(),  # type: ignore[arg-type]
+        registry=SimpleNamespace(),  # type: ignore[arg-type]
+        cell=SimpleNamespace(),  # type: ignore[arg-type]
+        helm=Helm(),  # type: ignore[arg-type]
+        runtime=SimpleNamespace(),  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=SimpleNamespace(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=config,
+        now=lambda: 1_900_000_030,
+    )
+    plane._operation_ids[plane._key(metadata)] = "internal-operation-alpha"
+    return plane
+
+
+@pytest.mark.asyncio
+async def test_first_provision_answers_no_retarget_without_a_recovery_receipt() -> None:
+    """A cell provisioned for the first time has never been retargeted.
+
+    `_provision` installs the release with `_fixed_helm_values` and only then
+    reaches `volume-owned`, where it asks whether a retarget is required. The
+    honest answer is "no". Demanding a `_runtime_retarget_recovery_v1` receipt
+    to reach that answer makes it unreachable, because the only writer of that
+    marker is the operator-driven retarget recovery command: a cell that has
+    never been retargeted cannot have one, so every first provision dies.
+    """
+
+    from exomem_provisioner.lifecycle import _fixed_helm_values
+
+    metadata = OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "operation-alpha", 7)
+    target = {
+        "releaseVersion": "0.68.3",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v4",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+        "compatibilityDigest": "e" * 64,
+    }
+    config = _retarget_config(target)
+    request = {
+        "provisionMode": "serve",
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+        "runtimeTarget": target,
+    }
+    # Exactly what `_provision` applied at `release-applied`, so the cell is
+    # already running the runtime this request asks for.
+    installed = _fixed_helm_values(metadata, request, config)
+    plane = _retarget_plane(metadata, request, config, installed, progress={})
+
+    assert await plane.provision_retarget_required(metadata, request, config) is False
+
+
+@pytest.mark.asyncio
+async def test_genuine_retarget_still_requires_the_operator_recovery_receipt() -> None:
+    """The guard must survive the fix that lets a first provision through.
+
+    When the cell is running a different image from the one the request now
+    asks for, a retarget really is required -- and that is exactly when an
+    operator-committed recovery receipt must be present. Absent one, this must
+    still refuse, or the reordering has deleted the guard rather than moved it.
+    """
+
+    from exomem_provisioner.lifecycle import _fixed_helm_values
+
+    metadata = OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "operation-alpha", 7)
+    target = {
+        "releaseVersion": "0.68.3",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v4",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+        "compatibilityDigest": "e" * 64,
+    }
+    config = _retarget_config(target)
+    request = {
+        "provisionMode": "serve",
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+        "runtimeTarget": target,
+    }
+    stale = _fixed_helm_values(metadata, request, config)
+    stale["image"] = "ghcr.io/artexis10/exomem@sha256:" + "9" * 64
+    plane = _retarget_plane(metadata, request, config, stale, progress={})
+
+    with pytest.raises(MetadataConflict) as raised:
+        await plane.provision_retarget_required(metadata, request, config)
+    assert raised.value.reason is ConflictReason.RETARGET_RECOVERY_RECEIPT_INVALID
+
+
+def _expiring_bundle_plane(
+    metadata: OpaqueProviderMetadata,
+    *,
+    minted_at: int,
+    now: int,
+    serving: bool = False,
+    runtime_admitted: bool = False,
+    routes: tuple[bool, bool] = (False, False),
+):
+    """A live plane whose cell already holds a bundle minted at `minted_at`.
+
+    The bundle comes from the production builder and the snapshot is a real
+    `KubernetesProviderSnapshot`, so neither can agree with the code under test
+    by construction. `init_complete` is False so `initialize` takes the branch
+    that reads the bundle back -- the branch the incident actually hit.
+    """
+
+    config = SimpleNamespace(
+        image="ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+        browser_origin="https://substratesystems.io",
+        control_hostname="control.example.invalid",
+        transfer_hostname="transfer.example.invalid",
+        protocol_version="1",
+        release_version="0.68.3",
+        migration_mode="state-root-v1",
+        runtime_target_for=lambda _request, *, v2: {
+            "releaseVersion": "0.68.3",
+            "protocolVersion": "1",
+        },
+    )
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+    request = {
+        "provisionMode": "serve",
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+        "_providerRecoveryEnvelopes": envelopes,
+    }
+    original = build_initial_hosted_authorization_bundle(
+        cell_id=metadata.subject_id,
+        logical_vault_id=metadata.tenant_id,
+        replica_id=metadata.resource_name + "-0",
+        software_version="0.68.3",
+        schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+        recovery_envelope=envelopes["authorizationSessionSecret"],
+        now=minted_at,
+    )
+    snapshot = KubernetesProviderSnapshot(
+        namespace=True,
+        release=True,
+        init_job_present=False,
+        init_complete=False,
+        init_failed=False,
+        serving=serving,
+        runtime_admitted=runtime_admitted,
+        routes=routes,
+    )
+    written: list[dict[str, object]] = []
+    applied: list[dict[str, object]] = []
+
+    class Cell:
+        files = original.files
+
+        async def read_authorization_session_bundle(self, _owner):
+            return self.files
+
+        async def write_authorization_session_bundle(self, _owner, files, **kwargs):
+            self.files = files
+            written.append({"files": files, **kwargs})
+
+    class Helm:
+        async def ensure_release(self, _owner, values):
+            applied.append(values)
+
+    class Registry:
+        async def inspect(self, _current, _owner):
+            return snapshot
+
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=Registry(),  # type: ignore[arg-type]
+        cell=Cell(),  # type: ignore[arg-type]
+        helm=Helm(),  # type: ignore[arg-type]
+        runtime=SimpleNamespace(),  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=SimpleNamespace(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=config,  # type: ignore[arg-type]
+        now=lambda: now,
+    )
+    key = plane._key(metadata)
+    plane._owned[key] = metadata
+    plane._helm_requests[key] = request
+    plane._snapshots[key] = snapshot
+    return plane, request, config, original, written, applied
+
+
+@pytest.mark.asyncio
+async def test_expired_authorization_bundle_is_reminted_before_the_cell_serves() -> None:
+    """Elapsed time must not strand a cell that has never served a request.
+
+    The bundle is minted at `install_release` with a one-hour attestation TTL.
+    Any pause before initialize -- a retry, an operator recovery, a slow CSI
+    attach -- can outlast it. Treating that as terminal makes elapsed time
+    indistinguishable from a forged attestation and leaves a cell that can
+    never finish provisioning, which is what happened on exomem-alpha-01:
+    minted 10:55:16Z, expired 11:55:16Z, retried 11:58Z.
+    """
+
+    metadata = _metadata()
+    minted_at = 1_900_000_000
+    plane, request, config, original, written, applied = _expiring_bundle_plane(
+        metadata,
+        minted_at=minted_at,
+        now=minted_at + 3_700,  # past the 3600s attestation TTL
+    )
+
+    await plane.initialize(metadata, request, config)  # type: ignore[arg-type]
+
+    assert written, "an expired bundle on a cell that never served must be re-minted"
+    assert written[-1]["files"] != original.files
+    # Replacing an existing bundle must be a compare-and-swap on what we read.
+    assert written[-1]["expected_revision"] == original.revision
+    assert applied and applied[0]["authorizationSessionRevision"] != original.revision
+
+
+@pytest.mark.asyncio
+async def test_expired_authorization_bundle_still_refuses_on_an_admitted_cell() -> None:
+    """Re-minting must never silently rotate the session of a live cell."""
+
+    metadata = _metadata()
+    minted_at = 1_900_000_000
+    plane, request, config, _original, written, _applied = _expiring_bundle_plane(
+        metadata,
+        minted_at=minted_at,
+        now=minted_at + 3_700,
+        runtime_admitted=True,
+        routes=(True, True),
+    )
+
+    with pytest.raises(MetadataConflict) as raised:
+        await plane.initialize(metadata, request, config)  # type: ignore[arg-type]
+    assert raised.value.reason is ConflictReason.AUTHORIZATION_SESSION_EXPIRED_ON_SERVING_CELL
+    assert not written, "an admitted cell's session must never be re-minted"
+
+
+@pytest.mark.asyncio
+async def test_expired_authorization_bundle_still_refuses_on_a_serving_pod() -> None:
+    """`serving` alone must block the rotation, without admission or routes.
+
+    Admission and routes are downstream of a running pod, so a guard that reads
+    only those two would rotate the keyring under a cell that is already
+    answering requests. Nothing in this file asserts that ordering, so the
+    guard must not depend on it.
+    """
+
+    metadata = _metadata()
+    minted_at = 1_900_000_000
+    plane, request, config, _original, written, _applied = _expiring_bundle_plane(
+        metadata,
+        minted_at=minted_at,
+        now=minted_at + 3_700,
+        serving=True,
+        runtime_admitted=False,
+        routes=(False, False),
+    )
+
+    with pytest.raises(MetadataConflict) as raised:
+        await plane.initialize(metadata, request, config)  # type: ignore[arg-type]
+    assert raised.value.reason is ConflictReason.AUTHORIZATION_SESSION_EXPIRED_ON_SERVING_CELL
+    assert not written, "a serving pod's session must never be re-minted"
+
+
+@pytest.mark.asyncio
+async def test_a_future_dated_authorization_bundle_still_fails_closed() -> None:
+    """Only elapsed time may be forgiven, not any other freshness anomaly.
+
+    A future-dated bundle never reaches the re-mint branch: the keyring's own
+    validity window is checked unconditionally, so it is refused by the first
+    call rather than by the freshness re-check. That is the stronger guarantee,
+    and this pins it -- if the keyring window ever became conditional on
+    `_require_fresh`, a not-yet-valid bundle would start looking like an
+    expired one, and the `expires_at` assertion in the re-mint branch is what
+    would then have to catch it.
+    """
+
+    metadata = _metadata()
+    minted_at = 1_900_000_000
+    plane, request, config, _original, written, _applied = _expiring_bundle_plane(
+        metadata,
+        minted_at=minted_at,
+        now=minted_at - 600,  # the bundle is not valid yet
+    )
+
+    with pytest.raises(MetadataConflict) as raised:
+        await plane.initialize(metadata, request, config)  # type: ignore[arg-type]
+    assert raised.value.reason is ConflictReason.AUTHORIZATION_KEYRING_IS_INVALID
+    assert not written, "a future-dated bundle must fail closed, not be re-minted"
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_authorization_bundle_is_reused_rather_than_reminted() -> None:
+    """The ordinary case must not start rotating bundles on every reconcile."""
+
+    metadata = _metadata()
+    minted_at = 1_900_000_000
+    plane, request, config, original, written, applied = _expiring_bundle_plane(
+        metadata,
+        minted_at=minted_at,
+        now=minted_at + 60,  # well inside the TTL
+    )
+
+    await plane.initialize(metadata, request, config)  # type: ignore[arg-type]
+
+    assert not written, "a fresh bundle must be reused, not re-minted"
+    assert applied and applied[0]["authorizationSessionRevision"] == original.revision

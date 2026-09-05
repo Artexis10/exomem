@@ -13,10 +13,12 @@ from pathlib import Path
 import pytest
 from benchmark_capabilities import (
     declares_absent_directory_fd,
+    declares_absent_held_filesystem,
     declares_absent_sandbox,
     declares_absent_surface_timers,
     declares_absent_trusted_git,
     has_bwrap_sandbox,
+    has_held_filesystem_backend,
     has_posix_directory_fd_traversal,
     has_posix_file_modes,
     has_posix_interval_timers,
@@ -373,6 +375,8 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
         reason = "os.defpath names no trusted system Git on this platform"
     elif not has_posix_directory_fd_traversal() and declares_absent_directory_fd(error):
         reason = "POSIX directory descriptors (openat) do not exist on this platform"
+    elif not has_held_filesystem_backend() and declares_absent_held_filesystem(error):
+        reason = "exomem ships no held-filesystem backend for this platform"
     else:
         return
     report.outcome = "skipped"
@@ -994,3 +998,148 @@ def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.fixture
 def source_schema(vault: Path) -> schema_module.SourceSchema:
     return schema_module.load_source_schema(vault)
+
+
+class ScopeWalkSentinel:
+    """Counts directory enumerations of a recall scope during one request.
+
+    The read-path contract ("The Read Path Never Walks The Corpus") is
+    structural, not a latency threshold: a stage either enumerated the scope or
+    it did not. Every walk on the read path bottoms out in `os.scandir` or
+    `os.listdir` on this interpreter — `Path.iterdir`, `Path.glob`/`rglob` and
+    `os.walk` all route through `os.scandir` — so counting those two names
+    catches a walk regardless of which spelling reintroduces it.
+
+    A descriptor-relative enumeration (`os.scandir(fd)`, which `vault.py` uses)
+    carries no path, so it is resolved through `/proc/self/fd` where that
+    exists and otherwise recorded as unresolved rather than silently dropped:
+    an enumeration the sentinel cannot attribute is its own state, not a pass.
+    """
+
+    def __init__(self, *scope_roots: Path, current_thread_only: bool = False) -> None:
+        self._roots = tuple(os.path.realpath(root) for root in scope_roots)
+        # A walk on a background worker is not a walk on the reader thread, and
+        # the contract is about the reader thread. The default counts every
+        # thread (what Lane 1 pinned); a caller that must exclude, say, the
+        # graph rebuild lane -- which a governed write legitimately starts, and
+        # which is owned by another change -- asks for its own thread only.
+        self._owner = threading.get_ident() if current_thread_only else None
+        self.enumerated: list[str] = []
+        self.unresolved: list[str] = []
+
+    @property
+    def count(self) -> int:
+        return len(self.enumerated) + len(self.unresolved)
+
+    def reset(self) -> None:
+        self.enumerated.clear()
+        self.unresolved.clear()
+
+    def report(self) -> str:
+        lines = [f"{len(self.enumerated)} scope enumerations"]
+        lines += sorted(set(self.enumerated))
+        if self.unresolved:
+            lines.append(f"{len(self.unresolved)} unattributable enumerations")
+            lines += sorted(set(self.unresolved))
+        return "\n".join(lines)
+
+    def _resolve(self, target: object) -> str | None:
+        if isinstance(target, int):
+            try:
+                return os.path.realpath(f"/proc/self/fd/{target}")
+            except OSError:
+                self.unresolved.append(f"fd:{target}")
+                return None
+        try:
+            return os.path.realpath(os.fspath(target))  # type: ignore[arg-type]
+        except (TypeError, ValueError, OSError):
+            self.unresolved.append(repr(target))
+            return None
+
+    def record(self, target: object) -> None:
+        if self._owner is not None and threading.get_ident() != self._owner:
+            return
+        path = self._resolve(target)
+        if path is None:
+            return
+        for root in self._roots:
+            if path == root or path.startswith(root + os.sep):
+                self.enumerated.append(path)
+                return
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        real_scandir = os.scandir
+        real_listdir = os.listdir
+
+        def counting_scandir(path=".", *args, **kwargs):
+            self.record(path)
+            return real_scandir(path, *args, **kwargs)
+
+        def counting_listdir(path=None, *args, **kwargs):
+            self.record("." if path is None else path)
+            return real_listdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "scandir", counting_scandir)
+        monkeypatch.setattr(os, "listdir", counting_listdir)
+
+
+@pytest.fixture
+def walk_sentinel(monkeypatch: pytest.MonkeyPatch):
+    """Install a `ScopeWalkSentinel` over the given scope roots."""
+
+    def _install(
+        *scope_roots: Path, current_thread_only: bool = False
+    ) -> ScopeWalkSentinel:
+        sentinel = ScopeWalkSentinel(
+            *scope_roots, current_thread_only=current_thread_only
+        )
+        sentinel.install(monkeypatch)
+        return sentinel
+
+    return _install
+
+
+@pytest.fixture
+def warm_managed_cell(monkeypatch: pytest.MonkeyPatch):
+    """Put a fixture vault in the state the live cell serves requests from.
+
+    The read-path contracts govern the MANAGED reader: an offline/CLI caller
+    keeps its exact source-walk fallback by design, so measuring either the
+    walk sentinel or timing attribution against an unmanaged, cold vault
+    measures the wrong path. This seeds the freshness registry, publishes the
+    lexical catalogue, builds the reference sidecar once, and admits the
+    request the way the server runtime does — the same recipe
+    `tests/test_projection_lag_tolerance.py` uses, plus the sidecar.
+    """
+
+    def _warm(vault: Path, *, prebuild_refs: bool = True) -> None:
+        from exomem import embeddings, file_watcher, lexstore, memory_refs, readiness
+
+        monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+        monkeypatch.setattr(embeddings, "ranking_enabled", lambda: True)
+        monkeypatch.setattr(readiness, "should_defer", lambda _component: False)
+        # Keep the real internal event consistent with the admitted request
+        # surface below, without inheriting or leaking another test's ready bit.
+        monkeypatch.setitem(readiness._events, "retrieval_catalog", threading.Event())
+
+        file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+        assert lexstore.get_store(vault).rebuild_atomic() is True
+        proof_generation = readiness.retrieval_proof_generation()
+        assert lexstore.runtime_retrieval_catalog_proof(vault, schedule_repair=False) is not None
+        assert readiness.admit_retrieval_proof(proof_generation) is True
+        # The reference sidecar is a maintained index too: `refs_for_paths`
+        # scans the corpus exactly once, on first use or a schema upgrade, and
+        # a live cell paid that long before any measured request. `prebuild_refs
+        # =False` leaves it cold on purpose, for the one test that pins what a
+        # managed reader OUGHT to do when an index it needs is not current.
+        if prebuild_refs:
+            memory_refs.ReferenceIndex(vault).rebuild_all()
+
+        monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+        monkeypatch.setattr(
+            readiness,
+            "retrieval_admission",
+            lambda _root=None: {"state": "ready", "admitted": True},
+        )
+
+    return _warm

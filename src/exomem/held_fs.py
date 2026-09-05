@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -246,6 +247,33 @@ def _capability_cache_key(root: Path) -> tuple[int, str, int, int] | None:
         os.path.normcase(os.fspath(root.absolute())),
         int(info.st_dev),
         int(info.st_ino),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformSupport:
+    """Whether this host has a held-filesystem backend, and why not when it has none."""
+
+    supported: bool
+    reason: str = ""
+
+
+def platform_support() -> PlatformSupport:
+    """Answer the host question without a root, so a caller can refuse early.
+
+    `probe` answers a question about one filesystem and can differ per vault.
+    This answers a question about the build: on a platform with no backend, no
+    vault will ever work, so the only honest response is to say so once rather
+    than let every reserved-path acquisition fail separately and describe
+    itself as an unavailable route.
+    """
+    backend = _backend()
+    if backend.platform_supported():
+        return PlatformSupport(True)
+    return PlatformSupport(
+        False,
+        f"exomem has no held-filesystem backend for {sys.platform!r}; "
+        "Linux and Windows are the platforms it can serve today",
     )
 
 

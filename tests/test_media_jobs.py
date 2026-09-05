@@ -1417,3 +1417,55 @@ def test_stale_compute_blocked_sidecar_wakes_once_but_converged_sidecar_does_not
         encoding="utf-8",
     )
     assert store.needs_worker() is False
+
+
+def test_needs_worker_reads_the_store_once_on_the_idle_path(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The idle path opened the store TWICE — more expensive than the busy one.
+
+    `needs_worker()` opens a connection, finds no pending/running/rescuable
+    job, and then called `blocked_compute_presentations_needing_convergence()`,
+    which opened a second one.  Every open takes the reserved-identity
+    boundary twice, so the cheapest possible answer ("nothing to do") cost the
+    most.  One connection answers both questions.
+    """
+    store = media_jobs.MediaJobStore(vault)
+    opened: list[bool] = []
+    original = media_jobs.MediaJobStore._connect
+
+    def counting_connect(self, **kwargs):
+        opened.append(True)
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(media_jobs.MediaJobStore, "_connect", counting_connect)
+
+    assert store.needs_worker() is False
+    assert len(opened) == 1, (
+        f"an idle needs_worker() opened the store {len(opened)} times; each open "
+        "takes the mutation boundary twice"
+    )
+
+
+def test_blocked_compute_presentations_still_reach_needs_worker(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Folding the second query in must not lose the stale-blocked rescue arm.
+
+    A compute-blocked job whose sidecar no longer matches its recorded error
+    is work: it needs a worker to converge the presentation.  That arm is the
+    reason the second connection existed, so it gets its own assertion.
+    """
+    store = media_jobs.MediaJobStore(vault)
+    job_id = store.enqueue(_job(vault, name="blocked-convergence.mp4"))
+    store.mark(job_id, media_jobs.BLOCKED, "ASRComputeRuntimeError: cuDNN failed to initialize")
+
+    monkeypatch.setattr(
+        media_jobs, "_blocked_presentation_is_current", lambda _content, _error: False
+    )
+    assert store.needs_worker() is True
+
+    monkeypatch.setattr(
+        media_jobs, "_blocked_presentation_is_current", lambda _content, _error: True
+    )
+    assert store.needs_worker() is False

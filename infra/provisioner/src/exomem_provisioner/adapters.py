@@ -24,6 +24,7 @@ from .authorization_membership import (
     MAX_ATTESTATION_TTL_SECONDS,
     MAX_BUNDLE_FILE_BYTES,
 )
+from .conflict_reason import ConflictReason
 from .credentials import validate_machine_credential
 from .lifecycle import (
     HealthObservation,
@@ -61,7 +62,10 @@ def _require_annotations(
 ) -> None:
     values = actual or {}
     if any(values.get(key) != value for key, value in metadata.kubernetes_annotations.items()):
-        raise MetadataConflict("Kubernetes object identity annotations differ")
+        raise MetadataConflict(
+            "Kubernetes object identity annotations differ",
+            reason=ConflictReason.KUBERNETES_OBJECT_IDENTITY_ANNOTATIONS_DIFFER,
+        )
 
 
 def _require_cell_identity(
@@ -77,7 +81,10 @@ def _require_cell_identity(
         "exomem.io/subject-digest",
     ):
         if values.get(key) != expected[key]:
-            raise MetadataConflict("Kubernetes cell identity annotations differ")
+            raise MetadataConflict(
+                "Kubernetes cell identity annotations differ",
+                reason=ConflictReason.KUBERNETES_CELL_IDENTITY_ANNOTATIONS_DIFFER,
+            )
 
 
 class KubernetesVolumeAdapter:
@@ -133,7 +140,7 @@ class KubernetesVolumeAdapter:
             raise
         pvc_annotations = dict(getattr(pvc.metadata, "annotations", None) or {})
         if getattr(pvc.metadata, "deletion_timestamp", None) is not None:
-            raise MetadataConflict("PVC is terminating")
+            raise MetadataConflict("PVC is terminating", reason=ConflictReason.PVC_TERMINATING)
         _require_annotations(pvc_annotations, metadata)
         pvc_envelope = str(pvc_annotations.get("exomem.io/recovery-envelope", ""))
         if self._identity_verifier is not None:
@@ -155,18 +162,22 @@ class KubernetesVolumeAdapter:
                 )
             except ProviderIdentityConflict as error:
                 raise MetadataConflict(
-                    "PVC provider recovery identity did not authenticate"
+                    "PVC provider recovery identity did not authenticate",
+                    reason=ConflictReason.PVC_RECOVERY_IDENTITY_UNAUTHENTICATED,
                 ) from error
         pv_name = getattr(pvc.spec, "volume_name", None)
         if not isinstance(pv_name, str) or not pv_name:
             return None
         pv = await asyncio.to_thread(self._core.read_persistent_volume, pv_name)
         if getattr(pv.metadata, "deletion_timestamp", None) is not None:
-            raise MetadataConflict("PV is terminating")
+            raise MetadataConflict("PV is terminating", reason=ConflictReason.PV_TERMINATING)
         csi = getattr(pv.spec, "csi", None)
         handle = getattr(csi, "volume_handle", None)
         if not isinstance(handle, str) or not handle:
-            raise MetadataConflict("bound PV has no CSI volumeHandle")
+            raise MetadataConflict(
+                "bound PV has no CSI volumeHandle",
+                reason=ConflictReason.BOUND_PV_MISSING_VOLUME_HANDLE,
+            )
         location = self._location(pv)
         annotations = dict(getattr(pv.metadata, "annotations", None) or {})
         identity_keys = set(metadata.kubernetes_annotations)
@@ -192,7 +203,8 @@ class KubernetesVolumeAdapter:
                 )
             except ProviderIdentityConflict as error:
                 raise MetadataConflict(
-                    "PV provider recovery identity did not authenticate"
+                    "PV provider recovery identity did not authenticate",
+                    reason=ConflictReason.PV_RECOVERY_IDENTITY_UNAUTHENTICATED,
                 ) from error
         return RecordedVolume(
             handle,
@@ -212,11 +224,14 @@ class KubernetesVolumeAdapter:
             return None
         pv = await asyncio.to_thread(self._core.read_persistent_volume, recorded.pv_name)
         if getattr(pv.metadata, "deletion_timestamp", None) is not None:
-            raise MetadataConflict("PV is terminating")
+            raise MetadataConflict("PV is terminating", reason=ConflictReason.PV_TERMINATING)
         annotations = dict(getattr(pv.metadata, "annotations", None) or {})
         _require_annotations(annotations, metadata)
         if not recorded.pv_recovery_envelope:
-            raise MetadataConflict("PV provider recovery identity is absent")
+            raise MetadataConflict(
+                "PV provider recovery identity is absent",
+                reason=ConflictReason.PV_RECOVERY_IDENTITY_ABSENT,
+            )
         if self._identity_verifier is not None:
             try:
                 self._identity_verifier.authenticate(
@@ -236,7 +251,8 @@ class KubernetesVolumeAdapter:
                 )
             except ProviderIdentityConflict as error:
                 raise MetadataConflict(
-                    "PV provider recovery identity did not authenticate"
+                    "PV provider recovery identity did not authenticate",
+                    reason=ConflictReason.PV_RECOVERY_IDENTITY_UNAUTHENTICATED,
                 ) from error
         return BoundVolumeRecoveryObservation(
             recorded=recorded,
@@ -282,7 +298,10 @@ class KubernetesVolumeAdapter:
                 }:
                     locations.update(getattr(expression, "values", ()) or ())
         if len(locations) != 1:
-            raise MetadataConflict("bound PV has no unique Hetzner location")
+            raise MetadataConflict(
+                "bound PV has no unique Hetzner location",
+                reason=ConflictReason.BOUND_PV_LOCATION_AMBIGUOUS,
+            )
         return locations.pop()
 
     async def create_static_binding(self, recorded: RecordedVolume) -> None:
@@ -467,7 +486,8 @@ class KubernetesCellAdapter:
                 )
             except ProviderIdentityConflict as error:
                 raise MetadataConflict(
-                    "PVC provider recovery identity did not authenticate"
+                    "PVC provider recovery identity did not authenticate",
+                    reason=ConflictReason.PVC_RECOVERY_IDENTITY_UNAUTHENTICATED,
                 ) from error
         volume_name = getattr(pvc.spec, "volume_name", None)
         return isinstance(volume_name, str) and bool(volume_name)
@@ -501,7 +521,10 @@ class KubernetesCellAdapter:
             or any(not self._CREDENTIAL_VERSION.fullmatch(version) for version in credentials)
             or not valid_credentials
         ):
-            raise MetadataConflict("cell credential bundle shape is invalid")
+            raise MetadataConflict(
+                "cell credential bundle shape is invalid",
+                reason=ConflictReason.CELL_CREDENTIAL_BUNDLE_SHAPE_IS_INVALID,
+            )
         bundle = json.dumps(
             {"schema_version": 1, "credentials": credentials},
             sort_keys=True,
@@ -570,29 +593,42 @@ class KubernetesCellAdapter:
                 )
             except ProviderIdentityConflict as error:
                 raise MetadataConflict(
-                    "credential Secret provider recovery identity did not authenticate"
+                    "credential Secret provider recovery identity did not authenticate",
+                    reason=ConflictReason.CREDENTIAL_SECRET_RECOVERY_IDENTITY_UNAUTHENTICATED,
                 ) from error
         encoded = dict(getattr(secret, "data", None) or {}).get("credentials.json")
         if not isinstance(encoded, str):
-            raise MetadataConflict("cell credential bundle is absent")
+            raise MetadataConflict(
+                "cell credential bundle is absent",
+                reason=ConflictReason.CELL_CREDENTIAL_BUNDLE_IS_ABSENT,
+            )
         try:
             decoded = base64.b64decode(encoded, validate=True)
             parsed = json.loads(decoded.decode("utf-8"))
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise MetadataConflict("cell credential bundle is invalid") from error
+            raise MetadataConflict(
+                "cell credential bundle is invalid",
+                reason=ConflictReason.CELL_CREDENTIAL_BUNDLE_IS_INVALID,
+            ) from error
         credentials = parsed.get("credentials") if isinstance(parsed, dict) else None
         if (
             not isinstance(parsed, dict)
             or parsed.get("schema_version") != 1
             or not isinstance(credentials, dict)
         ):
-            raise MetadataConflict("cell credential bundle is invalid")
+            raise MetadataConflict(
+                "cell credential bundle is invalid",
+                reason=ConflictReason.CELL_CREDENTIAL_BUNDLE_IS_INVALID,
+            )
         values = {str(key): str(value) for key, value in credentials.items()}
         try:
             if not all(validate_machine_credential(value) for value in values.values()):
                 raise ValueError
         except ValueError as error:
-            raise MetadataConflict("cell credential bundle is invalid") from error
+            raise MetadataConflict(
+                "cell credential bundle is invalid",
+                reason=ConflictReason.CELL_CREDENTIAL_BUNDLE_IS_INVALID,
+            ) from error
         return values, annotations
 
     async def write_authorization_session_bundle(
@@ -628,7 +664,10 @@ class KubernetesCellAdapter:
                 and re.fullmatch(r"[0-9a-f]{64}", expected_revision) is None
             )
         ):
-            raise MetadataConflict("authorization session bundle shape is invalid")
+            raise MetadataConflict(
+                "authorization session bundle shape is invalid",
+                reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_SHAPE_IS_INVALID,
+            )
         annotations = {
             **metadata.kubernetes_annotations,
             "exomem.io/recovery-envelope": recovery_envelope,
@@ -639,7 +678,10 @@ class KubernetesCellAdapter:
         try:
             string_data = {name: value.decode("utf-8") for name, value in sorted(files.items())}
         except UnicodeDecodeError as error:
-            raise MetadataConflict("authorization session bundle shape is invalid") from error
+            raise MetadataConflict(
+                "authorization session bundle shape is invalid",
+                reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_SHAPE_IS_INVALID,
+            ) from error
         body = {
             "apiVersion": "v1",
             "kind": "Secret",
@@ -665,7 +707,8 @@ class KubernetesCellAdapter:
                 )
             except Exception as error:
                 raise MetadataConflict(
-                    "authorization session bundle predecessor is absent"
+                    "authorization session bundle predecessor is absent",
+                    reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_PREDECESSOR_IS_ABSENT,
                 ) from error
             current_annotations = dict(
                 getattr(getattr(current, "metadata", None), "annotations", None) or {}
@@ -679,7 +722,8 @@ class KubernetesCellAdapter:
                 }
             except (TypeError, ValueError) as error:
                 raise MetadataConflict(
-                    "authorization session bundle predecessor differs"
+                    "authorization session bundle predecessor differs",
+                    reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_PREDECESSOR_DIFFERS,
                 ) from error
             current_revision = (
                 hashlib.sha256(
@@ -699,7 +743,10 @@ class KubernetesCellAdapter:
                 or not isinstance(resource_version, str)
                 or not resource_version
             ):
-                raise MetadataConflict("authorization session bundle predecessor differs")
+                raise MetadataConflict(
+                    "authorization session bundle predecessor differs",
+                    reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_PREDECESSOR_DIFFERS,
+                )
             body["metadata"]["resourceVersion"] = resource_version
         try:
             await asyncio.to_thread(
@@ -711,7 +758,8 @@ class KubernetesCellAdapter:
         except Exception as error:
             if _api_status(error) == 409:
                 raise MetadataConflict(
-                    "authorization session bundle changed concurrently"
+                    "authorization session bundle changed concurrently",
+                    reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_CHANGED_CONCURRENTLY,
                 ) from error
             if _api_status(error) != 404 or expected_revision is not None:
                 raise
@@ -729,7 +777,10 @@ class KubernetesCellAdapter:
         """Bind the next pod generation to an already-published Secret revision."""
 
         if re.fullmatch(r"[0-9a-f]{64}", revision) is None:
-            raise MetadataConflict("authorization session revision is invalid")
+            raise MetadataConflict(
+                "authorization session revision is invalid",
+                reason=ConflictReason.AUTHORIZATION_SESSION_REVISION_IS_INVALID,
+            )
         try:
             await asyncio.to_thread(
                 self._apps.patch_namespaced_stateful_set,
@@ -749,7 +800,8 @@ class KubernetesCellAdapter:
             )
         except Exception as error:
             raise MetadataConflict(
-                "authorization session pod generation could not be staged"
+                "authorization session pod generation could not be staged",
+                reason=ConflictReason.AUTHORIZATION_SESSION_POD_GENERATION_COULD_NOT_BE_STAGED,
             ) from error
 
     async def read_authorization_session_bundle(
@@ -787,26 +839,42 @@ class KubernetesCellAdapter:
                 )
             except ProviderIdentityConflict as error:
                 raise MetadataConflict(
-                    "authorization Secret provider recovery identity did not authenticate"
+                    "authorization Secret provider recovery identity did not authenticate",
+                    reason=ConflictReason.AUTHORIZATION_SECRET_RECOVERY_IDENTITY_UNAUTHENTICATED,
                 ) from error
         encoded = dict(getattr(secret, "data", None) or {})
         if set(encoded) != AUTHORIZATION_SESSION_FILES:
-            raise MetadataConflict("authorization session bundle shape is invalid")
+            raise MetadataConflict(
+                "authorization session bundle shape is invalid",
+                reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_SHAPE_IS_INVALID,
+            )
         try:
             files = {
                 name: base64.b64decode(value, validate=True) for name, value in encoded.items()
             }
         except (ValueError, TypeError) as error:
-            raise MetadataConflict("authorization session bundle shape is invalid") from error
+            raise MetadataConflict(
+                "authorization session bundle shape is invalid",
+                reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_SHAPE_IS_INVALID,
+            ) from error
         if any(not 1 <= len(value) <= MAX_BUNDLE_FILE_BYTES for value in files.values()):
-            raise MetadataConflict("authorization session bundle shape is invalid")
+            raise MetadataConflict(
+                "authorization session bundle shape is invalid",
+                reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_SHAPE_IS_INVALID,
+            )
         if any(base64.b64encode(files[name]).decode("ascii") != encoded[name] for name in files):
-            raise MetadataConflict("authorization session bundle shape is invalid")
+            raise MetadataConflict(
+                "authorization session bundle shape is invalid",
+                reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_SHAPE_IS_INVALID,
+            )
         return files
 
     async def scale(self, metadata: OpaqueProviderMetadata, replicas: int) -> None:
         if replicas not in {0, 1}:
-            raise MetadataConflict("hosted cell replicas must be zero or one")
+            raise MetadataConflict(
+                "hosted cell replicas must be zero or one",
+                reason=ConflictReason.HOSTED_CELL_REPLICAS_MUST_BE_ZERO_OR_ONE,
+            )
         await asyncio.to_thread(
             self._apps.patch_namespaced_stateful_set_scale,
             metadata.resource_name,
@@ -956,7 +1024,10 @@ class KubernetesVaultFingerprintAdapter:
             or annotations.get("exomem.io/vault-fingerprint-operation")
             != hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
         ):
-            raise MetadataConflict("vault fingerprint Job identity differs")
+            raise MetadataConflict(
+                "vault fingerprint Job identity differs",
+                reason=ConflictReason.VAULT_FINGERPRINT_JOB_IDENTITY_DIFFERS,
+            )
         containers: list[Any] = list(getattr(job.spec.template.spec, "containers", None) or ())
         if (
             len(containers) != 1
@@ -964,7 +1035,10 @@ class KubernetesVaultFingerprintAdapter:
             or list(getattr(containers[0], "args", None) or ())
             != ["exomem-provisioner-vault-fingerprint"]
         ):
-            raise MetadataConflict("vault fingerprint Job runtime differs")
+            raise MetadataConflict(
+                "vault fingerprint Job runtime differs",
+                reason=ConflictReason.VAULT_FINGERPRINT_JOB_RUNTIME_DIFFERS,
+            )
 
     async def _read(self, metadata: OpaqueProviderMetadata) -> Any | None:
         try:
@@ -993,7 +1067,10 @@ class KubernetesVaultFingerprintAdapter:
     async def _result(self, metadata: OpaqueProviderMetadata, job: Any) -> str | None:
         status = getattr(job, "status", None)
         if int(getattr(status, "failed", 0) or 0) > 0:
-            raise MetadataConflict("vault fingerprint Job failed")
+            raise MetadataConflict(
+                "vault fingerprint Job failed",
+                reason=ConflictReason.VAULT_FINGERPRINT_JOB_FAILED,
+            )
         if int(getattr(status, "succeeded", 0) or 0) != 1:
             return None
         pods = await asyncio.to_thread(
@@ -1003,7 +1080,10 @@ class KubernetesVaultFingerprintAdapter:
         )
         items = list(getattr(pods, "items", None) or ())
         if len(items) != 1:
-            raise MetadataConflict("vault fingerprint result is unavailable")
+            raise MetadataConflict(
+                "vault fingerprint result is unavailable",
+                reason=ConflictReason.VAULT_FINGERPRINT_RESULT_IS_UNAVAILABLE,
+            )
         statuses = list(getattr(items[0].status, "container_statuses", None) or ())
         terminated = (
             getattr(getattr(statuses[0], "state", None), "terminated", None)
@@ -1012,11 +1092,17 @@ class KubernetesVaultFingerprintAdapter:
         )
         message = getattr(terminated, "message", None)
         if getattr(terminated, "exit_code", None) != 0 or not isinstance(message, str):
-            raise MetadataConflict("vault fingerprint result is invalid")
+            raise MetadataConflict(
+                "vault fingerprint result is invalid",
+                reason=ConflictReason.VAULT_FINGERPRINT_RESULT_IS_INVALID,
+            )
         try:
             value = json.loads(message, object_pairs_hook=self._duplicates_rejected)
         except (TypeError, ValueError, json.JSONDecodeError) as error:
-            raise MetadataConflict("vault fingerprint result is invalid") from error
+            raise MetadataConflict(
+                "vault fingerprint result is invalid",
+                reason=ConflictReason.VAULT_FINGERPRINT_RESULT_IS_INVALID,
+            ) from error
         if (
             not isinstance(value, dict)
             or set(value) != {"artifact", "schemaVersion", "sha256"}
@@ -1025,7 +1111,10 @@ class KubernetesVaultFingerprintAdapter:
             or not isinstance(value.get("sha256"), str)
             or self._SHA256.fullmatch(value["sha256"]) is None
         ):
-            raise MetadataConflict("vault fingerprint result is invalid")
+            raise MetadataConflict(
+                "vault fingerprint result is invalid",
+                reason=ConflictReason.VAULT_FINGERPRINT_RESULT_IS_INVALID,
+            )
         return value["sha256"]
 
     async def fingerprint(
@@ -1067,7 +1156,10 @@ class KubernetesVaultFingerprintAdapter:
                     await self._delete(metadata)
                     await self._pause()
                     continue
-                raise MetadataConflict("another cell lifecycle Job owns the fixed slot")
+                raise MetadataConflict(
+                    "another cell lifecycle Job owns the fixed slot",
+                    reason=ConflictReason.ANOTHER_CELL_LIFECYCLE_JOB_OWNS_THE_FIXED_SLOT,
+                )
             self._require_job(
                 job,
                 metadata,
@@ -1080,7 +1172,10 @@ class KubernetesVaultFingerprintAdapter:
                 await self._delete(metadata)
                 return digest
             await self._pause()
-        raise MetadataConflict("vault fingerprint Job did not complete within its bound")
+        raise MetadataConflict(
+            "vault fingerprint Job did not complete within its bound",
+            reason=ConflictReason.VAULT_FINGERPRINT_JOB_DID_NOT_COMPLETE_WITHIN_ITS_BOUND,
+        )
 
 
 class KubernetesMaintenanceLeaseAdapter:
@@ -1272,13 +1367,22 @@ class PrivateCellApiAdapter:
             json=body,
         )
         if response.status_code != 200:
-            raise MetadataConflict("private cell lifecycle request failed")
+            raise MetadataConflict(
+                "private cell lifecycle request failed",
+                reason=ConflictReason.PRIVATE_CELL_LIFECYCLE_REQUEST_FAILED,
+            )
         envelope = response.json()
         if not isinstance(envelope, dict) or envelope.get("success") is not True:
-            raise MetadataConflict("private cell lifecycle response is invalid")
+            raise MetadataConflict(
+                "private cell lifecycle response is invalid",
+                reason=ConflictReason.PRIVATE_CELL_LIFECYCLE_RESPONSE_IS_INVALID,
+            )
         data = envelope.get("data")
         if not isinstance(data, dict):
-            raise MetadataConflict("private cell lifecycle response data is invalid")
+            raise MetadataConflict(
+                "private cell lifecycle response data is invalid",
+                reason=ConflictReason.PRIVATE_CELL_LIFECYCLE_RESPONSE_DATA_IS_INVALID,
+            )
         return data
 
     async def health(
@@ -1318,10 +1422,16 @@ class PrivateCellApiAdapter:
             json=None,
         )
         if contract_response.status_code != 200:
-            raise MetadataConflict("private cell contract request failed")
+            raise MetadataConflict(
+                "private cell contract request failed",
+                reason=ConflictReason.PRIVATE_CELL_CONTRACT_REQUEST_FAILED,
+            )
         contract = contract_response.json()
         if not isinstance(contract, dict):
-            raise MetadataConflict("private cell contract response is invalid")
+            raise MetadataConflict(
+                "private cell contract response is invalid",
+                reason=ConflictReason.PRIVATE_CELL_CONTRACT_RESPONSE_IS_INVALID,
+            )
         digest = contract.get("digest")
         contract_digest = (
             digest.get("value")
@@ -1335,7 +1445,10 @@ class PrivateCellApiAdapter:
         lifecycle_actions_enabled: bool | None = None
         if require_runtime_identity:
             if config.runtime_target is None:
-                raise MetadataConflict("selected runtime identity is unavailable")
+                raise MetadataConflict(
+                    "selected runtime identity is unavailable",
+                    reason=ConflictReason.SELECTED_RUNTIME_IDENTITY_IS_UNAVAILABLE,
+                )
             selected_profile = config.runtime_target["agentProfile"]
             agent_response = await self._request(
                 "GET",
@@ -1348,7 +1461,10 @@ class PrivateCellApiAdapter:
                 json=None,
             )
             if agent_response.status_code != 200:
-                raise MetadataConflict("private cell agent contract request failed")
+                raise MetadataConflict(
+                    "private cell agent contract request failed",
+                    reason=ConflictReason.PRIVATE_CELL_AGENT_CONTRACT_REQUEST_FAILED,
+                )
             agent_contract = agent_response.json()
             agent_metadata = (
                 agent_contract.get("agent_profile") if isinstance(agent_contract, dict) else None
@@ -1366,7 +1482,10 @@ class PrivateCellApiAdapter:
                 or not isinstance(agent_digest.get("value"), str)
                 or not isinstance(agent_contract.get("exomem_release"), str)
             ):
-                raise MetadataConflict("private cell agent contract is incomplete")
+                raise MetadataConflict(
+                    "private cell agent contract is incomplete",
+                    reason=ConflictReason.PRIVATE_CELL_AGENT_CONTRACT_IS_INCOMPLETE,
+                )
             runtime_contract = {
                 key: value for key, value in agent_contract.items() if key != "digest"
             }
@@ -1393,13 +1512,25 @@ class PrivateCellApiAdapter:
                     ).encode("utf-8")
                 ).hexdigest()
             except (TypeError, ValueError) as error:
-                raise MetadataConflict("private cell agent contract is invalid") from error
+                raise MetadataConflict(
+                    "private cell agent contract is invalid",
+                    reason=ConflictReason.PRIVATE_CELL_AGENT_CONTRACT_IS_INVALID,
+                ) from error
             if not hmac.compare_digest(agent_digest["value"], observed_runtime_digest):
-                raise MetadataConflict("private cell agent contract digest differs")
+                raise MetadataConflict(
+                    "private cell agent contract digest differs",
+                    reason=ConflictReason.PRIVATE_CELL_AGENT_CONTRACT_DIGEST_DIFFERS,
+                )
             if agent_contract["exomem_release"] != expected_release:
-                raise MetadataConflict("private cell agent contract release differs")
+                raise MetadataConflict(
+                    "private cell agent contract release differs",
+                    reason=ConflictReason.PRIVATE_CELL_AGENT_CONTRACT_RELEASE_DIFFERS,
+                )
             if agent_contract.get("protocol_version") != protocol_version:
-                raise MetadataConflict("private cell agent contract protocol differs")
+                raise MetadataConflict(
+                    "private cell agent contract protocol differs",
+                    reason=ConflictReason.PRIVATE_CELL_AGENT_CONTRACT_PROTOCOL_DIFFERS,
+                )
             agent_profile = agent_metadata["profile"]
             command_fingerprint = agent_metadata["active_capability_sha256"]
             if config.records_reader_version is not None:
@@ -1414,7 +1545,10 @@ class PrivateCellApiAdapter:
                     json=None,
                 )
                 if reader_response.status_code != 200:
-                    raise MetadataConflict("private cell reader status request failed")
+                    raise MetadataConflict(
+                        "private cell reader status request failed",
+                        reason=ConflictReason.PRIVATE_CELL_READER_STATUS_REQUEST_FAILED,
+                    )
                 reader_envelope = reader_response.json()
                 reader_status = (
                     reader_envelope.get("data") if isinstance(reader_envelope, dict) else None
@@ -1423,11 +1557,17 @@ class PrivateCellApiAdapter:
                     "records_reader_version",
                     "lifecycle_actions_enabled",
                 }:
-                    raise MetadataConflict("private cell reader status is incomplete")
+                    raise MetadataConflict(
+                        "private cell reader status is incomplete",
+                        reason=ConflictReason.PRIVATE_CELL_READER_STATUS_IS_INCOMPLETE,
+                    )
                 version = reader_status["records_reader_version"]
                 actions = reader_status["lifecycle_actions_enabled"]
                 if type(version) is not int or type(actions) is not bool:
-                    raise MetadataConflict("private cell reader status is invalid")
+                    raise MetadataConflict(
+                        "private cell reader status is invalid",
+                        reason=ConflictReason.PRIVATE_CELL_READER_STATUS_IS_INVALID,
+                    )
                 records_reader_version = version
                 lifecycle_actions_enabled = actions
         expected_policy_digest = hashlib.sha256(
@@ -1493,9 +1633,15 @@ class PrivateCellApiAdapter:
                 lifecycle_actions_enabled=lifecycle_actions_enabled,
             )
         except (KeyError, TypeError, ValueError) as error:
-            raise MetadataConflict("private cell health response is incomplete") from error
+            raise MetadataConflict(
+                "private cell health response is incomplete",
+                reason=ConflictReason.PRIVATE_CELL_HEALTH_RESPONSE_IS_INCOMPLETE,
+            ) from error
         if observation.contract_digest != (expected_contract_digest or config.contract_digest):
-            raise MetadataConflict("private cell contract digest differs")
+            raise MetadataConflict(
+                "private cell contract digest differs",
+                reason=ConflictReason.PRIVATE_CELL_CONTRACT_DIGEST_DIFFERS,
+            )
         return observation
 
     async def quiesce(
@@ -1537,7 +1683,10 @@ class PrivateCellApiAdapter:
             or not isinstance(ttl_seconds, int)
             or not 1 <= ttl_seconds <= MAX_ATTESTATION_TTL_SECONDS
         ):
-            raise MetadataConflict("authorization membership challenge is invalid")
+            raise MetadataConflict(
+                "authorization membership challenge is invalid",
+                reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_CHALLENGE_IS_INVALID,
+            )
         data = await self._call(
             "POST",
             metadata,
@@ -1551,7 +1700,10 @@ class PrivateCellApiAdapter:
             },
         )
         if set(data) != {"version", "attestation", "attestation_sha256"}:
-            raise MetadataConflict("authorization membership attestation is invalid")
+            raise MetadataConflict(
+                "authorization membership attestation is invalid",
+                reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_ATTESTATION_IS_INVALID,
+            )
         encoded = data.get("attestation")
         digest = data.get("attestation_sha256")
         if (
@@ -1560,7 +1712,10 @@ class PrivateCellApiAdapter:
             or not isinstance(digest, str)
             or self._SHA256.fullmatch(digest) is None
         ):
-            raise MetadataConflict("authorization membership attestation is invalid")
+            raise MetadataConflict(
+                "authorization membership attestation is invalid",
+                reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_ATTESTATION_IS_INVALID,
+            )
         try:
             encoded_bytes = encoded.encode("ascii")
             raw = base64.b64decode(
@@ -1569,13 +1724,19 @@ class PrivateCellApiAdapter:
                 validate=True,
             )
         except (UnicodeEncodeError, ValueError) as error:
-            raise MetadataConflict("authorization membership attestation is invalid") from error
+            raise MetadataConflict(
+                "authorization membership attestation is invalid",
+                reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_ATTESTATION_IS_INVALID,
+            ) from error
         if (
             not 1 <= len(raw) <= MAX_BUNDLE_FILE_BYTES
             or base64.urlsafe_b64encode(raw).rstrip(b"=") != encoded_bytes
             or not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), digest)
         ):
-            raise MetadataConflict("authorization membership attestation is invalid")
+            raise MetadataConflict(
+                "authorization membership attestation is invalid",
+                reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_ATTESTATION_IS_INVALID,
+            )
         return raw
 
     async def operator(
@@ -1588,10 +1749,16 @@ class PrivateCellApiAdapter:
         protocol_version: str,
     ) -> dict[str, Any]:
         if command not in {"credential", "probe"}:
-            raise MetadataConflict("unsupported private cell operator command")
+            raise MetadataConflict(
+                "unsupported private cell operator command",
+                reason=ConflictReason.UNSUPPORTED_PRIVATE_CELL_OPERATOR_COMMAND,
+            )
         operation_id = request.get("operation_id")
         if not isinstance(operation_id, str) or not operation_id:
-            raise MetadataConflict("private cell operator operation identity is absent")
+            raise MetadataConflict(
+                "private cell operator operation identity is absent",
+                reason=ConflictReason.PRIVATE_CELL_OPERATOR_OPERATION_IDENTITY_IS_ABSENT,
+            )
         return await self._call(
             "POST",
             metadata,
@@ -1702,7 +1869,10 @@ class HCloudVolumeAdapter:
         try:
             volume_id = int(handle)
         except ValueError as error:
-            raise MetadataConflict("HCloud CSI volumeHandle must be numeric") from error
+            raise MetadataConflict(
+                "HCloud CSI volumeHandle must be numeric",
+                reason=ConflictReason.HCLOUD_VOLUME_HANDLE_NOT_NUMERIC,
+            ) from error
         return await asyncio.to_thread(self._client.volumes.get_by_id, volume_id)
 
     async def label_volume(
@@ -1713,7 +1883,9 @@ class HCloudVolumeAdapter:
     ) -> None:
         volume = await self._get(handle)
         if volume is None:
-            raise MetadataConflict("HCloud volume is absent")
+            raise MetadataConflict(
+                "HCloud volume is absent", reason=ConflictReason.HCLOUD_VOLUME_ABSENT
+            )
         labels = dict(getattr(volume, "labels", {}) or {})
         identity_present = bool(self._IDENTITY_KEYS.intersection(labels)) or any(
             key.startswith(self._IDENTITY_PREFIXES) for key in labels
@@ -1742,7 +1914,8 @@ class HCloudVolumeAdapter:
                     raise ProviderIdentityConflict("provider recovery identity is immutable")
             except ProviderIdentityConflict as error:
                 raise MetadataConflict(
-                    "HCloud provider recovery identity did not authenticate"
+                    "HCloud provider recovery identity did not authenticate",
+                    reason=ConflictReason.HCLOUD_RECOVERY_IDENTITY_UNAUTHENTICATED,
                 ) from error
         if recovery_envelope is not None and self._identity_verifier is not None:
             try:
@@ -1757,7 +1930,8 @@ class HCloudVolumeAdapter:
                 )
             except ProviderIdentityConflict as error:
                 raise MetadataConflict(
-                    "HCloud provider recovery identity did not authenticate"
+                    "HCloud provider recovery identity did not authenticate",
+                    reason=ConflictReason.HCLOUD_RECOVERY_IDENTITY_UNAUTHENTICATED,
                 ) from error
         labels.update(metadata.hcloud_labels)
         if recovery_envelope is not None:
@@ -1790,7 +1964,8 @@ class HCloudVolumeAdapter:
                 )
             except ProviderIdentityConflict as error:
                 raise MetadataConflict(
-                    "HCloud provider recovery identity did not authenticate"
+                    "HCloud provider recovery identity did not authenticate",
+                    reason=ConflictReason.HCLOUD_RECOVERY_IDENTITY_UNAUTHENTICATED,
                 ) from error
         return True
 
@@ -1815,7 +1990,8 @@ class HCloudVolumeAdapter:
                 )
             except ProviderIdentityConflict as error:
                 raise MetadataConflict(
-                    "HCloud provider recovery identity did not authenticate"
+                    "HCloud provider recovery identity did not authenticate",
+                    reason=ConflictReason.HCLOUD_RECOVERY_IDENTITY_UNAUTHENTICATED,
                 ) from error
         return await self.verify_volume(handle, metadata, location)
 
@@ -1846,7 +2022,10 @@ class HCloudVolumeAdapter:
             labels = dict(getattr(volume, "labels", {}) or {})
             metadata = OpaqueProviderMetadata.from_hcloud_labels(labels)
             if metadata.tenant_id != tenant_id:
-                raise MetadataConflict("HCloud tenant selector returned another identity")
+                raise MetadataConflict(
+                    "HCloud tenant selector returned another identity",
+                    reason=ConflictReason.HCLOUD_TENANT_SELECTOR_MISMATCH,
+                )
             if self._identity_verifier is not None:
                 try:
                     self._identity_verifier.authenticate(
@@ -1862,7 +2041,8 @@ class HCloudVolumeAdapter:
                     )
                 except ProviderIdentityConflict as error:
                     raise MetadataConflict(
-                        "HCloud provider recovery identity did not authenticate"
+                        "HCloud provider recovery identity did not authenticate",
+                        reason=ConflictReason.HCLOUD_RECOVERY_IDENTITY_UNAUTHENTICATED,
                     ) from error
             observed = max(observed, metadata.fence_generation)
         return observed
@@ -1870,7 +2050,9 @@ class HCloudVolumeAdapter:
     async def quarantine_volume(self, handle: str) -> None:
         volume = await self._get(handle)
         if volume is None:
-            raise MetadataConflict("HCloud volume is absent")
+            raise MetadataConflict(
+                "HCloud volume is absent", reason=ConflictReason.HCLOUD_VOLUME_ABSENT
+            )
         labels = dict(getattr(volume, "labels", {}) or {})
         labels["exomem_quarantine"] = "true"
         await asyncio.to_thread(self._client.volumes.update, volume, labels=labels)
@@ -1944,7 +2126,10 @@ class HelmCliAdapter:
         self, metadata: OpaqueProviderMetadata, values: dict[str, Any]
     ) -> None:
         if self._has_secret_key(values):
-            raise MetadataConflict("Helm values must not carry plaintext credentials")
+            raise MetadataConflict(
+                "Helm values must not carry plaintext credentials",
+                reason=ConflictReason.HELM_VALUES_MUST_NOT_CARRY_PLAINTEXT_CREDENTIALS,
+            )
         environment = {"HELM_DRIVER": "configmap"}
         await self._require_version(environment)
         temporary: Path | None = None
@@ -1989,7 +2174,10 @@ class HelmCliAdapter:
                 environment,
             )
             if result.returncode != 0:
-                raise MetadataConflict("pinned Helm reconciliation failed")
+                raise MetadataConflict(
+                    "pinned Helm reconciliation failed",
+                    reason=ConflictReason.PINNED_HELM_RECONCILIATION_FAILED,
+                )
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
@@ -2000,7 +2188,10 @@ class HelmCliAdapter:
             environment,
         )
         if version.returncode != 0 or version.stdout.strip() != f"v{self._expected_version}":
-            raise MetadataConflict("installed Helm CLI does not match the pinned version")
+            raise MetadataConflict(
+                "installed Helm CLI does not match the pinned version",
+                reason=ConflictReason.INSTALLED_HELM_CLI_DOES_NOT_MATCH_THE_PINNED_VERSION,
+            )
 
     async def _current_values(
         self,
@@ -2021,13 +2212,22 @@ class HelmCliAdapter:
             environment,
         )
         if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 262_144:
-            raise MetadataConflict("current Helm values are unavailable")
+            raise MetadataConflict(
+                "current Helm values are unavailable",
+                reason=ConflictReason.CURRENT_HELM_VALUES_ARE_UNAVAILABLE,
+            )
         try:
             value = json.loads(result.stdout)
         except (TypeError, json.JSONDecodeError) as error:
-            raise MetadataConflict("current Helm values are invalid") from error
+            raise MetadataConflict(
+                "current Helm values are invalid",
+                reason=ConflictReason.CURRENT_HELM_VALUES_ARE_INVALID,
+            ) from error
         if not isinstance(value, dict) or self._has_secret_key(value):
-            raise MetadataConflict("current Helm values are invalid")
+            raise MetadataConflict(
+                "current Helm values are invalid",
+                reason=ConflictReason.CURRENT_HELM_VALUES_ARE_INVALID,
+            )
         return value
 
     async def current_release_values(self, metadata: OpaqueProviderMetadata) -> dict[str, Any]:
@@ -2057,13 +2257,22 @@ class HelmCliAdapter:
             environment,
         )
         if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 262_144:
-            raise MetadataConflict("historical Helm values are unavailable")
+            raise MetadataConflict(
+                "historical Helm values are unavailable",
+                reason=ConflictReason.HISTORICAL_HELM_VALUES_ARE_UNAVAILABLE,
+            )
         try:
             value = json.loads(result.stdout)
         except (TypeError, json.JSONDecodeError) as error:
-            raise MetadataConflict("historical Helm values are invalid") from error
+            raise MetadataConflict(
+                "historical Helm values are invalid",
+                reason=ConflictReason.HISTORICAL_HELM_VALUES_ARE_INVALID,
+            ) from error
         if not isinstance(value, dict) or self._has_secret_key(value):
-            raise MetadataConflict("historical Helm values are invalid")
+            raise MetadataConflict(
+                "historical Helm values are invalid",
+                reason=ConflictReason.HISTORICAL_HELM_VALUES_ARE_INVALID,
+            )
         return value
 
     async def _release_history(
@@ -2086,23 +2295,41 @@ class HelmCliAdapter:
             environment,
         )
         if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 262_144:
-            raise MetadataConflict("Helm release history is unavailable")
+            raise MetadataConflict(
+                "Helm release history is unavailable",
+                reason=ConflictReason.HELM_RELEASE_HISTORY_IS_UNAVAILABLE,
+            )
         try:
             history = json.loads(result.stdout)
         except (TypeError, json.JSONDecodeError) as error:
-            raise MetadataConflict("Helm release history is invalid") from error
+            raise MetadataConflict(
+                "Helm release history is invalid",
+                reason=ConflictReason.HELM_RELEASE_HISTORY_IS_INVALID,
+            ) from error
         if not isinstance(history, list) or not 1 <= len(history) <= 20:
-            raise MetadataConflict("Helm release history is invalid")
+            raise MetadataConflict(
+                "Helm release history is invalid",
+                reason=ConflictReason.HELM_RELEASE_HISTORY_IS_INVALID,
+            )
         revisions: list[int] = []
         for item in history:
             if not isinstance(item, dict):
-                raise MetadataConflict("Helm release history is invalid")
+                raise MetadataConflict(
+                    "Helm release history is invalid",
+                    reason=ConflictReason.HELM_RELEASE_HISTORY_IS_INVALID,
+                )
             revision = item.get("revision")
             if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
-                raise MetadataConflict("Helm release history is invalid")
+                raise MetadataConflict(
+                    "Helm release history is invalid",
+                    reason=ConflictReason.HELM_RELEASE_HISTORY_IS_INVALID,
+                )
             revisions.append(revision)
         if len(revisions) != len(set(revisions)):
-            raise MetadataConflict("Helm release history is invalid")
+            raise MetadataConflict(
+                "Helm release history is invalid",
+                reason=ConflictReason.HELM_RELEASE_HISTORY_IS_INVALID,
+            )
         return tuple(history)
 
     async def _deployed_revision(
@@ -2126,7 +2353,10 @@ class HelmCliAdapter:
             or not isinstance(revisions[0], int)
             or revisions[0] < 1
         ):
-            raise MetadataConflict("Helm deployed revision is ambiguous")
+            raise MetadataConflict(
+                "Helm deployed revision is ambiguous",
+                reason=ConflictReason.HELM_DEPLOYED_REVISION_IS_AMBIGUOUS,
+            )
         return revisions[0]
 
     @staticmethod
@@ -2145,7 +2375,10 @@ class HelmCliAdapter:
             or not isinstance(prior, int)
             or prior < 1
         ):
-            raise MetadataConflict("Helm runtime upgrade marker is invalid")
+            raise MetadataConflict(
+                "Helm runtime upgrade marker is invalid",
+                reason=ConflictReason.HELM_RUNTIME_UPGRADE_MARKER_IS_INVALID,
+            )
         return prior
 
     async def _rollback_already_committed(
@@ -2166,7 +2399,10 @@ class HelmCliAdapter:
         if not prior_revisions:
             return False
         if len(prior_revisions) != 1:
-            raise MetadataConflict("Helm runtime rollback authority is ambiguous")
+            raise MetadataConflict(
+                "Helm runtime rollback authority is ambiguous",
+                reason=ConflictReason.HELM_RUNTIME_ROLLBACK_AUTHORITY_IS_AMBIGUOUS,
+            )
         prior_values = await self._revision_values(
             metadata, environment, next(iter(prior_revisions))
         )
@@ -2196,7 +2432,10 @@ class HelmCliAdapter:
         operation_id: str,
     ) -> None:
         if "runtimeUpgrade" in values:
-            raise MetadataConflict("runtime upgrade marker is provisioner-owned")
+            raise MetadataConflict(
+                "runtime upgrade marker is provisioner-owned",
+                reason=ConflictReason.RUNTIME_UPGRADE_MARKER_IS_PROVISIONER_OWNED,
+            )
         current, prior_revision = await self._transition_context(
             metadata, operation_id=operation_id
         )
@@ -2232,7 +2471,10 @@ class HelmCliAdapter:
             ):
                 return
             if require_marker:
-                raise MetadataConflict("Helm runtime rollback authority is absent")
+                raise MetadataConflict(
+                    "Helm runtime rollback authority is absent",
+                    reason=ConflictReason.HELM_RUNTIME_ROLLBACK_AUTHORITY_IS_ABSENT,
+                )
             return
         result = await self._runner(
             (
@@ -2250,7 +2492,10 @@ class HelmCliAdapter:
             environment,
         )
         if result.returncode != 0:
-            raise MetadataConflict("Helm runtime rollback failed")
+            raise MetadataConflict(
+                "Helm runtime rollback failed",
+                reason=ConflictReason.HELM_RUNTIME_ROLLBACK_FAILED,
+            )
 
 
 Probe = Callable[[str, str, dict[str, str]], Awaitable[int]]

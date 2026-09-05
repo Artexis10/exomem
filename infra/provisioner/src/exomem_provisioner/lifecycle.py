@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 
+from .conflict_reason import ConflictReason, coerce_conflict_reason
 from .driver import (
     DriverFinal,
     DriverPending,
@@ -41,7 +42,33 @@ from .wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
 
 
 class MetadataConflict(RuntimeError):
-    """A provider object is bound to a different immutable identity."""
+    """A provider object is bound to a different immutable identity.
+
+    The message is for a reader of a traceback. `reason` is the machine-readable
+    half: one member of the closed `ConflictReason` set, which is what survives
+    into the terminal failure an operator actually sees.
+    """
+
+    def __init__(
+        self,
+        *args: object,
+        reason: ConflictReason = ConflictReason.UNCLASSIFIED,
+    ) -> None:
+        super().__init__(*args)
+        self.reason = coerce_conflict_reason(reason)
+
+
+def _conflict_reason(error: BaseException) -> ConflictReason:
+    """Resolve one closed-set label for a conflict crossing the driver boundary.
+
+    Re-validated here rather than trusted: a `reason` attribute is only honoured
+    when it is still a member of the vocabulary, so nothing a caller or a provider
+    influenced can reach the terminal failure.
+    """
+
+    if isinstance(error, ProviderIdentityConflict):
+        return ConflictReason.PROVIDER_RECOVERY_ENVELOPE_UNAUTHENTICATED
+    return coerce_conflict_reason(getattr(error, "reason", None))
 
 
 def _digest(value: str, *, length: int = 24) -> str:
@@ -54,7 +81,10 @@ _HCLOUD_IDENTITY_CHUNK = re.compile(r"^[a-z2-7]{1,52}$")
 
 def _validate_provider_id(value: str) -> str:
     if not _OPAQUE_PROVIDER_ID.fullmatch(value):
-        raise MetadataConflict("provider identity is not a bounded opaque ID")
+        raise MetadataConflict(
+            "provider identity is not a bounded opaque ID",
+            reason=ConflictReason.PROVIDER_IDENTITY_NOT_OPAQUE,
+        )
     return value
 
 
@@ -67,7 +97,10 @@ def _hcloud_identity_labels(prefix: str, value: str) -> dict[str, str]:
     )
     chunks = [encoded[offset : offset + 52] for offset in range(0, len(encoded), 52)]
     if not 1 <= len(chunks) <= 8:
-        raise MetadataConflict("provider identity exceeds HCloud label capacity")
+        raise MetadataConflict(
+            "provider identity exceeds HCloud label capacity",
+            reason=ConflictReason.PROVIDER_IDENTITY_EXCEEDS_LABEL_CAPACITY,
+        )
     return {
         f"{prefix}_n": str(len(chunks)),
         **{f"{prefix}_{index}": chunk for index, chunk in enumerate(chunks)},
@@ -77,23 +110,35 @@ def _hcloud_identity_labels(prefix: str, value: str) -> dict[str, str]:
 def decode_hcloud_identity(labels: dict[str, str], prefix: str) -> str:
     count_value = labels.get(f"{prefix}_n", "")
     if not count_value.isdigit() or not 1 <= int(count_value) <= 8:
-        raise MetadataConflict("HCloud provider identity chunk count is invalid")
+        raise MetadataConflict(
+            "HCloud provider identity chunk count is invalid",
+            reason=ConflictReason.HCLOUD_IDENTITY_CHUNK_COUNT_INVALID,
+        )
     count = int(count_value)
     expected_keys = {f"{prefix}_{index}" for index in range(count)}
     actual_keys = {key for key in labels if key.startswith(prefix + "_") and key != f"{prefix}_n"}
     if actual_keys != expected_keys:
-        raise MetadataConflict("HCloud provider identity chunks are incomplete")
+        raise MetadataConflict(
+            "HCloud provider identity chunks are incomplete",
+            reason=ConflictReason.HCLOUD_IDENTITY_CHUNKS_INCOMPLETE,
+        )
     chunks = [
         labels[key] for key in sorted(expected_keys, key=lambda key: int(key.rsplit("_", 1)[1]))
     ]
     if any(not _HCLOUD_IDENTITY_CHUNK.fullmatch(chunk) for chunk in chunks):
-        raise MetadataConflict("HCloud provider identity chunk is invalid")
+        raise MetadataConflict(
+            "HCloud provider identity chunk is invalid",
+            reason=ConflictReason.HCLOUD_IDENTITY_CHUNK_INVALID,
+        )
     encoded = "".join(chunks).upper()
     padded = encoded + "=" * (-len(encoded) % 8)
     try:
         decoded = base64.b32decode(padded, casefold=False).decode("ascii")
     except (ValueError, UnicodeDecodeError) as error:
-        raise MetadataConflict("HCloud provider identity cannot be decoded") from error
+        raise MetadataConflict(
+            "HCloud provider identity cannot be decoded",
+            reason=ConflictReason.HCLOUD_IDENTITY_UNDECODABLE,
+        ) from error
     return _validate_provider_id(decoded)
 
 
@@ -109,7 +154,10 @@ class OpaqueProviderMetadata:
         _validate_provider_id(self.subject_id)
         _validate_provider_id(self.operation_id)
         if not 1 <= self.fence_generation <= 9_007_199_254_740_991:
-            raise MetadataConflict("provider fence is outside the exact integer range")
+            raise MetadataConflict(
+                "provider fence is outside the exact integer range",
+                reason=ConflictReason.PROVIDER_FENCE_OUT_OF_RANGE,
+            )
 
     @property
     def resource_name(self) -> str:
@@ -143,7 +191,10 @@ class OpaqueProviderMetadata:
     def from_hcloud_labels(cls, labels: dict[str, str]) -> OpaqueProviderMetadata:
         fence_value = labels.get("exomem_fence", "")
         if not fence_value.isdigit():
-            raise MetadataConflict("HCloud provider fence label is invalid")
+            raise MetadataConflict(
+                "HCloud provider fence label is invalid",
+                reason=ConflictReason.HCLOUD_FENCE_LABEL_INVALID,
+            )
         metadata = cls(
             tenant_id=decode_hcloud_identity(labels, "exomem_tenant_id"),
             subject_id=decode_hcloud_identity(labels, "exomem_cell_id"),
@@ -151,14 +202,20 @@ class OpaqueProviderMetadata:
             fence_generation=int(fence_value),
         )
         if any(labels.get(key) != value for key, value in metadata.hcloud_labels.items()):
-            raise MetadataConflict("HCloud provider identity digest or chunks differ")
+            raise MetadataConflict(
+                "HCloud provider identity digest or chunks differ",
+                reason=ConflictReason.HCLOUD_IDENTITY_DIGEST_DIFFERS,
+            )
         return metadata
 
     @classmethod
     def from_kubernetes_annotations(cls, annotations: dict[str, str]) -> OpaqueProviderMetadata:
         fence_value = annotations.get("exomem.io/fence", "")
         if not fence_value.isdigit():
-            raise MetadataConflict("Kubernetes provider fence annotation is invalid")
+            raise MetadataConflict(
+                "Kubernetes provider fence annotation is invalid",
+                reason=ConflictReason.KUBERNETES_FENCE_ANNOTATION_INVALID,
+            )
         metadata = cls(
             tenant_id=annotations.get("exomem.io/tenant-id", ""),
             subject_id=annotations.get("exomem.io/cell-id", ""),
@@ -168,12 +225,18 @@ class OpaqueProviderMetadata:
         if any(
             annotations.get(key) != value for key, value in metadata.kubernetes_annotations.items()
         ):
-            raise MetadataConflict("Kubernetes provider identity digest differs")
+            raise MetadataConflict(
+                "Kubernetes provider identity digest differs",
+                reason=ConflictReason.KUBERNETES_IDENTITY_DIGEST_DIFFERS,
+            )
         return metadata
 
     def require_same(self, other: OpaqueProviderMetadata) -> None:
         if self != other:
-            raise MetadataConflict("provider identity metadata is immutable")
+            raise MetadataConflict(
+                "provider identity metadata is immutable",
+                reason=ConflictReason.PROVIDER_IDENTITY_IMMUTABLE,
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -504,7 +567,10 @@ class VolumeLifecycleWorker:
     ) -> RecordedVolume:
         recorded = await self._kubernetes.discover_bound_volume(metadata)
         if recorded is None:
-            raise MetadataConflict("bound CSI volume is not yet discoverable")
+            raise MetadataConflict(
+                "bound CSI volume is not yet discoverable",
+                reason=ConflictReason.BOUND_VOLUME_NOT_DISCOVERABLE,
+            )
         recorded.metadata.require_same(metadata)
         hcloud_envelope = recorded.hcloud_recovery_envelope
         pv_envelope = recorded.pv_recovery_envelope
@@ -538,7 +604,10 @@ class VolumeLifecycleWorker:
         if not await self._hcloud.verify_volume(
             recorded.volume_handle, metadata, recorded.location
         ):
-            raise MetadataConflict("HCloud volume identity or location differs")
+            raise MetadataConflict(
+                "HCloud volume identity or location differs",
+                reason=ConflictReason.HCLOUD_VOLUME_IDENTITY_DIFFERS,
+            )
         return replace(
             recorded,
             hcloud_recovery_envelope=hcloud_envelope,
@@ -555,13 +624,22 @@ class VolumeLifecycleWorker:
     ) -> None:
         recorded.metadata.require_same(metadata)
         if recorded.location != location:
-            raise MetadataConflict("recorded volume location differs from the recovery node")
+            raise MetadataConflict(
+                "recorded volume location differs from the recovery node",
+                reason=ConflictReason.RECORDED_VOLUME_LOCATION_DIFFERS,
+            )
         if not await self._hcloud.verify_volume(recorded.volume_handle, metadata, location):
-            raise MetadataConflict("provider volume identity differs from the durable record")
+            raise MetadataConflict(
+                "provider volume identity differs from the durable record",
+                reason=ConflictReason.PROVIDER_VOLUME_IDENTITY_DIFFERS,
+            )
         await self._kubernetes.create_static_binding(recorded)
         rebound = await self._kubernetes.discover_bound_volume(metadata)
         if rebound != recorded:
-            raise MetadataConflict("static PV/PVC did not bind the original volume handle")
+            raise MetadataConflict(
+                "static PV/PVC did not bind the original volume handle",
+                reason=ConflictReason.STATIC_BINDING_HANDLE_DIFFERS,
+            )
 
     async def quarantine_orphans(
         self,
@@ -578,7 +656,10 @@ class VolumeLifecycleWorker:
     async def destroy_retained(self, recorded: RecordedVolume) -> VolumeAbsenceProof:
         await self._kubernetes.delete_claim(recorded)
         if not await self._await_absence(lambda: self._kubernetes.claim_absent(recorded)):
-            raise MetadataConflict("retained PVC deletion did not converge")
+            raise MetadataConflict(
+                "retained PVC deletion did not converge",
+                reason=ConflictReason.RETAINED_CLAIM_DELETION_UNCONVERGED,
+            )
         await self._kubernetes.delete_pv(recorded.pv_name)
         pv_absent = await self._await_absence(lambda: self._kubernetes.pv_absent(recorded.pv_name))
         await self._hcloud.delete_volume(recorded.volume_handle)
@@ -590,7 +671,10 @@ class VolumeLifecycleWorker:
             hcloud_volume_absent=hcloud_absent,
         )
         if not (proof.kubernetes_pv_absent and proof.hcloud_volume_absent):
-            raise MetadataConflict("retained storage absence is not independently proven")
+            raise MetadataConflict(
+                "retained storage absence is not independently proven",
+                reason=ConflictReason.RETAINED_STORAGE_ABSENCE_UNPROVEN,
+            )
         return proof
 
 
@@ -639,7 +723,9 @@ class VolumeRegistrationDriver:
             )
             reference = recorded.recoverable_reference()
         except (MetadataConflict, ProviderIdentityConflict) as error:
-            raise DriverTerminal("PROVISIONER_PROVIDER_METADATA_CONFLICT") from error
+            raise DriverTerminal(
+                "PROVISIONER_PROVIDER_METADATA_CONFLICT", reason=_conflict_reason(error)
+            ) from error
         return DriverPending(
             "volume-owned",
             1,
@@ -1501,7 +1587,9 @@ class HighFidelityProviderPlane:
     ) -> None:
         volume = self._volumes.get(handle)
         if volume is None:
-            raise MetadataConflict("HCloud volume is absent")
+            raise MetadataConflict(
+                "HCloud volume is absent", reason=ConflictReason.HCLOUD_VOLUME_ABSENT
+            )
         if volume.metadata is not None:
             volume.metadata.require_same(metadata)
         volume.metadata = metadata
@@ -1701,7 +1789,8 @@ def _require_complete_product_policy(request: dict[str, Any]) -> None:
     if not isinstance(policy, dict) or dict(policy) != _SHIPPED_WORKER_POLICY:
         raise MetadataConflict(
             "worker policy must request the complete product surface "
-            f"({_SHIPPED_WORKER_POLICY}); a cell without semantic recall is not provisioned"
+            f"({_SHIPPED_WORKER_POLICY}); a cell without semantic recall is not provisioned",
+            reason=ConflictReason.WORKER_POLICY_INCOMPLETE,
         )
 
 
@@ -1888,7 +1977,9 @@ class CellLifecycleDriver:
                 return await self._destroy(context)
             raise DriverTerminal("PROVISIONER_ACTION_NOT_IMPLEMENTED")
         except MetadataConflict as error:
-            raise DriverTerminal("PROVISIONER_PROVIDER_METADATA_CONFLICT") from error
+            raise DriverTerminal(
+                "PROVISIONER_PROVIDER_METADATA_CONFLICT", reason=_conflict_reason(error)
+            ) from error
 
     @staticmethod
     def _rollforward_fingerprint(checkpoint: str) -> str | None:

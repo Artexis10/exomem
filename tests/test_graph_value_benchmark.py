@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import dataclasses
 import importlib.util
 import json
 import sys
@@ -22,8 +24,18 @@ def perfect_fixture(tmp_path_factory: pytest.TempPathFactory):
     manifest = bench.load_manifest()
     corpus = bench.render_exomem(manifest, tmp_path_factory.mktemp("graph-value") / "exomem")
     before = bench.corpus_hash(corpus.root)
-    run = bench.run_exomem_fixture(manifest, corpus, revision="fixture-revision")
+    run = bench.run_exomem_fixture(
+        manifest, corpus, revision="fixture-revision", include_relation_lifecycle=True
+    )
     return manifest, corpus, before, run
+
+
+@pytest.fixture(scope="module")
+def lifecycle_observation(tmp_path_factory: pytest.TempPathFactory):
+    return bench.collect_relation_lifecycle_observation(
+        bench.load_manifest(),
+        tmp_path_factory.mktemp("relation-lifecycle-observation"),
+    )
 
 
 def _case(
@@ -87,9 +99,761 @@ def test_exomem_fixture_passes_every_dimension_without_mutating_markdown(
     assert run.mutation_safe is True
     assert before == bench.corpus_hash(corpus.root)
     assert run.renderer_parity == corpus.parity
+    assert all(run.relation_lifecycle["checks"].values())
     assert {case for metric in scores.values() for case in metric.case_ids} == {
         str(task["id"]) for task in manifest["tasks"]
     }
+
+
+def test_relation_lifecycle_fixture_uses_public_surfaces_and_keeps_resolution_non_authoritative(
+    tmp_path: Path,
+) -> None:
+    """The synthetic relation lifecycle is a caller-decision gate, not a rank gate."""
+    manifest = bench.load_manifest()
+
+    result = bench.run_relation_lifecycle_fixture(manifest, tmp_path / "relation-lifecycle")
+
+    expected_cases = {
+        "policy-applicability-extension",
+        "core-part-of-reuse",
+        "alias-reuse-without-duplicate",
+        "honest-generic-relation",
+        "topical-proximity-abstains",
+        "extension-parent-rollup",
+        "survivor-directed-replacement",
+        "vault-registry-isolation",
+    }
+    assert set(result["checks"]) == expected_cases
+    assert all(result["checks"].values()), json.dumps(result, sort_keys=True)
+    assert result["evidence"]["resolution_only"]["markdown_unchanged"] is True
+    assert result["evidence"]["resolution_only"]["registry_unchanged"] is True
+    assert result["evidence"]["topical-proximity-abstains"]["selected_relation"] is None
+    assert result["evidence"]["topical-proximity-abstains"]["authored_relation"] is None
+    assert set(result["evidence"]["public_case_checks"]) == expected_cases
+    assert all(
+        all(case_checks.values())
+        for case_checks in result["evidence"]["public_case_checks"].values()
+    )
+
+
+def test_relation_lifecycle_records_exact_public_graph_filter_and_explain_calls(
+    tmp_path: Path,
+) -> None:
+    result = bench.run_relation_lifecycle_fixture(
+        bench.load_manifest(), tmp_path / "relation-lifecycle-trace"
+    )
+    calls = result["evidence"]["public_calls"]
+    assert any(
+        item["surface"] == "connect_memory"
+        and item["vault"] == "primary"
+        and item["cases"] == ["policy-applicability-extension", "extension-parent-rollup"]
+        and item["arguments"]
+        == {
+            "operation": "graph-context",
+            "path": "Knowledge Base/Notes/Insights/policy.md",
+            "depth": 1,
+        }
+        and bool(item["outcome"]["edges"])
+        for item in calls
+    )
+    assert any(
+        item["surface"] == "ask_memory"
+        and item["vault"] == "primary"
+        and item["cases"] == ["policy-applicability-extension"]
+        and item["arguments"]
+        == {
+            "query": "",
+            "relations": ["applies_to"],
+            "mode": "keyword",
+            "graph": False,
+            "explain": True,
+            "scope": "kb-only",
+        }
+        and bool(item["outcome"]["hits"])
+        for item in calls
+    )
+
+
+@pytest.mark.parametrize("surface", ["graph", "filter"])
+def test_lifecycle_gate_refuses_whole_helper_literals_with_forged_trace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lifecycle_observation: dict,
+    surface: str,
+) -> None:
+    outputs = lifecycle_observation["helper_outputs"][surface]
+
+    if surface == "graph":
+
+        def forged_graph(root, path, *, trace=None, **_kwargs):
+            if trace is not None:
+                trace.append(
+                    {
+                        "surface": "connect_memory",
+                        "operation": "graph-context",
+                        "path": path,
+                        "depth": 1,
+                    }
+                )
+            return copy.deepcopy(outputs[f"{Path(root).name}:{path}"])
+
+        monkeypatch.setattr(bench, "_graph_relation_types", forged_graph)
+    else:
+        output_offsets: dict[str, int] = {}
+
+        def forged_filter(root, relation, *, trace=None, **_kwargs):
+            if trace is not None:
+                trace.append(
+                    {
+                        "surface": "ask_memory",
+                        "query": "",
+                        "relations": [relation],
+                        "mode": "keyword",
+                        "graph": False,
+                        "explain": True,
+                        "scope": "kb-only",
+                    }
+                )
+            key = f"{Path(root).name}:{relation}"
+            offset = output_offsets.get(key, 0)
+            output_offsets[key] = offset + 1
+            return copy.deepcopy(outputs[key][offset])
+
+        monkeypatch.setattr(bench, "_relation_filter_explanation", forged_filter)
+
+    result = bench.run_relation_lifecycle_fixture(
+        bench.load_manifest(), tmp_path / f"literal-{surface}"
+    )
+
+    assert result["evidence"]["public_surface_complete"] is False
+    assert not all(result["checks"].values())
+    expected_failed = (
+        {
+            "policy-applicability-extension",
+            "core-part-of-reuse",
+            "honest-generic-relation",
+            "topical-proximity-abstains",
+            "extension-parent-rollup",
+            "survivor-directed-replacement",
+            "vault-registry-isolation",
+        }
+        if surface == "graph"
+        else {
+            "policy-applicability-extension",
+            "extension-parent-rollup",
+            "survivor-directed-replacement",
+            "vault-registry-isolation",
+        }
+    )
+    assert all(result["checks"][case_id] is False for case_id in expected_failed)
+
+
+def _set_nested(value: dict, path: tuple[object, ...], replacement: object) -> None:
+    current: object = value
+    for part in path[:-1]:
+        if isinstance(current, list) and isinstance(part, str):
+            # Filter rows are identified by path, never by ranking position.
+            matches = [hit for hit in current if hit["path"] == value["paths"][part]]
+            assert len(matches) == 1
+            current = matches[0]
+        else:
+            current = current[part]  # type: ignore[index]
+    assert current[path[-1]] != replacement, path  # type: ignore[index]
+    current[path[-1]] = replacement  # type: ignore[index]
+
+
+def _order_lifecycle_filter_target(observation: dict, group: str, position: str) -> None:
+    target = observation["paths"][
+        "predecessor" if group in {"survivor", "deprecated"} else "policy"
+    ]
+    hits = observation["filters"][group]
+    assert len(hits) > 1
+    assert sum(hit["path"] == target for hit in hits) == 1
+    original_facts = bench._lifecycle_hit_facts(hits)
+    calls = [
+        call for call in observation["public_calls"]
+        if call["outcome"].get("hits") == original_facts
+    ]
+    assert len(calls) == 1
+    hits.sort(key=lambda hit: hit["path"] != target, reverse=position == "last")
+    # Reordering legitimate results must preserve their public-call binding.
+    calls[0]["outcome"]["hits"] = bench._lifecycle_hit_facts(hits)
+    assert hits[0 if position == "first" else -1]["path"] == target
+
+
+@pytest.mark.parametrize("target_position", ["first", "last"])
+@pytest.mark.parametrize(
+    ("path", "replacement", "case_id", "check_id"),
+    [
+        (
+            ("graphs", "policy", 0, "raw_relation"),
+            None,
+            "policy-applicability-extension",
+            "graph_raw_relation",
+        ),
+        (
+            ("graphs", "policy", 0, "relation_type"),
+            "relates_to",
+            "policy-applicability-extension",
+            "graph_canonical_relation",
+        ),
+        (
+            ("filters", "policy_alias", "policy", "path"),
+            "other.md",
+            "policy-applicability-extension",
+            "alias_path",
+        ),
+        (
+            ("filters", "policy_alias", "policy", "relation_match", "counterpart"),
+            "other.md",
+            "policy-applicability-extension",
+            "alias_counterpart",
+        ),
+        (
+            ("filters", "policy_alias", "policy", "relation_match", "direction"),
+            "inbound",
+            "policy-applicability-extension",
+            "alias_direction",
+        ),
+        (
+            ("filters", "policy_alias", "policy", "relation_match", "relation_type"),
+            "relates_to",
+            "policy-applicability-extension",
+            "alias_canonical_relation",
+        ),
+        (
+            ("filters", "policy_alias", "policy", "relation_match", "requested_relation"),
+            "vault.applies_to",
+            "policy-applicability-extension",
+            "alias_requested_relation",
+        ),
+        (
+            ("filters", "policy_alias", "policy", "relation_match", "resolved_relation"),
+            "relates_to",
+            "policy-applicability-extension",
+            "alias_resolved_relation",
+        ),
+        (
+            ("filters", "policy_alias", "policy", "relation_match", "matched_via"),
+            "parent_relation",
+            "policy-applicability-extension",
+            "alias_match_mode",
+        ),
+        (
+            ("filters", "policy_canonical", "policy", "path"),
+            "other.md",
+            "policy-applicability-extension",
+            "canonical_path",
+        ),
+        (
+            ("filters", "policy_canonical", "policy", "relation_match", "counterpart"),
+            "other.md",
+            "policy-applicability-extension",
+            "canonical_counterpart",
+        ),
+        (
+            ("filters", "policy_canonical", "policy", "relation_match", "direction"),
+            "inbound",
+            "policy-applicability-extension",
+            "canonical_direction",
+        ),
+        (
+            ("filters", "policy_canonical", "policy", "relation_match", "relation_type"),
+            "relates_to",
+            "policy-applicability-extension",
+            "canonical_relation",
+        ),
+        (
+            ("filters", "policy_canonical", "policy", "relation_match", "requested_relation"),
+            "applies_to",
+            "policy-applicability-extension",
+            "canonical_requested_relation",
+        ),
+        (
+            ("filters", "policy_canonical", "policy", "relation_match", "resolved_relation"),
+            "relates_to",
+            "policy-applicability-extension",
+            "canonical_resolved_relation",
+        ),
+        (
+            ("filters", "policy_canonical", "policy", "relation_match", "matched_via"),
+            "parent_relation",
+            "policy-applicability-extension",
+            "canonical_match_mode",
+        ),
+        (
+            ("filters", "policy_parent", "policy", "path"),
+            "other.md",
+            "extension-parent-rollup",
+            "parent_path",
+        ),
+        (
+            ("filters", "policy_parent", "policy", "relation_match", "counterpart"),
+            "other.md",
+            "extension-parent-rollup",
+            "parent_counterpart",
+        ),
+        (
+            ("filters", "policy_parent", "policy", "relation_match", "direction"),
+            "inbound",
+            "extension-parent-rollup",
+            "parent_direction",
+        ),
+        (
+            ("filters", "policy_parent", "policy", "relation_match", "relation_type"),
+            "relates_to",
+            "extension-parent-rollup",
+            "parent_child_relation",
+        ),
+        (
+            ("filters", "policy_parent", "policy", "relation_match", "requested_relation"),
+            "vault.applies_to",
+            "extension-parent-rollup",
+            "parent_requested_relation",
+        ),
+        (
+            ("filters", "policy_parent", "policy", "relation_match", "resolved_relation"),
+            "vault.applies_to",
+            "extension-parent-rollup",
+            "parent_resolved_relation",
+        ),
+        (
+            ("filters", "policy_parent", "policy", "relation_match", "matched_via"),
+            "relation_type",
+            "extension-parent-rollup",
+            "parent_match_mode",
+        ),
+        (
+            ("graphs", "replacement", 0, "source_path"),
+            "other.md",
+            "survivor-directed-replacement",
+            "graph_path",
+        ),
+        (
+            ("graphs", "replacement", 0, "dst_key"),
+            "file:other.md",
+            "survivor-directed-replacement",
+            "graph_counterpart",
+        ),
+        (
+            ("graphs", "replacement", 0, "raw_relation"),
+            None,
+            "survivor-directed-replacement",
+            "graph_raw_relation",
+        ),
+        (
+            ("graphs", "replacement", 0, "relation_type"),
+            "vault.applies_to",
+            "survivor-directed-replacement",
+            "graph_canonical_relation",
+        ),
+        (
+            ("graphs", "replacement", 0, "metadata", "replacement"),
+            "vault.applicable_to",
+            "survivor-directed-replacement",
+            "graph_terminal_replacement",
+        ),
+        (
+            ("filters", "survivor", "predecessor", "path"),
+            "other.md",
+            "survivor-directed-replacement",
+            "survivor_path",
+        ),
+        (
+            ("filters", "survivor", "predecessor", "relation_match", "counterpart"),
+            "other.md",
+            "survivor-directed-replacement",
+            "survivor_counterpart",
+        ),
+        (
+            ("filters", "survivor", "predecessor", "relation_match", "direction"),
+            "inbound",
+            "survivor-directed-replacement",
+            "survivor_direction",
+        ),
+        (
+            ("filters", "survivor", "predecessor", "relation_match", "relation_type"),
+            "vault.applies_to",
+            "survivor-directed-replacement",
+            "survivor_raw_relation",
+        ),
+        (
+            ("filters", "survivor", "predecessor", "relation_match", "requested_relation"),
+            "vault.applicable_to",
+            "survivor-directed-replacement",
+            "survivor_requested_relation",
+        ),
+        (
+            ("filters", "survivor", "predecessor", "relation_match", "resolved_relation"),
+            "vault.applicable_to",
+            "survivor-directed-replacement",
+            "survivor_resolved_relation",
+        ),
+        (
+            ("filters", "survivor", "predecessor", "relation_match", "matched_via"),
+            "relation_type",
+            "survivor-directed-replacement",
+            "survivor_match_mode",
+        ),
+        (
+            ("filters", "deprecated", "predecessor", "path"),
+            "other.md",
+            "survivor-directed-replacement",
+            "predecessor_path",
+        ),
+        (
+            ("filters", "deprecated", "predecessor", "relation_match", "counterpart"),
+            "other.md",
+            "survivor-directed-replacement",
+            "predecessor_counterpart",
+        ),
+        (
+            ("filters", "deprecated", "predecessor", "relation_match", "direction"),
+            "inbound",
+            "survivor-directed-replacement",
+            "predecessor_direction",
+        ),
+        (
+            ("filters", "deprecated", "predecessor", "relation_match", "relation_type"),
+            "vault.applies_to",
+            "survivor-directed-replacement",
+            "predecessor_raw_relation",
+        ),
+        (
+            ("filters", "deprecated", "predecessor", "relation_match", "requested_relation"),
+            "vault.applies_to",
+            "survivor-directed-replacement",
+            "predecessor_requested_relation",
+        ),
+        (
+            ("filters", "deprecated", "predecessor", "relation_match", "resolved_relation"),
+            "vault.applies_to",
+            "survivor-directed-replacement",
+            "predecessor_resolved_relation",
+        ),
+        (
+            ("filters", "deprecated", "predecessor", "relation_match", "matched_via"),
+            "replacement",
+            "survivor-directed-replacement",
+            "predecessor_match_mode",
+        ),
+        (
+            ("resolutions", "replacement", "exact_matches", 0, "canonical"),
+            "vault.applies_to",
+            "survivor-directed-replacement",
+            "resolver_raw_canonical",
+        ),
+        (
+            ("resolutions", "replacement", "exact_matches", 0, "requested_relation"),
+            "vault.applies_to",
+            "survivor-directed-replacement",
+            "resolver_raw_canonical",
+        ),
+        (
+            ("resolutions", "replacement", "exact_matches", 0, "direction"),
+            "symmetric",
+            "survivor-directed-replacement",
+            "resolver_direction",
+        ),
+        (
+            ("resolutions", "replacement", "exact_matches", 0, "match"),
+            "alias",
+            "survivor-directed-replacement",
+            "resolver_match_mode",
+        ),
+        (
+            ("resolutions", "replacement", "exact_matches", 0, "immediate_replacement"),
+            None,
+            "survivor-directed-replacement",
+            "immediate_replacement",
+        ),
+        (
+            ("resolutions", "replacement", "exact_matches", 0, "terminal_replacement"),
+            None,
+            "survivor-directed-replacement",
+            "terminal_replacement",
+        ),
+    ],
+)
+def test_lifecycle_field_matrix_rejects_one_field_removal_swap_or_corruption(
+    lifecycle_observation: dict,
+    target_position: str,
+    path: tuple[object, ...],
+    replacement: object,
+    case_id: str,
+    check_id: str,
+) -> None:
+    mutant = copy.deepcopy(lifecycle_observation)
+    if path[0] == "filters":
+        _order_lifecycle_filter_target(mutant, str(path[1]), target_position)
+    assert all(bench.score_relation_lifecycle_observation(mutant)["checks"].values())
+    _set_nested(mutant, path, replacement)
+
+    result = bench.score_relation_lifecycle_observation(mutant)
+
+    assert result["checks"][case_id] is False
+    assert result["evidence"]["case_checks"][case_id][check_id] is False
+
+
+@pytest.mark.parametrize(
+    ("mutator", "check_id"),
+    [
+        (
+            lambda value: value["alias_proposal"]["duplicate_evidence"]["extensions"].update(
+                returned=999, omitted=-998, continuation="forged"
+            ),
+            "extension_inventory",
+        ),
+        (
+            lambda value: value["alias_proposal"]["duplicate_evidence"]["observations"].update(
+                total=-1, returned=-2, omitted=1, continuation="observations:-2"
+            ),
+            "observation_inventory",
+        ),
+    ],
+)
+def test_lifecycle_duplicate_inventories_are_complete_bounded_and_coherent(
+    lifecycle_observation: dict, mutator, check_id: str
+) -> None:
+    mutant = copy.deepcopy(lifecycle_observation)
+    mutator(mutant)
+
+    result = bench.score_relation_lifecycle_observation(mutant)
+
+    assert result["checks"]["alias-reuse-without-duplicate"] is False
+    assert result["evidence"]["case_checks"]["alias-reuse-without-duplicate"][check_id] is False
+
+
+def test_part_of_resolution_registry_write_mutant_is_rejected(
+    lifecycle_observation: dict,
+) -> None:
+    mutant = copy.deepcopy(lifecycle_observation)
+    mutant["hashes"]["part_after"]["registry"] = "forged-write-digest"
+
+    result = bench.score_relation_lifecycle_observation(mutant)
+
+    assert result["checks"]["core-part-of-reuse"] is False
+    assert (
+        result["evidence"]["case_checks"]["core-part-of-reuse"]["resolution_registry_unchanged"]
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutator", "check_id"),
+    [
+        (
+            lambda value: value["tenants"]["b"].update(registry=value["tenants"]["a"]["registry"]),
+            "registry_objects_distinct",
+        ),
+        (
+            lambda value: value["tenants"]["b"].update(
+                cache_entry=value["tenants"]["a"]["cache_entry"]
+            ),
+            "cache_objects_distinct",
+        ),
+        (
+            lambda value: value["tenants"]["b"].update(
+                cache_path=value["tenants"]["a"]["cache_path"]
+            ),
+            "cache_paths_distinct",
+        ),
+        (
+            lambda value: value["resolutions"].update(tenant_b=value["resolutions"]["tenant_a"]),
+            "resolver_contexts_isolated",
+        ),
+        (
+            lambda value: value["graphs"].update(tenant_b=value["graphs"]["tenant_a"]),
+            "graph_results_isolated",
+        ),
+        (
+            lambda value: value["filters"].update(tenant_b=value["filters"]["tenant_a"]),
+            "filter_results_isolated",
+        ),
+        (
+            lambda value: value["paths"].update(tenant_b_source=value["paths"]["tenant_a_source"]),
+            "tenant_paths_distinct",
+        ),
+    ],
+)
+def test_lifecycle_tenant_collapse_and_cross_swap_matrix_fails_specific_checks(
+    lifecycle_observation: dict, mutator, check_id: str
+) -> None:
+    mutant = copy.deepcopy(lifecycle_observation)
+    mutator(mutant)
+
+    result = bench.score_relation_lifecycle_observation(mutant)
+
+    assert result["checks"]["vault-registry-isolation"] is False
+    assert result["evidence"]["case_checks"]["vault-registry-isolation"][check_id] is False
+
+
+def test_lifecycle_gate_is_present_in_a_report_and_names_each_failed_case() -> None:
+    manifest = bench.load_manifest()
+    exomem_probes, basic_probes = _perfect_probe_results(manifest)
+    lifecycle = {
+        "checks": {str(item["id"]): True for item in manifest["relation_lifecycle"]["cases"]}
+    }
+    exomem = bench.ContenderRun(
+        contender="exomem",
+        available=True,
+        version="test",
+        revision="test",
+        corpus_hash="test",
+        mutation_safe=True,
+        probes=exomem_probes,
+        relation_lifecycle=lifecycle,
+    )
+    basic = bench.ContenderRun(
+        contender="basic-memory",
+        available=True,
+        version="test",
+        revision="test",
+        corpus_hash="test",
+        mutation_safe=True,
+        probes=basic_probes,
+    )
+
+    report = bench.build_report(manifest, exomem, basic)
+    assert (
+        report["local_core"]["evaluation"]["gates"]["lifecycle_integrity"]["relation_lifecycle"][
+            "passed"
+        ]
+        is True
+    )
+    for case_id in lifecycle["checks"]:
+        failed = copy.deepcopy(lifecycle)
+        failed["checks"][case_id] = False
+        report = bench.build_report(
+            manifest,
+            dataclasses.replace(exomem, relation_lifecycle=failed),
+            basic,
+        )
+        lifecycle_gate = report["local_core"]["evaluation"]["gates"]["lifecycle_integrity"]
+        assert lifecycle_gate["passed"] is False
+        assert lifecycle_gate["relation_lifecycle"]["failed"] == [case_id]
+
+
+def test_direct_exomem_contender_runs_attaches_and_serializes_real_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fastmcp
+    from fastmcp.client import transports
+
+    manifest = bench.load_manifest()
+    corpus = bench.render_exomem(manifest, tmp_path / "direct-exomem")
+    exomem_probes, basic_probes = _perfect_probe_results(manifest)
+    lifecycle_calls: list[dict] = []
+    real_lifecycle = bench.run_relation_lifecycle_fixture
+
+    def lifecycle_spy(value, root):
+        result = real_lifecycle(value, root)
+        lifecycle_calls.append({"manifest": value, "root": root, "result": result})
+        return result
+
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def list_tools(self):
+            return [SimpleNamespace(name="connect_memory")]
+
+    class FakeRecorder:
+        observed_operation_probes: dict[str, set[str]] = {}
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def call(self, *_args, **_kwargs):
+            return {"graph": {"nodes": [], "edges": []}}
+
+    class FakePreparation:
+        async def participate(self, _contender, prepare):
+            return await prepare()
+
+    async def fake_prepare_indexes(_recorder, *, profile):
+        assert profile == "lean"
+
+    async def fake_direct_probes(*_args, **_kwargs):
+        return exomem_probes
+
+    monkeypatch.setattr(fastmcp, "Client", FakeClient)
+    monkeypatch.setattr(transports, "StdioTransport", lambda **_kwargs: object())
+    monkeypatch.setattr(bench, "RecordedMCPClient", FakeRecorder)
+    monkeypatch.setattr(bench, "prepare_exomem_indexes", fake_prepare_indexes)
+    monkeypatch.setattr(bench, "run_exomem_direct_probes", fake_direct_probes)
+    monkeypatch.setattr(bench, "run_relation_lifecycle_fixture", lifecycle_spy)
+    monkeypatch.setattr(
+        bench,
+        "exomem_registry_inventory",
+        lambda: {"mcp": ["connect_memory"], "cli": []},
+    )
+    monkeypatch.setattr(
+        bench,
+        "reconcile_operation_inventory",
+        lambda *_args, **_kwargs: {"valid": True},
+    )
+    monkeypatch.setattr(
+        bench,
+        "attach_operation_execution",
+        lambda _manifest, *, inventory, **_kwargs: inventory,
+    )
+    monkeypatch.setattr(bench, "environment_fingerprint", lambda **_kwargs: {})
+    monkeypatch.setattr(bench, "_exomem_version", lambda: "test")
+    monkeypatch.setattr(bench, "git_revision", lambda _root: "test")
+
+    exomem = asyncio.run(
+        bench._run_exomem_mcp(
+            manifest,
+            corpus,
+            python=Path(sys.executable),
+            timeout=10.0,
+            profile="lean",
+            preparation=FakePreparation(),
+        )
+    )
+
+    assert len(lifecycle_calls) == 1
+    assert lifecycle_calls[0]["manifest"] is manifest
+    assert exomem.relation_lifecycle == lifecycle_calls[0]["result"]
+    assert exomem.relation_lifecycle["checks"]
+    assert all(exomem.relation_lifecycle["checks"].values())
+
+    basic = bench.ContenderRun(
+        contender="basic-memory",
+        available=True,
+        version="test",
+        revision="test",
+        corpus_hash="test",
+        mutation_safe=True,
+        probes=basic_probes,
+    )
+    report = bench.build_report(manifest, exomem, basic)
+    serialized = report["contenders"]["exomem"]["relation_lifecycle"]
+    gate = report["local_core"]["evaluation"]["gates"]["lifecycle_integrity"]
+    assert serialized == exomem.relation_lifecycle
+    assert serialized["checks"]
+    assert gate["relation_lifecycle"]["passed"] is True
+
+
+def test_scripted_relation_decision_marks_an_explicit_false_directional_choice_false_positive() -> (
+    None
+):
+    abstention = bench.score_scripted_relation_decision(
+        selected_relation=None, authored_relation=None, truthful=False
+    )
+    false_directional = bench.score_scripted_relation_decision(
+        selected_relation=None, authored_relation="supports", truthful=False
+    )
+
+    assert abstention == {"false_positive": False, "passed": True}
+    assert false_directional == {"false_positive": True, "passed": False}
 
 
 def test_graph_mistakes_remain_independent(perfect_fixture) -> None:
@@ -231,6 +995,7 @@ def test_reports_are_aggregate_reproducible_and_privacy_safe(perfect_fixture) ->
     assert "renderer_parity" in encoded
     assert report["contenders"]["exomem"]["fact_parity"] == corpus.fact_parity
     assert report["contenders"]["basic_memory"]["fact_parity"] == basic_corpus.fact_parity
+    assert report["contenders"]["exomem"]["relation_lifecycle"]["checks"]
     assert str(corpus.root) not in encoded
     assert "/home/" not in encoded
     assert "C:\\" not in encoded

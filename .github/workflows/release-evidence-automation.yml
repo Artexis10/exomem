@@ -35,6 +35,10 @@ permissions:
   contents: read
   pull-requests: read
 
+# These jobs deliberately have no checkout for gh to infer a repository from.
+env:
+  GH_REPO: ${{ github.repository }}
+
 # A disable/re-enable pair (or a double-click) fires auto_merge_enabled twice;
 # without serialization both jobs can pass the eligibility check before either
 # dispatch is visible, yielding two full-tier runs. Queue, don't cancel — a

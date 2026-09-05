@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from .conflict_reason import ConflictReason, coerce_conflict_reason
 from .models import ResourceKind
 from .wire_protocol import runtime_identity
 
@@ -61,9 +62,18 @@ class DriverRetryable(RuntimeError):
 
 
 class DriverTerminal(RuntimeError):
-    def __init__(self, code: str) -> None:
+    """A terminal driver failure: one stable code, optionally one condition label.
+
+    The code is the durable contract -- it is stored on the operation and matched
+    verbatim by `operation_recovery` and the recovery runbook, so it never varies
+    with the cause. `reason` carries the cause alongside it, drawn only from the
+    closed `ConflictReason` vocabulary.
+    """
+
+    def __init__(self, code: str, *, reason: ConflictReason | None = None) -> None:
         super().__init__(code)
         self.code = code
+        self.reason = None if reason is None else coerce_conflict_reason(reason)
 
 
 class ProvisionerDriver(Protocol):
@@ -114,7 +124,10 @@ class FakeDriver:
         key = (action, context.operation_id)
         recorded = self._effect_metadata.get(key)
         if recorded is not None and recorded.provider_identity != context.provider_identity:
-            raise DriverTerminal("PROVISIONER_PROVIDER_METADATA_CONFLICT")
+            raise DriverTerminal(
+                "PROVISIONER_PROVIDER_METADATA_CONFLICT",
+                reason=ConflictReason.PROVIDER_IDENTITY_IMMUTABLE,
+            )
         if context.fence_generation < self._tenant_fences.get(context.tenant_id, 0):
             raise DriverTerminal("PROVISIONER_STALE_FENCE")
         if recorded is None:

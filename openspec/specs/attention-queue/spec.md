@@ -1001,3 +1001,44 @@ surface, and the absence SHALL be indistinguishable from the item not existing.
   canonical state and persists it when possible
 - **AND** a later response may serve the rebuilt projection after it is ready
 - **AND** no mutation fails or is delayed beyond the write-latency gates
+
+### Requirement: Batched deterministic relation queue
+
+`review_memory(mode="relation-queue")` SHALL return a read-only deterministic
+batch of graph-native relation candidates grouped by source page. Each item
+SHALL carry a stable `exomem://review/relation/<id>` ref, signal fingerprint,
+candidate triple, method, evidence, and source hint. The queue SHALL exclude
+already-authored edges, unresolved placeholders, and unchanged candidates with
+unexpired dismiss or snooze decisions. It SHALL report `mutated: false`,
+activation-aligned coverage, and explicit truncation. A non-current graph SHALL
+produce its typed retryable state, never a Markdown or embedding fallback.
+
+#### Scenario: Deterministic batch with filtering
+- **WHEN** the queue is read twice on an unchanged current graph
+- **THEN** both reads return the same items in the same order without authored
+  duplicates, unresolved placeholders, or unexpired suppressed fingerprints
+
+#### Scenario: Read never mutates
+- **WHEN** the queue is read
+- **THEN** no Markdown, accepted graph edge, or review-state entry changes
+- **AND** the response reports `mutated: false`
+
+### Requirement: Fingerprint-bound rejection via triage
+
+`triage_memory` SHALL accept relation-queue refs through the existing dismiss,
+snooze, and reopen actions, binding decisions to the review ID and signal
+fingerprint. Newly returned items SHALL echo their source hint for bounded
+revalidation. Relation identities SHALL remain namespaced so triage never
+resolves an activation or attention item, or vice versa.
+
+#### Scenario: Dismissed candidate stays gone
+- **WHEN** a candidate is dismissed and the unchanged queue is reread
+- **THEN** the candidate remains absent while that decision is effective
+
+#### Scenario: Changed signal resurfaces
+- **WHEN** a dismissed candidate's underlying signal changes its fingerprint
+- **THEN** the new candidate may reappear without inheriting the old dismissal
+
+#### Scenario: Review namespaces remain isolated
+- **WHEN** a relation candidate is triaged
+- **THEN** activation and attention review decisions remain unchanged

@@ -1232,6 +1232,15 @@ def _probe(root: Path) -> Capabilities:
             pass
 
 
+def platform_supported() -> bool:
+    """Whether this platform has a backend at all, asked without a root.
+
+    Always true here: this module exists only because the host is Windows.
+    The per-root question stays `probe`'s.
+    """
+    return True
+
+
 def probe(root: Path) -> Capabilities:
     return _probe(root)
 

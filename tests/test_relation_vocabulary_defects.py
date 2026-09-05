@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from exomem import relation_queue, relation_registry
+from exomem import epistemic_graph, relation_queue, relation_registry
 
 
 def _proposal(**extensions):
@@ -103,6 +103,8 @@ def _crowded_vault(vault, *, authored: int, fresh: int) -> None:
         f"[[Knowledge Base/Notes/Insights/{target}]]" for target in targets
     )
     _write_page(vault, "crowded", f"## Relations\n\n{relations}\n\nAlso see {mentions}.")
+    # Queue reads require a published graph; fixture writes are deliberately raw.
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
 
 
 def test_the_display_budget_is_not_spent_on_filtered_candidates(vault) -> None:
@@ -118,12 +120,16 @@ def test_the_display_budget_is_not_spent_on_filtered_candidates(vault) -> None:
     _crowded_vault(vault, authored=limit, fresh=3)
 
     queue = relation_queue.build_queue(vault, limit_per_page=limit)
+    assert queue["status"] == "available"
     crowded = [
         group for group in queue["groups"] if group["path"].endswith("crowded.md")
     ]
 
     assert crowded, "the page with open candidates produced no group at all"
-    assert crowded[0]["items"], "every open candidate was starved by filtered ones"
+    assert {item["to"] for item in crowded[0]["items"]} == {
+        f"Knowledge Base/Notes/Insights/t{index:02d}.md"
+        for index in range(limit, limit + 3)
+    }, "filtering must retain every open candidate behind the authored prefix"
 
 
 def test_the_budget_still_bounds_what_is_shown(vault) -> None:
@@ -132,9 +138,10 @@ def test_the_budget_still_bounds_what_is_shown(vault) -> None:
     _crowded_vault(vault, authored=0, fresh=12)
 
     queue = relation_queue.build_queue(vault, limit_per_page=limit)
+    assert queue["status"] == "available"
     crowded = [
         group for group in queue["groups"] if group["path"].endswith("crowded.md")
     ]
 
     assert crowded
-    assert len(crowded[0]["items"]) <= limit
+    assert len(crowded[0]["items"]) == limit

@@ -1,0 +1,986 @@
+{
+  "delivery_commit": "afd5f6709b75438c0d5f14c880f82680efa0f2d9",
+  "source_provenance": "Recall production targets were unchanged from 8e6cb4dc. Earlier conftest mutation hashes predate the warm-fixture correction; both copies were resynced before the final restored gates. Per-attempt hashes identify the actual mutated bytes.",
+  "record_type": "observed-mutation-results",
+  "red_definition": "Named behavioral test failure (exit 1), not an import or collection error. Declared controls and retired anchors are not kills.",
+  "attempts": [
+    {
+      "id": "L1-M1",
+      "mechanism": "manual stage table write rejection",
+      "node": "tests/test_recall_timing_completeness.py::test_manual_stage_write_is_rejected",
+      "path": "src/exomem/find_types.py",
+      "before_sha256": "f85924df8f887061b0add5e2ea5b4242f2fe4ab080c2b4e605c14708fa7e4f97",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "f85924df8f887061b0add5e2ea5b4242f2fe4ab080c2b4e605c14708fa7e4f97",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       Failed: DID NOT RAISE <class 'TypeError'>\n=========================== short test summary info ============================\nFAILED tests/test_recall_timing_completeness.py::test_manual_stage_write_is_rejected\n1 failed in 0.89s"
+    },
+    {
+      "id": "L1-M10",
+      "mechanism": "reserved timing fields",
+      "node": "tests/test_recall_timing_completeness.py::test_span_rejects_a_reserved_field",
+      "path": "src/exomem/find_types.py",
+      "before_sha256": "f85924df8f887061b0add5e2ea5b4242f2fe4ab080c2b4e605c14708fa7e4f97",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "f85924df8f887061b0add5e2ea5b4242f2fe4ab080c2b4e605c14708fa7e4f97",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE           Failed: DID NOT RAISE <class 'TypeError'>\n=========================== short test summary info ============================\nFAILED tests/test_recall_timing_completeness.py::test_span_rejects_a_reserved_field\n1 failed in 1.09s"
+    },
+    {
+      "id": "L1-M10B-current",
+      "mechanism": "caller accounting-field bypass plus semantic parent duration understatement",
+      "node": "tests/test_recall_timing_completeness.py::test_every_nested_stage_fits_inside_its_parent",
+      "paths": [
+        "src/exomem/find_types.py",
+        "src/exomem/find.py"
+      ],
+      "before_sha256": {
+        "src/exomem/find_types.py": "f85924df8f887061b0add5e2ea5b4242f2fe4ab080c2b4e605c14708fa7e4f97",
+        "src/exomem/find.py": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "red_outcome": "bm25=5.194ms does not fit inside semantic.search=0.0ms",
+      "restore_sha256": {
+        "src/exomem/find_types.py": "f85924df8f887061b0add5e2ea5b4242f2fe4ab080c2b4e605c14708fa7e4f97",
+        "src/exomem/find.py": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3"
+      },
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": ""
+    },
+    {
+      "id": "L1-M11",
+      "mechanism": "nested parent attribution",
+      "node": "tests/test_recall_timing_completeness.py::test_every_nested_stage_fits_inside_its_parent",
+      "path": "src/exomem/find_types.py",
+      "before_sha256": "f85924df8f887061b0add5e2ea5b4242f2fe4ab080c2b4e605c14708fa7e4f97",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "f85924df8f887061b0add5e2ea5b4242f2fe4ab080c2b4e605c14708fa7e4f97",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: no stage reported containment at all\nE       assert {}\n=========================== short test summary info ============================\nFAILED tests/test_recall_timing_completeness.py::test_every_nested_stage_fits_inside_its_parent\n1 failed in 1.69s"
+    },
+    {
+      "id": "L1-M12",
+      "mechanism": "qualified nested stage name",
+      "node": "tests/test_recall_timing_completeness.py::test_no_stage_name_spans_two_depths",
+      "path": "src/exomem/find_types.py",
+      "before_sha256": "f85924df8f887061b0add5e2ea5b4242f2fe4ab080c2b4e605c14708fa7e4f97",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "f85924df8f887061b0add5e2ea5b4242f2fe4ab080c2b4e605c14708fa7e4f97",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE           AssertionError: hybrid with a page filter: {'recall_projection': {None, 'freshness'}}\nE           assert {'recall_proj... 'freshness'}} == {}\nE             \nE             Left contains 1 more item:\nE             {'recall_projection': {None, 'freshness'}}\nE             Use -v to get more diff\n=========================== short test summary info ============================\nFAILED tests/test_recall_timing_completeness.py::test_no_stage_name_spans_two_depths\n1 failed in 1.99s"
+    },
+    {
+      "id": "L1-M2",
+      "mechanism": "walk sentinel installation",
+      "node": "tests/test_recall_walk_sentinel.py::test_sentinel_counts_a_real_walk",
+      "path": "tests/conftest.py",
+      "before_sha256": "d1d8e70f8f2a926b1245b6ae6ae6d2a89bb1be58a8c04022f0cd73fcdf47617a",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "d1d8e70f8f2a926b1245b6ae6ae6d2a89bb1be58a8c04022f0cd73fcdf47617a",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: the sentinel did not see the canonical scan oracle walk\nE       assert 0 > 0\nE        +  where 0 = <conftest.ScopeWalkSentinel object at 0x7f890efef4d0>.count\n=========================== short test summary info ============================\nFAILED tests/test_recall_walk_sentinel.py::test_sentinel_counts_a_real_walk\n1 failed in 1.73s"
+    },
+    {
+      "id": "L1-M3",
+      "mechanism": "span source write",
+      "node": "tests/test_recall_timing_completeness.py::test_every_stage_carries_a_source",
+      "path": "src/exomem/find_types.py",
+      "before_sha256": "f85924df8f887061b0add5e2ea5b4242f2fe4ab080c2b4e605c14708fa7e4f97",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "f85924df8f887061b0add5e2ea5b4242f2fe4ab080c2b4e605c14708fa7e4f97",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: stages with no source: ['bm25', 'cache_lookup', 'date_filter', 'filter_eligibility', 'freshness', 'freshness.recall_projection', 'graph', 'graph.expand', 'graph.resolver', 'graph.seeds', 'keyword', 'pending_visibility', 'recall_projection', 'release_gate', 'semantic.search', 'serialize']\nE       assert not ['bm25', 'cache_lookup', 'date_filter', 'filter_eligibility', 'freshness', 'freshness.recall_projection', ...]\n=========================== short test summary info ============================\nFAILED tests/test_recall_timing_completeness.py::test_every_stage_carries_a_source\n1 failed in 2.30s"
+    },
+    {
+      "id": "L1-M4",
+      "mechanism": "scan source declaration",
+      "node": "tests/test_recall_timing_completeness.py::test_a_stage_that_walked_reports_that_it_computed",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: assert 'index' == 'computed'\nE         \nE         - computed\nE         + index\n=========================== short test summary info ============================\nFAILED tests/test_recall_timing_completeness.py::test_a_stage_that_walked_reports_that_it_computed\n1 failed in 1.99s"
+    },
+    {
+      "id": "L1-M5",
+      "mechanism": "query log stage source",
+      "node": "tests/test_recall_timing_completeness.py::test_the_query_log_summary_carries_a_source_for_every_stage_it_lists",
+      "path": "src/exomem/commands.py",
+      "before_sha256": "5ac14a539e4cf539a5802cf40da482d08910ea0d4658ffe0c6e34790c25828c3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "5ac14a539e4cf539a5802cf40da482d08910ea0d4658ffe0c6e34790c25828c3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: assert set() == {'bm25', 'cac...jection', ...}\nE         \nE         Extra items in the right set:\nE         'cache_lookup'\nE         'filter_eligibility'\nE         'freshness.recall_projection'\nE         'bm25'\nE         'release_gate'...\nE         \nE         ...Full output truncated (12 lines hidden), use '-vv' to show\n=========================== short test summary info ============================\nFAILED tests/test_recall_timing_completeness.py::test_the_query_log_summary_carries_a_source_for_every_stage_it_lists\n1 failed in 2.15s"
+    },
+    {
+      "id": "L1-M6",
+      "mechanism": "read-only stage entry",
+      "node": "tests/test_recall_timing_completeness.py::test_a_stage_entry_cannot_be_mutated_through_the_table",
+      "path": "src/exomem/find_types.py",
+      "before_sha256": "f85924df8f887061b0add5e2ea5b4242f2fe4ab080c2b4e605c14708fa7e4f97",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "f85924df8f887061b0add5e2ea5b4242f2fe4ab080c2b4e605c14708fa7e4f97",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       Failed: DID NOT RAISE <class 'TypeError'>\n=========================== short test summary info ============================\nFAILED tests/test_recall_timing_completeness.py::test_a_stage_entry_cannot_be_mutated_through_the_table\n1 failed in 0.98s"
+    },
+    {
+      "id": "L2-M1-adapted",
+      "mechanism": "scalar-list membership metadata",
+      "node": "tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field",
+      "path": "src/exomem/lexstore.py",
+      "before_sha256": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "E       AssertionError: page.project/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Failures/vendor-package-mismatch-with-shipping-platform.md', 'Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md', 'Knowledge Base/Notes/Patterns/locked-cryptographic-contract-with-rfc-citations.md', 'Knowledge Base/Notes/Research/Project Alpha/engine-architecture.md']\nE         page.project/$in case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         page.project/$in multi: index-only=[] oracle-only=['Knowledge Base/Notes/Failures/vendor-package-mismatch-with-shipping-platform.md', 'Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md', 'Knowledge Base/Notes/Patterns/locked-cryptographic-contract-with-rfc-citations.md', 'Knowledge Base/Notes/Research/Infrastructure/vector-index-tuning-revisited.md', 'Knowledge Base/Notes/Research/Infrastructure/vector-index-tuning.md', 'Knowledge Base/Notes/Research/Project Alpha/engine-architecture.md']\nE         page.project/$all: index-only=[] oracle-only=['Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md']\nE         page.project/$contains: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/proj-both-keys.md']\nE         page.tags/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md', 'Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization.md']\nE         page.tags/$in case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md', 'Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization.md']\nE         page.tags/$in spaced: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/spaced-lists.md']\nE         page.tags/$all: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md', 'Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization.md']\nE         page.tags/$contains: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md', 'Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization.md']\nE         page.type/$in list-valued: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/type-list.md']\nE         page.type/$in multi: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/type-list.md']\nE         page.status/$in list-valued: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/status-list.md']\nE         page.speakers/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         page.speakers/$in case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         page.source_kind/$in list-valued: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/source-list.md']\nE         page.domain/$in list-valued: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/domain-list.md']\nE         unit.tags/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         unit.tags/$in case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         OR page+page: index-only=[] oracle-only=['Knowledge Base/Sources/Articles/2026-06-02-postgres-autovacuum-tuning.md']\nE         scene-frame parent clause: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/Media/talk-frame-0005.md', 'Knowledge Base/Notes/Adv/Media/talk.md']\nE       assert not [\"page.project/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Failures/vendor-package-mismatch-with-shipping-pl...nowledge Base/Notes/Adv/case-lists.md', 'Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization.md']\", ...]\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field\n1 failed in 7.93s"
+    },
+    {
+      "id": "L2-M2",
+      "mechanism": "stale eligibility catalogue declines",
+      "node": "tests/test_recall_indexed_eligibility.py::test_stale_catalogue_generation_declines_with_warming",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       Failed: DID NOT RAISE <class 'exomem.find.RetrievalIndexWarming'>\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_stale_catalogue_generation_declines_with_warming\n1 failed in 2.16s"
+    },
+    {
+      "id": "L2-M3",
+      "mechanism": "pending overlay exact metadata",
+      "node": "tests/test_recall_indexed_eligibility.py::test_pending_write_is_filtered_against_its_committed_page",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: the committed project must be visible\nE       assert 'Knowledge Base/Notes/Research/Project Alpha/engine-architecture.md' in set()\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_pending_write_is_filtered_against_its_committed_page\n1 failed in 2.29s"
+    },
+    {
+      "id": "L2-M4",
+      "mechanism": "unsupported fields refuse before source scan",
+      "node": "tests/test_recall_indexed_eligibility.py::test_unsupported_field_is_rejected_at_compile_time_not_scanned",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "survived",
+      "exit_code": 0,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "1 passed in 1.94s"
+    },
+    {
+      "id": "L2-M5",
+      "mechanism": "managed filter never calls scan oracle",
+      "node": "tests/test_recall_walk_sentinel.py::test_filtered_hybrid_recall_enumerates_no_pages",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: 18 scope enumerations\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Entities\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Entities/Concepts\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Entities/People\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Notes\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Notes/Failures\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Notes/Insights\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Notes/Patterns\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Notes/Productions\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Notes/Productions/Reels\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Notes/Research\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Notes/Research/Health\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Notes/Research/Infrastructure\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Notes/Research/Project Alpha\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Sources\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Sources/Articles\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Sources/Books\nE         <scratch>/recall-matrix/pytest/mutants/L2-M5/test_filtered_hybrid_recall_en0/vault/Knowledge Base/Sources/Sessions\nE       assert 18 == 0\nE        +  where 18 = <conftest.ScopeWalkSentinel object at 0x7f0d1e1e3770>.count\n=========================== short test summary info ============================\nFAILED tests/test_recall_walk_sentinel.py::test_filtered_hybrid_recall_enumerates_no_pages\n1 failed in 2.97s"
+    },
+    {
+      "id": "L2-N10",
+      "mechanism": "between remains inexact",
+      "node": "tests/test_recall_indexed_eligibility.py::test_a_complement_over_an_inexact_bound_declines_rather_than_under_selecting",
+      "path": "src/exomem/structured_filters.py",
+      "before_sha256": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83",
+      "status": "survived",
+      "exit_code": 0,
+      "restore_sha256": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "1 passed in 2.47s"
+    },
+    {
+      "id": "L2-N11-current",
+      "mechanism": "predicate with no index column records refusable shape",
+      "node": "tests/test_recall_indexed_eligibility.py::test_a_null_valued_date_comparison_is_refused_not_deferred",
+      "path": "src/exomem/structured_filters.py",
+      "before_sha256": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE           AssertionError: EligibilityPlan(status='resolvable', unsupported_fields=(), expr=EligibilityConst(value=True), exact=False, has_unit_axis=False, inexpressible=())\nE           assert False\nE            +  where False = EligibilityPlan(status='resolvable', unsupported_fields=(), expr=EligibilityConst(value=True), exact=False, has_unit_axis=False, inexpressible=()).refuses\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_a_null_valued_date_comparison_is_refused_not_deferred\n1 failed in 2.17s"
+    },
+    {
+      "id": "L2-N7",
+      "mechanism": "eligibility candidate count timing",
+      "node": "tests/test_recall_indexed_eligibility.py::test_the_eligibility_stage_reports_its_candidate_count",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       KeyError: 'filter_eligibility'\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_the_eligibility_stage_reports_its_candidate_count\n1 failed in 2.48s"
+    },
+    {
+      "id": "L2-N8",
+      "mechanism": "unnarrowed managed plan warms",
+      "node": "tests/test_recall_indexed_eligibility.py::test_a_plan_the_columns_cannot_narrow_declines_instead_of_hydrating",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       Failed: DID NOT RAISE <class 'exomem.find.RetrievalIndexWarming'>\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_a_plan_the_columns_cannot_narrow_declines_instead_of_hydrating\n1 failed in 2.36s"
+    },
+    {
+      "id": "L2-R1-current",
+      "mechanism": "catalogue and evaluator share case folding",
+      "node": "tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field",
+      "path": "src/exomem/structured_filters.py",
+      "before_sha256": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "E       AssertionError: page.tags/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         page.tags/$in case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         page.tags/$all: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         page.tags/$contains: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         page.type/$eq: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         page.type/$eq case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         page.type/$eq spaced: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         page.type/$in list-valued: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         page.type/$in multi: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         page.status/$eq: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         page.status/$in list-valued: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         page.speakers/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         page.speakers/$in case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         unit.tags/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         unit.tags/$in case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         OR page+page: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         OR page+unit: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         AND with NOT: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE       assert not [\"page.tags/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\", \"page.tags/$in case: index-onl...x-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\", ...]\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field\n1 failed in 7.59s"
+    },
+    {
+      "id": "L2-R1",
+      "mechanism": "casefolded catalogue scalar",
+      "node": "tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field",
+      "path": "src/exomem/lexstore.py",
+      "before_sha256": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5",
+      "status": "retired",
+      "reason": "anchor_count=0",
+      "run": "aggregate",
+      "result_excerpt": ""
+    },
+    {
+      "id": "L2-R5-current",
+      "mechanism": "inexact complement never becomes an exact exclusion",
+      "node": "tests/test_recall_indexed_eligibility.py::test_a_complement_over_an_inexact_bound_declines_rather_than_under_selecting",
+      "path": "src/exomem/structured_filters.py",
+      "before_sha256": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83",
+      "status": "survived",
+      "exit_code": 0,
+      "restore_sha256": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "1 passed in 2.17s"
+    },
+    {
+      "id": "L2-R5-guard-current",
+      "mechanism": "inexact complement records its refusable shape",
+      "node": "tests/test_recall_indexed_eligibility.py::test_a_complement_over_an_inexact_bound_declines_rather_than_under_selecting",
+      "path": "src/exomem/structured_filters.py",
+      "before_sha256": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: EligibilityPlan(status='resolvable', unsupported_fields=(), expr=EligibilityConst(value=True), exact=False, has_unit_axis=False, inexpressible=())\nE       assert ()\nE        +  where () = EligibilityPlan(status='resolvable', unsupported_fields=(), expr=EligibilityConst(value=True), exact=False, has_unit_axis=False, inexpressible=()).inexpressible\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_a_complement_over_an_inexact_bound_declines_rather_than_under_selecting\n1 failed in 2.20s"
+    },
+    {
+      "id": "L2-R5",
+      "mechanism": "inexact complement widens rather than underselects",
+      "node": "tests/test_recall_indexed_eligibility.py::test_a_complement_over_an_inexact_bound_declines_rather_than_under_selecting",
+      "path": "src/exomem/structured_filters.py",
+      "before_sha256": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83",
+      "status": "retired",
+      "reason": "anchor_count=2",
+      "run": "aggregate",
+      "result_excerpt": ""
+    },
+    {
+      "id": "L3-H1a-current",
+      "mechanism": "only managed recall readers decline cold refs",
+      "node": "tests/test_recall_read_cache_custody.py::test_enrichment_callers_keep_answering_with_a_cold_sidecar",
+      "path": "src/exomem/memory_refs.py",
+      "before_sha256": "f4e67c6d4f1c3f76fb71d482d337c1ba43e6c9b5107966e70e4d5103c2070976",
+      "status": "survived",
+      "exit_code": 0,
+      "restore_sha256": "f4e67c6d4f1c3f76fb71d482d337c1ba43e6c9b5107966e70e4d5103c2070976",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "1 passed in 1.44s"
+    },
+    {
+      "id": "L3-H1a-guard-current",
+      "mechanism": "cold-sidecar decline is gated to recall readers",
+      "node": "tests/test_recall_read_cache_custody.py::test_enrichment_callers_keep_answering_with_a_cold_sidecar",
+      "path": "src/exomem/memory_refs.py",
+      "before_sha256": "f4e67c6d4f1c3f76fb71d482d337c1ba43e6c9b5107966e70e4d5103c2070976",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "f4e67c6d4f1c3f76fb71d482d337c1ba43e6c9b5107966e70e4d5103c2070976",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       exomem.find.RetrievalIndexWarming: {\"code\":\"RETRIEVAL_INDEX_WARMING\",\"complete\":false,\"error_code\":\"RETRIEVAL_INDEX_WARMING\",\"message\":\"the maintained semantic recall index is still warming; retry the exact recall shortly\",\"ok\":false,\"remediation\":\"Retry the exact recall after the maintained semantic index finishes warming.\",\"retry_after_ms\":250,\"site\":\"reference_sidecar\",\"status\":\"warming\"}\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_enrichment_callers_keep_answering_with_a_cold_sidecar\n1 failed in 1.61s"
+    },
+    {
+      "id": "L3-H1b-current",
+      "mechanism": "recall serializer threads the reader context to refs",
+      "node": "tests/test_recall_walk_sentinel.py::test_cold_refs_sidecar_declines_instead_of_walking",
+      "path": "src/exomem/memory_refs.py",
+      "before_sha256": "f4e67c6d4f1c3f76fb71d482d337c1ba43e6c9b5107966e70e4d5103c2070976",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "f4e67c6d4f1c3f76fb71d482d337c1ba43e6c9b5107966e70e4d5103c2070976",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       Failed: DID NOT RAISE <class 'exomem.find.RetrievalIndexWarming'>\n=========================== short test summary info ============================\nFAILED tests/test_recall_walk_sentinel.py::test_cold_refs_sidecar_declines_instead_of_walking\n1 failed in 2.46s"
+    },
+    {
+      "id": "L3-H1c-current",
+      "mechanism": "managed missing refs return before canonical-path walk",
+      "node": "tests/test_recall_read_cache_custody.py::test_a_widened_recall_does_not_walk_for_an_out_of_kb_hit",
+      "path": "src/exomem/memory_refs.py",
+      "before_sha256": "f4e67c6d4f1c3f76fb71d482d337c1ba43e6c9b5107966e70e4d5103c2070976",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "f4e67c6d4f1c3f76fb71d482d337c1ba43e6c9b5107966e70e4d5103c2070976",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: 1 scope enumerations\nE         <scratch>/recall-matrix/pytest/L3-H1c-current/test_a_widened_recall_does_not0/vault/Knowledge Base\nE       assert 1 == 0\nE        +  where 1 = <conftest.ScopeWalkSentinel object at 0x7fc9bc3a7e00>.count\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_a_widened_recall_does_not_walk_for_an_out_of_kb_hit\n1 failed in 2.00s"
+    },
+    {
+      "id": "L3-H1d-current",
+      "mechanism": "out-of-KB missing refs do not schedule an unhealable rebuild",
+      "node": "tests/test_recall_read_cache_custody.py::test_a_widened_recall_does_not_walk_for_an_out_of_kb_hit",
+      "path": "src/exomem/memory_refs.py",
+      "before_sha256": "f4e67c6d4f1c3f76fb71d482d337c1ba43e6c9b5107966e70e4d5103c2070976",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "f4e67c6d4f1c3f76fb71d482d337c1ba43e6c9b5107966e70e4d5103c2070976",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: a warm cell scheduled a knowledge-base rebuild to heal an out-of-KB path\nE       assert [PosixPath('/..._not0/vault')] == []\nE         \nE         Left contains one more item: PosixPath('<scratch>/recall-matrix/pytest/L3-H1d-current/test_a_widened_recall_does_not0/vault')\nE         Use -v to get more diff\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_a_widened_recall_does_not_walk_for_an_out_of_kb_hit\n1 failed in 2.01s"
+    },
+    {
+      "id": "L3-H2-current",
+      "mechanism": "absent catalogue has no custody opinion",
+      "node": "tests/test_recall_read_cache_custody.py::test_a_governed_write_with_no_catalogue_is_not_drift",
+      "path": "src/exomem/lexstore.py",
+      "before_sha256": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: an absent catalogue read as drift: (('lexical_corpus', 'Knowledge Base/Notes/Custody/custody-alpha.md'), ('eligibility_catalogue', 'Knowledge Base/Notes/Custody/custody-alpha.md'))\nE       assert (('lexical_co...dy-alpha.md')) == ()\nE         \nE         Left contains 2 more items, first extra item: ('lexical_corpus', 'Knowledge Base/Notes/Custody/custody-alpha.md')\nE         Use -v to get more diff\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_a_governed_write_with_no_catalogue_is_not_drift\n1 failed in 2.91s"
+    },
+    {
+      "id": "L3-LOW1-current",
+      "mechanism": "idle release does not count as custody rebuild",
+      "node": "tests/test_recall_read_cache_custody.py::test_a_correctness_eviction_does_not_discard_receipt_covered_pages",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: a reaper release was counted as a custody rebuild: {'frontmatter_cache': 1}\nE       assert {'frontmatter_cache': 1} == {}\nE         \nE         Left contains 1 more item:\nE         {'frontmatter_cache': 1}\nE         Use -v to get more diff\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_a_correctness_eviction_does_not_discard_receipt_covered_pages\n1 failed in 2.41s"
+    },
+    {
+      "id": "L3-LOW2-current",
+      "mechanism": "unavailable custody fails the relevant scopes closed",
+      "node": "tests/test_recall_read_cache_custody.py::test_custody_that_cannot_be_applied_fails_the_scope_closed",
+      "path": "src/exomem/index_sync.py",
+      "before_sha256": "e4e21b4bb3d229c3d02fd9dce762a54cbfaa75642a6a6bf41f2aea658d94837e",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "e4e21b4bb3d229c3d02fd9dce762a54cbfaa75642a6a6bf41f2aea658d94837e",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: custody could not be applied and nothing was invalidated\nE       assert ()\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_custody_that_cannot_be_applied_fails_the_scope_closed\n1 failed in 2.73s"
+    },
+    {
+      "id": "L3-M1-current",
+      "mechanism": "all registered custody seams apply receipt paths",
+      "node": "tests/test_recall_read_cache_custody.py::test_a_move_retires_the_old_row_and_creates_the_new_one",
+      "path": "src/exomem/freshness.py",
+      "before_sha256": "38e97f124a9ce6bf8627986620ccc876a7faac56f022f08d343408f78e9f3cdf",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "38e97f124a9ce6bf8627986620ccc876a7faac56f022f08d343408f78e9f3cdf",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE           AssertionError: frontmatter_cache did not retire the moved page's old row\nE           assert False\nE            +  where False = any(<generator object test_a_move_retires_the_old_row_and_creates_the_new_one.<locals>.<genexpr> at 0x7c347deb4040>)\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_a_move_retires_the_old_row_and_creates_the_new_one\n1 failed in 6.03s"
+    },
+    {
+      "id": "L3-M2-current",
+      "mechanism": "receipt custody does not take whole-scope drift path",
+      "node": "tests/test_recall_read_cache_custody.py::test_one_governed_write_updates_only_its_rows_in_every_substrate_cache",
+      "path": "src/exomem/freshness.py",
+      "before_sha256": "38e97f124a9ce6bf8627986620ccc876a7faac56f022f08d343408f78e9f3cdf",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "38e97f124a9ce6bf8627986620ccc876a7faac56f022f08d343408f78e9f3cdf",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: assert (('kb', 'gove...te_mismatch')) == ()\nE         \nE         Left contains 2 more items, first extra item: ('kb', 'governed_write_mismatch')\nE         Use -v to get more diff\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_one_governed_write_updates_only_its_rows_in_every_substrate_cache\n1 failed in 2.53s"
+    },
+    {
+      "id": "L3-M2b-current",
+      "mechanism": "correctness eviction keeps receipt-covered page cache",
+      "node": "tests/test_recall_read_cache_custody.py::test_a_correctness_eviction_does_not_discard_receipt_covered_pages",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: a correctness eviction discarded receipt-covered page rows\nE       assert 0 == 45\nE        +  where 0 = len(OrderedDict())\nE        +    where OrderedDict() = FrontmatterCache(entries=OrderedDict()).entries\nE        +      where FrontmatterCache(entries=OrderedDict()) = find_corpus.CACHE\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_a_correctness_eviction_does_not_discard_receipt_covered_pages\n1 failed in 2.15s"
+    },
+    {
+      "id": "L3-M3-current",
+      "mechanism": "frontmatter cache is registered in receipt custody fanout",
+      "node": "tests/test_recall_read_cache_custody.py::test_one_governed_write_updates_only_its_rows_in_every_substrate_cache",
+      "path": "src/exomem/find_corpus.py",
+      "before_sha256": "93878cdc84b3fb67895af85d19cdd467dd13b4b4291b937dcef5cc9b7f40a76d",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "93878cdc84b3fb67895af85d19cdd467dd13b4b4291b937dcef5cc9b7f40a76d",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE           AssertionError: frontmatter_cache did not take exact custody of the written page: CustodyReport(reason='governed_write', paths=('Knowledge Base/Notes/Custody/custody-alpha.md',), updated={'frontmatter_cache_muted': 1, 'lexical_corpus': 1, 'eligibility_catalogue': 1, 'reference_sidecar': 1}, retired={'frontmatter_cache_muted': 0, 'lexical_corpus': 0, 'eligibility_catalogue': 0, 'reference_sidecar': 0}, mismatches=(), rebuilt={})\nE           assert None == 1\nE            +  where None = <built-in method get of dict object at 0x71d8fa065d40>('frontmatter_cache')\nE            +    where <built-in method get of dict object at 0x71d8fa065d40> = {'eligibility_catalogue': 1, 'frontmatter_cache_muted': 1, 'lexical_corpus': 1, 'reference_sidecar': 1}.get\nE            +      where {'eligibility_catalogue': 1, 'frontmatter_cache_muted': 1, 'lexical_corpus': 1, 'reference_sidecar': 1} = CustodyReport(reason='governed_write', paths=('Knowledge Base/Notes/Custody/custody-alpha.md',), updated={'frontmatter...r_cache_muted': 0, 'lexical_corpus': 0, 'eligibility_catalogue': 0, 'reference_sidecar': 0}, mismatches=(), rebuilt={}).updated\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_one_governed_write_updates_only_its_rows_in_every_substrate_cache\n1 failed in 2.92s"
+    },
+    {
+      "id": "L3-M3-inert-current",
+      "mechanism": "frontmatter custody apply invalidates receipt paths",
+      "node": "tests/test_recall_read_cache_custody.py::test_one_governed_write_updates_only_its_rows_in_every_substrate_cache",
+      "path": "src/exomem/find_corpus.py",
+      "before_sha256": "93878cdc84b3fb67895af85d19cdd467dd13b4b4291b937dcef5cc9b7f40a76d",
+      "status": "survived",
+      "exit_code": 0,
+      "restore_sha256": "93878cdc84b3fb67895af85d19cdd467dd13b4b4291b937dcef5cc9b7f40a76d",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "1 passed in 2.14s"
+    },
+    {
+      "id": "L3-M3-inert-move-current",
+      "mechanism": "frontmatter custody removes retired receipt path",
+      "node": "tests/test_recall_read_cache_custody.py::test_a_move_retires_the_old_row_and_creates_the_new_one",
+      "path": "src/exomem/find_corpus.py",
+      "before_sha256": "93878cdc84b3fb67895af85d19cdd467dd13b4b4291b937dcef5cc9b7f40a76d",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "93878cdc84b3fb67895af85d19cdd467dd13b4b4291b937dcef5cc9b7f40a76d",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE           AssertionError: frontmatter_cache did not retire the moved page's old row\nE           assert False\nE            +  where False = any(<generator object test_a_move_retires_the_old_row_and_creates_the_new_one.<locals>.<genexpr> at 0x7a9085973880>)\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_a_move_retires_the_old_row_and_creates_the_new_one\n1 failed in 2.89s"
+    },
+    {
+      "id": "L3-M3",
+      "mechanism": "per-path eligibility custody repair",
+      "node": "tests/test_recall_read_cache_custody.py::test_one_governed_write_updates_only_its_rows_in_every_substrate_cache",
+      "path": "src/exomem/lexstore.py",
+      "before_sha256": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5",
+      "status": "survived",
+      "exit_code": 0,
+      "restore_sha256": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "1 passed in 3.47s"
+    },
+    {
+      "id": "L3-M3b-current",
+      "mechanism": "lexical fan-out degradation plus disabled lexical custody repair",
+      "node": "tests/test_recall_read_cache_custody.py::test_a_burst_of_distinct_writes_leaves_every_cache_row_current",
+      "paths": [
+        "src/exomem/index_sync.py",
+        "src/exomem/lexstore.py"
+      ],
+      "before_sha256": {
+        "src/exomem/index_sync.py": "e4e21b4bb3d229c3d02fd9dce762a54cbfaa75642a6a6bf41f2aea658d94837e",
+        "src/exomem/lexstore.py": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "red_outcome": "audit reported lexical_corpus and eligibility_catalogue mismatches for all three burst paths",
+      "mutations": [
+        {
+          "path": "src/exomem/index_sync.py",
+          "old": "        def lexical_dispatch():\n            return lexstore.upsert_after_write(vault_root, semantic_paths)\n",
+          "new": "        def lexical_dispatch():\n            return None  # mutation: fan-out leaves lexical rows stale\n"
+        },
+        {
+          "path": "src/exomem/lexstore.py",
+          "old": "    if not _custody_catalogue_live(vault_root):\n        return\n",
+          "new": "    if True:  # mutation: custody never repairs lexical rows\n        return\n"
+        }
+      ],
+      "restore_sha256": {
+        "src/exomem/index_sync.py": "e4e21b4bb3d229c3d02fd9dce762a54cbfaa75642a6a6bf41f2aea658d94837e",
+        "src/exomem/lexstore.py": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5"
+      },
+      "restore_exact": true,
+      "green_outcome": "restored delivery custody gate: 23 passed in 31.75s",
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: a burst left a cache row stale: (('lexical_corpus', 'Knowledge Base/Notes/Custody/custody-alpha.md'), ('lexical_corpus', 'Knowledge Base/Notes/Custody/custody-beta.md'), ('lexical_corpus', 'Knowledge Base/Notes/Custody/custody-gamma.md'), ('eligibility_catalogue', 'Knowledge Base/Notes/Custody/custody-alpha.md'), ('eligibility_catalogue', 'Knowledge Base/Notes/Custody/custody-beta.md'), ('eligibility_catalogue', 'Knowledge Base/Notes/Custody/custody-gamma.md'))\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_a_burst_of_distinct_writes_leaves_every_cache_row_current\n1 failed in 3.74s"
+    },
+    {
+      "id": "L3-M3c-current",
+      "mechanism": "lexical custody seam repairs a degraded fan-out",
+      "node": "tests/test_recall_read_cache_custody.py::test_a_burst_of_distinct_writes_leaves_every_cache_row_current",
+      "path": "src/exomem/index_sync.py",
+      "before_sha256": "e4e21b4bb3d229c3d02fd9dce762a54cbfaa75642a6a6bf41f2aea658d94837e",
+      "status": "survived",
+      "exit_code": 0,
+      "restore_sha256": "e4e21b4bb3d229c3d02fd9dce762a54cbfaa75642a6a6bf41f2aea658d94837e",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "1 passed in 4.06s"
+    },
+    {
+      "id": "L3-M4",
+      "mechanism": "cold reference sidecar declines before reader rebuild",
+      "node": "tests/test_recall_walk_sentinel.py::test_cold_refs_sidecar_declines_instead_of_walking",
+      "path": "src/exomem/memory_refs.py",
+      "before_sha256": "f4e67c6d4f1c3f76fb71d482d337c1ba43e6c9b5107966e70e4d5103c2070976",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "f4e67c6d4f1c3f76fb71d482d337c1ba43e6c9b5107966e70e4d5103c2070976",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       Failed: DID NOT RAISE <class 'exomem.find.RetrievalIndexWarming'>\n=========================== short test summary info ============================\nFAILED tests/test_recall_walk_sentinel.py::test_cold_refs_sidecar_declines_instead_of_walking\n1 failed in 3.02s"
+    },
+    {
+      "id": "L3-M4b-current",
+      "mechanism": "reference rebuild is single flight",
+      "node": "tests/test_recall_read_cache_custody.py::test_the_declined_refs_rebuild_is_single_flighted",
+      "path": "src/exomem/memory_refs.py",
+      "before_sha256": "f4e67c6d4f1c3f76fb71d482d337c1ba43e6c9b5107966e70e4d5103c2070976",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "f4e67c6d4f1c3f76fb71d482d337c1ba43e6c9b5107966e70e4d5103c2070976",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE           AssertionError: the rebuild is not single-flighted: (True, True)\nE           assert (True, True) == (True, False)\nE             \nE             At index 1 diff: True != False\nE             Use -v to get more diff\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_the_declined_refs_rebuild_is_single_flighted\n1 failed in 2.02s"
+    },
+    {
+      "id": "L3-M5",
+      "mechanism": "catalogue audit compares all eligibility metadata",
+      "node": "tests/test_recall_read_cache_custody.py::test_a_corrupted_filter_column_fails_the_audit_closed",
+      "path": "src/exomem/lexstore.py",
+      "before_sha256": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: ()\nE       assert ('eligibility_catalogue', 'Knowledge Base/Notes/Custody/custody-alpha.md') in ()\nE        +  where () = CustodyAudit(reason='filter_column', paths=('Knowledge Base/Notes/Custody/custody-alpha.md',), mismatches=(), invalidated=False).mismatches\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_a_corrupted_filter_column_fails_the_audit_closed\n1 failed in 2.54s"
+    },
+    {
+      "id": "L3-N1-current",
+      "mechanism": "receipt invalidation touches only named frontmatter rows",
+      "node": "tests/test_recall_read_cache_custody.py::test_one_governed_write_updates_only_its_rows_in_every_substrate_cache",
+      "path": "src/exomem/find_corpus.py",
+      "before_sha256": "93878cdc84b3fb67895af85d19cdd467dd13b4b4291b937dcef5cc9b7f40a76d",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "93878cdc84b3fb67895af85d19cdd467dd13b4b4291b937dcef5cc9b7f40a76d",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: a write to alpha evicted or re-parsed beta's row\nE       assert None is ParsedPage(path=PosixPath('<scratch>/recall-matrix/pytest/L3-N1-current/test_one_governed_write_update...57348.897797, snapshot_hash='704b8504de3c5417e51a2d053432260f9ffdd49aadffc53c354dff60f87da25e', frontmatter_valid=True)\nE        +  where None = <built-in method get of collections.OrderedDict object at 0x75c45f0596c0>((PosixPath('<scratch>/recall-matrix/pytest/L3-N1-current/test_one_governed_write_update0/vault') / 'Knowledge Base/Notes/Custody/custody-beta.md'))\nE        +    where <built-in method get of collections.OrderedDict object at 0x75c45f0596c0> = OrderedDict({PosixPath('<scratch>/recall-matrix/pytest/L3-N1-current/test_one_governed_write_update0/v...49.5994234, snapshot_hash='7ad9b76d3c62beadb5f4da00f8786b9829c13bf7859400b8502549a9d62d4abe', frontmatter_valid=True)}).get\nE        +      where OrderedDict({PosixPath('<scratch>/recall-matrix/pytest/L3-N1-current/test_one_governed_write_update0/v...49.5994234, snapshot_hash='7ad9b76d3c62beadb5f4da00f8786b9829c13bf7859400b8502549a9d62d4abe', frontmatter_valid=True)}) = FrontmatterCache(entries=OrderedDict({PosixPath('<scratch>/recall-matrix/pytest/L3-N1-current/test_one...9.5994234, snapshot_hash='7ad9b76d3c62beadb5f4da00f8786b9829c13bf7859400b8502549a9d62d4abe', frontmatter_valid=True)})).entries\nE        +        where FrontmatterCache(entries=OrderedDict({PosixPath('<scratch>/recall-matrix/pytest/L3-N1-current/test_one...9.5994234, snapshot_hash='7ad9b76d3c62beadb5f4da00f8786b9829c13bf7859400b8502549a9d62d4abe', frontmatter_valid=True)})) = find_corpus.CACHE\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_one_governed_write_updates_only_its_rows_in_every_substrate_cache\n1 failed in 2.59s"
+    },
+    {
+      "id": "L3-N3-current",
+      "mechanism": "custody runs only after final batch revalidation",
+      "node": "tests/test_recall_read_cache_custody.py::test_custody_is_applied_only_after_the_batch_revalidates",
+      "path": "src/exomem/index_sync.py",
+      "before_sha256": "e4e21b4bb3d229c3d02fd9dce762a54cbfaa75642a6a6bf41f2aea658d94837e",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "e4e21b4bb3d229c3d02fd9dce762a54cbfaa75642a6a6bf41f2aea658d94837e",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: the final revalidate was never reached\nE       assert 2 >= 3\n=========================== short test summary info ============================\nFAILED tests/test_recall_read_cache_custody.py::test_custody_is_applied_only_after_the_batch_revalidates\n1 failed in 2.89s"
+    },
+    {
+      "id": "L4-M1",
+      "mechanism": "default widening opt-in gate",
+      "node": "tests/test_recall_widening_opt_in.py::test_default_kb_recall_runs_no_widening_and_reports_it_skipped",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: a default `scope=\"kb\"` recall widened outside the knowledge base\nE       assert ['Reference/w...den-out-1.md'] == []\nE         \nE         Left contains 2 more items, first extra item: 'Reference/widen-out-0.md'\nE         Use -v to get more diff\n=========================== short test summary info ============================\nFAILED tests/test_recall_widening_opt_in.py::test_default_kb_recall_runs_no_widening_and_reports_it_skipped\n1 failed in 1.83s"
+    },
+    {
+      "id": "L4-M2",
+      "mechanism": "managed widening declines rather than offline fall-through",
+      "node": "tests/test_recall_widening_opt_in.py::test_requested_widening_declines_when_the_catalogue_is_not_live",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       exomem.find.RetrievalIndexWarming: {\"code\":\"RETRIEVAL_INDEX_WARMING\",\"complete\":false,\"error_code\":\"RETRIEVAL_INDEX_WARMING\",\"message\":\"the maintained semantic recall index is still warming; retry the exact recall shortly\",\"ok\":false,\"remediation\":\"Retry the exact recall after the maintained semantic index finishes warming.\",\"retry_after_ms\":250,\"site\":\"catalog_outcome\",\"status\":\"warming\"}\n=========================== short test summary info ============================\nFAILED tests/test_recall_widening_opt_in.py::test_requested_widening_declines_when_the_catalogue_is_not_live\n1 failed in 3.21s"
+    },
+    {
+      "id": "L4-M3",
+      "mechanism": "reserve keeps one KB slot",
+      "node": "tests/test_recall_widening_opt_in.py::test_requested_widening_keeps_the_reserve_under_limit_minus_one",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE           AssertionError: limit=1 reserved 1 out-of-KB slots: ['Reference/widen-out-0.md']\nE           assert 1 <= 0\nE            +  where 1 = len(['Reference/widen-out-0.md'])\nE            +  and   0 = max(0, (1 - 1))\n=========================== short test summary info ============================\nFAILED tests/test_recall_widening_opt_in.py::test_requested_widening_keeps_the_reserve_under_limit_minus_one\n1 failed in 2.09s"
+    },
+    {
+      "id": "L4-M4",
+      "mechanism": "managed reserve query remains path-restricted",
+      "node": "tests/test_recall_widening_opt_in.py::test_kb_ranking_is_identical_with_and_without_widening",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: knowledge-base pages leaked into the reserve: ['Knowledge Base/Notes/Insights/widen-kb-2.md']\nE       assert not ['Knowledge Base/Notes/Insights/widen-kb-2.md']\n=========================== short test summary info ============================\nFAILED tests/test_recall_widening_opt_in.py::test_kb_ranking_is_identical_with_and_without_widening\n1 failed in 2.03s"
+    },
+    {
+      "id": "L4-M5",
+      "mechanism": "skipped widening timing stage",
+      "node": "tests/test_recall_widening_opt_in.py::test_default_kb_recall_runs_no_widening_and_reports_it_skipped",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: the widening stage reported nothing at all; a stage that did not run must still say so. stages=['bm25', 'cache_lookup', 'clip', 'date_filter', 'filter_hits', 'freshness', 'freshness.recall_projection', 'fusion', 'graph', 'keyword', 'pending_visibility', 'recall_projection', 'release_gate', 'rerank', 'semantic.search', 'serialize', 'temporal', 'vector']\nE       assert 'outside_kb' in {'bm25': {'ms': 7.803, 'parent': 'semantic.search', 'source': 'index'}, 'cache_lookup': {'ms': 0.01, 'source': 'cache'}, 'clip': {'skipped': True, 'source': 'declined'}, 'date_filter': {'ms': 0.001, 'source': 'computed'}, ...}\n=========================== short test summary info ============================\nFAILED tests/test_recall_widening_opt_in.py::test_default_kb_recall_runs_no_widening_and_reports_it_skipped\n1 failed in 2.31s"
+    },
+    {
+      "id": "L4-M6",
+      "mechanism": "widening cache key",
+      "node": "tests/test_recall_widening_opt_in.py::test_kb_ranking_is_identical_with_and_without_widening",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: the widened call returned no out-of-KB hit; either the reserve did not run or it was served the unwidened cache entry\nE       assert []\nE        +  where [] = _outside_paths({'hits': [{'excerpt': '# Widen KB 0 zzwidentokenzz inside the knowledge base.', 'path': 'Knowledge Base/Notes/Insights...ecall_projection': {'calls': 2, 'ms': 0.309, 'parent': 'freshness', 'source': 'cache'}, ...}, 'total_ms': 15.625, ...}})\n=========================== short test summary info ============================\nFAILED tests/test_recall_widening_opt_in.py::test_kb_ranking_is_identical_with_and_without_widening\n1 failed in 2.37s"
+    },
+    {
+      "id": "L4-M7",
+      "mechanism": "catalogue restriction predicate",
+      "node": "tests/test_recall_widening_opt_in.py::test_offline_catalogue_rung_never_tags_a_kb_page_outside_kb",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: knowledge-base pages were tagged outside_kb: ['Knowledge Base/Notes/Insights/widen-kb-2.md']; all outside hits=['Knowledge Base/Notes/Insights/widen-kb-2.md']\nE       assert not ['Knowledge Base/Notes/Insights/widen-kb-2.md']\n=========================== short test summary info ============================\nFAILED tests/test_recall_widening_opt_in.py::test_offline_catalogue_rung_never_tags_a_kb_page_outside_kb\n1 failed in 1.88s"
+    },
+    {
+      "id": "L4-M8-adapted",
+      "mechanism": "offline lexical exception is degradation, not a decline",
+      "node": "tests/test_recall_widening_opt_in.py::test_an_offline_lexical_failure_degrades_rather_than_declines",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: an offline lexical failure was reported as a decline: {'ms': 0.332, 'source': 'declined'}\nE       assert 'declined' != 'declined'\n=========================== short test summary info ============================\nFAILED tests/test_recall_widening_opt_in.py::test_an_offline_lexical_failure_degrades_rather_than_declines\n1 failed in 2.41s"
+    },
+    {
+      "id": "L4-M8",
+      "mechanism": "offline lexical error degrades",
+      "node": "tests/test_recall_widening_opt_in.py::test_an_offline_lexical_failure_degrades_rather_than_declines",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "survived",
+      "exit_code": 0,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "1 passed in 2.14s"
+    },
+    {
+      "id": "L4-N1",
+      "mechanism": "outside KB prefix stripping",
+      "node": "tests/test_recall_widening_opt_in.py::test_kb_ranking_is_identical_with_and_without_widening",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: knowledge-base pages leaked into the reserve: ['Knowledge Base/Notes/Insights/widen-kb-2.md']\nE       assert not ['Knowledge Base/Notes/Insights/widen-kb-2.md']\n=========================== short test summary info ============================\nFAILED tests/test_recall_widening_opt_in.py::test_kb_ranking_is_identical_with_and_without_widening\n1 failed in 2.08s"
+    },
+    {
+      "id": "L4-N3b",
+      "mechanism": "unready reserve query declines",
+      "node": "tests/test_recall_widening_opt_in.py::test_requested_widening_declines_when_the_reserve_query_is_not_ready",
+      "path": "src/exomem/find.py",
+      "before_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3",
+      "restore_exact": true,
+      "run": "aggregate",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: {'ms': 13.518, 'source': 'index'}\nE       assert 'index' == 'declined'\nE         \nE         - declined\nE         + index\n=========================== short test summary info ============================\nFAILED tests/test_recall_widening_opt_in.py::test_requested_widening_declines_when_the_reserve_query_is_not_ready\n1 failed in 2.07s"
+    },
+    {
+      "id": "L2-M4-current",
+      "mechanism": "managed unsupported field falls through to the full-scan oracle",
+      "node": "tests/test_recall_indexed_eligibility.py::test_unsupported_field_is_rejected_at_compile_time_not_scanned",
+      "before_sha256": {
+        "src/exomem/find.py": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": {
+        "src/exomem/find.py": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3"
+      },
+      "restore_exact": true,
+      "run": "filter-completion",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: the managed read path called the full-scan oracle (_eligible_filter_paths) to answer a structured filter\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_unsupported_field_is_rejected_at_compile_time_not_scanned\n1 failed in 1.55s"
+    },
+    {
+      "id": "L2-N10-current",
+      "mechanism": "a $between day range is marked exact and becomes complementable",
+      "node": "tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field",
+      "before_sha256": {
+        "src/exomem/structured_filters.py": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": {
+        "src/exomem/structured_filters.py": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83"
+      },
+      "restore_exact": true,
+      "run": "filter-completion",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: AND with NOT $between: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/upd-instant-early.md', 'Knowledge Base/Notes/Adv/upd-instant.md']\nE       assert not [\"AND with NOT $between: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/upd-instant-early.md', 'Knowledge Base/Notes/Adv/upd-instant.md']\"]\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field\n1 failed in 9.96s"
+    },
+    {
+      "id": "L2-N11-current",
+      "mechanism": "a no-test predicate fails to record its permanent refusal shape",
+      "node": "tests/test_recall_indexed_eligibility.py::test_a_null_valued_date_comparison_is_refused_not_deferred",
+      "before_sha256": {
+        "src/exomem/structured_filters.py": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": {
+        "src/exomem/structured_filters.py": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83"
+      },
+      "restore_exact": true,
+      "run": "filter-completion",
+      "result_excerpt": "=================================== FAILURES ===================================\nE           AssertionError: EligibilityPlan(status='resolvable', unsupported_fields=(), expr=EligibilityConst(value=True), exact=False, has_unit_axis=False, inexpressible=())\nE           assert False\nE            +  where False = EligibilityPlan(status='resolvable', unsupported_fields=(), expr=EligibilityConst(value=True), exact=False, has_unit_axis=False, inexpressible=()).refuses\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_a_null_valued_date_comparison_is_refused_not_deferred\n1 failed in 2.22s"
+    },
+    {
+      "id": "L2-N2-current",
+      "mechanism": "pending rows outside KB are re-offered to a KB-scoped request",
+      "node": "tests/test_recall_indexed_eligibility.py::test_pending_custody_outside_the_kb_stays_out_of_a_kb_scoped_recall",
+      "before_sha256": {
+        "src/exomem/find.py": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": {
+        "src/exomem/find.py": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3"
+      },
+      "restore_exact": true,
+      "run": "filter-completion",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: assert {'Reference/o...e-pending.md'} == set()\nE         \nE         Extra items in the left set:\nE         'Reference/outside-pending.md'\nE         Use -v to get more diff\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_pending_custody_outside_the_kb_stays_out_of_a_kb_scoped_recall\n1 failed in 2.33s"
+    },
+    {
+      "id": "L2-N3-current",
+      "mechanism": "an equality SQL predicate loses its NULL guard under complement",
+      "node": "tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field",
+      "before_sha256": {
+        "src/exomem/lexstore.py": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": {
+        "src/exomem/lexstore.py": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5"
+      },
+      "restore_exact": true,
+      "run": "filter-completion",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: NOT page: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/type-int.md', 'Knowledge Base/Notes/Adv/type-list.md', 'Knowledge Base/Notes/Adv/type-null.md']\nE         NOT of OR: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/type-int.md', 'Knowledge Base/Notes/Adv/type-list.md', 'Knowledge Base/Notes/Adv/type-null.md']\nE       assert not [\"NOT page: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/type-int.md', 'Knowledge Base/Notes/Adv/type-list.md'...wledge Base/Notes/Adv/type-int.md', 'Knowledge Base/Notes/Adv/type-list.md', 'Knowledge Base/Notes/Adv/type-null.md']\"]\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field\n1 failed in 8.91s"
+    },
+    {
+      "id": "L2-N4-current",
+      "mechanism": "unit tag members retain authored rather than canonical spelling",
+      "node": "tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field",
+      "before_sha256": {
+        "src/exomem/lexstore.py": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": {
+        "src/exomem/lexstore.py": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5"
+      },
+      "restore_exact": true,
+      "run": "filter-completion",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: unit.tags/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         unit.tags/$in case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE       assert not [\"unit.tags/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\", \"unit.tags/$in case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\"]\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field\n1 failed in 9.21s"
+    },
+    {
+      "id": "L2-N5-current",
+      "mechanism": "unit-row EXISTS arm is omitted from catalogue eligibility",
+      "node": "tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field",
+      "before_sha256": {
+        "src/exomem/lexstore.py": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": {
+        "src/exomem/lexstore.py": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5"
+      },
+      "restore_exact": true,
+      "run": "filter-completion",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: unit.category/$eq: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         unit.category_key/$eq: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         unit.kind/$exists: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md', 'Knowledge Base/Notes/Insights/autovacuum-thresholds-prevent-table-bloat.md', 'Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md', 'Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md', 'Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization.md', 'Knowledge Base/Notes/Research/Health/metabolic-literacy-curriculum.md', 'Knowledge Base/Notes/Research/Infrastructure/vector-index-tuning-revisited.md', 'Knowledge Base/Notes/Research/Infrastructure/vector-index-tuning.md', 'Knowledge Base/Notes/Research/Project Alpha/engine-architecture.md']\nE         unit.form/$eq: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         unit.form/$ne: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md', 'Knowledge Base/Notes/Insights/autovacuum-thresholds-prevent-table-bloat.md', 'Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md', 'Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md', 'Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization.md', 'Knowledge Base/Notes/Research/Health/metabolic-literacy-curriculum.md', 'Knowledge Base/Notes/Research/Infrastructure/vector-index-tuning-revisited.md', 'Knowledge Base/Notes/Research/Infrastructure/vector-index-tuning.md', 'Knowledge Base/Notes/Research/Project Alpha/engine-architecture.md']\nE         unit.tags/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         unit.tags/$in case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         unit.context/$exists: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md', 'Knowledge Base/Notes/Insights/autovacuum-thresholds-prevent-table-bloat.md', 'Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md', 'Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md', 'Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization.md', 'Knowledge Base/Notes/Research/Health/metabolic-literacy-curriculum.md', 'Knowledge Base/Notes/Research/Infrastructure/vector-index-tuning-revisited.md', 'Knowledge Base/Notes/Research/Infrastructure/vector-index-tuning.md', 'Knowledge Base/Notes/Research/Project Alpha/engine-architecture.md']\nE         unit.check_by/$lt: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         unit.check_by/$gte: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         unit.check_by/$between: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         unit.check_by/$exists: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         AND page+unit: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md', 'Knowledge Base/Notes/Insights/autovacuum-thresholds-prevent-table-bloat.md', 'Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md', 'Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md', 'Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization.md']\nE         AND page+seeded unit: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         AND two unit axes on one row: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE       assert not [\"unit.category/$eq: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\", \"unit.category_key/$eq:...gine-architecture.md']\", \"unit.tags/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\", ...]\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field\n1 failed in 11.20s"
+    },
+    {
+      "id": "L2-N9-current",
+      "mechanism": "inexpressible complements fall through to retryable warming",
+      "node": "tests/test_recall_indexed_eligibility.py::test_a_complement_the_columns_cannot_express_is_refused_not_deferred",
+      "before_sha256": {
+        "src/exomem/find.py": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": {
+        "src/exomem/find.py": "9d1b16630849dc1333a0887d2879f67523a411b5d9542a6e3b2807b3e16547f3"
+      },
+      "restore_exact": true,
+      "run": "filter-completion",
+      "result_excerpt": "=================================== FAILURES ===================================\nE           exomem.find.RetrievalIndexWarming: {\"code\":\"RETRIEVAL_INDEX_WARMING\",\"complete\":false,\"error_code\":\"RETRIEVAL_INDEX_WARMING\",\"message\":\"the maintained semantic recall index is still warming; retry the exact recall shortly\",\"ok\":false,\"remediation\":\"Retry the exact recall after the maintained semantic index finishes warming.\",\"retry_after_ms\":250,\"site\":\"filter_eligibility_unnarrowed\",\"status\":\"warming\"}\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_a_complement_the_columns_cannot_express_is_refused_not_deferred\n1 failed in 3.14s"
+    },
+    {
+      "id": "L2-R1-current",
+      "mechanism": "catalogue scalar writer stops sharing evaluator case folding",
+      "node": "tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field",
+      "before_sha256": {
+        "src/exomem/structured_filters.py": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": {
+        "src/exomem/structured_filters.py": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83"
+      },
+      "restore_exact": true,
+      "run": "filter-completion",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: page.tags/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         page.tags/$in case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         page.tags/$all: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         page.tags/$contains: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         page.type/$eq: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         page.type/$eq case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         page.type/$eq spaced: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         page.type/$in list-valued: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         page.type/$in multi: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         page.status/$eq: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         page.status/$in list-valued: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         page.speakers/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         page.speakers/$in case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\nE         unit.tags/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         unit.tags/$in case: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/governed-unit.md']\nE         OR page+page: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         OR page+unit: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE         AND with NOT: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\nE       assert not [\"page.tags/$in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-lists.md']\", \"page.tags/$in case: index-onl...x-only=[] oracle-only=['Knowledge Base/Notes/Adv/case-scalars.md', 'Knowledge Base/Notes/Adv/spaced-scalars.md']\", ...]\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field\n1 failed in 5.90s"
+    },
+    {
+      "id": "L2-R2-current",
+      "mechanism": "an $in renderer drops its only query member",
+      "node": "tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field",
+      "before_sha256": {
+        "src/exomem/lexstore.py": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": {
+        "src/exomem/lexstore.py": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5"
+      },
+      "restore_exact": true,
+      "run": "filter-completion",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       exomem.find.RetrievalIndexWarming: {\"code\":\"RETRIEVAL_INDEX_WARMING\",\"complete\":false,\"error_code\":\"RETRIEVAL_INDEX_WARMING\",\"message\":\"the maintained semantic recall index is still warming; retry the exact recall shortly\",\"ok\":false,\"remediation\":\"Retry the exact recall after the maintained semantic index finishes warming.\",\"retry_after_ms\":250,\"site\":\"catalog_outcome\",\"status\":\"warming\"}\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field\n1 failed in 5.72s"
+    },
+    {
+      "id": "L2-R3-current",
+      "mechanism": "a day-scoped lower bound becomes exclusive",
+      "node": "tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field",
+      "before_sha256": {
+        "src/exomem/structured_filters.py": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": {
+        "src/exomem/structured_filters.py": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83"
+      },
+      "restore_exact": true,
+      "run": "filter-completion",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: page.updated/$gte: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/type-list.md']\nE         page.updated/$gte instant: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/upd-instant.md']\nE         page.updated/updated_after: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/type-list.md']\nE       assert not [\"page.updated/$gte: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/type-list.md']\", \"page.updated/$gte instant:...v/upd-instant.md']\", \"page.updated/updated_after: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/type-list.md']\"]\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field\n1 failed in 9.21s"
+    },
+    {
+      "id": "L2-R4-current",
+      "mechanism": "eligible scene-frame children no longer expand from their matched parent",
+      "node": "tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field",
+      "before_sha256": {
+        "src/exomem/lexstore.py": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": {
+        "src/exomem/lexstore.py": "4da72c369121355276ed999fb3739c7713f78a1997f0c017dec51296f47a71a5"
+      },
+      "restore_exact": true,
+      "run": "filter-completion",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: page.project/$exists: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/Media/talk-frame-0005.md']\nE         page.file_type/$not $in: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/Media/talk-frame-0005.md']\nE         scene-frame parent clause: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/Media/talk-frame-0005.md']\nE       assert not [\"page.project/$exists: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/Media/talk-frame-0005.md']\", \"page.file_t...05.md']\", \"scene-frame parent clause: index-only=[] oracle-only=['Knowledge Base/Notes/Adv/Media/talk-frame-0005.md']\"]\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_index_result_equals_the_oracle_for_every_seeded_field\n1 failed in 6.16s"
+    },
+    {
+      "id": "L2-R5-current",
+      "mechanism": "an inexact child is complemented as though its day seed were exact",
+      "node": "tests/test_recall_indexed_eligibility.py::test_a_complement_over_an_inexact_bound_declines_rather_than_under_selecting",
+      "before_sha256": {
+        "src/exomem/structured_filters.py": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83"
+      },
+      "status": "red",
+      "exit_code": 1,
+      "restore_sha256": {
+        "src/exomem/structured_filters.py": "4f18b26deb9945fcac3d4c42130a0c61bdd631941b521b4e93c2d5d708112e83"
+      },
+      "restore_exact": true,
+      "run": "filter-completion",
+      "result_excerpt": "=================================== FAILURES ===================================\nE       AssertionError: EligibilityPlan(status='resolvable', unsupported_fields=(), expr=EligibilityNot(child=AxisTest(axis='page.updated', op...rue, lower='2026-06-15', lower_op='>=', upper=None, upper_op='<=')), exact=True, has_unit_axis=False, inexpressible=())\nE       assert ()\nE        +  where () = EligibilityPlan(status='resolvable', unsupported_fields=(), expr=EligibilityNot(child=AxisTest(axis='page.updated', op...rue, lower='2026-06-15', lower_op='>=', upper=None, upper_op='<=')), exact=True, has_unit_axis=False, inexpressible=()).inexpressible\n=========================== short test summary info ============================\nFAILED tests/test_recall_indexed_eligibility.py::test_a_complement_over_an_inexact_bound_declines_rather_than_under_selecting\n1 failed in 2.42s"
+    }
+  ]
+}

@@ -1192,6 +1192,7 @@ def test_large_cold_vault_widening_returns_typed_warming_without_a_walk(
             query="widenneedle",
             mode="keyword",
             scope="kb",
+            widen_outside_kb=True,
         )
 
     assert walked == 0

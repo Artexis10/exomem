@@ -51,6 +51,7 @@ EVENT_CATALOG: dict[str, EventSpec] = {
     "mutation_lock_acquired": EventSpec(),
     "mutation_lock_released": EventSpec(),
     "mutation_lock_long_hold": EventSpec(),
+    "mutation_lock_refused": EventSpec(),
     "mutation_holder_unverified": EventSpec(),
     "lease_idle_released": EventSpec(),
     "lease_acquired": EventSpec(),

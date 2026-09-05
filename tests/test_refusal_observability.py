@@ -243,7 +243,12 @@ def test_every_declared_site_is_actually_used() -> None:
     A name nobody raises is dead documentation that will drift; a raise that
     uses a name outside the vocabulary escapes the closed set.
     """
-    source = SOURCE.read_text(encoding="utf-8")
+    # Reference resolution raises the same public refusal from its owning
+    # module; checking only find.py would call that live site dead code.
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (SOURCE, SOURCE.with_name("memory_refs.py"))
+    )
     used = set(re.findall(r'site="([a-z0-9_]+)"', source))
     declared = set(find_module.RETRIEVAL_WARMING_SITES)
 

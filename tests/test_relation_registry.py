@@ -80,6 +80,33 @@ def test_collisions_and_incomplete_semantics_are_stable_findings() -> None:
     ]
 
 
+def test_proposal_treats_whitespace_semantics_as_incomplete() -> None:
+    result = relation_registry.propose_extension(
+        relation_registry.core_registry(),
+        requested_label="applies_to",
+        parent="   ",
+        description="\n\t",
+        direction=" ",
+    )
+
+    assert {finding["code"] for finding in result["findings"]} == {
+        "incomplete_proposal"
+    }
+
+
+def test_complete_proposal_is_validated_by_canonical_registry_parser() -> None:
+    result = relation_registry.propose_extension(
+        relation_registry.core_registry(),
+        requested_label="applies_to",
+        parent="relates_to",
+        description="A complete reviewed meaning.",
+        direction="directed",
+        origins=["invented_origin"],
+    )
+
+    assert "invalid_origins" in {finding["code"] for finding in result["findings"]}
+
+
 @pytest.mark.parametrize(
     ("extensions", "collision_path", "expected"),
     [
@@ -237,6 +264,59 @@ def test_save_is_atomic_and_expected_hash_guarded(tmp_path: Path) -> None:
     assert path.read_bytes() == before
     saved = relation_registry.save_registry(vault, proposal, expected_hash=created["content_hash"])
     assert saved["previous_hash"] == created["content_hash"]
+
+
+@pytest.mark.parametrize("change", ["meaning", "alias", "definition"])
+def test_full_registry_save_enforces_semantic_continuity_and_no_hard_delete(
+    tmp_path: Path, change: str
+) -> None:
+    vault = tmp_path / "vault"
+    original = _proposal(
+        **{
+            "science.first": {
+                "parent": "supports",
+                "description": "Original meaning",
+                "aliases": ["first"],
+            },
+            "science.second": {
+                "parent": "relates_to",
+                "description": "Unrelated meaning",
+            },
+        }
+    )
+    created = relation_registry.save_registry(vault, original)
+    path = vault / created["path"]
+    before = path.read_bytes()
+
+    if change == "meaning":
+        candidate = _proposal(
+            **{
+                **original["extensions"],
+                "science.first": {
+                    **original["extensions"]["science.first"],
+                    "description": "Reinterpreted meaning",
+                },
+            }
+        )
+    elif change == "alias":
+        candidate = _proposal(
+            **{
+                **original["extensions"],
+                "science.first": {
+                    **original["extensions"]["science.first"],
+                    "aliases": [],
+                },
+            }
+        )
+    else:
+        candidate = _proposal(
+            **{"science.first": original["extensions"]["science.first"]}
+        )
+    with pytest.raises(ValueError, match="IMMUTABLE_RELATION_MEANING"):
+        relation_registry.save_registry(
+            vault, candidate, expected_hash=created["content_hash"]
+        )
+    assert path.read_bytes() == before
 
 
 def test_observed_relation_cannot_be_deleted() -> None:

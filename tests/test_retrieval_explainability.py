@@ -508,6 +508,7 @@ def test_auto_widened_hit_has_outside_lane_and_final_merge_evidence(
         graph=False,
         rerank=False,
         scope="kb",
+        widen_outside_kb=True,
         limit=2,
         detail="compact",
         explain=True,

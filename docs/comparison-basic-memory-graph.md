@@ -26,6 +26,15 @@
 > anchors, lifecycle status, relation-family profiles, or relation-bearing
 > blocks — a capability-existence statement needing no benchmark.
 
+## Current relation-evidence boundary
+
+This withdrawn comparison does not establish relation quality or ontology
+improvement. Exomem's current synthetic graph-value workflow keeps relation
+resolution, proposal, guarded registry save, and later edge acceptance as
+separate actions. A cohort census reports only aggregate `relation_counts`,
+`page_counts`, and `denominators`; it does not rank debt, expose note content,
+or automatically author, promote, or deprecate a relation.
+
 Measured 2026-07-16 against Exomem source package version `0.23.0` at the
 post-tag revision `7e89a3f7bff7` and Basic Memory `0.22.1` at pinned revision
 `0e59bbffaf7d`. The Exomem revision is current `main`, not the already-published

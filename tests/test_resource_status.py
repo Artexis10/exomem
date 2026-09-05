@@ -175,3 +175,58 @@ def test_status_cli_json_is_resource_status(monkeypatch, capsys, tmp_path: Path)
     assert data["mode"] == "normal"
     assert data["policy"]["retain_cpu_caches"] is False
     assert data["cuda"]["torch_imported"] is False
+
+
+def _hide_from_which(monkeypatch, name: str) -> None:
+    """Make `shutil.which` miss one name only.
+
+    `shutil.which` is a module global that pytest's own error reporting also
+    calls (`which("git", path=...)`). A blanket stub with an incompatible
+    signature turns any failure in these tests into an INTERNALERROR that hides
+    the real assertion.
+    """
+    real = resource_status.shutil.which
+
+    def _which(cmd, *args, **kwargs):
+        return None if cmd == name else real(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(resource_status.shutil, "which", _which)
+
+
+def test_nvidia_smi_is_found_off_path_under_wsl(monkeypatch, tmp_path: Path) -> None:
+    """WSL exposes the host driver but leaves it off a login shell's PATH.
+
+    Missing it makes the probe report `unknown`, which auto_quiet.decide() turns
+    into "pressure probe unavailable" — the detector fails silent, not loud.
+    """
+    shim = tmp_path / "nvidia-smi"
+    shim.write_text("#!/bin/sh\n")
+    shim.chmod(0o755)
+    _hide_from_which(monkeypatch, "nvidia-smi")
+    monkeypatch.setattr(resource_status, "_EXTRA_NVIDIA_SMI_PATHS", (str(shim),))
+
+    assert resource_status._find_nvidia_smi() == str(shim)
+
+
+def test_a_non_executable_fallback_is_not_treated_as_a_probe(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """os.X_OK, not existence: a present-but-unrunnable path is not a probe."""
+    shim = tmp_path / "nvidia-smi"
+    shim.write_text("#!/bin/sh\n")
+    shim.chmod(0o644)
+    _hide_from_which(monkeypatch, "nvidia-smi")
+    monkeypatch.setattr(resource_status, "_EXTRA_NVIDIA_SMI_PATHS", (str(shim),))
+
+    assert resource_status._find_nvidia_smi() is None
+
+
+def test_gpu_headroom_is_unknown_when_no_probe_exists(monkeypatch) -> None:
+    _forbid_torch_import(monkeypatch)
+    _hide_from_which(monkeypatch, "nvidia-smi")
+    monkeypatch.setattr(resource_status, "_EXTRA_NVIDIA_SMI_PATHS", ())
+
+    gpu = resource_status.gpu_headroom()
+
+    assert gpu["status"] == "unknown"
+    assert gpu["usable"] is None

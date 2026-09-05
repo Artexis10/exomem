@@ -30,7 +30,7 @@ def test_packaged_manifest_contains_every_source_controlled_asset() -> None:
     studio = files("exomem").joinpath("studio")
     manifest = json.loads(studio.joinpath("manifest.json").read_text(encoding="utf-8"))
 
-    assert manifest["version"] == 4
+    assert manifest["version"] == 5
     assert set(manifest["assets"]) == {
         "index.html",
         "styles.v2.css",
@@ -38,6 +38,8 @@ def test_packaged_manifest_contains_every_source_controlled_asset() -> None:
         "state.v2.js",
         "model.v1.js",
         "app.v4.js",
+        "model.v2.js",
+        "app.v5.js",
         "adoption.v1.js",
         "adoption-model.v1.js",
         "studio-icon.v1.svg",
@@ -53,7 +55,7 @@ def test_studio_shell_and_versioned_assets_have_cache_and_security_headers(
 
     redirect = client.get("/studio", follow_redirects=False)
     shell = client.get("/studio/")
-    script = client.get("/studio/assets/app.v4.js")
+    script = client.get("/studio/assets/app.v5.js")
 
     assert redirect.status_code == 307
     assert redirect.headers["location"] == "/studio/"
@@ -79,7 +81,7 @@ def test_shell_is_inert_and_client_keeps_key_session_scoped(
     all_assets = (
         shell
         + api_client
-        + client.get("/studio/assets/app.v4.js").text
+        + client.get("/studio/assets/app.v5.js").text
         + client.get("/studio/assets/adoption.v1.js").text
         + client.get("/studio/assets/adoption-model.v1.js").text
     )

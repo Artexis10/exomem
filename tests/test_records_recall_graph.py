@@ -77,15 +77,33 @@ def test_suppressed_refresh_purges_existing_graph_rows_when_disabled(
     conn = index._connect()
     try:
         with conn:
-            conn.execute(
-                "INSERT INTO graph_nodes(node_key, kind, path, anchor, title, text, source_hash, metadata) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("file:Knowledge Base/Records/Health/sessions/2026-08-02.md", "file", raw.relative_to(vault).as_posix(), "page", "Private workout", "Secret", "hash", "{}"),
+            epistemic_graph._insert_node(
+                conn,
+                epistemic_graph.GraphNode(
+                    node_key=epistemic_graph._file_key(raw.relative_to(vault).as_posix()),
+                    kind="file",
+                    path=raw.relative_to(vault).as_posix(),
+                    anchor="page",
+                    title="Private workout",
+                    text="Secret",
+                    source_hash="hash",
+                ),
             )
-            conn.execute(
-                "INSERT INTO graph_edges(edge_key, src_key, dst_key, relation_type, raw_relation, parent_relation, registry_status, registry_version, registry_hash, origin, source_path, source_anchor, metadata) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("edge", "file:Knowledge Base/Notes/Insight.md", "file:Knowledge Base/Records/Health/sessions/2026-08-02.md", "links_to", "links_to", None, "registered", 1, "hash", "test", "Knowledge Base/Notes/Insight.md", None, "{}"),
+            epistemic_graph._insert_edge(
+                conn,
+                epistemic_graph.GraphEdge(
+                    edge_key="edge",
+                    src_key="file:Knowledge Base/Notes/Insight.md",
+                    dst_key=epistemic_graph._file_key(raw.relative_to(vault).as_posix()),
+                    relation_type="links_to",
+                    raw_relation="links_to",
+                    parent_relation=None,
+                    registry_status="registered",
+                    registry_version=1,
+                    registry_hash="hash",
+                    origin="test",
+                    source_path="Knowledge Base/Notes/Insight.md",
+                ),
             )
     finally:
         conn.close()
@@ -461,15 +479,28 @@ def test_suppressed_path_purge_keeps_other_source_unit_collision_proof(
     conn = index._connect()
     try:
         with conn:
-            conn.execute(
-                "INSERT INTO graph_nodes(node_key, kind, path, anchor, title, text, source_hash, metadata) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (shared_unit, "finding", raw_rel, "unit", "raw", "raw", "hash", "{}"),
+            epistemic_graph._insert_node(
+                conn,
+                epistemic_graph.GraphNode(
+                    node_key=shared_unit, kind="finding", path=raw_rel,
+                    anchor="unit", title="raw", text="raw", source_hash="hash",
+                ),
             )
-            conn.execute(
-                "INSERT INTO graph_edges(edge_key, src_key, dst_key, relation_type, raw_relation, parent_relation, registry_status, registry_version, registry_hash, origin, source_path, source_anchor, metadata) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("visible-proof", shared_unit, epistemic_graph._file_key(visible_rel), "derived_from", "derived_from", None, "registered", 1, "hash", "semantic_unit", visible_rel, None, "{}"),
+            epistemic_graph._insert_edge(
+                conn,
+                epistemic_graph.GraphEdge(
+                    edge_key="visible-proof",
+                    src_key=shared_unit,
+                    dst_key=epistemic_graph._file_key(visible_rel),
+                    relation_type="derived_from",
+                    raw_relation="derived_from",
+                    parent_relation=None,
+                    registry_status="registered",
+                    registry_version=1,
+                    registry_hash="hash",
+                    origin="semantic_unit",
+                    source_path=visible_rel,
+                ),
             )
         index._delete_path(conn, raw_rel)
         remaining = conn.execute(
@@ -496,10 +527,12 @@ def test_collision_override_allows_only_proven_current_endpoint(tmp_path: Path) 
     conn = index._connect()
     try:
         with conn:
-            conn.execute(
-                "INSERT INTO graph_nodes(node_key, kind, path, anchor, title, text, source_hash, metadata) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (shared_unit, "finding", raw_rel, "unit", "raw", "raw", "hash", "{}"),
+            epistemic_graph._insert_node(
+                conn,
+                epistemic_graph.GraphNode(
+                    node_key=shared_unit, kind="finding", path=raw_rel,
+                    anchor="unit", title="raw", text="raw", source_hash="hash",
+                ),
             )
         assert not epistemic_graph._edge_recall_allowed(conn, vault, edge)
         assert epistemic_graph._edge_recall_allowed(

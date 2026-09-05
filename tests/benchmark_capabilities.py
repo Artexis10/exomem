@@ -465,6 +465,47 @@ _BROKER_SANDBOX_REFUSAL = re.compile(
 )
 
 
+#: The reserved-path substrate's refusals when its backend cannot anchor a
+#: root. Matched on the sentences that name the acquisition, never on a bare
+#: `RuntimeError` or `OSError`: a root that genuinely cannot be opened is what
+#: a real path-safety finding looks like, and the same call reports both.
+_HELD_FILESYSTEM_REFUSAL = re.compile(
+    r"(?:could not|cannot) acquire the vault"
+    r"|held filesystem route is unavailable"
+)
+
+
+def has_held_filesystem_backend() -> bool:
+    """True where exomem ships a held-filesystem backend for this platform.
+
+    A build fact, not a vault fact. `held_fs.probe` asks whether one root can
+    support the primitives and can differ per filesystem; this asks whether the
+    platform has an implementation at all. Linux and Windows do; darwin has
+    none, so every governed write there refuses at the reserved-path root.
+    """
+    from exomem import held_fs
+
+    return held_fs.platform_support().supported
+
+
+def declares_absent_held_filesystem(error: BaseException | None) -> bool:
+    """True when *error* is the reserved-path substrate declaring no backend.
+
+    Deliberately narrow. It does NOT match the graph-epoch incoherence that
+    follows on a platform with no backend: that state is genuinely incoherent,
+    and matching a downstream symptom would mask the lineage defects this
+    repository has actually had. Only the refusals that name the acquisition
+    are a missing capability speaking for itself.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if _HELD_FILESYSTEM_REFUSAL.search(str(error)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
 def declares_absent_directory_fd(error: BaseException | None) -> bool:
     """True when *error* is the epistemic harness declaring `openat` absent.
 

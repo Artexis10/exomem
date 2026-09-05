@@ -312,6 +312,7 @@ def test_default_scope_auto_widen_keeps_safe_category_plan_indexed(
         tmp_path,
         query="shared needle",
         scope="kb",
+        widen_outside_kb=True,
         mode="keyword",
         graph=False,
         result_level="page",

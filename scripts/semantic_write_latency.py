@@ -23,6 +23,7 @@ if str(SRC) not in sys.path:
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import managed_recall  # noqa: E402
 import scratch_root  # noqa: E402
 from synth_vault import gen_dense_vault  # noqa: E402
 
@@ -378,55 +379,13 @@ def _measure_fts5_visibility(
         return (time.perf_counter() - visible_started) * 1_000.0
 
 
-def _enter_managed_recall(vault_root: Path) -> None:
-    """Stand up the admission a served process has, for this phase only.
-
-    The warm window is not the admission. `begin_warm`/`finish_warm` only open
-    and close the window; what actually admits retrieval is the *catalogue
-    proof* published inside it -- `readiness.admit_retrieval_proof`, which is
-    the sole writer of the `retrieval_catalog` event that
-    `readiness.retrieval_admission` reads. An earlier version of this function
-    opened and closed the window without ever publishing that proof, so it left
-    `_warm_finished` set with the event unset, which is precisely the
-    `unavailable` state, and the gate died at the assertion below within a
-    minute of starting.
-
-    So this delegates to `warmup.warm_retrieval_catalog`, the function the
-    served process itself calls, rather than restating an abbreviation of it.
-    That keeps the rebaseline, the live-projection requirement, the maintained
-    versus reference index distinction and the proof CAS in one place, and it
-    means this warm-up cannot drift away from the product's.
-
-    `EXOMEM_EAGER_BOOT` is set for the call because a benchmark needs the
-    synchronous contract: without it, an incomplete catalogue is delegated to
-    the background repair worker and the function returns False, leaving the
-    sampling loop to race a rebuild. With it, the repair is awaited and proven,
-    and a failure to converge raises here instead of quietly measuring the
-    wrong thing.
-    """
-    from exomem import warmup
-
-    lexstore.ensure_fresh(vault_root)
-    readiness.manage_runtime()
-    previous_eager = os.environ.get("EXOMEM_EAGER_BOOT")
-    os.environ["EXOMEM_EAGER_BOOT"] = "1"
-    readiness.begin_warm()
-    try:
-        warmup.warm_retrieval_catalog(vault_root)
-    finally:
-        readiness.finish_warm()
-        if previous_eager is None:
-            os.environ.pop("EXOMEM_EAGER_BOOT", None)
-        else:
-            os.environ["EXOMEM_EAGER_BOOT"] = previous_eager
-
-    admission = readiness.retrieval_admission(vault_root)
-    if not admission.get("admitted"):
-        # A gate that silently measured the offline walk instead of managed
-        # recall would report the wrong capability entirely.
-        raise RuntimeError(
-            f"managed recall admission was not granted: {admission}"
-        )
+#: The admission a served process has, standing for a measured phase.
+#: Shared with `live_write_acceptance.py` as one object rather than two
+#: agreeing copies -- the abbreviation this replaced was written twice and
+#: shipped the same unadmitted-catalogue defect twice. `managed_recall`
+#: carries the reasoning; this name stays because it is what this script's
+#: own nodes drive.
+_enter_managed_recall = managed_recall.enter_managed_recall
 
 
 def _drain_derived_custody(vault_root: Path, *, passes: int = 64) -> None:

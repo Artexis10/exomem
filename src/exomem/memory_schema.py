@@ -6,7 +6,7 @@ import datetime as dt
 import math
 import re
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,7 @@ import yaml
 from . import (
     epistemic_graph,
     relation_registry,
+    relation_vocabulary,
     semantic_language_registry,
     semantic_units,
     traversal_profiles,
@@ -27,6 +28,7 @@ from .kbdir import kb_dirname
 SCHEMA_VERSION = 1
 MIN_REQUIRED_SAMPLE = 5
 DEFAULT_RELATION_PROMOTION_THRESHOLD = 3
+RELATION_RAW_VARIANT_LIMIT = 5
 # Fixed generic description for reviewed-corpus category candidates. Inference
 # never infers semantics, so every proposed definition shares this public-safe
 # text; a human reviewer refines it before saving.
@@ -370,6 +372,8 @@ def infer_relation_registry(
     *,
     project: str | None = None,
     page_type: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     include_model_suggestions: bool = False,
     recurrence_threshold: int = DEFAULT_RELATION_PROMOTION_THRESHOLD,
 ) -> dict[str, Any]:
@@ -380,6 +384,16 @@ def infer_relation_registry(
     pages, observations = _scan_relation_observations(
         vault_root, project=project, page_type=page_type, registry=registry
     )
+    start = _origin_date_bound(date_from, "date_from")
+    end = _origin_date_bound(date_to, "date_to")
+    if start and end and start > end:
+        raise ValueError("INVALID_DATE_SCOPE: date_from must not be after date_to")
+    included_paths, denominators = _date_scoped_relation_pages(pages, start, end)
+    if start or end:
+        observations = [
+            item for item in observations if item["source_path"] in included_paths
+        ]
+    census = _relation_census(pages, observations, included_paths, denominators)
     grouped: dict[str, dict[str, Any]] = {}
     for item in observations:
         key = str(item["raw_relation"])
@@ -403,13 +417,73 @@ def infer_relation_registry(
             entry["examples"].append(example)
     counts = Counter(item["registry_status"] for item in observations)
     proposal = relation_registry_proposal(registry)
-    for item in grouped.values():
+    promotion_groups: dict[str, dict[str, Any]] = {}
+    for item in sorted(grouped.values(), key=lambda entry: entry["raw_relation"]):
+        alias = relation_registry.normalize_relation(item["raw_relation"])
+        entry = promotion_groups.setdefault(
+            alias,
+            {
+                "raw_relation": alias,
+                "registry_status": item["registry_status"],
+                "count": 0,
+                "examples": [],
+                "raw_variants": [],
+            },
+        )
+        entry["count"] += item["count"]
+        for example in item["examples"]:
+            if example not in entry["examples"] and len(entry["examples"]) < 5:
+                entry["examples"].append(example)
+        entry["raw_variants"].append(
+            {
+                "raw_relation": item["raw_relation"],
+                "count": item["count"],
+                "examples": list(item["examples"]),
+            }
+        )
+    promotion_candidates: list[dict[str, Any]] = []
+    eligible_candidates = [
+        item
+        for item in sorted(
+            promotion_groups.values(), key=lambda entry: entry["raw_relation"]
+        )
+        if item["registry_status"] == "unregistered"
+        and item["count"] >= recurrence_threshold
+    ]
+    reserved_identities = (
+        set(registry.keys)
+        | set(registry.aliases)
+        | {
+            relation_registry.normalize_relation(item["raw_relation"])
+            for item in eligible_candidates
+        }
+    )
+    for item in eligible_candidates:
         raw = item["raw_relation"]
-        if (
-            item["registry_status"] == "unregistered"
-            and item["count"] >= recurrence_threshold
-        ):
-            proposal["extensions"].setdefault(raw, {"parent": None, "description": None})
+        alias = relation_registry.normalize_relation(raw)
+        base = relation_registry.extension_key_for_label(alias)
+        canonical = base
+        suffix = 2
+        while canonical in reserved_identities:
+            canonical = f"{base}_{suffix}"
+            suffix += 1
+        reserved_identities.add(canonical)
+        promotion_candidates.append(
+            {
+                "canonical": canonical,
+                "aliases": [alias],
+                "parent": None,
+                "description": None,
+                "direction": None,
+                "count": item["count"],
+                "examples": list(item["examples"]),
+                "raw_variants": item["raw_variants"][:RELATION_RAW_VARIANT_LIMIT],
+                "raw_variants_total": len(item["raw_variants"]),
+                "raw_variants_truncated": (
+                    len(item["raw_variants"]) > RELATION_RAW_VARIANT_LIMIT
+                ),
+            }
+        )
     warnings: list[dict[str, str]] = []
     suggestions: list[dict[str, Any]] = []
     if include_model_suggestions:
@@ -426,6 +500,8 @@ def infer_relation_registry(
         "subject": "relations",
         "sample_size": len(pages),
         "observation_count": len(observations),
+        "date_denominators": denominators,
+        "census": census,
         "counts": {
             key: counts.get(key, 0)
             for key in (
@@ -460,6 +536,7 @@ def infer_relation_registry(
             grouped.values(), key=lambda item: (-item["count"], item["raw_relation"])
         ),
         "proposal": proposal,
+        "promotion_candidates": promotion_candidates,
         "content_hash": registry.extension_hash,
         "warnings": warnings,
         "model_suggestions": suggestions,
@@ -467,6 +544,104 @@ def infer_relation_registry(
         if include_model_suggestions
         else None,
     }
+
+
+def _relation_census(
+    pages: list[Any],
+    observations: list[dict[str, Any]],
+    included_paths: set[str],
+    denominators: dict[str, int],
+) -> dict[str, dict[str, int]]:
+    """Return aggregate-only relation evidence for the selected page cohort."""
+    relation_counts = {
+        "core": 0,
+        "extension": 0,
+        "deprecated": 0,
+        "generic": 0,
+        "unregistered": 0,
+    }
+    authored_paths: set[str] = set()
+    for item in observations:
+        authored_paths.add(str(item["source_path"]))
+        status = item["registry_status"]
+        canonical = item["canonical"]
+        if status == "deprecated":
+            relation_counts["deprecated"] += 1
+        elif status == "unregistered":
+            relation_counts["unregistered"] += 1
+        elif canonical == "relates_to":
+            relation_counts["generic"] += 1
+        elif status == "core":
+            relation_counts["core"] += 1
+        elif status in {"extension", "alias"}:
+            relation_counts["extension"] += 1
+
+    cohort_pages = [page for page in pages if page.rel_path in included_paths]
+    return {
+        "relation_counts": relation_counts,
+        "page_counts": {
+            "zero_authored_relation_rows": sum(
+                page.rel_path not in authored_paths for page in cohort_pages
+            ),
+            "zero_body_connections": sum(
+                not vault.find_body_wikilinks(page.body) for page in cohort_pages
+            ),
+        },
+        "denominators": dict(denominators),
+    }
+
+
+def _origin_date_bound(value: str | None, name: str) -> dt.date | None:
+    if value is None:
+        return None
+    try:
+        return dt.date.fromisoformat(str(value))
+    except ValueError as exc:
+        raise ValueError(f"INVALID_DATE_SCOPE: {name} must be an ISO date") from exc
+
+
+def _date_scoped_relation_pages(
+    pages: list[Any], start: dt.date | None, end: dt.date | None
+) -> tuple[set[str], dict[str, int]]:
+    included: set[str] = set()
+    denominators = {
+        "sampled": len(pages),
+        "included": 0,
+        "undated": 0,
+        "excluded": 0,
+    }
+    for page in pages:
+        date = _frontmatter_origin_date(page.frontmatter.get("created"))
+        if date is None:
+            date = _frontmatter_origin_date(page.frontmatter.get("captured"))
+        if date is None:
+            denominators["undated"] += 1
+            if start is None and end is None:
+                included.add(page.rel_path)
+            continue
+        if (start and date < start) or (end and date > end):
+            denominators["excluded"] += 1
+            continue
+        denominators["included"] += 1
+        included.add(page.rel_path)
+    return included, denominators
+
+
+def _frontmatter_origin_date(value: Any) -> dt.date | None:
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip()
+    try:
+        return dt.date.fromisoformat(text)
+    except ValueError:
+        try:
+            return dt.datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+        except ValueError:
+            return None
 
 
 def relation_observations(
@@ -482,6 +657,206 @@ def relation_observations(
         page_type=page_type,
         registry=registry,
     )[1]
+
+
+def _normalize_indexed_relation(
+    raw_relation: object,
+    authored_line: object = None,
+) -> str:
+    """Recover the authored label, then use the registry's canonical normalizer.
+
+    Markdown parsing stores hyphens as underscores in ``raw_relation``. The
+    graph's persisted source-line provenance keeps the original spelling and
+    distinguishes authored ``applies-----to`` from authored ``applies__to``.
+    Rows without that provenance use their exact stored spelling; guessing a
+    lossy origin would incorrectly merge valid authored underscore runs.
+    """
+    stored = str(raw_relation or "")
+    authored = _authored_note_relation_label(str(authored_line or ""), stored)
+    return relation_registry.normalize_relation(authored)
+
+
+def _register_indexed_relation_normalizer(snapshot: Any) -> None:
+    """Register the deterministic scalar on the existing read snapshot."""
+    registrar = getattr(snapshot, "create_function", None)
+    if not callable(registrar):
+        raise TypeError("current graph snapshot cannot register SQLite scalars")
+    registrar(
+        "exomem_normalize_relation",
+        2,
+        _normalize_indexed_relation,
+        deterministic=True,
+    )
+
+
+def indexed_relation_observations(
+    vault_root: Path,
+    *,
+    raw_relations: Iterable[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict[str, Any] | None:
+    """Read recurrence from one current graph snapshot, or report unavailable.
+
+    This is the hot-path counterpart to :func:`relation_observations`: it never
+    builds an index, scans Markdown, or invokes embeddings. Callers may pass a
+    bounded set of just-parsed raw labels for a point lookup. Counts and paging
+    happen inside SQLite; Python sees only one bounded group page and at most
+    five distinct examples per returned group. ``None`` means a current
+    projection was unavailable.
+    """
+    from .epistemic_graph import EpistemicGraphIndex
+
+    relation_vocabulary.validate_candidate_limit(limit)
+    if type(offset) is not int or offset < 0:
+        raise ValueError("RELATION_CONTINUATION_INVALID: invalid observation offset")
+    try:
+        start = dt.date.fromisoformat(date_from) if date_from is not None else None
+        end = dt.date.fromisoformat(date_to) if date_to is not None else None
+    except ValueError as exc:
+        raise ValueError("INVALID_DATE_SCOPE: date bounds must be ISO dates") from exc
+    if start is not None and end is not None and start > end:
+        raise ValueError("INVALID_DATE_SCOPE: date_from must not be after date_to")
+    requested = tuple(
+        sorted(
+            {
+                relation_registry.normalize_relation(item)
+                for item in (raw_relations or ())
+                if relation_registry.normalize_relation(item)
+            }
+        )
+    )
+    try:
+        snapshot = EpistemicGraphIndex(vault_root)._open_read_snapshot()
+        if snapshot is None:
+            return None
+        try:
+            metadata_row = snapshot.execute(
+                "SELECT COUNT(*) FROM pragma_table_info('graph_edges') "
+                "WHERE name = 'metadata'"
+            ).fetchone()
+            has_authored_provenance = bool(metadata_row and metadata_row[0])
+            _register_indexed_relation_normalizer(snapshot)
+            authored_line_sql = (
+                "json_extract(metadata, '$.line')"
+                if has_authored_provenance
+                else "NULL"
+            )
+            normalized_relation_sql = (
+                f"exomem_normalize_relation(raw_relation, {authored_line_sql})"
+            )
+            predicate = "registry_status = 'unregistered'"
+            parameters: tuple[Any, ...] = ()
+            if raw_relations is not None:
+                if not requested:
+                    return {
+                        "items": [],
+                        "total": 0,
+                        "returned": 0,
+                        "omitted": 0,
+                        "offset": offset,
+                    }
+                predicate += (
+                    f" AND {normalized_relation_sql} IN ("
+                    + ",".join("?" for _ in requested)
+                    + ")"
+                )
+                parameters = requested
+            if start is not None:
+                predicate += (
+                    " AND EXISTS (SELECT 1 FROM graph_nodes AS source "
+                    "WHERE source.kind = 'file' AND source.path = graph_edges.source_path "
+                    "AND source.origin_date >= ?)"
+                )
+                parameters = (*parameters, start.isoformat())
+            if end is not None:
+                predicate += (
+                    " AND EXISTS (SELECT 1 FROM graph_nodes AS source "
+                    "WHERE source.kind = 'file' AND source.path = graph_edges.source_path "
+                    "AND source.origin_date <= ?)"
+                )
+                parameters = (*parameters, end.isoformat())
+            total_row = snapshot.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM (
+                    SELECT {normalized_relation_sql} AS normalized_relation
+                    FROM graph_edges
+                    WHERE {predicate}
+                    GROUP BY normalized_relation
+                )
+                """,
+                parameters,
+            ).fetchone()
+            total = int(total_row[0]) if total_row is not None else 0
+            group_rows = snapshot.execute(
+                f"""
+                SELECT {normalized_relation_sql} AS normalized_relation,
+                       COUNT(*) AS occurrence_count
+                FROM graph_edges
+                WHERE {predicate}
+                GROUP BY normalized_relation
+                ORDER BY occurrence_count DESC, normalized_relation
+                LIMIT ? OFFSET ?
+                """,
+                (*parameters, limit, offset),
+            ).fetchall()
+            items: list[dict[str, Any]] = [
+                {
+                    "raw_relation": str(raw_relation),
+                    "registry_status": "unregistered",
+                    "count": int(count),
+                    "examples": [],
+                }
+                for raw_relation, count in group_rows
+            ]
+            if items:
+                page_relations = tuple(item["raw_relation"] for item in items)
+                example_rows = snapshot.execute(
+                    f"""
+                    WITH distinct_examples AS (
+                        SELECT DISTINCT
+                               {normalized_relation_sql} AS normalized_relation,
+                               source_path,
+                               source_anchor
+                        FROM graph_edges
+                        WHERE {predicate}
+                          AND {normalized_relation_sql} IN (
+                              {",".join("?" for _ in page_relations)}
+                          )
+                    ), ranked_examples AS (
+                        SELECT normalized_relation, source_path, source_anchor,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY normalized_relation
+                                   ORDER BY source_path, COALESCE(source_anchor, '')
+                               ) AS example_rank
+                        FROM distinct_examples
+                    )
+                    SELECT normalized_relation, source_path, source_anchor
+                    FROM ranked_examples
+                    WHERE example_rank <= 5
+                    ORDER BY normalized_relation, example_rank
+                    """,
+                    (*parameters, *page_relations),
+                ).fetchall()
+                by_relation = {item["raw_relation"]: item for item in items}
+                for raw_relation, source_path, source_anchor in example_rows:
+                    by_relation[str(raw_relation)]["examples"].append(
+                        {"path": str(source_path), "anchor": source_anchor}
+                    )
+        finally:
+            snapshot.close()
+    except Exception:  # noqa: BLE001 - optional recurrence must never break a caller
+        return None
+    return {
+        "items": items,
+        "total": total,
+        "returned": len(items),
+        "omitted": max(total - len(items), 0),
+        "offset": offset,
+    }
 
 
 def _scan_relation_observations(
@@ -527,7 +902,7 @@ def _scan_relation_observations(
                     )
                 )
         for relation in document.note_relations:
-            raw = relation.kind
+            raw = _authored_note_relation_label(relation.raw, relation.kind)
             resolution = registry.resolve(
                 raw,
                 project=page_project,
@@ -619,7 +994,6 @@ def relation_registry_proposal(registry: relation_registry.RelationRegistry) -> 
         if item.family and item.parent and item.family != registry.core[item.parent].family:
             value["family"] = item.family
         for field, candidate in (
-            ("direction", item.direction),
             ("inverse", item.inverse),
             ("origins", sorted(item.origins)),
             ("aliases", list(item.aliases)),
@@ -630,6 +1004,10 @@ def relation_registry_proposal(registry: relation_registry.RelationRegistry) -> 
         ):
             if candidate not in (None, [], "active", "directed", ["semantic_relation"]):
                 value[field] = candidate
+        # Direction is meaning-bearing. Omitting the format default is unsafe
+        # when a directed extension refines symmetric ``relates_to``: loading
+        # the emitted proposal would silently inherit the parent's direction.
+        value["direction"] = item.direction
         scope = {}
         if item.projects:
             scope["projects"] = sorted(item.projects)
@@ -1045,13 +1423,18 @@ def _observation(
     path: str, anchor: str, raw: str, resolution: relation_registry.RelationResolution
 ) -> dict[str, Any]:
     return {
-        "raw_relation": relation_registry.normalize_relation(raw),
+        "raw_relation": raw,
         "canonical": resolution.canonical,
         "parent": resolution.parent,
         "registry_status": resolution.status,
         "source_path": path,
         "source_anchor": anchor,
     }
+
+
+def _authored_note_relation_label(raw: str, fallback: str) -> str:
+    match = re.match(r"^\s*[-*+]\s+([a-z][a-z0-9_.-]{1,80})", raw, re.IGNORECASE)
+    return match.group(1) if match else fallback
 
 
 def save_contract(

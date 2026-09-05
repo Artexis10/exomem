@@ -173,6 +173,7 @@ class ContenderRun:
     fingerprint: dict[str, Any] = field(default_factory=dict)
     index_duration_ms: float | None = None
     preflight_valid: bool = True
+    relation_lifecycle: dict[str, Any] = field(default_factory=dict)
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -192,6 +193,7 @@ class ContenderRun:
                 round(self.index_duration_ms, 3) if self.index_duration_ms is not None else None
             ),
             "preflight_valid": self.preflight_valid,
+            "relation_lifecycle": self.relation_lifecycle,
         }
 
 
@@ -260,6 +262,7 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
         "datasets",
         "media",
         "tasks",
+        "relation_lifecycle",
     }
     missing = required - set(data)
     if missing:
@@ -269,12 +272,15 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
     note_ids = [str(note["id"]) for note in data["notes"]]
     task_ids = [str(task["id"]) for task in data["tasks"]]
     probe_ids = [str(probe["id"]) for probe in data["probes"]]
+    lifecycle_ids = [str(case["id"]) for case in data["relation_lifecycle"]["cases"]]
     if len(note_ids) != len(set(note_ids)):
         raise ValueError("local-core manifest note ids must be unique")
     if len(task_ids) != len(set(task_ids)):
         raise ValueError("local-core manifest task ids must be unique")
     if len(probe_ids) != len(set(probe_ids)):
         raise ValueError("local-core manifest probe ids must be unique")
+    if len(lifecycle_ids) != len(set(lifecycle_ids)):
+        raise ValueError("local-core relation lifecycle case ids must be unique")
     unknown_dimensions = {str(task["dimension"]) for task in data["tasks"]} - set(ALL_DIMENSIONS)
     if unknown_dimensions:
         raise ValueError(f"graph manifest has unknown dimensions: {sorted(unknown_dimensions)}")
@@ -1203,6 +1209,7 @@ def evaluate_local_core_gates(
     basic_results: dict[str, ProbeResult],
     preflight_valid: bool,
     profile: str,
+    relation_lifecycle: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if profile not in manifest["profiles"]:
         raise ValueError(f"unknown local-core profile: {profile}")
@@ -1228,6 +1235,17 @@ def evaluate_local_core_gates(
             "missing": missing,
             "failed": failed,
         }
+    if relation_lifecycle is not None:
+        lifecycle_checks = relation_lifecycle.get("checks") or {}
+        lifecycle_failed = sorted(
+            str(case_id) for case_id, passed in lifecycle_checks.items() if not passed
+        )
+        lifecycle_complete = bool(lifecycle_checks) and not lifecycle_failed
+        gates["lifecycle_integrity"]["relation_lifecycle"] = {
+            "passed": lifecycle_complete,
+            "failed": lifecycle_failed,
+        }
+        gates["lifecycle_integrity"]["passed"] &= lifecycle_complete
     paired_regressions = sorted(
         probe_id
         for probe_id, probe in probes.items()
@@ -1799,12 +1817,23 @@ def markdown_hashes(root: Path) -> dict[str, str]:
 
 
 def run_exomem_fixture(
-    manifest: dict[str, Any], corpus: RenderedCorpus, *, revision: str = ""
+    manifest: dict[str, Any],
+    corpus: RenderedCorpus,
+    *,
+    revision: str = "",
+    include_relation_lifecycle: bool = False,
 ) -> ContenderRun:
     from exomem import epistemic_graph
 
     before = corpus_hash(corpus.root)
     epistemic_graph.EpistemicGraphIndex(corpus.root).rebuild_all()
+    relation_lifecycle = (
+        run_relation_lifecycle_fixture(
+            manifest, corpus.root.parent / f"{corpus.root.name}-relation-lifecycle"
+        )
+        if include_relation_lifecycle
+        else {}
+    )
     cases: dict[str, CaseResult] = {}
     for task in manifest["tasks"]:
         if str(task["dimension"]) == "recall_visibility":
@@ -1836,6 +1865,1455 @@ def run_exomem_fixture(
         notes=["model-free in-process shared graph leaf"],
         renderer_parity=corpus.parity,
         fact_parity=corpus.fact_parity,
+        relation_lifecycle=relation_lifecycle,
+    )
+
+
+def _lifecycle_markdown_hash(root: Path) -> str:
+    """Hash only authored fixture Markdown, not derived graph state."""
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*.md")):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _lifecycle_registry_hash(root: Path) -> str:
+    from exomem import relation_registry
+
+    path = relation_registry.extension_registry_path(root)
+    return hashlib.sha256(path.read_bytes() if path.exists() else b"").hexdigest()
+
+
+def _lifecycle_note(root: Path, slug: str, text: str) -> str:
+    rel = f"Knowledge Base/Notes/Insights/{slug}.md"
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\n"
+        "type: insight\n"
+        "status: active\n"
+        "created: 2026-01-01\n"
+        "---\n\n"
+        f"# {slug.replace('-', ' ').title()}\n\n{text}\n\n## Relations\n",
+        encoding="utf-8",
+    )
+    return rel
+
+
+def _scripted_author_relation(root: Path, source: str, target: str, relation: str) -> None:
+    """A deliberately tiny caller decision; resolution never reaches this writer."""
+    from exomem import commands
+
+    target_link = _canonical_wikilink(target)
+    commands.op_edit_memory(
+        root,
+        path=source,
+        why="Synthetic lifecycle caller explicitly chose a truthful relation.",
+        operation={
+            "kind": "replace_string",
+            "old_string": "## Relations\n",
+            "new_string": f"## Relations\n- {relation} [[{target_link}]]\n",
+        },
+    )
+
+
+def _lifecycle_propose_and_save(
+    root: Path, *, label: str, description: str, parent: str = "relates_to"
+) -> str:
+    from exomem import commands
+
+    proposal = commands.op_schema_memory(
+        root,
+        subject="relations",
+        operation="propose-relation",
+        proposal={
+            "requested_label": label,
+            "parent": parent,
+            "description": description,
+            "direction": "directed",
+        },
+    )
+    if not proposal["valid"]:
+        raise ValueError(f"synthetic relation proposal failed: {proposal['findings']}")
+    commands.op_schema_memory(
+        root,
+        subject="relations",
+        operation="save-relations",
+        proposal=proposal["delta"],
+        expected_hash=proposal["content_hash"],
+        why="Synthetic graph-value lifecycle relation review.",
+    )
+    return f"vault.{label}"
+
+
+def _lifecycle_rebuild(root: Path) -> None:
+    from exomem import epistemic_graph, graph_sync
+
+    # A governed registry save may already have registered the one durable
+    # convergence job.  Wait only for that typed in-flight owner, then use the
+    # same public graph projection the benchmark subsequently queries.
+    for attempt in range(10):
+        try:
+            epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+            return
+        except graph_sync.GraphRebuildInProgress:
+            if attempt == 9:
+                raise
+            time.sleep(0.05)
+
+
+def _graph_relation_types(
+    root: Path,
+    path: str,
+    *,
+    trace: list[dict[str, Any]] | None = None,
+    connect: Any | None = None,
+) -> list[dict[str, Any]]:
+    from exomem import commands
+
+    arguments = {"operation": "graph-context", "path": path, "depth": 1}
+    if trace is not None:
+        trace.append({"surface": "connect_memory", **arguments})
+    payload = (connect or commands.op_connect_memory)(root, **arguments)
+    return list((payload.get("graph") or {}).get("edges", []))
+
+
+def _relation_filter_explanation(
+    root: Path,
+    relation: str,
+    *,
+    trace: list[dict[str, Any]] | None = None,
+    ask: Any | None = None,
+) -> list[dict[str, Any]]:
+    from exomem import commands
+
+    arguments = {
+        "query": "",
+        "relations": [relation],
+        "mode": "keyword",
+        "graph": False,
+        "explain": True,
+        "scope": "kb-only",
+    }
+    if trace is not None:
+        trace.append({"surface": "ask_memory", **arguments})
+    response = (ask or commands.op_ask_memory)(root, **arguments)
+    return list(response["hits"])
+
+
+def _lifecycle_graph_facts(edges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            key: edge.get(key)
+            for key in (
+                "source_path",
+                "dst_key",
+                "raw_relation",
+                "relation_type",
+                "origin",
+                "source_anchor",
+                "parent_relation",
+                "matched_via",
+                "requested_relation",
+                "resolved_relation",
+                "metadata",
+            )
+            if key in edge
+        }
+        for edge in edges
+    ]
+
+
+def _lifecycle_hit_facts(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "path": hit.get("path"),
+            "relation_match": dict(hit.get("relation_match") or {}),
+            "has_explanation": "ranking_explanation" in hit,
+        }
+        for hit in hits
+    ]
+
+
+def _lifecycle_resolution_facts(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "selected_relation": payload.get("selected_relation"),
+        "proposed_relation": payload.get("proposed_relation"),
+        "context": dict(payload.get("context") or {}),
+        "exact_matches": [dict(item) for item in payload.get("exact_matches") or []],
+    }
+
+
+def _lifecycle_error_code(exc: Exception) -> str:
+    code = getattr(exc, "code", None)
+    if code:
+        return str(code)
+    message = str(exc)
+    return message.partition(":")[0] or type(exc).__name__
+
+
+def _lifecycle_observed_leaf(
+    calls: list[dict[str, Any]],
+    *,
+    surface: str,
+    vault: str,
+    cases: tuple[str, ...],
+    arguments: dict[str, Any],
+    invoke: Any,
+) -> Any:
+    try:
+        payload = invoke()
+    except Exception as exc:
+        calls.append(
+            {
+                "surface": surface,
+                "vault": vault,
+                "cases": list(cases),
+                "arguments": arguments,
+                "outcome": {"error": _lifecycle_error_code(exc)},
+            }
+        )
+        raise
+    if surface == "ask_memory":
+        hits = list(payload["hits"])
+        outcome = {"hit_count": len(hits), "hits": _lifecycle_hit_facts(hits)}
+    elif arguments.get("operation") == "graph-context":
+        edges = list((payload.get("graph") or {}).get("edges", []))
+        outcome = {
+            "edge_count": len(edges),
+            "edges": _lifecycle_graph_facts(edges),
+        }
+    else:
+        resolution = _lifecycle_resolution_facts(payload)
+        outcome = {
+            "exact_match_count": len(resolution["exact_matches"]),
+            "resolution": resolution,
+        }
+    calls.append(
+        {
+            "surface": surface,
+            "vault": vault,
+            "cases": list(cases),
+            "arguments": arguments,
+            "outcome": outcome,
+        }
+    )
+    return payload
+
+
+def score_scripted_relation_decision(
+    *, selected_relation: str | None, authored_relation: str | None, truthful: bool
+) -> dict[str, bool]:
+    """Score the caller's explicit decision independently of resolver evidence."""
+    false_positive = bool(authored_relation) and not truthful
+    return {
+        "false_positive": false_positive,
+        "passed": selected_relation is None and not false_positive,
+    }
+
+
+def collect_relation_lifecycle_observation(manifest: dict[str, Any], root: Path) -> dict[str, Any]:
+    """Collect the governed lifecycle through observed public command leaves.
+
+    The corpus is deliberately tiny and entirely synthetic.  Candidate evidence
+    is recorded before the scripted caller performs a separate write so neither
+    resolver ordering nor a candidate's presence can inflate the graph score.
+    """
+    from exomem import commands, relation_registry
+    from exomem.cli_ops import OpError
+
+    required_cases = {
+        "policy-applicability-extension",
+        "core-part-of-reuse",
+        "alias-reuse-without-duplicate",
+        "honest-generic-relation",
+        "topical-proximity-abstains",
+        "extension-parent-rollup",
+        "survivor-directed-replacement",
+        "vault-registry-isolation",
+    }
+    declared_cases = {str(case["id"]) for case in manifest["relation_lifecycle"]["cases"]}
+    if declared_cases != required_cases:
+        raise ValueError("relation lifecycle manifest must declare the complete synthetic corpus")
+
+    root = Path(root)
+    public_calls: list[dict[str, Any]] = []
+    helper_claims: list[dict[str, Any]] = []
+
+    def observed_connect(
+        cases: tuple[str, ...], vault_root: Path, **arguments: Any
+    ) -> dict[str, Any]:
+        return _lifecycle_observed_leaf(
+            public_calls,
+            surface="connect_memory",
+            vault=Path(vault_root).name,
+            cases=cases,
+            arguments=dict(arguments),
+            invoke=lambda: commands.op_connect_memory(vault_root, **arguments),
+        )
+
+    def observed_ask(cases: tuple[str, ...], vault_root: Path, **arguments: Any) -> dict[str, Any]:
+        return _lifecycle_observed_leaf(
+            public_calls,
+            surface="ask_memory",
+            vault=Path(vault_root).name,
+            cases=cases,
+            arguments=dict(arguments),
+            invoke=lambda: commands.op_ask_memory(vault_root, **arguments),
+        )
+
+    primary = root / "primary"
+    primary.mkdir(parents=True, exist_ok=True)
+    policy = _lifecycle_note(
+        primary,
+        "policy",
+        "A synthetic organisation policy applies to a specific employee case.",
+    )
+    employee_case = _lifecycle_note(primary, "employee-case", "A synthetic employee case.")
+    part_child = _lifecycle_note(primary, "child-organisation", "A child organisation.")
+    part_parent = _lifecycle_note(primary, "parent-organisation", "A parent organisation.")
+    generic_left = _lifecycle_note(primary, "generic-left", "A durable but generic connection.")
+    generic_right = _lifecycle_note(primary, "generic-right", "The other generic connection.")
+    topical_left = _lifecycle_note(
+        primary, "topic-left", "Both notes mention synthetic leave policy."
+    )
+    _lifecycle_note(primary, "topic-right", "This note also mentions synthetic leave policy.")
+    predecessor = _lifecycle_note(primary, "old-applicability", "Historical applicability.")
+
+    # The policy observation predates review. It supplies recurrence/activation
+    # evidence but cannot itself select or register the extension.
+    _scripted_author_relation(primary, policy, employee_case, "applies_to")
+    # Establish the synthetic graph before the registry delta so the accepted
+    # save exercises the registry-rebind route rather than a first-build path.
+    _lifecycle_rebuild(primary)
+    before_resolution = {
+        "markdown": _lifecycle_markdown_hash(primary),
+        "registry": _lifecycle_registry_hash(primary),
+    }
+    policy_resolution = observed_connect(
+        ("policy-applicability-extension",),
+        primary,
+        operation="resolve-relation",
+        query="an organisation policy applies to a specific employee case",
+        requested_relation="applies_to",
+    )
+    after_resolution = {
+        "markdown": _lifecycle_markdown_hash(primary),
+        "registry": _lifecycle_registry_hash(primary),
+    }
+    canonical_applicability = _lifecycle_propose_and_save(
+        primary,
+        label="applies_to",
+        description="A synthetic organisation policy applies to a specific employee case.",
+    )
+    current = relation_registry.load_registry(primary)
+    commands.op_schema_memory(
+        primary,
+        subject="relations",
+        operation="save-relations",
+        proposal={"upsert": {canonical_applicability: {"aliases": ["policy_applies"]}}},
+        expected_hash=current.extension_hash,
+        why="Synthetic lifecycle adds a distinct clean authoring alias.",
+    )
+    policy_edges = _graph_relation_types(
+        primary,
+        policy,
+        trace=helper_claims,
+        connect=lambda vault_root, **arguments: observed_connect(
+            ("policy-applicability-extension", "extension-parent-rollup"),
+            vault_root,
+            **arguments,
+        ),
+    )
+    policy_filter = _relation_filter_explanation(
+        primary,
+        "applies_to",
+        trace=helper_claims,
+        ask=lambda vault_root, **arguments: observed_ask(
+            ("policy-applicability-extension",), vault_root, **arguments
+        ),
+    )
+    policy_canonical_filter = _relation_filter_explanation(
+        primary,
+        canonical_applicability,
+        trace=helper_claims,
+        ask=lambda vault_root, **arguments: observed_ask(
+            ("policy-applicability-extension",), vault_root, **arguments
+        ),
+    )
+    policy_parent_filter = _relation_filter_explanation(
+        primary,
+        "relates_to",
+        trace=helper_claims,
+        ask=lambda vault_root, **arguments: observed_ask(
+            ("policy-applicability-extension", "extension-parent-rollup"),
+            vault_root,
+            **arguments,
+        ),
+    )
+
+    part_before = {
+        "markdown": _lifecycle_markdown_hash(primary),
+        "registry": _lifecycle_registry_hash(primary),
+    }
+    part_resolution = observed_connect(
+        ("core-part-of-reuse",),
+        primary,
+        operation="resolve-relation",
+        query="a child organisation belongs to its parent organisation",
+        requested_relation="part_of",
+    )
+    part_after = {
+        "markdown": _lifecycle_markdown_hash(primary),
+        "registry": _lifecycle_registry_hash(primary),
+    }
+    _scripted_author_relation(primary, part_child, part_parent, "part_of")
+    part_edges = _graph_relation_types(
+        primary,
+        part_child,
+        trace=helper_claims,
+        connect=lambda vault_root, **arguments: observed_connect(
+            ("core-part-of-reuse",), vault_root, **arguments
+        ),
+    )
+
+    alias_before = _lifecycle_registry_hash(primary)
+    alias_resolution = observed_connect(
+        ("alias-reuse-without-duplicate",),
+        primary,
+        operation="resolve-relation",
+        query="a policy applies in a case",
+        requested_relation="policy_applies",
+    )
+    alias_proposal = commands.op_schema_memory(
+        primary,
+        subject="relations",
+        operation="propose-relation",
+        proposal={
+            "requested_label": "policy_applies",
+            "parent": "relates_to",
+            "description": "A duplicate synthetic applicability meaning.",
+            "direction": "directed",
+        },
+    )
+    alias_after = _lifecycle_registry_hash(primary)
+
+    generic_resolution = observed_connect(
+        ("honest-generic-relation",),
+        primary,
+        operation="resolve-relation",
+        query="a meaningful generic connection with no specific predicate",
+        requested_relation="relates_to",
+    )
+    _scripted_author_relation(primary, generic_left, generic_right, "relates_to")
+    generic_edges = _graph_relation_types(
+        primary,
+        generic_left,
+        trace=helper_claims,
+        connect=lambda vault_root, **arguments: observed_connect(
+            ("honest-generic-relation",), vault_root, **arguments
+        ),
+    )
+
+    topical_before = {
+        "markdown": _lifecycle_markdown_hash(primary),
+        "registry": _lifecycle_registry_hash(primary),
+    }
+    topical_resolution = observed_connect(
+        ("topical-proximity-abstains",),
+        primary,
+        operation="resolve-relation",
+        query="two notes discuss the same synthetic leave policy topic",
+        requested_relation="supports",
+    )
+    topical_after = {
+        "markdown": _lifecycle_markdown_hash(primary),
+        "registry": _lifecycle_registry_hash(primary),
+    }
+    topical_decision = score_scripted_relation_decision(
+        selected_relation=topical_resolution["selected_relation"],
+        authored_relation=None,
+        truthful=False,
+    )
+    false_directional_trial = score_scripted_relation_decision(
+        selected_relation=None,
+        authored_relation="supports",
+        truthful=False,
+    )
+    topical_edges = _graph_relation_types(
+        primary,
+        topical_left,
+        trace=helper_claims,
+        connect=lambda vault_root, **arguments: observed_connect(
+            ("topical-proximity-abstains",), vault_root, **arguments
+        ),
+    )
+
+    old_applicability = _lifecycle_propose_and_save(
+        primary,
+        label="applicable_to",
+        description="A historical synthetic policy applicability relation.",
+    )
+    _scripted_author_relation(primary, predecessor, employee_case, "applicable_to")
+    current = relation_registry.load_registry(primary)
+    commands.op_schema_memory(
+        primary,
+        subject="relations",
+        operation="save-relations",
+        proposal={"deprecate": {old_applicability: canonical_applicability}},
+        expected_hash=current.extension_hash,
+        why="Synthetic lifecycle migration to the surviving applicability relation.",
+    )
+    replacement_edges = _graph_relation_types(
+        primary,
+        predecessor,
+        trace=helper_claims,
+        connect=lambda vault_root, **arguments: observed_connect(
+            ("survivor-directed-replacement",), vault_root, **arguments
+        ),
+    )
+    replacement_resolution = observed_connect(
+        ("survivor-directed-replacement",),
+        primary,
+        operation="resolve-relation",
+        query="historical policy applicability",
+        requested_relation=old_applicability,
+    )
+    survivor_filter = _relation_filter_explanation(
+        primary,
+        canonical_applicability,
+        trace=helper_claims,
+        ask=lambda vault_root, **arguments: observed_ask(
+            ("survivor-directed-replacement",), vault_root, **arguments
+        ),
+    )
+    deprecated_filter = _relation_filter_explanation(
+        primary,
+        old_applicability,
+        trace=helper_claims,
+        ask=lambda vault_root, **arguments: observed_ask(
+            ("survivor-directed-replacement",), vault_root, **arguments
+        ),
+    )
+
+    tenant_a = root / "tenant-a"
+    tenant_b = root / "tenant-b"
+    tenant_a_source = _lifecycle_note(tenant_a, "tenant-a-source", "Tenant A synthetic policy.")
+    tenant_a_target = _lifecycle_note(tenant_a, "tenant-a-target", "Tenant A synthetic case.")
+    tenant_b_source = _lifecycle_note(tenant_b, "tenant-b-source", "Tenant B synthetic policy.")
+    tenant_b_target = _lifecycle_note(tenant_b, "tenant-b-target", "Tenant B synthetic case.")
+    _scripted_author_relation(tenant_a, tenant_a_source, tenant_a_target, "governs")
+    _scripted_author_relation(tenant_b, tenant_b_source, tenant_b_target, "enables")
+    tenant_a_relation = _lifecycle_propose_and_save(
+        tenant_a, label="governs", description="Tenant A synthetic policy governs its case."
+    )
+    tenant_b_relation = _lifecycle_propose_and_save(
+        tenant_b, label="enables", description="Tenant B synthetic policy enables its case."
+    )
+    _lifecycle_rebuild(tenant_a)
+    _lifecycle_rebuild(tenant_b)
+    tenant_a_resolution = observed_connect(
+        ("vault-registry-isolation",),
+        tenant_a,
+        operation="resolve-relation",
+        query="tenant policy",
+        requested_relation="governs",
+        path=tenant_a_source,
+        target=tenant_a_target,
+    )
+    tenant_b_resolution = observed_connect(
+        ("vault-registry-isolation",),
+        tenant_b,
+        operation="resolve-relation",
+        query="tenant policy",
+        requested_relation="enables",
+        path=tenant_b_source,
+        target=tenant_b_target,
+    )
+    tenant_a_cross = observed_connect(
+        ("vault-registry-isolation",),
+        tenant_a,
+        operation="resolve-relation",
+        query="tenant policy",
+        requested_relation="enables",
+        path=tenant_b_source,
+        target=tenant_b_target,
+    )
+    tenant_b_cross = observed_connect(
+        ("vault-registry-isolation",),
+        tenant_b,
+        operation="resolve-relation",
+        query="tenant policy",
+        requested_relation="governs",
+        path=tenant_a_source,
+        target=tenant_a_target,
+    )
+    tenant_a_edges = _graph_relation_types(
+        tenant_a,
+        tenant_a_source,
+        trace=helper_claims,
+        connect=lambda vault_root, **arguments: observed_connect(
+            ("vault-registry-isolation",), vault_root, **arguments
+        ),
+    )
+    tenant_b_edges = _graph_relation_types(
+        tenant_b,
+        tenant_b_source,
+        trace=helper_claims,
+        connect=lambda vault_root, **arguments: observed_connect(
+            ("vault-registry-isolation",), vault_root, **arguments
+        ),
+    )
+    tenant_a_hits = _relation_filter_explanation(
+        tenant_a,
+        "governs",
+        trace=helper_claims,
+        ask=lambda vault_root, **arguments: observed_ask(
+            ("vault-registry-isolation",), vault_root, **arguments
+        ),
+    )
+    tenant_b_hits = _relation_filter_explanation(
+        tenant_b,
+        "enables",
+        trace=helper_claims,
+        ask=lambda vault_root, **arguments: observed_ask(
+            ("vault-registry-isolation",), vault_root, **arguments
+        ),
+    )
+
+    def crossed_graph(vault_root: Path, foreign_path: str) -> dict[str, str]:
+        try:
+            _graph_relation_types(
+                vault_root,
+                foreign_path,
+                trace=helper_claims,
+                connect=lambda inner_root, **arguments: observed_connect(
+                    ("vault-registry-isolation",), inner_root, **arguments
+                ),
+            )
+        except (ValueError, OpError) as exc:
+            return {"error": _lifecycle_error_code(exc)}
+        return {"error": "accepted"}
+
+    def crossed_filter(vault_root: Path, foreign_relation: str) -> dict[str, str]:
+        try:
+            _relation_filter_explanation(
+                vault_root,
+                foreign_relation,
+                trace=helper_claims,
+                ask=lambda inner_root, **arguments: observed_ask(
+                    ("vault-registry-isolation",), inner_root, **arguments
+                ),
+            )
+        except (ValueError, OpError) as exc:
+            return {"error": _lifecycle_error_code(exc)}
+        return {"error": "accepted"}
+
+    tenant_a_cross_graph = crossed_graph(tenant_a, tenant_b_source)
+    tenant_b_cross_graph = crossed_graph(tenant_b, tenant_a_source)
+    tenant_a_cross_filter = crossed_filter(tenant_a, "enables")
+    tenant_b_cross_filter = crossed_filter(tenant_b, "governs")
+    tenant_a_registry = relation_registry.load_registry(tenant_a)
+    tenant_b_registry = relation_registry.load_registry(tenant_b)
+    tenant_a_cache_path = relation_registry.extension_registry_path(tenant_a).resolve()
+    tenant_b_cache_path = relation_registry.extension_registry_path(tenant_b).resolve()
+    tenant_a_cache_entry = relation_registry._CACHE.get(tenant_a_cache_path)
+    tenant_b_cache_entry = relation_registry._CACHE.get(tenant_b_cache_path)
+
+    part_core = next(
+        (item for item in part_resolution["core_vocabulary"] if item.get("key") == "part_of"), {}
+    )
+    return {
+        "declared_cases": declared_cases,
+        "paths": {
+            "policy": policy,
+            "employee_case": employee_case,
+            "part_child": part_child,
+            "part_parent": part_parent,
+            "generic_left": generic_left,
+            "generic_right": generic_right,
+            "topical_left": topical_left,
+            "predecessor": predecessor,
+            "tenant_a_source": tenant_a_source,
+            "tenant_a_target": tenant_a_target,
+            "tenant_b_source": tenant_b_source,
+            "tenant_b_target": tenant_b_target,
+        },
+        "relations": {
+            "applicability": canonical_applicability,
+            "old_applicability": old_applicability,
+            "tenant_a": tenant_a_relation,
+            "tenant_b": tenant_b_relation,
+        },
+        "hashes": {
+            "resolution_before": before_resolution,
+            "resolution_after": after_resolution,
+            "part_before": part_before,
+            "part_after": part_after,
+            "alias_before": alias_before,
+            "alias_after": alias_after,
+            "topical_before": topical_before,
+            "topical_after": topical_after,
+        },
+        "resolutions": {
+            "policy": policy_resolution,
+            "part": part_resolution,
+            "alias": alias_resolution,
+            "generic": generic_resolution,
+            "topical": topical_resolution,
+            "replacement": replacement_resolution,
+            "tenant_a": tenant_a_resolution,
+            "tenant_b": tenant_b_resolution,
+            "tenant_a_cross": tenant_a_cross,
+            "tenant_b_cross": tenant_b_cross,
+        },
+        "graphs": {
+            "policy": policy_edges,
+            "part": part_edges,
+            "generic": generic_edges,
+            "topical": topical_edges,
+            "replacement": replacement_edges,
+            "tenant_a": tenant_a_edges,
+            "tenant_b": tenant_b_edges,
+        },
+        "filters": {
+            "policy_alias": policy_filter,
+            "policy_canonical": policy_canonical_filter,
+            "policy_parent": policy_parent_filter,
+            "survivor": survivor_filter,
+            "deprecated": deprecated_filter,
+            "tenant_a": tenant_a_hits,
+            "tenant_b": tenant_b_hits,
+        },
+        "alias_proposal": alias_proposal,
+        "part_core": part_core,
+        "topical_decision": topical_decision,
+        "false_directional_trial": false_directional_trial,
+        "tenants": {
+            "a": {
+                "registry": tenant_a_registry,
+                "cache_path": tenant_a_cache_path,
+                "cache_entry": tenant_a_cache_entry,
+                "cross_graph": tenant_a_cross_graph,
+                "cross_filter": tenant_a_cross_filter,
+            },
+            "b": {
+                "registry": tenant_b_registry,
+                "cache_path": tenant_b_cache_path,
+                "cache_entry": tenant_b_cache_entry,
+                "cross_graph": tenant_b_cross_graph,
+                "cross_filter": tenant_b_cross_filter,
+            },
+        },
+        "public_calls": public_calls,
+        "helper_claims": helper_claims,
+        "helper_outputs": {
+            "graph": {
+                f"primary:{policy}": policy_edges,
+                f"primary:{part_child}": part_edges,
+                f"primary:{generic_left}": generic_edges,
+                f"primary:{topical_left}": topical_edges,
+                f"primary:{predecessor}": replacement_edges,
+                f"tenant-a:{tenant_a_source}": tenant_a_edges,
+                f"tenant-a:{tenant_b_source}": [],
+                f"tenant-b:{tenant_b_source}": tenant_b_edges,
+                f"tenant-b:{tenant_a_source}": [],
+            },
+            "filter": {
+                "primary:applies_to": [policy_filter],
+                f"primary:{canonical_applicability}": [
+                    policy_canonical_filter,
+                    survivor_filter,
+                ],
+                "primary:relates_to": [policy_parent_filter],
+                f"primary:{old_applicability}": [deprecated_filter],
+                "tenant-a:governs": [tenant_a_hits],
+                "tenant-a:enables": [[]],
+                "tenant-b:enables": [tenant_b_hits],
+                "tenant-b:governs": [[]],
+            },
+        },
+    }
+
+
+def _lifecycle_bounded_inventory(
+    inventory: dict[str, Any], *, kind: str, returned_entries: list[dict[str, Any]]
+) -> bool:
+    required = {"total", "returned", "omitted", "truncated", "continuation"}
+    if set(inventory) != required:
+        return False
+    total = inventory.get("total")
+    returned = inventory.get("returned")
+    omitted = inventory.get("omitted")
+    truncated = inventory.get("truncated")
+    continuation = inventory.get("continuation")
+    if (
+        not all(type(value) is int and value >= 0 for value in (total, returned, omitted))
+        or type(truncated) is not bool
+        or total != returned + omitted
+        or returned != len(returned_entries)
+        or truncated != (omitted > 0)
+    ):
+        return False
+    if omitted == 0:
+        return continuation is None
+    if not isinstance(continuation, str):
+        return False
+    prefix, separator, offset = continuation.partition(":")
+    return separator == ":" and prefix == kind and offset.isdigit() and int(offset) > 0
+
+
+def _lifecycle_outbound_hit(hits: list[dict[str, Any]], path: str) -> dict[str, Any]:
+    return next((hit for hit in hits if hit.get("path") == path), {})
+
+
+def _lifecycle_call_bound(
+    calls: list[dict[str, Any]],
+    *,
+    surface: str,
+    vault: str,
+    cases: tuple[str, ...],
+    arguments: dict[str, Any],
+    outcome: dict[str, Any],
+) -> bool:
+    expected = {
+        "surface": surface,
+        "vault": vault,
+        "cases": list(cases),
+        "arguments": arguments,
+        "outcome": outcome,
+    }
+    return any(item == expected for item in calls)
+
+
+def score_relation_lifecycle_observation(observation: dict[str, Any]) -> dict[str, Any]:
+    paths = observation["paths"]
+    relations = observation["relations"]
+    resolutions = observation["resolutions"]
+    graphs = observation["graphs"]
+    filters = observation["filters"]
+    hashes = observation["hashes"]
+    calls = observation["public_calls"]
+    applicability = relations["applicability"]
+    old_applicability = relations["old_applicability"]
+
+    policy_edge = next(
+        (edge for edge in graphs["policy"] if edge.get("source_path") == paths["policy"]), {}
+    )
+    policy_alias_hit = _lifecycle_outbound_hit(filters["policy_alias"], paths["policy"])
+    policy_alias_match = policy_alias_hit.get("relation_match") or {}
+    policy_canonical_hit = _lifecycle_outbound_hit(filters["policy_canonical"], paths["policy"])
+    policy_canonical_match = policy_canonical_hit.get("relation_match") or {}
+    policy_parent_hit = _lifecycle_outbound_hit(filters["policy_parent"], paths["policy"])
+    policy_parent_match = policy_parent_hit.get("relation_match") or {}
+    part_edge = next(
+        (edge for edge in graphs["part"] if edge.get("source_path") == paths["part_child"]), {}
+    )
+    generic_edge = next(
+        (edge for edge in graphs["generic"] if edge.get("source_path") == paths["generic_left"]),
+        {},
+    )
+    replacement_edge = next(
+        (edge for edge in graphs["replacement"] if edge.get("source_path") == paths["predecessor"]),
+        {},
+    )
+    survivor_hit = _lifecycle_outbound_hit(filters["survivor"], paths["predecessor"])
+    survivor_match = survivor_hit.get("relation_match") or {}
+    predecessor_hit = _lifecycle_outbound_hit(filters["deprecated"], paths["predecessor"])
+    predecessor_match = predecessor_hit.get("relation_match") or {}
+    replacement_exact = next(
+        (
+            item
+            for item in resolutions["replacement"].get("exact_matches") or []
+            if item.get("canonical") == old_applicability
+        ),
+        {},
+    )
+
+    case_checks: dict[str, dict[str, bool]] = {
+        "policy-applicability-extension": {
+            "resolver_non_authoritative": resolutions["policy"].get("selected_relation") is None,
+            "resolution_markdown_unchanged": hashes["resolution_before"]["markdown"]
+            == hashes["resolution_after"]["markdown"],
+            "resolution_registry_unchanged": hashes["resolution_before"]["registry"]
+            == hashes["resolution_after"]["registry"],
+            "graph_path": policy_edge.get("source_path") == paths["policy"],
+            "graph_counterpart": str(policy_edge.get("dst_key") or "").endswith(
+                paths["employee_case"]
+            ),
+            "graph_raw_relation": policy_edge.get("raw_relation") == "applies_to",
+            "graph_canonical_relation": policy_edge.get("relation_type") == applicability,
+            "graph_origin": policy_edge.get("origin") == "markdown_relation",
+            "graph_source_anchor": bool(policy_edge.get("source_anchor")),
+            "alias_path": policy_alias_hit.get("path") == paths["policy"],
+            "alias_counterpart": policy_alias_match.get("counterpart") == paths["employee_case"],
+            "alias_direction": policy_alias_match.get("direction") == "outbound",
+            "alias_canonical_relation": policy_alias_match.get("relation_type") == applicability,
+            "alias_requested_relation": policy_alias_match.get("requested_relation")
+            == "applies_to",
+            "alias_resolved_relation": policy_alias_match.get("resolved_relation") == applicability,
+            "alias_match_mode": policy_alias_match.get("matched_via") == "relation_type",
+            "alias_explanation": "ranking_explanation" in policy_alias_hit,
+            "canonical_path": policy_canonical_hit.get("path") == paths["policy"],
+            "canonical_counterpart": policy_canonical_match.get("counterpart")
+            == paths["employee_case"],
+            "canonical_direction": policy_canonical_match.get("direction") == "outbound",
+            "canonical_relation": policy_canonical_match.get("relation_type") == applicability,
+            "canonical_requested_relation": policy_canonical_match.get("requested_relation")
+            == applicability,
+            "canonical_resolved_relation": policy_canonical_match.get("resolved_relation")
+            == applicability,
+            "canonical_match_mode": policy_canonical_match.get("matched_via") == "relation_type",
+            "parent_path": policy_parent_hit.get("path") == paths["policy"],
+            "parent_counterpart": policy_parent_match.get("counterpart") == paths["employee_case"],
+            "parent_direction": policy_parent_match.get("direction") == "outbound",
+            "parent_child_relation": policy_parent_match.get("relation_type") == applicability,
+            "parent_requested_relation": policy_parent_match.get("requested_relation")
+            == "relates_to",
+            "parent_resolved_relation": policy_parent_match.get("resolved_relation")
+            == "relates_to",
+            "parent_match_mode": policy_parent_match.get("matched_via") == "parent_relation",
+        },
+        "core-part-of-reuse": {
+            "core_key": observation["part_core"].get("key") == "part_of",
+            "core_direction": observation["part_core"].get("direction") == "directed",
+            "core_inverse": observation["part_core"].get("inverse") == "contains",
+            "resolver_non_authoritative": resolutions["part"].get("selected_relation") is None
+            and resolutions["part"].get("proposed_relation") is None,
+            "resolution_markdown_unchanged": hashes["part_before"]["markdown"]
+            == hashes["part_after"]["markdown"],
+            "resolution_registry_unchanged": hashes["part_before"]["registry"]
+            == hashes["part_after"]["registry"],
+            "caller_authored_raw": part_edge.get("raw_relation") == "part_of",
+            "caller_authored_canonical": part_edge.get("relation_type") == "part_of",
+            "caller_authored_path": part_edge.get("source_path") == paths["part_child"]
+            and str(part_edge.get("dst_key") or "").endswith(paths["part_parent"]),
+        },
+        "alias-reuse-without-duplicate": {},
+        "honest-generic-relation": {
+            "resolver_non_authoritative": resolutions["generic"].get("selected_relation") is None,
+            "caller_authored_raw": generic_edge.get("raw_relation") == "relates_to",
+            "caller_authored_canonical": generic_edge.get("relation_type") == "relates_to",
+            "caller_authored_path": generic_edge.get("source_path") == paths["generic_left"]
+            and str(generic_edge.get("dst_key") or "").endswith(paths["generic_right"]),
+        },
+        "topical-proximity-abstains": {
+            "scorer_abstains": observation["topical_decision"].get("passed") is True,
+            "false_directional_killed": observation["false_directional_trial"].get("false_positive")
+            is True
+            and observation["false_directional_trial"].get("passed") is False,
+            "resolution_non_authoritative": resolutions["topical"].get("selected_relation") is None,
+            "markdown_unchanged": hashes["topical_before"]["markdown"]
+            == hashes["topical_after"]["markdown"],
+            "registry_unchanged": hashes["topical_before"]["registry"]
+            == hashes["topical_after"]["registry"],
+            "no_false_edge": not any(
+                edge.get("relation_type") == "supports" for edge in graphs["topical"]
+            ),
+        },
+        "extension-parent-rollup": {
+            "graph_raw_relation": policy_edge.get("raw_relation") == "applies_to",
+            "graph_canonical_relation": policy_edge.get("relation_type") == applicability,
+            "parent_path": policy_parent_hit.get("path") == paths["policy"],
+            "parent_counterpart": policy_parent_match.get("counterpart") == paths["employee_case"],
+            "parent_direction": policy_parent_match.get("direction") == "outbound",
+            "parent_child_relation": policy_parent_match.get("relation_type") == applicability,
+            "parent_requested_relation": policy_parent_match.get("requested_relation")
+            == "relates_to",
+            "parent_resolved_relation": policy_parent_match.get("resolved_relation")
+            == "relates_to",
+            "parent_match_mode": policy_parent_match.get("matched_via") == "parent_relation",
+        },
+        "survivor-directed-replacement": {
+            "graph_path": replacement_edge.get("source_path") == paths["predecessor"],
+            "graph_counterpart": str(replacement_edge.get("dst_key") or "").endswith(
+                paths["employee_case"]
+            ),
+            "graph_raw_relation": replacement_edge.get("raw_relation") == "applicable_to",
+            "graph_canonical_relation": replacement_edge.get("relation_type") == old_applicability,
+            "graph_terminal_replacement": replacement_edge.get("metadata", {}).get("replacement")
+            == applicability,
+            "survivor_path": survivor_hit.get("path") == paths["predecessor"],
+            "survivor_counterpart": survivor_match.get("counterpart") == paths["employee_case"],
+            "survivor_direction": survivor_match.get("direction") == "outbound",
+            "survivor_raw_relation": survivor_match.get("relation_type") == old_applicability,
+            "survivor_requested_relation": survivor_match.get("requested_relation")
+            == applicability,
+            "survivor_resolved_relation": survivor_match.get("resolved_relation") == applicability,
+            "survivor_match_mode": survivor_match.get("matched_via") == "replacement",
+            "survivor_explanation": "ranking_explanation" in survivor_hit,
+            "predecessor_path": predecessor_hit.get("path") == paths["predecessor"],
+            "predecessor_counterpart": predecessor_match.get("counterpart")
+            == paths["employee_case"],
+            "predecessor_direction": predecessor_match.get("direction") == "outbound",
+            "predecessor_raw_relation": predecessor_match.get("relation_type") == old_applicability,
+            "predecessor_requested_relation": predecessor_match.get("requested_relation")
+            == old_applicability,
+            "predecessor_resolved_relation": predecessor_match.get("resolved_relation")
+            == old_applicability,
+            "predecessor_match_mode": predecessor_match.get("matched_via") == "relation_type",
+            "predecessor_explanation": "ranking_explanation" in predecessor_hit,
+            "resolver_raw_canonical": replacement_exact.get("canonical") == old_applicability
+            and replacement_exact.get("requested_relation") == old_applicability,
+            "resolver_direction": replacement_exact.get("direction") == "directed",
+            "resolver_match_mode": replacement_exact.get("match") == "canonical",
+            "immediate_replacement": replacement_exact.get("immediate_replacement")
+            == applicability,
+            "terminal_replacement": replacement_exact.get("terminal_replacement") == applicability,
+        },
+        "vault-registry-isolation": {},
+    }
+
+    duplicate_evidence = observation["alias_proposal"]["duplicate_evidence"]
+    alias_exact = next(
+        (
+            item
+            for item in resolutions["alias"].get("exact_matches") or []
+            if item.get("canonical") == applicability
+        ),
+        {},
+    )
+    proposal_exact = next(
+        (
+            item
+            for item in duplicate_evidence.get("exact_matches") or []
+            if item.get("canonical") == applicability
+        ),
+        {},
+    )
+    case_checks["alias-reuse-without-duplicate"] = {
+        "registry_unchanged": hashes["alias_before"] == hashes["alias_after"],
+        "resolver_alias": alias_exact.get("requested_relation") == "policy_applies"
+        and alias_exact.get("canonical") == applicability
+        and alias_exact.get("match") == "alias"
+        and alias_exact.get("direction") == "directed",
+        "proposal_collision": observation["alias_proposal"].get("valid") is False
+        and proposal_exact.get("requested_relation") == "policy_applies"
+        and proposal_exact.get("canonical") == applicability
+        and proposal_exact.get("match") == "alias",
+        "extension_inventory": _lifecycle_bounded_inventory(
+            duplicate_evidence.get("extensions") or {},
+            kind="extensions",
+            returned_entries=list(duplicate_evidence.get("candidates") or []),
+        ),
+        "observation_inventory": _lifecycle_bounded_inventory(
+            duplicate_evidence.get("observations") or {},
+            kind="observations",
+            returned_entries=list(duplicate_evidence.get("unregistered_pressure") or []),
+        ),
+    }
+
+    tenant_a = observation["tenants"]["a"]
+    tenant_b = observation["tenants"]["b"]
+    tenant_a_registry = tenant_a["registry"]
+    tenant_b_registry = tenant_b["registry"]
+    tenant_a_cache = tenant_a.get("cache_entry")
+    tenant_b_cache = tenant_b.get("cache_entry")
+    tenant_a_exact = next(iter(resolutions["tenant_a"].get("exact_matches") or []), {})
+    tenant_b_exact = next(iter(resolutions["tenant_b"].get("exact_matches") or []), {})
+    tenant_a_edge = next(iter(graphs["tenant_a"]), {})
+    tenant_b_edge = next(iter(graphs["tenant_b"]), {})
+    tenant_a_hit = _lifecycle_outbound_hit(filters["tenant_a"], paths["tenant_a_source"])
+    tenant_b_hit = _lifecycle_outbound_hit(filters["tenant_b"], paths["tenant_b_source"])
+    tenant_a_match = tenant_a_hit.get("relation_match") or {}
+    tenant_b_match = tenant_b_hit.get("relation_match") or {}
+    case_checks["vault-registry-isolation"] = {
+        "tenant_paths_distinct": len(
+            {
+                paths["tenant_a_source"],
+                paths["tenant_a_target"],
+                paths["tenant_b_source"],
+                paths["tenant_b_target"],
+            }
+        )
+        == 4,
+        "registry_objects_distinct": tenant_a_registry is not tenant_b_registry,
+        "registry_hashes_distinct": tenant_a_registry.extension_hash
+        != tenant_b_registry.extension_hash,
+        "registry_definitions_isolated": tenant_a_registry.definition(relations["tenant_a"])
+        is not None
+        and tenant_a_registry.definition(relations["tenant_b"]) is None
+        and tenant_b_registry.definition(relations["tenant_b"]) is not None
+        and tenant_b_registry.definition(relations["tenant_a"]) is None,
+        "cache_paths_absolute": tenant_a["cache_path"].is_absolute()
+        and tenant_b["cache_path"].is_absolute(),
+        "cache_paths_distinct": tenant_a["cache_path"] != tenant_b["cache_path"],
+        "cache_objects_distinct": bool(tenant_a_cache and tenant_b_cache)
+        and tenant_a_cache[1] is not tenant_b_cache[1],
+        "cache_matches_registry": bool(tenant_a_cache and tenant_b_cache)
+        and tenant_a_cache[0] == tenant_a_registry.extension_hash
+        and tenant_b_cache[0] == tenant_b_registry.extension_hash
+        and tenant_a_cache[1] is tenant_a_registry
+        and tenant_b_cache[1] is tenant_b_registry,
+        "resolver_contexts_isolated": resolutions["tenant_a"].get("context")
+        == {"path": paths["tenant_a_source"], "target": paths["tenant_a_target"]}
+        and resolutions["tenant_b"].get("context")
+        == {"path": paths["tenant_b_source"], "target": paths["tenant_b_target"]}
+        and tenant_a_exact.get("requested_relation") == "governs"
+        and tenant_a_exact.get("canonical") == relations["tenant_a"]
+        and tenant_b_exact.get("requested_relation") == "enables"
+        and tenant_b_exact.get("canonical") == relations["tenant_b"],
+        "crossed_resolvers_reject": not resolutions["tenant_a_cross"].get("exact_matches")
+        and not resolutions["tenant_b_cross"].get("exact_matches")
+        and resolutions["tenant_a_cross"].get("context")
+        == {"path": paths["tenant_b_source"], "target": paths["tenant_b_target"]}
+        and resolutions["tenant_b_cross"].get("context")
+        == {"path": paths["tenant_a_source"], "target": paths["tenant_a_target"]},
+        "crossed_graphs_reject": tenant_a["cross_graph"].get("error") == "NOT_FOUND"
+        and tenant_b["cross_graph"].get("error") == "NOT_FOUND",
+        "crossed_filters_reject": tenant_a["cross_filter"].get("error") == "INVALID_RELATION_FILTER"
+        and tenant_b["cross_filter"].get("error") == "INVALID_RELATION_FILTER",
+        "graph_results_isolated": tenant_a_edge.get("source_path") == paths["tenant_a_source"]
+        and tenant_a_edge.get("raw_relation") == "governs"
+        and tenant_a_edge.get("relation_type") == relations["tenant_a"]
+        and str(tenant_a_edge.get("dst_key") or "").endswith(paths["tenant_a_target"])
+        and tenant_b_edge.get("source_path") == paths["tenant_b_source"]
+        and tenant_b_edge.get("raw_relation") == "enables"
+        and tenant_b_edge.get("relation_type") == relations["tenant_b"]
+        and str(tenant_b_edge.get("dst_key") or "").endswith(paths["tenant_b_target"]),
+        "filter_results_isolated": bool(filters["tenant_a"] and filters["tenant_b"])
+        and tenant_a_hit.get("path") == paths["tenant_a_source"]
+        and tenant_a_match.get("counterpart") == paths["tenant_a_target"]
+        and tenant_a_match.get("direction") == "outbound"
+        and tenant_a_match.get("relation_type") == relations["tenant_a"]
+        and tenant_a_match.get("requested_relation") == "governs"
+        and tenant_a_match.get("resolved_relation") == relations["tenant_a"]
+        and tenant_a_match.get("matched_via") == "relation_type"
+        and "ranking_explanation" in tenant_a_hit
+        and tenant_b_hit.get("path") == paths["tenant_b_source"]
+        and tenant_b_match.get("counterpart") == paths["tenant_b_target"]
+        and tenant_b_match.get("direction") == "outbound"
+        and tenant_b_match.get("relation_type") == relations["tenant_b"]
+        and tenant_b_match.get("requested_relation") == "enables"
+        and tenant_b_match.get("resolved_relation") == relations["tenant_b"]
+        and tenant_b_match.get("matched_via") == "relation_type"
+        and "ranking_explanation" in tenant_b_hit,
+    }
+
+    def ask_arguments(relation: str) -> dict[str, Any]:
+        return {
+            "query": "",
+            "relations": [relation],
+            "mode": "keyword",
+            "graph": False,
+            "explain": True,
+            "scope": "kb-only",
+        }
+
+    def graph_arguments(path: str) -> dict[str, Any]:
+        return {"operation": "graph-context", "path": path, "depth": 1}
+
+    resolve_arguments = {
+        "policy": {
+            "operation": "resolve-relation",
+            "query": "an organisation policy applies to a specific employee case",
+            "requested_relation": "applies_to",
+        },
+        "part": {
+            "operation": "resolve-relation",
+            "query": "a child organisation belongs to its parent organisation",
+            "requested_relation": "part_of",
+        },
+        "alias": {
+            "operation": "resolve-relation",
+            "query": "a policy applies in a case",
+            "requested_relation": "policy_applies",
+        },
+        "generic": {
+            "operation": "resolve-relation",
+            "query": "a meaningful generic connection with no specific predicate",
+            "requested_relation": "relates_to",
+        },
+        "topical": {
+            "operation": "resolve-relation",
+            "query": "two notes discuss the same synthetic leave policy topic",
+            "requested_relation": "supports",
+        },
+        "replacement": {
+            "operation": "resolve-relation",
+            "query": "historical policy applicability",
+            "requested_relation": old_applicability,
+        },
+    }
+
+    def bound_resolve(name: str, vault: str, cases: tuple[str, ...]) -> bool:
+        return _lifecycle_call_bound(
+            calls,
+            surface="connect_memory",
+            vault=vault,
+            cases=cases,
+            arguments=resolve_arguments[name],
+            outcome={
+                "exact_match_count": len(resolutions[name].get("exact_matches") or []),
+                "resolution": _lifecycle_resolution_facts(resolutions[name]),
+            },
+        )
+
+    def bound_graph(name: str, vault: str, path: str, cases: tuple[str, ...]) -> bool:
+        return _lifecycle_call_bound(
+            calls,
+            surface="connect_memory",
+            vault=vault,
+            cases=cases,
+            arguments=graph_arguments(path),
+            outcome={
+                "edge_count": len(graphs[name]),
+                "edges": _lifecycle_graph_facts(graphs[name]),
+            },
+        )
+
+    def bound_filter(name: str, vault: str, relation: str, cases: tuple[str, ...]) -> bool:
+        return _lifecycle_call_bound(
+            calls,
+            surface="ask_memory",
+            vault=vault,
+            cases=cases,
+            arguments=ask_arguments(relation),
+            outcome={
+                "hit_count": len(filters[name]),
+                "hits": _lifecycle_hit_facts(filters[name]),
+            },
+        )
+
+    public_case_checks = {
+        "policy-applicability-extension": {
+            "resolve": bound_resolve("policy", "primary", ("policy-applicability-extension",)),
+            "graph": bound_graph(
+                "policy",
+                "primary",
+                paths["policy"],
+                ("policy-applicability-extension", "extension-parent-rollup"),
+            ),
+            "alias_filter_explain": bound_filter(
+                "policy_alias",
+                "primary",
+                "applies_to",
+                ("policy-applicability-extension",),
+            ),
+            "canonical_filter_explain": bound_filter(
+                "policy_canonical",
+                "primary",
+                applicability,
+                ("policy-applicability-extension",),
+            ),
+            "parent_filter_explain": bound_filter(
+                "policy_parent",
+                "primary",
+                "relates_to",
+                ("policy-applicability-extension", "extension-parent-rollup"),
+            ),
+        },
+        "core-part-of-reuse": {
+            "resolve": bound_resolve("part", "primary", ("core-part-of-reuse",)),
+            "graph": bound_graph("part", "primary", paths["part_child"], ("core-part-of-reuse",)),
+        },
+        "alias-reuse-without-duplicate": {
+            "resolve": bound_resolve("alias", "primary", ("alias-reuse-without-duplicate",))
+        },
+        "honest-generic-relation": {
+            "resolve": bound_resolve("generic", "primary", ("honest-generic-relation",)),
+            "graph": bound_graph(
+                "generic",
+                "primary",
+                paths["generic_left"],
+                ("honest-generic-relation",),
+            ),
+        },
+        "topical-proximity-abstains": {
+            "resolve": bound_resolve("topical", "primary", ("topical-proximity-abstains",)),
+            "graph": bound_graph(
+                "topical",
+                "primary",
+                paths["topical_left"],
+                ("topical-proximity-abstains",),
+            ),
+        },
+        "extension-parent-rollup": {
+            "graph": bound_graph(
+                "policy",
+                "primary",
+                paths["policy"],
+                ("policy-applicability-extension", "extension-parent-rollup"),
+            ),
+            "parent_filter_explain": bound_filter(
+                "policy_parent",
+                "primary",
+                "relates_to",
+                ("policy-applicability-extension", "extension-parent-rollup"),
+            ),
+        },
+        "survivor-directed-replacement": {
+            "graph": bound_graph(
+                "replacement",
+                "primary",
+                paths["predecessor"],
+                ("survivor-directed-replacement",),
+            ),
+            "resolve": bound_resolve("replacement", "primary", ("survivor-directed-replacement",)),
+            "survivor_filter_explain": bound_filter(
+                "survivor",
+                "primary",
+                applicability,
+                ("survivor-directed-replacement",),
+            ),
+            "predecessor_filter_explain": bound_filter(
+                "deprecated",
+                "primary",
+                old_applicability,
+                ("survivor-directed-replacement",),
+            ),
+        },
+        "vault-registry-isolation": {},
+    }
+
+    tenant_resolve_arguments = {
+        "tenant_a": {
+            "operation": "resolve-relation",
+            "query": "tenant policy",
+            "requested_relation": "governs",
+            "path": paths["tenant_a_source"],
+            "target": paths["tenant_a_target"],
+        },
+        "tenant_b": {
+            "operation": "resolve-relation",
+            "query": "tenant policy",
+            "requested_relation": "enables",
+            "path": paths["tenant_b_source"],
+            "target": paths["tenant_b_target"],
+        },
+        "tenant_a_cross": {
+            "operation": "resolve-relation",
+            "query": "tenant policy",
+            "requested_relation": "enables",
+            "path": paths["tenant_b_source"],
+            "target": paths["tenant_b_target"],
+        },
+        "tenant_b_cross": {
+            "operation": "resolve-relation",
+            "query": "tenant policy",
+            "requested_relation": "governs",
+            "path": paths["tenant_a_source"],
+            "target": paths["tenant_a_target"],
+        },
+    }
+    for name, vault in (
+        ("tenant_a", "tenant-a"),
+        ("tenant_b", "tenant-b"),
+        ("tenant_a_cross", "tenant-a"),
+        ("tenant_b_cross", "tenant-b"),
+    ):
+        public_case_checks["vault-registry-isolation"][f"resolve_{name}"] = _lifecycle_call_bound(
+            calls,
+            surface="connect_memory",
+            vault=vault,
+            cases=("vault-registry-isolation",),
+            arguments=tenant_resolve_arguments[name],
+            outcome={
+                "exact_match_count": len(resolutions[name].get("exact_matches") or []),
+                "resolution": _lifecycle_resolution_facts(resolutions[name]),
+            },
+        )
+    public_case_checks["vault-registry-isolation"].update(
+        {
+            "graph_tenant_a": bound_graph(
+                "tenant_a",
+                "tenant-a",
+                paths["tenant_a_source"],
+                ("vault-registry-isolation",),
+            ),
+            "graph_tenant_b": bound_graph(
+                "tenant_b",
+                "tenant-b",
+                paths["tenant_b_source"],
+                ("vault-registry-isolation",),
+            ),
+            "filter_tenant_a": bound_filter(
+                "tenant_a",
+                "tenant-a",
+                "governs",
+                ("vault-registry-isolation",),
+            ),
+            "filter_tenant_b": bound_filter(
+                "tenant_b",
+                "tenant-b",
+                "enables",
+                ("vault-registry-isolation",),
+            ),
+            "cross_graph_tenant_a": _lifecycle_call_bound(
+                calls,
+                surface="connect_memory",
+                vault="tenant-a",
+                cases=("vault-registry-isolation",),
+                arguments=graph_arguments(paths["tenant_b_source"]),
+                outcome={"error": "NOT_FOUND"},
+            ),
+            "cross_graph_tenant_b": _lifecycle_call_bound(
+                calls,
+                surface="connect_memory",
+                vault="tenant-b",
+                cases=("vault-registry-isolation",),
+                arguments=graph_arguments(paths["tenant_a_source"]),
+                outcome={"error": "NOT_FOUND"},
+            ),
+            "cross_filter_tenant_a": _lifecycle_call_bound(
+                calls,
+                surface="ask_memory",
+                vault="tenant-a",
+                cases=("vault-registry-isolation",),
+                arguments=ask_arguments("enables"),
+                outcome={"error": "INVALID_RELATION_FILTER"},
+            ),
+            "cross_filter_tenant_b": _lifecycle_call_bound(
+                calls,
+                surface="ask_memory",
+                vault="tenant-b",
+                cases=("vault-registry-isolation",),
+                arguments=ask_arguments("governs"),
+                outcome={"error": "INVALID_RELATION_FILTER"},
+            ),
+        }
+    )
+
+    public_surface_complete = all(
+        checks and all(checks.values()) for checks in public_case_checks.values()
+    )
+    checks = {
+        case_id: all(case_checks[case_id].values()) and all(public_case_checks[case_id].values())
+        for case_id in sorted(observation["declared_cases"])
+    }
+    return {
+        "checks": checks,
+        "evidence": {
+            "public_calls": calls,
+            "helper_claims": observation["helper_claims"],
+            "public_case_checks": public_case_checks,
+            "public_surface_complete": public_surface_complete,
+            "case_checks": case_checks,
+            "resolution_only": {
+                "markdown_unchanged": hashes["resolution_before"]["markdown"]
+                == hashes["resolution_after"]["markdown"],
+                "registry_unchanged": hashes["resolution_before"]["registry"]
+                == hashes["resolution_after"]["registry"],
+                "candidate_count": len(resolutions["policy"].get("candidates") or []),
+            },
+            "topical-proximity-abstains": {
+                "selected_relation": resolutions["topical"].get("selected_relation"),
+                "authored_relation": None,
+                "false_directional_choice_scores_false_positive": observation[
+                    "false_directional_trial"
+                ]["false_positive"],
+            },
+        },
+    }
+
+
+def run_relation_lifecycle_fixture(manifest: dict[str, Any], root: Path) -> dict[str, Any]:
+    """Exercise and fail-closed score the synthetic relation lifecycle."""
+    return score_relation_lifecycle_observation(
+        collect_relation_lifecycle_observation(manifest, root)
     )
 
 
@@ -2136,9 +3614,7 @@ def run_exomem_local_core_fixture(manifest: dict[str, Any], root: Path) -> dict[
             expected_fingerprint=unit.fingerprint,
             # The documented guard is the page's whole-file `content_hash`
             # over raw bytes, not the index's hash of the normalized source.
-            expected_hash=vault_module.content_hash(
-                path.read_bytes().decode("utf-8")
-            ),
+            expected_hash=vault_module.content_hash(path.read_bytes().decode("utf-8")),
             category="config",
             content="Keep current indexes rebuildable.",
         )
@@ -2193,9 +3669,7 @@ def run_exomem_local_core_fixture(manifest: dict[str, Any], root: Path) -> dict[
             why="repair the benchmark schema violation without discarding content",
             field="status",
             value="active",
-            expected_hash=vault_module.content_hash(
-                path.read_bytes().decode("utf-8")
-            ),
+            expected_hash=vault_module.content_hash(path.read_bytes().decode("utf-8")),
         )
         final = path.read_text(encoding="utf-8")
         return (
@@ -5206,6 +6680,7 @@ def build_report(
                 and adapter_valid
             ),
             profile=profile,
+            relation_lifecycle=exomem_run.relation_lifecycle,
         )
         if exomem_run.probes
         else None
@@ -5770,6 +7245,7 @@ async def _run_exomem_mcp(
     cases: dict[str, CaseResult] = {}
     probes: dict[str, ProbeResult] = {}
     inventory: dict[str, Any] = {}
+    relation_lifecycle: dict[str, Any] = {}
     effective_timeout = max(timeout, 600.0) if profile == "full" else timeout
     client = Client(
         transport,
@@ -5872,6 +7348,11 @@ async def _run_exomem_mcp(
                     graph_cases=cases,
                     media_modules=media_modules,
                 )
+            )
+            relation_lifecycle = await asyncio.to_thread(
+                run_relation_lifecycle_fixture,
+                manifest,
+                corpus.root.parent / "direct-relation-lifecycle",
             )
     inventory = attach_operation_execution(
         manifest,
@@ -5978,6 +7459,7 @@ async def _run_exomem_mcp(
         fingerprint=fingerprint,
         index_duration_ms=index_duration_ms,
         preflight_valid=preflight_valid,
+        relation_lifecycle=relation_lifecycle,
     )
 
 
@@ -6593,7 +8075,7 @@ def _execute(args: argparse.Namespace, manifest: dict[str, Any], work: Path) -> 
             run_direct_comparison(manifest, exomem_corpus, basic_corpus, args)
         )
     else:
-        exomem_run = run_exomem_fixture(manifest, exomem_corpus)
+        exomem_run = run_exomem_fixture(manifest, exomem_corpus, include_relation_lifecycle=True)
         exomem_run.probes = run_exomem_local_core_fixture(manifest, work / "exomem-local-core")
         discovered = exomem_registry_inventory()
         exomem_run.inventory = {

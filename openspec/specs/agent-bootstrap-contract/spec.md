@@ -558,29 +558,28 @@ The guidance SHALL state that an explicit request to save, arriving after the re
 - **THEN** the guidance directs that nothing is written
 
 ### Requirement: Bootstrap Presents Simple Front-Door Actions
-The bootstrap contract SHALL present the primary user/agent actions as save,
-adopt/import, ask, prove, review, update, and connect. For each action it SHALL
-name the preferred tool or composition of tools, the internal typed operation(s)
-that enforce governance, and any selected-pack routing guidance. It SHALL keep
-advanced tools visible but secondary.
+
+Portable generic bootstrap profiles SHALL present the primary user/agent actions as save, adopt/import, ask, prove, review, update, and connect. For each action they SHALL name the preferred tool or composition of tools, the internal typed operation(s) that enforce governance, and any selected-pack routing guidance. They SHALL keep advanced tools visible but secondary. A valid `session` profile MAY omit this static action teaching and the unselected pack catalogue after accepting the matching installed skill contract; it SHALL retain selected pack state and its selection rule.
+
+#### Scenario: Session profile relies on the attested installed skill
+- **WHEN** a client presents the matching installed skill contract with `profile="session"`
+- **THEN** the response omits static front-door actions and unselected packs
+- **AND** it retains selected pack state and the governance-bound selection rule
 
 #### Scenario: Bootstrap exposes available and selected packs
-- **WHEN** an agent reads the bootstrap response
+- **WHEN** an agent reads a portable generic bootstrap response
 - **THEN** it can list available built-in packs with beginner descriptions
 - **AND** it can list selected packs and their agent instructions
 - **AND** a missing selection falls back to a default personal-records pack
 
 #### Scenario: Agent can route a proof request
-- **WHEN** an agent reads the bootstrap response and the user asks "prove this"
-  or "save this for my warranty case"
+- **WHEN** an agent reads a portable generic bootstrap response and the user asks "prove this" or "save this for my warranty case"
 - **THEN** the agent can identify the evidence/proof workflow
 - **AND** it can distinguish that workflow from ordinary source capture
-- **AND** selected pack guidance can refine the route without exposing internal
-  ontology to the user
+- **AND** selected pack guidance can refine the route without exposing internal ontology to the user
 
 #### Scenario: Agent can route an existing-vault request
-- **WHEN** an agent reads the bootstrap response and the user asks to import or
-  adopt an old vault
+- **WHEN** an agent reads a portable generic bootstrap response and the user asks to import or adopt an old vault
 - **THEN** the agent can identify the scan-first adoption workflow
 - **AND** it knows existing files are read-only by default
 
@@ -764,3 +763,55 @@ Every bootstrap profile SHALL carry the immutable workflow invariant kernel and 
 #### Scenario: Hidden contract is absent from bootstrap
 - **WHEN** the vault contains an unreleased workflow contract
 - **THEN** bootstrap is byte-equivalent to the result for an otherwise identical vault without that contract
+
+### Requirement: Bootstrap teaches the governed relation vocabulary loop
+
+Every bootstrap profile SHALL teach agents to resolve relation intent before inventing a label, inspect continuation/inventory guidance when candidate evidence is truncated, prefer the most specific truthful active relation, preserve `relates_to` and no edge as honest outcomes, propose a vault extension only for a durable or recurring semantic need, and save only a reviewed complete proposal with an audit reason and current registry hash. It SHALL teach that an existing canonical meaning is evolved through a new key plus deprecation/replacement rather than an in-place semantic edit. Compact bootstrap SHALL name the read-only resolve route and governed proposal/save routes plus the portable core keys; richer profiles MAY add generic examples. The guidance MUST NOT imply that similarity proves semantic equivalence or that the server chooses or authors a relation.
+
+#### Scenario: A fresh agent can discover relation evolution from compact bootstrap
+- **WHEN** a generic client requests the default compact bootstrap
+- **THEN** it learns the resolve, reuse, honest-fallback, propose, and guarded-save sequence using only exported operations
+- **AND** it learns that vault canonical keys may be namespaced while clean aliases are valid authoring labels
+
+#### Scenario: Bootstrap keeps `relates_to` legitimate
+- **WHEN** an agent reads relation-authoring guidance
+- **THEN** the guidance tells it not to invent false specificity and not to propose vocabulary merely to improve a graph metric
+
+#### Scenario: Generic scaffold contains no private ontology
+- **WHEN** the shipped scaffold and workflow skills are inspected
+- **THEN** their relation examples use only synthetic generic domains and labels
+- **AND** they contain no private or user-specific identifier, path, project, or vault-derived example
+
+### Requirement: Bootstrap exposes relation registry currency without scanning content
+
+Bootstrap SHALL expose the active relation contract version, core registry version, extension registry hash, extension count, and the route for bounded relation inventory. It MUST obtain this information from registry metadata without reading note bodies. Vault extension definitions MAY be returned only by the authenticated resolver or explicit schema inventory for the addressed vault.
+
+#### Scenario: Compact bootstrap remains bounded with many extensions
+- **WHEN** a vault contains more extensions than the compact response budget permits
+- **THEN** bootstrap reports the count, hash, and inventory route without embedding the unbounded registry
+- **AND** the resolver can return bounded candidates for a requested intent
+
+### Requirement: Skill-aware session bootstrap
+
+The system SHALL accept the opt-in bootstrap profile `session` for clients that have already loaded the installed Exomem operating rules and present its metadata `skill_contract`. The server SHALL derive that contract as SHA-256 over canonical JSON mapping logical source paths to LF-normalized text for the core skill, `references/*.md`, and standalone workflow `SKILL.md` files discovered from the canonical manifest, with only `metadata.skill_contract` removed before hashing. It SHALL resolve the handshake before constructing compact state: an absent or mismatched contract SHALL return the actual `compact` profile in the same call with a closed unavailable reason. A valid session request SHALL return live policy and capability state without repeating the generic static authoring contract. It SHALL preserve the compact contract's filtered server identity, active capabilities, engagement and delegation envelope, governance, workflow contracts, relation vocabulary currency, active entity registry, source taxonomy, selected knowledge-pack guidance and selection rule, and due state when present. It SHALL retain the compact due-state and family-disposition post-write guidance cluster. The response SHALL identify its prerequisite and generic fallback. Existing `compact`, `full`, and `diagnostics` behavior SHALL remain available.
+
+#### Scenario: Skill-aware client requests current state
+- **WHEN** a client calls bootstrap with profile `session`
+- **THEN** current policy and active capability state match the compact projection for that caller
+- **AND** static semantic authoring recipes and unselected pack instructions are omitted
+- **AND** the result says that installed operating rules are required and compact supplies the portable contract
+
+#### Scenario: Stale skill receives portable compact contract
+- **WHEN** a client omits `skill_contract` or presents a digest that differs from the server's canonical skill contract
+- **THEN** the same call returns `profile="compact"` and a closed unavailable reason
+- **AND** compact resolution and due-state delivery execute once
+
+#### Scenario: Reduced adapter and overridden policy
+- **WHEN** the active adapter omits a tool or the user lowers a delegation ceiling
+- **THEN** the session profile preserves the lowered ceiling and active adapter fingerprint
+- **AND** it does not advertise an unavailable operation
+
+#### Scenario: Live workflow and due state
+- **WHEN** scoped workflow configuration, vocabulary extensions, selected packs or audience-filtered due state exist
+- **THEN** session bootstrap preserves the corresponding compact state and resolution routes
+- **AND** it does not substitute static skill defaults or silently treat missing state as empty

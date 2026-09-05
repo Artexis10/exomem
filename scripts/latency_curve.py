@@ -382,7 +382,10 @@ def measure_bm25_write_cycle(n: int, *, links_per_note: int) -> list[dict]:
         measured("read after one write")
 
         bm25.unload_cache()
-        find_module.unload_ram_caches()
+        # The harness is measuring a COLD read, so it wants the parsed-page
+        # cache gone. `unload_ram_caches` now preserves it by default (exact
+        # receipt custody); the memory-release meaning is the explicit one.
+        find_module.unload_ram_caches(pages=True)
         measured("read after unload_cache()")
         return rows
     finally:

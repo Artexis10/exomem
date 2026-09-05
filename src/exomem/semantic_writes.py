@@ -946,6 +946,9 @@ class CreationCommit:
     # a second one would be a second thing to keep fail-open; it does not share
     # the seam's licence to skip a disclosure decision, and does not get one.
     due_state: dict[str, Any] | None = None
+    # Server-internal point-lookup context. The mutation terminal consumes and
+    # strips it; no response detail exposes a local vault path.
+    relation_advisory_context: dict[str, str] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -963,6 +966,8 @@ class CreationCommit:
             value["structure_suggestion"] = self.structure_suggestion
         if self.due_state is not None:
             value["due_state"] = self.due_state
+        if self.relation_advisory_context is not None:
+            value["_relation_advisory_context"] = self.relation_advisory_context
         return value
 
 
@@ -1037,6 +1042,7 @@ class ExistingCommit:
     # a second one would be a second thing to keep fail-open; it does not share
     # the seam's licence to skip a disclosure decision, and does not get one.
     due_state: dict[str, Any] | None = None
+    relation_advisory_context: dict[str, str] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -1055,6 +1061,8 @@ class ExistingCommit:
             value["structure_suggestion"] = self.structure_suggestion
         if self.due_state is not None:
             value["due_state"] = self.due_state
+        if self.relation_advisory_context is not None:
+            value["_relation_advisory_context"] = self.relation_advisory_context
         return value
 
 
@@ -2329,9 +2337,16 @@ def commit_existing(
         )
     suggestion = _structure_suggestion(preflight.after, preflight.after_corpus)
     due = _due_state_block(vault_root, preflight.path)
-    if suggestion is None and due is None:
-        return committed
-    return replace(committed, structure_suggestion=suggestion, due_state=due)
+    context = {
+        "vault": str(Path(vault_root)),
+        "registry_hash": preflight.after.relation_registry_hash,
+    }
+    return replace(
+        committed,
+        structure_suggestion=suggestion,
+        due_state=due,
+        relation_advisory_context=context,
+    )
 
 
 def _commit_existing(
@@ -3802,9 +3817,16 @@ def commit_creation(
     )
     suggestion = _structure_suggestion(preflight.semantic_state, preflight.corpus)
     due = _due_state_block(vault_root, preflight.destination)
-    if suggestion is None and due is None:
-        return committed
-    return replace(committed, structure_suggestion=suggestion, due_state=due)
+    context = {
+        "vault": str(Path(vault_root)),
+        "registry_hash": preflight.semantic_state.relation_registry_hash,
+    }
+    return replace(
+        committed,
+        structure_suggestion=suggestion,
+        due_state=due,
+        relation_advisory_context=context,
+    )
 
 
 def _prepare_creation_catalog_publication(

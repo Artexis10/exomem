@@ -21,7 +21,11 @@ def test_capture_workflow_checks_existing_entity_before_create() -> None:
 
 
 def test_main_scaffold_treats_entities_as_stepping_stones_without_frozen_list() -> None:
-    text = (SCHEMA / "SKILL.md").read_text(encoding="utf-8")
+    entrypoint = (SCHEMA / "SKILL.md").read_text(encoding="utf-8")
+    assert "references/engagement.md" in entrypoint
+    text = (SCHEMA / "references" / "engagement.md").read_text(encoding="utf-8")
+    writing = (SCHEMA / "references" / "writing.md").read_text(encoding="utf-8")
+    assert 'connect_memory(operation="resolve-entity"' in writing
 
     assert "durable recurring entity" in text
     assert "active entity registry" in text
@@ -33,7 +37,9 @@ def test_main_scaffold_treats_entities_as_stepping_stones_without_frozen_list() 
 
 
 def test_people_pages_document_aliases_and_about_entity() -> None:
-    skill = (SCHEMA / "SKILL.md").read_text(encoding="utf-8")
+    entrypoint = (SCHEMA / "SKILL.md").read_text(encoding="utf-8")
+    assert "references/recall.md" in entrypoint
+    skill = (SCHEMA / "references" / "recall.md").read_text(encoding="utf-8")
     page_types = (SCHEMA / "references" / "page-types.md").read_text(encoding="utf-8")
 
     assert "### Referents" in skill

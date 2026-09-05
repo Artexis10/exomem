@@ -11,12 +11,13 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import commands
+from exomem import commands, workflow_skills
 from exomem import server as server_module
 from exomem.__main__ import _simple_cli_action_names, main
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
-PROFILES = ("compact", "full", "diagnostics")
+GENERIC_PROFILES = ("compact", "full", "diagnostics")
+PROFILES = (*GENERIC_PROFILES, "session")
 TIER2_PRODUCT_TOOLS = {
     "govern_memory",
     "manage_memory_file",
@@ -54,7 +55,7 @@ _ACTION_VOCABULARY_MAPS = {
 
 def _call_mcp(mcp, profile: str) -> dict:
     result = asyncio.run(
-        mcp.call_tool("bootstrap", {"profile": profile}, run_middleware=True)
+        mcp.call_tool("bootstrap", _bootstrap_args(profile), run_middleware=True)
     )
     structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):
@@ -64,6 +65,13 @@ def _call_mcp(mcp, profile: str) -> dict:
         if text:
             return json.loads(text)
     raise AssertionError("bootstrap returned no structured payload")
+
+
+def _bootstrap_args(profile: str) -> dict[str, str]:
+    args = {"profile": profile}
+    if profile == "session":
+        args["skill_contract"] = workflow_skills.skill_contract()
+    return args
 
 
 def _extract_advertised_tool_refs(
@@ -285,7 +293,7 @@ def test_all_rest_bootstrap_profiles_match_openapi_operations(
 
     for profile in PROFILES:
         response = client.post(
-            "/api/bootstrap", json={"profile": profile}, headers=auth
+            "/api/bootstrap", json=_bootstrap_args(profile), headers=auth
         )
         assert response.status_code == 200, response.text
         payload = response.json()["data"]
@@ -324,7 +332,10 @@ def test_all_cli_bootstrap_profiles_match_parser_registry(
     exported = set(product_tuple) | aliases
 
     for profile in PROFILES:
-        assert main(["bootstrap", "--profile", profile, "--json"]) == 0
+        args = ["bootstrap", "--profile", profile, "--json"]
+        if profile == "session":
+            args.extend(["--skill-contract", workflow_skills.skill_contract()])
+        assert main(args) == 0
         output = capsys.readouterr().out.strip().splitlines()[-1]
         payload = json.loads(output)["data"]
         _assert_conforms(
@@ -354,7 +365,7 @@ def test_narrow_surface_filters_every_profile_without_deleting_useful_routes(
     )
 
     with active_surface(descriptor):
-        payloads = [commands.op_bootstrap(vault, profile=profile) for profile in PROFILES]
+        payloads = [commands.op_bootstrap(vault, **_bootstrap_args(profile)) for profile in PROFILES]
 
     for payload in payloads:
         refs = _extract_advertised_tool_refs(
@@ -364,8 +375,9 @@ def test_narrow_surface_filters_every_profile_without_deleting_useful_routes(
         )
         assert refs <= descriptor.callable_commands
         assert {"review_memory", "read_media"}.isdisjoint(refs)
-        assert payload["simple_actions"]["ask"]["route"]["tool"] == "ask_memory"
-        assert payload["simple_actions"]["remember"]["route"]["tool"] == "remember"
+        if payload["profile"] != "session":
+            assert payload["simple_actions"]["ask"]["route"]["tool"] == "ask_memory"
+            assert payload["simple_actions"]["remember"]["route"]["tool"] == "remember"
 
 
 def test_direct_python_bootstrap_defaults_to_canonical_full_mcp(vault: Path) -> None:
@@ -384,7 +396,7 @@ def test_direct_python_bootstrap_defaults_to_canonical_full_mcp(vault: Path) -> 
 
 
 def test_bootstrap_guidance_uses_product_writer_not_legacy_note(vault: Path) -> None:
-    for profile in PROFILES:
+    for profile in GENERIC_PROFILES:
         serialized = json.dumps(commands.op_bootstrap(vault, profile=profile))
         assert "note()" not in serialized
         assert "remember()" in serialized

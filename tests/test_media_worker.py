@@ -3154,3 +3154,284 @@ def test_process_child_receives_wheel_owned_cuda_environment(tmp_path, monkeypat
     worker._launch_child()
 
     assert captured["env"]["LD_LIBRARY_PATH"].startswith("/wheel/cublas")
+
+
+# --- The idle supervisor must not take the mutation boundary forever ---
+#
+# `_supervise` loops on `self._wake.wait(0.5)` and called
+# `self._store.needs_worker()` on every pass.  Each of those opens the job
+# store, and opening it takes the reserved-identity boundary twice — once on
+# the gate, once on the `media-jobs-store` domain.  With nothing to do, that
+# is ~8 boundary acquisitions a second, forever, per service cell: the single
+# largest producer of log volume on a live box.
+#
+# The fix is a cheap freshness pre-check, NOT a longer poll: `idle_seconds`
+# (300) is the *child's* lifetime, not a supervisor cadence, and stretching
+# the poll would delay a newly-enqueued job by minutes.  A job can be enqueued
+# without ever setting `_wake` — `media_processing.reconcile_media` writes
+# straight to the store — so the safety-net poll has to keep its 0.5s
+# responsiveness while costing nothing when the store has not changed.
+
+
+def _count_reserved_identity_holds(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every mutation-boundary acquisition, by operation label."""
+    from exomem import mutation_lock as mutation_lock_module
+
+    taken: list[str] = []
+    original = mutation_lock_module.VaultMutationCoordinator.hold
+
+    def counting_hold(self, **kwargs):
+        taken.append(str(kwargs.get("operation")))
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(
+        mutation_lock_module.VaultMutationCoordinator, "hold", counting_hold
+    )
+    return taken
+
+
+def _run_supervisor_for(worker, seconds: float) -> None:
+    thread = threading.Thread(target=worker._supervise, daemon=True)
+    thread.start()
+    try:
+        time.sleep(seconds)
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive(), "supervisor thread did not stop"
+
+
+def test_idle_supervisor_stops_taking_the_mutation_boundary_twice_a_second(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty store must not be re-opened on every 0.5s pass.
+
+    This is the 87k-rows-an-hour producer.  Before the fix a two-second idle
+    window took roughly sixteen boundary acquisitions; after it, the store is
+    read once and the freshness signature answers every later pass for free.
+    """
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    assert worker._store is not None
+    assert worker._store.counts().get(media_jobs.PENDING, 0) == 0
+    monkeypatch.setattr(
+        worker, "_launch_child", lambda: pytest.fail("idle supervisor launched a child")
+    )
+
+    taken = _count_reserved_identity_holds(monkeypatch)
+    _run_supervisor_for(worker, 2.0)
+
+    boundary = [op for op in taken if op and op.startswith("reserved_identity")]
+    assert len(boundary) <= 4, (
+        f"an idle supervisor took the mutation boundary {len(boundary)} times in "
+        f"two seconds ({boundary}); this is the log flood"
+    )
+
+
+def test_a_store_write_is_still_seen_within_one_poll(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Promptness invariant: a job enqueued WITHOUT a wake still starts fast.
+
+    `media_processing.reconcile_media` enqueues straight into the store and
+    never touches `_wake`, so the cheap idle path must still notice a store
+    write on its next 0.5s pass.  A skip that never re-checks would strand
+    that job, which is why this is a separate test from the count above.
+    """
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    assert worker._store is not None
+    launched = threading.Event()
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", lambda: (launched.set(), None)[1])
+
+    # The stub is built BEFORE the supervisor thread starts, deliberately, and
+    # the placement is load-bearing rather than tidiness.  The deadline below
+    # is measured from the enqueue, but the backstop's clock is anchored at the
+    # supervisor's first idle pass -- so everything that happens after that
+    # pass and before the enqueue is subtracted from this test's margin.  A
+    # SLOWER fixture therefore shrinks its power rather than growing it, which
+    # is the inverse of the usual intuition, and at an enqueue 3.0s past the
+    # anchor the test reverts silently to passing on the backstop it exists to
+    # exclude.  Measured under a blinded signature: stub inside that window,
+    # blind latency 2.539s (margin +0.539s); stub outside it, 4.055s (+2.055s).
+    # Above `time.sleep(1.0)` is NOT far enough -- the thread is already
+    # running by then and the stub's ~1.7s still lands on the anchor's clock.
+    result = _preserve_media_stub(vault, filename="unwoken.mp3")
+    thread = threading.Thread(target=worker._supervise, daemon=True)
+    thread.start()
+    try:
+        # Let the supervisor settle into its idle state first, so the enqueue
+        # below has to be noticed by the cheap path rather than the first pass.
+        time.sleep(1.0)
+        assert not launched.is_set()
+        worker._store.enqueue(
+            media_jobs.MediaJob(
+                binary_path=vault / result.path,
+                sidecar_path=vault / result.sidecar_path,
+                media_type="audio",
+                do_ocr=True,
+                do_clip=False,
+            )
+        )
+        # WELL under `_SUPERVISE_FORCED_RECHECK_SECONDS`, and that gap is the
+        # whole point.  At the backstop's own value this test passed on the
+        # backstop rather than on the signature, so a signature that had
+        # stopped detecting writes at all still looked healthy -- dropping
+        # `st_mtime_ns` (which alone moves on 40/40 real enqueues, where size
+        # and inode move on 1/40) left it green at a 3.8s launch delay.
+        deadline = media_worker._SUPERVISE_FORCED_RECHECK_SECONDS / 2.5
+        assert launched.wait(timeout=deadline), (
+            f"a job enqueued without a wake was not picked up within {deadline}s "
+            "— the store signature did not detect the write, and only the "
+            "forced re-check backstop can still be covering for it"
+        )
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_an_in_process_enqueue_still_wakes_the_supervisor_immediately(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`MediaWorker.enqueue` sets `_wake`; that path must stay instant."""
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    launched = threading.Event()
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", lambda: (launched.set(), None)[1])
+
+    # Built before the thread starts, for the reason set out in the sibling
+    # above: everything between the supervisor's first idle pass and the
+    # enqueue is subtracted from the backstop's remaining time, so keeping the
+    # stub off that clock is what stops a slower fixture from silently
+    # reverting this test to the backstop it exists to exclude.  Measured under
+    # a blinded signature: 2.539s blind latency with the stub on the clock,
+    # 4.055s with it off -- against a 2.0s deadline.
+    result = _preserve_media_stub(vault, filename="woken.mp3")
+    thread = threading.Thread(target=worker._supervise, daemon=True)
+    thread.start()
+    try:
+        time.sleep(1.0)
+        worker.enqueue(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+        # Derived, not a literal: a plain 5.0 is exactly
+        # `_SUPERVISE_FORCED_RECHECK_SECONDS`, so the backstop alone satisfied
+        # it and this test stayed green with the signature frozen blind
+        # (measured 2.555s against a live 0.059s).  Four polls is a wall the
+        # wake path clears by two orders of magnitude and the backstop cannot.
+        deadline = media_worker._SUPERVISE_POLL_SECONDS * 4
+        assert launched.wait(timeout=deadline), (
+            f"an in-process enqueue did not wake the supervisor within {deadline}s"
+        )
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_the_forced_recheck_still_starts_a_worker_when_the_signature_is_blind(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backstop is a real net, and nothing else was testing it.
+
+    The signature and the forced re-check are each other's only guard: with the
+    signature working the backstop never fires, and with the backstop present a
+    broken signature is invisible.  So each was individually mutable without a
+    single test going red -- stretching the backstop to an hour survived the
+    whole media suite.
+
+    Here the signature is deliberately frozen, so the supervisor can only ever
+    see a settled store, and the backstop is the sole remaining path to a
+    worker.  A job enqueued with no wake and no signature movement must still
+    get one.
+    """
+    # NOT monkeypatched: patching `_SUPERVISE_FORCED_RECHECK_SECONDS` here is
+    # what let this very mutant survive the first time. A test that supplies
+    # its own value for the constant under test proves the mechanism works and
+    # says nothing about the number that ships, so the backstop could be
+    # stretched to an hour with this test still green. The ceiling below is an
+    # absolute wall-clock bound instead: it encodes the actual requirement,
+    # which is that the backstop is short enough to be a net at all.
+    assert media_worker._SUPERVISE_FORCED_RECHECK_SECONDS <= 10.0, (
+        "the forced re-check has drifted long enough to stop being a backstop"
+    )
+    # Independent of the pin above: a value that drifted into the band just
+    # under the ceiling would otherwise surface as an intermittent failure on
+    # a loaded box instead of a clean red.
+    backstop_ceiling = 10.0 + 2 * media_worker._SUPERVISE_POLL_SECONDS
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    assert worker._store is not None
+    monkeypatch.setattr(media_worker, "_job_store_signature", lambda _store: ("frozen",))
+    launched = threading.Event()
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", lambda: (launched.set(), None)[1])
+
+    thread = threading.Thread(target=worker._supervise, daemon=True)
+    thread.start()
+    try:
+        # Settle first: the supervisor must have recorded the frozen signature
+        # and decided there is nothing to do, or the launch below would come
+        # from the ordinary path rather than from the backstop.
+        time.sleep(0.3)
+        assert not launched.is_set()
+        result = _preserve_media_stub(vault, filename="blind-signature.mp3")
+        worker._store.enqueue(
+            media_jobs.MediaJob(
+                binary_path=vault / result.path,
+                sidecar_path=vault / result.sidecar_path,
+                media_type="audio",
+                do_ocr=True,
+                do_clip=False,
+            )
+        )
+        assert launched.wait(timeout=backstop_ceiling), (
+            f"with the store signature blind, no worker started within "
+            f"{backstop_ceiling}s — the forced re-check is not a net, and a "
+            "write the signature cannot see would strand the job"
+        )
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_the_signature_moves_on_a_real_enqueue(vault) -> None:
+    """`st_mtime_ns` does the work, and is pinned separately from the backstop.
+
+    Rows land in existing pages, so file size and inode usually do not move on
+    an enqueue at all.  Dropping the timestamp from the signature therefore
+    breaks detection while leaving something that still looks like a signature,
+    which is exactly the mutant the backstop used to hide.
+    """
+    store = media_jobs.MediaJobStore(vault)
+    before = media_worker._job_store_signature(store)
+    assert before is not None
+
+    result = _preserve_media_stub(vault, filename="signature-moves.mp3")
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+            do_ocr=True,
+            do_clip=False,
+        )
+    )
+
+    after = media_worker._job_store_signature(store)
+    assert after is not None
+    assert after != before, "an enqueue did not move the store signature"
+    # And it must be the timestamp doing it, not an incidental size change:
+    # strip the mtime from both and the remainder is allowed to be identical,
+    # which is precisely why the mtime cannot be dropped.
+    assert any(
+        entry is not None and other is not None and entry[0] != other[0]
+        for entry, other in zip(before, after, strict=True)
+        if entry is not None and other is not None
+    ), "no st_mtime_ns component moved; the signature is relying on size alone"

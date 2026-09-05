@@ -63,8 +63,9 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
@@ -85,7 +86,407 @@ def _sqlite_connect_owned(
     return sqlite3.connect(database, *args, **kwargs)
 
 _NAV_BASENAMES = frozenset({"index.md", "log.md"})
-SCHEMA_VERSION = 7
+
+#: Structured-filter eligibility columns on `pages`, in INSERT order. One tuple
+#: so the writer, the empty row and the schema cannot drift apart by an edit to
+#: one of them.
+#:
+#: Two columns per scalar axis, and that is the contract, not redundancy. The
+#: scalar column holds the value only when the page declares a comparable
+#: string, which is exactly when `$eq` can match; the members array is NULL
+#: only when the page does not declare the key at all, which is exactly what
+#: `$exists` asks, and it holds every comparable member, which is how the
+#: evaluator answers `$in` against a LIST-valued declaration on a scalar axis
+#: (`type: [insight, pattern]` matches `types=["insight"]`).
+_ELIGIBILITY_COLUMNS: tuple[str, ...] = (
+    "page_type",
+    "page_type_json",
+    "status",
+    "status_json",
+    "file_type",
+    "file_type_json",
+    "source_kind",
+    "source_kind_json",
+    "domain",
+    "domain_json",
+    "projects_json",
+    "tags_json",
+    "speakers_json",
+    "updated_day",
+    "updated_json",
+)
+_EMPTY_ELIGIBILITY: tuple[None, ...] = (None,) * len(_ELIGIBILITY_COLUMNS)
+
+#: axis -> (scalar column or None, members column). The page-level half of the
+#: structured-filter contract lives here: an axis with no entry has no index
+#: answer.
+_PAGE_AXIS_COLUMNS: dict[str, tuple[str | None, str]] = {
+    "page.type": ("page_type", "page_type_json"),
+    "page.status": ("status", "status_json"),
+    "page.file_type": ("file_type", "file_type_json"),
+    "page.source_kind": ("source_kind", "source_kind_json"),
+    "page.domain": ("domain", "domain_json"),
+    "page.project": (None, "projects_json"),
+    "page.tags": (None, "tags_json"),
+    "page.speakers": (None, "speakers_json"),
+    "page.updated": ("updated_day", "updated_json"),
+}
+#: The same, over `semantic_units`. The five governed scalar axes are
+#: single-valued by construction (the parser produces one string or None), so
+#: they need no members array; `unit.tags` and the two date/verdict axes do.
+#: Unit axes `unit_view` always names, so once a unit row exists the key does
+#: too. Mirrors `structured_filters._ALWAYS_PRESENT_UNIT_AXES`.
+_ALWAYS_PRESENT_UNIT_AXES: frozenset[str] = frozenset(
+    {"unit.category", "unit.category_key", "unit.kind", "unit.context", "unit.form", "unit.tags"}
+)
+_UNIT_AXIS_COLUMNS: dict[str, tuple[str | None, str | None]] = {
+    "unit.category": ("category", None),
+    "unit.category_key": ("category_key", None),
+    "unit.kind": ("kind", None),
+    "unit.context": ("context", None),
+    "unit.form": ("form", None),
+    "unit.verdict": ("verdict", None),
+    "unit.tags": (None, "tags_canonical_json"),
+    "unit.check_by": ("check_by_day", "check_by_json"),
+}
+
+
+def _canonical_scalar(field: str, value: object) -> str | None:
+    """The stored spelling for a scalar axis, or None when nothing can match.
+
+    A non-string declaration is stored as NULL on purpose. `_runtime_scalar`
+    types it as something other than a string, so `$eq` with a string operand
+    can never equal it, and excluding the row from the scalar column is the
+    same answer the evaluator gives. `$in` does NOT read this column — a list
+    declaration is answered from the members array below.
+    """
+    from . import structured_filters
+
+    if not isinstance(value, str):
+        return None
+    return structured_filters.canonicalize_axis_value(field, value)
+
+
+def _canonical_members(
+    field: str, value: object, *, present: bool, list_axis: bool = False
+) -> str | None:
+    """JSON array of the comparable members of one axis, or None when absent.
+
+    NULL means the page does not declare the key; that is the only thing
+    `$exists` asks, so it must not be conflated with "declares something this
+    axis cannot compare". A list yields its storable members. A bare string
+    yields a one-member array on a SCALAR axis — `type: insight` and
+    `type: [insight]` answer `$in` identically — but an empty one on a terminal
+    collection axis, because `_evaluate_operator` refuses every array operator
+    on a runtime that is not a list.
+    """
+    if not present:
+        return None
+    if isinstance(value, str):
+        if list_axis:
+            return "[]"
+        canonical = _canonical_scalar(field, value)
+        return json.dumps([] if canonical is None else [canonical], ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        members = [
+            canonical
+            for item in value
+            if isinstance(item, str) and (canonical := _canonical_scalar(field, item)) is not None
+        ]
+        return json.dumps(members, ensure_ascii=False)
+    return "[]"
+
+
+def _iso_day(value: object) -> str | None:
+    """The recorded day of a settled temporal value, else None."""
+    from datetime import date as _date
+    from datetime import datetime as _datetime
+
+    if isinstance(value, _datetime):
+        return value.date().isoformat()
+    if isinstance(value, _date):
+        return value.isoformat()
+    return None
+
+
+def _day_members(value: object, *, present: bool) -> str | None:
+    """JSON array of the recorded days a temporal axis declares."""
+    if not present:
+        return None
+    day = _iso_day(value)
+    if day is not None:
+        return json.dumps([day], ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        days = [d for item in value if (d := _iso_day(item)) is not None]
+        return json.dumps(days, ensure_ascii=False)
+    # An unparseable recorded value is present and matches no date operand.
+    return "[]"
+
+
+def _eligibility_columns(page: object) -> tuple[str | None, ...]:
+    """The eligibility row for one parsed page, in `_ELIGIBILITY_COLUMNS` order.
+
+    Derived from `structured_filters.page_view` rather than from raw
+    frontmatter, so the union of `project`/`projects`, the `source_type`
+    naming and the settled `updated` value are solved once — where the reader
+    already solves them — and key presence is read off the same view the
+    evaluator reads it off.
+    """
+    from . import structured_filters
+
+    view = structured_filters.page_view(page)
+    recorded = view.get("updated")
+    row: list[str | None] = []
+    for axis, key in (
+        ("page.type", "type"),
+        ("page.status", "status"),
+        ("page.file_type", "file_type"),
+        ("page.source_kind", "source_kind"),
+        ("page.domain", "domain"),
+    ):
+        row.append(_canonical_scalar(axis, view.get(key)))
+        row.append(_canonical_members(axis, view.get(key), present=key in view))
+    for axis, key in (
+        ("page.project", "project"),
+        ("page.tags", "tags"),
+        ("page.speakers", "speakers"),
+    ):
+        row.append(_canonical_members(axis, view.get(key), present=key in view, list_axis=True))
+    row.append(_iso_day(recorded))
+    row.append(_day_members(recorded, present="updated" in view))
+    return tuple(row)
+
+
+def _encode_filter_value(value: Any, *, member: bool = False) -> list[Any]:
+    """Retain scalar types that coarse SQL candidate columns cannot decide."""
+    if isinstance(value, datetime):
+        return ["datetime", value.isoformat()]
+    if isinstance(value, date):
+        return ["date", value.isoformat()]
+    if isinstance(value, (list, tuple)) and not member:
+        # Membership operators compare scalar items only. Nested containers
+        # remain non-comparable, including recursive YAML aliases.
+        return ["list", [_encode_filter_value(item, member=True) for item in value]]
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return ["scalar", value]
+    # Mappings, sets and binary YAML values are not comparable on any indexed
+    # axis. Keep them non-scalar instead of turning them into matching strings.
+    return ["unsupported", {}]
+
+
+def _decode_filter_value(encoded: list[Any]) -> Any:
+    kind, value = encoded
+    if kind == "datetime":
+        return datetime.fromisoformat(value)
+    if kind == "date":
+        return date.fromisoformat(value)
+    if kind == "list":
+        return [_decode_filter_value(item) for item in value]
+    if kind == "scalar":
+        return value
+    if kind == "unsupported":
+        return {}
+    raise ValueError("unknown eligibility metadata value kind")
+
+
+def _eligibility_view_json(page: Any) -> str:
+    from . import structured_filters
+
+    # Arbitrary frontmatter pointers are not supported by the managed planner.
+    # Persist only its public axes, not a second copy of the whole document.
+    view = structured_filters.page_view(page)
+    return json.dumps(
+        {
+            "view": {
+                key: _encode_filter_value(value)
+                for key, value in view.items()
+                if key != "frontmatter"
+            },
+            "media_file": page.media_file,
+            "frame_ts": page.frame_ts,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _unit_eligibility_columns(unit: object) -> tuple[str | None, ...]:
+    """`(verdict, check_by_day, check_by_json, tags_canonical_json)` for one unit.
+
+    Read off `structured_filters.unit_view`, the same adapter the evaluator
+    uses, so the settled `check_by` date and the casefolded tag members are
+    the values a predicate actually compares. `verdict` and `check_by` are
+    omitted from the view when absent — absence is the meaningful state for
+    both — so NULL here means absent, which is what `$exists` asks.
+    """
+    from . import structured_filters
+
+    view = structured_filters.unit_view(unit)
+    check_by = view.get("check_by")
+    return (
+        _canonical_scalar("unit.verdict", view.get("verdict")),
+        _iso_day(check_by),
+        _day_members(check_by, present="check_by" in view),
+        _canonical_members(
+            "unit.tags", view.get("tags"), present="tags" in view, list_axis=True
+        ),
+    )
+
+
+def _members_sql(column: str, values: tuple[str, ...]) -> tuple[str, list[object]]:
+    """`one member of <column> is in <values>`; proven-false for an empty set."""
+    if not values:
+        # `$in []` matches nothing in the evaluator; dropping the constraint
+        # would admit the whole scope instead.
+        return "0", []
+    placeholders = ",".join("?" for _ in values)
+    return (
+        f"EXISTS(SELECT 1 FROM json_each({column}) je WHERE je.value IN ({placeholders}))",
+        list(values),
+    )
+
+
+def _axis_test_sql(
+    test: Any, columns: tuple[str | None, str | None], alias: str
+) -> tuple[str, list[object]]:
+    """SQL for one `AxisTest` against its columns, aliased to `alias`.
+
+    Each branch mirrors one branch of `structured_filters._evaluate_operator`,
+    which is why they are written out rather than folded together: `$eq` reads
+    the scalar column because the evaluator refuses to equate a list with a
+    string, while `$in` reads the members array because the evaluator matches a
+    list member-wise. Collapsing them is precisely the defect this replaces.
+    """
+    scalar, members = columns
+    scalar_col = None if scalar is None else f"{alias}.{scalar}"
+    members_col = None if members is None else f"{alias}.{members}"
+    if test.op == "exists":
+        if test.axis in _ALWAYS_PRESENT_UNIT_AXES:
+            # `unit_view` always names these keys, so once a unit row exists
+            # the key does too. (With no unit at all the caller has already
+            # rendered the MISSING arm, where the answer is the opposite.)
+            return ("1" if test.present else "0"), []
+        if members_col is not None:
+            return (f"{members_col} IS {'NOT ' if test.present else ''}NULL", [])
+        assert scalar_col is not None
+        return (f"{scalar_col} IS {'NOT ' if test.present else ''}NULL", [])
+    if test.op == "nullish":
+        # Declared, but not as a value the axis can compare.
+        assert scalar_col is not None
+        if members_col is None:
+            return f"{scalar_col} IS NULL", []
+        return f"({scalar_col} IS NULL AND {members_col} IS NOT NULL)", []
+    if test.op == "in":
+        if members_col is not None:
+            return _members_sql(members_col, test.values)
+        assert scalar_col is not None
+        if not test.values:
+            return "0", []
+        placeholders = ",".join("?" for _ in test.values)
+        return f"{scalar_col} IN ({placeholders})", list(test.values)
+    if test.op == "all":
+        assert members_col is not None
+        if not test.values:
+            return "1", []
+        parts: list[str] = []
+        params: list[object] = []
+        for value in test.values:
+            sql, bound = _members_sql(members_col, (value,))
+            parts.append(sql)
+            params.extend(bound)
+        return "(" + " AND ".join(parts) + ")", params
+    if test.op in {"eq", "ne"}:
+        assert scalar_col is not None
+        value = test.values[0]
+        if test.op == "eq":
+            # Guarded, not bare. `NULL = ?` is NULL and `NOT NULL` is NULL, so
+            # a bare comparison inside a complement drops every page that does
+            # not declare the axis — the rows the evaluator keeps.
+            return f"({scalar_col} IS NOT NULL AND {scalar_col} = ?)", [value]
+        # `$ne` needs a comparable value of the SAME kind that differs, so an
+        # absent or non-string declaration is False, not True.
+        return f"({scalar_col} IS NOT NULL AND {scalar_col} <> ?)", [value]
+    if test.op == "contains":
+        value = test.values[0]
+        branches: list[str] = []
+        params = []
+        if scalar_col is not None:
+            branches.append(f"({scalar_col} IS NOT NULL AND instr({scalar_col}, ?) > 0)")
+            params.append(value)
+        if members_col is not None:
+            sql, bound = _members_sql(members_col, (value,))
+            branches.append(sql)
+            params.extend(bound)
+        return "(" + " OR ".join(branches) + ")", params
+    # range
+    assert scalar_col is not None
+    parts = [f"{scalar_col} IS NOT NULL"]
+    params = []
+    if test.lower is not None:
+        parts.append(f"{scalar_col} {test.lower_op} ?")
+        params.append(test.lower)
+    if test.upper is not None:
+        parts.append(f"{scalar_col} {test.upper_op} ?")
+        params.append(test.upper)
+    return "(" + " AND ".join(parts) + ")", params
+
+
+def _eligibility_sql(expr: Any, *, unit_missing: bool) -> tuple[str, list[object]]:
+    """Render one eligibility expression over `pages p` (and `semantic_units u`).
+
+    ``unit_missing`` renders the arm `page_matches` evaluates with no unit at
+    all: every unit axis reads as MISSING there, so only `$exists false`
+    survives and every other unit test is false. The caller ORs that arm with
+    one `EXISTS` over the unit rows, which is exactly the existential grouping
+    `page_matches` performs — and it puts the EXISTS at the top, so two unit
+    predicates in one conjunction are required of the SAME unit.
+    """
+    from . import structured_filters as sf
+
+    if isinstance(expr, sf.EligibilityConst):
+        return ("1" if expr.value else "0"), []
+    if isinstance(expr, sf.EligibilityNot):
+        sql, params = _eligibility_sql(expr.child, unit_missing=unit_missing)
+        return f"NOT ({sql})", params
+    if isinstance(expr, (sf.EligibilityAll, sf.EligibilityAny)):
+        joiner = " AND " if isinstance(expr, sf.EligibilityAll) else " OR "
+        parts: list[str] = []
+        params: list[object] = []
+        for child in expr.children:
+            sql, bound = _eligibility_sql(child, unit_missing=unit_missing)
+            parts.append(sql)
+            params.extend(bound)
+        return "(" + joiner.join(parts) + ")", params
+    axis = expr.axis
+    if axis.startswith("unit."):
+        if unit_missing:
+            # MISSING: `$exists false` is the only test a vanished unit passes.
+            return ("1" if expr.op == "exists" and not expr.present else "0"), []
+        return _axis_test_sql(expr, _UNIT_AXIS_COLUMNS[axis], "u")
+    return _axis_test_sql(expr, _PAGE_AXIS_COLUMNS[axis], "p")
+
+
+def _eligibility_predicate(eligibility: Any, scope_column: str) -> tuple[str, list[object]]:
+    """The whole page predicate for one `EligibilityPlan`, over `pages p`.
+
+    `page_matches` is `evaluate(plan, page, unit=None) OR any(evaluate(plan,
+    page, unit))`. That is rendered literally: the first arm with every unit
+    axis MISSING, the second as one `EXISTS` over the parent's in-scope units.
+    A plan with no unit predicate has only the first arm, exactly as the
+    evaluator short-circuits to `evaluate_filter(plan, page=page)`.
+    """
+    sql, params = _eligibility_sql(eligibility.expr, unit_missing=True)
+    if not eligibility.has_unit_axis:
+        return sql, params
+    unit_sql, unit_params = _eligibility_sql(eligibility.expr, unit_missing=False)
+    return (
+        f"({sql}) OR EXISTS(SELECT 1 FROM semantic_units u "
+        f"WHERE u.parent_path = p.path AND u.{scope_column} = 1 AND ({unit_sql}))",
+        params + unit_params,
+    )
+
+
+SCHEMA_VERSION = 10
 CATALOG_FOREGROUND_DELTA_CAP = 32
 
 # Publication-barrier timeouts. Every LIVE-sidecar mutation and journal-mode
@@ -1658,6 +2059,150 @@ def search_semantic_parent_paths_result(
     )
 
 
+def search_eligible_parent_paths_result(
+    vault_root: Path,
+    eligibility: Any,
+    *,
+    scope: str = "kb",
+    freshness: tuple | None = None,
+) -> CatalogQueryResult[list[str]]:
+    """Structured-filter candidate parents from the maintained page catalog."""
+    if not _catalog_usable():
+        return CatalogQueryResult(
+            None, CatalogReadiness("unsupported", False, backend())
+        )
+    return get_store(vault_root).search_eligible_parent_paths_result(
+        eligibility, scope, freshness
+    )
+
+
+def search_eligible_parent_rows_result(
+    vault_root: Path,
+    eligibility: Any,
+    *,
+    scope: str = "kb",
+    freshness: tuple | None = None,
+) -> CatalogQueryResult[list[tuple[str, str, str | None]]]:
+    """The eligible parent set with the two columns a browse needs to order it."""
+    if not _catalog_usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    return get_store(vault_root).search_eligible_parent_rows_result(eligibility, scope, freshness)
+
+
+@dataclass(frozen=True)
+class EligibilityMetadata:
+    view: dict[str, Any] | None
+    parent: str | None
+    updated: str
+    media_file: str | None
+    frame_ts: float | None
+    units: tuple[dict[str, Any], ...] = ()
+
+
+def parent_children_result(
+    vault_root: Path,
+    parents: set[str],
+    *,
+    scope: str,
+    freshness: tuple | None,
+) -> CatalogQueryResult[set[str]]:
+    """Stable children whose emitted metadata a pending parent can change."""
+    if not _catalog_usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    column = "in_vault" if scope == "vault" else "in_kb"
+
+    def query(conn: sqlite3.Connection) -> set[str]:
+        rows = conn.execute(
+            f"SELECT path FROM pages WHERE {column} = 1 AND emitted_parent_path "
+            "IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(parents), ensure_ascii=False),),
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    return get_store(vault_root)._serve_from_ready_catalog_result(
+        scope, freshness, query,
+        "lexical parent-child query failed (%s); pending eligibility declines",
+    )
+
+
+def eligibility_metadata_result(
+    vault_root: Path,
+    paths: set[str],
+    *,
+    scope: str,
+    freshness: tuple | None,
+    include_units: bool = False,
+) -> CatalogQueryResult[dict[str, EligibilityMetadata]]:
+    """Exact filter views and parent hints from one proven catalogue snapshot."""
+    if not _catalog_usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    return get_store(vault_root)._serve_from_ready_catalog_result(
+        scope,
+        freshness,
+        lambda conn: _eligibility_metadata_query(conn, paths, include_units=include_units),
+        "lexical eligibility metadata query failed (%s); filter eligibility declines",
+    )
+
+
+def _eligibility_metadata_query(
+    conn: sqlite3.Connection, paths: set[str], *, include_units: bool
+) -> dict[str, EligibilityMetadata]:
+    rows = conn.execute(
+        "WITH requested AS (SELECT value AS path FROM json_each(?)), "
+        "wanted AS (SELECT path FROM requested UNION "
+        "SELECT emitted_parent_path FROM pages WHERE path IN (SELECT path FROM requested)) "
+        "SELECT path, eligibility_view_json, emitted_parent_path, updated FROM pages "
+        "WHERE in_vault = 1 AND path IN (SELECT path FROM wanted)",
+        (json.dumps(sorted(paths), ensure_ascii=False),),
+    ).fetchall()
+    result = {}
+    try:
+        for path, payload, parent, updated in rows:
+            payload = None if payload is None else json.loads(payload)
+            view = (
+                None
+                if payload is None
+                else {key: _decode_filter_value(value) for key, value in payload["view"].items()}
+            )
+            result[str(path)] = EligibilityMetadata(
+                view,
+                parent,
+                updated,
+                None if payload is None else payload["media_file"],
+                None if payload is None else payload["frame_ts"],
+            )
+        if not include_units:
+            return result
+        unit_rows = conn.execute(
+            "SELECT parent_path, category, category_key, kind, tags_json, context, form, "
+            "verdict, check_by_day FROM semantic_units "
+            "WHERE parent_path IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(result), ensure_ascii=False),),
+        ).fetchall()
+        units: dict[str, list[dict[str, Any]]] = {}
+        for path, category, category_key, kind, tags, context, form, verdict, check_by in unit_rows:
+            unit = dict(
+                category=category,
+                category_key=category_key,
+                kind=kind,
+                tags=json.loads(tags),
+                context=context,
+                form=form,
+            )
+            if verdict is not None:
+                unit["verdict"] = verdict
+            if check_by is not None:
+                unit["check_by"] = date.fromisoformat(check_by)
+            units.setdefault(str(path), []).append(unit)
+        from dataclasses import replace
+
+        for path, values in units.items():
+            result[path] = replace(result[path], units=tuple(values))
+    except (ValueError, TypeError, KeyError, AttributeError) as error:
+        raise sqlite3.DatabaseError("invalid eligibility metadata snapshot") from error
+    return result
+
+
 def ensure_fresh(vault_root: Path) -> None:
     """Run the reconcile NOW (reconcile's seam) instead of lazily on the next
     search — and paranoidly: verified state is discarded first, so this pass
@@ -1758,6 +2303,266 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> bool:
         log.warning("lexical sidecar delete skipped (%s)", e)
         return False
     return True
+
+
+# ---------------------------------------------------- exact receipt custody
+
+#: The two substrate caches this store holds. They are one file and two
+#: questions: the trigram/BM25 content rows a keyword lane reads, and the
+#: `pages` metadata rows structured-filter eligibility resolves from. A receipt
+#: that refreshed one and not the other has to be able to say so.
+_CORPUS_CUSTODY_SEAM = "lexical_corpus"
+_CATALOGUE_CUSTODY_SEAM = "eligibility_catalogue"
+
+
+def page_content_hashes(vault_root: Path, rel_paths: Iterable[str]) -> dict[str, str | None]:
+    """The `pages.content_hash` this catalogue holds for each path, or None.
+
+    Lane 2 wrote the column and left it unread for exactly this: comparing a
+    catalogue row against the page it describes without re-parsing the page.
+    """
+    wanted = [str(rel) for rel in rel_paths]
+    if not wanted:
+        return {}
+    if not _custody_catalogue_live(vault_root):
+        return dict.fromkeys(wanted, None)
+    return get_store(vault_root).page_content_hashes(wanted)
+
+
+def page_eligibility_rows(
+    vault_root: Path, rel_paths: Iterable[str]
+) -> dict[str, tuple[str | None, ...] | None]:
+    """Every stored filter column plus `content_hash`, per path, or None."""
+    wanted = [str(rel) for rel in rel_paths]
+    if not wanted:
+        return {}
+    if not _custody_catalogue_live(vault_root):
+        return dict.fromkeys(wanted, None)
+    return get_store(vault_root).page_eligibility_rows(wanted)
+
+
+def _custody_catalogue_live(vault_root: Path) -> bool:
+    """Whether there is a catalogue for custody to have an opinion about.
+
+    A catalogue that is disabled, absent or retired holds no rows at all, and
+    "no rows" is not drift in the pages a receipt names — it is the cold case,
+    which the repair worker owns. Reading it as drift made every governed write
+    on a fresh, offline, FTS5-less or mid-rebuild cell invalidate both scopes
+    and empty the frontmatter cache, which is the opposite of what exact
+    custody is for. `memory_refs._custody_verify` already answers the cold case
+    this way; the two seams here now agree with it.
+    """
+    return bool(_catalog_usable() and lexical_path(vault_root).exists())
+
+
+def _custody_indexable(vault_root: Path, rel: str) -> bool:
+    """Whether this catalogue is supposed to hold a row for this path at all.
+
+    A suppressed raw Record is on disk and deliberately absent from these rows,
+    so "no row" is exact for it. Reading that as drift would fail a scope closed
+    on every governed write that touched one.
+
+    Two predicates decide whether the catalogue owes a row, and custody has to
+    ask BOTH of them, because the writer does. `rebuild_atomic` walks
+    `walk_vault_md`, which never descends into a reserved scan directory, so a
+    page under one of those has no row and is right not to -- and
+    `is_recall_candidate` alone says it should have one. That disagreement is
+    the same shape as an absent catalogue read as drift: a legitimate "no row
+    is correct" state reported as a mismatch, failing both scopes closed.
+
+    It cannot fire from today's callers: `in_excluded_scan_dir` already filters
+    those paths out upstream of `batch.identity_paths`, and `audit_custody` has
+    no production caller. It goes live the day the audit is wired into
+    reconciliation, which design.md's Risks anticipate, so the predicate is
+    aligned now rather than left as a trap for that change.
+    """
+    from . import recall_policy
+    from .vault import in_excluded_scan_dir
+
+    target = vault_root.joinpath(*rel.split("/"))
+    if not rel.lower().endswith(".md"):
+        return False
+    if in_excluded_scan_dir(rel):
+        return False
+    try:
+        if target.is_symlink() or not target.is_file():
+            return False
+    except OSError:
+        return False
+    try:
+        return bool(recall_policy.is_recall_candidate(vault_root, target))
+    except Exception:  # noqa: BLE001 - an unclassifiable page is not proven absent
+        return True
+
+
+def _custody_file_digest(
+    vault_root: Path, rel: str, digests: Mapping[str, str | None] | None = None
+) -> str | None:
+    if digests is not None and rel in digests:
+        return digests[rel]
+    target = vault_root.joinpath(*rel.split("/"))
+    try:
+        if target.is_symlink() or not target.is_file():
+            return None
+        return hashlib.sha256(target.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _expected_eligibility_row(vault_root: Path, rel: str) -> tuple[str | None, ...] | None:
+    """The row this catalogue owes for one path, derived from the page itself.
+
+    `None` means the catalogue owes no row (not indexable, or unparseable).
+    Otherwise it is `_eligibility_columns` — the same derivation `_insert_page`
+    writes — so a comparison covers every filter column, not just the content
+    hash that stands in front of them.
+    """
+    from . import find_corpus
+
+    if not _custody_indexable(vault_root, rel):
+        return None
+    target = vault_root.joinpath(*rel.split("/"))
+    page = find_corpus.CACHE.get(target, vault_root)
+    if page is None:
+        return None
+    return _eligibility_columns(page)
+
+
+def _custody_apply(
+    vault_root: Path,
+    changed: tuple[str, ...],
+    deleted: tuple[str, ...],
+    digests: Mapping[str, str | None],
+) -> None:
+    """Bring exactly these paths' rows current; touch no other row.
+
+    The fan-out's own lexical component has normally done this already, so the
+    common case finds nothing to do. It repeats per path rather than trusting
+    that, because a degraded component is precisely the case where a stale row
+    would otherwise survive under a receipt that says it did not.
+    """
+    if not _custody_catalogue_live(vault_root):
+        return
+    # One query for the whole batch, then one decision per path: a receipt
+    # naming a hundred paths must not cost a hundred connections to the store
+    # it is keeping current.
+    held = page_eligibility_rows(vault_root, [*changed, *deleted])
+    stale = [
+        rel
+        for rel in changed
+        if _custody_indexable(vault_root, rel)
+        and held.get(rel) != _stored_row_for(vault_root, rel, digests)
+    ]
+    retired = [
+        rel
+        for rel in (*deleted, *(rel for rel in changed if not _custody_indexable(vault_root, rel)))
+        if held.get(rel) is not None
+    ]
+    store = get_store(vault_root)
+    if stale:
+        store.upsert_paths([vault_root.joinpath(*rel.split("/")) for rel in stale])
+    if retired:
+        store.delete_rel_paths(retired)
+
+
+#: Derived eligibility rows, keyed by the exact bytes they were derived from.
+#: `_custody_apply` and `_catalogue_custody_verify` ask for the same row inside
+#: one batch, and each derivation parses the page; the digest IS the content
+#: identity, so a hit is exact by construction. Bounded because a long-lived
+#: cell writes indefinitely many generations.
+_STORED_ROW_MEMO_LIMIT: int = 512
+_stored_row_memo: dict[tuple[str, str, str], tuple[str | None, ...] | None] = {}
+_STORED_ROW_LOCK = threading.Lock()
+
+
+def _stored_row_for(
+    vault_root: Path, rel: str, digests: Mapping[str, str | None] | None
+) -> tuple[str | None, ...] | None:
+    """`_expected_eligibility_row` plus the content hash, in stored order."""
+    digest = _custody_file_digest(vault_root, rel, digests)
+    if digest is None:
+        return None
+    key = (str(vault_root), rel, digest)
+    with _STORED_ROW_LOCK:
+        if key in _stored_row_memo:
+            return _stored_row_memo[key]
+    expected = _expected_eligibility_row(vault_root, rel)
+    row = None if expected is None else (*expected, digest)
+    with _STORED_ROW_LOCK:
+        if len(_stored_row_memo) >= _STORED_ROW_MEMO_LIMIT:
+            _stored_row_memo.clear()
+        _stored_row_memo[key] = row
+    return row
+
+
+def _corpus_custody_verify(
+    vault_root: Path,
+    rel_paths: tuple[str, ...],
+    digests: Mapping[str, str | None] | None = None,
+) -> tuple[str, ...]:
+    """Content rows that do not describe the page they name.
+
+    `holds_content_identities` is the exact probe: it compares every value the
+    catalogue derives from a page's bytes and then serves.
+    """
+    if not _custody_catalogue_live(vault_root):
+        return ()
+    expected: dict[str, str | None] = {}
+    for rel in rel_paths:
+        expected[rel] = (
+            _custody_file_digest(vault_root, rel, digests)
+            if _custody_indexable(vault_root, rel)
+            else None
+        )
+    held = holds_content_identities(vault_root, expected)
+    return tuple(rel for rel in rel_paths if not held.get(rel, False))
+
+
+def _catalogue_custody_verify(
+    vault_root: Path,
+    rel_paths: tuple[str, ...],
+    digests: Mapping[str, str | None] | None = None,
+) -> tuple[str, ...]:
+    """Eligibility rows that do not describe the page they name.
+
+    EVERY filter column, not the content hash alone. The hash proves the bytes
+    the row was built from; it does not prove the row was built correctly, and
+    a `projects_json` corrupted with the hash left intact is invisible to a
+    hash comparison while a `projects`-filtered recall answers wrongly from it.
+    So the comparison is against `_eligibility_columns` over the page's current
+    frontmatter — the same derivation `_insert_page` writes, so it inherits
+    `canonicalize_axis_value` and the members/scalar split exactly.
+    """
+    if not _custody_catalogue_live(vault_root):
+        return ()
+    held = page_eligibility_rows(vault_root, list(rel_paths))
+    return tuple(
+        rel
+        for rel in rel_paths
+        if held.get(rel) != _stored_row_for(vault_root, rel, digests)
+    )
+
+
+def register_path_custody() -> None:
+    """Register both of this store's per-path invalidation seams."""
+    from . import freshness
+
+    freshness.register_custody_seam(
+        freshness.CustodySeam(
+            name=_CORPUS_CUSTODY_SEAM,
+            apply=_custody_apply,
+            verify=_corpus_custody_verify,
+        )
+    )
+    freshness.register_custody_seam(
+        freshness.CustodySeam(
+            name=_CATALOGUE_CUSTODY_SEAM,
+            # One apply for one store: the second registration reports the
+            # `pages` half of the same bounded write, it does not repeat it.
+            apply=lambda _root, _changed, _deleted, _digests: None,
+            verify=_catalogue_custody_verify,
+        )
+    )
 
 
 def holds_content_identities(
@@ -2468,14 +3273,26 @@ class LexicalStore:
 
     # The current normal-table shape sentinels. An older `pages` table lacks
     # one or more of these, so it must be rebuilt before a new-column INSERT.
-    _CURRENT_PAGES_COLUMNS = frozenset({"emitted_parent_path", "title"})
+    _CURRENT_PAGES_COLUMNS = frozenset(
+        {"emitted_parent_path", "title", "content_hash", "eligibility_view_json"}
+    ) | frozenset(_ELIGIBILITY_COLUMNS)
+    #: The eligibility sentinels on `semantic_units`. A catalog missing any of
+    #: them cannot answer a governed unit filter, so it is a legacy shape.
+    _CURRENT_UNIT_COLUMNS = frozenset(
+        {"verdict", "check_by_day", "check_by_json", "tags_canonical_json"}
+    )
 
     @staticmethod
     def _pages_has_current_columns(conn: sqlite3.Connection) -> bool:
-        """Read-only: does `pages` carry every current schema sentinel?"""
-        return LexicalStore._CURRENT_PAGES_COLUMNS <= {
-            row[1] for row in conn.execute("PRAGMA table_info(pages)")
-        }
+        """Read-only: do `pages` and `semantic_units` carry every sentinel?"""
+        try:
+            return LexicalStore._CURRENT_PAGES_COLUMNS <= {
+                row[1] for row in conn.execute("PRAGMA table_info(pages)")
+            } and LexicalStore._CURRENT_UNIT_COLUMNS <= {
+                row[1] for row in conn.execute("PRAGMA table_info(semantic_units)")
+            }
+        except sqlite3.OperationalError:
+            return False
 
     def _schema_is_current(self, conn: sqlite3.Connection) -> bool:
         """Read-only probe: is the catalog schema at the current version AND the
@@ -2507,7 +3324,40 @@ class LexicalStore:
             # The emitted (parent-video) note a scene-frame child collapses into,
             # NULL for ordinary pages — lets a matched semantic parent expand to
             # its in-scope frame children without a Markdown walk.
-            " emitted_parent_path TEXT)"
+            " emitted_parent_path TEXT,"
+            # Structured-filter eligibility. Every column holds the exact
+            # spelling `structured_filters` compares — canonicalized at write
+            # time through `canonicalize_axis_value` — so a SQL comparison and
+            # the in-memory evaluator settle on one answer instead of two.
+            #
+            # Two columns per scalar axis, deliberately. The bare column holds
+            # a value only when the page declares a comparable string, which is
+            # exactly when `$eq` can match. The `_json` array is NULL only when
+            # the page does not declare the key at all, which is exactly what
+            # `$exists` asks, and it carries every comparable member, which is
+            # how a LIST-valued declaration on a scalar axis (`type: [insight,
+            # pattern]`) answers `$in` the way the evaluator does.
+            " page_type TEXT,"
+            " page_type_json TEXT,"
+            " status TEXT,"
+            " status_json TEXT,"
+            " file_type TEXT,"
+            " file_type_json TEXT,"
+            " source_kind TEXT,"
+            " source_kind_json TEXT,"
+            " domain TEXT,"
+            " domain_json TEXT,"
+            # Terminal collection axes: members only, same NULL-means-absent rule.
+            " projects_json TEXT,"
+            " tags_json TEXT,"
+            " speakers_json TEXT,"
+            # The recorded day, settled through the same parse `page_view` uses.
+            # Ordered date filters bound on this and let the evaluator settle
+            # any finer granularity; `updated_json` answers presence and `$in`.
+            " updated_day TEXT,"
+            " updated_json TEXT,"
+            " eligibility_view_json TEXT,"
+            " content_hash TEXT)"
         )
         # Per-scope walk triples this sidecar was last VERIFIED against
         # (repr'd) — the cross-process "nothing changed while we were down"
@@ -2539,6 +3389,15 @@ class LexicalStore:
             " updated TEXT NOT NULL DEFAULT '0000-00-00',"
             " in_kb INTEGER NOT NULL DEFAULT 0,"
             " in_vault INTEGER NOT NULL DEFAULT 0,"
+            # Governed unit metadata, written from `unit_view` so a filter
+            # compares the settled `check_by` date and the casefolded tag
+            # members rather than the authored spelling. NULL means the unit
+            # declares nothing there, which is what `$exists` asks: for these
+            # two axes absence is the meaningful state ("no verdict yet").
+            " verdict TEXT,"
+            " check_by_day TEXT,"
+            " check_by_json TEXT,"
+            " tags_canonical_json TEXT,"
             " UNIQUE(parent_path, unit_ref))"
         )
 
@@ -2552,6 +3411,21 @@ class LexicalStore:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS pages_emitted_parent "
             "ON pages(emitted_parent_path, in_kb, in_vault)"
+        )
+        # Eligibility narrowing on the scalar page axes that carry real
+        # selectivity in a knowledge base (type, status) and the ordered date
+        # axis. The list axes are answered through json_each over the candidate
+        # rows, which needs no index of its own.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS pages_page_type ON pages(page_type, in_kb, in_vault)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS pages_status ON pages(status, in_kb, in_vault)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS pages_updated_day ON pages(updated_day, in_kb, in_vault)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS semantic_units_verdict "
+            "ON semantic_units(verdict, in_kb, in_vault)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS semantic_units_parent "
@@ -2955,10 +3829,9 @@ class LexicalStore:
         try:
             with conn:
                 self._apply_delta_rows(conn, delta)
-                if (
-                    catalog_semantic_identity(self.vault_root) != captured_identity
-                    or not self._delta_target_still_current(scope, delta)
-                ):
+                if catalog_semantic_identity(
+                    self.vault_root
+                ) != captured_identity or not self._delta_target_still_current(scope, delta):
                     raise _DeltaReplayStale
                 conn.execute(
                     "INSERT INTO meta(key, value) VALUES(?, ?) "
@@ -3186,6 +4059,9 @@ class LexicalStore:
             # Scene-frame children carry the parent video they collapse into;
             # unparseable rows (page is None) stay NULL like ordinary pages.
             emitted_parent_path = page.parent_media + ".md" if page.parent_media else None
+            eligibility = _eligibility_columns(page)
+            eligibility_view = _eligibility_view_json(page)
+            content_hash = getattr(page, "snapshot_hash", None)
         else:
             try:
                 rel = path.resolve().relative_to(self.vault_root.resolve()).as_posix()
@@ -3195,10 +4071,19 @@ class LexicalStore:
             title_lower = body_lower = stemmed = ""
             updated = "0000-00-00"
             emitted_parent_path = None
+            # An unparseable page has no frontmatter to filter on. Every axis is
+            # NULL, which is exactly "matches no positive constraint" — the same
+            # answer the scan oracle gives, since it cannot parse it either.
+            eligibility = _EMPTY_ELIGIBILITY
+            eligibility_view = None
+            content_hash = None
         is_nav = path.name.lower() in _NAV_BASENAMES
         cur = conn.execute(
             "INSERT INTO pages(path, title, mtime_ns, updated, in_kb, in_vault, is_nav, "
-            "emitted_parent_path) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            "emitted_parent_path, "
+            + ", ".join(_ELIGIBILITY_COLUMNS)
+            + ", eligibility_view_json, content_hash) "
+            "VALUES(" + ", ".join("?" * (10 + len(_ELIGIBILITY_COLUMNS))) + ")",
             (
                 rel,
                 title,
@@ -3208,6 +4093,9 @@ class LexicalStore:
                 int(in_vault),
                 int(is_nav),
                 emitted_parent_path,
+                *eligibility,
+                eligibility_view,
+                content_hash,
             ),
         )
         rowid = cur.lastrowid
@@ -3250,9 +4138,10 @@ class LexicalStore:
                 "record_type, unit_ref, parent_path, parent_ref, parent_generation, "
                 "parent_source_hash, parser_version, form, category_raw, category_key, "
                 "category, kind, content, tags_json, context, unit_source_hash, anchor, "
-                "line, end_line, fingerprint, source_order, updated, in_kb, in_vault) "
+                "line, end_line, fingerprint, source_order, updated, in_kb, in_vault, "
+                "verdict, check_by_day, check_by_json, tags_canonical_json) "
                 "VALUES('semantic_unit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?, ?, ?, ?, ?)",
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     unit.unit_ref,
                     state.path,
@@ -3277,6 +4166,7 @@ class LexicalStore:
                     updated,
                     int(in_kb),
                     int(in_vault),
+                    *_unit_eligibility_columns(unit),
                 ),
             )
             if fts5_available():
@@ -3571,10 +4461,9 @@ class LexicalStore:
                 # edit rolls the transaction back rather than false-emptying the
                 # recursive exact-category retry.
                 for path, _rel, signature, in_kb, in_vault in prepared:
-                    if (
-                        freshness_module.stat_signature(path) != signature
-                        or self._membership(path) != (in_kb, in_vault)
-                    ):
+                    if freshness_module.stat_signature(path) != signature or self._membership(
+                        path
+                    ) != (in_kb, in_vault):
                         raise OSError(f"source changed during bounded upsert: {path.name}")
             self._publish_live_witnesses(
                 conn,
@@ -3707,9 +4596,10 @@ class LexicalStore:
         witnessed: dict[str, tuple[object, bool]] = {}
         for scope in ("kb", "vault"):
             checkpoint, stored = targets[scope]
-            if checkpoint is None or freshness_module.recall_checkpoint(
-                self.vault_root, scope
-            ) != checkpoint:
+            if (
+                checkpoint is None
+                or freshness_module.recall_checkpoint(self.vault_root, scope) != checkpoint
+            ):
                 self._witnessed.pop(scope, None)
             elif stored == checkpoint:
                 self._witnessed[scope] = checkpoint
@@ -3960,6 +4850,10 @@ class LexicalStore:
         from . import freshness as freshness_module
         from .vault import VaultLockError
 
+        # A whole-corpus re-derivation, by definition. Exact receipts exist so
+        # this counter does not move on an ordinary governed write.
+        freshness_module.note_custody_rebuild(_CORPUS_CUSTODY_SEAM)
+        freshness_module.note_custody_rebuild(_CATALOGUE_CUSTODY_SEAM)
         self._last_rebuild_result = None
         if backend() == "python":
             return self._decline_rebuild("transient_failure")
@@ -4832,15 +5726,11 @@ class LexicalStore:
                     continue
                 if hashlib.sha256(content).hexdigest() != digest:
                     continue
-                page = find_corpus.parse_page(
-                    target, mtime, self.vault_root, content=content
-                )
+                page = find_corpus.parse_page(target, mtime, self.vault_root, content=content)
                 if page is None:
                     continue
                 expected_title = page.title
-                expected_parent = (
-                    page.parent_media + ".md" if page.parent_media else None
-                )
+                expected_parent = page.parent_media + ".md" if page.parent_media else None
                 if (
                     row[1] != expected_title
                     or str(row[2]) != (page.updated or "0000-00-00")
@@ -4862,6 +5752,55 @@ class LexicalStore:
         except sqlite3.Error as error:
             self._note_query_failure(error, "lexical identity probe declined (%s)")
             return dict.fromkeys(expected, False)
+        finally:
+            conn.close()
+
+    def page_content_hashes(self, rel_paths: list[str]) -> dict[str, str | None]:
+        """Stored `pages.content_hash` per path; None when there is no row.
+
+        Read-only and non-walking: one indexed lookup per path, never a parse.
+        """
+        rows = self.page_eligibility_rows(rel_paths)
+        return {
+            rel: (None if row is None else row[-1])
+            for rel, row in rows.items()
+        }
+
+    def page_eligibility_rows(
+        self, rel_paths: list[str]
+    ) -> dict[str, tuple[str | None, ...] | None]:
+        """Every stored filter column plus `content_hash`, per path, or None.
+
+        The columns are returned in `_ELIGIBILITY_COLUMNS` order with
+        `content_hash` last, which is exactly the shape `_eligibility_columns`
+        derives from a parsed page — so the audit can compare the two directly
+        instead of trusting one hash to stand for all sixteen values.
+        """
+        answers: dict[str, tuple[str | None, ...] | None] = dict.fromkeys(rel_paths, None)
+        if self._failed or not self.path.exists():
+            return answers
+        try:
+            conn = self._connect()
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical page-row probe declined (%s)")
+            return answers
+        columns = ", ".join((*_ELIGIBILITY_COLUMNS, "content_hash"))
+        try:
+            if not self._schema_is_current(conn):
+                return answers
+            for rel in rel_paths:
+                row = conn.execute(
+                    f"SELECT {columns} FROM pages WHERE path = ?",  # noqa: S608 - fixed names
+                    (rel,),
+                ).fetchone()
+                if row is not None:
+                    answers[rel] = tuple(
+                        None if value is None else str(value) for value in row
+                    )
+            return answers
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical page-row probe declined (%s)")
+            return dict.fromkeys(rel_paths, None)
         finally:
             conn.close()
 
@@ -4889,11 +5828,9 @@ class LexicalStore:
             conn = self._connect()
             try:
                 conn.execute("BEGIN")
-                if (
-                    not self._schema_is_current(conn)
-                    or _checkpoint_state(self._meta_checkpoint(conn, scope))
-                    != _checkpoint_state(checkpoint)
-                ):
+                if not self._schema_is_current(conn) or _checkpoint_state(
+                    self._meta_checkpoint(conn, scope)
+                ) != _checkpoint_state(checkpoint):
                     return None
                 col = "in_vault" if scope == "vault" else "in_kb"
                 rows = conn.execute(
@@ -5298,6 +6235,120 @@ class LexicalStore:
             params,
         ).fetchall()
         return sorted(str(row[0]) for row in rows)
+
+    def search_eligible_parent_paths_result(
+        self,
+        eligibility: Any,
+        scope: str,
+        freshness: tuple | None,
+    ) -> CatalogQueryResult[list[str]]:
+        """Candidate parents for a structured-filter plan, from `pages` alone.
+
+        This is the page-level counterpart of `search_semantic_parent_paths_result`
+        and answers a different question: not "which parents carry a matching
+        semantic unit" but "which pages could satisfy this whole plan". It is
+        anchored on `pages` rather than `semantic_units` because a plan may
+        constrain only page axes, or negate a unit axis — and every semantic
+        unit row is written by `_insert_page` alongside its page row, so
+        anchoring here loses no candidate the unit query would find.
+        """
+        return self._serve_from_ready_catalog_result(
+            scope,
+            freshness,
+            lambda conn: self._eligible_parent_paths_query(conn, eligibility, scope),
+            "lexical eligibility catalog query failed (%s); filter eligibility declines",
+        )
+
+    def _eligible_parent_paths_query(
+        self,
+        conn: sqlite3.Connection,
+        eligibility: Any,
+        scope: str,
+    ) -> list[str]:
+        """Sorted candidate parents, plus the frame children they emit into.
+
+        The predicate is the two arms `page_matches` evaluates: the plan with
+        every unit axis MISSING, ORed with one `EXISTS` over the parent's units
+        carrying the plan again. Putting the `EXISTS` at the top rather than per
+        subtree is what makes two unit predicates in one conjunction require the
+        SAME unit, which is the existential grouping the evaluator performs.
+
+        The scene-frame arm mirrors `_semantic_parent_paths_query` exactly: a
+        matched video parent expands to its in-scope frame children, because the
+        candidate lanes address the child while the final hit addresses the
+        emitted parent, and both identities belong to one eligibility set.
+        """
+        col = "in_vault" if scope == "vault" else "in_kb"
+        predicate, params = _eligibility_predicate(eligibility, col)
+        rows = conn.execute(
+            "WITH matched AS ("
+            f" SELECT p.path AS parent_path FROM pages p WHERE p.{col} = 1 AND (" + predicate + ")"
+            ") "
+            "SELECT parent_path FROM matched "
+            "UNION "
+            f"SELECT p.path FROM pages p WHERE p.{col} = 1 "
+            "AND p.emitted_parent_path IN (SELECT parent_path FROM matched)",
+            params,
+        ).fetchall()
+        return sorted(str(row[0]) for row in rows)
+
+    def search_eligible_parent_rows_result(
+        self,
+        eligibility: Any,
+        scope: str,
+        freshness: tuple | None,
+    ) -> CatalogQueryResult[list[tuple[str, str, str | None]]]:
+        """The same candidate set as `search_eligible_parent_paths_result`, ordered.
+
+        A browse that resolves only PATHS from the catalog has moved its walk
+        rather than removed it: it still has to open every page it was handed
+        to discover the `updated` it orders by, and `find_corpus.CACHE.get`
+        reads the bytes on every call, hit or miss. Projecting `updated`
+        alongside the path is what lets the reader hydrate the prefix the limit
+        can actually return.
+
+        `emitted_parent_path` comes back with it because it is the one fact
+        that decides whether the catalog's ordering key IS the request's: a
+        scene-frame child is reported under its parent video, whose `updated`
+        is its own. Reading it here means the caller can tell, without parsing
+        anything, whether a bounded prefix would be the right prefix.
+        """
+        return self._serve_from_ready_catalog_result(
+            scope,
+            freshness,
+            lambda conn: self._eligible_parent_rows_query(conn, eligibility, scope),
+            "lexical eligibility catalog row query failed (%s); browse ordering declines",
+        )
+
+    def _eligible_parent_rows_query(
+        self,
+        conn: sqlite3.Connection,
+        eligibility: Any,
+        scope: str,
+    ) -> list[tuple[str, str, str | None]]:
+        """`(path, updated, emitted_parent_path)` for the eligible parent set.
+
+        The membership is `_eligible_parent_paths_query`'s, restated as one
+        predicate over `pages` so the two extra columns come from the same row
+        as the path. Deliberately unordered: the caller sorts in Python with
+        the exact key the hit list is sorted by, rather than relying on this
+        connection's collation to agree with `str.__lt__`.
+        """
+        col = "in_vault" if scope == "vault" else "in_kb"
+        predicate, params = _eligibility_predicate(eligibility, col)
+        rows = conn.execute(
+            "WITH matched AS ("
+            f" SELECT p.path AS parent_path FROM pages p WHERE p.{col} = 1 AND (" + predicate + ")"
+            ") "
+            f"SELECT p.path, p.updated, p.emitted_parent_path FROM pages p WHERE p.{col} = 1 "
+            "AND (p.path IN (SELECT parent_path FROM matched)"
+            " OR p.emitted_parent_path IN (SELECT parent_path FROM matched))",
+            params,
+        ).fetchall()
+        return [
+            (str(path), str(updated or "0000-00-00"), None if parent is None else str(parent))
+            for path, updated, parent in rows
+        ]
 
     def emitted_parent_hints_result(
         self,

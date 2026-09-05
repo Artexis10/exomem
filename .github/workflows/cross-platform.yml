@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   suite:
-    name: tests (${{ matrix.os }}, py3.13, shard ${{ matrix.shard }}/4)
+    name: tests (${{ matrix.os }}, py3.13, shard ${{ matrix.shard }}/6)
     # Pull requests retain one visible, cheap skipped check; only scheduled and
     # explicit manual runs spend the eight-runner diagnostic matrix.
     if: >-
@@ -53,7 +53,7 @@ jobs:
         # neutral cost. It is the feedback delay on every change to this repo,
         # and it is paid on platforms whose defects are the hardest to
         # reproduce locally, which is exactly where a slow loop hurts most.
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,6 +108,22 @@ jobs:
       # same modules again in this Windows matrix pushed a shard past its 45m
       # session cap; macOS still gets them here, and Linux keeps its ordinary
       # CI coverage.
+      # Six shards AND a 3400s cap, because sharding alone does not fix this.
+      # Fifty percent more shards bought six percent of runtime, so most of a
+      # Windows shard here is not test execution that splits. The cap has to
+      # clear measured runtime rather than a prediction from the Linux-recorded
+      # durations file.
+      #
+      # Measured once the cap stopped truncating them, all six shards ran to
+      # completion at 1950s, 2575s, 2698s, 2788s, 2886s and 2896s. 3400s is
+      # 56:40 inside a 60 min job and about 17% above that worst case; setup
+      # and artifact upload measured about 45s, so the remaining budget is
+      # ample. The earlier 2705s figure was a floor read off a shard the old
+      # 2700s cap had truncated -- a bound wearing a measurement's clothes.
+      #
+      # Every flag below lives inside a folded `>-` scalar, so a `#` there is
+      # part of the command and comments out the rest of it. Explanations go
+      # here.
       - name: Run tests (lean — BM25/keyword, server media extraction off)
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
@@ -124,11 +140,11 @@ jobs:
           --deselect
           tests/test_governance_overhead.py::test_scrubber_throughput_under_budget
           ${{ startsWith(matrix.os, 'windows') && '--ignore=tests/test_held_fs_contract.py --ignore=tests/test_held_fs_windows.py --ignore=tests/test_reserved_admin_paths.py --ignore=tests/test_mutation_concurrency.py --ignore=tests/test_windows_path_alias_guard.py' || '' }}
-          --splits=4
+          --splits=6
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path=.test_durations.json
-          --session-timeout=2700
+          --session-timeout=3400
           --durations=50
           --durations-min=1
           --junitxml=test-results/junit-${{ matrix.os }}-shard-${{ matrix.shard }}.xml

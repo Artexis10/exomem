@@ -29,8 +29,8 @@ from _nag_governance_helpers import (
 )
 
 from exomem import attention as attention_module
-from exomem import find as find_module
 from exomem import commands, corpus_aware, review_state
+from exomem import find as find_module
 
 FAMILY = "prediction_window"
 FAMILY_REF = f"exomem://review/family/{FAMILY}"
@@ -892,9 +892,9 @@ def test_the_counts_ref_lookups_do_not_scale_with_the_vault(
     batches: list[int] = []
     real_batch = memory_refs.ReferenceIndex._refs_for_paths_batch
 
-    def counting_batch(self, wanted):
+    def counting_batch(self, wanted, *, recall_reader=False):
         batches.append(len(wanted))
-        return real_batch(self, wanted)
+        return real_batch(self, wanted, recall_reader=recall_reader)
 
     monkeypatch.setattr(memory_refs, "REFS_QUERY_CHUNK", chunk)
     monkeypatch.setattr(

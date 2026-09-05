@@ -16,6 +16,7 @@ from .ranking_config import LANE_ORDER, RankingConfig
 
 log = logging.getLogger(__name__)
 _span = find_types.timing_span
+_mark_source = find_types.timing_mark_source
 
 PageOf = Callable[[str], ParsedPage | None]
 
@@ -232,7 +233,7 @@ def collect_candidates(
     else:
         try:
             with _span(timings, "vector"):
-                with _span(timings, "vector.index"):
+                with _span(timings, "vector.index", source=find_types.SOURCE_INDEX):
                     idx = embeddings.get_embedding_index(vault_root)
                 with _span(timings, "vector.embed"):
                     query_vec = (
@@ -408,9 +409,14 @@ def collect_candidates(
                         allowed_paths=eligible_paths,
                     )
                     if not catalog_result.readiness.complete:
+                        _mark_source(timings, "bm25", find_types.SOURCE_DECLINED)
                         raise lexstore.CatalogUnavailable(catalog_result.readiness)
+                    _mark_source(timings, "bm25", find_types.SOURCE_INDEX)
                     bm25_hits = list(catalog_result.value or [])
                 else:
+                    # The in-process corpus path: it builds from the scope when
+                    # cold, so it is `computed`, never `index`.
+                    _mark_source(timings, "bm25", find_types.SOURCE_COMPUTED)
                     bm25_hits = bm25.search(
                         vault_root,
                         query,
@@ -455,6 +461,15 @@ def collect_candidates(
             if timings is not None:
                 timings.error("bm25", e)
         with _span(timings, "keyword"):
+            # Hydration is one of the four stages the contract names, so this
+            # lane reports its source instead of carrying the static `computed`
+            # default. `index` is the basis, not a courtesy: this lane's only
+            # source of paths is the injected `keyword_match_paths` provider,
+            # which resolves from the maintained lexical index and never
+            # enumerates the scope. The branch that CAN enumerate is the
+            # empty-query one in `find._find_keyword`, which marks itself
+            # `computed` when it takes the walk.
+            _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
             # Over-fetch by the same factor the BM25 lane uses, and for the same
             # reason: `collapse_frame_children` and `_eligible` below can drop
             # members, so a lane that supplied exactly the fused depth could
@@ -590,7 +605,7 @@ def collect_candidates(
                 # at all, so typed expansion alone would silently drop them. Those
                 # seeds fall back to the legacy 1-hop wikilink expansion instead,
                 # preserving pre-change recall for out-of-KB seeds.
-                with _span(timings, "graph.sidecar"):
+                with _span(timings, "graph.sidecar", source=find_types.SOURCE_INDEX):
                     indexed = graph_index.indexed_paths(graph_seeds)
                     typed_seeds = [s for s in graph_seeds if s in indexed]
                     legacy_seeds = [s for s in graph_seeds if s not in indexed]

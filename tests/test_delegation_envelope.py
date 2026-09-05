@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import envelope, mode
+from exomem import envelope, mode, workflow_skills
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -352,10 +352,14 @@ def bare_vault(tmp_path: Path) -> Path:
 def _served(vault: Path, profile: str = "compact") -> dict:
     from exomem import commands
 
-    return commands.op_bootstrap(vault, profile=profile)["engagement"]["envelope"]
+    return commands.op_bootstrap(
+        vault,
+        profile=profile,
+        **({"skill_contract": workflow_skills.skill_contract()} if profile == "session" else {}),
+    )["engagement"]["envelope"]
 
 
-@pytest.mark.parametrize("profile", ["compact", "full", "diagnostics"])
+@pytest.mark.parametrize("profile", ["compact", "full", "diagnostics", "session"])
 def test_bootstrap_serves_every_class_with_ceiling_and_provenance(
     config, bare_vault: Path, profile: str
 ) -> None:

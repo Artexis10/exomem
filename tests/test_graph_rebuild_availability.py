@@ -1109,8 +1109,10 @@ def test_a_queued_repair_is_not_rescheduled_as_a_whole_vault_rebuild(
     )
     monkeypatch.setattr(
         EpistemicGraphIndex,
-        "_graph_sync_predecessor_available",
-        lambda _self, _checkpoint: True,
+        # The dispatch reads the reason-carrying seam, so that is what a stub
+        # asserting "the predecessor is fine" has to answer.
+        "_graph_sync_predecessor_state",
+        lambda _self, _checkpoint: "available",
     )
     monkeypatch.setattr(
         EpistemicGraphIndex,
@@ -1159,8 +1161,10 @@ def test_a_standalone_caller_still_gets_a_converged_graph(
     )
     monkeypatch.setattr(
         EpistemicGraphIndex,
-        "_graph_sync_predecessor_available",
-        lambda _self, _checkpoint: True,
+        # The dispatch reads the reason-carrying seam, so that is what a stub
+        # asserting "the predecessor is fine" has to answer.
+        "_graph_sync_predecessor_state",
+        lambda _self, _checkpoint: "available",
     )
     monkeypatch.setattr(
         EpistemicGraphIndex,
@@ -1359,6 +1363,113 @@ def test_incremental_predecessor_requires_a_valid_checkpoint_lineage(tmp_path: P
         )
 
     assert index._graph_sync_predecessor_available(current_checkpoint) is False
+
+
+def test_dispatch_names_the_gate_that_sent_a_write_to_a_whole_vault_rebuild(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The whole-vault rebuild door that `_FALLBACK_DISPOSITIONS` does not cover.
+
+    `converge-graph-incrementally` made the *incremental* bail-outs a declared
+    nine-way table, and `fallback()` logs which reason fired -- "#576 F3. The
+    single most-wanted number in the incident, and the one nothing logged".
+
+    But `upsert_after_write` can register a whole-vault rebuild **before**
+    `refresh_paths` is ever called, at the `_graph_sync_predecessor_available`
+    gate. That door is outside the table and logs nothing at all, so a cell
+    rebuilding its entire graph on every ordinary write produces exactly two
+    log lines -- `graph rebuild published` and `graph rebuild finished` -- and
+    neither says which gate chose the expensive path. A nine-way classification
+    whose chosen branch cannot be read after the fact is not diagnosable in
+    production, and this is the tenth branch.
+
+    The gate must also say *why* it could not prove the predecessor. It refuses
+    for two very different reasons: the probe's read snapshot was declined (for
+    which `freshness.external_pending` alone is enough -- an in-memory liveness
+    hint that `_open_read_snapshot` documents as "an optimization for public
+    readers, not a correctness fence"), or the sidecar was read and its
+    acknowledgement genuinely is not the predecessor. The first is a liveness
+    condition costing a whole-vault rebuild per write; the second is a real
+    lineage gap that has to rebuild. Collapsing them into one silent `False` is
+    what made this take a code read rather than a log read.
+    """
+    from exomem import find as find_module
+
+    note = tmp_path / "Knowledge Base/Notes/Insights/gate.md"
+    note.parent.mkdir(parents=True)
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(note, "---\ntype: insight\nstatus: active\n---\n# Before\n")],
+        vault_root=tmp_path,
+        post_commit_fanout=False,
+    )
+    freshness.seed(
+        tmp_path,
+        "vault",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(tmp_path)
+        ),
+    )
+    freshness.seed(
+        tmp_path,
+        "kb",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in find_module._walk_md(tmp_path / "Knowledge Base")
+        ),
+    )
+    index = epistemic_graph.EpistemicGraphIndex(tmp_path)
+    index.rebuild_all()
+    assert index.available() is True
+
+    # The state the watcher's fail-closed default leaves behind when it cannot
+    # classify a fan-out incompleteness (`file_watcher.py`, "graph fan-out
+    # incomplete; periodic recovery re-armed"). Nothing on disk changes.
+    freshness.mark_external_pending(tmp_path)
+    assert index.available() is False
+
+    caplog.set_level("INFO", logger="exomem.epistemic_graph")
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(note, "---\ntype: insight\nstatus: active\n---\n# After\n")],
+        vault_root=tmp_path,
+    )
+
+    assert "whole-vault rebuild" in caplog.text, (
+        "a write that registered a whole-vault rebuild must say so; the two "
+        "lines it does emit report that a rebuild ran, never which gate chose it"
+    )
+    assert "graph_sync_predecessor_unreadable" in caplog.text, (
+        "the gate must distinguish a declined probe from a genuine lineage gap"
+    )
+    assert "external_pending=True" in caplog.text
+
+    # The genesis arm, both ways. `generation=1` has predecessor 0, so the
+    # answer is provable from the sidecar alone: a sidecar carrying no
+    # `graph_sync` acknowledgement can take it, and one that already carries an
+    # acknowledgement cannot. Collapsing the second into `available` is a
+    # False-to-True flip against the pre-fix predicate, and the rest of this
+    # suite does not notice it -- `refresh_paths` re-checks lineage downstream,
+    # which contains the blast radius but does not hold the seam.
+    freshness.clear_external_pending(tmp_path, through=freshness.external_pending_epoch(tmp_path))
+    genesis = graph_sync.GraphSyncCheckpoint.create(
+        generation=1,
+        mutation_id="0" * 24,
+        paths=(("Knowledge Base/Notes/Insights/gate.md", "d" * 64),),
+        created_paths=(),
+    )
+    fresh = epistemic_graph.EpistemicGraphIndex(tmp_path / "unbuilt")
+    (tmp_path / "unbuilt/Knowledge Base/Notes/Insights").mkdir(parents=True)
+    fresh.rebuild_all()
+    assert fresh._graph_sync_predecessor_state(genesis) == "available", (
+        "a sidecar with no graph_sync acknowledgement can take generation 1"
+    )
+    assert index._graph_sync_predecessor_state(genesis) == (
+        "graph_sync_predecessor_present_at_genesis"
+    ), (
+        "a sidecar that already carries a graph_sync acknowledgement cannot take "
+        "generation 1, and saying it can is a lineage claim the sidecar disproves"
+    )
 
 
 def test_single_flight_retries_for_new_checkpoint_and_never_releases_stale_waiter(

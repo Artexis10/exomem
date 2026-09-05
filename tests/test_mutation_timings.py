@@ -78,6 +78,14 @@ def _canonical(payload: object) -> str:
     return json.dumps(scrub(payload), sort_keys=True)
 
 
+def _normalize_advisory_vault(payload: dict, root: Path) -> None:
+    """Pin only the fixture vault after checking its internal advisory identity."""
+    context = payload["_relation_advisory_context"]
+    assert set(context) == {"vault", "registry_hash"}
+    assert context["vault"] == str(root)
+    context["vault"] = "<vault>"
+
+
 def _source(body: str = BEFORE_LINE) -> str:
     return (
         "---\n"
@@ -163,6 +171,8 @@ def test_write_response_is_byte_identical_without_the_flag(
     assert "timings" not in control
     assert "timings" in instrumented
     del instrumented["timings"]
+    _normalize_advisory_vault(control["semantic"], tmp_path / "control")
+    _normalize_advisory_vault(instrumented["semantic"], tmp_path / "instrumented")
     assert _canonical(instrumented) == _canonical(control)
 
 
@@ -173,6 +183,12 @@ def test_semantic_write_payloads_ignore_the_timings_kwarg(tmp_path: Path) -> Non
         bump=False,
         timings=mutation_timings_module.MutationTimings(),
     )
+
+    # The internal advisory carries the caller's vault for terminal projection.
+    # Prove both contexts are correct, then normalize only that fixture identity;
+    # registry identity and every other payload field must still be identical.
+    for payload, name in ((control, "control"), (timed, "timed")):
+        _normalize_advisory_vault(payload, tmp_path / name)
 
     assert _canonical(timed) == _canonical(control)
 

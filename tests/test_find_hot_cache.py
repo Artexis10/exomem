@@ -147,6 +147,20 @@ def test_clear_cache_clears_hot_cache(vault: Path, monkeypatch) -> None:
 
 
 def test_unload_ram_caches_preserves_freshness(vault: Path) -> None:
+    """Freshness survives an unload -- and so, by default, does the page cache.
+
+    The parsed-page cache used to go with every meaning of "unload". Exact
+    receipt custody (`accelerate-governed-recall`, design Decision 2) says a
+    whole-scope event may not discard a substrate cache whose paths are covered
+    by receipts, and a correctness eviction's subject is the resolver: a page
+    row is keyed to its file's content signature and evicted by its own
+    receipt, so it cannot be stale in the sense the eviction exists to fix.
+
+    So the default preserves it and `pages=True` -- what a caller releasing
+    memory asks for -- still clears it. Both halves are pinned here, because
+    losing either one is silent: the first costs a re-parse of the vault after
+    every graph rebuild, the second leaks the largest cache the reaper reclaims.
+    """
     from exomem import freshness
 
     kb = vault / "Knowledge Base"
@@ -159,19 +173,63 @@ def test_unload_ram_caches_preserves_freshness(vault: Path) -> None:
 
     assert find_module.find(vault, query="metabolism")
     status = find_module.cache_status()
-    assert status["pages"]["entries"] > 0
+    resident_pages = status["pages"]["entries"]
+    assert resident_pages > 0
     assert status["hot_find"]["entries"] > 0
     assert find_module._CACHE._signatures
 
     unloaded = find_module.unload_ram_caches()
-    assert unloaded["pages"] > 0
+    assert unloaded["pages"] == 0
     assert unloaded["hot_find"] > 0
-    assert find_module.cache_status()["pages"]["entries"] == 0
+    assert find_module.cache_status()["pages"]["entries"] == resident_pages
     assert find_module.cache_status()["hot_find"]["entries"] == 0
+    assert find_module._CACHE._signatures
+    assert freshness.triple(vault, "kb") == before_freshness
+
+    released = find_module.unload_ram_caches(pages=True)
+    assert released["pages"] == resident_pages
+    assert find_module.cache_status()["pages"]["entries"] == 0
     assert not find_module._CACHE._signatures
     assert freshness.triple(vault, "kb") == before_freshness
 
     assert find_module.find(vault, query="metabolism")
+
+
+def test_the_graph_rebuild_unload_seam_leaves_receipt_covered_pages(
+    vault: Path,
+) -> None:
+    """`epistemic_graph` evicts to re-derive the resolver, not to drop pages.
+
+    Its two call sites (`epistemic_graph.py`, inside `_rebuild_all_locked` and
+    the incremental topology check) take the default, and the default now
+    spares the parsed-page cache. That is the whole point of the split: a graph
+    rebuild is the frequent whole-scope event, and on a busy cell it was
+    charging every following reader a re-parse of the vault for a projection
+    the page rows have no part in.
+
+    Pinned in both directions -- the seam the graph actually calls, and what
+    that seam does -- because either half alone can drift without the other
+    noticing.
+    """
+    import inspect
+
+    from exomem import epistemic_graph
+
+    graph_source = inspect.getsource(epistemic_graph)
+    assert "unload_ram_caches()" in graph_source, (
+        "the graph rebuild no longer takes the page-preserving default"
+    )
+    assert "unload_ram_caches(pages=True)" not in graph_source, (
+        "a graph rebuild must not discard receipt-covered page rows"
+    )
+
+    assert find_module.find(vault, query="metabolism")
+    resident = find_module.cache_status()["pages"]["entries"]
+    assert resident > 0, "the query hydrated no pages, so this pins nothing"
+
+    find_module.unload_ram_caches()
+
+    assert find_module.cache_status()["pages"]["entries"] == resident
 
 
 def test_keyword_mode_also_cached(vault: Path, monkeypatch) -> None:

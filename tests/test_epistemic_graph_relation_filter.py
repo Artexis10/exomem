@@ -148,9 +148,9 @@ def test_missing_sidecar_is_warming(tmp_path: Path) -> None:
 def test_stale_schema_sidecar_is_warming(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     _built(vault)
-    # Simulate a pre-bump (v7) sidecar: its identity no longer matches v8.
+    # Simulate a pre-bump (v8) sidecar: its identity no longer matches v9.
     conn = sqlite3.connect(epistemic_graph.sidecar_path(vault))
-    conn.execute("UPDATE graph_meta SET value = '7' WHERE key = 'schema_version'")
+    conn.execute("UPDATE graph_meta SET value = '8' WHERE key = 'schema_version'")
     conn.commit()
     conn.close()
     result = epistemic_graph.EpistemicGraphIndex(vault).relation_participants(["supports"])
@@ -160,10 +160,10 @@ def test_stale_schema_sidecar_is_warming(tmp_path: Path) -> None:
 def test_schema_bump_invalidates_cache_token(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     _built(vault)
-    assert epistemic_graph.SCHEMA_VERSION == 8
+    assert epistemic_graph.SCHEMA_VERSION == 9
     token = epistemic_graph.cache_token(vault)
     assert token is not None
-    assert token[0] == "8"
+    assert token[0] == "9"
 
 
 def test_deterministic_participants(tmp_path: Path) -> None:
