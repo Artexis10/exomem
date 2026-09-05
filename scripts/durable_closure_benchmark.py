@@ -16,6 +16,7 @@ import asyncio
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import shutil
 import sys
@@ -253,13 +254,18 @@ def summarize_ledger_calls(calls: Sequence[Mapping[str, Any]]) -> dict[str, floa
             "server_occupied_union_ms": None,
             "server_idle_within_observed_span_ms": None,
         }
+    for call in calls:
+        for field in ("duration_ms", "total_ms"):
+            value = call.get(field)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"ledger {field} is missing or invalid")
     intervals = [
         (float(call["started_ms"]), float(call["ended_ms"]))
         for call in calls
         if "started_ms" in call and "ended_ms" in call
     ]
-    duration_sum = sum(float(call.get("duration_ms") or 0.0) for call in calls)
-    total_sum = sum(float(call.get("total_ms") or 0.0) for call in calls)
+    duration_sum = sum(float(call["duration_ms"]) for call in calls)
+    total_sum = sum(float(call["total_ms"]) for call in calls)
     if not intervals:
         return {
             "server_duration_sum_ms": duration_sum,
@@ -302,16 +308,16 @@ def ledger_clock_continuous(calls: Sequence[Mapping[str, Any]], rows: Sequence[M
     if len(calls) != len(rows) or len(calls) < 2:
         return True
     intervals = ledger_intervals(rows)
-    previous_offset: float | None = None
+    offsets: list[float] = []
     for call, interval in zip(calls, intervals, strict=True):
         ended = call.get("ended_ms")
         if not isinstance(ended, (int, float)):
             return False
         offset = interval["ended_ms"] - float(ended)
-        if previous_offset is not None and abs(offset - previous_offset) > 250.0:
+        if offsets and abs(offset - offsets[-1]) > 250.0:
             return False
-        previous_offset = offset
-    return True
+        offsets.append(offset)
+    return max(offsets) - min(offsets) <= 250.0
 
 
 def lifecycle_timings(*, workflow_started: float, closure_finished: float, shutdown_finished: float) -> dict[str, float]:
@@ -343,6 +349,8 @@ def attach_ledger_measurements(
         result["server_interval"] = None
         if row_index < len(ledger_rows) and ledger_rows[row_index].get("tool") == call.get("tool"):
             row = ledger_rows[row_index]
+            if "outcome" not in row or "error_code" not in row:
+                raise ValueError("ledger outcome/error fields are missing")
             if row.get("outcome") is not None and row.get("outcome") != call.get("outcome"):
                 raise ValueError("ledger outcome does not match client outcome")
             if row.get("error_code") is not None and row.get("error_code") != call.get("error_code"):

@@ -89,14 +89,14 @@ def test_overlapping_ledger_calls_keep_sum_and_union_distinct() -> None:
 
 def test_ledger_durations_join_to_each_client_call_without_inventing_intervals() -> None:
     calls = [
-        {"tool": "remember", "client_elapsed_ms": 8.0},
-        {"tool": "ask_memory", "client_elapsed_ms": 3.0},
+        {"tool": "remember", "outcome": "ok", "error_code": None, "client_elapsed_ms": 8.0},
+        {"tool": "ask_memory", "outcome": "ok", "error_code": None, "client_elapsed_ms": 3.0},
     ]
     joined = benchmark.attach_ledger_measurements(
         calls,
         [
-            {"tool": "remember", "duration_ms": 5.0, "total_ms": 7.0, "ts_utc": "2026-09-05T12:00:01.000+00:00"},
-            {"tool": "ask_memory", "duration_ms": 2.0, "total_ms": 2.5, "ts_utc": "2026-09-05T12:00:02.000+00:00"},
+            {"tool": "remember", "outcome": "ok", "error_code": None, "duration_ms": 5.0, "total_ms": 7.0, "ts_utc": "2026-09-05T12:00:01.000+00:00"},
+            {"tool": "ask_memory", "outcome": "ok", "error_code": None, "duration_ms": 2.0, "total_ms": 2.5, "ts_utc": "2026-09-05T12:00:02.000+00:00"},
         ],
     )
 
@@ -117,6 +117,25 @@ def test_ledger_refusal_cannot_be_joined_to_an_ok_client_call() -> None:
         raise AssertionError("ledger refusal must invalidate an incompatible client join")
 
 
+def test_missing_ledger_duration_and_outcome_are_not_measured_as_zero_or_ok() -> None:
+    try:
+        benchmark.summarize_ledger_calls([{"tool": "remember", "total_ms": 2, "started_ms": 0, "ended_ms": 2}])
+    except ValueError as error:
+        assert "duration" in str(error)
+    else:
+        raise AssertionError("missing duration must invalidate ledger summary")
+
+    try:
+        benchmark.attach_ledger_measurements(
+            [{"tool": "remember", "outcome": "ok", "client_elapsed_ms": 1}],
+            [{"tool": "remember", "duration_ms": 1, "total_ms": 1, "ts_utc": "2026-09-05T12:00:01+00:00"}],
+        )
+    except ValueError as error:
+        assert "outcome" in str(error)
+    else:
+        raise AssertionError("missing ledger outcome must invalidate a client join")
+
+
 def test_ledger_utc_completion_and_total_duration_form_a_measured_interval() -> None:
     rows = benchmark.ledger_intervals(
         [{"ts_utc": "2026-09-05T12:00:01.000+00:00", "total_ms": 250.0}]
@@ -130,6 +149,16 @@ def test_utc_ledger_step_invalidates_cross_call_occupancy() -> None:
     rows = [
         {"ts_utc": "2026-09-05T12:00:01.000+00:00", "total_ms": 5.0},
         {"ts_utc": "2026-09-05T12:00:02.500+00:00", "total_ms": 5.0},
+    ]
+
+    assert benchmark.ledger_clock_continuous(calls, rows) is False
+
+
+def test_cumulative_utc_offset_drift_invalidates_cross_call_occupancy() -> None:
+    calls = [{"ended_ms": float(index * 1000)} for index in range(20)]
+    rows = [
+        {"ts_utc": f"2026-09-05T12:00:{index + 1:02d}.{index * 100:03d}+00:00", "total_ms": 5.0}
+        for index in range(20)
     ]
 
     assert benchmark.ledger_clock_continuous(calls, rows) is False
