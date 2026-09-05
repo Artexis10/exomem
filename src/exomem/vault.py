@@ -2551,11 +2551,18 @@ def _open_bound_artifact(artifact: _BatchArtifactGuard) -> int:
     return descriptor
 
 
-def _capture_batch_snapshot(path: Path) -> tuple[_BatchSnapshot, _BatchArtifactGuard]:
+def _capture_batch_snapshot(
+    path: Path,
+    *,
+    before_timestamp_restore: Callable[[_BatchSnapshot, _BatchArtifactGuard], tuple[Any, ...]]
+    | None = None,
+    abort_publication_intents: Callable[[tuple[Any, ...]], None] | None = None,
+) -> tuple[_BatchSnapshot, _BatchArtifactGuard]:
     absolute = Path(os.path.abspath(path))
     stable_guard = PathGuard.capture(absolute.parent, absolute.name, leaf_policy="stable")
     stable_artifact = _BatchArtifactGuard(absolute.parent, stable_guard)
     source_descriptor = _open_bound_artifact(stable_artifact)
+    created_intents: tuple[Any, ...] = ()
     try:
         source_info = os.fstat(source_descriptor)
         try:
@@ -2570,6 +2577,16 @@ def _capture_batch_snapshot(path: Path) -> tuple[_BatchSnapshot, _BatchArtifactG
             source_guard.recheck()
             if not _same_identity(source_guard.identity, os.fstat(source_descriptor)):
                 raise PathGuardError("PATH_GUARD_CHANGED", "batch source changed")
+            snapshot = _BatchSnapshot(
+                content,
+                content_hash,
+                stat.S_IMODE(source_info.st_mode),
+                source_info.st_atime_ns,
+                source_info.st_mtime_ns,
+                xattrs,
+            )
+            if before_timestamp_restore is not None:
+                created_intents = before_timestamp_restore(snapshot, source_guard)
             _restore_bound_source_timestamps(
                 source_guard,
                 source_descriptor,
@@ -2577,6 +2594,8 @@ def _capture_batch_snapshot(path: Path) -> tuple[_BatchSnapshot, _BatchArtifactG
                 source_info.st_mtime_ns,
             )
         except BaseException as capture_error:
+            if created_intents and abort_publication_intents is not None:
+                abort_publication_intents(created_intents)
             try:
                 _restore_bound_source_timestamps(
                     stable_artifact,
@@ -2588,14 +2607,7 @@ def _capture_batch_snapshot(path: Path) -> tuple[_BatchSnapshot, _BatchArtifactG
                 raise restore_error from capture_error
             raise
         return (
-            _BatchSnapshot(
-                content,
-                content_hash,
-                stat.S_IMODE(source_info.st_mode),
-                source_info.st_atime_ns,
-                source_info.st_mtime_ns,
-                xattrs,
-            ),
+            snapshot,
             source_guard,
         )
     finally:
@@ -4155,11 +4167,17 @@ def post_commit_batch_fanout(
     try:
         from . import file_watcher
 
-        registered_intents = file_watcher.register_self_write(vault_root, replaced)
-        file_watcher.finalize_publication_intents(
-            publication_intents, succeeded=registered_intents
+        registered_intents, corpus_published = file_watcher.register_self_write(
+            vault_root, replaced, return_publication_result=True
         )
-        corpus_published = True
+        if corpus_published:
+            file_watcher.finalize_publication_intents(
+                publication_intents, succeeded=registered_intents
+            )
+        elif publication_intents:
+            file_watcher.abort_publication_intents(
+                publication_intents, force_paths=replaced
+            )
     except Exception:  # noqa: BLE001 — suppression is best-effort
         if publication_intents:
             from . import file_watcher
@@ -4590,7 +4608,12 @@ def _batch_atomic_write_locked(
     graph_debt_checkpoint: PlannedWrite | None = None
     deferred_checkpoint: GraphSyncCheckpoint | None = None
     deferred_predecessor: GraphSyncCheckpoint | None = None
-    publication_intents: tuple[Any, ...] = ()
+    publication_intents: list[Any] = []
+    publication_intents_enabled = False
+    if vault_root is not None and post_commit_fanout:
+        from .writer_lease import active_derived_batch_custody
+
+        publication_intents_enabled = not active_derived_batch_custody(Path(vault_root))
     if vault_root is not None:
         from . import graph_sync
 
@@ -4823,8 +4846,48 @@ def _batch_atomic_write_locked(
                     and write.expected_hash != MISSING_CONTENT_HASH
                 ):
                     raise ContentHashMismatchError(final, write.expected_hash, None)
+                if publication_intents_enabled:
+                    from . import file_watcher
+
+                    publication_intents.extend(
+                        file_watcher.register_publication_intents(
+                            Path(vault_root),
+                            [(final, _artifact.descriptor, _artifact.content_hash)],
+                        )
+                    )
                 continue
-            snapshot, source_guard = _capture_batch_snapshot(final)
+            if publication_intents_enabled:
+                from . import file_watcher
+
+                def register_snapshot_intent(
+                    snapshot: _BatchSnapshot,
+                    _source_guard: _BatchArtifactGuard,
+                    *,
+                    final: Path = final,
+                    artifact: _WorkspaceArtifact = _artifact,
+                ) -> tuple[Any, ...]:
+                    intents = file_watcher.register_publication_intents(
+                        Path(vault_root),
+                        [
+                            (
+                                final,
+                                artifact.descriptor,
+                                artifact.content_hash,
+                                snapshot.content_hash,
+                                len(snapshot.content),
+                            )
+                        ],
+                    )
+                    publication_intents.extend(intents)
+                    return intents
+
+                snapshot, source_guard = _capture_batch_snapshot(
+                    final,
+                    before_timestamp_restore=register_snapshot_intent,
+                    abort_publication_intents=file_watcher.abort_publication_intents,
+                )
+            else:
+                snapshot, source_guard = _capture_batch_snapshot(final)
             snapshots.append(snapshot)
             source_guards.append(source_guard)
             if not (
@@ -4916,6 +4979,10 @@ def _batch_atomic_write_locked(
                 if fast_receipt is not None:
                     call_ledger.note_derived_event("receipt_prepared")
     except BaseException as stage_error:
+        if publication_intents:
+            from . import file_watcher
+
+            file_watcher.abort_publication_intents(publication_intents)
         if not isinstance(stage_error, Exception):
             _cleanup_batch_workspaces(workspace_by_parent.values())
             _remove_empty_created_dirs(created_dirs)
@@ -4950,16 +5017,6 @@ def _batch_atomic_write_locked(
     )
     replaced: list[Path] = []
     final_guards: dict[Path, _BatchArtifactGuard] = {}
-    if vault_root is not None and post_commit_fanout and fast_receipt is None:
-        from . import file_watcher
-
-        publication_intents = file_watcher.register_publication_intents(
-            Path(vault_root),
-            (
-                (final, artifact.descriptor, artifact.content_hash)
-                for final, _workspace, artifact in staged
-            ),
-        )
     # The canonical transaction's own clock. Recorded as a span rather than
     # wrapped in a `with`, so timing this region does not reindent it: the
     # measurement that matters is how long the caller holds authority, and a

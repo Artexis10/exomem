@@ -44,7 +44,7 @@ def test_published_event_is_held_until_postcommit_registration(
         assert freshness.external_pending(vault) is False
 
     monkeypatch.setattr(vault_module, "_after_batch_destination_published", observe_published)
-    monkeypatch.setattr(file_watcher, "_publish_registry_change", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(file_watcher, "_publish_registry_change", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         "exomem.index_sync.upsert_after_write",
         lambda _root, paths, **_kwargs: fanout.append(list(paths)),
@@ -57,6 +57,76 @@ def test_published_event_is_held_until_postcommit_registration(
     assert fanout == [[target]]
     assert watcher._drain() == ([], [], [], 0, False)
     assert freshness.external_pending(vault) is False
+
+
+def test_snapshot_timestamp_echo_holds_before_image_but_not_later_restoration(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "snapshot-timestamp.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("old", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+    real_restore = vault_module._restore_bound_source_timestamps
+
+    def restore_and_observe(source, descriptor, atime_ns, mtime_ns):  # noqa: ANN001
+        real_restore(source, descriptor, atime_ns, mtime_ns)
+        watcher._record(source.path, deleted=False)
+
+    monkeypatch.setattr(
+        vault_module, "_restore_bound_source_timestamps", restore_and_observe
+    )
+    monkeypatch.setattr("exomem.index_sync.upsert_after_write", lambda *_args, **_kwargs: None)
+
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(target, "new")], vault_root=vault
+    )
+
+    assert freshness.external_pending(vault) is False
+    target.write_text("old", encoding="utf-8")
+    watcher._record(target, deleted=False)
+
+    assert freshness.external_pending(vault) is True
+    assert target in watcher._drain()[1]
+
+
+def test_stage_failure_aborts_an_already_observed_snapshot_intent(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "stage-abort.md"
+    second = vault / "Knowledge Base" / "Notes" / "stage-abort-second.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("old", encoding="utf-8")
+    second.write_text("old", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+    real_restore = vault_module._restore_bound_source_timestamps
+    real_snapshot = vault_module._capture_batch_snapshot
+
+    def restore_and_observe(source, descriptor, atime_ns, mtime_ns):  # noqa: ANN001
+        real_restore(source, descriptor, atime_ns, mtime_ns)
+        if source.path == target:
+            watcher._record(source.path, deleted=False)
+
+    def fail_second_snapshot(path: Path, **kwargs):
+        if path == second:
+            raise OSError("second snapshot failed")
+        return real_snapshot(path, **kwargs)
+
+    monkeypatch.setattr(
+        vault_module, "_restore_bound_source_timestamps", restore_and_observe
+    )
+    monkeypatch.setattr(vault_module, "_capture_batch_snapshot", fail_second_snapshot)
+
+    with pytest.raises(OSError, match="second snapshot failed"):
+        vault_module.batch_atomic_write(
+            [
+                vault_module.PlannedWrite(target, "new"),
+                vault_module.PlannedWrite(second, "new"),
+            ],
+            vault_root=vault,
+        )
+
+    assert freshness.external_pending(vault) is True
+    assert target in watcher._drain()[1]
 
 
 def test_foreign_bytes_after_publish_are_replayed_as_external(
@@ -322,9 +392,111 @@ def test_hashing_releases_registry_lock_and_observes_late_abort(
     assert entered.wait(timeout=2.0)
     assert file_watcher._SUPPRESS_LOCK.acquire(timeout=0.2)
     file_watcher._SUPPRESS_LOCK.release()
-    file_watcher.abort_publication_intents([intent])
-    release.set()
-    event_thread.join(timeout=2.0)
+    try:
+        file_watcher.abort_publication_intents([intent])
+
+        assert freshness.external_pending(vault) is True
+    finally:
+        release.set()
+        event_thread.join(timeout=2.0)
 
     assert not event_thread.is_alive()
     assert freshness.external_pending(vault) is True
+
+
+def test_token_change_during_hash_retries_once_against_the_replacement(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file_watcher.clear_self_write_registry()
+    target = vault / "Knowledge Base" / "Notes" / "token-change.md"
+    first = _register_active_intent(vault, target, b"one")
+    watcher = file_watcher.FileWatcher(vault)
+    entered = threading.Event()
+    release = threading.Event()
+    real_digest = file_watcher._bounded_descriptor_digest
+    calls = 0
+
+    def delayed_digest(path: Path, size: int | None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            assert release.wait(timeout=2.0)
+        return real_digest(path, size)
+
+    monkeypatch.setattr(file_watcher, "_bounded_descriptor_digest", delayed_digest)
+    event_thread = threading.Thread(
+        target=lambda: watcher._record(target, deleted=False), daemon=True
+    )
+    event_thread.start()
+    assert entered.wait(timeout=2.0)
+    file_watcher.finalize_publication_intents([first], succeeded=[first])
+    target.write_bytes(b"two")
+    second = _register_active_intent(vault, target, b"two")
+    release.set()
+    event_thread.join(timeout=2.0)
+    file_watcher.finalize_publication_intents([second], succeeded=[second])
+
+    assert not event_thread.is_alive()
+    assert calls == 2
+    assert freshness.external_pending(vault) is False
+
+
+def test_inflight_duplicate_events_share_one_weak_watcher_path_subscription(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file_watcher.clear_self_write_registry()
+    target = vault / "Knowledge Base" / "Notes" / "duplicate-subscription.md"
+    intent = _register_active_intent(vault, target, b"new")
+    watcher = file_watcher.FileWatcher(vault)
+    entered = threading.Barrier(3)
+    release = threading.Event()
+    real_digest = file_watcher._bounded_descriptor_digest
+
+    def delayed_digest(path: Path, size: int | None):
+        entered.wait(timeout=2.0)
+        assert release.wait(timeout=2.0)
+        return real_digest(path, size)
+
+    monkeypatch.setattr(file_watcher, "_bounded_descriptor_digest", delayed_digest)
+    threads = [
+        threading.Thread(target=lambda: watcher._record(target, deleted=False), daemon=True)
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    entered.wait(timeout=2.0)
+
+    assert len(intent.observers) == 1
+    file_watcher.abort_publication_intents([intent])
+    assert freshness.external_pending(vault) is True
+
+    release.set()
+    for thread in threads:
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+
+
+def test_failed_corpus_publication_keeps_intent_aborted_and_fallback_enabled(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "publication-false.md"
+    intent = _register_active_intent(vault, target, b"new")
+    fanout: dict[str, object] = {}
+
+    monkeypatch.setattr(file_watcher, "_publish_registry_change", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        "exomem.index_sync.upsert_after_write",
+        lambda _root, _paths, **kwargs: fanout.setdefault("kwargs", kwargs),
+    )
+    monkeypatch.setattr("exomem.index_sync.full_upsert_succeeded", lambda *_args: True)
+
+    assert vault_module.post_commit_batch_fanout(
+        vault, [target], None, None, publication_intents=[intent]
+    ) is True
+
+    assert fanout["kwargs"] == {
+        "created_paths": [],
+        "publish_corpus_change": True,
+    }
+    assert intent.disposition == "aborted"
