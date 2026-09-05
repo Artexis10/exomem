@@ -59,5 +59,5 @@
       status.
 - [x] 5.2 Scaffold SKILL.md: document relation-queue + accept-relation in the
       tool surface section (scaffold-no-leak test green).
-- [ ] 5.3 Merge sequencing after the typed-find-lane change (commands.py
+- [x] 5.3 Merge sequencing after the typed-find-lane change (commands.py
       adjacency).

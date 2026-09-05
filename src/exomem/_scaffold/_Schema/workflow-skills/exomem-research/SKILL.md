@@ -40,6 +40,12 @@ identity after an uncertain commit.
 4. Draft the result as a `research-note` unless another type clearly fits, listing every source preserved in step 2 in `sources:`.
 5. Use `connect_memory(operation="suggest-links")` on the draft and review related prior notes. Then write with `remember`, including the sources and accepted connections in the first write.
 
+## Relation governance
+Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`; corrections use a new canonical key and deprecate the old one.
+
 ## Output contract
 Return findings, cited sources, limits, saved path, and follow-up questions.
 

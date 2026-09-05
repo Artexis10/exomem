@@ -41,6 +41,12 @@ identity after an uncertain commit.
 5. Leave raw `Sources/` and `Evidence/` untouched except for metadata the core contract explicitly allows.
 6. Check `review_memory(mode="audit", categories=["unregistered_relation"])` for relation labels that recur but are not registered; promote the ones that have earned it with `schema_memory(subject="relations")`, which turns them into real typed edges instead of standing review debt.
 
+## Relation governance
+Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`; corrections use a new canonical key and deprecate the old one.
+
 ## Output contract
 Summarize changes made or proposed, citing affected paths. Flag risky changes instead of applying them silently.
 

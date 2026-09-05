@@ -41,6 +41,12 @@ identity after an uncertain commit.
 5. Draft textual conclusions only when there is a durable finding, naming the preserved artifact in `sources:`.
 6. Run `connect_memory(operation="suggest-links")` on the draft and review the links. Then write with `remember`, carrying the sources and accepted connections in the first write.
 
+## Relation governance
+Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`; corrections use a new canonical key and deprecate the old one.
+
 ## Output contract
 Return matching artifacts, what was inspected, citations, and any compiled conclusion path.
 

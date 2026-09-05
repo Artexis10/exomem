@@ -56,6 +56,12 @@ identity after an uncertain commit.
    it, so a queue without it is not proof it has nothing due.
 9. Propose risky actions before mutating.
 
+## Relation governance
+Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`; corrections use a new canonical key and deprecate the old one.
+
 ## Output contract
 Return a prioritized review list, recommended safe actions, and any completed saves or edits.
 

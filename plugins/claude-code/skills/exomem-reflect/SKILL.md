@@ -40,6 +40,12 @@ identity after an uncertain commit.
 4. Prefer one strong note over many weak notes unless the conclusions are genuinely different.
 5. Link the pages you already read in step 1 inline, using `connect_memory(operation="suggest-links")` to catch the ones you missed; draft the edges that carry direction under `## Relations`. Then save with `remember`, carrying the sources and accepted links in the first write.
 
+## Relation governance
+Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`; corrections use a new canonical key and deprecate the old one.
+
 ## Output contract
 Return what was saved, what was intentionally not saved, and remaining open questions.
 

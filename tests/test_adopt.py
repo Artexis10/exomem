@@ -32,11 +32,17 @@ def _snapshot(root: Path, *, exclude_kb: bool = False) -> dict[str, tuple[int, f
 def _legacy_vault(root: Path, *, kb: bool = False) -> Path:
     vault = root / "legacy-vault"
     (vault / "Warranty Case").mkdir(parents=True)
-    (vault / "Warranty Case" / "laptop-receipt.md").write_text("# Laptop receipt\n\nreceipt\n", encoding="utf-8", newline="\n")
+    (vault / "Warranty Case" / "laptop-receipt.md").write_text(
+        "# Laptop receipt\n\nreceipt\n", encoding="utf-8", newline="\n"
+    )
     (vault / "Creative Assets").mkdir()
-    (vault / "Creative Assets" / "shoot-reference.md").write_text("photo ideas\n", encoding="utf-8", newline="\n")
+    (vault / "Creative Assets" / "shoot-reference.md").write_text(
+        "photo ideas\n", encoding="utf-8", newline="\n"
+    )
     (vault / "Repos").mkdir()
-    (vault / "Repos" / "api-incident.md").write_text("deploy failed\n", encoding="utf-8", newline="\n")
+    (vault / "Repos" / "api-incident.md").write_text(
+        "deploy failed\n", encoding="utf-8", newline="\n"
+    )
     if kb:
         kb_root = vault / "Knowledge Base"
         (kb_root / "Notes").mkdir(parents=True)
@@ -760,15 +766,19 @@ def test_adopt_semantic_census_separates_identity_ownership_from_corpus_pages(
     assert set(paths[1:]).isdisjoint(corpus.pages)
 
 
+@pytest.mark.parametrize(
+    "identity_yaml", ["definitely-not-a-uuid", "123", "true", "[]", "{}", "''"]
+)
 def test_adopt_semantic_census_malformed_raw_id_fails_governance_identity_census(
     tmp_path: Path,
+    identity_yaml: str,
 ) -> None:
     vault = _legacy_vault(tmp_path, kb=True)
     page = vault / "Knowledge Base" / "Notes" / "malformed-id.md"
     page.write_text(
-        """---
+        f"""---
 type: insight
-exomem_id: definitely-not-a-uuid
+exomem_id: {identity_yaml}
 title: Malformed identity
 ---
 
@@ -782,6 +792,26 @@ title: Malformed identity
     assert census["governance"]["saved_contracts"]["error"] == "ValueError"
     assert census["governance"]["relation_dispositions"]["status"] == "error"
     assert census["governance"]["resource_status"] == "partial_identity_error"
+
+
+@pytest.mark.parametrize(
+    "identity_yaml",
+    ["null", "' 6CCAD7E0-58AF-4CE0-83C3-E49888849051 '"],
+)
+def test_adopt_semantic_census_accepts_absent_or_normalizable_identity(
+    tmp_path: Path, identity_yaml: str,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    page = vault / "Knowledge Base" / "Notes" / "valid-id.md"
+    page.write_text(
+        f"---\ntype: insight\nexomem_id: {identity_yaml}\n---\n# Valid identity\n",
+        encoding="utf-8",
+    )
+
+    census = semantic_census.scan(vault)
+
+    assert census["governance"]["saved_contracts"]["status"] == "current"
+    assert census["governance"]["relation_dispositions"]["status"] == "current"
 
 
 def test_adopt_vault_surface_exposes_semantic_census_bounds(tmp_path: Path) -> None:
@@ -821,7 +851,9 @@ def test_adopt_suggests_builtin_packs_from_structure(tmp_path: Path) -> None:
     }
     assert "required_fields" in report["pack_schema"]
     assert "purpose" in report["pack_schema"]["required_fields"]
-    assert report["pack_schema"]["selection_manifest"] == "Knowledge Base/_Packs/selected-packs.json"
+    assert (
+        report["pack_schema"]["selection_manifest"] == "Knowledge Base/_Packs/selected-packs.json"
+    )
     assert by_id["technical"]["beginner_description"]
     assert by_id["legal-warranty"]["suggested_workflows"][0]["route"]
     assert report["governance"]["kb_present"] is True
@@ -868,7 +900,9 @@ def test_adopt_copy_as_sources_preserves_original_and_records_provenance(tmp_pat
     assert copied[0]["original_sha256"] == expected_hash
     source_path = vault / copied[0]["source_path"]
     assert source_path.exists()
-    assert source_path.as_posix().endswith("Knowledge Base/Sources/Imported/2026-07-07-laptop-receipt.md")
+    assert source_path.as_posix().endswith(
+        "Knowledge Base/Sources/Imported/2026-07-07-laptop-receipt.md"
+    )
     source_text = source_path.read_text(encoding="utf-8")
     assert "imported_from: Warranty Case/laptop-receipt.md" in source_text
     assert f"original_sha256: {expected_hash}" in source_text
@@ -892,7 +926,9 @@ def test_adopt_quotes_yaml_significant_imported_path(tmp_path: Path) -> None:
     imported = vault / copied[0]["source_path"]
     raw = imported.read_text(encoding="utf-8")
     frontmatter = raw.removeprefix("---\n").split("\n---\n", 1)[0]
-    assert yaml.safe_load(frontmatter)["imported_from"] == "Legacy/Step2: Paste your conversation.md"
+    assert (
+        yaml.safe_load(frontmatter)["imported_from"] == "Legacy/Step2: Paste your conversation.md"
+    )
 
 
 def test_adopt_copy_as_sources_disambiguates_same_basename_batch(tmp_path: Path) -> None:

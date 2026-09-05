@@ -300,12 +300,16 @@ not yet count as a graph edge, and does not connect the page. That is deliberate
 the label stays visible as review debt instead of being silently downgraded to a
 generic link.
 
-So the vocabulary is extensible, not fixed. When a label recurs and earns its
-place, promote it: `schema_memory(subject="relations", operation="infer")` to see
-what recurs, then `save=true` (with `expected_hash` when overwriting) to register
-it for the vault. Registered labels immediately become real typed edges everywhere
-— gate, graph, and review queues. Prefer an existing registered relation when one
-genuinely fits; promote when none does, rather than forcing a poor match.
+So the vocabulary is extensible, not fixed. Resolve before authoring with
+`connect_memory(operation="resolve-relation")`, and reuse a specific truthful
+registered relation when one fits. `relates_to` is honest only for a real generic
+connection; no edge is better than invented meaning. For a durable recurring
+distinction, use `schema_memory(subject="relations", operation="propose-relation")`,
+review the complete delta and duplicate evidence, then persist that exact delta
+with `operation="save-relations"`, its `expected_hash`, and `why`. Meaning is
+immutable: corrections create a new canonical key and deprecate the old one.
+Registered labels become real typed edges everywhere — gate, graph, and review
+queues — while clean aliases remain the authoring labels.
 
 **The writer normalizes on your behalf.** Exomem's writers run every wikilink
 through `vault.normalize_wikilink()` before writing — bare names, KB-relative
