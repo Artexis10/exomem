@@ -419,6 +419,12 @@ def test_effective_capture_applies_authored_posture_under_the_active_level(
 # predated it, so the pins below name the base sentences and the structural
 # property (one capture text per level across every bootstrap projection).
 
+# The base is origin/main at the revision this branch merged, recorded the way
+# the hosted immutability manifest records its source_revision. The list is a
+# restated sample of that carrier's sentences, not a derivation of all of them:
+# the projection-parity pin below is the structural guard, this one names the
+# doctrines a rewrite has already dropped once.
+_BASE_CARRIER_REVISION = "fdc9ab4d"
 _BASE_CAPTURE_SENTENCES = {
     "balanced": (
         "Not mid-thought exploration, tangents, or unresolved questions.",
@@ -434,10 +440,12 @@ _BASE_CAPTURE_SENTENCES = {
 
 
 @pytest.mark.parametrize("level", sorted(_BASE_CAPTURE_SENTENCES))
-def test_capture_text_keeps_every_sentence_the_base_carrier_shipped(level: str) -> None:
+def test_capture_text_keeps_the_named_base_carrier_sentences(level: str) -> None:
     capture = prominence.contract(level).capture
     missing = [s for s in _BASE_CAPTURE_SENTENCES[level] if s not in capture]
-    assert missing == [], f"{level} capture dropped base doctrine: {missing}"
+    assert missing == [], (
+        f"{level} capture dropped base doctrine from {_BASE_CARRIER_REVISION}: {missing}"
+    )
 
 
 @pytest.mark.parametrize("level", ("off", "light", "balanced", "maximal"))
