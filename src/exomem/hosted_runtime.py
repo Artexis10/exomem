@@ -1509,6 +1509,11 @@ class HostedBindingV2:
             raise HostedConfigError(
                 "HOSTED_BINDING_CONFLICT", "hosted binding identity is invalid"
             )
+        if self.cell_id == self.vault_id:
+            raise HostedConfigError(
+                "HOSTED_BINDING_CONFLICT",
+                "hosted routing and logical vault identities must be distinct",
+            )
         if not _valid_runtime_identity(self.runtime_uid) or not _valid_runtime_identity(
             self.runtime_gid
         ):

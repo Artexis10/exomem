@@ -1,18 +1,18 @@
 ## 0. Prerequisite and red-first evidence gate
 
-- [ ] 0.1 Before touching consolidation product code, verify that
+- [x] 0.1 Before touching consolidation product code, verify that
   `harden-governance-for-consolidation` is merged, its six delta capabilities are
   canonical, its sidecar migrations are deployed, its independent security
   review/recheck is closed, and its independent verifier evidence is green. Run
   `openspec validate harden-governance-for-consolidation --strict` against the
   merged tree and stop if any prerequisite is only specified rather than shipped.
-- [ ] 0.2 Record immutable pre-change baselines for the MCP schema fixture,
-  OpenAPI operations, capability document, bootstrap ordering/size, Hosted v1/v2
-  command membership and descriptor hashes, generated v1/v2 plugin/manifest
+- [x] 0.2 Record immutable pre-change baselines for the MCP schema fixture,
+  OpenAPI operations, capability document, bootstrap ordering/size, Hosted v1-v4
+  command membership and descriptor hashes, generated v1-v4 plugin/manifest
   fixtures, deployment locks, client contracts, and registered promotion
-  evidence. These hashes are the negative assertion that consolidation adds v3
-  without widening or auto-promoting v1/v2.
-- [ ] 0.3 Create a red-first evidence log for this change. For every test task
+  evidence. These hashes are the negative assertion that consolidation adds v5
+  without widening or auto-promoting v1-v4.
+- [x] 0.3 Create a red-first evidence log for this change. For every test task
   below, run the named test before implementation, record its exact assertion
   failure (not collection/import failure), then rerun it green after the smallest
   implementation slice. A test introduced already green because it does not
@@ -24,7 +24,7 @@
 
 ## 1. Durable cell identity and authenticated portable intake
 
-- [ ] 1.1 Add red tests in `tests/test_consolidation_cell_identity.py` for
+- [x] 1.1 Add red tests in `tests/test_consolidation_cell_identity.py` for
   standalone local and Hosted private identity records containing generated
   logical `vault_id`, generated `installation_id`, authenticated root binding,
   monotonic installation generation/fence, stable filesystem/root identity,
@@ -36,7 +36,7 @@
   before export or run creation. Add a Hosted regression proving typed routing
   `cell_id`, logical `vault_id`, and `installation_id` are independent and
   `cell_id == vault_id` fails before readiness/owner-context construction.
-- [ ] 1.2 Add red legacy-adoption tests proving only an authenticated local owner
+- [x] 1.2 Add red legacy-adoption tests proving only an authenticated local owner
   under exclusive lifetime/writer authority can adopt an unbound vault; adoption
   generates rather than accepts both ids, binds the stable root/filesystem and
   installation registry atomically, records its one-time census as provenance,
@@ -889,7 +889,7 @@ binds that reference and observed digest; no caller field selects K.
 - [ ] 10.8 Run
   `uv run python -m pytest -q tests/test_consolidation_verification.py tests/test_consolidation_transport_verification.py tests/test_consolidation_oracle_closure.py tests/test_governance_oracle_closure.py tests/test_governance_egress.py tests/test_governance_postfilter.py tests/test_record_governance.py tests/test_media_deletion_propagation.py`.
 
-## 11. Command parity and additive Hosted v3
+## 11. Command parity and additive Hosted v5
 
 - [ ] 11.1 Add a red owner-authorization matrix in
   `tests/test_consolidation_surface.py` for all eleven actions. Resolve owner at
@@ -979,12 +979,12 @@ binds that reference and observed digest; no caller field selects K.
   surfaces; no adapter-local envelope or optional flattened delivery is allowed.
 - [ ] 11.5 Extend `tests/test_hosted_agent_surface.py`, Hosted plugin/manifest tests,
   deployment-lock tests, client fixtures, and promotion guards red-first for
-  additive `hosted-alpha-agent-v3`. Assert its ordered membership is byte-for-byte
-  v2 membership followed by `consolidate_memory`, it has a distinct descriptor/hash
-  and generated plugin/manifest fixtures, and v1/v2 membership, descriptors/hashes,
+  additive `hosted-alpha-agent-v5`. Assert its ordered membership is byte-for-byte
+  v4 membership followed by `consolidate_memory`, it has a distinct descriptor/hash
+  and generated plugin/manifest fixtures, and v1-v4 membership, descriptors/hashes,
   plugins/manifests, locks, clients, and registered evidence remain byte-identical.
-- [ ] 11.6 Add red Hosted selection/promotion tests proving defining/building v3 does
-  not select or auto-promote it; v1/v2 cells omit/refuse consolidation; explicit v3
+- [ ] 11.6 Add red Hosted selection/promotion tests proving defining/building v5 does
+  not select or auto-promote it; v1-v4 cells omit/refuse consolidation; explicit v5
   deployment selection requires a closed signed private
   `HostedProfileSelection/v1` binding typed cell/vault and installation/
   generation/active-fence, profile/descriptor hash,
@@ -1012,14 +1012,14 @@ binds that reference and observed digest; no caller field selects K.
 - [ ] 11.7 Add the common owner-control authorization guard before consolidation
   coercion/existence/allocation, then register the engine once in `_PRODUCT_SPEC`,
   action validation, classifier, bootstrap/capability docs, and generated surfaces.
-  Add v3 as a new immutable
+  Add v5 as a new immutable
   profile and wire Hosted through generic discovery plus the lifecycle owner-
   control admission lane. Validate/consume the closed profile-selection record at
   startup before advertise/admit; do not infer it from lifecycle flags, add a
-  public bespoke consolidation route, modify v1/v2, or put the product command in
+  public bespoke consolidation route, modify v1-v4, or put the product command in
   the transfer intercept set.
 - [ ] 11.8 Regenerate only intentional MCP schema, OpenAPI/capability/bootstrap/help,
-  and new v3 descriptor/plugin/manifest/compatibility artifacts. Inspect the exact
+  and new v5 descriptor/plugin/manifest/compatibility artifacts. Inspect the exact
   diff against task 0.2 baselines and reject unrelated drift.
 - [ ] 11.9 Run
   `uv run python -m pytest -q tests/test_consolidation_surface.py tests/test_mcp_schema_fidelity.py tests/test_rest_registry.py tests/test_rest_api.py tests/test_cli_ops.py tests/test_bootstrap_capabilities.py tests/test_hosted_agent_surface.py tests/test_hosted_plugin_definition.py tests/test_hosted_plugin_rendering.py tests/test_hosted_release_manifest.py tests/test_hosted_plugin_promotion.py tests/test_hosted_deployment_lock_consumption.py`.
@@ -1059,12 +1059,12 @@ binds that reference and observed digest; no caller field selects K.
   pending-forward-only, and retirement-finalize, and exhaustively refuse every
   nonrow product terminal/phase/mode/run-mode/eligibility combination.
 - [ ] 12.3 Add an authenticated REST/CLI parity pass at every observable state and a
-  complete disposable Hosted v3 lifecycle using an explicitly selected compatible
-  v3 candidate plus valid signed `HostedProfileSelection/v1` and verifier record,
+  complete disposable Hosted v5 lifecycle using an explicitly selected compatible
+  v5 candidate plus valid signed `HostedProfileSelection/v1` and verifier record,
   including source-export/custodian, owner-entitlement, and exact-cell transport-
   supervisor readiness. Add
   unsigned/unknown-key/expired/revoked/wrong-scope and every one-field readiness
-  negative while proving v1/v2 remain byte-identical. During the seal, black-box
+  negative while proving v1-v4 remain byte-identical. During the seal, black-box
   calls prove only the ordinary content-free sealed response; during exact-cell
   transport verification they run only under routing-stop supervision; after
   routing-open they prove persistent parity with no serialized internal authority.
@@ -1148,7 +1148,7 @@ binds that reference and observed digest; no caller field selects K.
 - [ ] 13.1 Update only generic product/bootstrap/capability/operator documentation
   needed to discover consolidation, its owner-inclusive maintenance seal, fresh
   destination principal requirement, three distinct confirmations, source-retention
-  obligation, v3 Hosted selection, and Exomem-mediated boundary. Keep scaffold
+  obligation, v5 Hosted selection, and Exomem-mediated boundary. Keep scaffold
   examples generic and do not mention a personal, client, or operator vault.
 - [ ] 13.2 Add a software rollback compatibility test: new starts may be disabled,
   but a deployment may not remove a reader/recovery implementation needed by any
@@ -1199,15 +1199,15 @@ binds that reference and observed digest; no caller field selects K.
   routing race, post-unseal rollback overwrite, post-retirement zero-copy loss,
   C1 provenance loss, custody-receipt signer/domain/retention/artifact drift,
   archive-disposition/clearance-consume replay ambiguity,
-  source-retirement conflation, v3 selection signature/verifier/readiness and Hosted v1/v2
+  source-retirement conflation, v5 selection signature/verifier/readiness and Hosted v1-v4
   drift, and path/rank/graph/count/error/timing oracles.
 - [ ] 14.2 Record every review finding with severity and exact file/test evidence. For
   each accepted finding, add a reproducing red test before the smallest fix, rerun
   the focused and affected regression gates, and require the same reviewer to
   recheck the amended exact diff and explicitly close or retain the blocker.
 - [ ] 14.3 Have a separate independent verifier run tasks 13.3-13.7 and the installed
-  stdio, REST, CLI, and explicitly selected Hosted v3 E2E from a clean environment.
-  The verifier SHALL inspect v1/v2 byte-identity baselines, kill/restart seams,
+  stdio, REST, CLI, and explicitly selected Hosted v5 E2E from a clean environment.
+  The verifier SHALL inspect v1-v4 byte-identity baselines, kill/restart seams,
   same-input negative pairs, receipt plaintext scans, rehearsal rollback, distinct
   confirmation gates, and source/archive/destination final fingerprints rather than
   accepting self-reported terminals.
