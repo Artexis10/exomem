@@ -764,6 +764,37 @@ def _isolate_state_root(tmp_path: Path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_authorization_host_control(tmp_path: Path):
+    """Keep OS-account custody out of both live state and fixture vaults."""
+    from exomem.governance import authorization_custody
+
+    private = pytest.MonkeyPatch()
+    real_root = authorization_custody._standalone_host_control_root()
+    before = _state_root_shallow_snapshot(real_root)
+    isolated = tmp_path.with_name(f"{tmp_path.name}-authorization-host-control")
+    private.setattr(
+        authorization_custody, "_standalone_host_control_root", lambda: isolated,
+    )
+    try:
+        yield
+        after = _state_root_shallow_snapshot(real_root)
+        assert after == before, _state_root_guard_message(real_root, before, after)
+    finally:
+        private.undo()
+
+
+@pytest.fixture(name="monkeypatch")
+def _ordered_monkeypatch(_isolate_authorization_host_control):
+    """Unwind test overrides before restoring the real host-control resolver.
+
+    The dependency makes the private safety patch outlive shared overrides;
+    calling this fixture's undo() mid-test still preserves that safety patch.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        yield patch
+
+
+@pytest.fixture(autouse=True)
 def _process_env_isolation():
     """Restore os.environ after every test.
 

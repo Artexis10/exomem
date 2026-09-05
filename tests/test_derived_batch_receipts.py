@@ -1126,6 +1126,9 @@ def test_hosted_runtime_owns_prompt_derived_drain_and_clean_shutdown(
         def complete_startup(self, **_kwargs):
             return SimpleNamespace(phase="active")
 
+        def readiness(self):
+            return SimpleNamespace(ready=True)
+
         def set_worker_status(self, *_args, **_kwargs) -> None:
             pass
 
@@ -1188,6 +1191,7 @@ def test_hosted_runtime_owns_prompt_derived_drain_and_clean_shutdown(
     runtime = server_runtime._initialize_locked_hosted_runtime(
         config,
         SimpleNamespace(),
+        binding=None,
     )
 
     assert events[:2] == ["derived:start", "retrieval"]
@@ -1274,7 +1278,9 @@ def test_hosted_registered_stop_fails_closed_before_lifecycle_deadline(
         lambda _root: worker.start(),
     )
 
-    runtime = server_runtime._initialize_locked_hosted_runtime(config, SimpleNamespace())
+    runtime = server_runtime._initialize_locked_hosted_runtime(
+        config, SimpleNamespace(), binding=None,
+    )
     try:
         # The hosted cell registered exactly this live worker; nothing in the
         # test hand-wrote the stopper the lifecycle will call.
