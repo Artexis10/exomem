@@ -803,7 +803,7 @@ def indexed_relation_observations(
                 """,
                 (*parameters, limit, offset),
             ).fetchall()
-            items = [
+            items: list[dict[str, Any]] = [
                 {
                     "raw_relation": str(raw_relation),
                     "registry_status": "unregistered",
