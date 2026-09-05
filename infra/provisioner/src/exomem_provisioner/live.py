@@ -673,8 +673,9 @@ class LiveLifecyclePlane:
         replica_id = owned.resource_name + "-0"
         files = await self._cell.read_authorization_session_bundle(owned)
         current = int(self._now())
-        if files is None:
-            bundle = build_initial_hosted_authorization_bundle(
+
+        async def _mint() -> Any:
+            minted = build_initial_hosted_authorization_bundle(
                 cell_id=owned.subject_id,
                 logical_vault_id=owned.tenant_id,
                 replica_id=replica_id,
@@ -685,13 +686,21 @@ class LiveLifecyclePlane:
             )
             await self._cell.write_authorization_session_bundle(
                 owned,
-                bundle.files,
+                minted.files,
                 recovery_envelope=recovery_envelope,
-                membership_epoch=bundle.epoch,
-                membership_digest=bundle.membership_digest,
-                revision=bundle.revision,
+                membership_epoch=minted.epoch,
+                membership_digest=minted.membership_digest,
+                revision=minted.revision,
             )
+            return minted
+
+        if files is None:
+            bundle = await _mint()
         else:
+            # Validate everything except the elapsed-time window first. The only
+            # clauses `_require_fresh` gates are the control and serving-membership
+            # freshness windows, so a bundle that passes here and fails below has
+            # nothing wrong with it but age.
             bundle = inspect_hosted_authorization_bundle(
                 files,
                 expected_cell_id=owned.subject_id,
@@ -701,8 +710,40 @@ class LiveLifecyclePlane:
                 expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
                 expected_recovery_envelope=recovery_envelope,
                 now=current,
-                _require_fresh=require_fresh,
+                _require_fresh=False,
             )
+            if require_fresh:
+                try:
+                    bundle = inspect_hosted_authorization_bundle(
+                        files,
+                        expected_cell_id=owned.subject_id,
+                        expected_logical_vault_id=owned.tenant_id,
+                        expected_replica_id=replica_id,
+                        expected_software_version=None,
+                        expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+                        expected_recovery_envelope=recovery_envelope,
+                        now=current,
+                        _require_fresh=True,
+                    )
+                except MetadataConflict:
+                    # The bundle is sound and merely expired. A cell that has never
+                    # been admitted or routed has never served a request under it,
+                    # so nothing is depending on the old session and re-minting is
+                    # the same act as minting one for a cell that had none.
+                    #
+                    # Provisioning a cell is not instantaneous: the bundle is minted
+                    # at `install_release`, and any pause before initialize -- a
+                    # retry, an operator recovery, a slow CSI attach -- can outlast
+                    # the one-hour attestation TTL. Failing terminally there makes
+                    # elapsed time indistinguishable from a forged attestation, and
+                    # leaves a cell that can never finish provisioning.
+                    snapshot = self._snapshot(metadata)
+                    if snapshot.runtime_admitted or snapshot.routes != (False, False):
+                        raise MetadataConflict(
+                            "authorization session expired on a serving cell",
+                            reason=(ConflictReason.AUTHORIZATION_SESSION_EXPIRED_ON_SERVING_CELL),
+                        ) from None
+                    bundle = await _mint()
         return bundle.revision
 
     async def _authorization_helm_values(

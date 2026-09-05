@@ -11,6 +11,7 @@ from exomem.governance import authorization_custody, authorization_serving_membe
 from pydantic import ValidationError
 
 from exomem_provisioner.authorization_membership import (
+    AUTHORIZATION_SESSION_SCHEMA_VERSION,
     build_initial_hosted_authorization_bundle,
     inspect_hosted_authorization_bundle,
 )
@@ -2154,3 +2155,172 @@ async def test_genuine_retarget_still_requires_the_operator_recovery_receipt() -
     with pytest.raises(MetadataConflict) as raised:
         await plane.provision_retarget_required(metadata, request, config)
     assert raised.value.reason is ConflictReason.RETARGET_RECOVERY_RECEIPT_INVALID
+
+
+def _expiring_bundle_plane(
+    metadata: OpaqueProviderMetadata,
+    *,
+    minted_at: int,
+    now: int,
+    runtime_admitted: bool,
+    routes: tuple[bool, bool],
+):
+    """A live plane whose cell already holds a bundle minted at `minted_at`.
+
+    The bundle is produced by the production builder rather than hand-written,
+    so it is exactly the shape `install_release` leaves behind.
+    """
+
+    config = SimpleNamespace(
+        image="ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+        browser_origin="https://substratesystems.io",
+        control_hostname="control.example.invalid",
+        transfer_hostname="transfer.example.invalid",
+        protocol_version="1",
+        release_version="0.68.3",
+        migration_mode="state-root-v1",
+        runtime_target_for=lambda _request, *, v2: {
+            "releaseVersion": "0.68.3",
+            "protocolVersion": "1",
+        },
+    )
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+    request = {
+        "provisionMode": "serve",
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+        "_providerRecoveryEnvelopes": envelopes,
+    }
+    original = build_initial_hosted_authorization_bundle(
+        cell_id=metadata.subject_id,
+        logical_vault_id=metadata.tenant_id,
+        replica_id=metadata.resource_name + "-0",
+        software_version="0.68.3",
+        schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+        recovery_envelope=envelopes["authorizationSessionSecret"],
+        now=minted_at,
+    )
+    written: list[dict[str, bytes]] = []
+    applied: list[dict[str, object]] = []
+
+    class Cell:
+        files = original.files
+
+        async def read_authorization_session_bundle(self, _owner):
+            return self.files
+
+        async def write_authorization_session_bundle(self, _owner, files, **_kwargs):
+            self.files = files
+            written.append(files)
+
+    class Helm:
+        async def ensure_release(self, _owner, values):
+            applied.append(values)
+
+    class Routes:
+        async def enable(self, _owner):  # pragma: no cover - Helm carries identity
+            raise AssertionError("direct route writes lose provider recovery identity")
+
+    class Registry:
+        async def inspect(self, _current, _owner):
+            return SimpleNamespace(runtime_admitted=runtime_admitted, routes=routes)
+
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=Registry(),  # type: ignore[arg-type]
+        cell=Cell(),  # type: ignore[arg-type]
+        helm=Helm(),  # type: ignore[arg-type]
+        runtime=SimpleNamespace(),  # type: ignore[arg-type]
+        routes=Routes(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=SimpleNamespace(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=config,  # type: ignore[arg-type]
+        now=lambda: now,
+    )
+    key = plane._key(metadata)
+    plane._owned[key] = metadata
+    plane._helm_requests[key] = request
+    plane._snapshots[key] = SimpleNamespace(runtime_admitted=runtime_admitted, routes=routes)
+    return plane, request, original, written, applied
+
+
+@pytest.mark.asyncio
+async def test_expired_authorization_bundle_is_reminted_before_the_cell_serves() -> None:
+    """Elapsed time must not strand a cell that has never served a request.
+
+    The bundle is minted at `install_release` and carries a one-hour attestation
+    TTL. Any pause before the cell is routed -- a retry, an operator recovery, a
+    slow CSI attach -- can outlast it. Treating that as a terminal conflict makes
+    elapsed time indistinguishable from a forged attestation and leaves a cell
+    that can never finish provisioning, which is what happened on
+    exomem-alpha-01: minted 10:55:16Z, expired 11:55:16Z, retried 11:58Z.
+    """
+
+    metadata = _metadata()
+    minted_at = 1_900_000_000
+    plane, request, original, written, applied = _expiring_bundle_plane(
+        metadata,
+        minted_at=minted_at,
+        now=minted_at + 3_700,  # past the 3600s attestation TTL
+        runtime_admitted=False,
+        routes=(False, False),
+    )
+
+    await plane.enable_routes(metadata, request)
+
+    assert written, "an expired bundle on an unrouted cell must be re-minted"
+    assert written[-1] != original.files
+    assert applied and applied[-1]["authorizationSessionRevision"] != original.revision
+
+
+@pytest.mark.asyncio
+async def test_expired_authorization_bundle_still_refuses_on_a_serving_cell() -> None:
+    """Re-minting must not silently rotate the session of a live cell.
+
+    A cell that is admitted or routed has served under this keyring, so the
+    fix above must not reach it: that would be a session rotation disguised as
+    a provisioning step.
+    """
+
+    metadata = _metadata()
+    minted_at = 1_900_000_000
+    plane, request, _original, written, _applied = _expiring_bundle_plane(
+        metadata,
+        minted_at=minted_at,
+        now=minted_at + 3_700,
+        runtime_admitted=True,
+        routes=(True, True),
+    )
+
+    with pytest.raises(MetadataConflict) as raised:
+        await plane.enable_routes(metadata, request)
+    assert raised.value.reason is ConflictReason.AUTHORIZATION_SESSION_EXPIRED_ON_SERVING_CELL
+    assert not written, "a serving cell's session must never be re-minted"
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_authorization_bundle_is_reused_rather_than_reminted() -> None:
+    """The ordinary case must not start rotating bundles on every reconcile."""
+
+    metadata = _metadata()
+    minted_at = 1_900_000_000
+    plane, request, original, written, applied = _expiring_bundle_plane(
+        metadata,
+        minted_at=minted_at,
+        now=minted_at + 60,  # well inside the TTL
+        runtime_admitted=False,
+        routes=(False, False),
+    )
+
+    await plane.enable_routes(metadata, request)
+
+    assert not written, "a fresh bundle must be reused, not re-minted"
+    assert applied and applied[-1]["authorizationSessionRevision"] == original.revision
