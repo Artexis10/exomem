@@ -421,8 +421,18 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       network run occurred.
 - [ ] 5.2 Families 1–9 fixtures + runs vs exomem + grep-markdown + no-memory
       (controls score non-trivially)
-- [ ] 5.3 4b.18 structural-blinding fix + structure-swap test (hard-gates all
+- [x] 5.3 4b.18 structural-blinding fix + structure-swap test (hard-gates all
       judge use)
+      Landed 2026-09-02 (`benchmarks/membench/judge/blinding.py`): structure is
+      canonicalized before the token rewriters (fence-delimited block carrying only
+      `title`, values unwrapped to a fixed point), `leakage_scan` gains a structural
+      axis over four registered vendor signatures, and `handshake.write_requests`
+      refuses a structural leak on the serialized line before writing. The
+      byte-identity guarantee is scoped to the frontmatter key-run axis; body
+      scaffolding (`## Capture` vs `## Observations`) is named as the open
+      remainder. Fresh review REQUEST_CHANGES -> correction -> recheck APPROVE;
+      14 mutations, zero survivors. `tests/test_membench_agreement.py:103` becomes
+      strictly harder once the v0.1 seed-1 corpus is present in a checkout.
 - [ ] 5.4 Competitor drivers (basic-memory, supermemory) + ⛳ independent
       adversarial review of every fairness packet and the glue diff BEFORE
       competitor runs
