@@ -65,6 +65,52 @@ def test_exact_marker_and_search_verification_require_every_unique_marker() -> N
     assert common.search_marker_present({"results": []}, marker) is False
 
 
+def test_common_markdown_payload_is_byte_identical_for_both_adapters() -> None:
+    payload = common.common_markdown_payload("common-subset-marker")
+
+    assert "## Observations" in payload["chapter"]
+    assert "## Observations" in payload["capture"]
+    assert payload["tracker_append"].endswith("common-subset-marker-tracker\n")
+    assert common.common_markdown_payload("common-subset-marker") == payload
+
+
+def test_search_verification_never_treats_query_echo_as_a_hit() -> None:
+    marker = "common-subset-marker-123"
+
+    assert common.search_marker_present({"query": marker, "results": []}, marker) is False
+    assert common.search_marker_present({"query": marker, "hits": []}, marker) is False
+    assert common.search_marker_present({"hits": [{"excerpt": marker}]}, marker) is True
+
+
+def test_exact_read_requires_each_expected_suffix_and_stale_replacement() -> None:
+    marker = "common-subset-marker"
+    assert common.read_body_has_markers(
+        {"content": f"---\ntitle: x\n---\n# Result\n{marker}-chapter\n"},
+        [f"{marker}-chapter"],
+    )
+    assert not common.read_body_has_markers(
+        {"content": f"{marker}-chapter\n"}, [f"{marker}-capture"]
+    )
+    assert common.stale_replacement_verified(
+        {"content": "Archived runbook retired\n"},
+        old="[[Archived Runbook]]",
+        replacement="Archived runbook retired",
+    )
+    assert not common.stale_replacement_verified(
+        {"content": "[[Archived Runbook]]\n"},
+        old="[[Archived Runbook]]",
+        replacement="Archived runbook retired",
+    )
+
+
+def test_refusal_classification_covers_error_envelopes_and_terminal_states() -> None:
+    assert common.result_classification({"success": False, "error": {"code": "NOPE"}}) == "refused"
+    assert common.result_classification({"error": {"code": "NOPE"}}) == "refused"
+    assert common.result_classification({"outcome": "rejected"}) == "refused"
+    assert common.result_classification({"status": "failed"}) == "refused"
+    assert common.result_classification({"hits": []}) == "ok"
+
+
 def test_equivalent_plan_uses_only_shared_markdown_operations() -> None:
     plan = common.common_plan("basic_memory")
     assert plan == common.common_plan("exomem")

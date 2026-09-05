@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIN_PAGES = 4
 MAX_PAGES = 8_000
 POLL_INTERVAL_SECONDS = 0.25
+WARM_SENTINEL = "durable-closure-common-warm-sentinel"
 BASIC_MEMORY_VERSION = "0.23.2"
 BASIC_MEMORY_WHEEL_SHA256 = "a1679a16319d8a7fb9c0486033551a47dedc0fbae7f5da81444eb3c4bf0ccecb"
 
@@ -83,7 +84,7 @@ def fixture_pages(pages: int) -> list[tuple[str, str]]:
         ),
         (
             "background.md",
-            "# Background\n\nThe durable workflow uses ordinary Markdown notes.\n",
+            f"# Background\n\nThe durable workflow uses ordinary Markdown notes. {WARM_SENTINEL}\n",
         ),
         (
             "stale-link.md",
@@ -95,11 +96,17 @@ def fixture_pages(pages: int) -> list[tuple[str, str]]:
         ),
     ]
     for number in range(pages - len(named)):
+        variants = (
+            f"- constraint: bounded retries {number}\n",
+            f"| field | value |\n| --- | --- |\n| batch | {number} |\n",
+            f"```text\nreference-{number}\n```\n",
+        )
         named.append(
             (
                 f"reference-{number:05d}.md",
                 f"# Reference {number}\n\n"
-                f"Ordinary background paragraph {number}; links to [[Active tracker]].\n",
+                f"Ordinary background paragraph {number}; links to [[Active tracker]].\n"
+                f"{variants[number % len(variants)]}",
             )
         )
     return named
@@ -201,6 +208,19 @@ def common_plan(product: str) -> list[dict[str, str]]:
     ]
 
 
+def common_markdown_payload(marker: str) -> dict[str, str]:
+    """The literal Markdown bodies shared by the two public adapters."""
+    return {
+        "chapter": (
+            "# Completed chapter\n\nStatus: completed\n\n## Observations\n\n"
+            f"- [finding] {marker}-chapter\n"
+        ),
+        "tracker_append": f"\n## Observations\n\n- [finding] {marker}-tracker\n",
+        "capture": (f"# Independent capture\n\n## Observations\n\n- [finding] {marker}-capture\n"),
+        "stale_replacement": "Archived runbook retired",
+    }
+
+
 def _mapping(value: Any) -> dict[str, Any] | None:
     return dict(value) if isinstance(value, Mapping) else None
 
@@ -275,12 +295,58 @@ def _json_contains(value: Any, marker: str) -> bool:
 
 
 def exact_marker_present(payload: Mapping[str, Any], marker: str) -> bool:
-    return isinstance(payload.get("content"), str) and marker in payload["content"]
+    return read_body_has_markers(payload, [marker])
+
+
+def _read_body(payload: Mapping[str, Any]) -> str | None:
+    for key in ("content", "body"):
+        body = payload.get(key)
+        if isinstance(body, str):
+            return body
+    return None
+
+
+def _normalized_body(body: str) -> str:
+    if body.startswith("---\n"):
+        _, separator, remainder = body[4:].partition("\n---\n")
+        if separator:
+            return remainder
+    return body
+
+
+def read_body_has_markers(payload: Mapping[str, Any], markers: Sequence[str]) -> bool:
+    body = _read_body(payload)
+    return body is not None and all(marker in _normalized_body(body) for marker in markers)
+
+
+def stale_replacement_verified(payload: Mapping[str, Any], *, old: str, replacement: str) -> bool:
+    body = _read_body(payload)
+    return (
+        body is not None
+        and old not in _normalized_body(body)
+        and replacement in _normalized_body(body)
+    )
 
 
 def search_marker_present(payload: Mapping[str, Any], marker: str) -> bool:
-    results = payload.get("results")
-    return isinstance(results, list) and any(_json_contains(item, marker) for item in results)
+    results = payload.get("results") or payload.get("hits")
+    if not isinstance(results, list):
+        return False
+    return any(
+        isinstance(hit, Mapping)
+        and any(marker in value for value in hit.values() if isinstance(value, str))
+        for hit in results
+    )
+
+
+def result_classification(payload: Mapping[str, Any]) -> str:
+    if payload.get("success") is False or isinstance(payload.get("error"), Mapping):
+        return "refused"
+    if str(payload.get("outcome") or "").lower() in {"error", "failed", "refused", "rejected"}:
+        return "refused"
+    if str(payload.get("status") or "").lower() in {"error", "failed", "refused", "rejected"}:
+        return "refused"
+    return "ok"
 
 
 def call_measurements(calls: Sequence[Mapping[str, Any]]) -> dict[str, float | int | None]:
@@ -304,7 +370,14 @@ def _sha256(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def runtime_provenance(*, executable: Path, wheel: Path | None, python: Path) -> dict[str, Any]:
+def runtime_provenance(
+    *,
+    executable: Path,
+    wheel: Path | None,
+    python: Path,
+    package: str,
+    expected_version: str | None,
+) -> dict[str, Any]:
     try:
         freeze = subprocess.run(
             [str(python), "-m", "pip", "freeze"],
@@ -313,14 +386,37 @@ def runtime_provenance(*, executable: Path, wheel: Path | None, python: Path) ->
             text=True,
             timeout=30,
         ).stdout.splitlines()
-    except (OSError, subprocess.SubprocessError):
-        freeze = []
+        inventory: dict[str, Any] = {"status": "ok", "entries": sorted(freeze)}
+    except (OSError, subprocess.SubprocessError) as error:
+        inventory = {"status": "unavailable", "reason": type(error).__name__, "entries": []}
+    probe = (
+        "import hashlib, importlib.metadata as m, json, pathlib, "
+        f"{package.replace('-', '_')} as p; "
+        "path=pathlib.Path(p.__file__); "
+        "print(json.dumps({'version':m.version('" + package + "'),"
+        "'module_sha256':hashlib.sha256(path.read_bytes()).hexdigest()}))"
+    )
+    try:
+        installed = json.loads(
+            subprocess.run(
+                [str(python), "-c", probe], check=True, capture_output=True, text=True, timeout=30
+            ).stdout
+        )
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        installed = {"status": "unavailable", "reason": type(error).__name__}
     return {
         "executable": str(executable),
         "executable_sha256": _sha256(executable),
         "wheel": str(wheel) if wheel else None,
         "wheel_sha256": _sha256(wheel) if wheel else None,
-        "dependencies": sorted(freeze),
+        "wheel_matches_pinned_digest": _sha256(wheel) == BASIC_MEMORY_WHEEL_SHA256
+        if wheel
+        else None,
+        "installed": installed,
+        "installed_version_matches_expected": installed.get("version") == expected_version
+        if expected_version and isinstance(installed, Mapping)
+        else None,
+        "dependency_inventory": inventory,
     }
 
 
@@ -342,22 +438,35 @@ class PublicClient:
             result = await self.client.call_tool_mcp(tool, arguments)
             payload = _decode_payload(result)
         except Exception as error:  # transport and adapter faults invalidate the row.
+            self.calls.append(
+                {
+                    "tool": tool,
+                    "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+                    "ack": ack,
+                    "classification": "invalid",
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            )
             raise AdapterFault(
                 f"{tool} public MCP call failed: {type(error).__name__}: {error}"
             ) from error
+        classification = result_classification(payload)
         self.calls.append(
-            {"tool": tool, "elapsed_ms": (time.perf_counter() - started) * 1000.0, "ack": ack}
+            {
+                "tool": tool,
+                "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+                "ack": ack,
+                "classification": classification,
+            }
         )
-        if not allow_refusal and (
-            payload.get("success") is False or payload.get("status") in {"error", "failed"}
-        ):
+        if not allow_refusal and classification == "refused":
             raise ProductRefusal(f"{tool} returned a failed public result: {payload.get('error')}")
         return payload
 
 
 async def _await_search(
     client: PublicClient, *, product: str, marker: str, timeout: float
-) -> tuple[bool, float, list[float]]:
+) -> tuple[bool, float, list[float], dict[str, Any]]:
     started = time.perf_counter()
     waits: list[float] = []
     while True:
@@ -377,23 +486,37 @@ async def _await_search(
                 {"query": marker, "mode": "keyword", "graph": False, "rerank": False, "limit": 10},
                 allow_refusal=True,
             )
-        if search_marker_present(payload, marker) or _json_contains(payload, marker):
-            return True, (time.perf_counter() - started) * 1000.0, waits
+        proof = _search_proof(payload)
+        if search_marker_present(payload, marker):
+            return True, (time.perf_counter() - started) * 1000.0, waits, proof
         if time.perf_counter() - started >= timeout:
-            return False, (time.perf_counter() - started) * 1000.0, waits
+            return False, (time.perf_counter() - started) * 1000.0, waits, proof
         waits.append(POLL_INTERVAL_SECONDS * 1000.0)
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
+def _search_proof(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Sanitize a final search response into enough evidence to diagnose a miss."""
+    container = "results" if isinstance(payload.get("results"), list) else "hits"
+    hits = payload.get(container)
+    return {
+        "classification": result_classification(payload),
+        "container": container if isinstance(hits, list) else None,
+        "hit_count": len(hits) if isinstance(hits, list) else None,
+        "top_level_keys": sorted(str(key) for key in payload)[:16],
+    }
 
 
 async def _await_initial_index(client: PublicClient, *, product: str, timeout: float) -> None:
     """Wait for the native public retrieval path before starting the workflow clock."""
     deadline = time.perf_counter() + timeout
+    proof: dict[str, Any] = {"classification": "unobserved"}
     while True:
         if product == "basic_memory":
             payload = await client.call(
                 "search_notes",
                 {
-                    "query": "durable-common-warmup",
+                    "query": WARM_SENTINEL,
                     "search_type": "text",
                     "project": "main",
                     "output_format": "json",
@@ -404,7 +527,7 @@ async def _await_initial_index(client: PublicClient, *, product: str, timeout: f
             payload = await client.call(
                 "ask_memory",
                 {
-                    "query": "durable-common-warmup",
+                    "query": WARM_SENTINEL,
                     "mode": "keyword",
                     "graph": False,
                     "rerank": False,
@@ -412,10 +535,14 @@ async def _await_initial_index(client: PublicClient, *, product: str, timeout: f
                 },
                 allow_refusal=True,
             )
-        if payload.get("success") is not False:
+        proof = _search_proof(payload)
+        if result_classification(payload) == "ok" and search_marker_present(payload, WARM_SENTINEL):
             return
         if time.perf_counter() >= deadline:
-            raise AdapterFault("initial public search did not converge before timeout")
+            raise AdapterFault(
+                "initial public search did not converge before timeout; "
+                f"final_sanitized_response={json.dumps(proof, sort_keys=True)}"
+            )
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
@@ -431,12 +558,13 @@ def _permit_refusal_envelopes(client: Any) -> None:
 async def _run_basic_memory(
     client: PublicClient, marker: str, fixture: Mapping[str, Any], timeout: float
 ) -> dict[str, Any]:
+    markdown = common_markdown_payload(marker)
     changed = ["Completed chapter", "Active tracker", "Stale link", "Independent capture"]
     await client.call(
         "write_note",
         {
             "title": changed[0],
-            "content": f"# Completed chapter\n\nStatus: completed\n\n{marker}-chapter\n",
+            "content": markdown["chapter"],
             "directory": "notes",
             "project": "main",
             "output_format": "json",
@@ -448,7 +576,7 @@ async def _run_basic_memory(
         {
             "identifier": changed[1],
             "operation": "append",
-            "content": f"\n{marker}-tracker\n",
+            "content": markdown["tracker_append"],
             "project": "main",
             "output_format": "json",
         },
@@ -460,7 +588,7 @@ async def _run_basic_memory(
             "identifier": changed[2],
             "operation": "find_replace",
             "find_text": "[[Archived Runbook]]",
-            "content": "Archived runbook retired",
+            "content": markdown["stale_replacement"],
             "expected_replacements": 1,
             "project": "main",
             "output_format": "json",
@@ -471,7 +599,7 @@ async def _run_basic_memory(
         "write_note",
         {
             "title": changed[3],
-            "content": f"# Independent capture\n\n{marker}-capture\n",
+            "content": markdown["capture"],
             "directory": "notes",
             "project": "main",
             "output_format": "json",
@@ -496,23 +624,24 @@ async def _run_basic_memory(
 async def _run_exomem(
     client: PublicClient, marker: str, fixture: Mapping[str, Any], timeout: float
 ) -> dict[str, Any]:
-    # Existing raw fixture pages are intentionally ordinary Markdown, avoiding richer authoring.
+    markdown = common_markdown_payload(marker)
     tracker = "Knowledge Base/Reference/" + str(fixture["named_pages"]["tracker"])
     stale = "Knowledge Base/Reference/" + str(fixture["named_pages"]["stale_link"])
-    chapter_content = f"# Completed chapter\n\nStatus: completed\n\n## Observations\n\n- [finding] {marker}-chapter\n"
     remembered = await client.call(
         "remember",
         {
             "title": "Completed chapter",
             "note_type": "insight",
-            "content": chapter_content,
+            "content": markdown["chapter"],
             "response_detail": "full",
             "validate_only": True,
         },
     )
     commit = await client.call(
         "remember",
-        _remember_commit_arguments(remembered, title="Completed chapter", content=chapter_content),
+        _remember_commit_arguments(
+            remembered, title="Completed chapter", content=markdown["chapter"]
+        ),
         ack=True,
     )
     completed = str(commit.get("path") or "")
@@ -524,10 +653,10 @@ async def _run_exomem(
             "path": tracker,
             "why": "record common-subset tracker state",
             "operation": {
-                "kind": "edit_section",
-                "heading": "# Active tracker",
-                "new_string": marker + "-tracker",
-                "section_position": "append",
+                "kind": "replace_string",
+                "old_string": "- Current owner: operations\n",
+                "new_string": "- Current owner: operations\n" + markdown["tracker_append"],
+                "replace_all": False,
             },
         },
         ack=True,
@@ -540,26 +669,27 @@ async def _run_exomem(
             "operation": {
                 "kind": "replace_string",
                 "old_string": "[[Archived Runbook]]",
-                "new_string": "Archived runbook retired",
+                "new_string": markdown["stale_replacement"],
                 "replace_all": False,
             },
         },
         ack=True,
     )
-    capture_content = f"# Independent capture\n\n## Observations\n\n- [finding] {marker}-capture\n"
     capture = await client.call(
         "remember",
         {
             "title": "Independent capture",
             "note_type": "insight",
-            "content": capture_content,
+            "content": markdown["capture"],
             "response_detail": "full",
             "validate_only": True,
         },
     )
     captured = await client.call(
         "remember",
-        _remember_commit_arguments(capture, title="Independent capture", content=capture_content),
+        _remember_commit_arguments(
+            capture, title="Independent capture", content=markdown["capture"]
+        ),
         ack=True,
     )
     capture_path = str(captured.get("path") or "")
@@ -648,6 +778,8 @@ async def run_product(
         log_file=state / "stdio.log",
     )
     client = Client(transport, timeout=timeout, init_timeout=timeout)
+    public = PublicClient(client)
+    setup_public = PublicClient(client)
     marker = f"common-subset-{uuid.uuid4().hex}"
     row: dict[str, Any] = {
         "product": product,
@@ -662,6 +794,8 @@ async def run_product(
             executable=executable,
             wheel=wheel if product == "basic_memory" else None,
             python=runtime_python,
+            package="basic-memory" if product == "basic_memory" else "exomem",
+            expected_version=BASIC_MEMORY_VERSION if product == "basic_memory" else None,
         ),
     }
     try:
@@ -677,22 +811,26 @@ async def run_product(
             if missing:
                 raise AdapterFault(f"registered public MCP tools missing: {missing}")
             # Discovery/initial indexing are pre-timing setup, never an inline reindex.
-            await _await_initial_index(PublicClient(client), product=product, timeout=timeout)
+            await _await_initial_index(setup_public, product=product, timeout=timeout)
             clock.start_timing()
-            public = PublicClient(client)
             result = await (
                 _run_basic_memory(public, marker, fixture, timeout)
                 if product == "basic_memory"
                 else _run_exomem(public, marker, fixture, timeout)
             )
-            stale_path = result["changed"][2]
-            exact = all(
-                _json_contains(read, marker)
-                if name != stale_path
-                else "[[Archived Runbook]]" not in json.dumps(read)
-                for name, read in zip(result["changed"], result["reads"], strict=True)
+            markdown = common_markdown_payload(marker)
+            chapter_read, tracker_read, stale_read, capture_read = result["reads"]
+            exact = (
+                read_body_has_markers(chapter_read, [f"{marker}-chapter"])
+                and read_body_has_markers(tracker_read, [f"{marker}-tracker"])
+                and stale_replacement_verified(
+                    stale_read,
+                    old="[[Archived Runbook]]",
+                    replacement=markdown["stale_replacement"],
+                )
+                and read_body_has_markers(capture_read, [f"{marker}-capture"])
             )
-            converged = all(found for found, _, _ in result["searches"])
+            converged = all(found for found, _, _, _ in result["searches"])
             clock.finish_closure()
             row.update(
                 {
@@ -703,8 +841,13 @@ async def run_product(
                         "exact_read_your_write": exact,
                         "search_converged": converged,
                         "searches": [
-                            {"found": found, "convergence_ms": elapsed, "waits_ms": waits}
-                            for found, elapsed, waits in result["searches"]
+                            {
+                                "found": found,
+                                "convergence_ms": elapsed,
+                                "waits_ms": waits,
+                                "final_response": proof,
+                            }
+                            for found, elapsed, waits, proof in result["searches"]
                         ],
                     },
                     "markers": [
@@ -724,6 +867,9 @@ async def run_product(
         row.update({"status": "invalid", "reason": str(error)})
     finally:
         clock.finish_teardown()
+        row.setdefault("public_calls", public.calls)
+        row.setdefault("measurements", call_measurements(public.calls))
+        row["pre_timing_public_calls"] = setup_public.calls
         row["phases"] = clock.report()
     return row
 
