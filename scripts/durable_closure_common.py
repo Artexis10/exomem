@@ -63,13 +63,17 @@ class PhaseClock:
         self.teardown_at = time.perf_counter()
 
     def report(self) -> dict[str, float | None]:
-        if self.timed_at is None or self.closure_at is None or self.teardown_at is None:
-            raise ValueError("phase clock is incomplete")
         assert self.prepared_at is not None
         return {
-            "pre_timing_ms": (self.timed_at - self.prepared_at) * 1000.0,
-            "wall_to_verified_closure_ms": (self.closure_at - self.timed_at) * 1000.0,
-            "teardown_ms": (self.teardown_at - self.closure_at) * 1000.0,
+            "pre_timing_ms": (self.timed_at - self.prepared_at) * 1000.0
+            if self.timed_at is not None
+            else None,
+            "wall_to_verified_closure_ms": (self.closure_at - self.timed_at) * 1000.0
+            if self.closure_at is not None and self.timed_at is not None
+            else None,
+            "teardown_ms": (self.teardown_at - self.closure_at) * 1000.0
+            if self.teardown_at is not None and self.closure_at is not None
+            else None,
         }
 
 
@@ -261,13 +265,32 @@ def _mapping(value: Any) -> dict[str, Any] | None:
 def _decode_payload(result: Any) -> dict[str, Any]:
     """Decode a public MCP envelope, including an ordinary product refusal."""
     if isinstance(result, Mapping):
+        is_error = bool(result.get("is_error", result.get("isError", False)))
         structured = result.get("structured_content") or result.get("structuredContent")
         content = result.get("content")
     else:
+        is_error = bool(getattr(result, "is_error", getattr(result, "isError", False)))
         structured = getattr(result, "structured_content", None) or getattr(
             result, "structuredContent", None
         )
         content = getattr(result, "content", None)
+    if is_error:
+        message = next(
+            (
+                text
+                for item in content or ()
+                if isinstance(
+                    text := (
+                        item.get("text")
+                        if isinstance(item, Mapping)
+                        else getattr(item, "text", None)
+                    ),
+                    str,
+                )
+            ),
+            "MCP tool reported an error",
+        )
+        return {"success": False, "error": {"code": "MCP_TOOL_ERROR", "message": message}}
     payload = _mapping(structured)
     if payload is not None:
         if "result" in payload:
@@ -301,13 +324,6 @@ def _decode_payload(result: Any) -> dict[str, Any]:
                     )
                 break
     if payload is None:
-        if getattr(result, "isError", getattr(result, "is_error", False)):
-            for item in content or ():
-                text = (
-                    item.get("text") if isinstance(item, Mapping) else getattr(item, "text", None)
-                )
-                if isinstance(text, str):
-                    return {"success": False, "error": {"code": "MCP_TOOL_ERROR", "message": text}}
         raise AdapterFault("malformed MCP result")
     return payload
 
@@ -315,7 +331,7 @@ def _decode_payload(result: Any) -> dict[str, Any]:
 def decode_result(result: Any) -> dict[str, Any]:
     """Decode a successful public result for callers that require success."""
     payload = _decode_payload(result)
-    if payload.get("success") is False or payload.get("status") in {"error", "failed"}:
+    if result_classification(payload) != "ok":
         raise AdapterFault("failed MCP result")
     return payload
 
@@ -400,7 +416,11 @@ def search_marker_present(payload: Mapping[str, Any], marker: str) -> bool:
         return False
     return any(
         isinstance(hit, Mapping)
-        and any(marker in value for value in hit.values() if isinstance(value, str))
+        and any(
+            marker in hit[key]
+            for key in ("body", "content", "excerpt", "snippet", "summary")
+            if isinstance(hit.get(key), str)
+        )
         for hit in results
     )
 
@@ -419,29 +439,105 @@ def result_classification(payload: Mapping[str, Any]) -> str:
     return "ok"
 
 
-def call_measurements(calls: Sequence[Mapping[str, Any]]) -> dict[str, float | int | None]:
+def call_measurements(calls: Sequence[Mapping[str, Any]]) -> dict[str, float | int | None | str]:
     acks = sorted(
         float(call["elapsed_ms"])
         for call in calls
         if call.get("ack") and call.get("classification", "ok") == "ok"
     )
+    measurements: dict[str, float | int | None | str] = {
+        "public_call_count": len(calls),
+        "ack_p50_ms": None,
+        "ack_p95_ms": None,
+        "shared_server_ms": None,
+        "shared_server_reason": "not exposed by the public MCP protocol",
+        "connector_ms": None,
+        "connector_reason": "not exposed by the public MCP protocol",
+    }
     if not acks:
-        return {"public_call_count": len(calls), "ack_p50_ms": None, "ack_p95_ms": None}
+        return measurements
 
     def percentile(fraction: float) -> float:
         return acks[min(len(acks) - 1, max(0, int(len(acks) * fraction + 0.999) - 1))]
 
-    return {
-        "public_call_count": len(calls),
-        "ack_p50_ms": percentile(0.50),
-        "ack_p95_ms": percentile(0.95),
-    }
+    measurements.update({"ack_p50_ms": percentile(0.50), "ack_p95_ms": percentile(0.95)})
+    return measurements
 
 
 def _sha256(path: Path) -> str | None:
     if not path.is_file():
         return None
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _source_digest(root: Path) -> str | None:
+    if not root.is_dir():
+        return None
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        digest.update(str(path.relative_to(root)).encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _source_identity(installed: Mapping[str, Any]) -> dict[str, Any]:
+    package_root = Path(str(installed.get("package_root") or ""))
+    source_digest = _source_digest(package_root)
+    identity: dict[str, Any] = {
+        "runtime_pythonpath_root": installed.get("runtime_pythonpath_root"),
+        "package_root": str(package_root) if package_root.is_dir() else None,
+        "revision": None,
+        "tree": None,
+        "source_digest": source_digest,
+        "dirty_source_digest": source_digest,
+        "dirty": None,
+    }
+    if not package_root.is_dir():
+        identity["reason"] = "runtime package root unavailable"
+        return identity
+    try:
+        repository = subprocess.run(
+            ["git", "-C", str(package_root), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+        relative = str(package_root.relative_to(repository))
+        identity.update(
+            {
+                "revision": subprocess.run(
+                    ["git", "-C", repository, "rev-parse", "HEAD"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                ).stdout.strip(),
+                "tree": subprocess.run(
+                    ["git", "-C", repository, "rev-parse", "HEAD^{tree}"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                ).stdout.strip(),
+                "dirty": bool(
+                    subprocess.run(
+                        ["git", "-C", repository, "status", "--porcelain", "--", relative],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    ).stdout.strip()
+                ),
+            }
+        )
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        identity["reason"] = type(error).__name__
+    return identity
 
 
 def runtime_provenance(
@@ -453,7 +549,7 @@ def runtime_provenance(
     expected_version: str | None,
 ) -> dict[str, Any]:
     probe = (
-        "import hashlib, importlib.metadata as m, json, pathlib, "
+        "import hashlib, importlib.metadata as m, json, os, pathlib, "
         f"{package.replace('-', '_')} as p; "
         "path=pathlib.Path(p.__file__); "
         "deps=sorted(f'{d.metadata[\"Name\"]}=={d.version}' for d in m.distributions() "
@@ -461,7 +557,8 @@ def runtime_provenance(
         "print(json.dumps({'version':m.version('"
         + package
         + "'),'module_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),"
-        "'dependencies':deps}))"
+        "'dependencies':deps,'package_root':str(path.parent),"
+        "'runtime_pythonpath_root':os.environ.get('PYTHONPATH')}))"
     )
     try:
         installed = json.loads(
@@ -476,7 +573,7 @@ def runtime_provenance(
         if isinstance(installed.get("dependencies"), list)
         else {"status": "unavailable", "reason": "metadata_probe_failed", "entries": []}
     )
-    return {
+    provenance = {
         "executable": str(executable),
         "executable_sha256": _sha256(executable),
         "wheel": str(wheel) if wheel else None,
@@ -490,6 +587,19 @@ def runtime_provenance(
         else None,
         "dependency_inventory": inventory,
     }
+    if package == "exomem":
+        provenance["source_identity"] = _source_identity(installed)
+    return provenance
+
+
+def basic_memory_provenance_is_pinned(provenance: Mapping[str, Any]) -> bool:
+    inventory = provenance.get("dependency_inventory")
+    return (
+        provenance.get("wheel_matches_pinned_digest") is True
+        and provenance.get("installed_version_matches_expected") is True
+        and isinstance(inventory, Mapping)
+        and inventory.get("status") == "ok"
+    )
 
 
 @dataclass
@@ -833,6 +943,7 @@ async def run_product(
     python: Path,
     basic_memory: Path,
     wheel: Path | None,
+    marker: str,
 ) -> dict[str, Any]:
     """Run one warm persistent public-MCP row, leaving product outcomes observable."""
     from fastmcp import Client
@@ -869,7 +980,6 @@ async def run_product(
     client = Client(transport, timeout=timeout, init_timeout=timeout)
     public = PublicClient(client)
     setup_public = PublicClient(client)
-    marker = f"common-subset-{uuid.uuid4().hex}"
     row: dict[str, Any] = {
         "product": product,
         "status": "invalid",
@@ -888,6 +998,8 @@ async def run_product(
         ),
     }
     try:
+        if product == "basic_memory" and not basic_memory_provenance_is_pinned(row["runtime"]):
+            raise AdapterFault("Basic Memory runtime provenance does not match the pinned packet")
         async with client:
             tools = {tool.name for tool in await client.list_tools()}
             _permit_refusal_envelopes(client)
@@ -958,15 +1070,16 @@ async def run_product(
                 }
             )
     except ProductRefusal as error:
-        if clock.timed_at is None:
-            clock.start_timing()
         clock.finish_closure()
         row.update({"status": "observed_failure", "reason": str(error)})
     except AdapterFault as error:
-        if clock.timed_at is None:
-            clock.start_timing()
         clock.finish_closure()
         row.update({"status": "invalid", "reason": str(error)})
+    except Exception as error:  # noqa: BLE001 - public client startup failures have no shared type.
+        clock.finish_closure()
+        row.update(
+            {"status": "invalid", "reason": f"MCP runtime failure: {type(error).__name__}: {error}"}
+        )
     finally:
         clock.finish_teardown()
         row.setdefault("public_calls", public.calls)
@@ -992,6 +1105,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--basic-memory-executable", type=Path, required=True)
     parser.add_argument("--basic-memory-wheel", type=Path, default=None)
+    parser.add_argument("--marker", default=None, help="shared marker for paired product runs")
     args = parser.parse_args(argv)
     selected = ("exomem", "basic_memory") if args.product == "both" else (args.product,)
     if args.pages < MIN_PAGES or args.pages > MAX_PAGES:
@@ -1004,6 +1118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ):
         parser.error("--state and --vault must both be empty disposable roots")
     rows = []
+    marker = args.marker or f"common-subset-{uuid.uuid4().hex}"
     for product in selected:
         rows.append(
             asyncio.run(
@@ -1016,6 +1131,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     python=args.python,
                     basic_memory=args.basic_memory_executable,
                     wheel=args.basic_memory_wheel,
+                    marker=marker,
                 )
             )
         )

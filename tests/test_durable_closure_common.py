@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -53,6 +54,19 @@ def test_malformed_or_failed_mcp_results_invalidate_instead_of_becoming_product_
         common.decode_result({"structured_content": {"result": {"success": False}}})
 
 
+def test_mcp_error_envelope_overrides_a_parseable_structured_payload() -> None:
+    class FailedResult:
+        is_error = True
+        structured_content = {"message": "tool failed"}
+        content = []
+
+    payload = common._decode_payload(FailedResult())
+
+    assert common.result_classification(payload) == "refused"
+    with pytest.raises(common.AdapterFault, match="failed"):
+        common.decode_result(FailedResult())
+
+
 def test_exact_marker_and_search_verification_require_every_unique_marker() -> None:
     marker = "common-subset-marker-123"
     payload = {"content": f"# Result\n\n{marker}\n"}
@@ -61,7 +75,7 @@ def test_exact_marker_and_search_verification_require_every_unique_marker() -> N
 
     hits = {"results": [{"content": marker}, {"title": "other"}]}
     assert common.search_marker_present(hits, marker) is True
-    assert common.search_marker_present({"results": [{"title": marker}]}, marker) is True
+    assert common.search_marker_present({"results": [{"title": marker}]}, marker) is False
     assert common.search_marker_present({"results": []}, marker) is False
 
 
@@ -79,6 +93,11 @@ def test_search_verification_never_treats_query_echo_as_a_hit() -> None:
 
     assert common.search_marker_present({"query": marker, "results": []}, marker) is False
     assert common.search_marker_present({"query": marker, "hits": []}, marker) is False
+    assert common.search_marker_present({"results": [{"query": marker}]}, marker) is False
+    assert (
+        common.search_marker_present({"hits": [{"diagnostic": f"no match for {marker}"}]}, marker)
+        is False
+    )
     assert common.search_marker_present({"hits": [{"excerpt": marker}]}, marker) is True
     assert common.search_marker_present({"result": [{"excerpt": marker}]}, marker) is True
     assert common._search_proof({"result": [{"excerpt": marker}]}) == {
@@ -165,6 +184,17 @@ def test_phase_clock_keeps_setup_teardown_and_timed_work_separate(
     }
 
 
+def test_phase_clock_reports_partial_startup_failure_without_raising() -> None:
+    clock = common.PhaseClock()
+    clock.finish_teardown()
+
+    assert clock.report() == {
+        "pre_timing_ms": None,
+        "wall_to_verified_closure_ms": None,
+        "teardown_ms": None,
+    }
+
+
 def test_basic_memory_environment_is_fresh_and_only_has_basic_memory_prefixes(
     tmp_path: Path,
 ) -> None:
@@ -190,6 +220,10 @@ def test_percentiles_and_call_counts_only_include_public_calls() -> None:
         "public_call_count": 3,
         "ack_p50_ms": 1.0,
         "ack_p95_ms": 2.0,
+        "shared_server_ms": None,
+        "shared_server_reason": "not exposed by the public MCP protocol",
+        "connector_ms": None,
+        "connector_reason": "not exposed by the public MCP protocol",
     }
 
 
@@ -202,9 +236,106 @@ def test_failed_ack_is_excluded_from_ack_percentiles() -> None:
         "public_call_count": 2,
         "ack_p50_ms": 1.0,
         "ack_p95_ms": 1.0,
+        "shared_server_ms": None,
+        "shared_server_reason": "not exposed by the public MCP protocol",
+        "connector_ms": None,
+        "connector_reason": "not exposed by the public MCP protocol",
     }
 
 
 def test_fixture_pages_have_deterministic_kilobyte_scale_variation() -> None:
     sizes = [len(body.encode()) for _, body in common.fixture_pages(12)]
     assert max(sizes) - min(sizes) >= 1_000
+
+
+def test_main_shares_an_explicit_marker_between_both_product_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: list[str] = []
+
+    async def fake_run_product(**kwargs: object) -> dict[str, object]:
+        seen.append(str(kwargs["marker"]))
+        return {"product": kwargs["product"], "status": "pass"}
+
+    monkeypatch.setattr(common, "run_product", fake_run_product)
+
+    assert (
+        common.main(
+            [
+                "--product",
+                "both",
+                "--state",
+                str(tmp_path / "state"),
+                "--vault",
+                str(tmp_path / "vault"),
+                "--marker",
+                "paired-marker",
+                "--basic-memory-executable",
+                "/bin/true",
+            ]
+        )
+        == 0
+    )
+    assert seen == ["paired-marker", "paired-marker"]
+    assert [row["product"] for row in json.loads(capsys.readouterr().out)["rows"]] == [
+        "exomem",
+        "basic_memory",
+    ]
+
+
+def test_startup_failure_becomes_an_invalid_json_row(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    result = common.main(
+        [
+            "--product",
+            "exomem",
+            "--state",
+            str(tmp_path / "state"),
+            "--vault",
+            str(tmp_path / "vault"),
+            "--python",
+            str(tmp_path / "missing-python"),
+            "--basic-memory-executable",
+            "/bin/true",
+        ]
+    )
+
+    row = json.loads(capsys.readouterr().out)["rows"][0]
+    assert result == 1
+    assert row["status"] == "invalid"
+    assert row["reason"].startswith("MCP runtime failure:")
+    assert row["phases"]["wall_to_verified_closure_ms"] is None
+
+
+def test_basic_memory_provenance_requires_the_pinned_wheel_version_and_inventory() -> None:
+    assert common.basic_memory_provenance_is_pinned(
+        {
+            "wheel_matches_pinned_digest": True,
+            "installed_version_matches_expected": True,
+            "dependency_inventory": {"status": "ok"},
+        }
+    )
+    assert not common.basic_memory_provenance_is_pinned(
+        {
+            "wheel_matches_pinned_digest": False,
+            "installed_version_matches_expected": True,
+            "dependency_inventory": {"status": "ok"},
+        }
+    )
+
+
+def test_exomem_provenance_reports_the_runtime_source_identity() -> None:
+    provenance = common.runtime_provenance(
+        executable=Path(sys.executable),
+        wheel=None,
+        python=Path(sys.executable),
+        package="exomem",
+        expected_version=None,
+    )
+
+    identity = provenance["source_identity"]
+    assert identity["runtime_pythonpath_root"]
+    assert identity["revision"]
+    assert identity["tree"]
+    assert len(identity["source_digest"]) == 64
