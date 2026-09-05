@@ -581,26 +581,42 @@ control = Path(control_value) if control_value else None
 COUNTER_FIELDS = (
     "graph_drain_attempts", "graph_drain_completed", "graph_rebuild_attempts", "graph_rebuild_completed",
     "graph_incremental_execution_elapsed_ms", "graph_rebuild_execution_elapsed_ms",
+    "graph_pre_reset_spillover_incremental_completed", "graph_pre_reset_spillover_rebuild_completed",
+    "graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms",
+    "graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms",
     "source_scan_pages", "source_scan_bytes", "graph_topology_paths_enumerated",
     "graph_topology_stat_estimated_bytes", "graph_topology_actual_body_read_bytes",
 )
+SNAPSHOT_FIELDS = COUNTER_FIELDS + (
+    "measurement_epoch", "graph_incremental_inflight", "graph_rebuild_inflight",
+    "graph_pre_reset_spillover_incremental_inflight", "graph_pre_reset_spillover_rebuild_inflight",
+)
 data = {
     "wrapper_status": "installed",
+    "measurement_epoch": 0,
     "graph_drain_attempts": 0, "graph_drain_completed": 0,
     "graph_rebuild_attempts": 0, "graph_rebuild_completed": 0,
     "graph_incremental_execution_elapsed_ms": 0.0,
     "graph_rebuild_execution_elapsed_ms": 0.0,
+    "graph_pre_reset_spillover_incremental_completed": 0,
+    "graph_pre_reset_spillover_rebuild_completed": 0,
+    "graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms": 0.0,
+    "graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms": 0.0,
+    "graph_incremental_inflight": 0, "graph_rebuild_inflight": 0,
+    "graph_pre_reset_spillover_incremental_inflight": 0,
+    "graph_pre_reset_spillover_rebuild_inflight": 0,
     "source_scan_pages": 0, "source_scan_bytes": 0,
     "graph_topology_paths_enumerated": 0,
     "graph_topology_stat_estimated_bytes": 0,
     "graph_topology_actual_body_read_bytes": 0,
     "snapshots": {},
     "scan_coverage": "find._walk_md only; path enumeration plus stat-estimated bytes, not body bytes",
-    "graph_topology_coverage": "EpistemicGraphIndex._sources_linking_to only; vault walk and reads are scoped to that call",
+    "graph_topology_coverage": "measurement-window observations from EpistemicGraphIndex._sources_linking_to only; vault walk and reads are scoped to that call and can include reset-crossing warm-up work",
     "graph_topology_byte_coverage": "actual body bytes via vault.read_bytes_without_pinning; stat-estimated bytes are separate and never summed",
 }
 lock = threading.RLock()
 topology = threading.local()
+active_epochs = {"incremental": {}, "rebuild": {}}
 last_command = None
 stopping = threading.Event()
 owner_path = out.with_name("instrumentation-owner.pid")
@@ -609,6 +625,16 @@ try:
     owner = True
 except FileExistsError:
     owner = owner_path.read_text(encoding="utf-8").strip() == str(os.getpid())
+
+def refresh_inflight():
+    epoch = data["measurement_epoch"]
+    for kind, current_key, spillover_key in (
+        ("incremental", "graph_incremental_inflight", "graph_pre_reset_spillover_incremental_inflight"),
+        ("rebuild", "graph_rebuild_inflight", "graph_pre_reset_spillover_rebuild_inflight"),
+    ):
+        active = active_epochs[kind]
+        data[current_key] = active.get(epoch, 0)
+        data[spillover_key] = sum(count for active_epoch, count in active.items() if active_epoch != epoch)
 
 def publish():
     if not owner:
@@ -633,11 +659,14 @@ def command():
         action = payload.get("action")
         phase = str(payload.get("phase") or "")
         if action == "reset":
+            data["measurement_epoch"] += 1
             for key in COUNTER_FIELDS:
                 data[key] = 0
             data["snapshots"] = {}
+            refresh_inflight()
         elif action == "snapshot" and phase:
-            data["snapshots"][phase] = {key: data[key] for key in COUNTER_FIELDS}
+            refresh_inflight()
+            data["snapshots"][phase] = {key: data[key] for key in SNAPSHOT_FIELDS}
         else:
             data["instrumentation_error"] = "InvalidControl"
         data["acknowledged_command"] = command_id
@@ -648,28 +677,40 @@ def controller():
     while not stopping.wait(0.01):
         command()
 
-def wrap_graph_execution(module, name, attempts, completed, elapsed):
+def wrap_graph_execution(module, name, kind, attempts, completed, elapsed, spillover_completed, spillover_elapsed):
     original = getattr(module, name, None)
     if original is None:
         raise AttributeError(f"missing required instrumentation hook: {name}")
     def counted(*args, **kwargs):
         command()
         with lock:
+            entry_epoch = data["measurement_epoch"]
+            active_epochs[kind][entry_epoch] = active_epochs[kind].get(entry_epoch, 0) + 1
             data[attempts] += 1
+            refresh_inflight()
         publish()
         started = time.monotonic()
+        succeeded = False
         try:
             result = original(*args, **kwargs)
-        except BaseException:
+            succeeded = True
+            return result
+        finally:
+            elapsed_ms = (time.monotonic() - started) * 1000.0
             with lock:
-                data[elapsed] += (time.monotonic() - started) * 1000.0
+                active_epochs[kind][entry_epoch] -= 1
+                if not active_epochs[kind][entry_epoch]:
+                    del active_epochs[kind][entry_epoch]
+                if entry_epoch == data["measurement_epoch"]:
+                    if succeeded:
+                        data[completed] += 1
+                    data[elapsed] += elapsed_ms
+                else:
+                    if succeeded:
+                        data[spillover_completed] += 1
+                    data[spillover_elapsed] += elapsed_ms
+                refresh_inflight()
             publish()
-            raise
-        with lock:
-            data[completed] += 1
-            data[elapsed] += (time.monotonic() - started) * 1000.0
-        publish()
-        return result
     setattr(module, name, counted)
 
 def wrap_topology_discovery(module, name):
@@ -686,8 +727,8 @@ def wrap_topology_discovery(module, name):
 
 try:
     from exomem import index_sync, epistemic_graph, find, vault
-    wrap_graph_execution(epistemic_graph.EpistemicGraphIndex, "drain_paths", "graph_drain_attempts", "graph_drain_completed", "graph_incremental_execution_elapsed_ms")
-    wrap_graph_execution(epistemic_graph.EpistemicGraphIndex, "_rebuild_all_off_boundary", "graph_rebuild_attempts", "graph_rebuild_completed", "graph_rebuild_execution_elapsed_ms")
+    wrap_graph_execution(epistemic_graph.EpistemicGraphIndex, "drain_paths", "incremental", "graph_drain_attempts", "graph_drain_completed", "graph_incremental_execution_elapsed_ms", "graph_pre_reset_spillover_incremental_completed", "graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms")
+    wrap_graph_execution(epistemic_graph.EpistemicGraphIndex, "_rebuild_all_off_boundary", "rebuild", "graph_rebuild_attempts", "graph_rebuild_completed", "graph_rebuild_execution_elapsed_ms", "graph_pre_reset_spillover_rebuild_completed", "graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms")
     wrap_topology_discovery(epistemic_graph.EpistemicGraphIndex, "_sources_linking_to")
     original_walk = find._walk_md
     def walk(root):
@@ -753,6 +794,11 @@ def read_instrumentation(state: Path) -> dict[str, Any]:
     required = (
         "graph_drain_attempts", "graph_drain_completed", "graph_rebuild_attempts", "graph_rebuild_completed",
         "graph_incremental_execution_elapsed_ms", "graph_rebuild_execution_elapsed_ms",
+        "graph_pre_reset_spillover_incremental_completed", "graph_pre_reset_spillover_rebuild_completed",
+        "graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms",
+        "graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms",
+        "measurement_epoch", "graph_incremental_inflight", "graph_rebuild_inflight",
+        "graph_pre_reset_spillover_incremental_inflight", "graph_pre_reset_spillover_rebuild_inflight",
         "source_scan_pages", "source_scan_bytes", "graph_topology_paths_enumerated",
         "graph_topology_stat_estimated_bytes", "graph_topology_actual_body_read_bytes", "wrapper_status",
     )
@@ -1533,26 +1579,54 @@ async def run_public_workflow(
         "connector_overhead_ms": None,
         "connector_overhead_reason": "stdio client wall and server ledger are independently measured but not request-correlated",
         "graph_invocations": {
+            "semantics": "current-epoch attempts/completions only; reset-crossing warm-up invocations are reported separately as pre-reset spillover",
             "at_closure": {
                 "drain_attempts": closure_snapshot["graph_drain_attempts"],
                 "drain_completed": closure_snapshot["graph_drain_completed"],
                 "rebuild_attempts": closure_snapshot["graph_rebuild_attempts"],
                 "rebuild_completed": closure_snapshot["graph_rebuild_completed"],
+                "incremental_inflight": closure_snapshot["graph_incremental_inflight"],
+                "rebuild_inflight": closure_snapshot["graph_rebuild_inflight"],
             },
             "at_convergence": {
                 "drain_attempts": convergence_snapshot["graph_drain_attempts"],
                 "drain_completed": convergence_snapshot["graph_drain_completed"],
                 "rebuild_attempts": convergence_snapshot["graph_rebuild_attempts"],
                 "rebuild_completed": convergence_snapshot["graph_rebuild_completed"],
+                "incremental_inflight": convergence_snapshot["graph_incremental_inflight"],
+                "rebuild_inflight": convergence_snapshot["graph_rebuild_inflight"],
             },
             "after_shutdown": {
                 "drain_attempts": instrumentation["graph_drain_attempts"],
                 "drain_completed": instrumentation["graph_drain_completed"],
                 "rebuild_attempts": instrumentation["graph_rebuild_attempts"],
                 "rebuild_completed": instrumentation["graph_rebuild_completed"],
+                "incremental_inflight": instrumentation["graph_incremental_inflight"],
+                "rebuild_inflight": instrumentation["graph_rebuild_inflight"],
+            },
+            "pre_reset_spillover": {
+                "at_closure": {
+                    "incremental_completed": closure_snapshot["graph_pre_reset_spillover_incremental_completed"],
+                    "rebuild_completed": closure_snapshot["graph_pre_reset_spillover_rebuild_completed"],
+                    "incremental_inflight": closure_snapshot["graph_pre_reset_spillover_incremental_inflight"],
+                    "rebuild_inflight": closure_snapshot["graph_pre_reset_spillover_rebuild_inflight"],
+                },
+                "at_convergence": {
+                    "incremental_completed": convergence_snapshot["graph_pre_reset_spillover_incremental_completed"],
+                    "rebuild_completed": convergence_snapshot["graph_pre_reset_spillover_rebuild_completed"],
+                    "incremental_inflight": convergence_snapshot["graph_pre_reset_spillover_incremental_inflight"],
+                    "rebuild_inflight": convergence_snapshot["graph_pre_reset_spillover_rebuild_inflight"],
+                },
+                "after_shutdown": {
+                    "incremental_completed": instrumentation["graph_pre_reset_spillover_incremental_completed"],
+                    "rebuild_completed": instrumentation["graph_pre_reset_spillover_rebuild_completed"],
+                    "incremental_inflight": instrumentation["graph_pre_reset_spillover_incremental_inflight"],
+                    "rebuild_inflight": instrumentation["graph_pre_reset_spillover_rebuild_inflight"],
+                },
             },
         },
         "graph_execution_elapsed_ms": {
+            "semantics": "current-epoch values include completed invocations only; active work has no elapsed value until completion",
             "at_closure": {
                 "incremental": closure_snapshot["graph_incremental_execution_elapsed_ms"],
                 "rebuild": closure_snapshot["graph_rebuild_execution_elapsed_ms"],
@@ -1564,6 +1638,20 @@ async def run_public_workflow(
             "after_shutdown": {
                 "incremental": instrumentation["graph_incremental_execution_elapsed_ms"],
                 "rebuild": instrumentation["graph_rebuild_execution_elapsed_ms"],
+            },
+            "pre_reset_spillover_full_invocation": {
+                "at_closure": {
+                    "incremental": closure_snapshot["graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms"],
+                    "rebuild": closure_snapshot["graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms"],
+                },
+                "at_convergence": {
+                    "incremental": convergence_snapshot["graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms"],
+                    "rebuild": convergence_snapshot["graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms"],
+                },
+                "after_shutdown": {
+                    "incremental": instrumentation["graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms"],
+                    "rebuild": instrumentation["graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms"],
+                },
             },
         },
         "graph_topology_discovery": {

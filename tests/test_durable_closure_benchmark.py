@@ -282,9 +282,17 @@ def test_instrumentation_error_invalidates_benchmark_measurement(tmp_path: Path)
     state = tmp_path / "state"
     state.mkdir()
     (state / "instrumentation.json").write_text(
-        '{"graph_drain_attempts":0,"graph_drain_completed":0,"graph_rebuild_attempts":0,'
-        '"graph_rebuild_completed":0,"graph_incremental_execution_elapsed_ms":0,'
-        '"graph_rebuild_execution_elapsed_ms":0,"source_scan_pages":0,"source_scan_bytes":0,'
+            '{"graph_drain_attempts":0,"graph_drain_completed":0,"graph_rebuild_attempts":0,'
+            '"graph_rebuild_completed":0,"graph_incremental_execution_elapsed_ms":0,'
+            '"graph_rebuild_execution_elapsed_ms":0,'
+            '"graph_pre_reset_spillover_incremental_completed":0,'
+            '"graph_pre_reset_spillover_rebuild_completed":0,'
+            '"graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms":0,'
+            '"graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms":0,'
+            '"measurement_epoch":1,"graph_incremental_inflight":0,"graph_rebuild_inflight":0,'
+            '"graph_pre_reset_spillover_incremental_inflight":0,'
+            '"graph_pre_reset_spillover_rebuild_inflight":0,'
+            '"source_scan_pages":0,"source_scan_bytes":0,'
         '"graph_topology_paths_enumerated":0,"graph_topology_stat_estimated_bytes":0,'
         '"graph_topology_actual_body_read_bytes":0,'
         '"wrapper_status":"installed","instrumentation_error":"ImportError"}',
@@ -351,6 +359,60 @@ def test_child_hook_measures_appeared_target_topology_reads_and_graph_execution_
     assert measured["graph_topology_actual_body_read_bytes"] == len(b"appeared-body")
     assert measured["graph_incremental_execution_elapsed_ms"] > 0
     assert measured["graph_rebuild_execution_elapsed_ms"] > 0
+
+
+def test_child_hook_reports_reset_crossing_graph_work_as_pre_reset_spillover(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    hook = benchmark.install_subprocess_instrumentation(state)
+    package = tmp_path / "exomem"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "index_sync.py").write_text("", encoding="utf-8")
+    (package / "find.py").write_text("def _walk_md(root): return ()\n", encoding="utf-8")
+    (package / "vault.py").write_text(
+        "def walk_vault_md(root): return ()\n"
+        "def read_bytes_without_pinning(path): return b''\n",
+        encoding="utf-8",
+    )
+    (package / "epistemic_graph.py").write_text(
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "class EpistemicGraphIndex:\n"
+        " def drain_paths(self, paths): Path(os.environ['DURABLE_CLOSURE_ENTERED']).write_text('entered'); time.sleep(0.08); return {}\n"
+        " def _rebuild_all_off_boundary(self): return None\n"
+        " def _sources_linking_to(self, targets, *, resolver=None): return set()\n",
+        encoding="utf-8",
+    )
+    control = state / "instrumentation-control.json"
+    environment = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join((str(hook), str(tmp_path))),
+        "DURABLE_CLOSURE_INSTRUMENTATION": str(state / "instrumentation.json"),
+        "DURABLE_CLOSURE_INSTRUMENTATION_CONTROL": str(control),
+        "DURABLE_CLOSURE_ENTERED": str(state / "entered"),
+    }
+    code = (
+        "import json, os, threading, time\n"
+        "from pathlib import Path\n"
+        "from exomem.epistemic_graph import EpistemicGraphIndex as I\n"
+        "index = I()\n"
+        "thread = threading.Thread(target=lambda: index.drain_paths([]))\n"
+        "thread.start()\n"
+        "entered = Path(os.environ['DURABLE_CLOSURE_ENTERED'])\n"
+        "deadline = time.monotonic() + 1\n"
+        "while not entered.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.001)\n"
+        "assert entered.exists()\n"
+        "Path(os.environ['DURABLE_CLOSURE_INSTRUMENTATION_CONTROL']).write_text(json.dumps({'id':'reset','action':'reset','phase':'timed'}))\n"
+        "thread.join()\n"
+    )
+    subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=environment, check=True, capture_output=True, text=True)
+
+    measured = json.loads((state / "instrumentation.json").read_text(encoding="utf-8"))
+    assert measured["graph_drain_attempts"] == measured["graph_drain_completed"] == 0
+    assert measured["graph_pre_reset_spillover_incremental_completed"] == 1
+    assert measured["graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms"] > 0
+    assert measured["graph_incremental_inflight"] == measured["graph_pre_reset_spillover_incremental_inflight"] == 0
 
 
 def test_missing_required_instrumentation_hook_is_not_silently_counted_as_zero(tmp_path: Path) -> None:
