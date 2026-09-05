@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import importlib.util
 import sys
@@ -128,6 +129,73 @@ def test_null_ledger_outcome_cannot_hide_a_client_refusal() -> None:
         assert "outcome" in str(error)
     else:
         raise AssertionError("null ledger terminal fields must not hide a refusal")
+
+
+def test_plaintext_mcp_tool_error_is_not_fabricated_as_a_refusal() -> None:
+    class Text:
+        text = "ValueError: STALE_SEMANTIC_WRITE"
+
+    class Result:
+        isError = True
+        content = (Text(),)
+
+    class Client:
+        async def call_tool_mcp(self, tool: str, arguments: dict[str, object]) -> Result:
+            return Result()
+
+    calls = [{"_origin": benchmark.time.perf_counter()}]
+    payload = asyncio.run(benchmark._call(Client(), calls, "remember", {}))
+
+    assert payload == {"_wire_status": "tool_error"}
+    assert calls[1]["outcome"] == "tool_error"
+    assert calls[1]["error_code"] is None
+    assert "STALE_SEMANTIC_WRITE" not in str(calls[1])
+
+
+def test_tool_error_joins_the_ledger_error_without_inventing_a_public_code() -> None:
+    calls = [{"tool": "remember", "outcome": "tool_error", "error_code": None, "client_elapsed_ms": 1.0}]
+    rows = [{"tool": "remember", "outcome": "error", "error_code": "ToolError", "duration_ms": 1, "total_ms": 1, "ts_utc": "2026-09-05T12:00:01+00:00"}]
+
+    joined = benchmark.attach_ledger_measurements(calls, rows)
+
+    assert joined[0]["outcome"] == "tool_error"
+    assert joined[0]["error_code"] is None
+
+
+def test_typed_warming_refusal_still_requires_the_same_ledger_error_code() -> None:
+    class Text:
+        text = '{"success": false, "error": {"code": "RETRIEVAL_INDEX_WARMING"}}'
+
+    class Result:
+        isError = True
+        content = (Text(),)
+
+    payload = benchmark._decode_call(Result())
+    outcome, code = benchmark._result_outcome(payload)
+
+    assert (outcome, code) == ("refused", "RETRIEVAL_INDEX_WARMING")
+    try:
+        benchmark.attach_ledger_measurements(
+            [{"tool": "ask_memory", "outcome": outcome, "error_code": code, "client_elapsed_ms": 1.0}],
+            [{"tool": "ask_memory", "outcome": "refused", "error_code": "ToolError", "duration_ms": 1, "total_ms": 1, "ts_utc": "2026-09-05T12:00:01+00:00"}],
+        )
+    except ValueError as error:
+        assert "error code" in str(error)
+    else:
+        raise AssertionError("a typed warming refusal must not be laundered through a generic ledger error")
+
+
+def test_invalid_measurement_report_retains_public_and_ledger_counts() -> None:
+    report = benchmark.invalid_measurement_report(
+        calls=[{"tool": "remember", "outcome": "tool_error"}],
+        ledger_row_count=1,
+        reason="ledger outcome does not match client outcome",
+    )
+
+    assert report["status"] == "invalid"
+    assert report["public_call_count"] == 1
+    assert report["ledger"]["row_count"] == 1
+    assert report["ledger"]["reason"] == "ledger outcome does not match client outcome"
 
 
 def test_missing_ledger_duration_and_outcome_are_not_measured_as_zero_or_ok() -> None:

@@ -217,7 +217,7 @@ def evaluate_useful_closure(
         refusals.append(
             {
                 "tool": tool,
-                "code": str(call.get("error_code") or "UNCLASSIFIED_REFUSAL"),
+                "code": str(call.get("error_code") or str(call.get("outcome") or "UNCLASSIFIED").upper()),
                 "window_ms": [started, ended],
             }
         )
@@ -351,9 +351,13 @@ def attach_ledger_measurements(
             row = ledger_rows[row_index]
             if "outcome" not in row or "error_code" not in row:
                 raise ValueError("ledger outcome/error fields are missing")
-            if row.get("outcome") != call.get("outcome"):
+            wire_tool_error = call.get("outcome") == "tool_error"
+            if wire_tool_error:
+                if row.get("outcome") not in {"error", "tool_error"}:
+                    raise ValueError("ledger outcome does not match client tool error")
+            elif row.get("outcome") != call.get("outcome"):
                 raise ValueError("ledger outcome does not match client outcome")
-            if row.get("error_code") != call.get("error_code"):
+            if not wire_tool_error and row.get("error_code") != call.get("error_code"):
                 raise ValueError("ledger error code does not match client outcome")
             result["server_duration_ms"] = float(row["duration_ms"]) if row.get("duration_ms") is not None else None
             result["server_total_ms"] = float(row["total_ms"]) if row.get("total_ms") is not None else None
@@ -363,6 +367,20 @@ def attach_ledger_measurements(
             raise ValueError("ledger tool order does not match public call order")
         joined.append(result)
     return joined
+
+
+def invalid_measurement_report(
+    *, calls: Sequence[Mapping[str, Any]], ledger_row_count: int, reason: str
+) -> dict[str, Any]:
+    """Emit a usable invalid result when authoritative measurements cannot join."""
+    retained_calls = [dict(call) for call in calls]
+    return {
+        "status": "invalid",
+        "measurement": {"status": "invalid", "reason": reason},
+        "public_call_count": len(retained_calls),
+        "calls": retained_calls,
+        "ledger": {"status": "invalid", "reason": reason, "row_count": ledger_row_count},
+    }
 
 
 def benchmark_environment(state: Path, vault: Path) -> dict[str, str]:
@@ -649,10 +667,22 @@ def _decode_call(result: Any) -> dict[str, Any]:
             if isinstance(decoded, dict):
                 nested = decoded.get("result")
                 return nested if isinstance(nested, dict) else decoded
-    return {"success": False, "error": {"code": "UNPARSEABLE_MCP_RESULT"}}
+    is_error = getattr(result, "is_error", None)
+    if is_error is None:
+        is_error = getattr(result, "isError", False)
+    # Keep the public protocol terminal signal but never copy opaque tool text
+    # (which can contain server-private exception detail) into the report.
+    if is_error is True:
+        return {"_wire_status": "tool_error"}
+    return {"_wire_status": "unparseable"}
 
 
 def _result_outcome(payload: Mapping[str, Any]) -> tuple[str, str | None]:
+    wire_status = payload.get("_wire_status")
+    if wire_status == "tool_error":
+        return "tool_error", None
+    if wire_status == "unparseable":
+        return "transport_error", None
     if payload.get("success") is False:
         error = payload.get("error")
         return "refused", str(error.get("code")) if isinstance(error, Mapping) else "UNKNOWN"
@@ -857,6 +887,14 @@ def _read_ledger(path: Path, workflow_started: float) -> list[dict[str, Any]]:
             raise ValueError(f"ledger row {line_number} is not an object")
         rows.append(row)
     return rows
+
+
+def _ledger_line_count(path: Path) -> int:
+    """Keep a physical row count even when parsing a ledger row fails."""
+    ledger = path / "ledger.jsonl"
+    if not ledger.is_file():
+        return 0
+    return len(ledger.read_text(encoding="utf-8").splitlines())
 
 
 def _ack_percentiles(calls: Sequence[Mapping[str, Any]]) -> dict[str, float | None]:
@@ -1148,19 +1186,28 @@ async def run_public_workflow(
         final_read_your_write=final_exact,
         graph_warming_components=_warming_components(recall),
     )
-    ledger_rows = _read_ledger(state / "ledger", workflow_started)[ledger_before:]
-    ledger_clock_ok = ledger_clock_continuous(call_records, ledger_rows)
-    call_records = attach_ledger_measurements(call_records, ledger_rows)
-    ledger_measurements = summarize_ledger_calls(
-        [{**row, **interval} for row, interval in zip(ledger_rows, ledger_intervals(ledger_rows), strict=True)]
-    )
-    if not ledger_clock_ok:
-        for key in ("ledger_observation_span_ms", "server_occupied_union_ms", "server_idle_within_observed_span_ms"):
-            ledger_measurements[key] = None
-        ledger_measurements["occupancy_reason"] = "invalid: UTC ledger clock discontinuity against client trace"
-    instrumentation = read_instrumentation(state)
-    closure_snapshot = closure_instrumentation["snapshots"]["closure"]
-    convergence_snapshot = convergence_instrumentation["snapshots"]["convergence"]
+    ledger_path = state / "ledger"
+    ledger_rows: list[dict[str, Any]] = []
+    try:
+        ledger_rows = _read_ledger(ledger_path, workflow_started)[ledger_before:]
+        ledger_clock_ok = ledger_clock_continuous(call_records, ledger_rows)
+        call_records = attach_ledger_measurements(call_records, ledger_rows)
+        ledger_measurements = summarize_ledger_calls(
+            [{**row, **interval} for row, interval in zip(ledger_rows, ledger_intervals(ledger_rows), strict=True)]
+        )
+        if not ledger_clock_ok:
+            for key in ("ledger_observation_span_ms", "server_occupied_union_ms", "server_idle_within_observed_span_ms"):
+                ledger_measurements[key] = None
+            ledger_measurements["occupancy_reason"] = "invalid: UTC ledger clock discontinuity against client trace"
+        instrumentation = read_instrumentation(state)
+        closure_snapshot = closure_instrumentation["snapshots"]["closure"]
+        convergence_snapshot = convergence_instrumentation["snapshots"]["convergence"]
+    except (KeyError, RuntimeError, TypeError, ValueError) as error:
+        return invalid_measurement_report(
+            calls=call_records,
+            ledger_row_count=len(ledger_rows) if ledger_rows else _ledger_line_count(ledger_path),
+            reason=str(error),
+        )
     return {
         "variant": variant,
         "profile": profile,
