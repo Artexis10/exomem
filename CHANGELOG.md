@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.72.1](https://github.com/Artexis10/exomem/compare/v0.72.0...v0.72.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **hosted:** serve the agent profile the deployment selects ([#1083](https://github.com/Artexis10/exomem/issues/1083)) ([9c583fb](https://github.com/Artexis10/exomem/commit/9c583fbc4d0b406827ddd5ac6621cc17c663a55b))
+
 ## [0.72.0](https://github.com/Artexis10/exomem/compare/v0.71.0...v0.72.0) (2026-09-05)
 
 
