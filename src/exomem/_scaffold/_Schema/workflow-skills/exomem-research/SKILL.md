@@ -1,7 +1,8 @@
 ---
 name: exomem-research
 description: "Run a focused research loop with Exomem: gather sources, preserve evidence, compile attributed findings, and connect prior notes."
-version: 0.1.0
+metadata:
+  version: "0.1.0"
 ---
 
 # exomem-research
@@ -12,12 +13,32 @@ Answer a focused question and save what should compound.
 ## When to use
 Use when the user asks to research a topic, compare options, investigate a claim, or save findings from a research pass.
 
+## Portable operating rules
+
+Before the first operation, obtain `bootstrap(profile="compact")` if current
+policy or capabilities are missing; honor `engagement.envelope` and
+`available_product_tools`. Use the harness's supported discovery mechanism and
+load only the tools needed now. If neither the applicable local procedure nor
+the portable operating contract is available, do not improvise a write.
+
+Sources/Evidence are immutable, and content outside the managed Knowledge Base
+is read-only. Before a compiled write: search/read for duplicates, draft, run
+`connect_memory(operation="suggest-links")`, and include known source references
+and reviewed connections in the first write. Honor the live confirmation ceiling;
+a workflow or standing capture preference does not grant restructure authority.
+
+Inspect mutation results before reporting success. On `success: false`, follow
+the structured error. For warming, busy, pending, or
+`MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, preserve the same mutation identity
+and unchanged payload; wait/reconcile/retry only as instructed, never with a new
+identity after an uncertain commit.
+
 ## Workflow
 1. Search Exomem first with `ask_memory` for prior conclusions and related sources.
 2. Gather external sources only as needed; preserve important raw sources with `capture_source`, passing `files` when the client can hand over an attachment. `preserve_evidence`, `preserve_artifacts`, and the `transfer_artifact` fallback are for proof-bearing artifacts, not for raw material.
 3. Attribute findings to sources and distinguish evidence from interpretation.
-4. Compile the result with `remember` as a `research-note` unless another type clearly fits, listing every source preserved in step 2 in `sources:`.
-5. Use `connect_memory(operation="suggest-links")` and connect related prior notes.
+4. Draft the result as a `research-note` unless another type clearly fits, listing every source preserved in step 2 in `sources:`.
+5. Use `connect_memory(operation="suggest-links")` on the draft and review related prior notes. Then write with `remember`, including the sources and accepted connections in the first write.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
