@@ -37,6 +37,16 @@ that cross-case isolation needs at least two cases. The observed 55-session
 singleton returned its presence canary at rank one; its aggregate verdict was
 unverifiable because there was no second case.
 
+Direct case teardown closes and evicts only lease managers whose configured
+state directory is the case's held `leases` path, including partial setup.
+The runner waits for synchronous provider operations to return before teardown;
+the standalone lease manager does not track active mutations. Teardown closes
+store owner locks before retiring directories and refuses a live coordinator
+renewer. This prevents a reused
+OS directory descriptor from finding a previous case's cached manager; other
+managers remain untouched. Doctor readiness names failing runtime check IDs
+without exporting private error messages.
+
 Old exports retain their original renderer and hash meanings. New evidence
 uses a fresh frozen source pin and run IDs. This repairs the existing
 equivalence prerequisite; it changes no cohort, threshold, exception predicate,

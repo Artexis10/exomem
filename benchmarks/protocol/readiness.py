@@ -23,7 +23,10 @@ def semantic_doctor_readiness(report: dict) -> LaneReadiness:
             malformed = True
             continue
         checks[row["id"]] = row["status"]
-    failed = sorted(name for name in SEMANTIC_DOCTOR_CHECKS if checks.get(name) != "pass")
+    failed = sorted(
+        {name for name in SEMANTIC_DOCTOR_CHECKS if checks.get(name) != "pass"}
+        | {name for name, status in checks.items() if status == "fail"}
+    )
     verified = not malformed and report.get("success") is True and report.get("profile") == "hybrid" and not failed
     return LaneReadiness(
         lane="semantic", requested=True, verified=verified,

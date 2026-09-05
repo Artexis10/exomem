@@ -67,21 +67,54 @@ class ExomemDirectProvider:
 
     def cleanup(self) -> None:
         try:
-            self._adapter.cleanup()
-        finally:
             try:
-                if self._context is not None:
-                    for component in ("vault", "logs", "leases"):
-                        retire_child_directory(
-                            self._context.work_root,
-                            component,
-                            max_entries=100_000,
-                            max_depth=64,
-                        )
+                self._close_writer_runtime()
             finally:
-                self._context = None
-                self._question_date = None
-                self._adapter.last_ingest_results = ()
+                self._adapter.cleanup()
+            if self._context is not None:
+                for component in ("vault", "logs", "leases"):
+                    retire_child_directory(
+                        self._context.work_root,
+                        component,
+                        max_entries=100_000,
+                        max_depth=64,
+                    )
+        finally:
+            self._context = None
+            self._question_date = None
+            self._adapter.last_ingest_results = ()
+
+    def _close_writer_runtime(self) -> None:
+        """Retire only this case's in-process leases before its FD is reusable.
+
+        The product caches managers by configured path. A runner capability
+        path can name a different inode in the next case after FD reuse.
+        Do not reset the process-wide cache or resolve the held path back to
+        an unprotected filesystem name. Setup failures can create a manager,
+        so find owned entries even when adapter setup did not return.
+        The runner calls this only after synchronous provider operations
+        return; the local lease manager does not count active mutations.
+        """
+        if self._context is None:
+            return
+        from exomem import writer_lease
+
+        state_dir = self._context.work_root / "leases"
+        with writer_lease._MANAGERS_LOCK:
+            owned = [
+                (config, manager) for config, manager in writer_lease._MANAGERS.items()
+                if config.state_dir == state_dir
+            ]
+            for config, manager in owned:
+                with manager._lock:
+                    if manager._renewer is not None and manager._renewer.is_alive():
+                        raise RuntimeError("direct provider lease renewer is still active")
+                    manager.close()
+                    handle = manager.idempotency._owner_lock_handle
+                    if handle is not None:
+                        handle.close()
+                        manager.idempotency._owner_lock_handle = None
+                    del writer_lease._MANAGERS[config]
 
     def variant_id(self) -> str:
         return "exomem-source-only"
