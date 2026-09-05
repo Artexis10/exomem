@@ -4164,7 +4164,9 @@ def post_commit_batch_fanout(
         if publication_intents:
             from . import file_watcher
 
-            file_watcher.abort_publication_intents(publication_intents)
+            file_watcher.abort_publication_intents(
+                publication_intents, force_paths=replaced
+            )
         logging.getLogger(__name__).debug(
             "self-write suppression registration failed", exc_info=True
         )
@@ -5121,7 +5123,9 @@ def _batch_atomic_write_locked(
             if publication_intents:
                 from . import file_watcher
 
-                file_watcher.abort_publication_intents(publication_intents)
+                file_watcher.abort_publication_intents(
+                    publication_intents, force_paths=final_guards
+                )
             _remove_empty_created_dirs(created_dirs)
             raise BatchWriteError(
                 "BATCH_ROLLBACK_INCOMPLETE",
@@ -5150,7 +5154,9 @@ def _batch_atomic_write_locked(
         if publication_intents:
             from . import file_watcher
 
-            file_watcher.abort_publication_intents(publication_intents)
+            file_watcher.abort_publication_intents(
+                publication_intents, force_paths=final_guards
+            )
         _cleanup_batch_workspaces(workspace_by_parent.values())
         _remove_empty_created_dirs(created_dirs)
         raise
