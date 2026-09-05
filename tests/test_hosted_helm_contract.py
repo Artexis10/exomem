@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from exomem.hosted_runtime import HostedCellConfig
+
 ROOT = Path(__file__).resolve().parents[1]
 PLATFORM = ROOT / "infra/helm/platform"
 CELL = ROOT / "infra/helm/cell"
@@ -2667,6 +2669,31 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert not [item for item in documents if item.get("kind") == "Job"]
     if service:
         assert service[0]["spec"]["type"] == "ClusterIP"
+
+
+def test_cell_chart_projects_a_selected_agent_profile_only_when_configured() -> None:
+    default_documents = _render(CELL, CELL / "values.validation.yaml", namespace="cell-alpha-test")
+    default_statefulset = _find(default_documents, "StatefulSet", "cell-alpha")
+    default_environment = {
+        item["name"]: item.get("value")
+        for item in default_statefulset["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert "EXOMEM_HOSTED_AGENT_PROFILE" not in default_environment
+
+    selected_documents = _render(
+        CELL,
+        CELL / "values.validation.yaml",
+        namespace="cell-alpha-test",
+        extra_args=("--set", "agentProfile=hosted-alpha-agent-v4"),
+    )
+    selected_statefulset = _find(selected_documents, "StatefulSet", "cell-alpha")
+    selected_environment = {
+        item["name"]: item.get("value")
+        for item in selected_statefulset["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert selected_environment["EXOMEM_HOSTED_AGENT_PROFILE"] == "hosted-alpha-agent-v4"
+    config = HostedCellConfig.from_env(selected_environment, require_provisioned=False)
+    assert config.active_agent_profile == "hosted-alpha-agent-v4"
 
 
 def test_cell_schema_rejects_mutable_image_and_non_fixed_limits() -> None:

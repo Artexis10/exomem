@@ -1811,6 +1811,7 @@ def _fixed_helm_values(
     ).encode("utf-8")
     values: dict[str, Any] = {
         "activeCredentialVersion": "1",
+        "agentProfile": target.get("agentProfile", ""),
         "browserOrigin": config.browser_origin,
         "cellId": metadata.subject_id,
         "credentialsSecretName": "exomem-cell-credentials",

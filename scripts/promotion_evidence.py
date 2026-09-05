@@ -11,11 +11,27 @@ file the operator writes after running it; the six counts are queried from the
 control plane and the run aborts unless each is exactly 1. A harness that
 defaulted those to true/1 would turn the signed-evidence chain into decoration.
 
-Everything here is timing-critical for the FIRST promotion only. The bootstrap
-authority is capped server-side at 30 minutes, the rollout assignment inherits
-that expiry, and `storeClientArtifact` requires the assignment still be active --
-so observe, sign, both imports and promote all have to land inside it. Rehearse
-against an existing tenant before opening a window.
+The window is the staged release's, and you choose it. This paragraph used to
+say the rollout assignment inherited the bootstrap authority's thirty-minute
+expiry, so everything after `run` -- provisioning, a human completing seven
+manual operations per platform, then observe, sign, import and promote -- had to
+land inside half an hour. It never fit, and it is no longer true: substrate #140
+gives the assignment `exomem_staged_client_releases.expires_at` instead.
+
+What still bounds you, in order:
+
+* The staged release -- `reviewer_bootstrap.py prepare --stage-minutes N`, up to
+  seven days. It gates `storeClientArtifact` and the `cells` precondition inside
+  `promoteExomemHostedCohort`, both of which re-check it independently.
+* The canary credential, `LEAST(requested, assignment, stage)`, requested at 24
+  hours. The clean-client runs need it, so the manual half has 24 hours however
+  long the stage is. Size the stage past that -- 48 hours leaves a day for
+  observe/sign/import/promote after the canary dies.
+* The bootstrap authority, 28 minutes requested against a 30-minute server cap.
+  It spans only the OAuth exchange inside `run`, which is automated, and it is
+  spent the instant the assignment row exists.
+
+Rehearse against an existing tenant before opening a window anyway.
 
 Resolve these FOUR environment variables before starting, not during the window.
 Two of them name nothing that is deployed under that name, and one is not

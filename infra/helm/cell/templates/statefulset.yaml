@@ -107,6 +107,10 @@ spec:
               value: {{ printf "%.0f" .Values.recordsReaderVersion | quote }}
             - name: EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED
               value: {{ .Values.lifecycleActionsEnabled | quote }}
+            {{- with .Values.agentProfile }}
+            - name: EXOMEM_HOSTED_AGENT_PROFILE
+              value: {{ . | quote }}
+            {{- end }}
             - name: EXOMEM_AUTH_SESSION_KEYRING_FILE
               value: /run/exomem/authorization-session/private/keyring.json
             - name: EXOMEM_AUTH_SESSION_CONTROL_FILE
