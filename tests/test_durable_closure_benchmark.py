@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import importlib.util
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -280,7 +283,10 @@ def test_instrumentation_error_invalidates_benchmark_measurement(tmp_path: Path)
     state.mkdir()
     (state / "instrumentation.json").write_text(
         '{"graph_drain_attempts":0,"graph_drain_completed":0,"graph_rebuild_attempts":0,'
-        '"graph_rebuild_completed":0,"source_scan_pages":0,"source_scan_bytes":0,'
+        '"graph_rebuild_completed":0,"graph_incremental_execution_elapsed_ms":0,'
+        '"graph_rebuild_execution_elapsed_ms":0,"source_scan_pages":0,"source_scan_bytes":0,'
+        '"graph_topology_paths_enumerated":0,"graph_topology_stat_estimated_bytes":0,'
+        '"graph_topology_actual_body_read_bytes":0,'
         '"wrapper_status":"installed","instrumentation_error":"ImportError"}',
         encoding="utf-8",
     )
@@ -300,6 +306,51 @@ def test_scan_walker_does_not_publish_or_poll_control_per_page(tmp_path: Path) -
 
     assert "command()" not in walker
     assert "publish()" not in walker
+
+
+def test_child_hook_measures_appeared_target_topology_reads_and_graph_execution_time(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    hook = benchmark.install_subprocess_instrumentation(state)
+    package = tmp_path / "exomem"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "index_sync.py").write_text("", encoding="utf-8")
+    (package / "find.py").write_text("def _walk_md(root): return ()\n", encoding="utf-8")
+    (package / "vault.py").write_text(
+        "from pathlib import Path\n"
+        "def walk_vault_md(root): yield Path(root) / 'appeared.md'\n"
+        "def read_bytes_without_pinning(path): return path.read_bytes()\n",
+        encoding="utf-8",
+    )
+    (package / "epistemic_graph.py").write_text(
+        "import time\nfrom . import vault\n"
+        "class EpistemicGraphIndex:\n"
+        " def drain_paths(self, paths): time.sleep(0.01); return {}\n"
+        " def _rebuild_all_off_boundary(self): time.sleep(0.01)\n"
+        " def _sources_linking_to(self, targets, *, resolver=None):\n"
+        "  return {str(path) for path in vault.walk_vault_md('.') if vault.read_bytes_without_pinning(path)}\n",
+        encoding="utf-8",
+    )
+    environment = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join((str(hook), str(tmp_path))),
+        "DURABLE_CLOSURE_INSTRUMENTATION": str(state / "instrumentation.json"),
+    }
+    code = (
+        "from pathlib import Path; Path('appeared.md').write_bytes(b'appeared-body'); "
+        "from exomem.epistemic_graph import EpistemicGraphIndex as I; "
+        "index = I(); index._sources_linking_to({'appeared.md'}); index.drain_paths([]); index._rebuild_all_off_boundary()"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", code], cwd=tmp_path, env=environment, check=True, capture_output=True, text=True
+    )
+
+    assert completed.stderr == ""
+    measured = json.loads((state / "instrumentation.json").read_text(encoding="utf-8"))
+    assert measured["graph_topology_paths_enumerated"] == 1
+    assert measured["graph_topology_actual_body_read_bytes"] == len(b"appeared-body")
+    assert measured["graph_incremental_execution_elapsed_ms"] > 0
+    assert measured["graph_rebuild_execution_elapsed_ms"] > 0
 
 
 def test_missing_required_instrumentation_hook_is_not_silently_counted_as_zero(tmp_path: Path) -> None:

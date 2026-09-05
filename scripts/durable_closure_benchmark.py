@@ -466,14 +466,35 @@ def install_subprocess_instrumentation(state: Path) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     hook = directory / "sitecustomize.py"
     hook.write_text(
-        '''import atexit, json, os, threading
+        '''import atexit, json, os, threading, time
 from pathlib import Path
 
 out = Path(os.environ["DURABLE_CLOSURE_INSTRUMENTATION"])
 control_value = os.environ.get("DURABLE_CLOSURE_INSTRUMENTATION_CONTROL", "")
 control = Path(control_value) if control_value else None
-data = {"wrapper_status": "installed", "graph_drain_attempts": 0, "graph_drain_completed": 0, "graph_rebuild_attempts": 0, "graph_rebuild_completed": 0, "source_scan_pages": 0, "source_scan_bytes": 0, "snapshots": {}, "scan_coverage": "find._walk_md only; other scan consumers are unmeasured"}
+COUNTER_FIELDS = (
+    "graph_drain_attempts", "graph_drain_completed", "graph_rebuild_attempts", "graph_rebuild_completed",
+    "graph_incremental_execution_elapsed_ms", "graph_rebuild_execution_elapsed_ms",
+    "source_scan_pages", "source_scan_bytes", "graph_topology_paths_enumerated",
+    "graph_topology_stat_estimated_bytes", "graph_topology_actual_body_read_bytes",
+)
+data = {
+    "wrapper_status": "installed",
+    "graph_drain_attempts": 0, "graph_drain_completed": 0,
+    "graph_rebuild_attempts": 0, "graph_rebuild_completed": 0,
+    "graph_incremental_execution_elapsed_ms": 0.0,
+    "graph_rebuild_execution_elapsed_ms": 0.0,
+    "source_scan_pages": 0, "source_scan_bytes": 0,
+    "graph_topology_paths_enumerated": 0,
+    "graph_topology_stat_estimated_bytes": 0,
+    "graph_topology_actual_body_read_bytes": 0,
+    "snapshots": {},
+    "scan_coverage": "find._walk_md only; path enumeration plus stat-estimated bytes, not body bytes",
+    "graph_topology_coverage": "EpistemicGraphIndex._sources_linking_to only; vault walk and reads are scoped to that call",
+    "graph_topology_byte_coverage": "actual body bytes via vault.read_bytes_without_pinning; stat-estimated bytes are separate and never summed",
+}
 lock = threading.RLock()
+topology = threading.local()
 last_command = None
 stopping = threading.Event()
 owner_path = out.with_name("instrumentation-owner.pid")
@@ -506,11 +527,11 @@ def command():
         action = payload.get("action")
         phase = str(payload.get("phase") or "")
         if action == "reset":
-            for key in ("graph_drain_attempts", "graph_drain_completed", "graph_rebuild_attempts", "graph_rebuild_completed", "source_scan_pages", "source_scan_bytes"):
+            for key in COUNTER_FIELDS:
                 data[key] = 0
             data["snapshots"] = {}
         elif action == "snapshot" and phase:
-            data["snapshots"][phase] = {key: data[key] for key in ("graph_drain_attempts", "graph_drain_completed", "graph_rebuild_attempts", "graph_rebuild_completed", "source_scan_pages", "source_scan_bytes")}
+            data["snapshots"][phase] = {key: data[key] for key in COUNTER_FIELDS}
         else:
             data["instrumentation_error"] = "InvalidControl"
         data["acknowledged_command"] = command_id
@@ -521,7 +542,7 @@ def controller():
     while not stopping.wait(0.01):
         command()
 
-def wrap(module, name, attempts, completed):
+def wrap_graph_execution(module, name, attempts, completed, elapsed):
     original = getattr(module, name, None)
     if original is None:
         raise AttributeError(f"missing required instrumentation hook: {name}")
@@ -530,17 +551,38 @@ def wrap(module, name, attempts, completed):
         with lock:
             data[attempts] += 1
         publish()
-        result = original(*args, **kwargs)
+        started = time.monotonic()
+        try:
+            result = original(*args, **kwargs)
+        except BaseException:
+            with lock:
+                data[elapsed] += (time.monotonic() - started) * 1000.0
+            publish()
+            raise
         with lock:
             data[completed] += 1
+            data[elapsed] += (time.monotonic() - started) * 1000.0
         publish()
         return result
     setattr(module, name, counted)
 
+def wrap_topology_discovery(module, name):
+    original = getattr(module, name, None)
+    if original is None:
+        raise AttributeError(f"missing required instrumentation hook: {name}")
+    def counted(*args, **kwargs):
+        topology.depth = getattr(topology, "depth", 0) + 1
+        try:
+            return original(*args, **kwargs)
+        finally:
+            topology.depth -= 1
+    setattr(module, name, counted)
+
 try:
-    from exomem import index_sync, epistemic_graph, find
-    wrap(epistemic_graph.EpistemicGraphIndex, "drain_paths", "graph_drain_attempts", "graph_drain_completed")
-    wrap(epistemic_graph.EpistemicGraphIndex, "_rebuild_all_off_boundary", "graph_rebuild_attempts", "graph_rebuild_completed")
+    from exomem import index_sync, epistemic_graph, find, vault
+    wrap_graph_execution(epistemic_graph.EpistemicGraphIndex, "drain_paths", "graph_drain_attempts", "graph_drain_completed", "graph_incremental_execution_elapsed_ms")
+    wrap_graph_execution(epistemic_graph.EpistemicGraphIndex, "_rebuild_all_off_boundary", "graph_rebuild_attempts", "graph_rebuild_completed", "graph_rebuild_execution_elapsed_ms")
+    wrap_topology_discovery(epistemic_graph.EpistemicGraphIndex, "_sources_linking_to")
     original_walk = find._walk_md
     def walk(root):
         for path in original_walk(root):
@@ -552,6 +594,30 @@ try:
                     pass
             yield path
     find._walk_md = walk
+    original_topology_walk = vault.walk_vault_md
+    if original_topology_walk is None:
+        raise AttributeError("missing required instrumentation hook: walk_vault_md")
+    def topology_walk(root):
+        for path in original_topology_walk(root):
+            if getattr(topology, "depth", 0):
+                with lock:
+                    data["graph_topology_paths_enumerated"] += 1
+                    try:
+                        data["graph_topology_stat_estimated_bytes"] += path.stat().st_size
+                    except OSError:
+                        pass
+            yield path
+    vault.walk_vault_md = topology_walk
+    original_topology_read = vault.read_bytes_without_pinning
+    if original_topology_read is None:
+        raise AttributeError("missing required instrumentation hook: read_bytes_without_pinning")
+    def topology_read(path, *args, **kwargs):
+        body = original_topology_read(path, *args, **kwargs)
+        if getattr(topology, "depth", 0):
+            with lock:
+                data["graph_topology_actual_body_read_bytes"] += len(body)
+        return body
+    vault.read_bytes_without_pinning = topology_read
 except Exception as error:
     data["instrumentation_error"] = type(error).__name__
 
@@ -578,7 +644,13 @@ def read_instrumentation(state: Path) -> dict[str, Any]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError("benchmark instrumentation is malformed") from error
-    if not isinstance(data, dict) or any(key not in data for key in ("graph_drain_attempts", "graph_drain_completed", "graph_rebuild_attempts", "graph_rebuild_completed", "source_scan_pages", "source_scan_bytes", "wrapper_status")):
+    required = (
+        "graph_drain_attempts", "graph_drain_completed", "graph_rebuild_attempts", "graph_rebuild_completed",
+        "graph_incremental_execution_elapsed_ms", "graph_rebuild_execution_elapsed_ms",
+        "source_scan_pages", "source_scan_bytes", "graph_topology_paths_enumerated",
+        "graph_topology_stat_estimated_bytes", "graph_topology_actual_body_read_bytes", "wrapper_status",
+    )
+    if not isinstance(data, dict) or any(key not in data for key in required):
         raise RuntimeError("benchmark instrumentation is incomplete")
     if data.get("wrapper_status") != "installed":
         raise RuntimeError("benchmark instrumentation wrapper is unavailable")
@@ -1366,6 +1438,39 @@ async def run_public_workflow(
                 "drain_completed": instrumentation["graph_drain_completed"],
                 "rebuild_attempts": instrumentation["graph_rebuild_attempts"],
                 "rebuild_completed": instrumentation["graph_rebuild_completed"],
+            },
+        },
+        "graph_execution_elapsed_ms": {
+            "at_closure": {
+                "incremental": closure_snapshot["graph_incremental_execution_elapsed_ms"],
+                "rebuild": closure_snapshot["graph_rebuild_execution_elapsed_ms"],
+            },
+            "at_convergence": {
+                "incremental": convergence_snapshot["graph_incremental_execution_elapsed_ms"],
+                "rebuild": convergence_snapshot["graph_rebuild_execution_elapsed_ms"],
+            },
+            "after_shutdown": {
+                "incremental": instrumentation["graph_incremental_execution_elapsed_ms"],
+                "rebuild": instrumentation["graph_rebuild_execution_elapsed_ms"],
+            },
+        },
+        "graph_topology_discovery": {
+            "coverage": instrumentation["graph_topology_coverage"],
+            "byte_coverage": instrumentation["graph_topology_byte_coverage"],
+            "at_closure": {
+                "paths_enumerated": closure_snapshot["graph_topology_paths_enumerated"],
+                "stat_estimated_bytes": closure_snapshot["graph_topology_stat_estimated_bytes"],
+                "actual_body_read_bytes": closure_snapshot["graph_topology_actual_body_read_bytes"],
+            },
+            "at_convergence": {
+                "paths_enumerated": convergence_snapshot["graph_topology_paths_enumerated"],
+                "stat_estimated_bytes": convergence_snapshot["graph_topology_stat_estimated_bytes"],
+                "actual_body_read_bytes": convergence_snapshot["graph_topology_actual_body_read_bytes"],
+            },
+            "after_shutdown": {
+                "paths_enumerated": instrumentation["graph_topology_paths_enumerated"],
+                "stat_estimated_bytes": instrumentation["graph_topology_stat_estimated_bytes"],
+                "actual_body_read_bytes": instrumentation["graph_topology_actual_body_read_bytes"],
             },
         },
         "source_scans": {
