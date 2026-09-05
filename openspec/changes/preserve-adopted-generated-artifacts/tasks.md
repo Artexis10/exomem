@@ -32,8 +32,8 @@
 
 - [x] 5.1 Kill mutants that remove explicit selection, swap the selected id, reconstruct bytes, omit receipt fields, or mark handoff committed.
 - [x] 5.2 Kill mutants that disable request-window replay, skip later re-stage/hash comparison, accept an unverifiable expired handle, lose Source/Evidence receipt parity, record delivery before receipt, or assert remote identity without platform proof.
-- [ ] 5.3 Run focused preservation, Records, carrier, Hosted package/promotion, public-input, scaffold leak, generated-contract, and historical-lock tests.
-- [ ] 5.4 Run `ruff check`, the full non-model pytest suite, and `openspec validate --all --strict` and report exact false-positive and draft-clutter counts.
+- [x] 5.3 Run focused preservation, Records, carrier, Hosted package/promotion, public-input, scaffold leak, generated-contract, and historical-lock tests. Evidence: tests/artifact_adoption/, Records integration, carrier, hosted package/promotion, scaffold leak, generated-contract and manifest suites green on the delivered tip.
+- [x] 5.4 Run `ruff check`, the full non-model pytest suite, and `openspec validate --all --strict` and report exact false-positive and draft-clutter counts. Evidence: ruff clean; full lean suite on the delivered tip; strict validate 182/182; false-positive and draft-clutter counts reported in the PR body.
 
 ## 6. OpenSpec closure
 

@@ -29,9 +29,9 @@
 
 ## 5. Verification and delivery
 
-- [ ] 5.1 Run focused fixture, carrier, bootstrap-budget, Hosted profile/package/promotion, plugin sync, public-input, and scaffold leak tests.
+- [x] 5.1 Run focused fixture, carrier, bootstrap-budget, Hosted profile/package/promotion, plugin sync, public-input, and scaffold leak tests. Evidence: tests/test_personal_baseline_contract.py, carrier and bootstrap-budget suites, tests/test_hosted_v5_candidate.py, tests/test_plugin_sync.py, tests/test_scaffold_no_leak.py green on the delivered tip.
 - [x] 5.2 Run required mutation tests and record killed-mutant evidence.
-- [ ] 5.3 Run `ruff check`, the full non-model pytest suite, and `openspec validate --all --strict`.
-- [ ] 5.4 Report false-positive results separately and do not claim comparative no-nudge benchmark evidence without its governed amendment.
+- [x] 5.3 Run `ruff check`, the full non-model pytest suite, and `openspec validate --all --strict`. Evidence: ruff clean; full lean suite on the delivered tip; openspec validate --all --strict 182/182 with the CI-pinned validator.
+- [x] 5.4 Report false-positive results separately and do not claim comparative no-nudge benchmark evidence without its governed amendment. Evidence: PR body reports the false-positive twins per fixture separately and claims no comparative no-nudge benchmark result; f21 stays withheld.
 - [x] 5.5 Run delegation-envelope fixtures proving baseline writes never bypass the mapped class disposition or confirmation.
 - [ ] 5.6 After all four changes are implemented, independently reviewed, merged, and represented in promoted v5 evidence, refresh each delta against the then-current canonical specs and archive in this exact order: `add-governed-curation-lane`, `complete-recurring-entity-lifecycle`, `preserve-adopted-generated-artifacts`, `capture-durable-personal-baselines`; preserve requirements introduced by earlier archives and run `openspec validate --all --strict` before and after every archive.
