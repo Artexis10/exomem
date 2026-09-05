@@ -17,6 +17,10 @@ The model-free media variant SHALL prove preservation and durable enqueue only. 
 - **WHEN** canonical writes are durable and final exact recall verifies their new state while optional projections remain pending
 - **THEN** useful durable closure and later full convergence are reported as distinct times
 
+#### Scenario: Evidence-backed writes depend on media completion
+- **WHEN** extraction can change a cited media sidecar while unrelated tracker or background-note work is ready
+- **THEN** independent work proceeds during extraction, while the evidence-backed write validates its sources after the relevant media completion without bypassing source-version or backlink guards
+
 ### Requirement: Measurements declare their provenance
 The report SHALL include workflow wall time, public call count, summed and union server durations, connector overhead when observed, write ACK p50/p95, warming/refusal observations and windows, graph incremental/rebuild counts, derived scan pages/bytes, and final read-your-write correctness. Missing measurements SHALL be explicit nulls with reasons, never invented zeroes. Historical workflow reconstruction SHALL use call-ledger rows and distinguish client gaps from measured connector or model time.
 

@@ -69,6 +69,10 @@ possible. On an existing page, `edit_memory` with `operation.kind="batch_replace
 can combine known string changes into one guarded mutation. It is not an atomic
 multi-page transaction. Keep conflicting canonical edits ordered; run independent
 reads or artifact work concurrently only within the active client's capabilities.
+When a compiled note cites a media sidecar that extraction can still change,
+complete the relevant extraction before validating that dependent write. Do
+source-independent tracker, background-note or unrelated capture work while it
+runs. Never bypass a source-version guard or reuse a stale staged backlink.
 
 Inspect each terminal and handle actionable warnings, but do not reread the page
 after every committed edit or poll until every projection is current. Chain a

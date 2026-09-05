@@ -158,6 +158,16 @@ The generic dependency structure is preservation → media enqueue and note work
 bounded final verification, with extraction convergence measured separately. No
 application-specific command or second multi-page transaction engine is added.
 
+The combined real-extraction stress probe also exposed a necessary dependency:
+source closure resolves a binary citation through its evidence sidecar, fingerprints
+that source and stages a guarded backlink write. Extraction can change that
+sidecar between preparation and commit. The observed `STALE_SEMANTIC_WRITE`
+protects fresh extraction from being overwritten; it is not a guard to relax.
+Source-independent note work can overlap extraction, but the evidence-backed
+write follows the relevant artifact's completion. The current media worker
+processes its queue serially; batching removes public round trips and synchronous
+graph draining, not that worker's single-owner execution constraint.
+
 ## Rerunning the ledger decomposition
 
 Use a selected copy of the service's logs, keeping private inputs outside the
