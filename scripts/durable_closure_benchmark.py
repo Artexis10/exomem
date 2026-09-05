@@ -461,7 +461,7 @@ def controller():
 def wrap(module, name, attempts, completed):
     original = getattr(module, name, None)
     if original is None:
-        return
+        raise AttributeError(f"missing required instrumentation hook: {name}")
     def counted(*args, **kwargs):
         command()
         with lock:

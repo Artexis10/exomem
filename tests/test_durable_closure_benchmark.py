@@ -218,6 +218,13 @@ def test_scan_walker_does_not_publish_or_poll_control_per_page(tmp_path: Path) -
     assert "publish()" not in walker
 
 
+def test_missing_required_instrumentation_hook_is_not_silently_counted_as_zero(tmp_path: Path) -> None:
+    hook = benchmark.install_subprocess_instrumentation(tmp_path / "state")
+    source = (hook / "sitecustomize.py").read_text(encoding="utf-8")
+
+    assert 'raise AttributeError(f"missing required instrumentation hook: {name}")' in source
+
+
 def test_workflow_wall_excludes_transport_shutdown_and_postprocessing() -> None:
     timing = benchmark.lifecycle_timings(workflow_started=10.0, closure_finished=30.0, shutdown_finished=35.0)
 
