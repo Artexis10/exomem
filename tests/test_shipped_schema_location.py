@@ -125,8 +125,12 @@ def test_a_fresh_vault_has_no_shipped_markdown_in_its_notes(tmp_path: Path) -> N
     stray = sorted(path.name for path in schema.rglob("*.md"))
 
     assert stray == []
-    deployed = sorted(vault_module.shipped_schema_target(tmp_path).rglob("*.md"))
-    assert len(deployed) == 18
+    shipped = vault_module.shipped_schema_target(tmp_path)
+    deployed = sorted(shipped.rglob("*.md"))
+    scaffold = init_module._SCAFFOLD / "_Schema"
+    assert {path.relative_to(shipped) for path in deployed} == {
+        path.relative_to(scaffold) for path in scaffold.rglob("*.md")
+    }
     assert (
         vault_module.shipped_schema_target(tmp_path)
         / "examples/workflow-contracts/companion-example.md"

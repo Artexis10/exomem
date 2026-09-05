@@ -1,7 +1,8 @@
 ---
 name: exomem-review
 description: Use Exomem's Epistemic Inbox and audit queues to surface stale conclusions, contradictions, relation debt, and unprocessed sources safely.
-version: 0.2.0
+metadata:
+  version: "0.2.0"
 ---
 
 # exomem-review
@@ -12,6 +13,26 @@ Drain Exomem review queues into safe next actions.
 ## When to use
 Use when the user asks to review the KB, see what needs attention, drain backlog,
 or inspect stale, contradictory, disconnected, or unprocessed material.
+
+## Portable operating rules
+
+Before the first operation, obtain `bootstrap(profile="compact")` if current
+policy or capabilities are missing; honor `engagement.envelope` and
+`available_product_tools`. Use the harness's supported discovery mechanism and
+load only the tools needed now. If neither the applicable local procedure nor
+the portable operating contract is available, do not improvise a write.
+
+Sources/Evidence are immutable, and content outside the managed Knowledge Base
+is read-only. Before a compiled write: search/read for duplicates, draft, run
+`connect_memory(operation="suggest-links")`, and include known source references
+and reviewed connections in the first write. Honor the live confirmation ceiling;
+a workflow or standing capture preference does not grant restructure authority.
+
+Inspect mutation results before reporting success. On `success: false`, follow
+the structured error. For warming, busy, pending, or
+`MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, preserve the same mutation identity
+and unchanged payload; wait/reconcile/retry only as instructed, never with a new
+identity after an uncertain commit.
 
 ## Workflow
 1. Start with `review_memory(mode="attention")` for the ranked review queue.
