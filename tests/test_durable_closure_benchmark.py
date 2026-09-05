@@ -105,6 +105,18 @@ def test_ledger_durations_join_to_each_client_call_without_inventing_intervals()
     assert joined[0]["server_interval"] == {"started_ms": 1788609600993.0, "ended_ms": 1788609601000.0}
 
 
+def test_ledger_refusal_cannot_be_joined_to_an_ok_client_call() -> None:
+    calls = [{"tool": "ask_memory", "outcome": "ok", "client_elapsed_ms": 1.0, "ended_ms": 1.0}]
+    rows = [{"tool": "ask_memory", "outcome": "refused", "error_code": "RETRIEVAL_INDEX_WARMING", "duration_ms": 1, "total_ms": 1, "ts_utc": "2026-09-05T12:00:01.000+00:00"}]
+
+    try:
+        benchmark.attach_ledger_measurements(calls, rows)
+    except ValueError as error:
+        assert "outcome" in str(error)
+    else:
+        raise AssertionError("ledger refusal must invalidate an incompatible client join")
+
+
 def test_ledger_utc_completion_and_total_duration_form_a_measured_interval() -> None:
     rows = benchmark.ledger_intervals(
         [{"ts_utc": "2026-09-05T12:00:01.000+00:00", "total_ms": 250.0}]
@@ -152,6 +164,15 @@ def test_instrumentation_error_invalidates_benchmark_measurement(tmp_path: Path)
         assert "error" in str(error)
     else:
         raise AssertionError("instrumentation errors must not be reported as measured zeroes")
+
+
+def test_scan_walker_does_not_publish_or_poll_control_per_page(tmp_path: Path) -> None:
+    hook = benchmark.install_subprocess_instrumentation(tmp_path / "state")
+    source = (hook / "sitecustomize.py").read_text(encoding="utf-8")
+    walker = source.split("    def walk(root):", 1)[1].split("    find._walk_md = walk", 1)[0]
+
+    assert "command()" not in walker
+    assert "publish()" not in walker
 
 
 def test_workflow_wall_excludes_transport_shutdown_and_postprocessing() -> None:
@@ -248,6 +269,13 @@ def test_projected_media_results_and_legacy_single_result_feed_extraction_reads(
 
     assert benchmark.media_result_rows(batch) == batch["media_results"]
     assert benchmark.media_result_rows(legacy) == [{**legacy, "outcome": "processed"}]
+
+
+def test_media_projection_must_match_requested_paths_once_and_in_order() -> None:
+    paths = ["a.pdf", "a.png", "b.png"]
+    duplicate_rows = [{"path": "a.pdf", "outcome": "processed", "sidecar_path": "a.md", "job_id": 1}] * 3
+
+    assert benchmark.media_rows_match_request(paths, duplicate_rows) is False
 
 
 def test_real_extraction_requires_unique_expected_text_and_named_engines() -> None:

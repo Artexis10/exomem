@@ -123,6 +123,19 @@ def media_result_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def media_rows_match_request(paths: Sequence[str], rows: Sequence[Mapping[str, Any]]) -> bool:
+    """A batch terminal is useful only if it accounts for each selected artifact."""
+    if [row.get("path") for row in rows] != list(paths):
+        return False
+    return all(
+        str(row.get("outcome") or "").lower() in {"processed", "retried"}
+        and isinstance(row.get("sidecar_path"), str)
+        and bool(row.get("sidecar_path"))
+        and (isinstance(row.get("job_id"), int) or row.get("state") == "completed")
+        for row in rows
+    )
+
+
 def extraction_proof(
     artifacts: Sequence[Mapping[str, Any]], reads: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any] | None:
@@ -330,6 +343,10 @@ def attach_ledger_measurements(
         result["server_interval"] = None
         if row_index < len(ledger_rows) and ledger_rows[row_index].get("tool") == call.get("tool"):
             row = ledger_rows[row_index]
+            if row.get("outcome") is not None and row.get("outcome") != call.get("outcome"):
+                raise ValueError("ledger outcome does not match client outcome")
+            if row.get("error_code") is not None and row.get("error_code") != call.get("error_code"):
+                raise ValueError("ledger error code does not match client outcome")
             result["server_duration_ms"] = float(row["duration_ms"]) if row.get("duration_ms") is not None else None
             result["server_total_ms"] = float(row["total_ms"]) if row.get("total_ms") is not None else None
             result["server_interval"] = intervals[row_index]
@@ -388,8 +405,16 @@ data = {"wrapper_status": "installed", "graph_drain_attempts": 0, "graph_drain_c
 lock = threading.RLock()
 last_command = None
 stopping = threading.Event()
+owner_path = out.with_name("instrumentation-owner.pid")
+try:
+    owner_path.open("x", encoding="utf-8").write(str(os.getpid()))
+    owner = True
+except FileExistsError:
+    owner = owner_path.read_text(encoding="utf-8").strip() == str(os.getpid())
 
 def publish():
+    if not owner:
+        return
     with lock:
         temporary = out.with_suffix(".tmp")
         temporary.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
@@ -397,7 +422,7 @@ def publish():
 
 def command():
     global last_command
-    if control is None or not control.is_file():
+    if not owner or control is None or not control.is_file():
         return
     try:
         payload = json.loads(control.read_text(encoding="utf-8"))
@@ -448,21 +473,20 @@ try:
     original_walk = find._walk_md
     def walk(root):
         for path in original_walk(root):
-            command()
             with lock:
                 data["source_scan_pages"] += 1
                 try:
                     data["source_scan_bytes"] += path.stat().st_size
                 except OSError:
                     pass
-            publish()
             yield path
     find._walk_md = walk
 except Exception as error:
     data["instrumentation_error"] = type(error).__name__
 
 publish()
-threading.Thread(target=controller, name="durable-closure-instrumentation", daemon=True).start()
+if owner:
+    threading.Thread(target=controller, name="durable-closure-instrumentation", daemon=True).start()
 
 @atexit.register
 def save():
@@ -899,7 +923,8 @@ async def run_public_workflow(
     recall: dict[str, Any] = {"success": False}
     extraction_enqueue_started: float | None = None
     extraction_sidecar_paths: list[str] = []
-    full_convergence_ms: float | None = None
+    media_convergence_wall_ms: float | None = None
+    useful_closure_finished = workflow_started
     client = Client(transport, timeout=timeout, init_timeout=timeout)
     async with client:
         registered_tools = {tool.name: tool for tool in await client.list_tools()}
@@ -957,8 +982,7 @@ async def run_public_workflow(
             media_rows = [row for payload in process_payloads for row in media_result_rows(payload)]
             process_ok = (
                 all(_outcome_ok(payload) for payload in process_payloads)
-                and len(media_rows) == len(evidence_paths)
-                and all(str(row.get("outcome") or "").lower() in {"processed", "retried"} for row in media_rows)
+                and media_rows_match_request(evidence_paths, media_rows)
             )
             extraction_sidecar_paths = [
                 str(row.get("sidecar_path") or "") for row in media_rows if isinstance(row.get("sidecar_path"), str)
@@ -1055,6 +1079,7 @@ async def run_public_workflow(
         closure_instrumentation = await instrumentation_command(
             state, action="snapshot", phase="closure", timeout=timeout
         )
+        useful_closure_finished = time.perf_counter()
 
         # Continue with independent note/relation closure before awaiting media.
         # The media convergence clock starts at its earlier public enqueue.
@@ -1087,7 +1112,7 @@ async def run_public_workflow(
                         **proof,
                     }
                 )
-                full_convergence_ms = (time.perf_counter() - workflow_started) * 1000.0
+                media_convergence_wall_ms = (time.perf_counter() - workflow_started) * 1000.0
 
         convergence_instrumentation = await instrumentation_command(
             state, action="snapshot", phase="convergence", timeout=timeout
@@ -1138,6 +1163,7 @@ async def run_public_workflow(
             closure_finished=closure_finished,
             shutdown_finished=shutdown_finished,
         ),
+        "useful_closure_wall_ms": (useful_closure_finished - workflow_started) * 1000.0,
         "public_call_count": len(call_records),
         "call_counts": {
             "probes": sum(1 for call in call_records if call.get("probe")),
@@ -1203,14 +1229,10 @@ async def run_public_workflow(
             "error": instrumentation.get("instrumentation_error"),
         },
         "media": media,
-        "full_convergence_ms": full_convergence_ms,
-        "full_convergence_reason": (
-            None
-            if full_convergence_ms is not None
-            else "model-free profile proves enqueue/custody only"
-            if profile == MODEL_FREE_PROFILE
-            else "public extraction proof did not converge"
-        ),
+        "media_convergence_wall_ms": media_convergence_wall_ms,
+        "full_convergence_ms": None,
+        "full_convergence_reason": "graph, lexical, and embedding projection convergence are not publicly proven by this harness",
+        "initial_graph_readiness": {"status": "unmeasured", "reason": "managed keyword warm-up does not establish hybrid graph readiness"},
     }
 
 
