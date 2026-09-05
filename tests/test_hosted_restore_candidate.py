@@ -172,6 +172,22 @@ def test_fresh_initialize_workload_creates_state_manifest_before_server_start(
     binding = _binding(tmp_path)
     monkeypatch.setattr(hosted_runtime, "_default_security_bootstrap", _bootstrap)
     monkeypatch.setenv("EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION", "1")
+    enrollment_events: list[str] = []
+
+    def prepare_custody() -> None:
+        enrollment_events.append("custody")
+
+    def enroll(owner: HostedBindingV2, *, now: int) -> None:
+        assert owner == binding
+        assert now > 0
+        # This test owns state migration; enrollment's real custody and
+        # revision-zero publication are exercised in test_consolidation_enrollment.
+        assert state_migration.migration_completed(owner.vault_root)
+        _require_bound_state_ready(owner)
+        enrollment_events.append("enroll")
+
+    monkeypatch.setattr(hosted_runtime, "_prepare_hosted_enrollment_custody", prepare_custody)
+    monkeypatch.setattr(hosted_runtime, "_enroll_initialized_hosted_cell", enroll)
 
     code, _data = hosted_runtime.execute_hosted_init_v2(
         {
@@ -191,6 +207,7 @@ def test_fresh_initialize_workload_creates_state_manifest_before_server_start(
     )
 
     assert code == "HOSTED_CELL_INITIALIZED"
+    assert enrollment_events == ["custody", "enroll"]
     _require_bound_state_ready(binding)
     _configure_hosted_server(monkeypatch, binding)
     runtime = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
