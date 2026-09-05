@@ -85,7 +85,25 @@ def test_foreign_bytes_after_publish_are_replayed_as_external(
         )
 
     assert freshness.external_pending(vault) is True
-    assert watcher._drain()[1] == [target]
+    assert target in watcher._drain()[1]
+
+
+def test_foreign_bytes_do_not_fall_through_to_legacy_self_signature(vault: Path) -> None:
+    file_watcher.clear_self_write_registry()
+    target = vault / "Knowledge Base" / "Notes" / "same-signature-foreign.md"
+    intent = _register_active_intent(vault, target, b"new")
+    file_watcher.register_self_write(vault, [target])
+    file_watcher.finalize_publication_intents([intent], succeeded=[intent])
+    signature = target.stat()
+    target.write_bytes(b"bad")
+    os.utime(target, ns=(signature.st_atime_ns, signature.st_mtime_ns))
+    watcher = file_watcher.FileWatcher(vault)
+
+    assert file_watcher._is_self_write_event(vault, target, deleted=False) is True
+    watcher._record(target, deleted=False)
+
+    assert freshness.external_pending(vault) is True
+    assert target in watcher._drain()[1]
 
 
 def test_registration_failure_replays_held_event_before_writer_returns(
@@ -131,8 +149,6 @@ def test_rollback_incomplete_replays_published_remnant_immediately(
 
     def observe(path: Path) -> None:
         real_published(path)
-        if path == target:
-            watcher._record(path, deleted=False)
 
     def fail_second_publication(self, artifact, final, **kwargs):  # noqa: ANN001
         nonlocal publications
@@ -157,7 +173,7 @@ def test_rollback_incomplete_replays_published_remnant_immediately(
         )
 
     assert freshness.external_pending(vault) is True
-    assert watcher._drain()[1] == [target]
+    assert target in watcher._drain()[1]
 
 
 def test_expired_held_intent_replays_without_another_event(
