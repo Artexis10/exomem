@@ -89,6 +89,11 @@ def dependency_gate(dependencies: Mapping[str, bool]) -> dict[str, Any]:
     return {"ready": not blocked, "blocked_dependencies": blocked}
 
 
+def source_closure_dependencies(*, artifacts_present: bool) -> dict[str, bool]:
+    """Start source closure with its mandatory public artifact-manifest edge."""
+    return {"artifact-manifest": artifacts_present}
+
+
 async def run_after_dependencies(
     dependencies: Mapping[str, bool], dependent_operation: Callable[[], Awaitable[Any]]
 ) -> dict[str, Any]:
@@ -97,6 +102,14 @@ async def run_after_dependencies(
     if gate["ready"]:
         await dependent_operation()
     return gate
+
+
+def has_ordinary_retrieval_failure(calls: Sequence[Mapping[str, Any]]) -> bool:
+    """Any public recall or read failure invalidates a blocked closure result."""
+    return any(
+        call.get("tool") in {"ask_memory", "read_memory"} and call.get("outcome") != "ok"
+        for call in calls
+    )
 
 
 def validated_evidence_paths(
@@ -681,30 +694,41 @@ def materialize_corpus(vault: Path, *, pages: int) -> dict[str, Any]:
     }
 
 
+def _explicit_terminal_payload(payload: Mapping[str, Any]) -> bool:
+    """Recognize the documented machine-readable terminal refusal envelope."""
+    if payload.get("success") is False or isinstance(payload.get("error"), Mapping):
+        return True
+    terminal = payload.get("outcome")
+    return isinstance(terminal, str) and terminal.lower() in {"failed", "refused", "rejected", "error"}
+
+
 def _decode_call(result: Any) -> dict[str, Any]:
+    is_error = bool(getattr(result, "is_error", False) or getattr(result, "isError", False))
+    decoded_payload: dict[str, Any] | None = None
     structured = getattr(result, "structured_content", None)
     if structured is None:
         structured = getattr(result, "structuredContent", None)
     if isinstance(structured, dict):
         nested = structured.get("result")
-        return nested if isinstance(nested, dict) else structured
-    content = getattr(result, "content", ()) or ()
-    for item in content:
-        text = getattr(item, "text", None)
-        if isinstance(text, str):
-            try:
-                decoded = json.loads(text)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(decoded, dict):
-                nested = decoded.get("result")
-                return nested if isinstance(nested, dict) else decoded
-    is_error = getattr(result, "is_error", None)
-    if is_error is None:
-        is_error = getattr(result, "isError", False)
+        decoded_payload = nested if isinstance(nested, dict) else structured
+    else:
+        content = getattr(result, "content", ()) or ()
+        for item in content:
+            text = getattr(item, "text", None)
+            if isinstance(text, str):
+                try:
+                    decoded = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(decoded, dict):
+                    nested = decoded.get("result")
+                    decoded_payload = nested if isinstance(nested, dict) else decoded
+                    break
+    if decoded_payload is not None and (not is_error or _explicit_terminal_payload(decoded_payload)):
+        return decoded_payload
     # Keep the public protocol terminal signal but never copy opaque tool text
     # (which can contain server-private exception detail) into the report.
-    if is_error is True:
+    if is_error:
         return {"_wire_status": "tool_error"}
     return {"_wire_status": "unparseable"}
 
@@ -1121,7 +1145,7 @@ async def run_public_workflow(
         # The source note has a causal dependency on media custody/completion.
         # Keep unrelated tracker, critique, archive, and stale-edge work above
         # this boundary so extraction settles while ordinary closure continues.
-        source_dependencies: dict[str, bool] = {}
+        source_dependencies = source_closure_dependencies(artifacts_present=artifacts is not None)
         if artifacts is not None:
             if profile == REAL_EXTRACTION_PROFILE:
                 proof: dict[str, Any] | None = None
@@ -1242,9 +1266,7 @@ async def run_public_workflow(
         _outcome_ok(payload)
         for payload in (tracker_observation, critique_observation, tracker_correction, archived_read)
     )
-    ordinary_retrieval_refused = any(
-        call.get("tool") == "ask_memory" and call.get("outcome") != "ok" for call in call_records
-    )
+    ordinary_retrieval_refused = has_ordinary_retrieval_failure(call_records)
     final_exact = bool(
         path
         and mutation_success

@@ -185,6 +185,22 @@ def test_typed_warming_refusal_still_requires_the_same_ledger_error_code() -> No
         raise AssertionError("a typed warming refusal must not be laundered through a generic ledger error")
 
 
+def test_mcp_error_flag_overrides_parseable_nonterminal_payloads() -> None:
+    class Text:
+        text = '{"message": "STALE_SEMANTIC_WRITE"}'
+
+    class StructuredResult:
+        is_error = True
+        structured_content = {"message": "STALE_SEMANTIC_WRITE"}
+
+    class JsonResult:
+        isError = True
+        content = (Text(),)
+
+    for result in (StructuredResult(), JsonResult()):
+        assert benchmark._result_outcome(benchmark._decode_call(result)) == ("tool_error", None)
+
+
 def test_invalid_measurement_report_retains_public_and_ledger_counts() -> None:
     report = benchmark.invalid_measurement_report(
         calls=[{"tool": "remember", "outcome": "tool_error"}],
@@ -449,6 +465,24 @@ def test_failed_dependency_gate_does_not_run_the_dependent_write() -> None:
     assert gate == {"ready": False, "blocked_dependencies": ["real-extraction-proof"]}
 
 
+def test_missing_manifest_dependency_skips_all_source_closure_calls() -> None:
+    source_calls = 0
+
+    async def source_closure() -> None:
+        nonlocal source_calls
+        source_calls += 1
+
+    gate = asyncio.run(
+        benchmark.run_after_dependencies(
+            benchmark.source_closure_dependencies(artifacts_present=False),
+            source_closure,
+        )
+    )
+
+    assert source_calls == 0
+    assert gate == {"ready": False, "blocked_dependencies": ["artifact-manifest"]}
+
+
 def test_unproven_source_closure_is_blocked_only_when_independent_work_and_recalls_hold() -> None:
     common = {
         "core_passed": False,
@@ -464,6 +498,19 @@ def test_unproven_source_closure_is_blocked_only_when_independent_work_and_recal
     ) == "fail"
     assert benchmark.workflow_status(
         **common, independent_work_succeeded=True, ordinary_retrieval_refused=True
+    ) == "fail"
+
+
+def test_read_tool_error_is_an_ordinary_retrieval_failure_not_a_blocked_mask() -> None:
+    calls = [{"tool": "read_memory", "outcome": "tool_error"}]
+
+    assert benchmark.has_ordinary_retrieval_failure(calls) is True
+    assert benchmark.workflow_status(
+        core_passed=False,
+        media_status="blocked",
+        blocked_dependencies=["real-extraction-proof"],
+        independent_work_succeeded=True,
+        ordinary_retrieval_refused=benchmark.has_ordinary_retrieval_failure(calls),
     ) == "fail"
 
 
@@ -507,20 +554,14 @@ def test_small_model_free_smoke_uses_one_registered_stdio_product_session(
     assert report["public_call_count"] >= 5
     assert {call["tool"] for call in report["calls"]} >= {
         "bootstrap",
-        "remember",
         "ask_memory",
         "read_memory",
     }
+    assert all(call["phase"] != "source-closure" for call in report["calls"])
     assert report["media"]["status"] == "blocked"
     if report["status"] == "blocked":
-        assert report["verification"] == {
-            "direct_marker": True,
-            "tracker_marker": True,
-            "recall_hit": True,
-            "evidence_citations": True,
-            "stale_relation_absent": True,
-            "mutations_succeeded": True,
-        }
+        assert report["blocked_dependencies"] == ["artifact-manifest"]
+        assert report["useful_closure"]["final_read_your_write"] is False
     else:
         assert report["useful_closure"]["refusal_observations"]
     ordinary_recall = next(call for call in report["calls"] if call["tool"] == "ask_memory")
