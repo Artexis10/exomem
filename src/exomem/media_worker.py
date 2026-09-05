@@ -85,6 +85,7 @@ def _is_canonical_sidecar(sidecar: Path, binary: Path) -> bool:
         return False
     return os.path.normcase(str(sidecar.parent)) == os.path.normcase(str(binary.parent))
 _COMPLETE = "complete"
+_HANDOFF = "handoff"
 _STALE = "stale"
 _BLOCKED_ACTION = "install the required media dependency, then retry"
 _RENDERER_ACTION = "check the timestamp renderer, then retry"
@@ -233,6 +234,12 @@ def _binary_identity(
     return (before, digest)
 
 
+def _result_binary_identity(
+    identity: tuple[tuple[int, int, int, int, int], str | None]
+) -> dict[str, object]:
+    return {"stat": list(identity[0]), "sha256": identity[1]}
+
+
 class MediaWorker:
     """Media supervisor with process-default and inline execution modes."""
 
@@ -359,7 +366,11 @@ class MediaWorker:
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             counts = self._store.counts()
-            if counts["pending"] == 0 and counts["running"] == 0:
+            if (
+                counts["pending"] == 0
+                and counts["running"] == 0
+                and self._store.pending_result_count() == 0
+            ):
                 return
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("media worker queue did not drain")
@@ -385,6 +396,8 @@ class MediaWorker:
         outcome = _ProcessOutcome(_COMPLETE)
         if job.do_ocr:
             outcome = self._run_extraction(job)
+        if outcome.state == _HANDOFF:
+            return outcome
         if job.do_clip:
             self._run_clip(job)
         if job.do_reembed:
@@ -455,10 +468,8 @@ class MediaWorker:
                 expected_binary=expected_binary,
                 error=self._asr_runtime_failure,
             )
-            return (
-                _ProcessOutcome(BLOCKED, self._asr_runtime_failure)
-                if committed
-                else _ProcessOutcome(_STALE)
+            return self._publication_outcome(
+                committed, BLOCKED, self._asr_runtime_failure
             )
         try:
             kwargs = {"media_type": job.media_type, "vault_root": self._vault_root}
@@ -479,7 +490,7 @@ class MediaWorker:
                 error=error,
                 next_action=_RENDERER_ACTION,
             )
-            return _ProcessOutcome(BLOCKED, error) if committed else _ProcessOutcome(_STALE)
+            return self._publication_outcome(committed, BLOCKED, error)
         except extract.ExtractionUnavailable as e:
             error = f"{type(e).__name__}: {e}"
             log.warning("extraction unavailable for %s: %s", job.binary_path.name, e)
@@ -491,7 +502,7 @@ class MediaWorker:
                 error=error,
                 next_action=_BLOCKED_ACTION,
             )
-            return _ProcessOutcome(BLOCKED, error) if committed else _ProcessOutcome(_STALE)
+            return self._publication_outcome(committed, BLOCKED, error)
         except runtime_resources.ModelBusyError:
             raise
         except asr_runtime.ASRComputeRuntimeError as e:
@@ -505,7 +516,7 @@ class MediaWorker:
                 expected_binary=expected_binary,
                 error=error,
             )
-            return _ProcessOutcome(BLOCKED, error) if committed else _ProcessOutcome(_STALE)
+            return self._publication_outcome(committed, BLOCKED, error)
         except Exception as e:  # noqa: BLE001 — a corrupt file shouldn't re-loop forever
             error = f"{type(e).__name__}: {e}"
             log.exception("extraction failed for %s", job.binary_path.name)
@@ -517,7 +528,7 @@ class MediaWorker:
                 error=error,
                 next_action=_FAILED_ACTION,
             )
-            return _ProcessOutcome(FAILED, error) if committed else _ProcessOutcome(_STALE)
+            return self._publication_outcome(committed, FAILED, error)
         text = result.text.strip() or "(no text detected)"
         committed = False
         for commit_attempt in range(3):
@@ -554,6 +565,19 @@ class MediaWorker:
             if binary_changed:
                 stale_parts.append("media identity changed")
             if binary_changed and not sidecar_changed:
+                if self._store is not None:
+                    current_identity = _binary_identity(job.binary_path)
+                    if current_identity is not None and self._store.record_result(
+                        job,
+                        kind="pending",
+                        sidecar_before_hash=expected_sidecar,
+                        binary_identity=_result_binary_identity(current_identity),
+                        payload={
+                            "error": "media identity changed",
+                            "next_action": "wait for media reconciliation",
+                        },
+                    ):
+                        return _ProcessOutcome(_HANDOFF)
                 preserve.update_sidecar_processing_pending(
                     self._vault_root,
                     job.sidecar_path,
@@ -565,7 +589,16 @@ class MediaWorker:
         log.info(
             "extracted %s via %s (%d chars)", job.binary_path.name, result.engine, len(result.text)
         )
-        return _ProcessOutcome(_COMPLETE)
+        return self._publication_outcome(committed, _COMPLETE, None)
+
+    def _publication_outcome(
+        self, committed: bool, state: str, error: str | None
+    ) -> _ProcessOutcome:
+        if not committed:
+            return _ProcessOutcome(_STALE)
+        if self._store is not None:
+            return _ProcessOutcome(_HANDOFF, error)
+        return _ProcessOutcome(state, error)
 
     def _block_compute_runtime_failure(
         self,
@@ -575,8 +608,6 @@ class MediaWorker:
         expected_binary: tuple[tuple[int, int, int, int, int], str | None],
         error: str,
     ) -> bool:
-        if self._store is not None and job.id is not None:
-            self._store.mark(job.id, BLOCKED, error)
         try:
             self._commit_processing_failure(
                 job,
@@ -619,6 +650,19 @@ class MediaWorker:
         speakers: list[dict] | None = None,
         speaker_verification: str | None = None,
     ) -> bool:
+        if self._store is not None:
+            return self._store.record_result(
+                job,
+                kind="extraction",
+                sidecar_before_hash=expected_sidecar,
+                binary_identity=_result_binary_identity(expected_binary),
+                payload={
+                    "text": text,
+                    "engine": engine,
+                    "speakers": speakers or [],
+                    "speaker_verification": speaker_verification or "unavailable",
+                },
+            )
         token: DeferredGraphCompletion | None = None
         receipts: list[deferred_index.DeferredReceipt] = []
         with get_manager().mutation_guard(
@@ -687,6 +731,15 @@ class MediaWorker:
         error: str,
         next_action: str,
     ) -> bool:
+        if self._store is not None:
+            return self._store.record_result(
+                job,
+                kind="failure",
+                sidecar_before_hash=expected_sidecar,
+                binary_identity=_result_binary_identity(expected_binary),
+                payload={"error": error, "next_action": next_action},
+                terminal_state=state,
+            )
         token: DeferredGraphCompletion | None = None
         receipts: list[deferred_index.DeferredReceipt] = []
         with get_manager().mutation_guard(
@@ -743,7 +796,7 @@ class MediaWorker:
         self,
         token: DeferredGraphCompletion,
         receipts: list[deferred_index.DeferredReceipt],
-    ) -> None:
+    ) -> bool:
         try:
             with get_manager().mutation_guard(
                 self._vault_root,
@@ -759,10 +812,12 @@ class MediaWorker:
                         vault_root=self._vault_root,
                     )
                 except FileNotFoundError:
-                    return
+                    index_sync.recover_full_receipt_graph_epoch(self._vault_root, build=False)
+                    return False
                 floor = graph_sync.GraphSyncGenerationFloor.parse(floor_raw)
                 if floor is None or floor.generation != token.checkpoint.generation:
-                    return
+                    index_sync.recover_full_receipt_graph_epoch(self._vault_root, build=False)
+                    return False
                 floor_content = floor_raw.decode("utf-8")
                 try:
                     checkpoint_raw = graph_sync._read_bounded_bytes(
@@ -776,10 +831,12 @@ class MediaWorker:
                 else:
                     predecessor = graph_sync.GraphSyncCheckpoint.parse(checkpoint_raw)
                     if predecessor is None:
-                        return
+                        index_sync.recover_full_receipt_graph_epoch(self._vault_root, build=False)
+                        return False
                     checkpoint_hash = content_hash(checkpoint_raw.decode("utf-8"))
                 if predecessor != token.predecessor or checkpoint_hash is None:
-                    return
+                    index_sync.recover_full_receipt_graph_epoch(self._vault_root, build=False)
+                    return False
                 batch_atomic_write(
                     [
                         PlannedWrite(
@@ -801,8 +858,10 @@ class MediaWorker:
             )
             if completed is True:
                 deferred_index.clear_full_receipts(self._vault_root, receipts)
+                return True
         except Exception:  # noqa: BLE001 - canonical media is already committed
             log.exception("media deferred graph completion failed")
+        return False
 
     def _run_clip(self, job: _Job) -> None:
         """CLIP-embed an image (one vector) or a video (per-keyframe vectors) so it's
@@ -958,6 +1017,7 @@ class MediaWorker:
         forced_recheck_at = 0.0
         try:
             while not self._stop_event.is_set():
+                self._drain_parent_results()
                 child = self._child
                 if child is not None and child.poll() is not None:
                     returncode = child.returncode
@@ -1032,6 +1092,78 @@ class MediaWorker:
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     child.wait(timeout=5)
             self._child = None
+
+    def _drain_parent_results(self) -> None:
+        """Publish bounded child results while the disposable child remains alive."""
+        assert self._store is not None
+        for result in self._store.pending_results(limit=32):
+            try:
+                self._publish_parent_result(result)
+            except Exception:  # noqa: BLE001 - durable result custody is retried
+                log.warning("media parent publication deferred for job %s", result.job_id, exc_info=True)
+
+    def _publish_parent_result(self, result: media_jobs.MediaJobResult) -> None:
+        job = result.job
+        current_binary = _binary_identity(job.binary_path)
+        if (
+            current_binary is None
+            or _result_binary_identity(current_binary) != result.binary_identity
+            or _content_digest(job.sidecar_path) != result.sidecar_before_hash
+        ):
+            # A third value is foreign/stale. It is never a license to replace
+            # canonical bytes; release only this result and let reconciliation
+            # mint a fresh claim from current input.
+            self._store.finalize_result(result, requeue_remaining=True)
+            return
+        with get_manager().mutation_guard(
+            self._vault_root,
+            operation="background_media_parent_publication",
+            holder_kind="background",
+        ):
+            before = job.sidecar_path.read_text(encoding="utf-8")
+            if content_hash(before) != result.sidecar_before_hash:
+                return
+            if _result_binary_identity(_binary_identity(job.binary_path) or ((-1,) * 5, None)) != result.binary_identity:
+                return
+            if result.kind == "extraction":
+                target = preserve.render_sidecar_extraction(
+                    before,
+                    text=str(result.payload["text"]),
+                    engine=str(result.payload["engine"]),
+                    speakers=list(result.payload.get("speakers", [])),
+                    speaker_verification=str(result.payload.get("speaker_verification", "unavailable")),
+                    attempts=max(1, job.attempts),
+                )
+            else:
+                target = preserve.render_sidecar_processing_failure(
+                    before,
+                    state=media_jobs.PENDING if result.kind == "pending" else job.state,
+                    attempts=max(1, job.attempts),
+                    error=str(result.payload["error"]),
+                    retryable=True,
+                    next_action=str(result.payload["next_action"]),
+                )
+            rel = job.sidecar_path.relative_to(self._vault_root).as_posix()
+            [receipt] = deferred_index.add_full_receipts(self._vault_root, [rel])
+            if not self._store.persist_prepared_result(
+                result,
+                target_hash=content_hash(target),
+                target_size=len(target.encode("utf-8")),
+                receipt_revision=receipt.revision,
+            ):
+                return
+            handoff = preserve.commit_media_sidecar_writes(
+                self._vault_root,
+                (PlannedWrite(job.sidecar_path, target, expected_hash=result.sidecar_before_hash),),
+                post_commit_fanout=False,
+                defer_graph_completion=True,
+            )
+            assert isinstance(handoff, DeferredGraphCompletion)
+        if not self._complete_deferred_graph_completion(handoff, [receipt]):
+            return
+        self._store.finalize_result(
+            result, requeue_remaining=result.kind in {"extraction", "pending"}
+        )
 
     def scan_pending(self) -> int:
         """Restart recovery: re-enqueue pending OCR + CLIP-index un-indexed images."""
@@ -1251,6 +1383,11 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                 store.mark(job.id, FAILED, f"{type(exc).__name__}: {exc}")
             else:
                 assert job.id is not None
+                if outcome.state == _HANDOFF:
+                    # Durable result custody now belongs to the long-lived parent.
+                    # In particular, do not run later CLIP/re-embed stages or
+                    # complete this claim in the disposable process.
+                    continue
                 if outcome.state == BLOCKED:
                     store.mark(job.id, BLOCKED, outcome.error)
                 elif outcome.state == FAILED:

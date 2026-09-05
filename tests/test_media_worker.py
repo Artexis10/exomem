@@ -123,6 +123,76 @@ def test_worker_fills_pending_sidecar(vault, monkeypatch: pytest.MonkeyPatch) ->
     assert "extracted_by: pending" not in body
 
 
+def test_process_child_hands_extraction_to_parent_without_sidecar_write(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="parent-owned.mp3")
+    sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="parent-only transcript", media_type="audio", engine="test"
+        ),
+    )
+
+    outcome = media_worker.MediaWorker(vault, execution_mode="process")._process(claimed)
+
+    assert outcome.state == "handoff"
+    assert sidecar.read_text(encoding="utf-8") == before
+    [pending] = store.pending_results()
+    assert pending.payload["text"] == "parent-only transcript"
+
+
+def test_parent_publishes_handed_result_and_requeues_only_remaining_stages(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="parent-publish.mp3")
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+            do_ocr=True,
+            do_clip=True,
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    before = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+    identity = media_worker._binary_identity(claimed.binary_path)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="extraction",
+        sidecar_before_hash=before,
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"text": "published by parent", "engine": "test"},
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_args: True)
+
+    worker._publish_parent_result(store.pending_results()[0])
+
+    assert "published by parent" in sidecar.read_text(encoding="utf-8")
+    assert store.pending_result_count() == 0
+    remaining = store.get(claimed.id)
+    assert remaining is not None and not remaining.do_ocr and remaining.do_clip
+
+
 def test_extraction_compute_stays_outside_guard_and_sidecar_commit_is_inside(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -9,6 +9,7 @@ this derived database is safe because startup scans reconstruct missing work.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
@@ -73,6 +74,78 @@ _RECONCILIATION_ACTION = (
 _COMPUTE_RUNTIME_ACTION = (
     "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
 )
+_RESULT_SCHEMA_VERSION = 1
+_MAX_RESULT_PAYLOAD_BYTES = 768 * 1024
+_MAX_RESULT_TEXT_BYTES = 512 * 1024
+_MAX_RESULT_ERROR_BYTES = 4096
+_RESULT_KINDS = frozenset({"extraction", "failure", "pending"})
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _validated_binary_identity(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict) or set(value) != {"stat", "sha256"}:
+        return None
+    stat_value = value.get("stat")
+    digest = value.get("sha256")
+    if (
+        not isinstance(stat_value, list)
+        or len(stat_value) != 5
+        or any(not isinstance(item, int) or isinstance(item, bool) or item < 0 for item in stat_value)
+        or (digest is not None and not _is_sha256(digest))
+    ):
+        return None
+    return {"stat": stat_value, "sha256": digest}
+
+
+def _bounded_text(value: object, limit: int) -> str | None:
+    if not isinstance(value, str) or len(value.encode("utf-8")) > limit:
+        return None
+    return value
+
+
+def _validated_result_payload(kind: str, payload: object) -> dict[str, object] | None:
+    if not isinstance(payload, dict):
+        return None
+    if kind == "extraction":
+        text = _bounded_text(payload.get("text"), _MAX_RESULT_TEXT_BYTES)
+        engine = _bounded_text(payload.get("engine"), 256)
+        if text is None or engine is None or not engine:
+            return None
+        result: dict[str, object] = {"text": text, "engine": engine}
+        verification = payload.get("speaker_verification")
+        if verification is not None:
+            verified = _bounded_text(verification, 128)
+            if verified is None:
+                return None
+            result["speaker_verification"] = verified
+        speakers = payload.get("speakers")
+        if speakers is not None:
+            if not isinstance(speakers, list) or len(speakers) > 64:
+                return None
+            clean_speakers: list[dict[str, str]] = []
+            for speaker in speakers:
+                if not isinstance(speaker, dict) or set(speaker) - {"speaker"}:
+                    return None
+                label = _bounded_text(speaker.get("speaker"), 128)
+                if label is None:
+                    return None
+                clean_speakers.append({"speaker": label})
+            result["speakers"] = clean_speakers
+        return result
+    if kind in {"failure", "pending"}:
+        error = _bounded_text(payload.get("error"), _MAX_RESULT_ERROR_BYTES)
+        next_action = _bounded_text(payload.get("next_action"), 512)
+        if error is None or next_action is None:
+            return None
+        return {"error": error, "next_action": next_action}
+    return None
 
 
 def is_compute_runtime_error(error: object) -> bool:
@@ -315,8 +388,24 @@ class MediaJob:
     do_reembed: bool = False
     id: int | None = None
     attempts: int = 0
+    claim_revision: int = 0
     state: str = PENDING
     last_error: str | None = None
+
+
+@dataclass(frozen=True)
+class MediaJobResult:
+    job_id: int
+    claim_revision: int
+    kind: str
+    sidecar_before_hash: str
+    binary_identity: dict[str, Any]
+    payload: dict[str, Any]
+    payload_hash: str
+    job: MediaJob
+    target_hash: str | None = None
+    target_size: int | None = None
+    receipt_revision: int | None = None
 
 
 def pid_alive(pid: int | None) -> bool:
@@ -440,6 +529,7 @@ class MediaJobStore:
                         do_reembed INTEGER NOT NULL DEFAULT 0,
                         state TEXT NOT NULL DEFAULT 'pending',
                         attempts INTEGER NOT NULL DEFAULT 0,
+                        claim_revision INTEGER NOT NULL DEFAULT 0,
                         created_at REAL NOT NULL,
                         updated_at REAL NOT NULL,
                         last_error TEXT
@@ -452,6 +542,28 @@ class MediaJobStore:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS jobs_binary_rel ON jobs(binary_rel)"
                 )
+                self._migrate_claim_revision(conn)
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS media_job_results (
+                        job_id INTEGER PRIMARY KEY,
+                        schema_version INTEGER NOT NULL DEFAULT 1,
+                        claim_revision INTEGER NOT NULL,
+                        kind TEXT NOT NULL,
+                        sidecar_before_hash TEXT NOT NULL,
+                        binary_identity_json TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        payload_hash TEXT NOT NULL,
+                        target_hash TEXT,
+                        target_size INTEGER,
+                        receipt_revision INTEGER,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+                    )
+                    """
+                )
+                self._migrate_result_schema(conn)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS runtime (
@@ -473,6 +585,29 @@ class MediaJobStore:
                 self._migrate_job_key(conn)
         finally:
             conn.close()
+
+    @staticmethod
+    def _migrate_claim_revision(conn: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        if "claim_revision" not in columns:
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN claim_revision INTEGER NOT NULL DEFAULT 0"
+            )
+
+    @staticmethod
+    def _migrate_result_schema(conn: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(media_job_results)").fetchall()
+        }
+        if "schema_version" not in columns:
+            conn.execute(
+                "ALTER TABLE media_job_results "
+                "ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
+            )
 
     def _migrate_job_key(self, conn: sqlite3.Connection) -> None:
         """Re-key existing rows onto (binary_rel, media_type), collapsing duplicates.
@@ -618,6 +753,7 @@ class MediaJobStore:
                 """
                 UPDATE jobs
                 SET state = 'running', attempts = attempts + 1,
+                    claim_revision = claim_revision + 1,
                     updated_at = ?, last_error = NULL
                 WHERE id = ? AND state = 'pending'
                 """,
@@ -626,7 +762,14 @@ class MediaJobStore:
             conn.commit()
             if changed != 1:
                 return None
-            return self._row_to_job({**dict(row), "state": RUNNING, "attempts": row["attempts"] + 1})
+            return self._row_to_job(
+                {
+                    **dict(row),
+                    "state": RUNNING,
+                    "attempts": row["attempts"] + 1,
+                    "claim_revision": row["claim_revision"] + 1,
+                }
+            )
         except Exception:
             conn.rollback()
             raise
@@ -641,9 +784,15 @@ class MediaJobStore:
         try:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT do_ocr, do_clip, do_reembed FROM jobs WHERE id = ?", (job.id,)
+                "SELECT do_ocr, do_clip, do_reembed, state, claim_revision "
+                "FROM jobs WHERE id = ?",
+                (job.id,),
             ).fetchone()
-            if row is None:
+            if (
+                row is None
+                or row["state"] != RUNNING
+                or int(row["claim_revision"]) != job.claim_revision
+            ):
                 conn.commit()
                 return
             remaining = {
@@ -656,7 +805,7 @@ class MediaJobStore:
                     """
                     UPDATE jobs SET do_ocr = ?, do_clip = ?, do_reembed = ?,
                         state = 'pending', updated_at = ?, last_error = NULL
-                    WHERE id = ?
+                    WHERE id = ? AND state = 'running' AND claim_revision = ?
                     """,
                     (
                         int(remaining["do_ocr"]),
@@ -664,10 +813,14 @@ class MediaJobStore:
                         int(remaining["do_reembed"]),
                         time.time(),
                         job.id,
+                        job.claim_revision,
                     ),
                 )
             else:
-                conn.execute("DELETE FROM jobs WHERE id = ?", (job.id,))
+                conn.execute(
+                    "DELETE FROM jobs WHERE id = ? AND state = 'running' AND claim_revision = ?",
+                    (job.id, job.claim_revision),
+                )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -688,8 +841,16 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def defer(self, job_id: int) -> bool:
+    def defer(self, job: MediaJob | int) -> bool:
         """Return a claimed job to pending after transient coordination refusal."""
+        job_id = job.id if isinstance(job, MediaJob) else job
+        if job_id is None:
+            return False
+        revision_clause = ""
+        params: list[object] = [time.time(), job_id]
+        if isinstance(job, MediaJob):
+            revision_clause = " AND claim_revision = ?"
+            params.append(job.claim_revision)
         conn = self._connect()
         try:
             with conn:
@@ -698,11 +859,191 @@ class MediaJobStore:
                     UPDATE jobs
                     SET state = 'pending', attempts = MAX(0, attempts - 1),
                         last_error = NULL, updated_at = ?
-                    WHERE id = ? AND state = 'running'
-                    """,
-                    (time.time(), job_id),
+                    WHERE id = ? AND state = 'running'""" + revision_clause,
+                    tuple(params),
                 ).rowcount
                 return changed == 1
+        finally:
+            conn.close()
+
+    def record_result(
+        self,
+        job: MediaJob,
+        *,
+        kind: str,
+        sidecar_before_hash: str,
+        binary_identity: dict[str, Any],
+        payload: dict[str, Any],
+        terminal_state: str | None = None,
+    ) -> bool:
+        """Atomically hand child computation to the parent under one claim fence."""
+        if job.id is None or kind not in _RESULT_KINDS:
+            return False
+        if terminal_state is not None and terminal_state not in {BLOCKED, FAILED}:
+            return False
+        validated = _validated_result_payload(kind, payload)
+        if validated is None or not _is_sha256(sidecar_before_hash):
+            return False
+        identity = _validated_binary_identity(binary_identity)
+        if identity is None:
+            return False
+        payload_json = _canonical_json(validated)
+        identity_json = _canonical_json(identity)
+        if len(payload_json.encode("utf-8")) > _MAX_RESULT_PAYLOAD_BYTES:
+            return False
+        digest = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        now = time.time()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state, claim_revision FROM jobs WHERE id = ?", (job.id,)
+            ).fetchone()
+            allowed_states = {RUNNING}
+            if terminal_state is not None:
+                allowed_states.add(terminal_state)
+            if (
+                row is None
+                or row["state"] not in allowed_states
+                or int(row["claim_revision"]) != job.claim_revision
+            ):
+                conn.commit()
+                return False
+            if terminal_state is None:
+                changed = conn.execute(
+                    """
+                    INSERT INTO media_job_results(
+                        job_id, schema_version, claim_revision, kind, sidecar_before_hash,
+                        binary_identity_json, payload_json, payload_hash, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(job_id) DO NOTHING
+                    """,
+                    (
+                        job.id, _RESULT_SCHEMA_VERSION, job.claim_revision, kind, sidecar_before_hash,
+                        identity_json, payload_json, digest, now, now,
+                    ),
+                ).rowcount
+            else:
+                changed = conn.execute(
+                    """
+                    INSERT INTO media_job_results(
+                        job_id, schema_version, claim_revision, kind, sidecar_before_hash,
+                        binary_identity_json, payload_json, payload_hash, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(job_id) DO NOTHING
+                    """,
+                    (
+                        job.id, _RESULT_SCHEMA_VERSION, job.claim_revision, kind, sidecar_before_hash,
+                        identity_json, payload_json, digest, now, now,
+                    ),
+                ).rowcount
+                if changed:
+                    changed = conn.execute(
+                        """
+                        UPDATE jobs SET state = ?, last_error = ?, updated_at = ?
+                        WHERE id = ? AND state IN ('running', 'blocked', 'failed')
+                            AND claim_revision = ?
+                        """,
+                        (
+                            terminal_state,
+                            str(validated.get("error") or "")[:1000] or None,
+                            now,
+                            job.id,
+                            job.claim_revision,
+                        ),
+                    ).rowcount
+            conn.commit()
+            return changed == 1
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def pending_results(self, *, limit: int = STATUS_JOB_LIMIT) -> list[MediaJobResult]:
+        if isinstance(limit, bool) or limit <= 0:
+            raise ValueError("media result limit must be a positive integer")
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT jobs.*, media_job_results.claim_revision AS result_claim_revision,
+                       kind, sidecar_before_hash, binary_identity_json, payload_json,
+                       payload_hash, target_hash, target_size, receipt_revision
+                FROM media_job_results JOIN jobs ON jobs.id = media_job_results.job_id
+                ORDER BY media_job_results.updated_at, jobs.id LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [self._row_to_result(row) for row in rows]
+        finally:
+            conn.close()
+
+    def pending_result_count(self) -> int:
+        conn = self._connect()
+        try:
+            return int(conn.execute("SELECT count(*) FROM media_job_results").fetchone()[0])
+        finally:
+            conn.close()
+
+    def persist_prepared_result(
+        self, result: MediaJobResult, *, target_hash: str, target_size: int, receipt_revision: int
+    ) -> bool:
+        if not _is_sha256(target_hash) or target_size < 0 or receipt_revision <= 0:
+            return False
+        conn = self._connect()
+        try:
+            with conn:
+                return conn.execute(
+                    """
+                    UPDATE media_job_results SET target_hash = ?, target_size = ?,
+                        receipt_revision = ?, updated_at = ?
+                    WHERE job_id = ? AND claim_revision = ? AND payload_hash = ?
+                    """,
+                    (target_hash, target_size, receipt_revision, time.time(), result.job_id,
+                     result.claim_revision, result.payload_hash),
+                ).rowcount == 1
+        finally:
+            conn.close()
+
+    def finalize_result(self, result: MediaJobResult, *, requeue_remaining: bool) -> bool:
+        """CAS-remove a published result, retaining only stages the child did not own."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT do_ocr, do_clip, do_reembed FROM jobs WHERE id = ?", (result.job_id,)
+            ).fetchone()
+            deleted = conn.execute(
+                """
+                DELETE FROM media_job_results
+                WHERE job_id = ? AND claim_revision = ? AND payload_hash = ?
+                """,
+                (result.job_id, result.claim_revision, result.payload_hash),
+            ).rowcount
+            if deleted != 1 or row is None:
+                conn.rollback()
+                return False
+            if requeue_remaining:
+                remaining_ocr = 0 if result.kind == "extraction" else int(row["do_ocr"])
+                if remaining_ocr or row["do_clip"] or row["do_reembed"]:
+                    conn.execute(
+                        """
+                        UPDATE jobs SET do_ocr = ?, state = 'pending', last_error = NULL,
+                            updated_at = ? WHERE id = ? AND claim_revision = ?
+                        """,
+                        (remaining_ocr, time.time(), result.job_id, result.claim_revision),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM jobs WHERE id = ? AND claim_revision = ?",
+                        (result.job_id, result.claim_revision),
+                    )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -791,7 +1132,9 @@ class MediaJobStore:
             with conn:
                 changed = conn.execute(
                     f"UPDATE jobs SET state = 'pending', updated_at = ? "
-                    f"WHERE state IN ({placeholders})",
+                    f"WHERE state IN ({placeholders}) "
+                    "AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                    "WHERE media_job_results.job_id = jobs.id)",
                     (time.time(), *states),
                 ).rowcount
                 return int(changed)
@@ -1126,8 +1469,26 @@ class MediaJobStore:
             do_clip=bool(row["do_clip"]),
             do_reembed=bool(row["do_reembed"]),
             attempts=int(row["attempts"]),
+            claim_revision=int(row["claim_revision"]),
             state=str(row["state"]),
             last_error=row["last_error"],
+        )
+
+    def _row_to_result(self, row: Any) -> MediaJobResult:
+        payload = json.loads(str(row["payload_json"]))
+        identity = json.loads(str(row["binary_identity_json"]))
+        return MediaJobResult(
+            job_id=int(row["id"]),
+            claim_revision=int(row["result_claim_revision"]),
+            kind=str(row["kind"]),
+            sidecar_before_hash=str(row["sidecar_before_hash"]),
+            binary_identity=identity,
+            payload=payload,
+            payload_hash=str(row["payload_hash"]),
+            job=self._row_to_job(row),
+            target_hash=row["target_hash"],
+            target_size=row["target_size"],
+            receipt_revision=row["receipt_revision"],
         )
 
 

@@ -49,6 +49,58 @@ def _sharing_failure(job: media_jobs.MediaJob, *, winerror: int = 5) -> str:
     )
 
 
+def test_result_custody_rejects_a_refunded_stale_claim(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    job_id = store.enqueue(_job(vault))
+    first = store.claim_next()
+    assert first is not None
+    assert store.defer(first) is True
+
+    second = store.claim_next()
+    assert second is not None
+    assert first.attempts == second.attempts == 1
+    assert first.claim_revision < second.claim_revision
+
+    assert not store.record_result(
+        first,
+        kind="extraction",
+        sidecar_before_hash="a" * 64,
+        binary_identity={"stat": [1, 2, 3, 4, 5], "sha256": "b" * 64},
+        payload={"text": "older", "engine": "test"},
+    )
+    assert store.record_result(
+        second,
+        kind="extraction",
+        sidecar_before_hash="a" * 64,
+        binary_identity={"stat": [1, 2, 3, 4, 5], "sha256": "b" * 64},
+        payload={"text": "current", "engine": "test"},
+    )
+
+    [result] = store.pending_results()
+    assert result.job_id == job_id
+    assert result.claim_revision == second.claim_revision
+    assert result.payload["text"] == "current"
+    assert store.claim_next() is None
+
+
+def test_failed_result_remains_join_pending_until_parent_finalizes(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+    claimed = store.claim_next()
+    assert claimed is not None
+    assert store.record_result(
+        claimed,
+        kind="failure",
+        sidecar_before_hash="a" * 64,
+        binary_identity={"stat": [1, 2, 3, 4, 5], "sha256": "b" * 64},
+        payload={"error": "broken input", "next_action": "replace it"},
+        terminal_state=media_jobs.FAILED,
+    )
+
+    assert store.counts()[media_jobs.FAILED] == 1
+    assert store.pending_result_count() == 1
+
+
 def _rollback_incomplete_error(
     *,
     targets: tuple[str, ...] = ("Knowledge Base/Evidence/item.mp3.md",),
