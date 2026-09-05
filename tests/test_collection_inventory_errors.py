@@ -406,6 +406,17 @@ _WITHHELD_PAIRS = [
     # symlinked tracker inside a withheld collection is what tells a
     # stat-before-authorize ordering apart from the correct one.
     (f"{_PRIV}/linked.md", f"{_ABSENT}/linked.md", True),
+    # Un-normalized spellings of the same references. `access.py`'s
+    # `_kb_relative` folds backslashes and the outer slashes but NOT `./`, `//`
+    # or `/./`, so an exclusion rule simply fails to match these unless the
+    # reference is canonicalized before it is offered to the policy. That
+    # canonicalization is the half of the fix these rows exist to hold down:
+    # authorize the spelling as given and the exclusion silently stops applying.
+    (f"./{_PRIV}/Items/x.md", f"./{_ABSENT}/Items/x.md", False),
+    (f"{_PRIV}//Items//x.md", f"{_ABSENT}//Items//x.md", False),
+    (f"{_PRIV}/./Items/x.md", f"{_ABSENT}/./Items/x.md", False),
+    (f"./{_PRIV_LINK}/_collection.md", f"./{_ABSENT_LINK}/_collection.md", True),
+    (f"./{_PRIV}/linked.md", f"./{_ABSENT}/linked.md", True),
 ]
 _WITHHELD_IDS = [
     "md_file",
@@ -416,6 +427,11 @@ _WITHHELD_IDS = [
     "symlinked_parent",
     "trailing_slash",
     "symlinked_tracker",
+    "dot_slash_md_file",
+    "double_slash_md_file",
+    "mid_path_dot_md_file",
+    "dot_slash_symlinked_manifest",
+    "dot_slash_symlinked_tracker",
 ]
 
 
@@ -483,3 +499,30 @@ def test_a_directory_whose_manifest_alone_is_withheld_never_names_it(
     assert envelope["code"] == "INVALID_COLLECTION_PATH"
     assert envelope["remediation"] == _GENERIC_REMEDIATION
     assert "Guarded/_collection.md" not in json.dumps(envelope)
+
+
+def test_reference_key_folds_every_spelling_of_one_reference(tmp_path: Path) -> None:
+    """One reference, many spellings, one key -- the exclusion policy sees only this.
+
+    `access._kb_relative` folds backslashes and the outer slashes but not `./`,
+    `//` or `/./`, so a rule excluding a collection simply does not match those
+    spellings. Canonicalizing here is what makes exclusion spelling-insensitive
+    on this surface, which is why the fold is pinned directly and not only
+    through the behaviour it produces.
+    """
+    from exomem import structured_collections as collections
+
+    canonical = "Knowledge Base/Planning/Work/_collection.md"
+
+    assert [
+        collections._reference_key(tmp_path, spelling)
+        for spelling in (
+            canonical,
+            f"./{canonical}",
+            "Knowledge Base/Planning//Work//_collection.md",
+            "Knowledge Base/Planning/./Work/_collection.md",
+            f"{canonical}/",
+            canonical.replace("/", "\\"),
+            str(tmp_path / canonical),
+        )
+    ] == [canonical] * 7
