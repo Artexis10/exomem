@@ -274,6 +274,7 @@ def test_process_media_mcp_schema_annotations_and_leaf_result(
     assert set(schema["properties"]) == {
         "authorization_session_credential",
         "path",
+        "paths",
         "operation",
         "response_detail",
     }
