@@ -180,6 +180,7 @@ def test_fixed_helm_values_use_one_selected_rollback_runtime_unit() -> None:
     assert values["image"] == config.image
     assert values["expectedRelease"] == "0.21.0"
     assert values["expectedProtocol"] == "1"
+    assert values["agentProfile"] == "hosted-alpha-agent-v1"
     assert values["recordsReaderVersion"] == 2
     assert values["lifecycleActionsEnabled"] is False
 
@@ -1196,6 +1197,7 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
     assert plane.count_volumes(_metadata()) == 1
     assert plane.helm_values(_metadata()) == {
         "activeCredentialVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
         "browserOrigin": "https://substratesystems.io",
         "cellId": "cell-alpha",
         "credentialsSecretName": "exomem-cell-credentials",
