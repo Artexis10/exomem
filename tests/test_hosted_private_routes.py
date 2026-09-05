@@ -2967,10 +2967,12 @@ def test_v5_curation_apply_replays_to_one_terminal_and_one_content_effect(
     Two mechanisms are in play and the test says which owns what, because
     crediting the wrong one is how a guard gets removed later by someone who
     reads only the assertion. The single content effect is owned by curation's
-    own completed-replay terminal: the third request below carries no
-    idempotency key at all and still commits nothing new. What the public key
-    adds is that a keyed retry is answered from the same terminal rather than
-    re-entering the leaf, which is the acknowledgement-loss case.
+    own pre-execution blockers (`_blockers_for_uncommitted`: the create
+    destination already exists), which refuse the third request below -- it
+    carries no idempotency key at all -- as `CURATION_BINDING_STALE` before
+    the replayed terminal is ever consulted. What the public key adds is that a
+    keyed retry is answered from the same terminal rather than re-entering the
+    leaf, which is the acknowledgement-loss case.
     """
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "lease-state"))
     client, config, _lifecycle, _invoker = _v5_cell(
@@ -2997,17 +2999,16 @@ def test_v5_curation_apply_replays_to_one_terminal_and_one_content_effect(
 
     before = _curation(client, config, "status", {"run_id": proposed["run_id"]}).json()["data"]
 
-    # The control: no idempotency key at all. The run is already terminal, so
-    # the retry is answered from the store -- as the committed terminal, or as a
-    # stale-binding refusal once the approval has been replayed -- and never as
-    # a fresh commit. That refusal is what identifies the curation terminal
-    # rather than the public key as the owner of the single content effect.
+    # The control: no idempotency key at all. The approval's binding is stale
+    # once the step has committed, so curation's own pre-execution blocker
+    # refuses the request before any leaf or replayed terminal is reached, and
+    # never as a fresh commit. That refusal is what identifies curation rather
+    # than the public key as the owner of the single content effect. It is
+    # asserted exactly: a lenient "any CURATION_ code" would also accept a
+    # regression that re-executed the step and failed later.
     unkeyed = _curation(client, config, "apply", approval)
-    if unkeyed.status_code == 200:
-        assert unkeyed.json()["data"]["terminal"] is True, unkeyed.text
-    else:
-        assert unkeyed.status_code == 400, unkeyed.text
-        assert unkeyed.json()["error"]["code"].startswith("CURATION_"), unkeyed.text
+    assert unkeyed.status_code == 400, unkeyed.text
+    assert unkeyed.json()["error"]["code"] == "CURATION_BINDING_STALE", unkeyed.text
 
     after = _curation(client, config, "status", {"run_id": proposed["run_id"]}).json()["data"]
     assert after["committed_steps"] == before["committed_steps"] == ["one"]
@@ -3236,11 +3237,13 @@ def test_v5_curation_commits_and_replays_under_fast_durable_acknowledgement(
     assert applied.status_code == 200, applied.text
     committed = applied.json()["data"]
 
-    # The apply answer is the fast path's own terminal envelope, not the
-    # curation projection the unflagged path returns: it carries the committed
-    # path and receipt id directly, and defers the derived work. Asserting that
-    # is what proves the crossing actually happened rather than that the
-    # environment variable was merely set.
+    # Under the flag the apply answer is the same curation projection the
+    # unflagged path returns (run, plan, phase, committed steps, path, receipt
+    # id) plus the fast path's four deferred-work keys: `derived_sync`,
+    # `derived_sync_components`, `advisory_sync` and `advisory_result_ref`.
+    # Nothing is removed. Asserting those additive keys is what proves the
+    # crossing actually happened rather than that the environment variable was
+    # merely set.
     assert committed["state"] == "committed"
     assert committed["terminal"] is True
     assert committed["derived_sync"] == "pending"
