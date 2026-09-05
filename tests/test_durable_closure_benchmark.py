@@ -415,6 +415,47 @@ def test_child_hook_reports_reset_crossing_graph_work_as_pre_reset_spillover(tmp
     assert measured["graph_incremental_inflight"] == measured["graph_pre_reset_spillover_incremental_inflight"] == 0
 
 
+def test_child_hook_applies_one_concurrent_reset_command_once(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    hook = benchmark.install_subprocess_instrumentation(state)
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(hook),
+        "DURABLE_CLOSURE_INSTRUMENTATION": str(state / "instrumentation.json"),
+    }
+    code = """
+import threading
+import sitecustomize as sc
+
+sc.stopping.set()
+sc.publish = lambda: None
+
+class Control:
+    def is_file(self): return True
+    def read_text(self, encoding): return "ignored"
+
+barrier = threading.Barrier(2)
+outer_checks = 0
+class CommandId(str):
+    def __eq__(self, other):
+        global outer_checks
+        if other is None:
+            outer_checks += 1
+            if outer_checks <= 2:
+                barrier.wait(timeout=1)
+        return super().__eq__(other)
+
+sc.control = Control()
+sc.json.loads = lambda raw: {"id": CommandId("one-reset"), "action": "reset", "phase": "timed"}
+threads = [threading.Thread(target=sc.command) for _ in range(2)]
+for thread in threads: thread.start()
+for thread in threads: thread.join(timeout=1)
+assert not any(thread.is_alive() for thread in threads)
+assert sc.data["measurement_epoch"] == 1, sc.data
+"""
+    subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=environment, check=True, capture_output=True, text=True)
+
+
 def test_missing_required_instrumentation_hook_is_not_silently_counted_as_zero(tmp_path: Path) -> None:
     hook = benchmark.install_subprocess_instrumentation(tmp_path / "state")
     source = (hook / "sitecustomize.py").read_text(encoding="utf-8")

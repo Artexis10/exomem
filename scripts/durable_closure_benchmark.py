@@ -656,6 +656,8 @@ def command():
     if not isinstance(command_id, str) or command_id == last_command:
         return
     with lock:
+        if command_id == last_command:
+            return
         action = payload.get("action")
         phase = str(payload.get("phase") or "")
         if action == "reset":
