@@ -9,7 +9,7 @@ import pytest
 import yaml
 from starlette.testclient import TestClient
 
-from exomem import commands, entity_types, semantic_authoring, server
+from exomem import commands, entity_types, semantic_authoring, server, workflow_skills
 from exomem.__main__ import main
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
@@ -526,6 +526,105 @@ def test_bootstrap_profiles_and_validation(vault: Path) -> None:
 
     with pytest.raises(ValueError, match="compact.*full.*diagnostics"):
         commands.op_bootstrap(vault, profile="verbose")
+
+
+def test_session_bootstrap_projects_filtered_compact_live_state(vault: Path) -> None:
+    """A loaded, current skill receives live state without portable teaching."""
+    compact = commands.op_bootstrap(vault, profile="compact", workflow="research")
+    session = commands.op_bootstrap(
+        vault,
+        profile="session",
+        workflow="research",
+        skill_contract=workflow_skills.skill_contract(),
+    )
+
+    assert session["profile"] == "session"
+    for field in (
+        "contract_version",
+        "server",
+        "active_capabilities",
+        "engagement",
+        "governance",
+        "workflow_contracts",
+        "relation_vocabulary",
+        "entity_registry",
+        "source_taxonomy",
+    ):
+        assert session[field] == compact[field]
+    assert session["knowledge_packs"] == {
+        "selected": compact["knowledge_packs"]["selected"],
+        "selection_rule": compact["knowledge_packs"]["selection_rule"],
+    }
+    assert session["workflow"] == {"requested": compact["workflow"]["requested"]}
+    assert session["authoring_contract"]["post_write"] == {
+        key: compact["authoring_contract"]["post_write"][key]
+        for key in (
+            "due_state",
+            "due_state_handling",
+            "due_state_authority",
+            "review_reason",
+            "family_disposition",
+            "family_disposition_reading",
+        )
+    }
+    assert session["loaded_operating_rules_prerequisite"]
+    assert session["compact_fallback"]
+    assert "semantic_authoring" not in session
+    assert "examples" not in session
+    assert "available" not in session["knowledge_packs"]
+    compact_size = len(json.dumps(compact, sort_keys=True))
+    session_size = len(json.dumps(session, sort_keys=True))
+    assert session_size <= compact_size * 0.35, (session_size, compact_size)
+
+
+def test_session_bootstrap_carries_due_state_once(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import due_state
+
+    block = {"total": 1, "categories": {"prediction": 1}, "items": []}
+    emitted: list[dict] = []
+    monkeypatch.setattr(due_state, "served", lambda _vault: block)
+    monkeypatch.setattr(
+        due_state, "mark_emitted", lambda due_block, *, vault_root: emitted.append(due_block)
+    )
+
+    session = commands.op_bootstrap(
+        vault, profile="session", skill_contract=workflow_skills.skill_contract()
+    )
+
+    assert session["due_state"] == block
+    assert emitted == [block]
+
+
+@pytest.mark.parametrize(
+    ("skill_contract", "reason"),
+    ((None, "skill_contract_required"), ("stale", "skill_contract_mismatch")),
+)
+def test_session_bootstrap_unattested_contract_returns_compact_once(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    skill_contract: str | None,
+    reason: str,
+) -> None:
+    from exomem import due_state
+
+    block = {"total": 1, "categories": {"prediction": 1}, "items": []}
+    served: list[Path] = []
+    emitted: list[dict] = []
+    monkeypatch.setattr(due_state, "served", lambda root: served.append(root) or block)
+    monkeypatch.setattr(
+        due_state, "mark_emitted", lambda due_block, *, vault_root: emitted.append(due_block)
+    )
+
+    fallback = commands.op_bootstrap(vault, profile="session", skill_contract=skill_contract)
+
+    assert fallback["profile"] == "compact"
+    assert fallback["session_profile_unavailable"] == reason
+    assert "semantic_authoring" in fallback
+    assert fallback["due_state"] == block
+    assert served == [vault]
+    assert emitted == [block]
 
 
 def test_product_front_door_metadata_is_registry_derived() -> None:

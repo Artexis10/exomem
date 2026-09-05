@@ -387,32 +387,47 @@ def op_bootstrap(
     vault_root: Path,
     profile: str = "compact",
     workflow: str | None = None,
+    skill_contract: str | None = None,
 ) -> dict:
-    """Return Exomem's versioned operating contract for generic MCP clients.
+    """Return Exomem's versioned operating contract and live session state.
 
-    Call this once at the start of a session when the client does not have the
-    Exomem Claude Skill loaded. It teaches the agent how to use the tools: when
-    to search, when to save, how to interpret scoped misses, which `find` knobs
-    are cheap vs diagnostic, how compiled notes differ from raw sources/evidence,
-    and how Exomem differs from built-in AI memory. The payload is deterministic
-    instruction plus local compute policy and product-surface metadata; it does
-    not inspect or summarize vault content.
+    Call this when current live state is missing. A client with the installed
+    Exomem skill uses session with its metadata skill-contract digest; generic
+    clients or those missing the rules use compact, full, or diagnostics to
+    learn tool use: when to search, when to save, how to interpret scoped
+    misses, which `find` knobs are cheap vs diagnostic, how compiled notes
+    differ from raw sources/evidence, and how Exomem differs from built-in AI
+    memory. The payload is deterministic instruction plus local compute policy
+    and product-surface metadata; it does not inspect or summarize vault content.
 
     Args:
-        profile: "compact" (default), "full", or "diagnostics". Compact is
-            enough for normal clients. Full adds examples. Diagnostics adds
-            performance interpretation guidance.
+        profile: "compact" (default), "full", "diagnostics", or "session".
+            Session supplies live state to a client that has loaded the installed
+            skill operating rules and presents its current skill contract digest.
         workflow: Optional caller-selected workflow label. Returned as context
             only; it does not change server behavior.
+        skill_contract: Installed skill metadata digest required for the session
+            profile. An absent or stale digest returns compact in this call with
+            a closed unavailable reason.
 
     Returns:
         A structured, versioned contract with workflow, search, save, upload,
         and performance guidance for MCP clients.
     """
-    if profile not in ("compact", "full", "diagnostics"):
+    if profile not in ("compact", "full", "diagnostics", "session"):
         raise ValueError(
-            f"bootstrap: profile must be 'compact', 'full', or 'diagnostics', got {profile!r}"
+            "bootstrap: profile must be 'compact', 'full', 'diagnostics', or 'session', "
+            f"got {profile!r}"
         )
+
+    session_requested = profile == "session"
+    session_unavailable: str | None = None
+    if session_requested:
+        if skill_contract is None:
+            session_unavailable = "skill_contract_required"
+        elif skill_contract != workflow_skills_module.skill_contract():
+            session_unavailable = "skill_contract_mismatch"
+        profile = "compact"
 
     try:
         package_version = version("exomem")
@@ -1356,7 +1371,61 @@ def op_bootstrap(
             due_state_module.mark_emitted(due_block, vault_root=vault_root)
     except Exception:  # noqa: BLE001 — a due-state count never breaks a bootstrap
         log.debug("due-state projection unavailable for bootstrap", exc_info=True)
-    return _filter_bootstrap_payload(payload, active_descriptor)
+    compact_payload = _filter_bootstrap_payload(payload, active_descriptor)
+    if session_unavailable is not None:
+        return compact_payload | {"session_profile_unavailable": session_unavailable}
+    if session_requested:
+        return _session_bootstrap_projection(compact_payload)
+    return compact_payload
+
+
+_SESSION_POST_WRITE_KEYS = (
+    "due_state",
+    "due_state_handling",
+    "due_state_authority",
+    "review_reason",
+    "family_disposition",
+    "family_disposition_reading",
+)
+
+
+def _session_bootstrap_projection(compact: dict) -> dict:
+    """Project filtered compact state for a client holding the skill contract."""
+    session = {
+        key: compact[key]
+        for key in (
+            "contract_version",
+            "server",
+            "active_capabilities",
+            "engagement",
+            "governance",
+            "workflow_contracts",
+            "relation_vocabulary",
+            "entity_registry",
+            "source_taxonomy",
+        )
+    }
+    session["profile"] = "session"
+    session["knowledge_packs"] = {
+        key: compact["knowledge_packs"][key] for key in ("selected", "selection_rule")
+    }
+    session["workflow"] = {"requested": compact["workflow"]["requested"]}
+    session["authoring_contract"] = {
+        "post_write": {
+            key: compact["authoring_contract"]["post_write"][key]
+            for key in _SESSION_POST_WRITE_KEYS
+            if key in compact["authoring_contract"]["post_write"]
+        }
+    }
+    if "due_state" in compact:
+        session["due_state"] = compact["due_state"]
+    session["loaded_operating_rules_prerequisite"] = (
+        "The installed skill operating rules are loaded and match skill_contract."
+    )
+    session["compact_fallback"] = (
+        "Request profile='compact' when local operating rules are unavailable or stale."
+    )
+    return session
 
 
 def _require_supported_projected_find_request(

@@ -30,6 +30,7 @@ from exomem import (
     schema,
     server,
     server_runtime,
+    workflow_skills,
     writer_lease,
 )
 from exomem import commands as commands_module
@@ -716,11 +717,18 @@ def test_hosted_bootstrap_profiles_match_private_command_contract(
     )
     assert exported_tuple == expected_tuple
 
-    for profile in ("compact", "full", "diagnostics"):
+    for profile in ("compact", "full", "diagnostics", "session"):
         response = client.post(
             "/private/exomem/v1/command/bootstrap",
             headers=headers,
-            json={"profile": profile},
+            json={
+                "profile": profile,
+                **(
+                    {"skill_contract": workflow_skills.skill_contract()}
+                    if profile == "session"
+                    else {}
+                ),
+            },
         )
         assert response.status_code == 200, response.text
         payload = response.json()["data"]
@@ -782,11 +790,18 @@ def test_hosted_agent_profile_routes_enforce_contract_and_bootstrap(
     assert {"maintain_memory", "adoption_studio", "transfer_artifact"} <= legacy_names
     assert "agent_profile" not in legacy
 
-    for bootstrap_profile in ("compact", "full", "diagnostics"):
+    for bootstrap_profile in ("compact", "full", "diagnostics", "session"):
         response = client.post(
             f"{command_path}/bootstrap",
             headers=headers,
-            json={"profile": bootstrap_profile},
+            json={
+                "profile": bootstrap_profile,
+                **(
+                    {"skill_contract": workflow_skills.skill_contract()}
+                    if bootstrap_profile == "session"
+                    else {}
+                ),
+            },
         )
         assert response.status_code == 200, response.text
         payload = response.json()["data"]
