@@ -80,6 +80,13 @@ def test_search_verification_never_treats_query_echo_as_a_hit() -> None:
     assert common.search_marker_present({"query": marker, "results": []}, marker) is False
     assert common.search_marker_present({"query": marker, "hits": []}, marker) is False
     assert common.search_marker_present({"hits": [{"excerpt": marker}]}, marker) is True
+    assert common.search_marker_present({"result": [{"excerpt": marker}]}, marker) is True
+    assert common._search_proof({"result": [{"excerpt": marker}]}) == {
+        "classification": "ok",
+        "container": "result",
+        "hit_count": 1,
+        "top_level_keys": ["result"],
+    }
 
 
 def test_exact_read_requires_each_expected_suffix_and_stale_replacement() -> None:
@@ -101,6 +108,21 @@ def test_exact_read_requires_each_expected_suffix_and_stale_replacement() -> Non
         old="[[Archived Runbook]]",
         replacement="Archived runbook retired",
     )
+    assert common.read_body_equals(
+        {"content": "---\ntitle: x\n---\n# Result\nbody\n"}, "# Result\nbody\n"
+    )
+    assert not common.read_body_equals({"content": "# Result\nbody\n"}, "# Result\nother\n")
+
+
+def test_stale_replacement_body_has_the_explicit_common_terminal_newline(tmp_path: Path) -> None:
+    fixture = common.materialize_fixture(tmp_path / "fixture", pages=4)
+    markdown = common.common_markdown_payload("common-subset-marker")
+
+    expected = common.stale_replacement_body(fixture, markdown)
+
+    assert expected.endswith("-->\n")
+    assert markdown["stale_replacement"] in expected
+    assert "[[Archived Runbook]]" not in expected
 
 
 def test_refusal_classification_covers_error_envelopes_and_terminal_states() -> None:
@@ -108,6 +130,7 @@ def test_refusal_classification_covers_error_envelopes_and_terminal_states() -> 
     assert common.result_classification({"error": {"code": "NOPE"}}) == "refused"
     assert common.result_classification({"outcome": "rejected"}) == "refused"
     assert common.result_classification({"status": "failed"}) == "refused"
+    assert common.result_classification({"ok": False}) == "refused"
     assert common.result_classification({"hits": []}) == "ok"
 
 
@@ -168,3 +191,20 @@ def test_percentiles_and_call_counts_only_include_public_calls() -> None:
         "ack_p50_ms": 1.0,
         "ack_p95_ms": 2.0,
     }
+
+
+def test_failed_ack_is_excluded_from_ack_percentiles() -> None:
+    calls = [
+        {"tool": "write", "elapsed_ms": 1.0, "ack": True, "classification": "ok"},
+        {"tool": "edit", "elapsed_ms": 99.0, "ack": True, "classification": "refused"},
+    ]
+    assert common.call_measurements(calls) == {
+        "public_call_count": 2,
+        "ack_p50_ms": 1.0,
+        "ack_p95_ms": 1.0,
+    }
+
+
+def test_fixture_pages_have_deterministic_kilobyte_scale_variation() -> None:
+    sizes = [len(body.encode()) for _, body in common.fixture_pages(12)]
+    assert max(sizes) - min(sizes) >= 1_000

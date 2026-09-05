@@ -95,6 +95,17 @@ def fixture_pages(pages: int) -> list[tuple[str, str]]:
             "# Archived Runbook\n\nHistorical recovery notes remain available.\n",
         ),
     ]
+    named = [
+        (
+            name,
+            body
+            + "\n<!-- deterministic fixture padding\n"
+            + ("x" * (index + 1) * 1024)
+            + "\n-->"
+            + ("" if name == "stale-link.md" else "\n"),
+        )
+        for index, (name, body) in enumerate(named)
+    ]
     for number in range(pages - len(named)):
         variants = (
             f"- constraint: bounded retries {number}\n",
@@ -106,7 +117,9 @@ def fixture_pages(pages: int) -> list[tuple[str, str]]:
                 f"reference-{number:05d}.md",
                 f"# Reference {number}\n\n"
                 f"Ordinary background paragraph {number}; links to [[Active tracker]].\n"
-                f"{variants[number % len(variants)]}",
+                f"{variants[number % len(variants)]}\n<!-- deterministic fixture padding\n"
+                + ("x" * ((number % 4) + 5) * 1024)
+                + "\n-->",
             )
         )
     return named
@@ -215,10 +228,30 @@ def common_markdown_payload(marker: str) -> dict[str, str]:
             "# Completed chapter\n\nStatus: completed\n\n## Observations\n\n"
             f"- [finding] {marker}-chapter\n"
         ),
-        "tracker_append": f"\n## Observations\n\n- [finding] {marker}-tracker\n",
+        "tracker_append": f"## Observations\n\n- [finding] {marker}-tracker\n",
         "capture": (f"# Independent capture\n\n## Observations\n\n- [finding] {marker}-capture\n"),
         "stale_replacement": "Archived runbook retired",
     }
+
+
+def expected_changed_bodies(fixture: Mapping[str, Any], marker: str) -> list[str]:
+    """Expected normalized Markdown after the shared operations, before product frontmatter."""
+    source = dict(fixture_pages(int(fixture["page_count"])))
+    markdown = common_markdown_payload(marker)
+    tracker = source[str(fixture["named_pages"]["tracker"])] + markdown["tracker_append"]
+    stale = stale_replacement_body(fixture, markdown)
+    return [markdown["chapter"], tracker, stale, markdown["capture"]]
+
+
+def stale_replacement_body(fixture: Mapping[str, Any], markdown: Mapping[str, str]) -> str:
+    """Apply the common stale-link correction with its explicit final newline."""
+    source = dict(fixture_pages(int(fixture["page_count"])))
+    return (
+        source[str(fixture["named_pages"]["stale_link"])].replace(
+            "[[Archived Runbook]]", markdown["stale_replacement"], 1
+        )
+        + "\n"
+    )
 
 
 def _mapping(value: Any) -> dict[str, Any] | None:
@@ -307,16 +340,49 @@ def _read_body(payload: Mapping[str, Any]) -> str | None:
 
 
 def _normalized_body(body: str) -> str:
+    body = body.removeprefix("\n")
     if body.startswith("---\n"):
         _, separator, remainder = body[4:].partition("\n---\n")
         if separator:
-            return remainder
+            return remainder.removeprefix("\n")
     return body
 
 
 def read_body_has_markers(payload: Mapping[str, Any], markers: Sequence[str]) -> bool:
     body = _read_body(payload)
     return body is not None and all(marker in _normalized_body(body) for marker in markers)
+
+
+def read_body_equals(payload: Mapping[str, Any], expected: str) -> bool:
+    body = _read_body(payload)
+    return body is not None and _normalized_body(body) == expected
+
+
+def body_proof(payload: Mapping[str, Any], expected: str) -> dict[str, Any]:
+    body = _read_body(payload)
+    normalized = _normalized_body(body) if body is not None else None
+    proof: dict[str, Any] = {
+        "matches": normalized == expected,
+        "actual_bytes": len(normalized.encode()) if normalized is not None else None,
+        "expected_bytes": len(expected.encode()),
+        "actual_sha256": hashlib.sha256(normalized.encode()).hexdigest() if normalized else None,
+        "expected_sha256": hashlib.sha256(expected.encode()).hexdigest(),
+    }
+    if normalized is not None and normalized != expected:
+        mismatch = next(
+            (
+                index
+                for index, (actual, wanted) in enumerate(zip(normalized, expected, strict=False))
+                if actual != wanted
+            ),
+            min(len(normalized), len(expected)),
+        )
+        proof["first_mismatch"] = {
+            "offset": mismatch,
+            "actual": normalized[mismatch : mismatch + 80],
+            "expected": expected[mismatch : mismatch + 80],
+        }
+    return proof
 
 
 def stale_replacement_verified(payload: Mapping[str, Any], *, old: str, replacement: str) -> bool:
@@ -329,7 +395,7 @@ def stale_replacement_verified(payload: Mapping[str, Any], *, old: str, replacem
 
 
 def search_marker_present(payload: Mapping[str, Any], marker: str) -> bool:
-    results = payload.get("results") or payload.get("hits")
+    results = payload.get("results") or payload.get("hits") or payload.get("result")
     if not isinstance(results, list):
         return False
     return any(
@@ -340,7 +406,11 @@ def search_marker_present(payload: Mapping[str, Any], marker: str) -> bool:
 
 
 def result_classification(payload: Mapping[str, Any]) -> str:
-    if payload.get("success") is False or isinstance(payload.get("error"), Mapping):
+    if (
+        payload.get("success") is False
+        or payload.get("ok") is False
+        or isinstance(payload.get("error"), Mapping)
+    ):
         return "refused"
     if str(payload.get("outcome") or "").lower() in {"error", "failed", "refused", "rejected"}:
         return "refused"
@@ -350,7 +420,11 @@ def result_classification(payload: Mapping[str, Any]) -> str:
 
 
 def call_measurements(calls: Sequence[Mapping[str, Any]]) -> dict[str, float | int | None]:
-    acks = sorted(float(call["elapsed_ms"]) for call in calls if call.get("ack"))
+    acks = sorted(
+        float(call["elapsed_ms"])
+        for call in calls
+        if call.get("ack") and call.get("classification", "ok") == "ok"
+    )
     if not acks:
         return {"public_call_count": len(calls), "ack_p50_ms": None, "ack_p95_ms": None}
 
@@ -378,23 +452,16 @@ def runtime_provenance(
     package: str,
     expected_version: str | None,
 ) -> dict[str, Any]:
-    try:
-        freeze = subprocess.run(
-            [str(python), "-m", "pip", "freeze"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        ).stdout.splitlines()
-        inventory: dict[str, Any] = {"status": "ok", "entries": sorted(freeze)}
-    except (OSError, subprocess.SubprocessError) as error:
-        inventory = {"status": "unavailable", "reason": type(error).__name__, "entries": []}
     probe = (
         "import hashlib, importlib.metadata as m, json, pathlib, "
         f"{package.replace('-', '_')} as p; "
         "path=pathlib.Path(p.__file__); "
-        "print(json.dumps({'version':m.version('" + package + "'),"
-        "'module_sha256':hashlib.sha256(path.read_bytes()).hexdigest()}))"
+        "deps=sorted(f'{d.metadata[\"Name\"]}=={d.version}' for d in m.distributions() "
+        'if d.metadata.get("Name")); '
+        "print(json.dumps({'version':m.version('"
+        + package
+        + "'),'module_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),"
+        "'dependencies':deps}))"
     )
     try:
         installed = json.loads(
@@ -404,6 +471,11 @@ def runtime_provenance(
         )
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
         installed = {"status": "unavailable", "reason": type(error).__name__}
+    inventory = (
+        {"status": "ok", "entries": installed.pop("dependencies")}
+        if isinstance(installed.get("dependencies"), list)
+        else {"status": "unavailable", "reason": "metadata_probe_failed", "entries": []}
+    )
     return {
         "executable": str(executable),
         "executable_sha256": _sha256(executable),
@@ -483,7 +555,14 @@ async def _await_search(
         else:
             payload = await client.call(
                 "ask_memory",
-                {"query": marker, "mode": "keyword", "graph": False, "rerank": False, "limit": 10},
+                {
+                    "query": marker,
+                    "mode": "keyword",
+                    "detail": "full",
+                    "graph": False,
+                    "rerank": False,
+                    "limit": 10,
+                },
                 allow_refusal=True,
             )
         proof = _search_proof(payload)
@@ -497,7 +576,13 @@ async def _await_search(
 
 def _search_proof(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Sanitize a final search response into enough evidence to diagnose a miss."""
-    container = "results" if isinstance(payload.get("results"), list) else "hits"
+    container = (
+        "results"
+        if isinstance(payload.get("results"), list)
+        else "hits"
+        if isinstance(payload.get("hits"), list)
+        else "result"
+    )
     hits = payload.get(container)
     return {
         "classification": result_classification(payload),
@@ -529,6 +614,7 @@ async def _await_initial_index(client: PublicClient, *, product: str, timeout: f
                 {
                     "query": WARM_SENTINEL,
                     "mode": "keyword",
+                    "detail": "full",
                     "graph": False,
                     "rerank": False,
                     "limit": 1,
@@ -559,6 +645,7 @@ async def _run_basic_memory(
     client: PublicClient, marker: str, fixture: Mapping[str, Any], timeout: float
 ) -> dict[str, Any]:
     markdown = common_markdown_payload(marker)
+    source = dict(fixture_pages(int(fixture["page_count"])))
     changed = ["Completed chapter", "Active tracker", "Stale link", "Independent capture"]
     await client.call(
         "write_note",
@@ -587,8 +674,8 @@ async def _run_basic_memory(
         {
             "identifier": changed[2],
             "operation": "find_replace",
-            "find_text": "[[Archived Runbook]]",
-            "content": markdown["stale_replacement"],
+            "find_text": source[str(fixture["named_pages"]["stale_link"])],
+            "content": stale_replacement_body(fixture, markdown),
             "expected_replacements": 1,
             "project": "main",
             "output_format": "json",
@@ -625,6 +712,7 @@ async def _run_exomem(
     client: PublicClient, marker: str, fixture: Mapping[str, Any], timeout: float
 ) -> dict[str, Any]:
     markdown = common_markdown_payload(marker)
+    source = dict(fixture_pages(int(fixture["page_count"])))
     tracker = "Knowledge Base/Reference/" + str(fixture["named_pages"]["tracker"])
     stale = "Knowledge Base/Reference/" + str(fixture["named_pages"]["stale_link"])
     remembered = await client.call(
@@ -654,8 +742,9 @@ async def _run_exomem(
             "why": "record common-subset tracker state",
             "operation": {
                 "kind": "replace_string",
-                "old_string": "- Current owner: operations\n",
-                "new_string": "- Current owner: operations\n" + markdown["tracker_append"],
+                "old_string": source[str(fixture["named_pages"]["tracker"])],
+                "new_string": source[str(fixture["named_pages"]["tracker"])]
+                + markdown["tracker_append"],
                 "replace_all": False,
             },
         },
@@ -668,8 +757,8 @@ async def _run_exomem(
             "why": "correct common-subset stale link",
             "operation": {
                 "kind": "replace_string",
-                "old_string": "[[Archived Runbook]]",
-                "new_string": markdown["stale_replacement"],
+                "old_string": source[str(fixture["named_pages"]["stale_link"])],
+                "new_string": stale_replacement_body(fixture, markdown),
                 "replace_all": False,
             },
         },
@@ -820,6 +909,7 @@ async def run_product(
             )
             markdown = common_markdown_payload(marker)
             chapter_read, tracker_read, stale_read, capture_read = result["reads"]
+            expected_bodies = expected_changed_bodies(fixture, marker)
             exact = (
                 read_body_has_markers(chapter_read, [f"{marker}-chapter"])
                 and read_body_has_markers(tracker_read, [f"{marker}-tracker"])
@@ -830,15 +920,27 @@ async def run_product(
                 )
                 and read_body_has_markers(capture_read, [f"{marker}-capture"])
             )
+            bodies_match = all(
+                read_body_equals(read, expected)
+                for read, expected in zip(result["reads"], expected_bodies, strict=True)
+            )
+            bodies = [
+                body_proof(read, expected)
+                for read, expected in zip(result["reads"], expected_bodies, strict=True)
+            ]
             converged = all(found for found, _, _, _ in result["searches"])
             clock.finish_closure()
             row.update(
                 {
-                    "status": "pass" if exact and converged else "observed_failure",
+                    "status": "pass"
+                    if exact and bodies_match and converged
+                    else "observed_failure",
                     "public_calls": public.calls,
                     "measurements": call_measurements(public.calls),
                     "verification": {
                         "exact_read_your_write": exact,
+                        "expected_bodies_match": bodies_match,
+                        "body_proof": bodies,
                         "search_converged": converged,
                         "searches": [
                             {
