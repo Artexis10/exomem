@@ -98,6 +98,10 @@ def test_core_and_standalone_authoring_skills_embed_the_canonical_contract() -> 
     core_text = core.read_text(encoding="utf-8")
     assert core_text.count(concise) == 1
     workflow_skills.validate_contract_projection("exomem", core.parent, core=True)
+    core_text = core.read_text(encoding="utf-8")
+    operating_rules = core_text.split("## Portable operating rules\n", 1)[1].split(
+        "\n## ", 1
+    )[0].strip()
 
     authoring = [
         str(skill["name"])
@@ -112,6 +116,9 @@ def test_core_and_standalone_authoring_skills_embed_the_canonical_contract() -> 
         skill_dir = workflow_skills.source_dir(name)
         text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
         assert text.count(concise) == 1, f"{name} must carry the standalone contract"
+        assert text.count(operating_rules) == 1, (
+            f"{name} must carry the core's portable startup/retry rules"
+        )
         assert "repository checkout" not in concise.lower()
         # A reference to the core skill is not a substitute for the embedding.
         workflow_skills.validate_contract_projection(name, skill_dir)
@@ -183,7 +190,7 @@ def test_workflow_skill_docs_route_through_product_commands() -> None:
             )
 
 
-def test_core_skill_tool_loading_mentions_current_product_surface() -> None:
+def test_core_skill_routes_tool_loading_by_current_intent() -> None:
     skill_md = workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md"
     text = skill_md.read_text(encoding="utf-8")
     loading_section = text.split("## Loading the tools", maxsplit=1)[1].split(
@@ -216,21 +223,34 @@ def test_core_skill_tool_loading_mentions_current_product_surface() -> None:
         "read_media",
     ]:
         assert command in loading_section
-    assert (
-        'ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,'
-        'observe_memory,edit_memory,replace_memory,capture_source,compile_source,'
-        'preserve_evidence,preserve_artifacts,transfer_artifact,record_memory,review_memory,triage_memory,'
-        'connect_memory,adopt_vault,maintain_memory,schema_memory,govern_memory,'
-        'process_media,query_dataset,read_media")'
-    ) in loading_section
+    # Discovery must not turn a lookup into a load of every mutation/media schema.
+    assert 'ToolSearch("select:ask_memory")' in loading_section
+    assert "Load only" in loading_section
+    assert "available_product_tools" in loading_section
+    assert "Load the product surface up front" not in loading_section
+    assert "select:bootstrap,ask_memory,read_memory,browse_memory,remember" not in text
+
+
+def test_core_skill_reference_routes_resolve_inside_every_distribution() -> None:
+    """Native installs and uploads must carry the router's actual destinations."""
+    from exomem import package_skills
+
+    root = workflow_skills.WORKFLOW_SKILLS_DIR.parent
+    text = (root / "SKILL.md").read_text(encoding="utf-8")
+    targets = set(re.findall(r"\]\((references/[^)#]+\.md)(?:#[^)]*)?\)", text))
+    assert targets, "conditional workflows need explicit local routes"
+    payload = package_skills._core_payload(None)
+    for target in targets:
+        assert (root / target).is_file(), target
+        assert payload[target] == (root / target).read_text(encoding="utf-8")
 
 
 def test_shipped_records_guidance_routes_observed_state_without_magic_verbs() -> None:
     """Both generic skill copies teach the same safe Records routing contract."""
     repo_root = Path(__file__).resolve().parents[1]
     skill_copies = (
-        workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md",
-        repo_root / "plugins" / "claude-code" / "skills" / "exomem" / "SKILL.md",
+        workflow_skills.WORKFLOW_SKILLS_DIR.parent / "references" / "planning-records.md",
+        repo_root / "plugins" / "claude-code" / "skills" / "exomem" / "references" / "planning-records.md",
     )
     operation_copies = (
         workflow_skills.WORKFLOW_SKILLS_DIR.parent / "references" / "operations.md",

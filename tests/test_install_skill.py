@@ -176,6 +176,10 @@ def test_install_skills_lands_the_full_set_in_both_clients(
     for client in ("claude", "codex"):
         skills = tmp_path / client / "skills"
         assert (skills / "exomem" / "SKILL.md").is_file()
+        # A router without its references installs successfully but cannot work.
+        for source in (install_module._SKILL_SRC / "references").glob("*.md"):
+            installed = skills / "exomem" / "references" / source.name
+            assert installed.read_bytes() == source.read_bytes()
         for name in EXPECTED_WORKFLOW_SKILLS:
             assert (skills / name / "SKILL.md").is_file(), f"{name} missing for {client}"
 
