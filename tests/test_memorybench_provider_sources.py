@@ -62,6 +62,37 @@ def test_guest_child_cpu_policy_matches_the_executed_python_profile() -> None:
     assert {key: environment.get(key) for key in settings} == settings
 
 
+def test_guest_initialization_keeps_machine_state_inside_owned_work_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.init import init_vault
+    from exomem.state_paths import vault_state_dir
+
+    bun = shutil.which("bun")
+    if bun is None:
+        pytest.skip("Bun is required for the cross-language initialization check")
+    work = tmp_path / "guest-service"
+    ambient_state = tmp_path / "ambient-state"
+    module = (PROVIDERS / "_guest_transport.ts").resolve().as_uri()
+    script = (
+        f"import {{buildExomemChildEnvironment,exomemOwnedStateEnvironment}} from {json.dumps(module)};"
+        "console.log(JSON.stringify(buildExomemChildEnvironment("
+        f"{{EXOMEM_STATE_ROOT:{json.dumps(str(ambient_state))}}},"
+        f"exomemOwnedStateEnvironment({json.dumps(str(work))}))));"
+    )
+    result = subprocess.run([bun, "-e", script], capture_output=True, text=True, check=True, timeout=20)
+    for key, value in json.loads(result.stdout).items():
+        monkeypatch.setenv(key, value)
+
+    vault = work / "vault"
+    init_vault(vault)
+    state = vault_state_dir(vault)
+    assert state.is_dir()
+    assert state.is_relative_to(work)
+    assert not state.is_relative_to(vault)
+    assert not ambient_state.exists()
+
+
 def _patch_paths(patch_text: str) -> set[str]:
     return {
         match.group(1)

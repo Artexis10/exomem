@@ -499,13 +499,14 @@ describe("guest transport", () => {
     )
   })
 
-  test("Exomem writer-lease state is bound inside the owned service root", async () => {
+  test("Exomem machine and writer-lease state are bound inside the owned service root", async () => {
     const transport = await import("../_guest_transport") as Record<string, unknown>
     const bind = transport.exomemOwnedStateEnvironment as undefined |
       ((workRoot: string) => Record<string, string>)
     expect(typeof bind).toBe("function")
     const work = join(await root(), "service")
     expect(bind!(work)).toEqual({
+      EXOMEM_STATE_ROOT: join(work, "state"),
       EXOMEM_WRITER_LEASE_STATE_DIR: join(work, "writer-lease-state"),
     })
 

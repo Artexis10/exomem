@@ -218,6 +218,7 @@ function requireAbsoluteRoot(name: string, value: string | undefined): string {
 export function exomemOwnedStateEnvironment(workRoot: string): Record<string, string> {
   const ownedRoot = requireAbsoluteRoot("Exomem work root", workRoot)
   return {
+    EXOMEM_STATE_ROOT: join(ownedRoot, "state"),
     EXOMEM_WRITER_LEASE_STATE_DIR: join(ownedRoot, "writer-lease-state"),
   }
 }
