@@ -92,7 +92,7 @@ def runtime_provenance(server_root: Path, python: Path) -> dict[str, Any]:
     """Record content-free identity for the exact target runtime before timing."""
     target = validate_server_root(server_root)
     source_root = target / "src"
-    python_path = normalize_python_launcher(python, Path.cwd())
+    python_path = Path(python)
     environment = _target_source_environment(target)
     package_origin = _command_output(
         [str(python_path), "-c", "import exomem, pathlib; print(pathlib.Path(exomem.__file__).resolve())"],
@@ -536,7 +536,6 @@ def invalid_measurement_report(
 def benchmark_environment(state: Path, vault: Path, *, server_root: Path = ROOT) -> dict[str, str]:
     """Create hermetic process state without disabling watchers or scheduling."""
     target = validate_server_root(server_root)
-    launcher = normalize_python_launcher(python, Path.cwd())
     env = {
         key: value
         for key, value in os.environ.items()
@@ -1165,6 +1164,7 @@ async def run_public_workflow(
     if profile not in {MODEL_FREE_PROFILE, REAL_EXTRACTION_PROFILE}:
         raise ValueError(f"unsupported profile: {profile}")
     target = validate_server_root(server_root)
+    launcher = normalize_python_launcher(python, Path.cwd())
     workflow_plan(variant)
     state.mkdir(parents=True, exist_ok=True)
     vault.mkdir(parents=True, exist_ok=True)

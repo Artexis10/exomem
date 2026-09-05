@@ -674,6 +674,30 @@ def test_relative_python_launcher_is_anchored_once_to_runner_cwd_not_server_root
     assert launcher != server_launcher.absolute()
 
 
+def test_relative_python_launcher_drives_registered_stdio_workflow(tmp_path: Path, monkeypatch: object) -> None:
+    runner_cwd = tmp_path / "runner"
+    launcher = runner_cwd / ".venv" / "bin" / "python"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(f"#!/bin/sh\nexec '{Path(sys.prefix) / 'bin' / 'python'}' \"$@\"\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.chdir(runner_cwd)  # type: ignore[attr-defined]
+
+    report = benchmark.asyncio.run(
+        benchmark.run_public_workflow(
+            python=Path(".venv/bin/python"),
+            state=tmp_path / "state",
+            vault=tmp_path / "vault",
+            pages=4,
+            profile=benchmark.MODEL_FREE_PROFILE,
+            timeout=30.0,
+            server_root=benchmark.ROOT,
+        )
+    )
+
+    assert report["runtime"]["python"]["invocation"] == str(launcher.absolute())
+    assert any(call["tool"] == "bootstrap" for call in report["calls"])
+
+
 def test_small_model_free_smoke_uses_one_registered_stdio_product_session(
     tmp_path: Path,
 ) -> None:
