@@ -4144,18 +4144,27 @@ def post_commit_batch_fanout(
     semantic_states: Mapping[str, Any] | None,
     *,
     created_paths: Iterable[Path] = (),
+    publication_intents: Iterable[Any] = (),
 ) -> bool:
     if vault_root is None or not replaced:
         return True
     # Register the self-authored replacements so the live watcher drops
     # their echo instead of re-embedding the same files a second time.
+    publication_intents = tuple(publication_intents)
     corpus_published = False
     try:
         from . import file_watcher
 
-        file_watcher.register_self_write(vault_root, replaced)
+        registered_intents = file_watcher.register_self_write(vault_root, replaced)
+        file_watcher.finalize_publication_intents(
+            publication_intents, succeeded=registered_intents
+        )
         corpus_published = True
     except Exception:  # noqa: BLE001 — suppression is best-effort
+        if publication_intents:
+            from . import file_watcher
+
+            file_watcher.abort_publication_intents(publication_intents)
         logging.getLogger(__name__).debug(
             "self-write suppression registration failed", exc_info=True
         )
@@ -4579,6 +4588,7 @@ def _batch_atomic_write_locked(
     graph_debt_checkpoint: PlannedWrite | None = None
     deferred_checkpoint: GraphSyncCheckpoint | None = None
     deferred_predecessor: GraphSyncCheckpoint | None = None
+    publication_intents: tuple[Any, ...] = ()
     if vault_root is not None:
         from . import graph_sync
 
@@ -4938,6 +4948,16 @@ def _batch_atomic_write_locked(
     )
     replaced: list[Path] = []
     final_guards: dict[Path, _BatchArtifactGuard] = {}
+    if vault_root is not None and post_commit_fanout and fast_receipt is None:
+        from . import file_watcher
+
+        publication_intents = file_watcher.register_publication_intents(
+            Path(vault_root),
+            (
+                (final, artifact.descriptor, artifact.content_hash)
+                for final, _workspace, artifact in staged
+            ),
+        )
     # The canonical transaction's own clock. Recorded as a span rather than
     # wrapped in a `with`, so timing this region does not reindent it: the
     # measurement that matters is how long the caller holds authority, and a
@@ -5098,6 +5118,10 @@ def _batch_atomic_write_locked(
             workspace_by_parent.values(), retained=implicated_workspaces
         )
         if rollback_errors:
+            if publication_intents:
+                from . import file_watcher
+
+                file_watcher.abort_publication_intents(publication_intents)
             _remove_empty_created_dirs(created_dirs)
             raise BatchWriteError(
                 "BATCH_ROLLBACK_INCOMPLETE",
@@ -5106,15 +5130,27 @@ def _batch_atomic_write_locked(
                 diagnostics=rollback_errors,
             ) from commit_error
         if cleanup_retained:
+            if publication_intents:
+                from . import file_watcher
+
+                file_watcher.abort_publication_intents(publication_intents)
             _remove_empty_created_dirs(created_dirs)
             raise BatchWriteError(
                 "BATCH_CLEANUP_INCOMPLETE",
                 target_summary,
                 False,
             ) from commit_error
+        if publication_intents:
+            from . import file_watcher
+
+            file_watcher.abort_publication_intents(publication_intents)
         _remove_empty_created_dirs(created_dirs)
         raise
     except BaseException:
+        if publication_intents:
+            from . import file_watcher
+
+            file_watcher.abort_publication_intents(publication_intents)
         _cleanup_batch_workspaces(workspace_by_parent.values())
         _remove_empty_created_dirs(created_dirs)
         raise
@@ -5148,6 +5184,7 @@ def _batch_atomic_write_locked(
             index_reports,
             semantic_states,
             created_paths=created_paths,
+            publication_intents=publication_intents,
         )
     if cleanup_retained:
         raise BatchWriteError(
