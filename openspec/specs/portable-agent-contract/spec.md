@@ -27,12 +27,12 @@ Contract construction SHALL NOT inspect a vault or require a model.
 
 ### Requirement: MCP-Only Distribution Is Sufficient
 
-A generic client with only the MCP server's tool list and bootstrap operation
-SHALL receive enough information to create a compliant compiled note. Every
-bootstrap profile SHALL include the complete minimum semantic-authoring object,
-and authoring-tool descriptions SHALL include the exact compact syntax,
-`## Observations` location, open-category rule, and required-minimum/remediation
-that applies to that tool.
+A generic client with only the MCP server's tool list and portable `compact`, `full`, or `diagnostics` bootstrap operation SHALL receive enough information to create a compliant compiled note. Those generic profiles SHALL include the complete minimum semantic-authoring object, and authoring-tool descriptions SHALL include the exact compact syntax, `## Observations` location, open-category rule, and required-minimum/remediation that applies to that tool. A valid `session` profile is the attested exception: it MAY omit generic semantic-authoring, Records, Planning, and front-door teaching only after the matching installed skill contract has been accepted, while retaining the live due-state/family-disposition post-write guidance required to interpret returned state.
+
+#### Scenario: Session profile relies on the attested installed skill
+- **WHEN** a client presents the matching installed skill contract with `profile="session"`
+- **THEN** the response omits generic semantic-authoring teaching
+- **AND** portable profiles remain complete for clients without that installed skill
 
 #### Scenario: Generic MCP client can author without a skill
 - **WHEN** a client receives tool schemas and calls default `bootstrap()` without an installed skill or repository instructions

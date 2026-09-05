@@ -7,5 +7,5 @@
 ## 2. Skill integration and delivery
 
 - [x] 2.1 Update core and standalone skill routing with old-server and missing-procedure fallback, regenerate the Claude plugin, and verify package parity and preserved semantic grammar
-- [ ] 2.2 Run affected tests, strict OpenSpec validation, independent adversarial review and required completion CI; resolve attributable failures before delivery
-- [ ] 2.3 Synchronize the delta specification and archive through OpenSpec, verify strict validation, and deliver the reviewed change with measured instruction sizes
+- [x] 2.2 Run affected tests, strict OpenSpec validation, independent adversarial review and required completion CI; resolve attributable failures before delivery
+- [x] 2.3 Synchronize the delta specification and archive through OpenSpec, verify strict validation, and deliver the reviewed change with measured instruction sizes
