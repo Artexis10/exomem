@@ -328,6 +328,21 @@ def test_stress_variant_places_a_public_probe_after_each_mutating_step() -> None
         }
 
 
+def test_workflow_plan_delays_only_the_evidence_backed_note_until_media_settles() -> None:
+    names = [step["name"] for step in benchmark.workflow_plan("optimized")]
+
+    enqueue_end = names.index("process-media")
+    independent_end = names.index("repair-stale-relation")
+    media_proof = names.index("media-completion-proof")
+    source_note = names.index("remember-evidence-backed-note")
+    final_verification = names.index("ordinary-recall")
+
+    assert enqueue_end < names.index("observe-tracker") <= independent_end
+    assert enqueue_end < names.index("observe-critique") <= independent_end
+    assert enqueue_end < names.index("read-archived") <= independent_end
+    assert independent_end < media_proof < source_note < final_verification
+
+
 def test_artifact_manifest_requires_three_https_handles_and_expected_hashes(tmp_path: Path) -> None:
     manifest = tmp_path / "artifacts.json"
     manifest.write_text(

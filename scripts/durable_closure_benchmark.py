@@ -164,9 +164,16 @@ def workflow_plan(variant: str) -> list[dict[str, Any]]:
         raise ValueError(f"unsupported variant: {variant}")
     base = [
         {"name": "bootstrap", "tool": "bootstrap", "mutates": False, "probe": False},
+        {"name": "preserve-artifacts", "tool": "preserve_artifacts", "mutates": True, "probe": False},
+        {"name": "process-media", "tool": "process_media", "mutates": True, "probe": False},
+        {"name": "observe-tracker", "tool": "observe_memory", "mutates": True, "probe": False},
+        {"name": "observe-critique", "tool": "observe_memory", "mutates": True, "probe": False},
+        {"name": "read-archived", "tool": "read_memory", "mutates": False, "probe": False},
+        {"name": "repair-stale-relation", "tool": "edit_memory", "mutates": True, "probe": False},
+        {"name": "media-completion-proof", "tool": "read_memory", "mutates": False, "probe": False},
         {"name": "validate-remember", "tool": "remember", "mutates": False, "probe": False},
-        {"name": "remember", "tool": "remember", "mutates": True, "probe": False},
-        {"name": "observe", "tool": "observe_memory", "mutates": True, "probe": False},
+        {"name": "remember-evidence-backed-note", "tool": "remember", "mutates": True, "probe": False},
+        {"name": "observe-source-note", "tool": "observe_memory", "mutates": True, "probe": False},
         {"name": "ordinary-recall", "tool": "ask_memory", "mutates": False, "probe": False},
         {"name": "exact-read", "tool": "read_memory", "mutates": False, "probe": False},
     ]
@@ -815,10 +822,11 @@ async def _observe_reviewed(
     content: str,
     anchor: str,
     call_tool: Any,
+    phase: str,
 ) -> dict[str, Any]:
     """Use the product's validate/transition/commit public mutation protocol."""
     preview = await call_tool(
-        "observe_memory", {"path": path, "operation": "validate", "category": category, "content": content, "id": anchor}
+        "observe_memory", {"path": path, "operation": "validate", "category": category, "content": content, "id": anchor}, phase=phase
     )
     semantic = _semantic_diagnostics(preview)
     return await call_tool(
@@ -833,7 +841,7 @@ async def _observe_reviewed(
             "relation_disposition": "reviewed_none",
             "relation_review_hash": semantic.get("transition_hash"),
             "relation_review_reason": "No honest relation is added by the isolated benchmark observation.",
-        },
+        }, phase=phase,
     )
 
 
@@ -1034,7 +1042,7 @@ async def run_public_workflow(
                 str(row.get("sidecar_path") or "") for row in media_rows if isinstance(row.get("sidecar_path"), str)
             ]
             media = {
-                "status": "ready" if hashes_match and len(evidence_paths) == 3 and process_ok else "fail",
+                "status": "queued" if hashes_match and len(evidence_paths) == 3 and process_ok else "fail",
                 "fixture_provenance": [{key: item[key] for key in item} for item in artifacts],
                 "preserved_hashes_match": hashes_match,
                 "evidence_paths": evidence_paths,
@@ -1044,6 +1052,91 @@ async def run_public_workflow(
                 "extraction_convergence_ms": None,
                 "engine_versions": None,
             }
+        tracker_path = corpus["active_tracker"]
+        tracker_observation = await _observe_reviewed(
+            client,
+            calls,
+            path=tracker_path,
+            category="action",
+            content=f"{marker} tracker update",
+            anchor="benchmark-tracker",
+            call_tool=workflow_call,
+            phase="independent-closure",
+        )
+        critique_observation = await _observe_reviewed(
+            client,
+            calls,
+            path=corpus["critique"],
+            category="finding",
+            content=f"{marker} critique update",
+            anchor="benchmark-critique",
+            call_tool=workflow_call,
+            phase="independent-closure",
+        )
+        archived_read = await workflow_call(
+            "read_memory", {"path": corpus["archived_note"]}, phase="independent-closure"
+        )
+
+        stale_line = "- supports [[Knowledge Base/Notes/Insights/archived-runbook]]"
+        edit_operation = {"kind": "replace_string", "old_string": stale_line, "new_string": "", "replace_all": False}
+        tracker_correction = await workflow_call(
+            "edit_memory",
+            {
+                "path": corpus["stale_relation"],
+                "why": "correct stale benchmark relation",
+                "operation": edit_operation,
+            },
+            phase="independent-closure",
+        )
+
+        # The source note has a causal dependency on media custody/completion.
+        # Keep unrelated tracker, critique, archive, and stale-edge work above
+        # this boundary so extraction settles while ordinary closure continues.
+        if artifacts is not None:
+            if profile == REAL_EXTRACTION_PROFILE:
+                proof: dict[str, Any] | None = None
+                deadline = time.perf_counter() + timeout
+                while extraction_sidecar_paths and time.perf_counter() < deadline:
+                    reads = [
+                        await workflow_call("read_memory", {"path": sidecar_path}, phase="convergence-poll")
+                        for sidecar_path in extraction_sidecar_paths
+                    ]
+                    proof = extraction_proof(artifacts, reads)
+                    if proof is not None:
+                        break
+                    await asyncio.sleep(0.2)
+                if proof is None:
+                    media.update(
+                        {
+                            "status": "blocked",
+                            "reason": "public extraction-content and engine-version verification did not converge",
+                        }
+                    )
+                else:
+                    media.update(
+                        {
+                            "status": "ready",
+                            "extraction_convergence_ms": (time.perf_counter() - extraction_enqueue_started) * 1000.0
+                            if extraction_enqueue_started is not None
+                            else None,
+                            **proof,
+                        }
+                    )
+                    media_convergence_wall_ms = (time.perf_counter() - workflow_started) * 1000.0
+            else:
+                custody_reads = [
+                    await workflow_call("read_memory", {"path": sidecar_path}, phase="media-custody")
+                    for sidecar_path in extraction_sidecar_paths
+                ]
+                custody_ok = bool(custody_reads) and all(_outcome_ok(read) for read in custody_reads)
+                media.update(
+                    {
+                        "status": "blocked" if media.get("status") == "queued" and custody_ok else "fail",
+                        "reason": "model-free profile records public queued sidecar custody but does not claim extraction completion",
+                        "custody_reads": len(custody_reads),
+                    }
+                )
+
         remember_arguments = {
             "title": "Durable closure benchmark result",
             "note_type": "insight",
@@ -1055,6 +1148,7 @@ async def run_public_workflow(
         validation = await workflow_call(
             "remember",
             {**remember_arguments, "validate_only": True},
+            phase="source-closure",
         )
         remembered = await workflow_call(
             "remember",
@@ -1067,6 +1161,7 @@ async def run_public_workflow(
                 "relation_review_hash": validation.get("draft_hash"),
                 "relation_review_reason": "No honest relation exists in the isolated benchmark fixture.",
             },
+            phase="source-closure",
         )
         path = str(remembered.get("path") or "")
         if path:
@@ -1078,41 +1173,10 @@ async def run_public_workflow(
                 content=f"{marker} observation",
                 anchor="follow-up",
                 call_tool=workflow_call,
+                phase="source-closure",
             )
         else:
             remembered_observation = {"success": False}
-
-        tracker_path = corpus["active_tracker"]
-        tracker_observation = await _observe_reviewed(
-            client,
-            calls,
-            path=tracker_path,
-            category="action",
-            content=f"{marker} tracker update",
-            anchor="benchmark-tracker",
-            call_tool=workflow_call,
-        )
-        critique_observation = await _observe_reviewed(
-            client,
-            calls,
-            path=corpus["critique"],
-            category="finding",
-            content=f"{marker} critique update",
-            anchor="benchmark-critique",
-            call_tool=workflow_call,
-        )
-        archived_read = await workflow_call("read_memory", {"path": corpus["archived_note"]})
-
-        stale_line = "- supports [[Knowledge Base/Notes/Insights/archived-runbook]]"
-        edit_operation = {"kind": "replace_string", "old_string": stale_line, "new_string": "", "replace_all": False}
-        tracker_correction = await workflow_call(
-            "edit_memory",
-            {
-                "path": corpus["stale_relation"],
-                "why": "correct stale benchmark relation",
-                "operation": edit_operation,
-            },
-        )
 
         recall = await workflow_call(
             "ask_memory",
@@ -1126,39 +1190,6 @@ async def run_public_workflow(
             state, action="snapshot", phase="closure", timeout=timeout
         )
         useful_closure_finished = time.perf_counter()
-
-        # Continue with independent note/relation closure before awaiting media.
-        # The media convergence clock starts at its earlier public enqueue.
-        if profile == REAL_EXTRACTION_PROFILE and artifacts is not None:
-            proof: dict[str, Any] | None = None
-            deadline = time.perf_counter() + timeout
-            while extraction_sidecar_paths and time.perf_counter() < deadline:
-                reads = [
-                    await workflow_call("read_memory", {"path": sidecar_path}, phase="convergence-poll")
-                    for sidecar_path in extraction_sidecar_paths
-                ]
-                proof = extraction_proof(artifacts, reads)
-                if proof is not None:
-                    break
-                await asyncio.sleep(0.2)
-            if proof is None:
-                media.update(
-                    {
-                        "status": "blocked",
-                        "reason": "public extraction-content and engine-version verification did not converge",
-                    }
-                )
-            else:
-                media.update(
-                    {
-                        "status": "ready",
-                        "extraction_convergence_ms": (time.perf_counter() - extraction_enqueue_started) * 1000.0
-                        if extraction_enqueue_started is not None
-                        else None,
-                        **proof,
-                    }
-                )
-                media_convergence_wall_ms = (time.perf_counter() - workflow_started) * 1000.0
 
         convergence_instrumentation = await instrumentation_command(
             state, action="snapshot", phase="convergence", timeout=timeout
