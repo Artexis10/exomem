@@ -58,8 +58,8 @@ _PLAN_RECEIPT_FIELDS = (
 #: MUST NOT infer any other. `needs_review` is explicitly NONTERMINAL: it means the
 #: guarded write is mid-flight and the caller should complete the review step, not that
 #: anything failed. Conflating it with failure is the 2026-08-06 misclassification.
-STATES = ("needs_review", "committed", "rejected", "retryable", "indeterminate")
-TERMINAL_STATES = frozenset({"committed", "rejected"})
+STATES = ("needs_review", "committed", "rejected", "retryable", "indeterminate", "settled")
+TERMINAL_STATES = frozenset({"committed", "rejected", "settled"})
 
 #: The closed derived-graph outcome vocabulary a client may branch on. Absent
 #: means no graph work was required; `pending` means the write is durable but
@@ -351,7 +351,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
         state = item.get("state")
         if outcome == "failed":
             if not (
-                state == "failed"
+                state in {"blocked", "failed"}
                 and path(item.get("path"))
                 and isinstance(item.get("code"), str)
                 and 0 < len(item["code"]) <= 128
@@ -405,6 +405,42 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
         "paths": [item["path"] for item in projected],
         "media_results": projected,
     }
+
+
+def settled_media_terminal(
+    leaf_result: Any,
+    *,
+    request_id: str,
+    receipt_id: str | None,
+    idempotency_key: str | None,
+) -> dict[str, Any] | None:
+    """Own a completed queue-only media acknowledgement without claiming a commit.
+
+    Reconciliation can find an already-current sidecar or retry only its
+    machine-local job. Both are complete public requests, but neither crossed
+    the canonical mutation boundary. Keep their bounded media outcome behind
+    the same terminal marker as canonical writes so compact/full presentation
+    and exact idempotency replay cannot fall back to a raw leaf.
+    """
+    if not _media_result_projection(leaf_result):
+        return None
+    terminal: dict[str, Any] = {
+        "_terminal": _TERMINAL_MARKER,
+        "version": _TERMINAL_VERSION,
+        "ok": True,
+        "state": "settled",
+        "status": "settled",
+        "terminal": True,
+        "mutated": False,
+        "request_id": request_id,
+        "receipt_id": receipt_id,
+        "warnings_count": _warning_count(leaf_result),
+        "leaf_result": leaf_result,
+    }
+    terminal.update(_path_projection(leaf_result))
+    if idempotency_key is not None:
+        terminal["idempotency_key"] = idempotency_key
+    return terminal
 
 
 def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
