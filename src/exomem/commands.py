@@ -533,21 +533,10 @@ def op_bootstrap(
 
     compute_policy = mode_module.resolved()
     engagement_policy = prominence_module.resolved()
-    if profile == "compact" and engagement_policy["level"] in {"balanced", "maximal"}:
-        # The full prominence prose remains available from the full and diagnostics
-        # projections. Keep this command-free predicate in compact so all three
-        # projections teach the new class without spending the compact budget twice
-        # on adjacent lifecycle doctrine carried by their dedicated contracts.
-        engagement_policy["contract"]["capture"] = (
-            "Stable preference/recurring routine/historical baseline/durable affiliation requires "
-            "stability or recurrence plus reusable comparison/interpretation/decision value. "
-            "Uniquely resolved Entity: narrow Entity facet/proactive_capture; affiliation relation/"
-            "link_acceptance. Else compiled observation; Records if compatible. One-off/incidental/"
-            "tentative quiet. Entity creation/structural change: confirmed restructure_execution. "
-            "Generated draft stays ephemeral; selected is not write consent. Exact bytes; "
-            "Source/Evidence by role, not MIME. No handle: non-committing handoff. Delivery/Record: "
-            "never infer remote bytes."
-        )
+    # Every projection, compact included, serves prominence's own capture text.
+    # An earlier compact-only replacement compressed it to save bytes and dropped
+    # the Planning/Records transition rule the workflow-contract feedback loop
+    # pins; the compact budget no longer needs the saving.
     # The delegation envelope rides INSIDE the engagement block rather than beside
     # it: prominence sets its defaults, so a client reading one without the other
     # would learn how eager Exomem is without learning what it is allowed to do on
