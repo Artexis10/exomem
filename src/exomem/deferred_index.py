@@ -22,6 +22,7 @@ _SEMANTIC_UPSERTS_GENERATION_KEY = "semantic_upserts_generation"
 _GRAPH_UPSERTS_GENERATION_KEY = "graph_upserts_generation"
 _GRAPH_FULL_REBUILD_KEY = "graph_full_rebuild_generation"
 _GRAPH_FULL_REBUILD_SEQUENCE_KEY = "graph_full_rebuild_sequence"
+_PENDING_VISIBILITY_GENERATION_KEY = "pending_visibility_generation:v1"
 
 #: The queues this store carries, and the tables behind them.  The graph queue
 #: is the newest and the reason the mapping exists: it reuses the semantic
@@ -42,6 +43,219 @@ _QUEUE_TABLES = {
 _ROTATION_EPSILON_SECONDS = 1e-6
 
 
+def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
+    """Add the exact derived-batch custody tables without touching old queues."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS derived_batches (
+            schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+            batch_id TEXT PRIMARY KEY CHECK(length(batch_id) BETWEEN 1 AND 128),
+            mutation_attempt_digest TEXT NOT NULL
+                CHECK(length(mutation_attempt_digest) = 64),
+            canonical_generation TEXT NOT NULL
+                CHECK(length(canonical_generation) BETWEEN 1 AND 128),
+            checkpoint_id TEXT NOT NULL
+                CHECK(length(checkpoint_id) BETWEEN 1 AND 128),
+            state TEXT NOT NULL CHECK(state IN (
+                'prepared', 'ready', 'completed', 'aborted', 'superseded',
+                'reconcile_required'
+            )),
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            failure_code TEXT CHECK(
+                failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 64
+            )
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS derived_batch_paths (
+            batch_id TEXT NOT NULL,
+            rel_path TEXT NOT NULL CHECK(length(rel_path) BETWEEN 1 AND 1024),
+            before_hash TEXT CHECK(before_hash IS NULL OR length(before_hash) = 64),
+            after_hash TEXT CHECK(after_hash IS NULL OR length(after_hash) = 64),
+            stable_memory_ref TEXT CHECK(
+                stable_memory_ref IS NULL OR length(stable_memory_ref) BETWEEN 1 AND 256
+            ),
+            PRIMARY KEY(batch_id, rel_path),
+            FOREIGN KEY(batch_id) REFERENCES derived_batches(batch_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS derived_batch_components (
+            batch_id TEXT NOT NULL,
+            component TEXT NOT NULL CHECK(component IN (
+                'freshness', 'memory_refs', 'resolver', 'semantic_purge',
+                'lexstore', 'graph', 'embeddings', 'claims', 'write_advisory'
+            )),
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            state TEXT NOT NULL CHECK(state IN (
+                'prepared', 'ready', 'claimed', 'retryable', 'completed',
+                'not_required', 'aborted', 'superseded', 'reconcile_required',
+                'failed'
+            )),
+            lease_revision INTEGER NOT NULL DEFAULT 0 CHECK(lease_revision >= 0),
+            claim_owner TEXT CHECK(
+                claim_owner IS NULL OR length(claim_owner) BETWEEN 1 AND 128
+            ),
+            claim_expires_at REAL,
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+            next_attempt_at REAL NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            failure_code TEXT CHECK(
+                failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 64
+            ),
+            PRIMARY KEY(batch_id, component),
+            FOREIGN KEY(batch_id) REFERENCES derived_batches(batch_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pending_recall_rows (
+            batch_id TEXT NOT NULL,
+            rel_path TEXT NOT NULL CHECK(length(rel_path) BETWEEN 1 AND 1024),
+            component_revision INTEGER NOT NULL CHECK(component_revision >= 1),
+            canonical_generation TEXT NOT NULL
+                CHECK(length(canonical_generation) BETWEEN 1 AND 128),
+            state TEXT NOT NULL CHECK(state IN ('prepared', 'live', 'retired')),
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY(batch_id, rel_path),
+            FOREIGN KEY(batch_id, rel_path)
+                REFERENCES derived_batch_paths(batch_id, rel_path)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS write_advisory_results (
+            result_id TEXT PRIMARY KEY CHECK(length(result_id) BETWEEN 1 AND 64),
+            batch_id TEXT NOT NULL,
+            component_revision INTEGER NOT NULL CHECK(component_revision >= 1),
+            target_rel_path TEXT CHECK(
+                target_rel_path IS NULL OR length(target_rel_path) BETWEEN 1 AND 1024
+            ),
+            target_fingerprint TEXT NOT NULL
+                CHECK(length(target_fingerprint) BETWEEN 1 AND 128),
+            counterpart_fingerprint TEXT CHECK(
+                counterpart_fingerprint IS NULL
+                OR length(counterpart_fingerprint) BETWEEN 1 AND 128
+            ),
+            state TEXT NOT NULL CHECK(state IN (
+                'pending', 'ready', 'failed', 'superseded'
+            )),
+            failure_code TEXT CHECK(
+                failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 64
+            ),
+            advisory_ref TEXT CHECK(
+                advisory_ref IS NULL OR length(advisory_ref) BETWEEN 1 AND 256
+            ),
+            review_ref TEXT CHECK(
+                review_ref IS NULL OR length(review_ref) BETWEEN 1 AND 256
+            ),
+            retention_deadline REAL NOT NULL,
+            terminal_replay_until REAL NOT NULL,
+            publication_revision INTEGER NOT NULL DEFAULT 1
+                CHECK(publication_revision >= 1),
+            published_at REAL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            UNIQUE(batch_id, component_revision)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS write_advisory_result_candidates (
+            result_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 7),
+            counterpart_rel_path TEXT NOT NULL
+                CHECK(length(counterpart_rel_path) BETWEEN 1 AND 1024),
+            counterpart_fingerprint TEXT NOT NULL
+                CHECK(length(counterpart_fingerprint) BETWEEN 1 AND 128),
+            warning TEXT NOT NULL CHECK(length(warning) BETWEEN 1 AND 300),
+            advisory_ref TEXT NOT NULL
+                CHECK(length(advisory_ref) BETWEEN 1 AND 256),
+            review_ref TEXT NOT NULL CHECK(length(review_ref) BETWEEN 1 AND 256),
+            triage_fingerprint TEXT NOT NULL CHECK(length(triage_fingerprint) = 24),
+            PRIMARY KEY(result_id, ordinal),
+            FOREIGN KEY(result_id) REFERENCES write_advisory_results(result_id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS derived_components_schedule "
+        "ON derived_batch_components(state, next_attempt_at, updated_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS derived_paths_lookup "
+        "ON derived_batch_paths(rel_path, batch_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS pending_recall_visibility "
+        "ON pending_recall_rows(state, canonical_generation)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS advisory_result_retention "
+        "ON write_advisory_results(retention_deadline, terminal_replay_until)"
+    )
+    advisory_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(write_advisory_results)")
+    }
+    if "target_rel_path" not in advisory_columns:
+        conn.execute(
+            "ALTER TABLE write_advisory_results ADD COLUMN target_rel_path TEXT"
+        )
+    # Seed the fence only when it is genuinely absent.  An unconditional write
+    # here would make every ``create=True`` open queue for the SQLite write lock
+    # behind a live writer, which is exactly what the read seams must not do.
+    if conn.execute(
+        "SELECT 1 FROM maintenance_state WHERE key = ?",
+        (_PENDING_VISIBILITY_GENERATION_KEY,),
+    ).fetchone() is None:
+        conn.execute(
+            "INSERT OR IGNORE INTO maintenance_state(key, value) VALUES (?, '0')",
+            (_PENDING_VISIBILITY_GENERATION_KEY,),
+        )
+    for event in ("INSERT", "UPDATE", "DELETE"):
+        conn.execute(
+            f"CREATE TRIGGER IF NOT EXISTS pending_visibility_generation_{event.lower()} "
+            f"AFTER {event} ON pending_recall_rows BEGIN "
+            "INSERT INTO maintenance_state(key, value) VALUES "
+            f"('{_PENDING_VISIBILITY_GENERATION_KEY}', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1; END"
+        )
+    component_columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(derived_batch_components)")
+    }
+    if "lease_revision" not in component_columns:
+        conn.execute(
+            "ALTER TABLE derived_batch_components "
+            "ADD COLUMN lease_revision INTEGER NOT NULL DEFAULT 0"
+        )
+        # The rejected schema used ``revision`` for both durable lineage and
+        # lease attempts.  Every schema-v1 batch/pending/advisory row has one
+        # durable revision; preserve the excess as lease lineage instead of
+        # stranding revision-1 related rows behind a revision-2+ component.
+        conn.execute(
+            "UPDATE derived_batch_components SET "
+            "lease_revision = CASE WHEN revision > 1 THEN revision - 1 ELSE 0 END, "
+            "revision = 1"
+        )
+        conn.execute("UPDATE pending_recall_rows SET component_revision = 1")
+        conn.execute("UPDATE write_advisory_results SET component_revision = 1")
+    # DDL itself is durable without a caller transaction, but the additive
+    # generation initialization and any repair DML are not. Commit schema
+    # migration before returning a handle whose caller may begin immediately.
+    conn.commit()
+
+
 def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
     with reserved_paths._subsystem_authority_scope("deferred_index"):
         return _sqlite_connect_owned(database, *args, **kwargs)
@@ -54,7 +268,9 @@ def _sqlite_connect_owned(
 
 
 def store_path(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / ".deferred-index.sqlite"
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / ".deferred-index.sqlite"
 
 
 def _connect_readonly(vault_root: Path) -> sqlite3.Connection:
@@ -217,6 +433,7 @@ def _connect_created_owned(
         conn.execute(
             "ALTER TABLE full_upserts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
         )
+    _ensure_derived_batch_schema(conn)
     if publish:
         try:
             reserved_paths._publish_sqlite_owner_family(
@@ -1199,7 +1416,9 @@ def _status(vault_root: Path | None, *, table: str) -> dict[str, Any]:
 
 
 def _embedding_sidecar(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / ".embeddings.sqlite"
+    from . import index_paths
+
+    return index_paths.sidecar_path(vault_root)
 
 
 def _file_identity(path: Path) -> tuple[int, int, int, int]:

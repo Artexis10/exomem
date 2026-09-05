@@ -110,6 +110,17 @@ def test_env_uninitialized_root_allows_browse(
         product_invoke.invoke_product("ask_memory", {"query": "x"})
 
 
+def test_preinit_allowances_do_not_require_state_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    plain = tmp_path / "plain-folder"
+    plain.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(plain))
+
+    assert product_invoke.invoke_product("browse_memory", {"mode": "list"})
+    assert product_invoke.invoke_product("adopt_vault", {"mode": "scan-only"})
+
+
 def test_coerce_accepts_native_types(vault: Path):
     result = product_invoke.invoke_product(
         "ask_memory", {"query": "progressive disclosure", "limit": 3, "graph": False}

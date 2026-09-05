@@ -35,6 +35,7 @@ from . import (
     vault,
 )
 from . import find as find_module
+from .cli_ops import OpError
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
 
@@ -266,6 +267,10 @@ class StableIdentityEntry:
 class StableIdentityCensus:
     entries: tuple[StableIdentityEntry, ...]
     paths_by_identity: Mapping[str, tuple[str, ...]] = field(init=False)
+    _reference_paths: frozenset[str] = field(init=False, repr=False, compare=False)
+    _canonical_refs_by_path: Mapping[str, str | None] = field(
+        init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         entries = tuple(
@@ -288,6 +293,32 @@ class StableIdentityCensus:
             MappingProxyType(
                 {identity: tuple(sorted(values)) for identity, values in sorted(grouped.items())}
             ),
+        )
+        reference_entries = tuple(
+            entry for entry in entries if not vault.in_excluded_scan_dir(entry.path)
+        )
+        reference_owners: dict[str, list[str]] = {}
+        for entry in reference_entries:
+            if entry.page_identity is not None:
+                reference_owners.setdefault(entry.page_identity, []).append(entry.path)
+        canonical_refs = {
+            entry.path: (
+                memory_refs.memory_ref(entry.page_identity)
+                if entry.page_identity is not None
+                and len(reference_owners[entry.page_identity]) == 1
+                else None
+            )
+            for entry in reference_entries
+        }
+        object.__setattr__(
+            self,
+            "_reference_paths",
+            frozenset(entry.path for entry in reference_entries),
+        )
+        object.__setattr__(
+            self,
+            "_canonical_refs_by_path",
+            MappingProxyType(canonical_refs),
         )
 
     def with_page(
@@ -324,8 +355,6 @@ class StableIdentityCensus:
             raw_identity = state.frontmatter.get(ID_FIELD)
             identity: str | None = None
             if raw_identity is not None:
-                if not isinstance(raw_identity, str) or normalize_id(raw_identity) is None:
-                    raise ValueError(f"stable identity is invalid at {state.path}")
                 identity = normalize_id(raw_identity)
             entries.append(StableIdentityEntry(state.path, identity))
         return cls(tuple(entries))
@@ -750,25 +779,38 @@ def _path_parts(path: str) -> tuple[str, ...]:
     return tuple(part.casefold() for part in PurePosixPath(path.replace("\\", "/")).parts)
 
 
-def _path_excluded_from_semantic_minimum(path: str) -> bool:
+def _path_excluded_from_compiled_destination(path: str) -> bool:
     parts = _path_parts(path)
     if any(part in _SEMANTIC_UNIT_EXEMPT_PARTS for part in parts):
         return True
     name = parts[-1] if parts else ""
-    if name in {"hub.md", "index.md", "log.md"}:
+    return name in {"hub.md", "index.md", "log.md"}
+
+
+def _path_excluded_from_semantic_minimum(path: str) -> bool:
+    if _path_excluded_from_compiled_destination(path):
         return True
+    parts = _path_parts(path)
+    name = parts[-1] if parts else ""
     stem = PurePosixPath(name).stem
     return any(stem.endswith(suffix) for suffix in _SEMANTIC_UNIT_EXEMPT_SUFFIXES)
+
+
+def _structural_compiled_destination(path: str) -> str | None:
+    """Return a compiled route without applying minimum-unit-only exemptions."""
+    if _path_excluded_from_compiled_destination(path):
+        return None
+    parts = _path_parts(path)
+    if len(parts) < 3 or parts[:2] != ("knowledge base", "notes"):
+        return None
+    return _COMPILED_ROOT_TYPES.get(parts[2])
 
 
 def canonical_compiled_destination(path: str) -> str | None:
     """Return the compiled type selected by one canonical destination, if any."""
     if _path_excluded_from_semantic_minimum(path):
         return None
-    parts = _path_parts(path)
-    if len(parts) < 3 or parts[:2] != ("knowledge base", "notes"):
-        return None
-    return _COMPILED_ROOT_TYPES.get(parts[2])
+    return _structural_compiled_destination(path)
 
 
 def _frontmatter_tags(page: SemanticPageState) -> frozenset[str]:
@@ -799,8 +841,10 @@ def compiled_intent(page: SemanticPageState) -> bool:
 
 def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | None:
     """Return a deterministic path/type mismatch before semantic applicability."""
-    destination_type = canonical_compiled_destination(page.path)
+    destination_type = _structural_compiled_destination(page.path)
     page_type = normalized_compiled_type(page.page_type)
+    if _path_excluded_from_semantic_minimum(page.path) and page_type not in COMPILED_TYPES:
+        return None
     if destination_type is not None and page_type != destination_type:
         return ContractFinding(
             code="COMPILED_TYPE_MISMATCH",
@@ -898,14 +942,23 @@ def _copy_registry(
     registry: relation_registry.RelationRegistry,
 ) -> relation_registry.RelationRegistry:
     return relation_registry.RelationRegistry(
-        registry.core_version,
-        registry.extension_hash,
-        MappingProxyType({key: _copy_definition(value) for key, value in registry.core.items()}),
-        MappingProxyType(
+        core_version=registry.core_version,
+        extension_hash=registry.extension_hash,
+        core=MappingProxyType(
+            {key: _copy_definition(value) for key, value in registry.core.items()}
+        ),
+        extensions=MappingProxyType(
             {key: _copy_definition(value) for key, value in registry.extensions.items()}
         ),
-        MappingProxyType(dict(registry.aliases)),
-        tuple(MappingProxyType(dict(finding)) for finding in registry.findings),
+        aliases=MappingProxyType(dict(registry.aliases)),
+        findings=tuple(MappingProxyType(dict(finding)) for finding in registry.findings),
+        terminal_replacements=MappingProxyType(dict(registry.terminal_replacements)),
+        predecessor_closure=MappingProxyType(
+            {
+                key: frozenset(predecessors)
+                for key, predecessors in registry.predecessor_closure.items()
+            }
+        ),
     )
 
 
@@ -1200,6 +1253,9 @@ class _CensusUnsafe(Exception):
 # own temp+rename writes nor by observed sync behavior.
 _CORPUS_CONTEXT_CACHE: dict[tuple[str, str], tuple[tuple, SemanticCorpusContext]] = {}
 _CORPUS_CONTEXT_EVENT_TOKENS: dict[tuple[str, str], tuple[int, int, str]] = {}
+_CORPUS_CONTEXT_EVENT_CHECKPOINTS: dict[
+    tuple[str, str], freshness.FreshnessCheckpoint
+] = {}
 _CORPUS_CONTEXT_LANGUAGE_HASHES: dict[tuple[str, str], str] = {}
 _CORPUS_CONTEXT_CACHE_LOCK = threading.Lock()
 _CORPUS_CONTEXT_UPDATE_LOCK = threading.RLock()
@@ -1248,6 +1304,45 @@ class _CorpusContextFlight:
 
 _CORPUS_CONTEXT_FLIGHTS: dict[tuple[str, str], _CorpusContextFlight] = {}
 
+#: A waiter owns an interactive request budget, not the owner's vault-sized
+#: build duration.  Two seconds is fixed and deliberately non-configurable: it
+#: is far below the measured 103.6-second median post-commit interval and the
+#: 15-second connector timeout while leaving room for ordinary scheduling noise.
+_CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS = 2.0
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceIdentitySnapshot:
+    """One immutable, event-captioned view of canonical reference ownership."""
+
+    checkpoint: freshness.FreshnessCheckpoint
+    reference_paths: frozenset[str]
+    canonical_refs_by_path: Mapping[str, str | None]
+    _cache_context_identity: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceWikilinkResolution:
+    """One I/O-free wikilink resolution from an exact cached corpus context."""
+
+    status: str
+    path: str | None = None
+
+
+def _drop_corpus_caption_locked(cache_key: tuple[str, str]) -> None:
+    _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
+    _CORPUS_CONTEXT_EVENT_CHECKPOINTS.pop(cache_key, None)
+
+
+def _caption_corpus_context_locked(
+    cache_key: tuple[str, str], checkpoint: freshness.FreshnessCheckpoint
+) -> None:
+    if checkpoint.triple is None:
+        _drop_corpus_caption_locked(cache_key)
+        return
+    _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = checkpoint.triple
+    _CORPUS_CONTEXT_EVENT_CHECKPOINTS[cache_key] = checkpoint
+
 
 def corpus_context_cache_enabled() -> bool:
     """Whether the corpus-context cache is active (EXOMEM_DISABLE_CORPUS_CACHE)."""
@@ -1262,6 +1357,7 @@ def reset_corpus_context_cache() -> None:
     with _CORPUS_CONTEXT_CACHE_LOCK:
         _CORPUS_CONTEXT_CACHE.clear()
         _CORPUS_CONTEXT_EVENT_TOKENS.clear()
+        _CORPUS_CONTEXT_EVENT_CHECKPOINTS.clear()
         _CORPUS_CONTEXT_LANGUAGE_HASHES.clear()
 
 
@@ -1270,9 +1366,120 @@ def evict_corpus_context(vault_root: Path) -> bool:
     cache_key = _corpus_cache_key(Path(vault_root))
     with _CORPUS_CONTEXT_CACHE_LOCK:
         removed = _CORPUS_CONTEXT_CACHE.pop(cache_key, None) is not None
-        _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
+        _drop_corpus_caption_locked(cache_key)
         _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(cache_key, None)
     return removed
+
+
+def current_reference_identity_snapshot(
+    vault_root: Path,
+) -> ReferenceIdentitySnapshot | None:
+    """Return the current cached identity authority without filesystem corpus work."""
+    root = Path(vault_root)
+    with _CORPUS_CONTEXT_UPDATE_LOCK:
+        if freshness.external_pending(root) or not freshness.is_live(root, "vault"):
+            return None
+        checkpoint = freshness.consumer_checkpoint(root, "vault")
+        if checkpoint.triple is None:
+            return None
+        try:
+            cache_key = _corpus_cache_key(root)
+        except Exception:  # noqa: BLE001 - an unkeyable root has no authority
+            return None
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
+            if entry is None or caption != checkpoint:
+                return None
+            identity = entry[1].identity_census
+            snapshot = ReferenceIdentitySnapshot(
+                checkpoint,
+                identity._reference_paths,
+                identity._canonical_refs_by_path,
+                entry[1],
+            )
+        if freshness.external_pending(root):
+            return None
+        return snapshot
+
+
+def reference_identity_snapshot_is_current(
+    vault_root: Path, snapshot: ReferenceIdentitySnapshot
+) -> bool:
+    """Revalidate an exact cached identity snapshot without walking or parsing."""
+    root = Path(vault_root)
+    with _CORPUS_CONTEXT_UPDATE_LOCK:
+        if freshness.external_pending(root) or not freshness.is_live(root, "vault"):
+            return False
+        if freshness.consumer_checkpoint(root, "vault") != snapshot.checkpoint:
+            return False
+        try:
+            cache_key = _corpus_cache_key(root)
+        except Exception:  # noqa: BLE001 - an unkeyable root has no authority
+            return False
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            return bool(
+                entry is not None
+                and _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
+                == snapshot.checkpoint
+                and entry[1] is snapshot._cache_context_identity
+                and entry[1].identity_census._reference_paths is snapshot.reference_paths
+                and entry[1].identity_census._canonical_refs_by_path
+                is snapshot.canonical_refs_by_path
+            )
+
+
+def _resolve_reference_wikilink_from_context(
+    context: SemanticCorpusContext,
+    raw_target: str,
+) -> ReferenceWikilinkResolution:
+    """Resolve against immutable context maps, preserving union ambiguity."""
+    cleaned = str(raw_target or "").strip()
+    if cleaned.startswith("[[") and cleaned[-2:] == "]]":
+        cleaned = cleaned[2:-2].strip()
+    cleaned = cleaned.split("|", 1)[0].split("#", 1)[0]
+    cleaned = cleaned.removesuffix(".md").strip().strip("/")
+    if not cleaned:
+        return ReferenceWikilinkResolution("unresolved")
+
+    if "/" in cleaned:
+        candidates = (cleaned, f"{vault.kb_prefix()}{cleaned}")
+        for candidate in candidates:
+            if candidate in context.resolver_full_paths:
+                return ReferenceWikilinkResolution("resolved", f"{candidate}.md")
+        if cleaned in context.resolver_kb_stripped:
+            return ReferenceWikilinkResolution(
+                "resolved",
+                f"{vault.kb_prefix()}{cleaned}.md",
+            )
+        return ReferenceWikilinkResolution("unresolved")
+
+    matches = set(context.resolver_stems.get(cleaned, ()))
+    matches.update(context.resolver_titles.get(cleaned.lower(), ()))
+    if len(matches) > 1:
+        return ReferenceWikilinkResolution("ambiguous")
+    if not matches:
+        return ReferenceWikilinkResolution("unresolved")
+    return ReferenceWikilinkResolution("resolved", f"{next(iter(matches))}.md")
+
+
+def resolve_reference_wikilink(
+    vault_root: Path,
+    snapshot: ReferenceIdentitySnapshot | None,
+    raw_target: str,
+) -> ReferenceWikilinkResolution:
+    """Resolve from one exact current cached context without filesystem work."""
+    root = Path(vault_root)
+    if snapshot is None or not reference_identity_snapshot_is_current(root, snapshot):
+        return ReferenceWikilinkResolution("unavailable")
+    context = snapshot._cache_context_identity
+    if not isinstance(context, SemanticCorpusContext):
+        return ReferenceWikilinkResolution("unavailable")
+    result = _resolve_reference_wikilink_from_context(context, raw_target)
+    if not reference_identity_snapshot_is_current(root, snapshot):
+        return ReferenceWikilinkResolution("unavailable")
+    return result
 
 
 def _corpus_cache_key(root: Path) -> tuple[str, str]:
@@ -1843,8 +2050,9 @@ def _reconcile_markdown_delta(
         else:
             states.pop(rel_path, None)
         if in_kb:
-            # ``from_states`` preserves the strict invalid-ID failure that the
-            # full stable-identity census would raise for governed Markdown.
+            # The reference census admits every canonical Markdown path while
+            # treating missing or malformed IDs as path-fallback identities,
+            # exactly like ``memory_refs.ReferenceIndex``.
             identities[rel_path] = StableIdentityCensus.from_states((state,)).entries[0]
         else:
             identities.pop(rel_path, None)
@@ -1874,11 +2082,12 @@ def on_corpus_files_changed(
     that belongs to the publish seam.
     """
     with _CORPUS_CONTEXT_UPDATE_LOCK:
+        checkpoint = freshness.consumer_checkpoint(Path(vault_root), "vault")
         _patch_corpus_files_changed_locked(
             vault_root,
             changed=changed,
             deleted=deleted,
-            event_token=freshness.triple(Path(vault_root), "vault"),
+            event_checkpoint=checkpoint,
         )
 
 
@@ -1971,7 +2180,7 @@ def publish_corpus_files_changed_classified(
             # Read the token here, not in the patch call below: it is a
             # registry-side read, so a failure in it is registry-side too and
             # must not be reported as the projection's fault.
-            event_token = freshness.triple(root, "vault")
+            event_checkpoint = freshness.consumer_checkpoint(root, "vault")
         except BaseException as error:
             if not isinstance(error, Exception):
                 raise
@@ -1981,7 +2190,7 @@ def publish_corpus_files_changed_classified(
                 root,
                 changed=changed_values,
                 deleted=deleted_values,
-                event_token=event_token,
+                event_checkpoint=event_checkpoint,
             )
         except BaseException as error:
             # Freshness already advanced, so the previous context can no
@@ -1991,7 +2200,7 @@ def publish_corpus_files_changed_classified(
             cache_key = _corpus_cache_key(root)
             with _CORPUS_CONTEXT_CACHE_LOCK:
                 _CORPUS_CONTEXT_CACHE.pop(cache_key, None)
-                _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
+                _drop_corpus_caption_locked(cache_key)
                 _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(cache_key, None)
             if not isinstance(error, Exception):
                 raise
@@ -2008,7 +2217,7 @@ def _patch_corpus_files_changed_locked(
     *,
     changed: Iterable[Path],
     deleted: Iterable[Path | str],
-    event_token: tuple[int, int, str] | None,
+    event_checkpoint: freshness.FreshnessCheckpoint,
 ) -> str:
     """Patch one cache entry while ``_CORPUS_CONTEXT_UPDATE_LOCK`` is held.
 
@@ -2029,7 +2238,7 @@ def _patch_corpus_files_changed_locked(
         with _CORPUS_CONTEXT_CACHE_LOCK:
             if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
                 _CORPUS_CONTEXT_CACHE.pop(cache_key, None)
-                _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
+                _drop_corpus_caption_locked(cache_key)
                 _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(cache_key, None)
         return _CORPUS_PATCH_EVICTED
 
@@ -2089,10 +2298,7 @@ def _patch_corpus_files_changed_locked(
             _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
                 f"{language.schema_version}:{language.content_hash}"
             )
-            if event_token is None:
-                _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
-            else:
-                _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = event_token
+            _caption_corpus_context_locked(cache_key, event_checkpoint)
     return _CORPUS_PATCH_APPLIED
 
 
@@ -2102,7 +2308,7 @@ def _trim_corpus_cache_locked(keep: tuple[str, str]) -> None:
         for stale_key in list(_CORPUS_CONTEXT_CACHE):
             if stale_key != keep:
                 del _CORPUS_CONTEXT_CACHE[stale_key]
-                _CORPUS_CONTEXT_EVENT_TOKENS.pop(stale_key, None)
+                _drop_corpus_caption_locked(stale_key)
                 _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(stale_key, None)
                 break
         else:
@@ -2262,10 +2468,7 @@ def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> b
             )
             # L4: no candidate is ever involved here, and a token of None
             # pops rather than leaving a stale caption behind.
-            if after.triple is None:
-                _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
-            else:
-                _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = after.triple
+            _caption_corpus_context_locked(cache_key, after)
             _trim_corpus_cache_locked(cache_key)
     log.info(
         "semantic corpus context populated on miss pages=%d build_ms=%.1f",
@@ -2330,15 +2533,15 @@ def build_corpus_context_with_census(
     cache_key: tuple[str, str] | None = None
     if candidate is None and corpus_context_cache_enabled():
         cache_key = _corpus_cache_key(root)
-        event_token = freshness.triple(root, "vault")
-        if event_token is not None:
+        event_checkpoint = freshness.consumer_checkpoint(root, "vault")
+        if event_checkpoint.triple is not None:
             with _CORPUS_CONTEXT_CACHE_LOCK:
                 event_entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
-                cached_token = _CORPUS_CONTEXT_EVENT_TOKENS.get(cache_key)
+                cached_checkpoint = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
                 cached_language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
             if (
                 event_entry is not None
-                and cached_token == event_token
+                and cached_checkpoint == event_checkpoint
                 and cached_language_hash == f"{language.schema_version}:{language.content_hash}"
                 and _config_census(root) == _stored_config_census(event_entry[0])
                 and (
@@ -2378,9 +2581,10 @@ def build_corpus_context_with_census(
                         if current is not entry:
                             entry = current
                         elif entry[0] == census:
-                            current_token = freshness.triple(root, "vault")
-                            if current_token is not None:
-                                _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
+                            current_checkpoint = freshness.consumer_checkpoint(
+                                root, "vault"
+                            )
+                            _caption_corpus_context_locked(cache_key, current_checkpoint)
                             log.info(
                                 "semantic corpus context reused pages=%d census_ms=%.1f",
                                 len(entry[1].pages),
@@ -2413,9 +2617,12 @@ def build_corpus_context_with_census(
                                     _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
                                         f"{language.schema_version}:{language.content_hash}"
                                     )
-                                    current_token = freshness.triple(root, "vault")
-                                    if current_token is not None:
-                                        _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
+                                    current_checkpoint = freshness.consumer_checkpoint(
+                                        root, "vault"
+                                    )
+                                    _caption_corpus_context_locked(
+                                        cache_key, current_checkpoint
+                                    )
                                     log.info(
                                         "semantic corpus context reconciled pages=%d "
                                         "changed=%d reconcile_ms=%.1f census_ms=%.1f",
@@ -2457,7 +2664,19 @@ def build_corpus_context_with_census(
                 and flight.registry_identity == registry_identity
                 and flight.language_identity == language_identity
             )
-            flight.done.wait()
+            completed = flight.done.is_set()
+            if not completed:
+                completed = flight.done.wait(timeout=_CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS)
+            if not completed:
+                raise OpError(
+                    "MUTATION_WARMING",
+                    "semantic corpus context is still being built",
+                    details={
+                        "status": "retryable",
+                        "committed": False,
+                        "retry_after_ms": 2000,
+                    },
+                )
             if not same_inputs:
                 return build_corpus_context_with_census(
                     root,
@@ -2528,11 +2747,8 @@ def build_corpus_context_with_census(
                         _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
                             f"{language.schema_version}:{language.content_hash}"
                         )
-                        current_token = freshness.triple(root, "vault")
-                        if current_token is None:
-                            _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
-                        else:
-                            _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
+                        current_checkpoint = freshness.consumer_checkpoint(root, "vault")
+                        _caption_corpus_context_locked(cache_key, current_checkpoint)
                         _trim_corpus_cache_locked(cache_key)
                     stored = True
         log.info(
@@ -2724,11 +2940,6 @@ def _build_identity_census(
             raw_identity = frontmatter.get(ID_FIELD)
             identity: str | None = None
             if raw_identity is not None:
-                if not isinstance(raw_identity, str) or normalize_id(raw_identity) is None:
-                    raise activation_manifest.ActivationManifestError(
-                        "IDENTITY_CENSUS_INVALID_ID",
-                        f"stable identity is invalid at {rel}",
-                    )
                 identity = normalize_id(raw_identity)
             entries.append(StableIdentityEntry(rel, identity))
             sources[rel] = source

@@ -197,7 +197,7 @@ def test_summary_reports_expectation_mismatch_as_gate_limit() -> None:
 # ------------------------------------------------------- injection ladder
 
 
-def test_injection_cli_rung_and_degradation(claude_home) -> None:
+def test_injection_cli_rung_and_degradation(claude_home, monkeypatch) -> None:
     # These drivers run the wired hook the way a client does -- through
     # `bash -c` against a `#!/bin/sh` wrapper. Windows registers the same
     # `bash ~/.claude/hooks/<w>.sh` command and has no shell to honour it,
@@ -205,8 +205,16 @@ def test_injection_cli_rung_and_degradation(claude_home) -> None:
     require_posix_executable_scripts()
     workdir = make_workdir("inject")
     try:
+        state_root = workdir / "external-state"
+        monkeypatch.setenv("EXOMEM_STATE_ROOT", str(state_root))
         seeded = injection_ladder.build_seeded_vault(workdir)
         assert seeded.ingested > 0
+        from exomem import state_migration
+
+        assert state_migration.migration_completed(seeded.vault)
+        # HookHome deliberately starts from a minimal environment. Retain the
+        # exact root the seed migration completed under for its CLI subprocess.
+        seeded.env["EXOMEM_STATE_ROOT"] = str(state_root)
         # Happy path: CLI rung reachable -> stub block cites corpus content.
         happy = injection_ladder.run_injection(
             claude_home, seeded, state_home=workdir / "state-happy"

@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Workflow skills
 
 Workflow skills are named agent workflows that sit above Exomem's typed tools.

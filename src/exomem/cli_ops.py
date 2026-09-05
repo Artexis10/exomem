@@ -92,6 +92,7 @@ _REMEDIATION: dict[str, str] = {
     "MUTATION_LOCK_UNAVAILABLE": (
         "Check that the runtime state root is writable and supports host file locking."
     ),
+    "MODEL_BUSY": "Retry shortly; model compute is at its admitted capacity.",
     "INVALID_MEDIA_OPERATION": "Use operation=process, operation=status, or operation=retry.",
     "INVALID_RECORD_ARGUMENTS": "Use only the arguments accepted by the selected record action.",
     "INVALID_PLAN_ARGUMENTS": "Use only the arguments accepted by the selected Planning action.",
@@ -114,6 +115,10 @@ _REMEDIATION: dict[str, str] = {
     "PLAN_RESPONSE_TOO_LARGE": "Narrow the Planning query or request fewer rows.",
     "STALE_RECORD": "Re-read the record and retry with its current versions.",
     "STALE_RECORD_SNAPSHOT": "Re-run the query against the current collection snapshot.",
+    "RECORD_RECOVERY_REQUIRED": (
+        "Have the cell operator inspect and quarantine stale private transaction residue, "
+        "then retry the unchanged request."
+    ),
     "RECORD_ID_CONFLICT": "Use a new record ID or re-read the existing record before retrying.",
     "RECORD_NATURAL_KEY_CONFLICT": (
         "Update the named existing item instead of appending a second one for the same key. "
@@ -136,6 +141,8 @@ _SERVICE_UNAVAILABLE_CODES = frozenset(
         "WRITER_COORDINATOR_CONTRACT_ABSENT",
         "MUTATION_LOCK_UNAVAILABLE",
         "VAULT_UNAVAILABLE",
+        "RECORD_RECOVERY_REQUIRED",
+        "MODEL_BUSY",
         # Retrieval-index-reliability (restore-indexed-category-recall): a safe
         # exact category/kind plan whose maintained semantic catalog cannot yet
         # prove completeness — retryable with bounded `retry_after_ms`, never a
@@ -482,6 +489,15 @@ def _coerce_dict(value: Any, name: str) -> dict:
     return out
 
 
+def _coerce_nullable_dict(value: Any, name: str) -> dict | None:
+    out = _coerce_json(value, name)
+    if out is None:
+        return None
+    if not isinstance(out, dict):
+        raise OpError("BAD_JSON", f"`{name}` must be a JSON object or null")
+    return out
+
+
 def _coerce_client_artifact_files(value: Any, name: str, *, cli: bool) -> list[dict[str, str]]:
     """Validate file handles at non-MCP boundaries without reflecting signed URLs."""
     from .commands import _ClientArtifactFiles
@@ -572,6 +588,8 @@ def coerce(
             kwargs[name] = _coerce_list(value, name)
         elif p.type == "dict":
             kwargs[name] = _coerce_dict(value, name)
+        elif p.type == "nullable_dict":
+            kwargs[name] = _coerce_nullable_dict(value, name)
         elif p.type == "json":
             kwargs[name] = _coerce_json(value, name, cli=cli)
         elif p.type == "client_artifact_files":

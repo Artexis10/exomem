@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from conftest import initialize_vault_state_offline
 
 from exomem import media_processing, readiness, server_runtime
 from exomem.governance import projection_runtime
@@ -17,6 +18,7 @@ def test_initialize_runtime_loads_dotenv_from_service_working_directory(
     monkeypatch.chdir(tmp_path)
     vault = tmp_path / "vault"
     vault.mkdir()
+    initialize_vault_state_offline(vault, source="server runtime dotenv fixture")
     calls: list[tuple[object, bool]] = []
 
     def load_dotenv(*, dotenv_path, override):
@@ -46,6 +48,7 @@ def test_initialize_runtime_does_not_start_workers_before_transport(
 ) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
+    initialize_vault_state_offline(vault, source="server runtime transport fixture")
     events: list[str] = []
 
     monkeypatch.setattr(server_runtime, "resolve_vault", lambda: vault)
@@ -114,6 +117,51 @@ def test_local_runtime_activation_does_not_start_while_consolidation_sealed(
 
     assert calls == []
     assert activation._thread is None  # noqa: SLF001
+
+
+def test_initialize_runtime_requires_ready_state_before_any_state_consumer(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    events: list[str] = []
+    monkeypatch.setattr(server_runtime, "resolve_vault", lambda: vault)
+    monkeypatch.setattr(
+        state_migration,
+        "require_vault_state_ready",
+        lambda root: events.append(f"ready:{root}"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server_runtime.schema,
+        "load_source_schema",
+        lambda root: (
+            events.append(f"schema:{root}"),
+            SimpleNamespace(source_types=("session",)),
+        )[1],
+    )
+    monkeypatch.setattr(
+        server_runtime.project_keys,
+        "keys_hint",
+        lambda root: (events.append(f"keys:{root}"), "")[1],
+    )
+    monkeypatch.setattr(
+        projection_runtime,
+        "preactivate_projection_runtime",
+        lambda root: events.append(f"projection:{root}"),
+    )
+    monkeypatch.setattr(server_runtime, "_start_metrics_persistence", lambda: None)
+
+    server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+
+    assert events == [
+        f"ready:{vault}",
+        f"schema:{vault}",
+        f"keys:{vault}",
+        f"projection:{vault}",
+    ]
 
 
 def test_local_runtime_activation_waits_for_liveness_and_starts_once(
@@ -406,6 +454,91 @@ def test_local_runtime_activation_falls_back_without_liveness_probe(
     try:
         asyncio.run(exercise())
     finally:
+        readiness.reset()
+
+
+def test_local_runtime_lifespan_waits_for_inflight_activation_before_teardown(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def start_compute(_root: Path) -> None:
+        entered.set()
+        assert release.wait(timeout=2.0)
+        finished.set()
+
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", start_compute)
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+
+    async def exercise() -> None:
+        lifetime = activation.lifespan()(SimpleNamespace())
+        await lifetime.__aenter__()
+        activation.start()
+        assert await asyncio.to_thread(entered.wait, 1.0)
+        exiting = asyncio.create_task(lifetime.__aexit__(None, None, None))
+        await asyncio.sleep(0.05)
+        assert not exiting.done()
+        release.set()
+        await asyncio.wait_for(exiting, timeout=1.0)
+        assert finished.is_set()
+        assert activation._thread is not None
+        assert not activation._thread.is_alive()
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        thread = activation._thread
+        if thread is not None:
+            thread.join(timeout=1.0)
+        readiness.reset()
+
+
+def test_local_runtime_lifespan_interrupts_a_stuck_admission_wait(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    compute_started = threading.Event()
+    exited = threading.Event()
+
+    def start_compute(_root: Path) -> None:
+        readiness.begin_warm()
+        compute_started.set()
+
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", start_compute)
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+
+    async def exercise() -> None:
+        async with activation.lifespan()(SimpleNamespace()):
+            activation.start()
+            assert await asyncio.to_thread(compute_started.wait, 1.0)
+        exited.set()
+
+    runner = threading.Thread(target=lambda: asyncio.run(exercise()), daemon=True)
+    runner.start()
+    try:
+        assert compute_started.wait(timeout=1.0)
+        assert exited.wait(timeout=0.5)
+        assert activation._thread is not None
+        assert not activation._thread.is_alive()
+    finally:
+        readiness.mark_ready("retrieval_catalog")
+        readiness.mark_ready("semantic_corpus")
+        readiness.finish_warm()
+        runner.join(timeout=1.0)
         readiness.reset()
 
 

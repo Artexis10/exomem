@@ -126,6 +126,39 @@ def cuda_accounting_if_initialized() -> dict[str, Any]:
     return {"torch_imported": True, "initialized": True, "memory": memory}
 
 
+def asr_runtime_status() -> dict[str, Any]:
+    """ASR configuration disclosure without importing CTranslate2 or probing CUDA."""
+    raw_device = (os.environ.get("EXOMEM_ASR_DEVICE") or "").strip().lower()
+    raw_compute = (os.environ.get("EXOMEM_ASR_COMPUTE_TYPE") or "").strip().lower()
+    valid_device = raw_device in {"", "auto", "gpu", "cpu", "cuda"}
+    valid_compute = raw_compute not in {"auto"}
+    resolved_mode = mode.resolve_mode()
+    if not valid_device or not valid_compute:
+        effective = "refusal: invalid ASR device or compute-type request"
+    elif raw_device == "cpu":
+        effective = f"bounded CPU {raw_compute or 'int8'}; CUDA is explicitly disabled"
+    elif raw_device == "cuda":
+        effective = f"CUDA {raw_compute or 'float16'} required; no CPU fallback after refusal or runtime failure"
+    elif resolved_mode == "quiet":
+        effective = f"bounded CPU {raw_compute or 'int8'} (quiet automatic policy)"
+    elif raw_compute:
+        effective = (
+            f"automatic CUDA only when admitted with {raw_compute}; otherwise CPU only if "
+            f"that exact override is supported, else refusal"
+        )
+    else:
+        effective = "automatic CUDA float16 when admitted, otherwise bounded CPU int8"
+    return {
+        "device_request_raw": raw_device or None,
+        "compute_type_request_raw": raw_compute or None,
+        "device_request": raw_device if valid_device else "invalid",
+        "compute_type_request": (raw_compute or None) if valid_compute else "invalid",
+        "effective_policy": effective,
+        "mode": resolved_mode,
+        "runtime": "not probed (allocation-free status)",
+    }
+
+
 def runtime_info() -> dict[str, Any]:
     """Runtime shape without shelling out or importing heavy modules."""
     variant = (os.environ.get("EXOMEM_CONTAINER_VARIANT") or "").strip() or None
@@ -148,7 +181,7 @@ def runtime_info() -> dict[str, Any]:
 
 def collect(vault_root: Path | None = None) -> dict[str, Any]:
     """Collect process-local resource status without allocating heavy resources."""
-    from . import media_jobs
+    from . import media_jobs, runtime_resources
 
     policy = mode.resolved()
     return {
@@ -161,6 +194,8 @@ def collect(vault_root: Path | None = None) -> dict[str, Any]:
         "caches": _cache_residency(),
         "deferred_work": _deferred_work(vault_root),
         "media": media_jobs.status(vault_root),
+        "compute": runtime_resources.status(),
+        "asr": asr_runtime_status(),
         "cuda": cuda_accounting_if_initialized(),
     }
 
@@ -173,8 +208,22 @@ def _min_free_vram_mb() -> int:
     return int(gb * 1024)
 
 
-def _probe_nvidia_smi() -> dict[str, Any]:
+#: WSL exposes the host driver here but does not put it on a login shell's PATH.
+#: Without this fallback `which` misses it, the probe reports `unknown`, and
+#: `auto_quiet.decide()` answers "pressure probe unavailable" forever — the
+#: detector fails silent rather than loud.
+_EXTRA_NVIDIA_SMI_PATHS = ("/usr/lib/wsl/lib/nvidia-smi",)
+
+
+def _find_nvidia_smi() -> str | None:
     exe = shutil.which("nvidia-smi")
+    if exe:
+        return exe
+    return next((p for p in _EXTRA_NVIDIA_SMI_PATHS if os.access(p, os.X_OK)), None)
+
+
+def _probe_nvidia_smi() -> dict[str, Any]:
+    exe = _find_nvidia_smi()
     if not exe:
         return {"status": "unavailable", "reason": "nvidia-smi not found"}
     try:
@@ -245,6 +294,8 @@ def gpu_headroom() -> dict[str, Any]:
 
 
 def resource_posture() -> dict[str, Any]:
+    from . import runtime_resources
+
     policy = mode.resolved()
     return {
         "runtime": runtime_info(),
@@ -252,6 +303,8 @@ def resource_posture() -> dict[str, Any]:
         "source": _mode_source(),
         "policy": policy,
         "cpu_baseline": True,
+        "compute": runtime_resources.status(),
+        "asr": asr_runtime_status(),
         "gpu": gpu_headroom(),
         "cuda": cuda_accounting_if_initialized(),
     }

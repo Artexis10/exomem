@@ -387,6 +387,30 @@ def test_planning_revision_and_rebaseline_require_exact_current_guards_and_gaps(
         why="acknowledge the exact direct edit",
     )
     assert receipt["operation"] == "rebaseline"
+    checkpoint = inspect(tmp_path, manifest_path)
+    assert checkpoint["audit"]["status"] == "acknowledged_gap"
+
+    proposal = (tmp_path / manifest_path).read_text(encoding="utf-8").replace(
+        "title: Planning work", "title: Reader friendly planning", 1
+    )
+    revision = validate(
+        tmp_path,
+        mode="revision",
+        collection=manifest_path,
+        manifest_text=proposal,
+    )
+    revised = revise(
+        tmp_path,
+        manifest_path,
+        manifest_text=proposal,
+        **revision["lifecycle_guards"],
+        why="make the collection title reader friendly",
+    )
+
+    restarted = inspect(tmp_path, manifest_path)
+    assert revised["operation"] == "revise"
+    assert restarted["audit"]["status"] == "acknowledged_gap"
+    assert restarted["audit"]["discontinuities"] == checkpoint["audit"]["discontinuities"]
 
 
 @pytest.mark.parametrize("horizon", ["now", "next", "later"])
@@ -557,6 +581,122 @@ def test_planning_triage_allows_only_explicit_transition_fields(tmp_path: Path) 
     )
 
     assert receipt["operation"] == "triage"
+
+
+def test_planning_compatibility_updated_frontmatter_round_trips_all_operations(
+    tmp_path: Path,
+) -> None:
+    from exomem.planning import add, create_collection, inspect, query, triage, update
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    create_collection(tmp_path, collection, _manifest(), why="create planning collection")
+    added = add(tmp_path, collection, item={"title": "Legacy planning item"}, why="capture intent")
+    item_path = next((tmp_path / "Knowledge Base" / "Planning" / "Work" / "Items").glob("*.md"))
+    original = item_path.read_text(encoding="utf-8").replace(
+        "schema_version: 1\n",
+        'schema_version: 1\nupdated: "2024-05-06T07:08:09Z"\n',
+        1,
+    )
+    item_path.write_text(original, encoding="utf-8")
+
+    snapshot = query(tmp_path, collection)
+    assert [row["plan_id"] for row in snapshot["rows"]] == [added["plan_id"]]
+    assert "updated" not in snapshot["rows"][0]
+    assert inspect(tmp_path, collection)["diagnostics"] == []
+
+    new_item = add(
+        tmp_path, collection, item={"title": "New planning item"}, why="capture more intent"
+    )
+    new_path = tmp_path / new_item["affected_paths"][0]
+    assert "updated:" not in new_path.read_text(encoding="utf-8")
+    current = query(tmp_path, collection)
+    legacy = next(row for row in current["rows"] if row["plan_id"] == added["plan_id"])
+    updated = update(
+        tmp_path,
+        collection,
+        plan_id=added["plan_id"],
+        changes={"priority": "high"},
+        expected_container_hash=current["snapshot"],
+        expected_item_version=legacy["item_version"],
+        why="raise the authored priority",
+    )
+    assert updated["operation"] == "update"
+    assert 'updated: "2024-05-06T07:08:09Z"\n' in item_path.read_text(encoding="utf-8")
+
+    current = query(tmp_path, collection)
+    legacy = next(row for row in current["rows"] if row["plan_id"] == added["plan_id"])
+    triaged = triage(
+        tmp_path,
+        collection,
+        plan_id=added["plan_id"],
+        transition={"status": "planned", "commitment": "considering", "horizon": "quarter"},
+        expected_container_hash=current["snapshot"],
+        expected_item_version=legacy["item_version"],
+        why="triage the intended work",
+    )
+    assert triaged["operation"] == "triage"
+    assert 'updated: "2024-05-06T07:08:09Z"\n' in item_path.read_text(encoding="utf-8")
+
+    with pytest.raises(CollectionError, match="SCHEMA_UNKNOWN_FIELD"):
+        add(
+            tmp_path,
+            collection,
+            item={"title": "Caller timestamp", "updated": "2025-01-01"},
+            why="attempt to author compatibility metadata",
+        )
+
+
+def test_planning_rejects_unknown_frontmatter_beside_compatibility_updated(tmp_path: Path) -> None:
+    from exomem.planning import add, create_collection, query
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    create_collection(tmp_path, collection, _manifest(), why="create planning collection")
+    add(tmp_path, collection, item={"title": "Unknown legacy field"}, why="capture intent")
+    item_path = next((tmp_path / "Knowledge Base" / "Planning" / "Work" / "Items").glob("*.md"))
+    item_path.write_text(
+        item_path.read_text(encoding="utf-8").replace(
+            "schema_version: 1\n", "schema_version: 1\nlegacy_unknown: rejected\n", 1
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CollectionError, match="SCHEMA_UNKNOWN_FIELD"):
+        query(tmp_path, collection)
+
+
+def test_planning_manifest_declared_updated_remains_authored_schema_data(tmp_path: Path) -> None:
+    from exomem.planning import add, create_collection, query, update
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    manifest = _manifest().replace(
+        "    health:\n      type: string\n", "    health:\n      type: string\n    updated:\n      type: string\n"
+    )
+    create_collection(tmp_path, collection, manifest, why="create planning collection")
+    added = add(
+        tmp_path,
+        collection,
+        item={"title": "Authored timestamp", "updated": "2025-01-01"},
+        why="capture authored metadata",
+    )
+
+    snapshot = query(tmp_path, collection)
+    assert snapshot["rows"][0]["updated"] == "2025-01-01"
+    update(
+        tmp_path,
+        collection,
+        plan_id=added["plan_id"],
+        changes={"updated": "2025-02-01"},
+        expected_container_hash=snapshot["snapshot"],
+        expected_item_version=snapshot["rows"][0]["item_version"],
+        why="update authored metadata",
+    )
+    assert query(tmp_path, collection)["rows"][0]["updated"] == "2025-02-01"
 
 
 def test_planning_inspection_reports_a_direct_edit_without_repairing_it(tmp_path: Path) -> None:

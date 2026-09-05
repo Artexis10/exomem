@@ -191,15 +191,6 @@ def test_claim_level_gate_on(monkeypatch) -> None:
     assert claims.claim_level_enabled() is True
 
 
-def test_max_polarity_pairs_default_and_override(monkeypatch) -> None:
-    monkeypatch.delenv("EXOMEM_CLAIM_POLARITY_MAX_PAIRS", raising=False)
-    assert claims._max_polarity_pairs() == 20
-    monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_MAX_PAIRS", "5")
-    assert claims._max_polarity_pairs() == 5
-    monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_MAX_PAIRS", "junk")
-    assert claims._max_polarity_pairs() == 20
-
-
 # ---------------- sidecar (FAKE vectors — torch-free) ----------------
 
 
@@ -320,10 +311,18 @@ def test_claim_text_for_page_live_extraction_fallback(vault: Path, monkeypatch) 
     assert txt is not None and "Live extracted claim." in txt
 
 
-# ---------------- wiring: proximity → polarity through detect_contradictions ----------------
+# ---------------- wiring: the write path invokes NO polarity classification ----------------
 
 
-def test_detect_contradictions_attaches_polarity_when_gated(vault: Path, monkeypatch) -> None:
+def test_detect_contradictions_attaches_no_polarity_even_when_gated(vault: Path, monkeypatch) -> None:
+    """The claim-level gate no longer changes write-path advisories.
+
+    Write-time warning generation invokes no polarity classification at all: the
+    lane moved to the asynchronous audit sweep behind the admitted frozen
+    verifier, and `_refine_contradictions` left with it. Gate on, the emitted
+    advisory is the overlap kind with no polarity clause — exactly as on the
+    default path.
+    """
     monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     cand_rel = _seed_claim_md(
@@ -341,15 +340,30 @@ def test_detect_contradictions_attaches_polarity_when_gated(vault: Path, monkeyp
         top_n=10,
     )
     assert len(out) == 1
-    assert out[0].polarity == "contradict"
-    assert out[0].polarity_method == "heuristic"
-    # The polarity surfaces through the existing overlap_warning surface.
-    w = corpus_aware.overlap_warning(out[0])
-    assert "CONTRADICTS" in w
-    assert out[0].as_dict()["polarity"] == "contradict"
+    assert not hasattr(out[0], "polarity")
+    assert out[0].as_dict() == {
+        "path": cand_rel, "title": "Caching improves latency", "cosine": 0.85
+    }
+    warning = corpus_aware.overlap_warning(out[0])
+    assert "claim-level check" not in warning
+    assert "CONTRADICTS" not in warning
+    assert corpus_aware.detected_overlap_advisory_groups(out) == [("overlap", out)]
 
 
-def test_detect_contradictions_polarity_absent_when_gate_off(vault: Path, monkeypatch) -> None:
+def test_write_path_carries_no_polarity_mechanism_at_all() -> None:
+    """Removal, not capping: the functions, the clause table, and the fields are
+    gone, so no configuration can bring write-time polarity back."""
+    import dataclasses
+
+    assert not hasattr(corpus_aware, "_refine_contradictions")
+    assert not hasattr(corpus_aware, "_POLARITY_CLAUSE")
+    assert corpus_aware._WRITE_ADVISORY_KINDS == frozenset({"near-duplicate", "overlap"})
+    assert {f.name for f in dataclasses.fields(corpus_aware.DupCandidate)} == {
+        "path", "title", "cosine",
+    }
+
+
+def test_detect_contradictions_gate_off_stays_byte_identical(vault: Path, monkeypatch) -> None:
     monkeypatch.delenv("EXOMEM_CLAIM_LEVEL", raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     cand_rel = _seed_claim_md(
@@ -362,7 +376,6 @@ def test_detect_contradictions_polarity_absent_when_gate_off(vault: Path, monkey
         vault, title="t", body="b", precomputed={cand_rel: 0.85}, top_n=10
     )
     assert len(out) == 1
-    assert out[0].polarity is None
     # Byte-identical baseline: as_dict omits polarity, warning is the old string.
     assert out[0].as_dict() == {"path": cand_rel, "title": "Caching improves latency", "cosine": 0.85}
     assert "claim-level check" not in corpus_aware.overlap_warning(out[0])

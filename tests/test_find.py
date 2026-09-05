@@ -132,13 +132,15 @@ def test_limit_respected(vault: Path) -> None:
 
 
 def test_scope_kb_auto_widens_to_curated_trees(vault: Path) -> None:
-    """Default scope='kb' now auto-widens to the vault when KB has no hits.
+    """scope='kb' widens to the vault ON REQUEST when KB has no hits.
 
-    Previously this returned []; the sibling marker lives outside Knowledge
-    Base/ and was structurally invisible. Auto-widen surfaces it, tagged
-    outside_kb so the caller knows it came from beyond the KB.
+    The sibling marker lives outside Knowledge Base/ and is structurally
+    invisible to a KB recall. `widen_outside_kb` surfaces it, tagged
+    outside_kb so the caller knows it came from beyond the KB. Opt-in since
+    `accelerate-governed-recall`; the default is pinned in
+    tests/test_recall_widening_opt_in.py.
     """
-    hits = find_module.find(vault, query="reference-marker-xyz")
+    hits = find_module.find(vault, query="reference-marker-xyz", widen_outside_kb=True)
     assert len(hits) == 1
     assert hits[0].path == "Reference/sample-curated.md"
     assert hits[0].outside_kb is True
@@ -203,7 +205,11 @@ def test_results_sorted_by_updated_desc(vault: Path) -> None:
     assert dates == sorted(dates, reverse=True)
 
 
-# ---------------- auto-widen: terse out-of-KB files (the X3 tracker case) ----
+# ---------------- widening: terse out-of-KB files (the X3 tracker case) ------
+# The reserve is OPT-IN since `accelerate-governed-recall` (it used to run on
+# every default recall and cost the reader a whole-corpus lexical pass), so the
+# cases below ask for it. That the DEFAULT does not widen is pinned separately,
+# in tests/test_recall_widening_opt_in.py.
 
 
 def _make_x3_tracker(vault: Path) -> str:
@@ -226,9 +232,9 @@ def _make_x3_tracker(vault: Path) -> str:
 
 
 def test_kb_scope_auto_widens_for_out_of_kb_file(vault: Path) -> None:
-    """A file in a sibling folder surfaces under the default scope via widening."""
+    """A file in a sibling folder surfaces under scope='kb' via requested widening."""
     rel = _make_x3_tracker(vault)
-    hits = find_module.find(vault, query="X3")
+    hits = find_module.find(vault, query="X3", widen_outside_kb=True)
     assert any(h.path == rel for h in hits)
     x3 = next(h for h in hits if h.path == rel)
     assert x3.outside_kb is True
@@ -242,7 +248,9 @@ def test_auto_widen_relaxed_gate_partial_token_match(vault: Path) -> None:
     keeps it.
     """
     rel = _make_x3_tracker(vault)
-    hits = find_module.find(vault, query="X3 rep progression tracking")
+    hits = find_module.find(
+        vault, query="X3 rep progression tracking", widen_outside_kb=True
+    )
     assert any(h.path == rel for h in hits)
 
 
@@ -254,14 +262,19 @@ def test_auto_widen_python_backend_honors_nonrepairing_contract(
     monkeypatch.setattr(find_module, "_bounded_lexical_repair_allowed", lambda _key: False)
     rel = _make_x3_tracker(vault)
 
-    hits = find_module.find(vault, query="X3 rep progression tracking")
+    hits = find_module.find(
+        vault, query="X3 rep progression tracking", widen_outside_kb=True
+    )
 
     assert any(h.path == rel for h in hits)
 
 
 def test_kb_only_scope_does_not_widen_to_tracker(vault: Path) -> None:
+    """kb-only is the strict opt-out: it does not widen even when asked."""
     rel = _make_x3_tracker(vault)
-    hits = find_module.find(vault, query="X3", scope="kb-only")
+    hits = find_module.find(
+        vault, query="X3", scope="kb-only", widen_outside_kb=True
+    )
     assert all(h.path != rel for h in hits)
 
 
@@ -298,7 +311,7 @@ def test_reserve_surfaces_out_of_kb_even_when_kb_has_matches(vault: Path) -> Non
     )
     find_module.clear_cache()
     bm25.clear_cache()
-    hits = find_module.find(vault, query=token, limit=2)
+    hits = find_module.find(vault, query=token, limit=2, widen_outside_kb=True)
     # Out-of-KB note reserved a slot (recall guarantee)...
     assert any(h.path == "Reference/reserve-out.md" and h.outside_kb for h in hits)
     # ...and the KB still keeps a slot.
@@ -307,7 +320,7 @@ def test_reserve_surfaces_out_of_kb_even_when_kb_has_matches(vault: Path) -> Non
 
 def test_no_reserve_consumed_when_nothing_outside_matches(vault: Path) -> None:
     """When no out-of-KB file matches, results stay pure KB (no reserve waste)."""
-    hits = find_module.find(vault, query="metabolism", limit=5)
+    hits = find_module.find(vault, query="metabolism", limit=5, widen_outside_kb=True)
     assert hits
     assert all(h.path.startswith("Knowledge Base/") for h in hits)
     assert all(not h.outside_kb for h in hits)

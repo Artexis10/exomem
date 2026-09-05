@@ -876,19 +876,21 @@ def direct_residue(
     rels = tuple(
         dict.fromkeys([*(item.source_path for item in manifest), *residue_paths])
     )
+    from .. import epistemic_graph, lexstore, memory_refs
+
     lexical = _query_path(
-        Path(vault_root) / kb_dirname() / ".lexical.sqlite",
+        lexstore.lexical_path(Path(vault_root)),
         (
             ("SELECT 1 FROM pages WHERE path = ? LIMIT 1", rels),
             ("SELECT 1 FROM semantic_units WHERE parent_path = ? LIMIT 1", rels),
         ),
     )
     refs = _query_path(
-        Path(vault_root) / kb_dirname() / ".refs.sqlite",
+        memory_refs.sidecar_path(Path(vault_root)),
         (("SELECT 1 FROM identities WHERE path = ? LIMIT 1", rels),),
     )
     graph = _query_path(
-        Path(vault_root) / kb_dirname() / ".graph.sqlite",
+        epistemic_graph.sidecar_path(Path(vault_root)),
         (
             ("SELECT 1 FROM graph_nodes WHERE path = ? LIMIT 1", rels),
             ("SELECT 1 FROM graph_parent_refs WHERE path = ? LIMIT 1", rels),
@@ -1285,10 +1287,12 @@ def _restored_derivatives_exact(operation: LifecycleOperation) -> bool:
         if item.source_path.lower().endswith(".md")
     )
     if markdown:
-        lexical_path = Path(vault_root) / kb_dirname() / ".lexical.sqlite"
+        from .. import epistemic_graph, lexstore, memory_refs
+
+        lexical_path = lexstore.lexical_path(Path(vault_root))
         checks: list[bool | None] = [
             _all_rows(
-                Path(vault_root) / kb_dirname() / ".refs.sqlite",
+                memory_refs.sidecar_path(Path(vault_root)),
                 "SELECT 1 FROM identities WHERE path = ? LIMIT 1",
                 markdown,
             )
@@ -1310,7 +1314,7 @@ def _restored_derivatives_exact(operation: LifecycleOperation) -> bool:
         if graph_enabled:
             checks.append(
                 _all_rows(
-                    Path(vault_root) / kb_dirname() / ".graph.sqlite",
+                    epistemic_graph.sidecar_path(Path(vault_root)),
                     "SELECT 1 FROM graph_nodes WHERE path = ? LIMIT 1",
                     markdown,
                 )

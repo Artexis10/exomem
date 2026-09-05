@@ -35,7 +35,7 @@ from typing import Annotated, Any, Literal, NotRequired
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
 from mcp.types import TextContent
-from pydantic import Field, StrictInt, StringConstraints
+from pydantic import Field, StrictInt, StringConstraints, WithJsonSchema
 from typing_extensions import TypedDict
 
 from . import add as add_module
@@ -53,15 +53,18 @@ from . import contradiction_stance as contradiction_stance_module
 from . import corpus_aware as corpus_aware_module
 from . import create_directory as create_directory_module
 from . import create_file as create_file_module
+from . import deferred_write_advisory as deferred_write_advisory_module
 from . import delete_directory as delete_directory_module
 from . import delete_file as delete_file_module
 from . import edit as edit_module
 from . import edit_operations as edit_operations_module
 from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
+from . import envelope as envelope_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
+from . import find_types, query_log, retrieval_models, semantic_census, upload_tokens, vault
 from . import get_page as get_page_module
 from . import knowledge_packs as knowledge_packs_module
 from . import link as link_module
@@ -81,7 +84,6 @@ from . import plan_memory as plan_memory_module
 from . import plan_progress as plan_progress_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
-from . import query_log, retrieval_models, semantic_census, upload_tokens, vault
 from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import record_memory as record_memory_module
@@ -89,6 +91,7 @@ from . import recover_from_trash as recover_from_trash_module
 from . import referent_runtime as referent_runtime_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
+from . import relation_vocabulary as relation_vocabulary_module
 from . import replace as replace_module
 from . import reserved_paths as reserved_paths_module
 from . import retrieval_explain as retrieval_explain_module
@@ -102,6 +105,7 @@ from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import structured_files as structured_files_module
 from . import traversal_profiles as traversal_profiles_module
+from . import workflow_contracts as workflow_contracts_module
 from . import workflow_skills as workflow_skills_module
 from .command_surface import (
     DESTRUCTIVE_OPS,  # noqa: F401 - re-exported for server.py
@@ -158,6 +162,43 @@ _RerankCandidateLimit = Annotated[
             "Maximum fused candidates passed to the reranker; strict integer "
             "from the effective result limit through 300."
         ),
+    ),
+]
+_WorkflowContextArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "project": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        "domain": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        "activity": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+_OptionalRelationText = Annotated[
+    str | None,
+    WithJsonSchema({"anyOf": [{"type": "string"}, {"type": "null"}]}),
+]
+_OptionalRelationProposal = Annotated[
+    dict | None,
+    WithJsonSchema({"anyOf": [{"type": "object"}, {"type": "null"}]}),
+]
+_RelationCandidateLimit = Annotated[
+    int,
+    WithJsonSchema(
+        {
+            "type": "integer",
+            "minimum": relation_vocabulary_module.RELATION_CANDIDATE_LIMIT_MIN,
+            "maximum": relation_vocabulary_module.RELATION_CANDIDATE_LIMIT_MAX,
+        }
     ),
 ]
 # Keep commands.py as the public command-surface facade for server, CLI, docs,
@@ -381,17 +422,144 @@ def op_bootstrap(
     except PackageNotFoundError:
         package_version = "0+unknown"
 
+    from . import envelope as envelope_module
     from . import mode as mode_module
     from . import prominence as prominence_module
     from . import tool_surface as tool_surface_module
 
     compute_policy = mode_module.resolved()
     engagement_policy = prominence_module.resolved()
+    # The delegation envelope rides INSIDE the engagement block rather than beside
+    # it: prominence sets its defaults, so a client reading one without the other
+    # would learn how eager Exomem is without learning what it is allowed to do on
+    # its own. Every string here is deliberately command-free, exactly like the
+    # epistemic commitments — `_filter_bootstrap_payload` deletes any value naming
+    # a command the active surface cannot call, and a ceiling that vanished on a
+    # reduced surface would be a ceiling nobody was told about.
+    engagement_policy["envelope"] = envelope_module.resolved(
+        level=engagement_policy["level"]
+    )
     active_descriptor = _active_bootstrap_descriptor()
     active_product_names = frozenset(active_descriptor.product_commands)
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
+    workflow_inventory = workflow_contracts_module.inventory_contracts(vault_root)
+    workflow_summaries = workflow_inventory.get("summaries", [])
+    workflow_defaults = [item for item in workflow_summaries if not any(item["scope"].values())]
+    workflow_scoped = [item for item in workflow_summaries if any(item["scope"].values())]
+    workflow_portable = workflow_contracts_module.portable_projection()
+    workflow_portable_identity = {
+        key: workflow_portable[key] for key in ("family", "schema_version", "digest")
+    }
+    workflow_complete = "total" in workflow_inventory
+    workflow_status = workflow_inventory.get("status")
+    workflow_failure_code = workflow_inventory.get("code")
+    workflow_findings = workflow_inventory.get("findings", [])
+    workflow_unavailable = (
+        not workflow_complete
+        or workflow_status is not None
+        or workflow_failure_code is not None
+        or bool(workflow_findings)
+    )
+    workflow_route = {
+        "tool": "schema_memory",
+        "subject": "workflow-contracts",
+        "operation": "resolve",
+    }
+    workflow_callable = "schema_memory" in active_product_names
+    if workflow_callable:
+        if workflow_status is not None:
+            workflow_public_status = workflow_status
+        elif workflow_unavailable:
+            workflow_public_status = "workflow_resolution_unavailable"
+        else:
+            workflow_public_status = None
+    else:
+        workflow_public_status = (
+            "builtin_standalone"
+            if workflow_complete and not workflow_unavailable and not workflow_summaries
+            else "workflow_resolution_unavailable"
+        )
+    workflow_projection_base = {
+        "invariants": workflow_portable["invariants"],
+        "builtin_fallback": workflow_portable["builtin_fallback"],
+        "resolution_available": workflow_callable,
+        "proactive_routing_available": bool(workflow_callable and not workflow_unavailable),
+    }
+    workflow_compact_protocol = {
+        "version": workflow_portable["agent_protocol"]["version"],
+        "outcomes": {
+            "planning_reference": workflow_portable["agent_protocol"]["outcomes"][
+                "planning_reference"
+            ],
+            "transition": workflow_portable["agent_protocol"]["outcomes"]["transition"],
+        },
+    }
+    workflow_resolution_required = workflow_unavailable or bool(workflow_summaries)
+    if workflow_complete:
+        workflow_projection_base.update(
+            {
+                "default": workflow_defaults[:1],
+                "scoped": workflow_scoped[:8],
+                "total": workflow_inventory["total"],
+                "truncated": bool(
+                    workflow_inventory["truncated"]
+                    or len(workflow_defaults) > 1
+                    or len(workflow_scoped) > 8
+                ),
+            }
+        )
+    if profile == "compact":
+        workflow_contract_projection = {
+            **workflow_projection_base,
+            "portable": workflow_portable_identity,
+            "agent_protocol": workflow_compact_protocol,
+            **({"resolution_required": True} if workflow_resolution_required else {}),
+            **({"route": workflow_route} if workflow_callable else {}),
+            **({"status": workflow_public_status} if workflow_public_status is not None else {}),
+            **({"findings": workflow_findings} if workflow_findings else {}),
+        }
+        selected_packs = {
+            key: value for key, value in selected_packs.items() if key != "workflow_contract"
+        }
+    elif workflow_callable:
+        workflow_contract_projection = {
+            **workflow_projection_base,
+            "portable": workflow_portable,
+            "agent_protocol": workflow_portable["agent_protocol"],
+            "resolution_required": workflow_resolution_required,
+            "route": workflow_route,
+            **({"status": workflow_public_status} if workflow_public_status is not None else {}),
+            "findings": workflow_findings,
+        }
+    else:
+        workflow_contract_projection = {
+            **workflow_projection_base,
+            "portable": workflow_portable,
+            "agent_protocol": workflow_portable["agent_protocol"],
+            "resolution_required": workflow_resolution_required,
+            "status": workflow_public_status,
+        }
     entity_type_registry = entity_types_module.load_entity_types(vault_root)
+    relation_registry = relation_registry_module.load_registry(vault_root)
+    relation_vocabulary_projection = {
+        "contract_version": "2026-09-01.1",
+        "core_version": relation_registry.core_version,
+        "core_vocabulary": sorted(relation_registry.core),
+        "extension_hash": relation_registry.extension_hash,
+        "extension_count": len(relation_registry.extensions),
+        "inventory_route": {
+            "tool": "connect_memory",
+            "args": {"operation": "resolve-relation"},
+        },
+        "workflow": (
+            "Choose a specific truthful registered relation: resolve-relation and reuse it. "
+            "Otherwise use relates_to for a real generic connection, or no edge. Use "
+            "propose-relation only for durable recurring meaning; save-relations is "
+            "proposal-first and hash guarded. Corrections create a new canonical key and "
+            "deprecate the old key."
+        ),
+    }
     source_taxonomy_projection = _source_taxonomy_projection(vault_root, profile=profile)
     simple_actions = simple_action_catalog(selected_packs, available_tools=active_product_names)
     front_door_actions = product_front_door_catalog(
@@ -481,9 +649,10 @@ def op_bootstrap(
                     "published, failed; route: record_memory"
                 ),
                 "pairing_rule": (
-                    "an outcome on an open committed Planning item is one landing, "
-                    "two consequences: record then transition, once. A tentative "
-                    "claim is not an event, elapsed time not an outcome"
+                    "an outcome on an open Planning item is recorded once. A user may "
+                    "then request a guarded Planning transition; otherwise review may "
+                    "propose one. A tentative claim is not an event, and elapsed time "
+                    "is not an outcome"
                 ),
             },
             "capture_examples": (
@@ -491,7 +660,8 @@ def op_bootstrap(
                 "events, and current state here without waiting for a magic save or log verb. "
                 "Resolve one compatible collection before append or update; if none fits, "
                 "describe and propose a concise collection before validate and explicit create. "
-                "Paired: one append then one plan triage, once."
+                "A recorded outcome never closes Planning automatically; propose or perform "
+                "a guarded transition only with explicit user intent."
             ),
             "review_rule": (
                 "Review may compare planned intent with recorded reality; it must not make "
@@ -510,8 +680,9 @@ def op_bootstrap(
                 "templates, migrations, or canonical data."
             ),
             "software_rule": (
-                "Exomem Planning owns durable intent and prioritisation; OpenSpec, git, tests, "
-                "and code own accepted software contracts and execution truth."
+                "Exomem Planning owns durable intent and prioritisation; a resolved workflow "
+                "contract may declare companion-owned execution artifacts without asserting "
+                "their availability or state."
             ),
         }
     else:
@@ -560,8 +731,8 @@ def op_bootstrap(
             "neither resolves, evaluates, or updates Planning automatically."
         ),
         "execution_truth_boundary": (
-            "Planning owns durable intent and prioritisation. OpenSpec defines accepted product "
-            "contracts; repositories, git, tests, and code own software execution truth."
+            "Planning owns durable intent and prioritisation. A resolved workflow contract "
+            "may declare companion ownership, while external execution truth remains opaque."
         ),
     }
     # The doctrine every client tier has to receive. The shipped skill scaffold
@@ -704,6 +875,8 @@ def op_bootstrap(
         "records": records_contract,
         "semantic_authoring": semantic_authoring_projection,
         "planning": planning_contract,
+        "workflow_contracts": workflow_contract_projection,
+        "relation_vocabulary": relation_vocabulary_projection,
         "epistemic_contract": epistemic_contract,
         "memory_model": {
             "built_in_ai_memory": (
@@ -760,7 +933,7 @@ def op_bootstrap(
                 "bootstrap",
                 "adopt_vault or browse_memory when first seeing an existing vault",
                 "ask_memory for cheap product recall",
-                "read_memory or ask_memory(deep=true) when more context is needed",
+                "read_memory or reasoning_lookup for more context",
                 (
                     "show the note title by default in normal user-facing prose and do not "
                     "expose the raw canonical ref by default; add the current vault-relative "
@@ -773,11 +946,9 @@ def op_bootstrap(
                     "title-first citation"
                 ),
                 "reason in the agent",
-                "use connect_memory(operation='suggest-links' or 'suggest-relations') before important compiled writes",
-                "remember or replace_memory for page-level conclusions; observe_memory for one semantic unit; edit_memory for other small page corrections",
                 (
-                    "read the returned warnings and follow up on unresolved links "
-                    "or duplicate warnings; write_feedback needs "
+                    "after a write, read the returned warnings and follow up on "
+                    "unresolved links or duplicate warnings; write_feedback needs "
                     "response_detail='full', and suggestions additionally need "
                     "remember(suggestions=true)"
                 ),
@@ -845,7 +1016,31 @@ def op_bootstrap(
                 "due_state_authority": "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering",
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
-                "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists what is quiet and why, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
+                "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
+                # Carried by EVERY profile. It was full-only while compact sat 24
+                # bytes under its ceiling; the queued compact-bootstrap trim has
+                # since paid for it out of redundancy elsewhere in the payload, and
+                # compact is the payload a hookless client receives, which is the
+                # surface with no detector-aware skill behind it. Compact states
+                # the same rule in fewer words -- both halves, the write-time
+                # routing act and the advisory as the net rather than the
+                # mechanism; full keeps its own wording unchanged.
+                "destination_choice": (
+                    "choose the destination at write time: when a coherent durable thread "
+                    "emerges outside the current page's declared scope, search for a focused "
+                    "existing destination, or create one, and link it. Post-write structural "
+                    "advisories are the safety net for missed routing, never the primary "
+                    "mechanism"
+                    if profile == "compact"
+                    else "choosing the destination is part of writing, not a reaction to an "
+                    "advisory. When a coherent durable thread emerges in conversation that "
+                    "sits outside the current page's declared scope, search for a focused "
+                    "existing destination and link it, or create one, at write time. "
+                    "Post-write structural advisories are the safety net for routing that "
+                    "was missed, never the primary mechanism: a page left to accumulate "
+                    "structural debt until a detector speaks has already cost the reader "
+                    "what the routing would have given them."
+                ),
             },
             "note_type_recipes": {
                 "research-note": "Project-scoped finding with Question, Findings, and typed Relations.",
@@ -872,18 +1067,26 @@ def op_bootstrap(
                 "contract": semantic_authoring_projection,
                 "compact_syntax": semantic_authoring_module.AUTHORING_CONTRACT.compact["syntax"],
                 "compact_kind": semantic_authoring_module.AUTHORING_CONTRACT.compact["kind"],
-                "category_rule": semantic_authoring_module.AUTHORING_CONTRACT.semantic_roles[
-                    "category"
-                ],
-                "rich_form": semantic_authoring_module.AUTHORING_CONTRACT.rich["heading_syntax"],
                 "rich_relation_rule": semantic_authoring_module.AUTHORING_CONTRACT.rich[
                     "relation_rule"
                 ],
-                "mutation_rule": semantic_authoring_module.AUTHORING_CONTRACT.routes[
-                    "single_semantic_unit"
-                ],
-                "drift_guards": (
-                    "update/remove require the current parent content hash and unit fingerprint"
+                **(
+                    {
+                        "category_rule": semantic_authoring_module.AUTHORING_CONTRACT.semantic_roles[
+                            "category"
+                        ],
+                        "rich_form": semantic_authoring_module.AUTHORING_CONTRACT.rich[
+                            "heading_syntax"
+                        ],
+                        "mutation_rule": semantic_authoring_module.AUTHORING_CONTRACT.routes[
+                            "single_semantic_unit"
+                        ],
+                        "drift_guards": (
+                            "update/remove require the current parent content hash and unit fingerprint"
+                        ),
+                    }
+                    if profile != "compact"
+                    else {}
                 ),
             },
             "reviewed_creation": {
@@ -907,42 +1110,54 @@ def op_bootstrap(
                     "it, then call remember() so normal semantic precommit still applies"
                 ),
             },
-            "reviewed_existing_edit": {
-                "validate_call": {
-                    "tool": "edit_memory",
-                    "arguments": {
-                        "path": "Knowledge Base/Notes/Research/example.md",
-                        "why": "refresh relation review",
-                        "operation": {
-                            "kind": "replace_string",
-                            "old_string": "before",
-                            "new_string": "after",
-                            "validate_only": True,
+            "reviewed_existing_edit": (
+                {
+                    "rule": (
+                        "validate the exact edit; retain transition_token and "
+                        "relation_review_hash; commit that edit unchanged with an explicit "
+                        "reviewed_none reason only when no truthful relation applies"
+                    )
+                }
+                if profile == "compact"
+                else {
+                    "validate_call": {
+                        "tool": "edit_memory",
+                        "arguments": {
+                            "path": "Knowledge Base/Notes/Research/example.md",
+                            "why": "refresh relation review",
+                            "operation": {
+                                "kind": "replace_string",
+                                "old_string": "before",
+                                "new_string": "after",
+                                "validate_only": True,
+                            },
                         },
                     },
-                },
-                "commit_call": {
-                    "tool": "edit_memory",
-                    "arguments": {
-                        "path": "Knowledge Base/Notes/Research/example.md",
-                        "why": "refresh relation review",
-                        "operation": {
-                            "kind": "replace_string",
-                            "old_string": "before",
-                            "new_string": "after",
-                            "transition_token": "<returned transition_token>",
-                            "relation_disposition": "reviewed_none",
-                            "relation_review_hash": "<returned relation_review_hash>",
-                            "relation_review_reason": ("No honest typed relation applies."),
+                    "commit_call": {
+                        "tool": "edit_memory",
+                        "arguments": {
+                            "path": "Knowledge Base/Notes/Research/example.md",
+                            "why": "refresh relation review",
+                            "operation": {
+                                "kind": "replace_string",
+                                "old_string": "before",
+                                "new_string": "after",
+                                "transition_token": "<returned transition_token>",
+                                "relation_disposition": "reviewed_none",
+                                "relation_review_hash": "<returned relation_review_hash>",
+                                "relation_review_reason": (
+                                    "No honest typed relation applies."
+                                ),
+                            },
                         },
                     },
-                },
-                "rule": (
-                    "retain semantic.transition_token and "
-                    "semantic.relation_review_hash from validation; commit the "
-                    "identical proposed edit with a bounded reason"
-                ),
-            },
+                    "rule": (
+                        "retain semantic.transition_token and "
+                        "semantic.relation_review_hash from validation; commit the "
+                        "identical proposed edit with a bounded reason"
+                    ),
+                }
+            ),
         },
         "tool_defaults": {
             "normal_lookup": {
@@ -950,14 +1165,10 @@ def op_bootstrap(
                 "args": {"detail": "compact", "rerank": False},
                 "when": "normal cheap product recall",
             },
-            "metadata_lookup": {
-                "tool": "ask_memory",
-                "args": {"detail": "compact", "rerank": False},
-                "when": "caller needs the richer find filters or compact stubs",
-            },
             "reasoning_lookup": {
                 "tool": "ask_memory",
                 "args": {"deep": True},
+                "when": "synthesis over bounded context",
             },
             "adopt_existing_vault": {
                 "tool": "adopt_vault",
@@ -999,16 +1210,7 @@ def op_bootstrap(
             },
         },
         "performance_profiles": {
-            "normal": {
-                "ask_memory_args": {"detail": "compact", "rerank": False},
-                "interpretation": "cheap product recall; follow with read_memory if needed",
-            },
-            "reasoning": {
-                "ask_memory_args": {"deep": True},
-                "interpretation": "bounded context assembly for synthesis",
-            },
             "diagnostics": {
-                "ask_memory_args": {"include_timings": True, "rerank": True},
                 "interpretation": (
                     "timings measure retrieval stages; unset rerank is mode-aware "
                     "and CPU steady-state modes keep auto-rerank off; compute_policy "
@@ -1054,22 +1256,23 @@ def op_bootstrap(
                 },
             },
             "retry_examples": [
-                "try synonyms and singular/plural forms",
-                "try adjacent domain terms",
-                "try scope='vault' if Knowledge Base recall is sparse",
                 "use adopt_vault(mode='scan-only') before proposing migration/copy actions",
-                "try ask_memory(deep=true) for synthesis instead of many read_memory calls",
             ],
         },
         "product_commands": product_tool_catalog(
             active_product_names, callable_tools=active_descriptor.callable_commands
         ),
-        "tool_catalog": product_tool_catalog(
-            active_product_names, callable_tools=active_descriptor.callable_commands
+        **(
+            {
+                "tool_catalog": product_tool_catalog(
+                    active_product_names, callable_tools=active_descriptor.callable_commands
+                )
+            }
+            if profile != "compact"
+            else {}
         ),
         "common_tools": [
             "adopt_vault",
-            "browse_memory",
             "ask_memory",
             "read_memory",
             "remember",
@@ -1077,9 +1280,6 @@ def op_bootstrap(
             "observe_memory",
             "replace_memory",
             "connect_memory",
-            "preserve_artifacts",
-            "transfer_artifact",
-            "read_media",
         ],
     }
 
@@ -1188,6 +1388,7 @@ def _require_supported_projected_find_request(
     prefer_compiled: bool,
     prefer_active: bool,
     prefer_used: bool,
+    widen_outside_kb: bool,
     pack: bool,
     graph_enrich: bool,
     include_timings: bool,
@@ -1223,6 +1424,7 @@ def _require_supported_projected_find_request(
         or not prefer_compiled
         or not prefer_active
         or prefer_used
+        or widen_outside_kb
         or pack
         or graph_enrich
         or explain
@@ -1260,6 +1462,7 @@ def op_find(
     prefer_compiled: bool = True,
     prefer_active: bool = True,
     prefer_used: bool = False,
+    widen_outside_kb: bool = False,
     pack: bool = False,
     graph_enrich: bool = False,
     detail: str = "full",
@@ -1310,21 +1513,16 @@ def op_find(
         continuation: Opaque governed-projection continuation returned by a prior page.
             It is bound to the same principal, authorization session, purpose, request,
             and retained projected snapshot. Omit for the first page.
-        scope: "kb" (default) searches Knowledge Base/ first and
-            AUTO-WIDENS to the whole vault when the KB doesn't fill
-            `limit` — so content in sibling folders (Tracking/,
-            Reference/, Finance/, ... and curated, read-only trees kept
-            outside Knowledge Base/) is never silently invisible. Widened
-            hits carry `outside_kb: true`. "vault" always walks the
-            whole vault. "kb-only" is the strict opt-out: KB only,
-            never widens. Outside-KB recall is BM25/keyword (the
-            vector sidecar is KB-scoped), with a relaxed gate so terse
-            files (e.g. a numbers-heavy tracker) surface on a partial
-            token match. `_Schema/`, `_trash/`, `_attachments/`, and
+        scope: "kb" (default) searches Knowledge Base/ only. "vault"
+            searches the whole vault, including sibling folders
+            (Tracking/, Reference/, Finance/, ... and curated,
+            read-only trees kept outside Knowledge Base/). "kb-only" is
+            the strict form of "kb": it can never widen even on
+            request. `_Schema/`, `_trash/`, `_attachments/`, and
             `.obsidian/` are excluded under every scope. NOTE: an
             empty result means "not found in what I searched," NOT
-            "doesn't exist" — say so, and try "vault" before
-            concluding absence.
+            "doesn't exist" — say so, and try `widen_outside_kb` or
+            "vault" before concluding absence.
         mode: Ranker. "hybrid" (default) fuses BM25 + local vector
             embeddings via reciprocal rank fusion — best recall on
             natural-language queries. "keyword" preserves the original
@@ -1377,6 +1575,17 @@ def op_find(
             no separate feedback call exists or is needed. Use for "what
             have I been working with lately" recall; leave off for
             neutral knowledge lookup.
+        widen_outside_kb: When true (OFF by default), scope="kb" also
+            RESERVES up to `limit - 1` slots for pages outside
+            Knowledge Base/, so content in sibling folders is not
+            silently invisible; reserved hits carry `outside_kb: true`.
+            Out-of-KB recall is BM25/keyword (the vector sidecar is
+            KB-scoped) over the maintained catalogue, with a relaxed
+            gate so terse files (e.g. a numbers-heavy tracker) surface
+            on a partial token match. Ignored for "vault" (already
+            searching everything) and "kb-only" (the strict opt-out).
+            Off, scope="kb" costs nothing for callers who never read
+            the reserve.
         pack: When true (off by default), ALSO assemble a reasoning-ready
             context pack from the top hits and change the return to
             {"hits": [...], "pack": {...}} (with pack off, the return is the
@@ -1491,6 +1700,7 @@ def op_find(
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
             prefer_used=prefer_used,
+            widen_outside_kb=widen_outside_kb,
             pack=pack,
             graph_enrich=graph_enrich,
             include_timings=include_timings,
@@ -1625,6 +1835,7 @@ def op_find(
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
             prefer_used=prefer_used,
+            widen_outside_kb=widen_outside_kb,
             timings=timings,
             degraded_out=degraded,
             failed_out=failed,
@@ -1684,7 +1895,15 @@ def op_find(
         )
         if projection_runtime is None:
             ref_index = memory_refs_module.ReferenceIndex(vault_root)
-            refs = ref_index.refs_for_paths([str(hit.get("path") or "") for hit in hit_dicts])
+            # The recall serializer is the one caller the no-walk contract
+            # governs: a cold sidecar here declines with the retryable warming
+            # outcome and one background rebuild instead of scanning the corpus
+            # on the request. Every other `refs_for_paths` caller keeps the
+            # inline build (see `ReferenceIndex.refs_for_paths`).
+            with memory_refs_module.recall_serializer():
+                refs = ref_index.refs_for_paths(
+                    [str(hit.get("path") or "") for hit in hit_dicts]
+                )
             for hit in hit_dicts:
                 ref = refs.get(str(hit.get("path") or ""))
                 if ref:
@@ -2030,10 +2249,16 @@ def op_fetch(
 
 
 def _timing_log_summary(timings_dict: dict | None) -> dict | None:
-    """Query-log-safe slice of a timings envelope: totals + per-stage ms only
-    (never content; stage entries drop skip/error detail to stay compact)."""
+    """Query-log-safe slice of a timings envelope: totals, per-stage ms and
+    per-stage source only (never content; stage entries drop skip/error detail
+    to stay compact)."""
     if timings_dict is None:
         return None
+    timed_stages = {
+        name: entry
+        for name, entry in timings_dict.get("stages", {}).items()
+        if isinstance(entry, dict) and "ms" in entry
+    }
     return {
         "total_ms": timings_dict.get("total_ms"),
         # Carried deliberately. This projection is closed, so a field it does
@@ -2042,10 +2267,18 @@ def _timing_log_summary(timings_dict: dict | None) -> dict | None:
         # which is the thing #283 spent a month unable to see.
         "unattributed_ms": timings_dict.get("unattributed_ms"),
         "cache_hit": bool(timings_dict.get("cache", {}).get("hit")),
-        "stage_ms": {
-            name: entry["ms"]
-            for name, entry in timings_dict.get("stages", {}).items()
-            if isinstance(entry, dict) and "ms" in entry
+        "stage_ms": {name: entry["ms"] for name, entry in timed_stages.items()},
+        # Same closure argument, one level up: a corpus walk that reappears is
+        # a stage that stops saying `index` and starts saying `computed`, and
+        # across many requests the query log is the only place that is visible
+        # without re-running a benchmark. Drawn from the same filtered set as
+        # `stage_ms`, so the log cannot report a stage's time without also
+        # reporting where it came from, and closed to the known vocabulary so
+        # only those four tokens can ever reach the durable record.
+        "stage_source": {
+            name: entry["source"]
+            for name, entry in timed_stages.items()
+            if entry.get("source") in find_types.STAGE_SOURCES
         },
     }
 
@@ -2566,8 +2799,8 @@ def op_audit_fix(vault_root: Path, dry_run: bool = False, rebuild_embeddings: bo
         dry_run: If true, compute what would change without writing.
             Default false.
         rebuild_embeddings: If true, wipe and rebuild the vector sidecar
-            at `<vault>/Knowledge Base/.embeddings.sqlite` after the fix
-            sweep. Use on first run, after a machine swap, or when the
+            (`.embeddings.sqlite` in the machine-local state root) after
+            the fix sweep. Use on first run, after a machine swap, or when the
             sidecar has drifted from disk. Ignored when `dry_run=true`.
 
     Returns:
@@ -4529,6 +4762,7 @@ def op_ask_memory(
     prefer_compiled: bool = True,
     prefer_active: bool = True,
     prefer_used: bool = False,
+    widen_outside_kb: bool = False,
     graph_enrich: bool = False,
     include_timings: bool = False,
     explain: bool = False,
@@ -4579,6 +4813,11 @@ def op_ask_memory(
         prefer_compiled: Prefer compiled notes over raw sources by default.
         prefer_active: Prefer active conclusions over superseded ones.
         prefer_used: Apply usage boost when explicitly requested.
+        widen_outside_kb: With scope="kb", also reserve up to limit-1 slots for
+            curated vault pages OUTSIDE the knowledge base. Off by default:
+            scope="kb" means the knowledge base and nothing else. Turn it on
+            when a terse out-of-KB file (a tracker, a handbook) is what you are
+            looking for, or use scope="vault" to search everything equally.
         graph_enrich: With deep mode, include typed graph neighborhood data.
         include_timings: Include retrieval timings for diagnostics.
         explain: Add bounded retrieval-plan and per-hit ranking evidence.
@@ -4616,6 +4855,7 @@ def op_ask_memory(
         prefer_compiled=prefer_compiled,
         prefer_active=prefer_active,
         prefer_used=prefer_used,
+        widen_outside_kb=widen_outside_kb,
         pack=deep,
         graph_enrich=graph_enrich,
         detail=detail,
@@ -5435,9 +5675,15 @@ def op_preserve_artifacts(
     # One invocation preserves N artifacts. The batch scope is what keeps that
     # one counters block rather than N: see `due_state.batch_scope`.
     with due_state_module.batch_scope(vault_root):
-        return client_artifacts.preserve_artifacts(
+        result = client_artifacts.preserve_artifacts(
             vault_root, scope=scope, category=category, files=files
         )
+    # No batch deltas: Evidence blobs author no predictions, questions,
+    # experiments or supersession pointers, so this leaf's own writes never move
+    # a projected category (design D3). The carriage value is the session
+    # channel — a first qualifying response, and change-only deltas from
+    # elsewhere in the conversation.
+    return _carrying_due_state(vault_root, result)
 
 
 def op_transfer_artifact(
@@ -5501,7 +5747,11 @@ def op_process_media(
     # Bounded all-media work writes one transcript per artifact, so the no-path
     # form is a batch and must not deliver one counters block per artifact.
     with due_state_module.batch_scope(vault_root):
-        return _process_media(vault_root, path=path, operation=operation)
+        result = _process_media(vault_root, path=path, operation=operation)
+    # `retry` re-enqueues in the machine-local job store and commits nothing, so
+    # the commit gate inside the carrier keeps it silent — that is the contract,
+    # not an omission.
+    return _carrying_due_state(vault_root, result)
 
 
 def _process_media(
@@ -5697,7 +5947,14 @@ def op_review_memory(
     Args:
         mode: attention, activation, item, audit, dispositions, provenance,
             evolution, compilation, stale, contradiction, unprocessed-sources,
-            relation-debt, relation-queue, adoption, or plan-progress.
+            relation-debt, relation-queue, adoption, plan-progress, or
+            write-advisory-result. `write-advisory-result` resolves exactly one
+            opaque `exomem://write-advisory-result/<id>` reference returned by a
+            committed write and reports only that job's current `pending`,
+            `ready`, `failed`, or `superseded` state; it requires `ref`, has no
+            list, browse, search, rank, count, continuation, or
+            implicit-current form, and a malformed, unknown, unauthorized, or
+            expired reference returns the shared not-found outcome.
             `plan-progress` reports, for each committed Planning item declaring
             `progress_evidence`, the counts its bound Records views return; it is
             derived and read-only, and it scores nothing. `dispositions` lists every
@@ -5731,7 +5988,9 @@ def op_review_memory(
             `chain_id` is always the active head. An unresolvable path raises an
             explicit error.
         state: For attention/activation, open (default), all, snoozed, or dismissed.
-        ref: Stable `exomem://review/<id>` reference for item mode.
+        ref: Stable `exomem://review/<id>` reference for item mode, or the
+            opaque `exomem://write-advisory-result/<id>` reference for
+            write-advisory-result mode. Required by both.
         detail: Audit output detail: actionable (default) or full.
         legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
 
@@ -5761,6 +6020,8 @@ def op_review_memory(
         if not ref:
             raise ValueError("INVALID_REVIEW: item mode requires `ref`")
         return attention_module.item_by_ref(vault_root, ref).as_dict()
+    if mode == "write-advisory-result":
+        return deferred_write_advisory_module.resolve_result(vault_root, ref)
     if mode == "dispositions":
         return _dispositions_view(vault_root)
     if mode == "audit":
@@ -5810,7 +6071,8 @@ def op_review_memory(
     raise ValueError(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "dispositions, provenance, evolution, compilation, stale, contradiction, "
-        "unprocessed-sources, relation-debt, relation-queue, adoption, or plan-progress"
+        "unprocessed-sources, relation-debt, relation-queue, adoption, plan-progress, "
+        "or write-advisory-result"
     )
 
 
@@ -5923,6 +6185,22 @@ def _adopted_paths(result: Any) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _audit_fix_paths(result: Any) -> list[str]:
+    """The pages a `fix` pass actually rewrote, in first-seen order.
+
+    Read off `fixed` rather than `files_rewritten`, which is a count. A dry-run
+    preview reports the same rows without having written them, so it is excluded
+    here as well as by the carrier's commit gate.
+    """
+    if not isinstance(result, dict) or result.get("dry_run"):
+        return []
+    out: list[str] = []
+    for row in result.get("fixed") or []:
+        if isinstance(row, dict) and isinstance(row.get("path"), str):
+            out.append(row["path"])
+    return list(dict.fromkeys(out))
+
+
 def _apply_batch_deltas(vault_root: Path, rel_paths: list[str]) -> None:
     """Bring the due-state projection up to date for a batch's governed writes.
 
@@ -5942,6 +6220,49 @@ def _apply_batch_deltas(vault_root: Path, rel_paths: list[str]) -> None:
             due_state_module.apply_write_delta(vault_root, rel_path)
         except Exception:  # noqa: BLE001 — a projection delta never breaks a write
             log.debug("due-state delta failed for %s", rel_path, exc_info=True)
+
+
+def _carrying_due_state(vault_root: Path, result: Any) -> Any:
+    """Attach the post-batch advisory due-state block for the terminal to decide on.
+
+    The operation leaves are batch carriers: one invocation commits many governed
+    writes, so the block belongs at the end of the batch rather than once per
+    write. The batch scope each leaf already opens keeps the governor quiet
+    throughout; this runs after the batch's deltas have been applied, so the
+    number served is the projection AFTER the batch and not a stale read.
+
+    Produces only, exactly like `semantic_writes._due_state_block` and
+    `records._due_state_block`: emission is decided at the mutation terminal,
+    which is the only place that knows whether the response will actually carry
+    the block. The vault rides along under the same server-internal `_vault` key
+    the terminal reads for the emission key and never puts on the wire.
+
+    Gated on an actual commit (design D1). Carriage rides the committed terminal,
+    which exists only when `mark_active_mutation_committed` fired: a clean-vault
+    repair pass, already-valid media, a `retry` re-enqueue and a verified replay
+    all commit nothing, have no terminal to carry a block on, and would otherwise
+    leak an ungoverned advisory — plus `_vault` — straight into a raw leaf result.
+    The gate is also what keeps `structured-files`' closed receipt shape valid on
+    the replay path that validates it.
+
+    A failure here costs the caller an advisory and never the operation.
+    """
+    from .writer_lease import active_mutation_committed
+
+    if not isinstance(result, dict) or "due_state" in result:
+        return result
+    if not active_mutation_committed():
+        return result
+    try:
+        from . import due_state as due_state_module
+
+        block = due_state_module.block_for_batch(vault_root)
+    except Exception:  # noqa: BLE001 — an advisory never breaks a committed batch
+        log.debug("due-state batch block failed (non-fatal)", exc_info=True)
+        return result
+    if not block:
+        return result
+    return {**result, "due_state": {**block, "_vault": str(vault_root)}}
 
 
 def _set_family_disposition(
@@ -5991,6 +6312,13 @@ def _dispositions_view(vault_root: Path) -> dict:
         record = dispositions[family]
         if not isinstance(record, dict):
             continue
+        if str(record.get("disposition") or "") not in {"quiet", "off"}:
+            # A slate-only row: the family carries a durable `quiet_offered_at`
+            # while its disposition is still `normal`. It is not a decision and
+            # must not be listed as one -- this view answers "what have I
+            # quieted", and a row saying `normal` would be an answer to a
+            # different question.
+            continue
         rows.append(
             {
                 "family": family,
@@ -6003,6 +6331,8 @@ def _dispositions_view(vault_root: Path) -> dict:
                 "manual_dismissals": counts.get(family, 0),
             }
         )
+    from . import envelope as envelope_module
+
     return {
         "dispositions": rows,
         "registered_families": sorted(review_state_module.registered_families()),
@@ -6012,6 +6342,21 @@ def _dispositions_view(vault_root: Path) -> dict:
             "still reviewable by naming its category. It is not evidence the family "
             "is clean."
         ),
+        # A structurally SEPARATE block, never rows mixed into the one above.
+        # The two vocabularies share the word `off` and mean different things by
+        # it, and a reader looking at one list has no way to tell which is which:
+        # a family `off` is a review-state decision about one KIND of signal, an
+        # envelope `off` is "the agent does not initiate this CLASS of action".
+        "envelope": {
+            **envelope_module.resolved(),
+            "note": (
+                "Action classes, not signal families. An envelope `off` means the "
+                "agent does not initiate that class on its own; it never blocks an "
+                "explicit request. A family `off` is the review-state decision "
+                "listed above. A ceiling is product law: no level, override or "
+                "adaptation authorizes behaviour above it."
+            ),
+        },
     }
 
 
@@ -6076,6 +6421,7 @@ def op_triage_memory(
     until: str | None = None,
     why: str | None = None,
     expected_fingerprint: str | None = None,
+    source_path: _OptionalRelationText = None,
 ) -> dict:
     """Triage one Epistemic Inbox item explicitly.
 
@@ -6102,8 +6448,31 @@ def op_triage_memory(
             decision was made; `quiet` and `off` require one.
         expected_fingerprint: Optional reviewed fingerprint; a mismatch refuses
             the write and asks the caller to refresh.
+        source_path: Source-page hint returned by relation review. Required for
+            newly returned relation items; omitted legacy requests use only the
+            bounded compatibility prefix.
     """
     normalized_action = str(action or "").strip().lower()
+    if envelope_module.is_envelope_ref(ref):
+        if until is not None:
+            raise ValueError("INVALID_REVIEW_ACTION: envelope triage does not accept `until`")
+        if expected_fingerprint is not None:
+            raise ValueError(
+                "INVALID_REVIEW_ACTION: envelope triage does not accept `expected_fingerprint`"
+            )
+        action_class = envelope_module.parse_envelope_ref(ref)
+        if normalized_action == "reset":
+            envelope_module.reset_disposition(action_class)
+        else:
+            envelope_module.set_disposition(action_class, normalized_action)
+        served = envelope_module.resolved()["classes"][action_class]
+        return {
+            "class": action_class,
+            "ceiling": served["ceiling"],
+            "disposition": served["disposition"],
+            "provenance": served["provenance"],
+            "ref": envelope_module.envelope_ref(action_class),
+        }
     if review_state_module.is_family_ref(ref):
         # BEFORE every other namespace: a family reference names a KIND of
         # signal, so none of the item-shaped branches below can resolve it, and
@@ -6149,6 +6518,7 @@ def op_triage_memory(
             until=until,
             why=why,
             expected_fingerprint=expected_fingerprint,
+            source_path=source_path,
         )
     normalized = str(action or "").strip().lower()
     try:
@@ -6225,15 +6595,17 @@ def op_triage_memory(
 def op_connect_memory(
     vault_root: Path,
     operation: str = _CONNECT_MEMORY_DEFAULT_OPERATION,
-    path: str | None = None,
-    target: str | None = None,
-    query: str | None = None,
+    path: _OptionalRelationText = None,
+    target: _OptionalRelationText = None,
+    query: _OptionalRelationText = None,
+    requested_relation: _OptionalRelationText = None,
+    continuation: _OptionalRelationText = None,
     unit_ref: str | None = None,
     categories: list[str] | None = None,
     kinds: list[str] | None = None,
     draft_title: str | None = None,
     draft_body: str | None = None,
-    limit: int = 8,
+    limit: _RelationCandidateLimit = 8,
     scope: str = "kb",
     include_model_suggestions: bool = False,
     depth: int = 1,
@@ -6274,16 +6646,22 @@ def op_connect_memory(
 
     Args:
         operation: context, suggest-links, suggest-relations, graph-context,
-            inbound-links, resolve-entity, create-entity, or accept-relation.
-        path: Existing page path for link, graph, or relation context.
-        target: Target path for inbound-links; defaults to path.
-        query: Query seed for graph-context.
+            inbound-links, resolve-relation, resolve-entity, create-entity, or
+            accept-relation.
+        path: Existing page path for link, graph, or relation context; resolve-relation
+            reports it unchanged as optional source context without reading the page.
+        target: Target path for inbound-links; resolve-relation reports it unchanged
+            as optional target context without reading the page.
+        query: Query seed for graph-context or plain-language resolve-relation intent.
+        requested_relation: Optional clean, canonical, or alias label for
+            resolve-relation. At least query or requested_relation is required.
+        continuation: Opaque continuation returned by resolve-relation.
         unit_ref: Exact current semantic-unit seed for graph-context.
         categories: Registry-resolved semantic-unit category allowlist.
         kinds: Governed semantic-unit kind allowlist.
         draft_title: Draft title for suggestion modes.
         draft_body: Draft body for suggestion modes.
-        limit: Candidate cap for suggestion modes.
+        limit: Candidate cap for suggestion and relation-resolution modes.
         scope: Search scope for link suggestions.
         include_model_suggestions: Request optional model-backed relation suggestions.
         depth: Graph traversal depth.
@@ -6322,6 +6700,76 @@ def op_connect_memory(
             eligibility too, so a candidate that stopped being open between
             the queue read and this call also refuses.
     """
+    if operation == "resolve-relation":
+        supplied = locals()
+        unrelated_defaults = {
+            "unit_ref": None,
+            "categories": None,
+            "kinds": None,
+            "draft_title": None,
+            "draft_body": None,
+            "scope": "kb",
+            "include_model_suggestions": False,
+            "depth": 1,
+            "relation_types": None,
+            "node_types": None,
+            "max_nodes": 40,
+            "max_edges": 80,
+            "traversal_profile": None,
+            "max_body_chars": 3000,
+            "entity_type": None,
+            "name": None,
+            "slug": None,
+            "summary": None,
+            "why_in_kb": None,
+            "tags": None,
+            "connections": None,
+            "affiliation": None,
+            "relationship": None,
+            "domain": None,
+            "language": None,
+            "repo": None,
+            "license": None,
+            "used_in": None,
+            "decided": None,
+            "project": None,
+            "decision_status": None,
+            "ref": None,
+            "expected_hash": None,
+            "why": None,
+            "expected_fingerprint": None,
+        }
+        invalid = sorted(
+            name
+            for name, default in unrelated_defaults.items()
+            if supplied[name] != default
+        )
+        if invalid:
+            raise ValueError(
+                "INVALID_RELATION_ARGUMENT: resolve-relation does not accept "
+                + ", ".join(invalid)
+            )
+        relation_vocabulary_module.validate_candidate_limit(limit)
+        _, observation_offset = relation_vocabulary_module.continuation_offsets(
+            continuation
+        )
+        registry = relation_registry_module.load_registry(vault_root)
+        observations = memory_schema_module.indexed_relation_observations(
+            vault_root,
+            limit=limit,
+            offset=observation_offset,
+        )
+        result = relation_vocabulary_module.resolve_relation(
+            registry,
+            query=query,
+            requested_relation=requested_relation,
+            limit=limit,
+            observations=observations if observations is not None else (),
+            continuation=continuation,
+        )
+        result["recurrence_available"] = observations is not None
+        result["context"] = {"path": path, "target": target}
+        return result
     if operation == "accept-relation":
         if not ref:
             raise ValueError("INVALID_MODE: accept-relation requires `ref`")
@@ -6349,6 +6797,7 @@ def op_connect_memory(
             expected_hash=expected_hash,
             why=why,
             expected_fingerprint=expected_fingerprint,
+            source_path=path,
             edit_memory=_accept_relations_edit,
         )
     if path:
@@ -6431,8 +6880,8 @@ def op_connect_memory(
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
-        "suggest-relations, graph-context, inbound-links, resolve-entity, create-entity, or "
-        "accept-relation"
+        "suggest-relations, graph-context, inbound-links, resolve-relation, resolve-entity, "
+        "create-entity, or accept-relation"
     )
 
 
@@ -6490,7 +6939,7 @@ def op_adopt_vault(
             semantic_example_limit=semantic_example_limit,
         )
         _apply_batch_deltas(vault_root, _adopted_paths(result))
-    return result
+    return _carrying_due_state(vault_root, result)
 
 
 _ADOPTION_STUDIO_ACTIONS = (
@@ -6635,7 +7084,7 @@ def op_adoption_studio(
                     only_paths=only_paths,
                 )
                 _apply_batch_deltas(vault_root, _adoption_run_paths(applied))
-            return applied
+            return _carrying_due_state(vault_root, applied)
         if action == "cancel":
             return adoption_run_module.cancel(vault_root, run_id=run_id, why=why)
         if action == "finish":
@@ -6653,14 +7102,21 @@ def op_adoption_studio(
             )
         if action == "propose":
             return proposals_module.propose(vault_root, run_id=run_id, proposals=proposals or [])
-        # apply-proposal
-        return proposals_module.apply_proposal(
-            vault_root,
-            ref=ref,
-            expected_fingerprint=expected_fingerprint,
-            why=why,
-            expected_hash=expected_hash,
-        )
+        # apply-proposal. The other six registry actions are run bookkeeping or
+        # previews and deliberately do NOT carry: letting a `plan` preview
+        # deliver would burn the session's single change-only emission before
+        # the apply the caller is actually waiting on (design D2).
+        from . import due_state as due_state_module
+
+        with due_state_module.batch_scope(vault_root):
+            applied_proposal = proposals_module.apply_proposal(
+                vault_root,
+                ref=ref,
+                expected_fingerprint=expected_fingerprint,
+                why=why,
+                expected_hash=expected_hash,
+            )
+        return _carrying_due_state(vault_root, applied_proposal)
     except adoption_run_module.AdoptionRunError as exc:
         raise ValueError(f"{exc.code}: {exc.reason}") from exc
     except Exception as exc:  # structured proposal errors carry code/reason
@@ -6756,13 +7212,20 @@ def op_maintain_memory(
             raise ValueError(
                 "INVALID_ARGUMENTS: structured-files apply requires true and exact preview guards"
             )
-        return structured_files_module.apply(
-            vault_root,
-            collection,
-            plan_id=plan_id,
-            source_snapshot=source_snapshot,
-            why=why,
-        )
+        from . import due_state as due_state_module
+
+        with due_state_module.batch_scope(vault_root):
+            migrated = structured_files_module.apply(
+                vault_root,
+                collection,
+                plan_id=plan_id,
+                source_snapshot=source_snapshot,
+                why=why,
+            )
+        # Renames and rendered bodies, not authored obligations, so no batch
+        # deltas. A verified replay commits nothing and the carrier's commit
+        # gate keeps its closed receipt shape untouched.
+        return _carrying_due_state(vault_root, migrated)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -6777,23 +7240,35 @@ def op_maintain_memory(
         # the whole projection: both are batches, and neither should be able to
         # deliver one counters block per file it touched.
         with due_state_module.batch_scope(vault_root):
-            return op_audit_fix(
+            report = op_audit_fix(
                 vault_root,
                 dry_run=True if dry_run is None else dry_run,
                 rebuild_embeddings=rebuild_embeddings,
             )
+            # `fix` has no full recompute of its own — unlike `reconcile`, which
+            # heals the whole projection — so without these deltas the block it
+            # carries would describe the vault as it was BEFORE the pass that
+            # just rewrote it (design D3, task 1.5).
+            _apply_batch_deltas(vault_root, _audit_fix_paths(report))
+        return _carrying_due_state(vault_root, report)
     if mode == "reconcile":
         with due_state_module.batch_scope(vault_root):
-            return op_reconcile(
+            # No batch deltas here on purpose: `op_reconcile` already runs
+            # `due_state.reconcile`, a full recompute, which is a strictly
+            # stronger settlement than a per-path delta (design D3, task 1.5).
+            report = op_reconcile(
                 vault_root,
                 dry_run=False if dry_run is None else dry_run,
                 rebuild_graph=rebuild_graph,
             )
+        return _carrying_due_state(vault_root, report)
     if mode == "backfill-ids":
         with due_state_module.batch_scope(vault_root):
-            return memory_refs_module.backfill_ids(
+            report = memory_refs_module.backfill_ids(
                 vault_root, dry_run=True if dry_run is None else dry_run
             )
+            _apply_batch_deltas(vault_root, list(report.get("updated") or []))
+        return _carrying_due_state(vault_root, report)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
         "backfill-ids, or structured-files"
@@ -6808,14 +7283,19 @@ def op_schema_memory(
     project: str | None = None,
     page_type: str | None = None,
     save: bool = False,
-    expected_hash: str | None = None,
+    expected_hash: _OptionalRelationText = None,
     strict: bool = False,
     compare_to: str | None = None,
-    proposal: dict | None = None,
-    why: str | None = None,
+    proposal: _OptionalRelationProposal = None,
+    why: _OptionalRelationText = None,
     include_model_suggestions: bool = False,
+    context: _WorkflowContextArgument = None,
+    date_from: _OptionalRelationText = None,
+    date_to: _OptionalRelationText = None,
+    continuation: _OptionalRelationText = None,
+    limit: _RelationCandidateLimit = 20,
 ) -> dict:
-    """Infer, validate, diff, or save governed memory schemas.
+    """Infer, validate, diff, or save governed memory schemas and workflow contracts.
 
     Contracts describe recurring frontmatter fields, semantic blocks, and typed
     relations without changing ordinary write validation. Inference is read-only
@@ -6823,24 +7303,60 @@ def op_schema_memory(
     current content hash.
 
     Args:
-        operation: infer, validate, diff, or save-entity-types.
-        name: Lowercase contract slug; required only for `subject="contract"`.
-        subject: `contract`, `categories`, `relations`, or `traversal-profiles`.
+        operation: For `relations`, `propose-relation` returns a reviewed delta
+            without writing and `save-relations` commits that delta with expected_hash
+            and why. For `workflow-contracts`, exactly one of: inventory (no workflow
+            fields); inspect (name); validate (exactly one of name or proposal);
+            resolve (context plus at most one of name or proposal); preview (proposal,
+            optional name); save (proposal and why, optional name plus expected_hash
+            for updates); or refresh (name, expected_hash, and why). Other subjects
+            retain their existing operations.
+        name: A saved workflow key for inspect/refresh, validate as an alternative to
+            proposal, resolve (or `@standalone`), and optional preview/save update.
+        subject: `contract`, `categories`, `relations`, `traversal-profiles`, or
+            `workflow-contracts`. Workflow contracts support inventory, inspect,
+            validate, resolve, preview, save, and refresh with their exact argument matrix.
         project: Optional project scope for inference.
         page_type: Optional page-type scope for inference.
-        save: Persist an inferred proposal. Default false.
-        expected_hash: Required current hash when overwriting a saved contract.
+        save: Legacy inference flag. Ignored when false for workflow contracts and
+            refused when true; workflow writes use operation=`save`.
+        expected_hash: Current relation registry hash required by save-relations, or
+            current workflow hash required for workflow save updates and refresh.
         strict: In validate mode, signal a failing CLI/CI outcome on findings.
         compare_to: In diff mode, compare to this saved contract instead of corpus reality.
-        proposal: Reviewed semantic-language, relation, or traversal-profile proposal.
-        why: Required audit reason for save-entity-types.
+        proposal: Reviewed relation definition for propose-relation, reviewed delta
+            for save-relations, or workflow proposal for workflow modes.
+        why: Required audit reason for relation delta save, workflow save/refresh,
+            and entity-type saves.
         include_model_suggestions: Request response-only optional relation suggestions.
+        context: Exact optional workflow resolve mapping. Its only keys are project,
+            domain, and activity; omit a key for unknown or set it null for known absent.
+        date_from: Optional inclusive ISO origin-date bound for relation evidence.
+        date_to: Optional inclusive ISO origin-date bound for relation evidence.
+        continuation: Opaque relation candidate continuation.
+        limit: Relation extension and observation candidate budget.
 
     Returns:
-        A structured profile/proposal, validation report, or contract diff.
+        A structured profile/proposal, validation report, contract diff, or workflow result.
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
+    if subject == "workflow-contracts":
+        return _workflow_contract_schema_operation(
+            vault_root,
+            operation=operation,
+            name=name,
+            proposal=proposal,
+            expected_hash=expected_hash,
+            why=why,
+            context=context,
+            save=save,
+            project=project,
+            page_type=page_type,
+            strict=strict,
+            compare_to=compare_to,
+            include_model_suggestions=include_model_suggestions,
+        )
     if operation == "save-entity-types":
         if proposal is None or not isinstance(proposal, dict):
             raise ValueError("INCOMPLETE_ENTITY_TYPE_PROPOSAL: save requires a reviewed proposal")
@@ -6945,11 +7461,201 @@ def op_schema_memory(
             return result
         raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
     if subject == "relations":
+        if operation == "propose-relation":
+            relation_vocabulary_module.validate_candidate_limit(limit)
+            if proposal is None or not isinstance(proposal, dict):
+                raise ValueError(
+                    "INCOMPLETE_RELATION_PROPOSAL: propose-relation requires a reviewed proposal"
+                )
+            allowed_proposal_fields = {
+                "requested_label",
+                "namespace",
+                "parent",
+                "description",
+                "direction",
+                "aliases",
+                "inverse",
+                "origins",
+                "source_kinds",
+                "target_kinds",
+                "projects",
+                "page_types",
+                "query",
+            }
+            if set(proposal) - allowed_proposal_fields:
+                raise ValueError(
+                    "INVALID_RELATION_ARGUMENT: proposal has unknown fields"
+                )
+            required_semantics = (
+                "requested_label",
+                "parent",
+                "description",
+                "direction",
+            )
+            if any(
+                not isinstance(proposal.get(field_name), str)
+                or not str(proposal[field_name]).strip()
+                for field_name in required_semantics
+            ):
+                raise ValueError(
+                    "INCOMPLETE_RELATION_PROPOSAL: requested_label, parent, description, "
+                    "and direction are required"
+                )
+            for field_name in (
+                "aliases",
+                "origins",
+                "source_kinds",
+                "target_kinds",
+                "projects",
+                "page_types",
+            ):
+                supplied = proposal.get(field_name)
+                if supplied is not None and (
+                    not isinstance(supplied, list)
+                    or not all(isinstance(item, str) for item in supplied)
+                ):
+                    raise ValueError(
+                        f"INVALID_RELATION_ARGUMENT: proposal.{field_name} must be a list of strings"
+                    )
+            if any(
+                value is not None and not isinstance(value, str)
+                for value in (
+                    proposal.get("namespace"),
+                    proposal.get("inverse"),
+                    proposal.get("query"),
+                )
+            ):
+                raise ValueError(
+                    "INVALID_RELATION_ARGUMENT: proposal text fields must be strings"
+                )
+            if (
+                why is not None
+                or save
+                or expected_hash is not None
+                or compare_to is not None
+                or name is not None
+                or project is not None
+                or page_type is not None
+                or strict
+                or include_model_suggestions
+                or context is not None
+            ):
+                raise ValueError(
+                    "INVALID_RELATION_ARGUMENT: propose-relation is read-only"
+                )
+            _, observation_offset = relation_vocabulary_module.continuation_offsets(
+                continuation
+            )
+            observations = memory_schema_module.indexed_relation_observations(
+                vault_root,
+                date_from=date_from,
+                date_to=date_to,
+                limit=limit,
+                offset=observation_offset,
+            )
+            registry = relation_registry_module.load_registry(vault_root)
+            result = relation_vocabulary_module.propose_relation(
+                registry,
+                requested_label=proposal.get("requested_label", ""),
+                parent=proposal.get("parent"),
+                description=proposal.get("description"),
+                direction=proposal.get("direction"),
+                namespace=proposal.get("namespace", "vault"),
+                aliases=proposal.get("aliases") or (),
+                inverse=proposal.get("inverse"),
+                origins=proposal.get("origins"),
+                source_kinds=proposal.get("source_kinds"),
+                target_kinds=proposal.get("target_kinds"),
+                projects=proposal.get("projects"),
+                page_types=proposal.get("page_types"),
+                query=proposal.get("query"),
+                limit=limit,
+                observations=observations if observations is not None else (),
+                continuation=continuation,
+            )
+            return {
+                "subject": "relations",
+                "valid": not result["findings"],
+                "content_hash": result["expected_hash"],
+                "recurrence_available": observations is not None,
+                "date_scope": {"date_from": date_from, "date_to": date_to},
+                **result,
+            }
+        if operation == "save-relations":
+            if proposal is None or not isinstance(proposal, dict):
+                raise ValueError(
+                    "INCOMPLETE_RELATION_PROPOSAL: save-relations requires a reviewed delta"
+                )
+            if not why or not why.strip():
+                raise ValueError("WHY_REQUIRED: save-relations requires why")
+            if not expected_hash:
+                raise ValueError(
+                    "EXPECTED_HASH_REQUIRED: save-relations requires expected_hash"
+                )
+            if (
+                save
+                or project is not None
+                or page_type is not None
+                or date_from is not None
+                or date_to is not None
+                or continuation is not None
+                or include_model_suggestions
+                or compare_to is not None
+                or strict
+                or name is not None
+                or context is not None
+            ):
+                raise ValueError(
+                    "INVALID_RELATION_ARGUMENT: save-relations accepts only delta, hash, and why"
+                )
+            # Pure validation happens before the invocation-specific inner
+            # mutation boundary. The guarded section reloads and repeats the
+            # hash/merge against the bytes it will actually commit.
+            current = relation_registry_module.load_registry(vault_root)
+            relation_registry_module.require_current_hash(
+                current.extension_hash, expected_hash
+            )
+            relation_registry_module.merge_extension_delta(
+                memory_schema_module.relation_registry_proposal(current), proposal
+            )
+            from .writer_lease import active_manager, active_mutation_request_id
+
+            with active_manager().mutation_guard(
+                vault_root,
+                request_id=active_mutation_request_id(),
+                operation="relation_registry_delta_commit",
+                holder_kind="command",
+            ):
+                current = relation_registry_module.load_registry(vault_root)
+                relation_registry_module.require_current_hash(
+                    current.extension_hash, expected_hash
+                )
+                merged = relation_registry_module.merge_extension_delta(
+                    memory_schema_module.relation_registry_proposal(current), proposal
+                )
+                saved = relation_registry_module.save_registry(
+                    vault_root,
+                    merged,
+                    expected_hash=expected_hash,
+                )
+            changed_keys = sorted(
+                set(proposal.get("upsert") or {})
+                | set(proposal.get("deprecate") or {})
+            )
+            return {
+                "subject": "relations",
+                "valid": True,
+                "why": why.strip(),
+                "changed_keys": changed_keys,
+                "saved": saved,
+            }
         if operation == "infer":
             result = memory_schema_module.infer_relation_registry(
                 vault_root,
                 project=project,
                 page_type=page_type,
+                date_from=date_from,
+                date_to=date_to,
                 include_model_suggestions=include_model_suggestions,
             )
             if save:
@@ -7091,6 +7797,186 @@ def op_schema_memory(
         )
         return result
     raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
+
+
+def _workflow_contract_schema_operation(
+    vault_root: Path,
+    *,
+    operation: str,
+    name: str | None,
+    proposal: dict | None,
+    expected_hash: str | None,
+    why: str | None,
+    context: Mapping[str, str | None] | None,
+    save: bool,
+    project: str | None,
+    page_type: str | None,
+    strict: bool,
+    compare_to: str | None,
+    include_model_suggestions: bool,
+) -> dict:
+    """Route the workflow subject through its one code-owned family implementation."""
+    family = workflow_contracts_module.registered_families()[workflow_contracts_module.FAMILY]
+    if (
+        save
+        or project is not None
+        or page_type is not None
+        or strict
+        or compare_to is not None
+        or include_model_suggestions
+    ):
+        return {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS"}
+    invalid = {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS"}
+
+    def saved_name(value: object) -> bool:
+        return workflow_contracts_module.is_saved_contract_key(value)
+
+    try:
+        if operation == "inventory":
+            if (
+                name is not None
+                or proposal is not None
+                or expected_hash is not None
+                or why is not None
+                or context is not None
+            ):
+                return invalid
+            return {
+                "subject": "workflow-contracts",
+                **workflow_contracts_module.inventory_contracts(vault_root),
+            }
+        if operation == "inspect":
+            if (
+                not saved_name(name)
+                or proposal is not None
+                or expected_hash is not None
+                or why is not None
+                or context is not None
+            ):
+                return invalid
+            return {
+                "subject": "workflow-contracts",
+                **workflow_contracts_module.inspect_contract(vault_root, name),
+            }
+        if operation == "validate":
+            has_name = name is not None
+            has_proposal = proposal is not None
+            if (
+                expected_hash is not None
+                or why is not None
+                or context is not None
+                or has_name == has_proposal
+                or (name is not None and not saved_name(name))
+            ):
+                return invalid
+            if has_name:
+                return {
+                    "subject": "workflow-contracts",
+                    **workflow_contracts_module.validate_saved_contract(vault_root, name),
+                }
+            try:
+                contract = family.parser(proposal or {})
+            except workflow_contracts_module.WorkflowContractError as error:
+                return {
+                    "subject": "workflow-contracts",
+                    "valid": False,
+                    "findings": [{"code": error.code}],
+                }
+            return {
+                "subject": "workflow-contracts",
+                "valid": True,
+                "findings": [],
+                "proposal": contract.as_dict(),
+                "fingerprint": contract.fingerprint,
+            }
+        if operation == "resolve":
+            if (
+                context is None
+                or expected_hash is not None
+                or why is not None
+                or (name is not None and name != "@standalone" and not saved_name(name))
+            ):
+                return invalid
+            result = {
+                "subject": "workflow-contracts",
+                **family.resolver(
+                    vault_root, context, name=name, proposal=proposal
+                ),
+            }
+            if result.get("resolved"):
+                from . import prominence as prominence_module
+
+                active_prominence = prominence_module.resolve()
+                result["active_prominence"] = active_prominence
+                result["effective_capture"] = prominence_module.effective_capture(
+                    result["decision"]["capture"], active_prominence
+                )
+            return result
+        if operation == "preview":
+            if (
+                proposal is None
+                or expected_hash is not None
+                or why is not None
+                or context is not None
+                or (name is not None and not saved_name(name))
+            ):
+                return invalid
+            contract = family.parser(proposal)
+            path, content, _guard, current_hash = workflow_contracts_module.prepare_contract_save(
+                vault_root, contract, name=name, require_expected_hash=False
+            )
+            return {
+                "subject": "workflow-contracts",
+                "content": content,
+                "current_hash": current_hash,
+                "fingerprint": contract.fingerprint,
+                "path": path.relative_to(vault_root).as_posix(),
+            }
+        if operation == "save":
+            if (
+                proposal is None
+                or not why
+                or context is not None
+                or (name is not None and expected_hash is None)
+                or (name is None and expected_hash is not None)
+                or (name is not None and not saved_name(name))
+            ):
+                return invalid
+            contract = family.parser(proposal)
+            result = {
+                "subject": "workflow-contracts",
+                "saved": workflow_contracts_module.save_contract(
+                    vault_root, contract, why=why, name=name, expected_hash=expected_hash
+                ),
+            }
+            from .writer_lease import mark_active_mutation_committed
+
+            mark_active_mutation_committed()
+            return result
+        if operation == "refresh":
+            if (
+                not saved_name(name)
+                or proposal is not None
+                or not expected_hash
+                or not why
+                or context is not None
+            ):
+                return invalid
+            inspected = workflow_contracts_module.inspect_contract(vault_root, name)
+            contract = family.parser(inspected["contract"])
+            result = {
+                "subject": "workflow-contracts",
+                "saved": workflow_contracts_module.save_contract(
+                    vault_root, contract, why=why, name=name, expected_hash=expected_hash
+                ),
+            }
+            from .writer_lease import mark_active_mutation_committed
+
+            mark_active_mutation_committed()
+            return result
+    except workflow_contracts_module.WorkflowContractError as error:
+        return {"resolved": False, "code": error.code}
+    return invalid
 
 
 def op_reclassify_source(

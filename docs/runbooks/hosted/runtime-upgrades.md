@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Hosted runtime upgrades
 
 Use this controller workflow for every Hosted runtime release. Concrete versions,
@@ -68,6 +70,17 @@ and is deleted before its observation is accepted. Never use a mutable tag or an
 image that did not pass the signed-candidate checks. Omit the option once the
 installed provisioner contains the collector.
 
+The collector shells out to `kubectl`. A k3s node has no bare `kubectl` — it is
+`k3s kubectl` — so when running this on the node, put a wrapper on a private path
+and name it with `--kubectl` (or `EXOMEM_KUBECTL`). Do not install a system-wide
+shim; the operator workspace owns it:
+
+```bash
+install -d -m 0700 "$operation_dir/bin"
+printf '#!/bin/sh\nexec k3s kubectl "$@"\n' > "$operation_dir/bin/kubectl"
+chmod 0700 "$operation_dir/bin/kubectl"
+```
+
 ```bash
 provisioner_observer_args=()
 if test -n "${EXOMEM_PROVISIONER_BOOTSTRAP_IMAGE:-}"; then
@@ -81,6 +94,7 @@ infra/scripts/hosted_fleet_inventory.py collect \
   --substrate-token-file "${EXOMEM_SUBSTRATE_OPERATOR_TOKEN_FILE:?set the private token file}" \
   --runtime-catalog "$operation_dir/runtime-catalog.json" \
   --target "$target" --observed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --kubectl "$operation_dir/bin/kubectl" \
   "${provisioner_observer_args[@]}" \
   --inventory-output "$operation_dir/inventory-before-expand.json" \
   --facts-output "$operation_dir/inventory-before-expand-facts.json"
@@ -104,8 +118,8 @@ Compose the pair with `hosted_composition_lock.py`, using the derived legacy fil
 the exact signed runtime/provisioner inputs, and both coupled trust inputs:
 
 ```text
---runtime-upgrade <runtime-upgrade.json>:<sha256>
---substrate-trust <substrate-trust.json>:<sha256>
+--runtime-upgrade <runtime-upgrade.json>=<sha256>
+--substrate-trust <substrate-trust.json>=<sha256>
 ```
 
 The composer requires exact agreement on target, Substrate consumer commit,
@@ -138,6 +152,14 @@ fence on every `advance` command.
 Create the rollout plan before advancing to `rolling`. A fleet with legacy cells
 requires one explicit canary. A dependency-free fleet omits `--canary-cell` and
 records a no-op.
+
+For the state-root transition, the reviewed target must declare the migration
+workload for every cell. Do not accept `runtime-drained` as zero-pod evidence:
+the provider observation must show no tenant runtime pod before the target-image
+Job starts. Once that Job reports state migration complete, **never roll back to the old image after state migration**. Any fingerprint, health, route, or
+readiness failure after that checkpoint keeps the routes closed and recovers
+forward with the target image; the old image no longer has write authority for
+the migrated volume.
 
 ```bash
 rollout_args=()

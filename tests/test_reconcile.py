@@ -23,6 +23,7 @@ from exomem import (
     graph_sync,
     index_sync,
     relation_review,
+    review_state,
     semantic_contract,
     semantic_writes,
 )
@@ -1088,7 +1089,7 @@ def test_reconcile_creates_baseline_only_when_not_dry_run_and_never_refreshes_it
     assert activation_manifest.is_grandfathered(vault, page)
     assert page.read_bytes() == before_page
     assert "exomem_id:" not in page.read_text(encoding="utf-8")
-    assert not (vault / "Knowledge Base/.review-state.json").exists()
+    assert not review_state.state_path(vault).exists()
 
     later = vault / "Knowledge Base/Notes/Insights/later-reconcile.md"
     later.write_text("---\ntype: insight\nstatus: active\n---\n\n# Later\n", encoding="utf-8", newline="\n")

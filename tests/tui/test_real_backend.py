@@ -136,7 +136,9 @@ async def test_ask_citation_contradiction_review(vault: Path):
         if options.display and options.option_count:
             await pilot.press("d")
             await _settle(app, pilot)
-            state_file = vault / "Knowledge Base" / ".review-state.json"
+            from exomem import review_state
+
+            state_file = review_state.state_path(vault)
             assert state_file.exists(), "triage must persist through the governed path"
         else:
             assert app.screen.query_one("#review-recovery").has_class("visible")

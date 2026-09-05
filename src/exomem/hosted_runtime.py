@@ -443,6 +443,7 @@ class HostedCellConfig:
         target = os.environ if env is None else env
         target["EXOMEM_VAULT_PATH"] = str(self.vault_root)
         target["EXOMEM_HOSTED_STATE_ROOT"] = str(self.state_root)
+        target["EXOMEM_STATE_ROOT"] = str(self.state_root / "vault-state")
         target["EXOMEM_WRITER_LEASE_STATE_DIR"] = str(self.state_root)
         target["EXOMEM_LOG_DIR"] = str(self.log_root)
         target["EXOMEM_UPLOAD_MAX_BYTES"] = str(self.resource_limits.upload_bytes)
@@ -1119,6 +1120,7 @@ def provision_hosted_cell(config: HostedCellConfig) -> HostedProvisionResult:
     _preflight_provisioning(config)
     existing = _is_complete_provisioning(config)
     if existing:
+        _initialize_provisioned_machine_state_offline(config)
         return _provision_result(config, "existing")
 
     _ensure_owned_root(config.state_root, "state", config)
@@ -1128,6 +1130,7 @@ def provision_hosted_cell(config: HostedCellConfig) -> HostedProvisionResult:
         _validate_binding_marker(config.vault_root, "vault", config)
         if _valid_vault_scaffold(config.vault_root):
             config.validate_provisioned()
+            _initialize_provisioned_machine_state_offline(config)
             return _provision_result(config, "existing")
 
     stage = _staging_root(config)
@@ -1138,7 +1141,7 @@ def provision_hosted_cell(config: HostedCellConfig) -> HostedProvisionResult:
     if not stage.exists():
         stage.mkdir(mode=0o700, parents=False)
         _write_binding_marker(stage, "vault", config)
-        init_module.init_vault(stage)
+        init_module.init_vault(stage, initialize_state=False)
         _sync_tree(stage)
 
     if config.vault_root.exists():
@@ -1147,7 +1150,44 @@ def provision_hosted_cell(config: HostedCellConfig) -> HostedProvisionResult:
     _promote_staged_vault(stage, config.vault_root)
     _sync_directory(config.vault_root.parent)
     config.validate_provisioned()
+    _initialize_provisioned_machine_state_offline(config)
     return _provision_result(config, "provisioned")
+
+
+def _initialize_provisioned_machine_state_offline(config: HostedCellConfig) -> None:
+    """Publish the state manifest while the provisioner still owns startup.
+
+    ``provision_hosted_cell`` is an explicit, offline lifecycle boundary. The
+    canonical vault is already published here, so state migration binds its
+    final identity and hosted state root; service startup stays read-only.
+    """
+    from . import state_migration
+
+    overrides = {
+        "EXOMEM_HOSTED_CELL": "1",
+        "EXOMEM_HOSTED_CELL_ID": config.cell_id,
+        "EXOMEM_VAULT_PATH": str(config.vault_root),
+        "EXOMEM_HOSTED_STATE_ROOT": str(config.state_root),
+        "EXOMEM_STATE_ROOT": str(config.state_root / "vault-state"),
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(config.state_root),
+        "EXOMEM_LOG_DIR": str(config.log_root),
+    }
+    previous = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
+    try:
+        authority = state_migration.assert_offline_migration_authority(
+            source="hosted cell provisioning",
+        )
+        state_migration.migrate_vault_state_offline(
+            config.vault_root,
+            authority=authority,
+        )
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _promote_staged_vault(stage: Path, destination: Path) -> None:
@@ -2230,7 +2270,7 @@ def initialize_hosted_cell_v2(
                     )
                 stage.chmod(0o700, follow_symlinks=False)
                 _write_v2_marker(stage, "vault", binding)
-                init_module.init_vault(stage)
+                init_module.init_vault(stage, initialize_state=False)
                 _sync_tree(stage)
             # The chown above lands on the staging directory alone, and at that
             # point the directory is empty. `init_vault` then writes the entire
@@ -2306,6 +2346,74 @@ def initialize_hosted_cell_v2(
     )
 
 
+@contextmanager
+def _hosted_binding_state_environment(binding: HostedBindingV2):
+    """Bind offline initialization state to the assigned writable roots."""
+    overrides = {
+        "EXOMEM_HOSTED_CELL": "1",
+        "EXOMEM_HOSTED_CELL_ID": binding.cell_id,
+        "EXOMEM_HOSTED_VAULT_ID": binding.vault_id,
+        "EXOMEM_HOSTED_RUNTIME_UID": str(binding.runtime_uid),
+        "EXOMEM_HOSTED_RUNTIME_GID": str(binding.runtime_gid),
+        "EXOMEM_VAULT_PATH": str(binding.vault_root),
+        "EXOMEM_HOSTED_STATE_ROOT": str(binding.state_root),
+        "EXOMEM_STATE_ROOT": str(binding.state_root / "vault-state"),
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(binding.state_root),
+        "EXOMEM_LOG_DIR": str(binding.log_root),
+    }
+    previous = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _migrate_hosted_machine_state_under_lifetime_lock(
+    binding: HostedBindingV2,
+    *,
+    authority_source: str,
+):
+    """Run the state migrator while the caller holds the hosted lifetime lock."""
+
+    from . import state_migration
+
+    with _hosted_binding_state_environment(binding):
+        authority = state_migration.assert_offline_migration_authority(
+            source=authority_source,
+        )
+        resolution = state_migration.migrate_vault_state_offline(
+            binding.vault_root,
+            authority=authority,
+        )
+        # The initialization/restore Job is privileged so it can converge
+        # legacy v1 ownership. State copied by that process must be handed back
+        # to the immutable runtime uid/gid before the tenant pod can start.
+        if os.geteuid() == 0:
+            entries = _preflight_migration_tree(
+                binding.state_root,
+                HostedMigrationLimits(),
+            )
+            _converge_tree_ownership(entries, binding)
+        return resolution
+
+
+def _migrate_hosted_machine_state_offline(binding: HostedBindingV2) -> None:
+    """Run target-image state migration under both hosted lock layers."""
+
+    from .hosted_restore import acquire_hosted_lifetime_lock
+
+    with acquire_hosted_lifetime_lock(binding.state_root, binding=binding):
+        _migrate_hosted_machine_state_under_lifetime_lock(
+            binding,
+            authority_source="hosted target-image initialization job",
+        )
+
+
 def execute_hosted_init_v2(request: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Operator adapter kept separate from the storage primitive."""
 
@@ -2333,7 +2441,15 @@ def execute_hosted_init_v2(request: dict[str, Any]) -> tuple[str, dict[str, Any]
         from .hosted_restore import acquire_hosted_lifetime_lock
 
         try:
-            with acquire_hosted_lifetime_lock(binding.state_root, binding=binding):
+            with (
+                acquire_hosted_lifetime_lock(binding.state_root, binding=binding),
+                _hosted_binding_state_environment(binding),
+            ):
+                if os.environ.get("EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION") == "1":
+                    _migrate_hosted_machine_state_under_lifetime_lock(
+                        binding,
+                        authority_source="hosted target-image initialization job",
+                    )
                 _prepare_hosted_enrollment_custody()
                 _enroll_initialized_hosted_cell(binding, now=int(time.time()))
                 if os.geteuid() == 0:

@@ -658,6 +658,11 @@
           "description": "Apply usage boost when explicitly requested.",
           "type": "boolean"
         },
+        "widen_outside_kb": {
+          "default": false,
+          "description": "With scope=\"kb\", also reserve up to limit-1 slots for curated vault pages OUTSIDE the knowledge base. Off by default: scope=\"kb\" means the knowledge base and nothing else. Turn it on when a terse out-of-KB file (a tracker, a handbook) is what you are looking for, or use scope=\"vault\" to search everything equally.",
+          "type": "boolean"
+        },
         "graph_enrich": {
           "default": false,
           "description": "With deep mode, include typed graph neighborhood data.",
@@ -1033,7 +1038,7 @@
       "properties": {
         "operation": {
           "default": "suggest-links",
-          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, resolve-entity, create-entity, or accept-relation.",
+          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, resolve-relation, resolve-entity, create-entity, or accept-relation.",
           "type": "string"
         },
         "path": {
@@ -1046,7 +1051,7 @@
             }
           ],
           "default": null,
-          "description": "Existing page path for link, graph, or relation context."
+          "description": "Existing page path for link, graph, or relation context; resolve-relation\nreports it unchanged as optional source context without reading the page."
         },
         "target": {
           "anyOf": [
@@ -1058,7 +1063,7 @@
             }
           ],
           "default": null,
-          "description": "Target path for inbound-links; defaults to path."
+          "description": "Target path for inbound-links; resolve-relation reports it unchanged\nas optional target context without reading the page."
         },
         "query": {
           "anyOf": [
@@ -1070,7 +1075,31 @@
             }
           ],
           "default": null,
-          "description": "Query seed for graph-context."
+          "description": "Query seed for graph-context or plain-language resolve-relation intent."
+        },
+        "requested_relation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional clean, canonical, or alias label for\nresolve-relation. At least query or requested_relation is required."
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque continuation returned by resolve-relation."
         },
         "unit_ref": {
           "anyOf": [
@@ -1140,8 +1169,10 @@
         },
         "limit": {
           "default": 8,
-          "description": "Candidate cap for suggestion modes.",
-          "type": "integer"
+          "maximum": 64,
+          "minimum": 1,
+          "type": "integer",
+          "description": "Candidate cap for suggestion and relation-resolution modes."
         },
         "scope": {
           "default": "kb",
@@ -3248,7 +3279,7 @@
     }
   },
   "plan_memory": {
-    "description": "Work with human-owned intended future state through one Planning surface.\n\n`inspect`, `validate`, and `query` are read-only. `create`, `add`, `update`,\n`triage`, `revise`, and `rebaseline` are guarded mutations. Planning stores\ngoals, outcomes, initiatives, work items, horizons, priorities, and explicit\ncommitments; observed events belong in `record_memory`, while accepted\nsoftware change contracts and execution truth remain in the repository.\n\nA plan's UUID is durable identity, not its reader-facing filename. New\ncollections can declare human filenames and managed presentation blocks;\nexisting UUID collections move only through an explicit read-only\n`maintain_memory(mode=\"structured-files\")` preview followed by exact-plan\napply. Never infer completion or horizon changes from elapsed time.",
+    "description": "Work with human-owned intended future state through one Planning surface.\n\n`inspect`, `validate`, and `query` are read-only. `create`, `add`, `update`,\n`triage`, `revise`, and `rebaseline` are guarded mutations. Planning stores\ngoals, outcomes, initiatives, work items, horizons, priorities, and explicit\ncommitments; observed events belong in `record_memory`, while a resolved\nworkflow contract may keep companion-owned execution artifacts external.\n\nA plan's UUID is durable identity, not its reader-facing filename. New\ncollections can declare human filenames and managed presentation blocks;\nexisting UUID collections move only through an explicit read-only\n`maintain_memory(mode=\"structured-files\")` preview followed by exact-plan\napply. Never infer completion or horizon changes from elapsed time.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -5471,7 +5502,7 @@
       "properties": {
         "mode": {
           "default": "attention",
-          "description": "attention, activation, item, audit, dispositions, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, or plan-progress. `plan-progress` reports, for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; it is derived and read-only, and it scores nothing. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
+          "description": "attention, activation, item, audit, dispositions, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, plan-progress, or write-advisory-result. `write-advisory-result` resolves exactly one opaque `exomem://write-advisory-result/<id>` reference returned by a committed write and reports only that job's current `pending`, `ready`, `failed`, or `superseded` state; it requires `ref`, has no list, browse, search, rank, count, continuation, or implicit-current form, and a malformed, unknown, unauthorized, or expired reference returns the shared not-found outcome. `plan-progress` reports, for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; it is derived and read-only, and it scores nothing. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
           "type": "string"
         },
         "categories": {
@@ -5589,7 +5620,7 @@
             }
           ],
           "default": null,
-          "description": "Stable `exomem://review/<id>` reference for item mode."
+          "description": "Stable `exomem://review/<id>` reference for item mode, or the opaque `exomem://write-advisory-result/<id>` reference for write-advisory-result mode. Required by both."
         },
         "detail": {
           "default": "actionable",
@@ -5624,12 +5655,12 @@
     }
   },
   "schema_memory": {
-    "description": "Infer, validate, diff, or save governed memory schemas.\n\nContracts describe recurring frontmatter fields, semantic blocks, and typed\nrelations without changing ordinary write validation. Inference is read-only\nunless `save=true`; an existing contract can only be overwritten with its\ncurrent content hash.",
+    "description": "Infer, validate, diff, or save governed memory schemas and workflow contracts.\n\nContracts describe recurring frontmatter fields, semantic blocks, and typed\nrelations without changing ordinary write validation. Inference is read-only\nunless `save=true`; an existing contract can only be overwritten with its\ncurrent content hash.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "infer, validate, diff, or save-entity-types.",
+          "description": "For `relations`, `propose-relation` returns a reviewed delta without writing and `save-relations` commits that delta with expected_hash and why. For `workflow-contracts`, exactly one of: inventory (no workflow fields); inspect (name); validate (exactly one of name or proposal); resolve (context plus at most one of name or proposal); preview (proposal, optional name); save (proposal and why, optional name plus expected_hash for updates); or refresh (name, expected_hash, and why). Other subjects retain their existing operations.",
           "type": "string"
         },
         "name": {
@@ -5642,11 +5673,11 @@
             }
           ],
           "default": null,
-          "description": "Lowercase contract slug; required only for `subject=\"contract\"`."
+          "description": "A saved workflow key for inspect/refresh, validate as an alternative to proposal, resolve (or `@standalone`), and optional preview/save update."
         },
         "subject": {
           "default": "contract",
-          "description": "`contract`, `categories`, `relations`, or `traversal-profiles`.",
+          "description": "`contract`, `categories`, `relations`, `traversal-profiles`, or `workflow-contracts`. Workflow contracts support inventory, inspect, validate, resolve, preview, save, and refresh with their exact argument matrix.",
           "type": "string"
         },
         "project": {
@@ -5675,7 +5706,7 @@
         },
         "save": {
           "default": false,
-          "description": "Persist an inferred proposal. Default false.",
+          "description": "Legacy inference flag. Ignored when false for workflow contracts and refused when true; workflow writes use operation=`save`.",
           "type": "boolean"
         },
         "expected_hash": {
@@ -5688,7 +5719,7 @@
             }
           ],
           "default": null,
-          "description": "Required current hash when overwriting a saved contract."
+          "description": "Current relation registry hash required by save-relations, or\ncurrent workflow hash required for workflow save updates and refresh."
         },
         "strict": {
           "default": false,
@@ -5710,7 +5741,6 @@
         "proposal": {
           "anyOf": [
             {
-              "additionalProperties": true,
               "type": "object"
             },
             {
@@ -5718,7 +5748,7 @@
             }
           ],
           "default": null,
-          "description": "Reviewed semantic-language, relation, or traversal-profile proposal."
+          "description": "Reviewed relation definition for propose-relation, reviewed delta\nfor save-relations, or workflow proposal for workflow modes."
         },
         "why": {
           "anyOf": [
@@ -5730,12 +5760,100 @@
             }
           ],
           "default": null,
-          "description": "Required audit reason for save-entity-types."
+          "description": "Required audit reason for relation delta save, workflow save/refresh,\nand entity-type saves."
         },
         "include_model_suggestions": {
           "default": false,
           "description": "Request response-only optional relation suggestions.",
           "type": "boolean"
+        },
+        "context": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "project": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "domain": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "activity": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact optional workflow resolve mapping. Its only keys are project,\ndomain, and activity; omit a key for unknown or set it null for known absent."
+        },
+        "date_from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional inclusive ISO origin-date bound for relation evidence."
+        },
+        "date_to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional inclusive ISO origin-date bound for relation evidence."
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque relation candidate continuation."
+        },
+        "limit": {
+          "default": 20,
+          "maximum": 64,
+          "minimum": 1,
+          "type": "integer",
+          "description": "Relation extension and observation candidate budget."
         },
         "response_detail": {
           "default": "compact",
@@ -5855,6 +5973,18 @@
           ],
           "default": null,
           "description": "Optional reviewed fingerprint; a mismatch refuses the write and asks the caller to refresh."
+        },
+        "source_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Source-page hint returned by relation review. Required for\nnewly returned relation items; omitted legacy requests use only the\nbounded compatibility prefix."
         },
         "response_detail": {
           "default": "compact",

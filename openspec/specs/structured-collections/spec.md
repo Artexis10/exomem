@@ -138,15 +138,27 @@ Append and targeted update for Markdown-log and Markdown-item storage SHALL acce
 - **THEN** collection serialization does not introduce a global cross-vault lock
 
 ### Requirement: Idempotent append and conflict-safe update
-The substrate SHALL make exact append retries idempotent where a stable item identity is available. Reusing one identity with different content SHALL refuse as an identity conflict. Targeted update SHALL change only the resolved item and SHALL never fall back from a missing identifier to fuzzy text matching.
+The substrate SHALL make exact append retries idempotent where a stable item identity is available. When a caller omits the item identity and every field of the manifest's declared natural key is present in the validated values, the substrate SHALL derive the identity deterministically from the collection identity and the natural-key serialisation the read path already uses, and stamp it explicitly like any other item key; an explicit identity SHALL still win, and a payload that lacks a natural-key field SHALL receive a random identity as before. Reusing one identity with different content SHALL refuse as an identity conflict. An append whose derived or supplied identity differs from an existing item's while its serialised natural key equals that item's SHALL refuse as a natural-key conflict naming every such existing item, so the new item cannot shadow an older one keyed differently. Targeted update SHALL change only the resolved item and SHALL never fall back from a missing identifier to fuzzy text matching. Both profiles SHALL inherit these rules through the shared mechanics.
 
 #### Scenario: Exact append retry produces one item
 - **WHEN** a client retries the same append with the same collection, item identity, and normalized payload
 - **THEN** the substrate returns the committed item without adding a duplicate
 
+#### Scenario: Re-stated append without identity replays
+- **WHEN** a client appends the same observation twice without supplying an item identity and the payloads are identical
+- **THEN** the second append returns the committed item as a replay and the collection holds one item
+
 #### Scenario: Reused identity with different content refuses
-- **WHEN** an append supplies an existing item identity with materially different content
+- **WHEN** an append supplies an existing item identity with materially different content, or omits the identity and the derived identity already exists with different content
 - **THEN** it refuses with a record identity conflict and preserves the existing item
+
+#### Scenario: Natural-key twin of an older item refuses
+- **WHEN** an append's natural-key values equal those of an existing item whose identity was minted before derivation existed
+- **THEN** it refuses with a natural-key conflict that names the existing item and writes nothing
+
+#### Scenario: Planning titles stop duplicating
+- **WHEN** a Planning collection declares `[title]` as its natural key and an agent adds a work item whose title already exists
+- **THEN** the add replays when the payload is identical and refuses otherwise, so the agent updates the existing item instead of filing a twin
 
 #### Scenario: Missing identifier does not select a similar item
 - **WHEN** targeted update names an identifier that no longer exists
@@ -526,3 +538,61 @@ Preview and apply SHALL reuse collection discovery, profile validation, source s
 
 - **WHEN** representation apply races another mutation in the same vault
 - **THEN** the existing writer boundary serializes them and prevents torn file moves or presentation bytes
+
+### Requirement: Representation migration extends collection audit history
+
+A guarded structured-file apply SHALL extend the selected collection's existing audit chain for every item whose path or bytes change. The same atomic publication SHALL update affected item markers, the manifest head, content-free audit events, managed presentation bytes, governed inbound links, and the inverse receipt. A previously `ok` collection SHALL remain `ok`; a previously `acknowledged_gap` collection SHALL retain the same permanent discontinuity and remain `acknowledged_gap`.
+
+Preview and apply SHALL refuse a selected collection with a pre-existing malformed audit chain. Representation maintenance SHALL NOT rebaseline, hide, delete, or relabel an audit gap.
+
+#### Scenario: UUID rename remains continuously audited
+
+- **WHEN** a healthy UUID-named item is moved and re-rendered by an exact structured-file plan
+- **THEN** the item keeps its collection-scoped identity, its final marker and manifest head extend the prior chain, and post-apply inspection reports `ok`
+
+#### Scenario: Migration preserves an acknowledged discontinuity
+
+- **WHEN** a collection at a valid `acknowledged_gap` checkpoint applies an exact representation plan
+- **THEN** the new item events extend that checkpoint and inspection preserves the same discontinuity rather than reporting `ok` or a new gap
+
+#### Scenario: Malformed history blocks representation maintenance
+
+- **WHEN** preview or apply observes a fork, missing transition, unmatched marker, ambiguous identity, or other structural audit gap
+- **THEN** it refuses without changing any manifest, item, link, activity, or receipt bytes
+
+### Requirement: Structured filenames have one portable physical spelling
+
+Structured filename projection SHALL normalise compatibility-equivalent Unicode to the held-path portable spelling before sanitisation, byte limits, collision detection, preview identity, and publication. Canonical frontmatter values and human headings SHALL preserve their declared Unicode text independently of the filename projection.
+
+#### Scenario: Compatibility character does not diverge at apply
+
+- **WHEN** a natural-key value contains a compatibility character such as the subscript in `CO₂`
+- **THEN** preview returns the exact portable path that apply publishes, and a second preview reports no filename move
+
+#### Scenario: Compatibility-equivalent names collide deterministically
+
+- **WHEN** two items would differ only by compatibility-equivalent filename characters
+- **THEN** collision handling assigns deterministic identity suffixes before apply rather than allowing the held mutation seam to alias their targets
+
+### Requirement: Planning and Records share checkpoint continuation semantics
+
+Audit reconstruction SHALL recognise both Records `rebaseline` and Planning `plan_rebaseline` as permanent discontinuity checkpoints. A later valid revision or item event SHALL extend either checkpoint while preserving its bounded discontinuity, and SHALL NOT convert a malformed historical chain into an acknowledged gap.
+
+#### Scenario: Planning revision follows rebaseline
+
+- **WHEN** a valid Planning manifest edit is rebaselined with the exact current mismatch codes and then validly revised
+- **THEN** both mutations commit, inspection remains `acknowledged_gap`, and the original Planning discontinuity remains visible
+
+#### Scenario: Records revision follows rebaseline
+
+- **WHEN** a valid Records manifest edit is rebaselined with the exact current mismatch codes and then validly revised
+- **THEN** both mutations commit, inspection remains `acknowledged_gap`, and the original Records discontinuity remains visible
+
+### Requirement: Failed representation publication restores exact pre-migration state
+
+Structured-file apply SHALL stage all path moves and SHALL publish no visible partial transaction. If any target guard, item/manifest write, audit write, inbound-link rewrite, or receipt write fails, rollback SHALL restore every original path and byte, including compatibility-Unicode moves, and SHALL leave no final target, advanced audit head, or committed receipt.
+
+#### Scenario: Failure after staged compatibility rename is exact
+
+- **WHEN** publication fails after a compatibility-Unicode source has been staged and other targets have been installed
+- **THEN** every original path and hash is restored, every planned final target is absent, and collection inspection reports the same status as before apply

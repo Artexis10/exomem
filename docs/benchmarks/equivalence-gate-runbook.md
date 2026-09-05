@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # §4.6c runbook — the 25-case Exomem direct-vs-MemoryBench equivalence gate
 
 The prerequisite for every comparative run. Both lanes retrieve; neither reads

@@ -304,6 +304,9 @@ def test_policy_activation_runs_the_real_preimage_chain_without_publishing_conte
     )
 
     now = int(time.time())
+    # This synthetic saga uses fixed phase timestamps. Its nested governance
+    # receipts must share that clock instead of rotating to the real month.
+    monkeypatch.setattr(receipts, "_now", lambda: T1)
     monkeypatch.setenv(
         "EXOMEM_WRITER_LEASE_STATE_DIR",
         str(tmp_path / "writer-state"),

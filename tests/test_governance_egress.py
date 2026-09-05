@@ -2711,6 +2711,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "graph-context": True,
             "inbound-links": True,
             "resolve-entity": True,
+            "resolve-relation": True,
             "create-entity": False,
             "accept-relation": False,
         },
@@ -2796,11 +2797,27 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "infer": "save-conditional",
         "validate": "structure",
         "diff": "structure",
+        "inventory": "structure",
+        "inspect": "structure",
+        "resolve": "structure",
+        "preview": "structure",
+        "save": "mutation",
+        "refresh": "mutation",
+        "save-entity-types": "mutation",
+        "propose-relation": "structure",
+        "save-relations": "mutation",
     }
     schema = product["schema_memory"]
     assert commands.invocation_is_read_only(schema, {"operation": "infer"})
     assert not commands.invocation_is_read_only(schema, {"operation": "infer", "save": True})
     assert commands.invocation_is_read_only(schema, {"operation": "validate"})
+    assert commands.invocation_is_read_only(
+        schema, {"operation": "resolve", "subject": "workflow-contracts"}
+    )
+    assert not commands.invocation_is_read_only(
+        schema, {"operation": "save", "subject": "workflow-contracts"}
+    )
+    assert not commands.invocation_is_read_only(schema, {"operation": "save-entity-types"})
     with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
         commands.invocation_is_read_only(schema, {"operation": "future-schema-mode"})
 

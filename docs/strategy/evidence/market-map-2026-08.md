@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Market map evidence — 2026-08 (web recon, URLs cited in-line)
 
 Input evidence for `docs/strategy/exomem-competitive-strategy-2026-08.md`.

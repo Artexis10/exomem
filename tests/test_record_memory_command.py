@@ -148,6 +148,50 @@ def test_record_memory_rejects_cross_action_arguments_before_defaults(
         record_memory(tmp_path, **kwargs)
 
 
+def test_record_memory_update_names_the_unexpected_argument(tmp_path: Path) -> None:
+    """Twin of plan_memory's update-surplus refusal: name the offending field."""
+    from exomem.cli_ops import OpError
+    from exomem.record_memory import record_memory
+
+    with pytest.raises(OpError) as raised:
+        record_memory(
+            tmp_path,
+            action="update",
+            collection="Knowledge Base/Records/New/_collection.md",
+            item_key="991acdd4-16b9-4396-8220-2cb37b7e8516",
+            expected_container_hash="a" * 64,
+            expected_item_version="b" * 64,
+            why="update",
+            changes={"status": "done"},
+            item={"title": "not allowed here"},
+        )
+
+    assert raised.value.code == "INVALID_RECORD_ARGUMENTS"
+    assert "unexpected for update: item" in raised.value.message
+    assert "not allowed here" not in raised.value.message
+
+
+def test_record_memory_update_names_the_missing_argument(tmp_path: Path) -> None:
+    """Twin of plan_memory's update-missing refusal: name the missing field."""
+    from exomem.cli_ops import OpError
+    from exomem.record_memory import record_memory
+
+    with pytest.raises(OpError) as raised:
+        record_memory(
+            tmp_path,
+            action="update",
+            collection="Knowledge Base/Records/New/_collection.md",
+            item_key="991acdd4-16b9-4396-8220-2cb37b7e8516",
+            expected_container_hash="a" * 64,
+            expected_item_version="b" * 64,
+            changes={"status": "done"},
+        )
+
+    assert raised.value.code == "INVALID_RECORD_ARGUMENTS"
+    assert "missing for update: why" in raised.value.message
+    assert "991acdd4-16b9-4396-8220-2cb37b7e8516" not in raised.value.message
+
+
 def test_record_memory_preserves_explicit_false_and_routes_append(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

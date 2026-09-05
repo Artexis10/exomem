@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Retained-volume rebind
 
 ## Preconditions

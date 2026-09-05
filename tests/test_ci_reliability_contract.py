@@ -29,10 +29,13 @@ FULL_CI_JOBS = {
 #: `retrieval-latency` job) they cover exactly the previous lean suite —
 #: pinned below by test_pr_tiers_partition_the_lean_suite_exactly.
 PR_TIER_JOBS = (
-    ("core-tests", 6, "core"),
+    ("core-tests", 12, "core"),
     ("harness-tests", 4, "harness"),
 )
 
+#: Session caps per tier; the headroom test derives the floor from the durations file.
+CORE_SESSION_TIMEOUT = 1400
+HARNESS_SESSION_TIMEOUT = 900
 HARNESS_MODULES_FILE = ROOT / "tests" / "harness_modules.txt"
 NIGHTLY_OWNED_MODULE = "tests/test_latency_gate.py"
 
@@ -74,7 +77,7 @@ def test_pr_tier_lanes_have_time_bounds_and_versioned_timing_evidence(
 
     assert job["timeout-minutes"] == 30
     run_step = _run_step(job)
-    assert "--session-timeout=900" in run_step["run"]
+    assert f"--session-timeout={CORE_SESSION_TIMEOUT if tier == 'core' else HARNESS_SESSION_TIMEOUT}" in run_step["run"]
     assert "--durations=50" in run_step["run"]
     assert "--durations-min=1" in run_step["run"]
     assert (
@@ -749,3 +752,202 @@ def test_cross_platform_matrix_runs_nightly_and_manually_only() -> None:
         "windows-latest",
         "macos-latest",
     ]
+
+
+def test_release_evidence_automation_removes_both_manual_cranks() -> None:
+    """The release pipeline is self-driving without reintroducing the stampede.
+
+    ci.yml's release-evidence job stays a seconds-class check; the companion
+    workflow supplies the two automations that used to be manual cranks:
+    dispatching the full-tier evidence run (only on the explicit release
+    intent of enabling auto-merge — never per push to main, which is the
+    measured stampede test_expensive_ci_runs_nightly_and_manually_only pins),
+    and re-running the release PR's failed checks when eligible evidence
+    lands on main.
+    """
+    text = (ROOT / ".github/workflows/release-evidence-automation.yml").read_text(
+        encoding="utf-8"
+    )
+    workflow = yaml.safe_load(text)
+    triggers = _triggers(workflow)
+
+    assert triggers["pull_request"] == {"types": ["auto_merge_enabled"]}
+    # workflow_run matches on ci.yml's `name:`, not its filename — derive the
+    # expected value from ci.yml itself so renaming CI cannot silently kill
+    # the rerun trigger while this test stays green.
+    ci_name = yaml.safe_load(
+        (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    )["name"]
+    assert triggers["workflow_run"] == {"workflows": [ci_name], "types": ["completed"]}
+    assert set(triggers) == {"pull_request", "workflow_run"}
+
+    # Duplicate release intents (disable/re-enable auto-merge) must serialize
+    # so only one evidence dispatch can win the eligibility check.
+    assert "concurrency" in workflow
+    assert "release-evidence-automation-" in workflow["concurrency"]["group"]
+
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"dispatch-evidence", "rerun-evidence-check"}
+
+    dispatch_if = " ".join(str(jobs["dispatch-evidence"]["if"]).split())
+    assert "auto_merge_enabled" not in dispatch_if  # gated by the trigger, not the if
+    assert "release-please--branches--main" in dispatch_if
+    assert "github.event_name == 'pull_request'" in dispatch_if
+
+    rerun_if = " ".join(str(jobs["rerun-evidence-check"]["if"]).split())
+    assert "workflow_run" in rerun_if
+    assert "'success'" in rerun_if
+    assert "'main'" in rerun_if
+    assert "workflow_dispatch" in rerun_if
+    assert "schedule" in rerun_if
+
+    # The dispatch job must never fire from pushes: only the two declared
+    # events exist, and neither is push/synchronize.
+    assert "synchronize" not in text
+    assert "push:" not in text
+
+    # Least privilege: actions write (dispatch + rerun), nothing more.
+    assert workflow["permissions"] == {
+        "actions": "write",
+        "contents": "read",
+        "pull-requests": "read",
+    }
+
+
+@pytest.mark.parametrize("job_name", ["dispatch-evidence", "rerun-evidence-check"])
+@pytest.mark.skipif(os.name != "posix", reason="executes the Ubuntu workflow's Bash step")
+def test_release_evidence_commands_work_without_a_checkout(tmp_path: Path, job_name: str) -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/release-evidence-automation.yml").read_text(encoding="utf-8")
+    )
+    job = workflow["jobs"][job_name]
+    step = next(step for step in job["steps"] if "run" in step)
+    executable = tmp_path / "gh"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "args = sys.argv[1:]\n"
+        "if args[0] == 'api':\n"
+        "    endpoint = args[1]\n"
+        "    if endpoint.endswith('/commits/main'):\n"
+        "        print('tested-base')\n"
+        "    elif '/pulls?' in endpoint:\n"
+        "        print(json.dumps({'base': {'sha': 'tested-base'}, 'head': {'sha': 'release-head'}}))\n"
+        "    elif 'event=pull_request' in endpoint:\n"
+        "        print('123')\n"
+        "    else:\n"
+        "        print('0')\n"
+        "elif args[:2] in (['workflow', 'run'], ['run', 'rerun']):\n"
+        "    if os.environ.get('GH_REPO') != 'example/project':\n"
+        "        sys.exit('fatal: not a git repository; explicit repository context is missing')\n"
+        "    print('submitted: ' + ' '.join(args))\n"
+        "else:\n"
+        "    sys.exit('unexpected gh command')\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+
+    def render(value: str) -> str:
+        return value.replace("${{ github.repository }}", "example/project").replace(
+            "${{ github.repository_owner }}", "example"
+        )
+
+    env = dict(os.environ)
+    env.pop("GH_REPO", None)
+    for scope in (workflow, job, step):
+        env.update({key: render(str(value)) for key, value in scope.get("env", {}).items()})
+    env.update({
+        "PATH": str(tmp_path) + os.pathsep + env["PATH"],
+        "BASE_SHA": "tested-base",
+        "EVIDENCE_SHA": "tested-base",
+    })
+    result = subprocess.run(
+        ["bash", "-e", "-c", render(step["run"])],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected = (
+        "workflow run ci.yml --ref main"
+        if job_name == "dispatch-evidence"
+        else "run rerun 123 --failed"
+    )
+    assert "submitted: " + expected in result.stdout
+
+
+#: The worst cross-platform session observed, in seconds. A floor rather than a
+#: maximum: three six-way Windows shards were censored at the 2700s cap they hit,
+#: so the true worst is at least this.
+#:
+#: Measured rather than predicted, and the measurement is why. `.test_durations.json`
+#: is Linux-recorded and this lane does not run on Linux, so a prediction from it
+#: needs a platform factor -- and the factor is not a constant. Four-way sessions
+#: ran 2482s, 2449s and 2595s; six-way ran 2184s, 2250s and 2644s. Fifty percent
+#: more shards bought six percent of runtime, so most of a shard here is not test
+#: execution that splits, and no linear model over the durations file describes it.
+#: Finding that fixed cost is its own change; until then the cap clears the
+#: measurement.
+MEASURED_WORST_CROSS_PLATFORM_SESSION = 2705
+
+_FOLDED_RUN_RE = re.compile(
+    r"^(?P<indent>\s*)-?\s*run:\s*>[-+]?\s*$(?P<body>(?:\n(?:(?P=indent)\s+.*|\s*))*)",
+    re.MULTILINE,
+)
+
+
+def test_the_cross_platform_cap_clears_the_runtime_actually_measured() -> None:
+    """The cap must sit above what a healthy shard takes, not above a prediction.
+
+    At 2700s it sat below: shards reported clean summaries -- `2929 passed, 0
+    failed in 45:02` -- and then exit 1, so a green suite read as a red lane.
+
+    Deliberately not derived from `.test_durations.json` the way the pull-request
+    tiers are. Applying that rule here passed while the lane was failing, because
+    the file records Linux times and this lane runs on Windows and macOS. The
+    correction is not a constant either: six shards ran only six percent faster
+    than four, so the runtime does not scale with the split and a linear model
+    over the durations would keep being wrong in a new way.
+    """
+    workflow = _cross_platform_workflow()
+    job = workflow["jobs"]["suite"]
+    command = _run_step(job)["run"]
+
+    timeout = int(re.search(r"--session-timeout=(\d+)", command).group(1))
+    job_seconds = job["timeout-minutes"] * 60
+
+    assert timeout > MEASURED_WORST_CROSS_PLATFORM_SESSION, (
+        f"--session-timeout={timeout}s is at or below the worst session measured "
+        f"({MEASURED_WORST_CROSS_PLATFORM_SESSION}s), so a healthy shard reports as a failure"
+    )
+    assert timeout >= 1.15 * MEASURED_WORST_CROSS_PLATFORM_SESSION, (
+        f"--session-timeout={timeout}s leaves no margin over the worst measured "
+        "session; runner variance will cross it again"
+    )
+    assert timeout < job_seconds, (
+        "the session cap must stay inside the job budget, so a hang is reported by "
+        "pytest rather than killed silently by the runner"
+    )
+
+
+def test_no_folded_run_script_carries_a_yaml_style_comment() -> None:
+    """A `#` inside a folded `>` scalar is part of the command, not a comment.
+
+    Folding joins the lines with spaces, so one `#` comments out every flag after
+    it and the lane silently stops running what the file appears to say. Found by
+    doing it: an explanation added beside `--session-timeout` would have disabled
+    that flag, `--durations` and `--junitxml` on every shard.
+
+    Reads the raw file rather than the parsed tree, because `yaml.safe_load`
+    discards the scalar style that is the whole distinction -- a `#` is a correct
+    shell comment in a literal `|` block.
+    """
+    offenders: list[str] = []
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        for body in _FOLDED_RUN_RE.finditer(path.read_text(encoding="utf-8")):
+            for number, line in enumerate(body.group("body").splitlines(), start=1):
+                if "#" in line:
+                    offenders.append(f"{path.name}: folded run block line {number}: {line.strip()}")
+
+    assert not offenders, (
+        "a `#` inside a folded `>` run scalar is part of the command and comments "
+        f"out every flag after it: {offenders}"
+    )

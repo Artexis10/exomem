@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
+from conftest import initialize_vault_state_offline
 
 from exomem import (
     audit,
     commands,
+    epistemic_graph,
     memory_schema,
     relation_registry,
     semantic_language_registry,
+    state_paths,
 )
 from exomem.__main__ import main
 
@@ -299,6 +303,7 @@ def test_schema_memory_registry_parity_and_strict_cli_exit(
 ) -> None:
     vault = tmp_path / "vault"
     pages = _seed_pages(vault)
+    initialize_vault_state_offline(vault, source="schema memory CLI fixture")
     commands.op_schema_memory(
         vault,
         operation="infer",
@@ -365,10 +370,39 @@ def test_relation_inference_is_evidence_backed_and_proposal_first(tmp_path: Path
     assert candidate["registry_status"] == "unregistered"
     assert candidate["count"] == 3
     assert candidate["examples"][0]["path"].endswith("page-0.md")
-    assert inferred["proposal"]["extensions"]["science.replicates"] == {
+    assert inferred["proposal"]["extensions"] == {}
+    assert len(inferred["promotion_candidates"]) == 1
+    promotion = inferred["promotion_candidates"][0]
+    assert {
+        key: promotion[key]
+        for key in (
+            "canonical",
+            "aliases",
+            "parent",
+            "description",
+            "direction",
+            "count",
+        )
+    } == {
+        "canonical": "vault.science_replicates",
+        "aliases": ["science.replicates"],
         "parent": None,
         "description": None,
+        "direction": None,
+        "count": 3,
     }
+    assert [item["path"] for item in promotion["examples"]] == [
+        item["path"] for item in candidate["examples"]
+    ]
+    assert promotion["raw_variants"] == [
+        {
+            "raw_relation": "science.replicates",
+            "count": 3,
+            "examples": promotion["examples"],
+        }
+    ]
+    assert promotion["raw_variants_total"] == 1
+    assert promotion["raw_variants_truncated"] is False
     sibling = next(
         item for item in inferred["relations"] if item["raw_relation"] == "science.sibling"
     )
@@ -380,7 +414,7 @@ def test_relation_inference_is_evidence_backed_and_proposal_first(tmp_path: Path
 
     with pytest.raises(ValueError, match="INCOMPLETE_RELATION_PROPOSAL"):
         commands.op_schema_memory(vault, operation="infer", subject="relations", save=True)
-    with pytest.raises(ValueError, match="INVALID_RELATION_REGISTRY"):
+    with pytest.raises(ValueError, match="OBSERVED_RELATION_DELETION"):
         commands.op_schema_memory(
             vault,
             operation="infer",
@@ -388,6 +422,281 @@ def test_relation_inference_is_evidence_backed_and_proposal_first(tmp_path: Path
             save=True,
             proposal=inferred["proposal"],
         )
+
+
+def test_relation_inference_preserves_raw_census_and_aggregates_promotions(
+    tmp_path: Path,
+) -> None:
+    notes = tmp_path / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    labels = (
+        "applies-to",
+        "applies_to",
+        "science.replicates",
+        "science_replicates",
+    )
+    for index, label in enumerate(labels):
+        (notes / f"{index}.md").write_text(
+            "---\ntype: insight\n---\n# Source\n\n"
+            f"- {label}: [[Knowledge Base/Notes/target]]\n",
+            encoding="utf-8",
+        )
+
+    inferred = memory_schema.infer_relation_registry(
+        tmp_path, recurrence_threshold=1
+    )
+
+    census = {item["raw_relation"]: item for item in inferred["relations"]}
+    assert set(census) == set(labels)
+    assert all(item["canonical"] is None for item in census.values())
+    assert all(item["count"] == 1 for item in census.values())
+    for index, label in enumerate(labels):
+        assert census[label]["examples"] == [
+            {
+                "path": f"Knowledge Base/Notes/{index}.md",
+                "anchor": "line-3",
+            }
+        ]
+
+    candidates = inferred["promotion_candidates"]
+    assert [
+        (item["canonical"], item["aliases"], item["count"])
+        for item in candidates
+    ] == [
+        ("vault.applies_to", ["applies_to"], 2),
+        ("vault.science_replicates", ["science.replicates"], 1),
+        ("vault.science_replicates_2", ["science_replicates"], 1),
+    ]
+    applies = candidates[0]
+    assert applies["raw_variants_total"] == 2
+    assert applies["raw_variants_truncated"] is False
+    assert applies["raw_variants"] == [
+        {
+            "raw_relation": "applies-to",
+            "count": 1,
+            "examples": census["applies-to"]["examples"],
+        },
+        {
+            "raw_relation": "applies_to",
+            "count": 1,
+            "examples": census["applies_to"]["examples"],
+        },
+    ]
+    identities = [item["canonical"] for item in candidates] + [
+        alias for item in candidates for alias in item["aliases"]
+    ]
+    assert len(identities) == len(set(identities))
+
+
+def test_relation_inference_census_is_scoped_aggregate_and_non_authoring(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    notes = vault / "Knowledge Base" / "Notes"
+    schema = vault / "Knowledge Base" / "_Schema"
+    notes.mkdir(parents=True)
+    schema.mkdir()
+    (schema / "relation-registry.yaml").write_text(
+        """\
+schema_version: 1
+extensions:
+  vault.applies_to:
+    parent: relates_to
+    description: A synthetic applicability relation.
+    direction: directed
+    aliases: [applies_to]
+  vault.legacy_applies:
+    parent: relates_to
+    description: A retired synthetic applicability relation.
+    direction: directed
+    status: deprecated
+    replaced_by: vault.applies_to
+""",
+        encoding="utf-8",
+    )
+    pages = {
+        "old-core.md": "---\ncreated: 2020-01-10\ntype: insight\n---\n- supports [[Target]]\n",
+        "old-canonical-extension.md": (
+            "---\ncreated: 2020-02-01\ntype: procedure\n---\n- vault.applies_to [[Target]]\n"
+        ),
+        "old-extension.md": (
+            "---\ncaptured: 2020-02-10\ntype: procedure\n---\n- applies_to [[Target]]\n"
+        ),
+        "old-deprecated.md": (
+            "---\ncreated: 2020-03-10\ntype: insight\n---\n- vault.legacy_applies [[Target]]\n"
+        ),
+        "old-generic.md": "---\ncreated: 2020-04-10\ntype: insight\n---\n- relates_to [[Target]]\n",
+        "current-unregistered.md": (
+            "---\ncreated: 2026-01-10\ntype: insight\n---\n- unregistered.label: [[Target]]\n"
+        ),
+        "current-body-only.md": (
+            "---\ncreated: 2026-02-10\ntype: insight\n---\nA body-only [[Target]] connection.\n"
+        ),
+        "undated.md": (
+            "---\nupdated: 1999-01-01\ntype: insight\n---\n"
+            "Synthetic disconnected page.\n\n"
+            "```text\n[[Ignored fenced target]]\n```\n"
+            "Escaped \\[\\[Ignored escaped target\\]\\] and `[[Ignored inline target]]`.\n"
+        ),
+    }
+    for name, body in pages.items():
+        (notes / name).write_text(body, encoding="utf-8")
+    before = {path: path.read_bytes() for path in vault.rglob("*") if path.is_file()}
+    derived_state = state_paths.vault_state_dir(vault)
+    before_derived = (
+        {path: path.read_bytes() for path in derived_state.rglob("*") if path.is_file()}
+        if derived_state.exists()
+        else {}
+    )
+    assert not epistemic_graph.sidecar_path(vault).exists()
+
+    all_pages = commands.op_schema_memory(
+        vault, operation="infer", subject="relations"
+    )
+    census = all_pages["census"]
+    assert census == {
+        "relation_counts": {
+            "core": 1,
+            "extension": 2,
+            "deprecated": 1,
+            "generic": 1,
+            "unregistered": 1,
+        },
+        "page_counts": {
+            "zero_authored_relation_rows": 2,
+            "zero_body_connections": 1,
+        },
+        "denominators": {
+            "sampled": 8,
+            "included": 7,
+            "undated": 1,
+            "excluded": 0,
+        },
+    }
+    assert {path: path.read_bytes() for path in vault.rglob("*") if path.is_file()} == before
+    after_derived = (
+        {path: path.read_bytes() for path in derived_state.rglob("*") if path.is_file()}
+        if derived_state.exists()
+        else {}
+    )
+    assert after_derived == before_derived
+    assert not epistemic_graph.sidecar_path(vault).exists()
+    serialized = json.dumps(census, sort_keys=True)
+    assert "Knowledge Base" not in serialized
+    assert "Target" not in serialized
+    assert "Synthetic" not in serialized
+
+    current = commands.op_schema_memory(
+        vault,
+        operation="infer",
+        subject="relations",
+        page_type="insight",
+        date_from="2026-01-01",
+        date_to="2026-12-31",
+    )["census"]
+    assert current == {
+        "relation_counts": {
+            "core": 0,
+            "extension": 0,
+            "deprecated": 0,
+            "generic": 0,
+            "unregistered": 1,
+        },
+        "page_counts": {
+            "zero_authored_relation_rows": 1,
+            "zero_body_connections": 0,
+        },
+        "denominators": {
+            "sampled": 6,
+            "included": 2,
+            "undated": 1,
+            "excluded": 3,
+        },
+    }
+
+
+def test_relation_inference_reserves_canonical_keys_across_distinct_aliases(
+    tmp_path: Path,
+) -> None:
+    notes = tmp_path / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    for index, label in enumerate(("science.replicates", "science_replicates")):
+        (notes / f"{index}.md").write_text(
+            "---\ntype: insight\n---\n# Source\n\n## Relations\n"
+            f"- {label} [[Knowledge Base/Notes/target]]\n",
+            encoding="utf-8",
+        )
+
+    inferred = memory_schema.infer_relation_registry(
+        tmp_path, recurrence_threshold=1
+    )
+
+    assert [
+        (item["canonical"], item["aliases"])
+        for item in inferred["promotion_candidates"]
+    ] == [
+        ("vault.science_replicates", ["science.replicates"]),
+        ("vault.science_replicates_2", ["science_replicates"]),
+    ]
+
+
+def test_relation_inference_bounds_raw_variant_evidence(tmp_path: Path) -> None:
+    notes = tmp_path / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    for index, label in enumerate(
+        (
+            "applies-to",
+            "applies--to",
+            "applies---to",
+            "applies----to",
+            "applies-----to",
+            "applies_to",
+        )
+    ):
+        (notes / f"{index}.md").write_text(
+            "---\ntype: insight\n---\n# Source\n\n"
+            f"- {label}: [[Knowledge Base/Notes/target]]\n",
+            encoding="utf-8",
+        )
+
+    inferred = memory_schema.infer_relation_registry(
+        tmp_path, recurrence_threshold=1
+    )
+
+    candidate = inferred["promotion_candidates"][0]
+    assert candidate["count"] == 6
+    assert len(candidate["raw_variants"]) == 5
+    assert candidate["raw_variants_total"] == 6
+    assert candidate["raw_variants_truncated"] is True
+
+
+def test_relation_inference_reserves_all_candidate_aliases_before_keys(
+    tmp_path: Path,
+) -> None:
+    notes = tmp_path / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    for index, label in enumerate(("foo", "vault.foo")):
+        (notes / f"{index}.md").write_text(
+            "---\ntype: insight\n---\n# Source\n\n## Relations\n"
+            f"- {label} [[Knowledge Base/Notes/target]]\n",
+            encoding="utf-8",
+        )
+
+    inferred = memory_schema.infer_relation_registry(
+        tmp_path, recurrence_threshold=1
+    )
+
+    candidates = inferred["promotion_candidates"]
+    assert [
+        (item["canonical"], item["aliases"]) for item in candidates
+    ] == [
+        ("vault.foo_2", ["foo"]),
+        ("vault.vault_foo", ["vault.foo"]),
+    ]
+    identities = [item["canonical"] for item in candidates] + [
+        alias for item in candidates for alias in item["aliases"]
+    ]
+    assert len(identities) == len(set(identities))
 
 
 def test_reviewed_relation_proposal_saves_and_observed_deletion_is_refused(tmp_path: Path) -> None:
@@ -496,8 +805,8 @@ def test_relation_diff_without_proposal_compares_corpus_reality(tmp_path: Path) 
         )
     result = commands.op_schema_memory(vault, operation="diff", subject="relations")
     assert result["comparison"] == "corpus"
-    assert result["changed"] is True
-    assert result["changes"]["added"] == ["science.replicates"]
+    assert result["changed"] is False
+    assert result["changes"]["added"] == []
 
 
 def _seed_category_pages(vault: Path) -> list[Path]:

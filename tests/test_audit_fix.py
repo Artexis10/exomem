@@ -414,3 +414,28 @@ def test_audit_fix_dry_run_leaves_nested_sidecar_on_disk(vault: Path) -> None:
 
     assert [f for f in report.fixed if f.category == "duplicated_sidecar"]
     assert sidecar.read_text(encoding="utf-8") == _NESTED_SIDECAR
+
+
+def test_audit_fix_proposes_source_reextraction_for_blank_duplicated_sidecar(
+    vault: Path,
+) -> None:
+    sidecar = vault / "Knowledge Base" / "Evidence" / "Case" / "repeated.pdf.md"
+    block = "# Repeated document\n\n## Body\n\nExact content."
+    original = (
+        "---\ntype: source\nmedia_type: pdf\n---\n"
+        "# Evidence: repeated.pdf\n\nPreserved under `Evidence/Case/`.\n\n"
+        "## Extracted text\n\n## Preserved notes\n\n"
+        + "\n\n".join([block] * 3)
+        + "\n"
+    )
+    _seed(sidecar, original)
+    _seed(sidecar.with_suffix(""), "binary bytes")
+
+    report = audit_fix_module.audit_fix(vault, dry_run=False, today=TODAY)
+
+    assert not [f for f in report.fixed if f.category == "duplicated_sidecar"]
+    [proposal] = [p for p in report.proposed if p.category == "duplicated_sidecar"]
+    assert proposal.severity == "error"
+    assert "source re-extraction required" in proposal.detail
+    assert "retry media processing" in (proposal.proposed_fix or "")
+    assert sidecar.read_text(encoding="utf-8") == original

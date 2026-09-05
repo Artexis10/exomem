@@ -91,7 +91,6 @@ from pathlib import Path
 from typing import Any
 
 from . import review_state as review_state_module
-from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
@@ -207,7 +206,9 @@ _PROCESS_SESSION_KEY = f"process:{uuid.uuid4().hex}"
 
 def state_path(vault_root: Path) -> Path:
     """Beside the review state, and for the same reason: this is derived bookkeeping."""
-    return Path(vault_root) / kb_dirname() / STATE_FILENAME
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / STATE_FILENAME
 
 
 def load(vault_root: Path) -> dict[str, Any] | None:
@@ -238,9 +239,9 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
     """Atomically replace the projection state. Best effort; never raises."""
     path = state_path(vault_root)
     try:
-        from . import vault
+        from . import state_paths, vault
 
-        path.parent.mkdir(parents=True, exist_ok=True)
+        state_paths.ensure_vault_state_dir(vault_root)
         handle_fd, temp_name = tempfile.mkstemp(
             prefix=f".{STATE_FILENAME}.", suffix=".tmp", dir=path.parent
         )
@@ -1362,7 +1363,13 @@ def _record_emission(
 
 
 def emission_ledger(vault_root: Path) -> dict[str, Any]:
-    """The persisted `{writes, emissions, last_digest, due_total}` a projector reads."""
+    """The persisted `{writes, emissions, last_digest, due_total}` a projector reads.
+
+    `writes` counts governed page or structured projection deltas applied here,
+    not every filesystem mutation and not terminal deliveries. A qualifying
+    carrier that authors no projected category can therefore add one emission
+    while leaving `writes` unchanged.
+    """
     return _emission_section(load(vault_root) or _UNPERSISTED.get(str(vault_root)))
 
 
@@ -1716,6 +1723,27 @@ def block_for_write(
     """
     if apply_write_delta(vault_root, rel_path, today=today) is None:
         return None
+    from .governance import egress as egress_module
+
+    with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):
+        return served(vault_root, today=today)
+
+
+def block_for_batch(
+    vault_root: Path, *, today: dt.date | None = None
+) -> dict[str, Any] | None:
+    """The block a completed multi-write batch may carry, or None.
+
+    The same serve as `block_for_write`, inside the same `due_state_advisory`
+    disclosure boundary and with the same produce-only posture — emission is
+    decided at the mutation terminal, after the batch scope has exited. It
+    differs in one way only: it applies no delta of its own, because a batch's
+    per-write deltas have already been applied (the operation leaves call
+    `_apply_batch_deltas`, and `reconcile` full-recomputes) by the time the
+    invocation reaches its terminal. Serving here therefore reports the
+    POST-batch projection; re-deltaing one arbitrary path of the batch would
+    report a number that belongs to no moment in particular.
+    """
     from .governance import egress as egress_module
 
     with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):

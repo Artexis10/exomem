@@ -458,6 +458,8 @@ def _find_call_summary(message) -> str:
 
 def build_server(*, require_auth: bool) -> FastMCP:
     """Construct and return the FastMCP app, ready to run."""
+    from . import runtime_resources
+
     runtime = initialize_runtime(load_dotenv_func=load_dotenv)
     from .governance.authorization_request import validate_credential_registry
     from .governance.authorization_transport import AuthorizationSessionMiddleware
@@ -480,6 +482,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
             "exomem",
             auth=auth,
             parse_mcp_authorization=False,
+            lifespan=runtime_resources.lifespan(),
         )
         mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
         mcp.add_middleware(CallTraceMiddleware(hosted=True))
@@ -504,7 +507,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
             "exomem",
             auth=auth,
             icons=server_icons(),
-            lifespan=runtime_activation.lifespan(),
+            lifespan=runtime_resources.lifespan(runtime_activation.lifespan()),
         )
         mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
         mcp.add_middleware(CallTraceMiddleware())

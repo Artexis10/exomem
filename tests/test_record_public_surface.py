@@ -94,7 +94,13 @@ def test_compact_bootstrap_puts_record_route_before_semantic_authoring() -> None
         "args": {"action": "inspect"},
     }
     assert payload["front_door_actions"]["record"]["primary_tools"] == ["record_memory"]
-    assert serialized.find(b'"record"') < 8192
+    # An absolute offset is a PROXY for "reachable early", and the real ordering
+    # property is the relative assertion on the next line. The proxy is re-cut
+    # rather than nudged: the delegation envelope put 1,796 bytes of authority
+    # contract inside `engagement`, which precedes the action catalogue by
+    # design, and 8,192 had no margin left for anything that legitimately sits
+    # in front. 10 KiB is still the first sixth of a ~63 KB payload.
+    assert serialized.find(b'"record"') < 10_240
     assert serialized.find(b'"record"') < serialized.find(b'"semantic_authoring"')
     # The compact payload's SIZE budget is not asserted here. It lives in
     # `tests/test_bootstrap_compact_budget.py::COMPACT_BYTE_CEILING`, which owns

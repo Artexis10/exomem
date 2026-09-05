@@ -17,6 +17,11 @@ Two failures are on record:
    committed runner, so it evaporated and the next lane inherited the same
    broken sandbox four days later.
 
+3. Preflight watched the machine-default state root while the live service was
+   legitimately updating it. The worker could run tests, but the cross-process
+   state guard attributed unrelated service activity to the lane. Both POSIX
+   and Windows platform defaults must be redirected for this probe.
+
 The lesson from (2) is why this file exists: the fix belongs where it is
 enforced, not where it was convenient.
 """
@@ -112,6 +117,23 @@ def test_a_lane_proves_it_can_run_a_test_before_it_is_given_a_brief(
     assert "exit 1" in preflight_body, (
         "a preflight that cannot run a test must refuse to launch the lane"
     )
+
+
+def test_preflight_isolates_platform_and_explicit_state_roots(runner: str) -> None:
+    """The probe must not watch a live service's unrelated machine-global state."""
+    preflight_call = runner.find('preflight_sandbox "$wt"')
+    assert preflight_call != -1
+    preflight_body = runner[runner.index("preflight_sandbox()") : preflight_call]
+
+    for binding in (
+        'XDG_STATE_HOME="$preflight_xdg"',
+        'LOCALAPPDATA="$preflight_localappdata"',
+        'EXOMEM_STATE_ROOT="$preflight_state"',
+        '--basetemp="$preflight_pytest"',
+    ):
+        assert binding in preflight_body, (
+            f"preflight is missing lane-local isolation binding: {binding}"
+        )
 
 
 def test_a_worker_can_never_be_pointed_at_the_shared_primary_checkout(

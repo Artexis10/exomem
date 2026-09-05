@@ -47,6 +47,7 @@ _INSPECTION_KEYS = frozenset(
         "saved_views",
         "lifecycle_guards",
         "presentation",
+        "observed_values",
     }
 )
 _INSPECTION_VIEW_QUERY_KEYS = frozenset(
@@ -155,6 +156,47 @@ def _inspection_json(value: Any, *, depth: int = 0, nodes: list[int] | None = No
 
 def _inspection_field_name(value: Any) -> str | None:
     return _inspection_string(value, maximum=128)
+
+
+def _inspection_observed_values(value: Any) -> dict[str, dict[str, Any]] | None:
+    """Re-validate the free-string vocabulary summary before it reaches egress."""
+    if not isinstance(value, Mapping) or len(value) > collections._MAX_SCHEMA_FIELDS:
+        return None
+    normalized: dict[str, dict[str, Any]] = {}
+    for name, summary in value.items():
+        field = _inspection_field_name(name)
+        if (
+            field is None
+            or not isinstance(summary, Mapping)
+            or set(summary) != {"values", "truncated"}
+            or type(summary.get("truncated")) is not bool
+            or not isinstance(summary.get("values"), list)
+            or len(summary["values"]) > record_formats._MAX_OBSERVED_VALUES
+        ):
+            return None
+        entries: list[dict[str, Any]] = []
+        for entry in summary["values"]:
+            if not isinstance(entry, Mapping) or set(entry) != {
+                "value",
+                "count",
+                "value_truncated",
+            }:
+                return None
+            # Deliberately looser than the producer's 120-CHARACTER cut: this is a
+            # byte ceiling on a string that may be 120 wide characters, so it must
+            # not double as a re-assertion of the cut.
+            observed = _inspection_string(entry.get("value"), maximum=512)
+            count, cut = entry.get("count"), entry.get("value_truncated")
+            if observed is None or type(count) is not int or count < 1 or type(cut) is not bool:
+                return None
+            # Distinctness is NOT asserted here: two distinct values sharing the
+            # display window collapse to the same display string, and both are
+            # flagged. The invariant lives at the producer instead --
+            # _observed_field_values keys its counter on the full stripped
+            # value, so one entry per distinct full value is structural.
+            entries.append({"value": observed, "count": count, "value_truncated": cut})
+        normalized[field] = {"values": entries, "truncated": summary["truncated"]}
+    return normalized
 
 
 def _inspection_legacy_identifier(value: Any) -> str | None:
@@ -472,6 +514,12 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
     snapshot = payload.get("snapshot")
     if snapshot is not None and _inspection_hash(snapshot) is None:
         return None
+    observed_values = payload.get("observed_values")
+    normalized_observed = (
+        None if observed_values is None else _inspection_observed_values(observed_values)
+    )
+    if observed_values is not None and normalized_observed is None:
+        return None
     contract, legacy = payload.get("contract"), payload.get("legacy")
     if kind == "collection":
         if legacy is not None or not isinstance(contract, Mapping):
@@ -555,6 +603,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             or path is None
             or legacy.get("inspect_only") is not True
             or snapshot is not None
+            or normalized_observed is not None
             or normalized_versions
             or normalized_views
             or status != "not_applicable"
@@ -615,6 +664,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             else {}
         ),
         **({"lifecycle_guards": dict(guards)} if guards is not None else {}),
+        **({"observed_values": normalized_observed} if normalized_observed is not None else {}),
     }
     return result
 
@@ -652,6 +702,7 @@ egress.register_projector(
         "saved_views",
         "lifecycle_guards",
         "presentation",
+        "observed_values",
     ),
     validator=_validate_record_inspection,
 )
@@ -707,7 +758,9 @@ def full_release_filter(vault_root: Path) -> Callable[[str], bool]:
     return allowed
 
 
-def _authorize(root: Path, relative: str, *, receipt: bool = False) -> bool:
+def _authorize(
+    root: Path, relative: str, *, receipt: bool = False, policy: Any | None = None
+) -> bool:
     if access.refuse_if_excluded(root, relative):
         return False
     return (
@@ -715,6 +768,7 @@ def _authorize(root: Path, relative: str, *, receipt: bool = False) -> bool:
             root,
             relative,
             receipt_decision="release_authorized" if receipt else None,
+            policy=policy,
         )
         == egress.LEVEL_FULL
     )
@@ -729,14 +783,17 @@ class _LinkProjector:
     admitted: Mapping[str, bool]
     candidate_index_complete: bool | None
     verdicts: dict[str, bool]
+    policy: Any | None
 
     @classmethod
-    def create(cls, root: Path, manifest: collections.CollectionManifest) -> _LinkProjector:
+    def create(
+        cls, root: Path, manifest: collections.CollectionManifest, *, policy: Any | None = None
+    ) -> _LinkProjector:
         # Keep the common numeric/event query path independent of vault-wide
         # link lookup. Even link-bearing collections defer that lookup until a
         # bare title or memory identity actually needs it.
         empty = vault.WikilinkResolver.from_entries(root, ())
-        return cls(root, manifest, empty, {}, {}, None, {})
+        return cls(root, manifest, empty, {}, {}, None, {}, policy)
 
     def _candidate_index_available(self) -> bool:
         if self.candidate_index_complete is not None:
@@ -765,7 +822,7 @@ class _LinkProjector:
             # The resolver's title and identity indexes must not learn from a
             # path that this principal cannot read. Otherwise a hidden name or
             # duplicate identity can change an otherwise public link result.
-            allowed = _authorize(self.root, relative)
+            allowed = _authorize(self.root, relative, policy=self.policy)
             admitted[relative] = allowed
             if not allowed:
                 continue
@@ -901,7 +958,9 @@ class _LinkProjector:
             return self.verdicts[relative]
         if relative in self.admitted and not self.admitted[relative]:
             return self._remember(relative, False)
-        return self._remember(relative, _authorize(self.root, relative, receipt=True))
+        return self._remember(
+            relative, _authorize(self.root, relative, receipt=True, policy=self.policy)
+        )
 
     def _remember(self, target: str, allowed: bool) -> bool:
         if target in self.verdicts:
@@ -961,14 +1020,15 @@ def _resolve_released_collection(
     selector: str | Path | collections.CollectionManifest,
     *,
     receipt: bool,
+    policy: Any | None = None,
 ) -> collections.CollectionManifest:
     path = selector.path if isinstance(selector, collections.CollectionManifest) else selector
     manifest = collections.resolve_collection(
         root,
         path,
-        authorize_path=lambda relative: _authorize(root, relative, receipt=receipt),
+        authorize_path=lambda relative: _authorize(root, relative, receipt=receipt, policy=policy),
     )
-    if not _authorize(root, manifest.path, receipt=receipt):
+    if not _authorize(root, manifest.path, receipt=receipt, policy=policy):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     return manifest
 
@@ -983,7 +1043,8 @@ def query_collection(
     """Query released Records only; authorization happens before adapter parsing."""
     root = Path(vault_root)
     with egress.disclosure_boundary(root, "record_query", join_existing=True) as collector:
-        manifest = _resolve_released_collection(root, collection, receipt=True)
+        policy = egress.policy_module.load(root)
+        manifest = _resolve_released_collection(root, collection, receipt=True, policy=policy)
         if manifest.semantic_profile != semantic_profile:
             error_code = (
                 "RECORDS_PROFILE_REQUIRED"
@@ -994,16 +1055,16 @@ def query_collection(
                 error_code,
                 "collection profile is not available",
             )
-        if not _authorize(root, manifest.storage.source, receipt=True):
+        if not _authorize(root, manifest.storage.source, receipt=True, policy=policy):
             raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-        links = _LinkProjector.create(root, manifest)
+        links = _LinkProjector.create(root, manifest, policy=policy)
         view = kwargs.get("view")
         if view is not None:
             _authorize_saved_view(root, manifest, view, links)
         result = record_formats.query_collection(
             root,
             manifest,
-            authorize_path=lambda path: _authorize(root, path, receipt=True),
+            authorize_path=lambda path: _authorize(root, path, receipt=True, policy=policy),
             project_values=links,
             project_child_value=links.project_presentation_value,
             **kwargs,
@@ -1218,6 +1279,13 @@ def inspect_collection(
                 "audit": _inspection_audit(audit),
                 "saved_views": saved_views,
                 "lifecycle_guards": guards,
+                # Item-derived, so it rides the same authorized item pass the rest
+                # of this payload does; nothing recomputes it from unfiltered bytes.
+                **(
+                    {"observed_values": dict(inspection.observed_values)}
+                    if inspection.observed_values is not None
+                    else {}
+                ),
                 **(
                     {"presentation": _presentation_inspection(inspection.presentation, manifest)}
                     if (

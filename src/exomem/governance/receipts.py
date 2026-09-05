@@ -1483,6 +1483,13 @@ def begin_event(
     )
 
 
+@contextmanager
+def exclusive_sequence(vault_root: Path):
+    """Keep one reentrant receipt lock around an offline multi-effect protocol."""
+    with _receipt_lock(vault_root):
+        yield
+
+
 def terminal_event(vault_root: Path, event_id: str, *, phase: str, outcome: str | None = None) -> dict[str, Any]:
     if phase not in {"committed", "aborted"}:
         raise ReceiptError("terminal phase must be committed or aborted")
@@ -1502,8 +1509,47 @@ def terminal_event(vault_root: Path, event_id: str, *, phase: str, outcome: str 
                 and record.get("phase") in {"committed", "aborted"}
             ]
             if terminals:
-                if terminals[-1].get("phase") == phase:
-                    return terminals[-1]
+                if len(terminals) != 1:
+                    raise ReceiptError("critical event has multiple terminals")
+                if terminals[0].get("phase") == phase:
+                    intents = [record for record in existing if record.get("phase") == "intent"]
+                    terminal = terminals[0]
+                    expected_payload: dict[str, Any] = {"causation_id": event_id}
+                    if outcome is not None:
+                        expected_payload["outcome"] = outcome
+                    terminal_payload = {
+                        key: value
+                        for key, value in terminal.items()
+                        if key
+                        not in {
+                            "schema", "event_id", "event_type", "phase", "timestamp",
+                            "instance_id", "seq", "prev", "hash", "durable", "_path", "_offset",
+                        }
+                    }
+                    if (
+                        len(intents) != 1
+                        or terminal.get("event_id") != f"{event_id}:{phase}"
+                        or terminal.get("durable") is not True
+                        or terminal_payload != expected_payload
+                        or terminal.get("seq") != intents[0].get("seq", 0) + 1
+                        or terminal is not records[-1]
+                    ):
+                        raise ReceiptError("critical terminal is not the exact durable adjacent endpoint")
+                    # Re-enter append_event so its narrow tail-only critical
+                    # repair fsyncs and advances a head that lost only this
+                    # already-durable adjacent terminal.  It refuses any
+                    # suffix, locator divergence, or non-adjacent evidence.
+                    payload: dict[str, Any] = {"causation_id": event_id}
+                    if outcome is not None:
+                        payload["outcome"] = outcome
+                    return append_event(
+                        vault_root,
+                        event_type="critical",
+                        phase=phase,
+                        event_id=f"{event_id}:{phase}",
+                        payload=payload,
+                        critical=True,
+                    )
                 raise ReceiptError("critical event already has a different terminal phase")
             if not any(record.get("phase") == "intent" for record in existing):
                 raise ReceiptError("critical terminal requires an intent")
@@ -1576,6 +1622,106 @@ def _read_sidecar_instance_id(vault_root: Path) -> str | None:
             conn.close()
     except sqlite3.Error as exc:
         raise ReceiptError(f"receipt sidecar read error: {exc}") from exc
+
+
+def require_legacy_receipt_descendant(
+    vault_root: Path,
+    database: Path,
+    anchor: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Require the legacy active head to be a durable descendant of *anchor*.
+
+    Rollback adoption deliberately permits old-v3 to append after the schema
+    fence opens.  The only admissible legacy authority is therefore the active
+    receipt chain whose D1 record is exactly the marker endpoint and whose
+    current durable/observed head is the verified chain tail.
+    """
+
+    if set(anchor) != {"instance_id", "seq", "hash", "path", "byte_offset"}:
+        raise ReceiptError("rollback receipt anchor has an invalid shape")
+    instance_id = anchor.get("instance_id")
+    sequence = anchor.get("seq")
+    digest = anchor.get("hash")
+    locator = anchor.get("path")
+    offset = anchor.get("byte_offset")
+    if (
+        not _hex32(instance_id)
+        or not isinstance(sequence, int)
+        or isinstance(sequence, bool)
+        or sequence < 1
+        or not _hex(digest)
+        or not isinstance(locator, str)
+        or not locator
+        or Path(locator).is_absolute()
+        or not isinstance(offset, int)
+        or isinstance(offset, bool)
+        or offset < 0
+    ):
+        raise ReceiptError("rollback receipt anchor is invalid")
+
+    path = Path(database)
+    try:
+        connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            instance_rows = connection.execute(
+                "SELECT instance_id FROM receipt_instance WHERE singleton=1"
+            ).fetchall()
+            if instance_rows != [(instance_id,)]:
+                raise ReceiptError("legacy receipt instance does not match rollback anchor")
+            rows = connection.execute(
+                "SELECT durable_seq, durable_hash, observed_seq, observed_hash, path, byte_offset "
+                "FROM receipts_head WHERE instance_id=?",
+                (instance_id,),
+            ).fetchall()
+            if len(rows) != 1:
+                raise ReceiptError("legacy receipt head is absent or ambiguous")
+            durable_seq, durable_hash, observed_seq, observed_hash, head_path, head_offset = rows[0]
+        finally:
+            connection.close()
+    except ReceiptError:
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        raise ReceiptError("legacy receipt sidecar cannot be read") from exc
+
+    directory = _instance_dir(Path(vault_root), str(instance_id))
+    records, issues = _chain_state(directory)
+    if issues:
+        raise ReceiptError("legacy receipt chain requires reconciliation")
+    anchor_record = next(
+        (
+            record
+            for record in records
+            if record.get("seq") == sequence and record.get("hash") == digest
+        ),
+        None,
+    )
+    if anchor_record is None or not _scanned_locator_matches(
+        Path(vault_root), str(instance_id), records, sequence, str(digest), locator, offset
+    ):
+        raise ReceiptError("legacy receipt chain is not anchored at rollback D1")
+    tail_seq, tail_hash = _tail(records)
+    if (
+        (durable_seq, durable_hash) != (tail_seq, tail_hash)
+        or (observed_seq, observed_hash) != (tail_seq, tail_hash)
+        or not _scanned_locator_matches(
+            Path(vault_root),
+            str(instance_id),
+            records,
+            tail_seq,
+            tail_hash,
+            str(head_path),
+            int(head_offset),
+        )
+    ):
+        raise ReceiptError("legacy receipt head is not the verified durable tail")
+    return {
+        "instance_id": str(instance_id),
+        "seq": tail_seq,
+        "hash": tail_hash,
+        "path": str(head_path),
+        "byte_offset": int(head_offset),
+    }
 
 
 def _scanned_locator_matches(

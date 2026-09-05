@@ -142,8 +142,9 @@ def test_family_registry_matches_preregistration_section_one() -> None:
     2, and f27 from sequence 3. Being in this table is registration, not
     release: the two are separate, and the gate that keeps them separate lives
     in ``test_epistemic_amendment_governance.py``. It withheld f15-f19 until the
-    founder acknowledged the receipt on 2026-08-15, and it withholds f20-f26 and
-    f27 now, exactly the same way, because their receipts are still unacknowledged.
+    founder acknowledged the receipt on 2026-08-15, released f27 the same way on
+    2026-08-30, and it withholds f20-f26 now, exactly the same way, because
+    sequence 2's receipt is still unacknowledged.
     """
 
     from epistemic.registry import PREREGISTERED_FAMILIES, parse_preregistered_families

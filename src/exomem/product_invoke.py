@@ -130,8 +130,14 @@ def invoke_prepared(
         )
 
     root = resolve_vault_for(cmd.name, kwargs, vault_root)
+    from . import state_migration
+
     try:
         with consolidation_enrollment.invocation_runtime_presence(root):
+            # Ordinary invocation refuses legacy or ambiguous machine-local
+            # state placement until an explicit offline migration completes.
+            if not allows_uninitialized_vault(cmd.name, kwargs):
+                state_migration.require_vault_state_ready(root)
             injected: tuple[Any, ...]
             if cmd.needs_schema:
                 injected = (root, schema_module.load_source_schema(root))

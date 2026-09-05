@@ -9,6 +9,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import pytest
+from conftest import initialize_vault_state_offline
 from fastmcp.exceptions import ToolError
 from starlette.testclient import TestClient
 
@@ -44,6 +45,7 @@ def _build_server(
         REPO_ROOT / "src" / "exomem" / "_scaffold" / "_Schema",
         vault / "Knowledge Base" / "_Schema",
     )
+    initialize_vault_state_offline(vault, source="tool surface fixture")
     monkeypatch.setattr(server_module, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "leases"))

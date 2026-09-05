@@ -20,7 +20,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from exomem import commands, recall_policy
+from exomem import commands, embeddings, readiness, recall_policy
+from exomem import find as find_module
 from exomem.find_types import FindTimings
 
 
@@ -92,12 +93,16 @@ def test_a_stage_that_runs_twice_reports_both_runs() -> None:
 
 
 def test_a_stage_that_runs_once_carries_no_call_count() -> None:
-    """The single-run shape is pinned by exact-dict assertions elsewhere."""
+    """The single-run shape is pinned by exact-dict assertions elsewhere.
+
+    `source` joined `ms` when every stage was made to say where its answer came
+    from; `calls` still appears only when a stage ran more than once.
+    """
     timings = FindTimings()
     with timings.span("keyword"):
         pass
 
-    assert set(timings.as_dict()["stages"]["keyword"]) == {"ms"}
+    assert set(timings.as_dict()["stages"]["keyword"]) == {"ms", "source"}
 
 
 def test_the_query_log_projection_carries_the_unattributed_term() -> None:
@@ -122,6 +127,60 @@ def test_the_query_log_projection_carries_the_unattributed_term() -> None:
 
 def test_the_query_log_projection_tolerates_no_timings() -> None:
     assert commands._timing_log_summary(None) is None
+
+
+def test_real_find_attributes_graph_materialization_and_reranking(
+    vault: Path, monkeypatch
+) -> None:
+    """A live find call must not report its major stages as unattributed."""
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(embeddings, "ranking_enabled", lambda: True)
+    monkeypatch.setattr(readiness, "should_defer", lambda _component: False)
+
+    real_outbound_wikilinks = find_module._outbound_wikilink_paths
+
+    def slow_outbound_wikilinks(*args, **kwargs):
+        time.sleep(0.04)
+        return real_outbound_wikilinks(*args, **kwargs)
+
+    real_passes_filters = find_module._passes_filters
+
+    def slow_passes_filters(*args, **kwargs):
+        time.sleep(0.04)
+        return real_passes_filters(*args, **kwargs)
+
+    def slow_rerank(_query, passages):
+        time.sleep(0.04)
+        return [float(index) for index, _ in enumerate(passages)]
+
+    monkeypatch.setattr(find_module, "_outbound_wikilink_paths", slow_outbound_wikilinks)
+    monkeypatch.setattr(find_module, "_passes_filters", slow_passes_filters)
+    monkeypatch.setattr(
+        embeddings,
+        "rerank_pairs",
+        slow_rerank,
+    )
+
+    result = commands.op_find(
+        vault,
+        query="metabolism",
+        mode="hybrid",
+        graph=True,
+        rerank=True,
+        include_timings=True,
+    )
+
+    timings = result["timings"]
+    assert {"graph", "filter_hits", "rerank"} <= set(timings["stages"])
+    assert timings["unattributed_ms"] <= 0.15 * timings["total_ms"]
+
+    top_level_ms = sum(
+        stage["ms"]
+        for name, stage in timings["stages"].items()
+        if "." not in name and "ms" in stage
+    )
+    covered_ms = timings["total_ms"] - timings["unattributed_ms"]
+    assert abs(top_level_ms - covered_ms) <= 0.15 * timings["total_ms"]
 
 
 def _kb_page(vault: Path, name: str) -> Path:
@@ -182,7 +241,13 @@ def test_a_stale_remembered_root_refuses_a_page_rather_than_admitting_it(
 
 
 def test_dropping_rebuildable_caches_drops_the_root_memo_too(tmp_path: Path, monkeypatch) -> None:
-    """`unload_ram_caches` means "everything rebuildable" — no quiet exceptions."""
+    """`unload_ram_caches` means "everything rebuildable it was asked for".
+
+    The parsed-page cache is the one documented exception, and it is not quiet:
+    it is spared by default because exact receipt custody already evicts its
+    rows per receipt, and a caller that wants it back says `pages=True`. The
+    root memo has no such custody, so it still goes with every unload.
+    """
     from exomem import find as find_module
 
     monkeypatch.setattr(recall_policy, "_needs_canonical_alias_check", lambda parts: True)

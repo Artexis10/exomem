@@ -22,6 +22,12 @@ Use when the user asks to ingest, add, import, process, or preserve an external 
 4. If the source is worth distilling, use `compile_source` for planning and `remember` for the compiled note — passing the path preserved in step 2 as `sources:`. That is what links the note back to the raw artifact and marks the source processed; omit it and the source stays in the unprocessed backlog forever.
 5. Link related prior notes with `connect_memory(operation="suggest-links")`.
 
+## Relation governance
+Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`; corrections use a new canonical key and deprecate the old one.
+
 ## Output contract
 Report the stored source/evidence path, any compiled note path, and what remains unprocessed.
 

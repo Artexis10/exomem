@@ -111,7 +111,20 @@ preflight_sandbox() {
 
   echo "codex_task: preflight -- can this environment run one test?"
   local out
-  if out=$(cd "$wt" && uv run --frozen python -m pytest tests/test_scaffold_no_leak.py -q 2>&1); then
+  # The live Exomem service legitimately updates the machine-default state
+  # root while this probe runs.  Point both the platform default and the
+  # explicit Exomem root into the lane so pytest's cross-process guard tests
+  # the worker rather than observing unrelated service activity.
+  local preflight_xdg="$wt/.task/preflight-xdg"
+  local preflight_localappdata="$wt/.task/preflight-localappdata"
+  local preflight_state="$wt/.task/preflight-state"
+  local preflight_pytest="$wt/.task/preflight-pytest"
+  if out=$(cd "$wt" && \
+    XDG_STATE_HOME="$preflight_xdg" \
+    LOCALAPPDATA="$preflight_localappdata" \
+    EXOMEM_STATE_ROOT="$preflight_state" \
+    uv run --frozen python -m pytest tests/test_scaffold_no_leak.py -q \
+      --basetemp="$preflight_pytest" 2>&1); then
     echo "codex_task: preflight OK -- $(grep -oE '[0-9]+ (passed|skipped).*' <<<"$out" | tail -1)"
     return 0
   fi

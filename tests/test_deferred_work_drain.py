@@ -194,6 +194,7 @@ def test_freshness_requires_semantic_unit_parity_not_only_current_chunks(
     )
     find_module.clear_cache()
     sidecar = index_paths.sidecar_path(vault)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(sidecar) as connection:
         connection.execute(
             "CREATE TABLE chunks (file_path TEXT, chunk_idx INTEGER, file_mtime REAL)"
@@ -226,6 +227,7 @@ def test_freshness_requires_obsolete_chunk_rows_to_be_pruned(
     target.write_text("# no longer chunked\n", encoding="utf-8")
     find_module.clear_cache()
     sidecar = index_paths.sidecar_path(vault)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(sidecar) as connection:
         connection.execute(
             "CREATE TABLE chunks (file_path TEXT, chunk_idx INTEGER, file_mtime REAL)"
@@ -547,7 +549,7 @@ def test_zero_live_cap_periodic_drain_progresses_without_overspending_drift(
     monkeypatch.setattr(
         file_watcher.freshness,
         "reconcile",
-        lambda *_a, **_kw: SimpleNamespace(drifted=True, changed=(), deleted=()),
+        lambda *_a, **_kw: file_watcher.freshness.ReconcileDelta(True, [], []),
     )
     monkeypatch.setattr(
         watcher,
@@ -672,7 +674,7 @@ def test_reconcile_drift_spends_budget_before_deferred_drain(
     monkeypatch.setattr(
         file_watcher.freshness,
         "reconcile",
-        lambda *_a, **_kw: SimpleNamespace(drifted=True, changed=(), deleted=()),
+        lambda *_a, **_kw: file_watcher.freshness.ReconcileDelta(True, [], []),
     )
     monkeypatch.setattr(
         file_watcher.media_processing, "reconcile_all_media", lambda *_a, **_kw: 0

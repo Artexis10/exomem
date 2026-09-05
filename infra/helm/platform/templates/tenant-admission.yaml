@@ -90,11 +90,8 @@ spec:
         has(object.spec.securityContext) &&
         has(object.spec.securityContext.seccompProfile) &&
         object.spec.securityContext.seccompProfile.type == 'RuntimeDefault' &&
-        (variables.lifecycleJob
-          ? (!has(object.spec.securityContext.fsGroup) &&
-            !has(object.spec.securityContext.fsGroupChangePolicy))
-          : (object.spec.securityContext.fsGroup == 10001 &&
-            object.spec.securityContext.fsGroupChangePolicy == 'OnRootMismatch')) &&
+        !has(object.spec.securityContext.fsGroup) &&
+        !has(object.spec.securityContext.fsGroupChangePolicy) &&
         !has(object.spec.securityContext.runAsUser) &&
         !has(object.spec.securityContext.runAsGroup) &&
         !has(object.spec.securityContext.supplementalGroups) &&
@@ -169,7 +166,11 @@ spec:
         !has(object.spec.containers[0].command) &&
         object.spec.containers[0].args == ['hosted', 'init', '--contract-version', '1', '--request-file', '/run/exomem/operator-requests/init.json'] &&
         has(object.spec.containers[0].env) &&
-        size(object.spec.containers[0].env) == 4 &&
+        (size(object.spec.containers[0].env) == 4 ||
+          (size(object.spec.containers[0].env) == 5 &&
+          object.spec.containers[0].env.exists(env,
+            env.name == 'EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION' && has(env.value) &&
+            env.value == '1' && !has(env.valueFrom)))) &&
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_LOG_DIR' && has(env.value) && env.value == '/dev' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
@@ -357,13 +358,13 @@ spec:
           env.value == namespaceObject.metadata.annotations['exomem.io/lifecycle-actions-enabled'] && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_AUTH_SESSION_KEYRING_FILE' && has(env.value) &&
-          env.value == '/run/exomem/authorization-session/keyring.json' && !has(env.valueFrom)) &&
+          env.value == '/run/exomem/authorization-session/private/keyring.json' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_AUTH_SESSION_CONTROL_FILE' && has(env.value) &&
-          env.value == '/run/exomem/authorization-session/control.json' && !has(env.valueFrom)) &&
+          env.value == '/run/exomem/authorization-session/private/control.json' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_AUTH_SESSION_MEMBERSHIP_FILE' && has(env.value) &&
-          env.value == '/run/exomem/authorization-session/serving-membership.json' && !has(env.valueFrom)) &&
+          env.value == '/run/exomem/authorization-session/private/serving-membership.json' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_AUTH_SESSION_REPLICA_ID' && !has(env.value) && has(env.valueFrom) &&
           env.valueFrom.fieldRef.fieldPath == 'metadata.name') &&
@@ -483,7 +484,7 @@ spec:
             volume.secret.defaultMode == 292) ||
           (volume.name == 'authorization-session-source' && has(volume.secret) &&
             volume.secret.secretName == namespaceObject.metadata.annotations['exomem.io/authorization-session-secret-name'] &&
-            volume.secret.defaultMode == 288) ||
+            volume.secret.defaultMode == 292) ||
           (volume.name == 'authorization-session-custody' && has(volume.emptyDir) &&
             volume.emptyDir.medium == 'Memory' &&
             string(dyn(volume.emptyDir).sizeLimit) == '256Ki')))

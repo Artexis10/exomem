@@ -104,20 +104,37 @@ def _projected_payloads(source: Path) -> dict[str, bytes]:
 
 
 def copy_projected_custody(source: Path, destination: Path) -> None:
-    """Publish exactly three stable 0600 files from one projected generation."""
+    """Create private custody and publish one projected generation into it."""
 
     source = Path(source)
     destination = Path(destination)
     staged: list[Path] = []
+    created_destination = False
     try:
         payloads = _projected_payloads(source)
+        parent_info = os.lstat(destination.parent)
+        if not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode):
+            raise HostedCustodyMountUnavailable
+        parent_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        parent_fd = os.open(destination.parent, parent_flags)
+        try:
+            os.mkdir(destination.name, mode=0o700, dir_fd=parent_fd)
+            created_destination = True
+        finally:
+            os.close(parent_fd)
         info = os.lstat(destination)
         mode = stat.S_IMODE(info.st_mode)
         if (
             not stat.S_ISDIR(info.st_mode)
             or stat.S_ISLNK(info.st_mode)
-            or mode & 0o007
-            or (info.st_uid != os.geteuid() and info.st_gid != os.getegid())
+            or mode != 0o700
+            or info.st_uid != os.geteuid()
+            or info.st_gid != os.getegid()
             or any(destination.iterdir())
         ):
             raise HostedCustodyMountUnavailable
@@ -150,26 +167,36 @@ def copy_projected_custody(source: Path, destination: Path) -> None:
         finally:
             os.close(directory_fd)
     except HostedCustodyMountUnavailable:
-        for path in staged:
+        if created_destination:
+            for path in staged:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            for name in _FILENAMES:
+                try:
+                    (destination / name).unlink()
+                except OSError:
+                    pass
             try:
-                path.unlink()
-            except OSError:
-                pass
-        for name in _FILENAMES:
-            try:
-                (destination / name).unlink()
+                destination.rmdir()
             except OSError:
                 pass
         raise
     except (OSError, TypeError, ValueError):
-        for path in staged:
+        if created_destination:
+            for path in staged:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            for name in _FILENAMES:
+                try:
+                    (destination / name).unlink()
+                except OSError:
+                    pass
             try:
-                path.unlink()
-            except OSError:
-                pass
-        for name in _FILENAMES:
-            try:
-                (destination / name).unlink()
+                destination.rmdir()
             except OSError:
                 pass
         raise HostedCustodyMountUnavailable from None

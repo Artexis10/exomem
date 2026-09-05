@@ -27,7 +27,7 @@ from typing import Protocol
 
 import numpy as np
 
-from . import accel, model_cache
+from . import accel, model_cache, runtime_resources
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +124,7 @@ class _TorchEncoder:
 
     def __init__(self, model_name: str, device: str, half: bool) -> None:
         # Heavy import stays local — keyword-mode and a lean install must not pay it.
+        runtime_resources.configure_torch()
         from sentence_transformers import SentenceTransformer
 
         model = model_cache.load_offline_first(
@@ -167,8 +168,7 @@ class _OnnxEncoder:
 
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        # One intra-op thread per cell core. Left at the runtime default here;
-        # the cell sets OMP_NUM_THREADS, which onnxruntime honours.
+        runtime_resources.configure_onnx_session_options(options)
         self._session = ort.InferenceSession(
             onnx_path, sess_options=options, providers=_providers(device)
         )

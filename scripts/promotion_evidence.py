@@ -56,6 +56,11 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _hosted_candidate_locks import read_lock  # noqa: E402 - script dir inserted above
+
 TEST_IDENTITY = "hosted-client-plugins-v1"
 
 OPERATIONS = (
@@ -161,10 +166,15 @@ def attest(secret: str, label: str, *parts: str) -> str:
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
 
 
-def load_locks(repo: Path, platform: str) -> dict:
-    generated = repo / "plugins" / "hosted" / "generated"
-    package = json.loads((generated / f"{platform}.lock.json").read_text())
-    archive = json.loads((generated / f"{platform}.zip.lock.json").read_text())
+def load_locks(repo: Path, platform: str, profile: str) -> dict:
+    # Scoped to the candidate's profile. This read was fixed at the generated
+    # root, which holds only the default candidate, so a v2/v3/v4 candidate signed
+    # evidence carrying v1's artifact, archive, compatibility, contract, command
+    # surface, plugin version and profile. Nothing local rejects that: `observe`
+    # signs it happily and `import` refuses it afterwards, by which time the
+    # authority and both clean-client sessions are spent.
+    package = read_lock(repo, profile, f"{platform}.lock.json")
+    archive = read_lock(repo, profile, f"{platform}.zip.lock.json")
     return {"package": package, "archive": archive}
 
 
@@ -273,7 +283,17 @@ def observe(args: argparse.Namespace) -> int:
         substrate,
         f"select oauth_client_config_sha256 from exomem_staged_client_releases where id='{stage_id}'",
     )
-    locks = load_locks(args.repo, args.platform)
+    # From the bootstrap that produced this state directory, so the evidence cannot
+    # be signed against a different candidate's locks than the one whose cell was
+    # actually exercised.
+    profile = context.get("profile")
+    if not isinstance(profile, str) or not profile:
+        raise SystemExit(
+            "bootstrap-context.json carries no profile, so it predates candidate-scoped "
+            "locks and this run cannot tell which candidate's digests to sign. Add the "
+            "candidate's profile to that file before observing."
+        )
+    locks = load_locks(args.repo, args.platform, profile)
     package, archive = locks["package"], locks["archive"]
     now = datetime.now(UTC)
 
@@ -468,39 +488,62 @@ def promote(args: argparse.Namespace) -> int:
     )
     print(f"  expected live cohort: {live!r}")
 
+    # Claude is mandatory; OpenAI is opt-in. `promoteExomemHostedCohort` takes
+    # `openaiArtifactId` optionally and gates every OpenAI precondition behind
+    # `typeof input.openaiArtifactId === "string"`, promoting the candidate to
+    # `live` either way, so a Claude-only cohort opens admission on its own.
+    # Requiring the pair here made a ChatGPT connector a precondition of
+    # promoting Claude at all. A half-present OpenAI pair is still refused: an
+    # artifact without its evidence record, or the reverse, is an operator
+    # mistake rather than a Claude-only promotion.
     missing = [
         name
-        for name in (
-            "artifact-claude.txt",
-            "artifact-openai.txt",
-            "evidence-claude.json",
-            "evidence-openai.json",
-        )
+        for name in ("artifact-claude.txt", "evidence-claude.json")
         if not (state / name).exists()
     ]
+    openai_present = [
+        name
+        for name in ("artifact-openai.txt", "evidence-openai.json")
+        if (state / name).exists()
+    ]
+    if len(openai_present) == 1:
+        missing.append(
+            "artifact-openai.txt" if openai_present == ["evidence-openai.json"]
+            else "evidence-openai.json"
+        )
     if missing:
         if args.dry_run:
             print(f"  DRY RUN - digest path verified; still missing {missing}")
             return 0
-        raise SystemExit(
-            f"cannot promote without both artifacts and both evidence records: {missing}"
-        )
+        raise SystemExit(f"cannot promote without a complete artifact/evidence pair: {missing}")
 
+    promote_openai = len(openai_present) == 2
     claude_artifact = (state / "artifact-claude.txt").read_text().strip()
-    openai_artifact = (state / "artifact-openai.txt").read_text().strip()
+    openai_artifact = (
+        (state / "artifact-openai.txt").read_text().strip() if promote_openai else None
+    )
     body = {
         "action": "promote-cohort",
         "candidateId": candidate_id,
         "claudeArtifactId": claude_artifact,
-        "openaiArtifactId": openai_artifact,
         "expectedLiveCandidateId": live,
         "expectedRoutableCellDigest": digest,
         "claudeEvidence": json.loads((state / "evidence-claude.json").read_text()),
-        "openaiEvidence": json.loads((state / "evidence-openai.json").read_text()),
     }
+    if promote_openai:
+        # Both keys or neither. A null `openaiArtifactId` beside a real
+        # `openaiEvidence` describes a cohort that does not exist.
+        body["openaiArtifactId"] = openai_artifact
+        body["openaiEvidence"] = json.loads((state / "evidence-openai.json").read_text())
+    else:
+        print("  Claude-only cohort: no OpenAI artifact in the state directory")
     if args.dry_run:
         print("  DRY RUN - not promoting")
-        print(f"  would send artifacts {claude_artifact[:8]} / {openai_artifact[:8]}")
+        print(
+            "  would send artifacts "
+            + (f"{claude_artifact[:8]} / {openai_artifact[:8]}" if promote_openai
+               else f"{claude_artifact[:8]} (Claude only)")
+        )
         return 0
     status, payload = call("/api/exomem/admin/contracts", body, "promote-cohort", state)
     if status != 200:

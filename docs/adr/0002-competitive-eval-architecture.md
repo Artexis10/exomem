@@ -1,7 +1,9 @@
+<!-- authority:non-specification -->
+
 # ADR 0002 — Competitive evaluation architecture: inverted configuration authorship
 
-Status: accepted 2026-08-09 (founder-approved plan; supersession recorded in
-OpenSpec change `add-competitive-benchmark-programme`)
+Historical status: accepted 2026-08-09. The OpenSpec change
+`add-competitive-benchmark-programme` is the current durable authority.
 
 ## Context
 
@@ -22,7 +24,7 @@ both principal competitors ship their own benchmark harnesses, one of which
 already contains a competitor-authored provider for the other, and that an
 Exomem guest provider already exists inside Basic Memory's harness fork.
 
-## Decision
+## Historical decision record
 
 Four coordinated splits, one fairness inversion:
 

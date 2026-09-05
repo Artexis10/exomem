@@ -15,17 +15,21 @@ by — activation or attention items (the #198 isolation rule).
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import activation as activation_module
+from . import context_refs, relation_registry, semantic_language_registry, semantic_units
 from . import epistemic_graph as epistemic_graph_module
 from . import find as find_module
-from . import relation_registry, semantic_language_registry, semantic_units
+from . import graph_sync as graph_sync_module
 from . import review_state as review_state_module
+from . import semantic_contract as semantic_contract_module
 from . import vault as vault_module
+from .kbdir import kb_dirname
 from .vault import kb_root
 
 RELATION_REVIEW_PREFIX = "exomem://review/relation/"
@@ -40,6 +44,8 @@ class ResolvedCandidate:
     fingerprint: str
     candidate: dict[str, Any]
     target_ref: str
+    source_page: Any | None = None
+    identity_refs: tuple[str, str] | None = None
 
 
 def is_relation_ref(value: str) -> bool:
@@ -131,15 +137,20 @@ def _candidate_fingerprint(
     )
 
 
-def _authored_targets(page: Any, vault_root: Path) -> set[tuple[str, str]]:
-    """Set of `(relation_type, target.md)` already authored under ``## Relations``."""
-    document = semantic_units.parse_semantic_units(
+def _relation_document(page: Any, vault_root: Path) -> Any:
+    """Parse one already-read source with the current semantic registries."""
+    return semantic_units.parse_semantic_units(
         page.body,
         validate=False,
         language_registry=semantic_language_registry.load_registry(vault_root),
         relation_registry=relation_registry.load_registry(vault_root),
         page_type=page.page_type,
     )
+
+
+def _authored_targets(page: Any, vault_root: Path) -> set[tuple[str, str]]:
+    """Set of `(relation_type, target.md)` already authored under ``## Relations``."""
+    document = _relation_document(page, vault_root)
     authored: set[tuple[str, str]] = set()
     for relation in document.canonical_note_relations:
         try:
@@ -156,6 +167,43 @@ def _authored_targets(page: Any, vault_root: Path) -> set[tuple[str, str]]:
 
 def _is_placeholder_target(vault_root: Path, target: str) -> bool:
     return not (Path(vault_root) / epistemic_graph_module._with_md(target)).is_file()
+
+
+def _current_candidate_is_authored(
+    vault_root: Path,
+    page: Any,
+    candidate: dict[str, Any],
+) -> bool | None:
+    """Check current Markdown using exact cached resolver authority."""
+    relation_type = str(candidate.get("relation_type") or "")
+    target = epistemic_graph_module._with_md(str(candidate.get("to") or ""))
+    if not relation_type or not target:
+        return False
+    matching_relations = tuple(
+        relation
+        for relation in _relation_document(page, vault_root).canonical_note_relations
+        if relation.kind == relation_type
+    )
+    if not matching_relations:
+        return False
+    snapshot = semantic_contract_module.current_reference_identity_snapshot(vault_root)
+    if snapshot is None:
+        return None
+    for relation in matching_relations:
+        resolution = semantic_contract_module.resolve_reference_wikilink(
+            vault_root,
+            snapshot,
+            str(relation.target or ""),
+        )
+        if resolution.status == "unavailable":
+            return None
+        if resolution.status == "resolved" and resolution.path == target:
+            return True
+    if not semantic_contract_module.reference_identity_snapshot_is_current(
+        vault_root, snapshot
+    ):
+        return None
+    return False
 
 
 def _eligible_pages(vault_root: Path) -> list[Any]:
@@ -208,23 +256,172 @@ def _page_content_hash(page: Any) -> str:
 #: group, and the genuinely open candidates behind them never surfaced on any
 #: read, however many times the queue was rebuilt.
 #:
-#: Bounded rather than unlimited because generation includes embedding
-#: proximity, which is the expensive generator; the ceiling stops an adversarial
-#: page from turning one queue read into a full-corpus scoring pass.
+#: Decision regeneration excludes embeddings, but each deterministic method is
+#: still capped to the same supported 64-candidate prefix as Lane B.  The cap is
+#: PER METHOD: a visible item can legitimately follow a full filtered prefix
+#: from an earlier method.
 _CLASSIFICATION_HEADROOM = 4
-_MAX_GENERATED_PER_PAGE = 64
+_MAX_GENERATED_PER_METHOD = 64
+
+
+def _body_wikilink_candidates(
+    vault_root: Path,
+    page: Any,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Reproduce Lane B's indexed body-wikilink evidence for one source."""
+    document = _relation_document(page, vault_root)
+    canonical_lines = {
+        relation.line for relation in document.note_relations if relation.canonical
+    }
+    index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
+    connection = index._open_read_snapshot()
+    if connection is None:
+        return []
+    try:
+        rows = connection.execute(
+            "SELECT d.path, d.title, e.review_evidence "
+            "FROM graph_edges e JOIN graph_nodes d "
+            "ON d.node_key = e.dst_key AND d.kind = 'file' "
+            "WHERE e.origin = 'wikilink' AND e.source_path = ? "
+            "ORDER BY COALESCE(CAST(json_extract(e.review_evidence, "
+            "'$.internal.occurrence') AS INTEGER), e.rowid), d.path, e.rowid "
+            "LIMIT ?",
+            (page.rel_path, max(0, int(limit))),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        connection.close()
+
+    indexed: dict[tuple[Any, ...], dict[str, Any]] = {}
+    resolver_entries: list[tuple[str, str | None]] = []
+    for target_path, title, raw_evidence in rows:
+        try:
+            payload = json.loads(str(raw_evidence or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        evidence = payload.get("evidence") or {}
+        internal = payload.get("internal") or {}
+        key = (
+            str(target_path),
+            str(evidence.get("target") or ""),
+            int(internal.get("occurrence", -1)),
+            int(internal.get("start", -1)),
+            int(internal.get("end", -1)),
+            int(internal.get("line", -1)),
+        )
+        indexed[key] = evidence
+        resolver_entries.append((str(target_path), str(title) if title else None))
+    resolver = vault_module.WikilinkResolver.from_entries(
+        vault_root,
+        resolver_entries,
+    )
+    observations = epistemic_graph_module._body_wikilink_observations(
+        vault_root,
+        page.body,
+        skip_lines=canonical_lines,
+        resolver=resolver,
+    )
+    candidates: list[dict[str, Any]] = []
+    for observation in observations:
+        key = (
+            str(observation["target_path"]),
+            str(observation["target"]),
+            int(observation["occurrence"]),
+            int(observation["start"]),
+            int(observation["end"]),
+            int(observation["line"]),
+        )
+        evidence = indexed.get(key)
+        if evidence is None:
+            continue
+        candidates.append(
+            {
+                "from": page.rel_path,
+                "to": str(observation["target_path"]),
+                "relation_type": "links_to",
+                "method": "wikilink",
+                "evidence": evidence,
+            }
+        )
+    return candidates
+
+
+def _shared_source_candidates(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Reproduce Lane B's bounded shared-source candidates for one source."""
+    index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
+    connection = index._open_read_snapshot()
+    if connection is None:
+        return []
+    try:
+        rows = connection.execute(
+            "SELECT e2.source_path, e1.dst_key "
+            "FROM graph_edges e1 JOIN graph_edges e2 ON e2.dst_key = e1.dst_key "
+            "JOIN graph_nodes d ON d.node_key = ('file:' || e2.source_path) "
+            "WHERE e1.source_path = ? "
+            "AND e1.origin = 'frontmatter' AND e1.source_anchor = 'sources' "
+            "AND e1.relation_type = 'derived_from' "
+            "AND e2.origin = 'frontmatter' AND e2.source_anchor = 'sources' "
+            "AND e2.relation_type = 'derived_from' "
+            "AND e2.source_path <> e1.source_path "
+            "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
+            "WHERE p.src_key = ('file:' || e1.source_path) "
+            "AND p.dst_key = ('file:' || e2.source_path) "
+            "AND p.relation_type = 'relates_to') "
+            "ORDER BY e2.source_path, e1.dst_key LIMIT ?",
+            (rel_path, max(0, int(limit))),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        connection.close()
+    return [
+        {
+            "from": rel_path,
+            "to": epistemic_graph_module._with_md(str(target_path)),
+            "relation_type": "relates_to",
+            "method": "shared_sources",
+            "evidence": {
+                "shared_source": epistemic_graph_module._with_md(
+                    str(shared_key or "").removeprefix("file:")
+                )
+            },
+        }
+        for target_path, shared_key in rows
+    ]
 
 
 def _page_candidates(
     vault_root: Path, page: Any, *, limit_per_page: int
 ) -> list[dict[str, Any]]:
+    """Re-derive one source's deterministic candidate neighborhood.
+
+    This is the decision-time compatibility leaf, not queue assembly.  It may
+    inspect the one hinted page and bounded graph neighborhoods, but deliberately
+    excludes embedding proximity.  Explicit per-page ``suggest_relations`` keeps
+    that discovery method; relation review decisions never recompute it.
+    """
     budget = max(0, int(limit_per_page))
-    proposal = epistemic_graph_module.suggest_relations(
-        vault_root,
-        path=page.rel_path,
-        limit=min(_MAX_GENERATED_PER_PAGE, budget * _CLASSIFICATION_HEADROOM),
+    method_cap = min(
+        _MAX_GENERATED_PER_METHOD,
+        max(1, budget * _CLASSIFICATION_HEADROOM),
     )
-    return list(proposal.get("candidates") or [])
+    generated = [
+        *epistemic_graph_module._structural_candidates(
+            vault_root, page.rel_path
+        )[:method_cap],
+        *_body_wikilink_candidates(vault_root, page, limit=method_cap),
+        *epistemic_graph_module._frontmatter_source_candidates(page)[:method_cap],
+        *_shared_source_candidates(vault_root, page.rel_path, limit=method_cap),
+    ]
+    return epistemic_graph_module._dedupe_candidates(generated)
 
 
 def _page_for(vault_root: Path, rel_path: str) -> Any | None:
@@ -234,7 +431,16 @@ def _page_for(vault_root: Path, rel_path: str) -> Any | None:
     candidate against the file's CURRENT state, not a read from earlier in
     this call (or an earlier request). Returns `None` if the page is gone.
     """
-    path = Path(vault_root) / str(rel_path or "")
+    try:
+        path, _rel = vault_module.resolve_under_vault(
+            Path(vault_root),
+            str(rel_path or ""),
+            must_exist=True,
+            must_be_file=True,
+            must_be_under_kb=True,
+        )
+    except vault_module.VaultPathError:
+        return None
     try:
         mtime = path.stat().st_mtime
     except OSError:
@@ -242,15 +448,88 @@ def _page_for(vault_root: Path, rel_path: str) -> Any | None:
     return find_module._parse_page(path, mtime, Path(vault_root))
 
 
-def _enrich(vault_root: Path, page: Any, candidate: dict[str, Any]) -> dict[str, Any]:
+def _fallback_ref(rel_path: str) -> str:
+    if rel_path.startswith(f"{kb_dirname()}/Sources/"):
+        return context_refs.source_ref(rel_path)
+    return context_refs.vault_ref(rel_path)
+
+
+def _hinted_candidate_refs(
+    vault_root: Path,
+    candidate: dict[str, Any],
+) -> tuple[str, str] | None:
+    """Derive Lane B's exact refs without opening or repairing the refs sidecar."""
+    from_path = epistemic_graph_module._with_md(str(candidate.get("from") or ""))
+    to_path = epistemic_graph_module._with_md(str(candidate.get("to") or ""))
+    paths = tuple(dict.fromkeys((from_path, to_path)))
+    if not all(paths):
+        return None
+    identity_snapshot = semantic_contract_module.current_reference_identity_snapshot(
+        vault_root
+    )
+    index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
+    connection = index._open_read_snapshot()
+    if connection is None:
+        return None
+    try:
+        placeholders = ",".join("?" for _ in paths)
+        rows = connection.execute(
+            "SELECT path, exomem_id FROM graph_nodes "
+            f"WHERE kind = 'file' AND path IN ({placeholders}) ORDER BY path",
+            paths,
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    identities = {str(path): exomem_id for path, exomem_id in rows}
+    if set(identities) != set(paths):
+        return None
+    if identity_snapshot is None:
+        if (
+            semantic_contract_module.current_reference_identity_snapshot(vault_root)
+            is not None
+        ):
+            return None
+    elif not semantic_contract_module.reference_identity_snapshot_is_current(
+        vault_root, identity_snapshot
+    ):
+        return None
+    if any(exomem_id is not None for exomem_id in identities.values()):
+        if identity_snapshot is None or not set(paths).issubset(
+            identity_snapshot.reference_paths
+        ):
+            return None
+        refs = {
+            path: identity_snapshot.canonical_refs_by_path[path]
+            or _fallback_ref(path)
+            for path in paths
+        }
+    else:
+        refs = {path: _fallback_ref(path) for path in paths}
+    return refs[from_path], refs[to_path]
+
+
+def _enrich(
+    vault_root: Path,
+    page: Any,
+    candidate: dict[str, Any],
+    *,
+    exact_refs: tuple[str, str] | None = None,
+) -> dict[str, Any]:
     from_path = str(candidate.get("from") or page.rel_path)
     to_path = str(candidate.get("to") or "")
-    refs = review_state_module.refs_for_paths(vault_root, [from_path, to_path])
+    if exact_refs is None:
+        refs = review_state_module.refs_for_paths(vault_root, [from_path, to_path])
+        from_ref = refs.get(from_path, from_path)
+        to_ref = refs.get(to_path, to_path)
+    else:
+        from_ref, to_ref = exact_refs
     review_id = _candidate_identity(candidate)
     fingerprint = _candidate_fingerprint(
         candidate,
-        from_ref=refs.get(from_path, from_path),
-        to_ref=refs.get(to_path, to_path),
+        from_ref=from_ref,
+        to_ref=to_ref,
         signal_version=_evidence_signal_version(page, candidate),
     )
     return {
@@ -263,7 +542,7 @@ def _enrich(vault_root: Path, page: Any, candidate: dict[str, Any]) -> dict[str,
         "method": candidate.get("method"),
         "evidence": candidate.get("evidence") or {},
         "bullet": _bullet(candidate),
-        "target_ref": refs.get(from_path, from_path),
+        "target_ref": from_ref,
         "state": "open",
     }
 
@@ -276,6 +555,7 @@ def _classify_candidate(
     store: review_state_module.ReviewStateStore,
     state_payload: dict[str, Any],
     authored: set[tuple[str, str]] | None = None,
+    exact_refs: tuple[str, str] | None = None,
     today=None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Apply the three read-time eligibility filters to one candidate.
@@ -298,7 +578,7 @@ def _classify_candidate(
         return "authored_edge", None
     if _is_placeholder_target(vault_root, to_path):
         return "placeholder_target", None
-    enriched = _enrich(vault_root, page, candidate)
+    enriched = _enrich(vault_root, page, candidate, exact_refs=exact_refs)
     effective, _decision = store.effective_state(
         enriched["review_id"],
         enriched["fingerprint"],
@@ -317,114 +597,147 @@ def build_queue(
     limit_per_page: int = _DEFAULT_LIMIT_PER_PAGE,
     today=None,
 ) -> dict[str, Any]:
-    """Assemble the deterministic, read-only relation-acceptance queue.
-
-    Generation is lazy: candidate generation (`suggest_relations` per page,
-    which can invoke embedding-proximity scoring) STOPS as soon as
-    `limit_pages` groups with open items have been collected, so a small
-    `limit_pages` never pays full-corpus generation cost. Because of that,
-    per-call totals (`pages_scanned`, `filtered`, the `relation_*` coverage
-    counters) describe only the scanned prefix, not the whole corpus — the
-    activation denominators in `coverage` (from the cheap, model-free
-    `activation.scan`) stay full-corpus as before, but `pages_truncated` /
-    `pages_unscanned` / `coverage["relation_scan_complete"]` say explicitly
-    when the relation-specific counts are partial rather than implying a
-    full-corpus total that was never computed.
-    """
+    """Assemble one bounded graph-native relation-acceptance queue."""
     vault_root = Path(vault_root)
-    scan = activation_module.scan(vault_root)
-    store = review_state_module.ReviewStateStore(vault_root)
-    state_payload = store.load()
-    cap = max(0, int(limit_pages))
+    batch = epistemic_graph_module.EpistemicGraphIndex(
+        vault_root
+    ).relation_review_batch(
+        limit_pages=limit_pages,
+        limit_per_page=limit_per_page,
+    )
+    status = str(batch.get("status") or "warming")
+    if status != "available":
+        if not epistemic_graph_module.graph_enabled():
+            status = "unavailable"
+        else:
+            sync_state = str(graph_sync_module.status(vault_root).get("state") or "")
+            if sync_state == "recovery_required":
+                status = "pending"
+            elif sync_state == "unavailable":
+                status = "unavailable"
+            elif status not in {"warming", "pending", "unavailable"}:
+                status = "warming"
+        return {
+            **batch,
+            "status": status,
+            "mode": "relation-queue",
+            "mutated": False,
+            "groups": [],
+            "shown": 0,
+            "pages_shown": 0,
+            "retryable": True,
+            "retry_after": "graph-current",
+            "next_action": "retry-relation-queue",
+        }
 
-    filtered = {"authored_edge": 0, "placeholder_target": 0, "decided": 0}
     groups: list[dict[str, Any]] = []
-    pages_scanned = 0
-    scan_complete = True
-
-    for page in _ordered_pages(vault_root, scan):
-        if len(groups) >= cap:
-            scan_complete = False
-            break
-        pages_scanned += 1
-        authored = _authored_targets(page, vault_root)
+    for raw_group in batch.get("groups") or []:
+        group = dict(raw_group)
+        source_path = str(group.get("source_path") or group.get("path") or "")
+        source_hash = str(
+            group.get("source_content_hash") or group.get("content_hash") or ""
+        )
+        group["source_path"] = source_path
+        group["source_content_hash"] = source_hash
         items: list[dict[str, Any]] = []
-        for candidate in _page_candidates(
-            vault_root, page, limit_per_page=limit_per_page
-        ):
-            reason, enriched = _classify_candidate(
-                vault_root,
-                page,
-                candidate,
-                store=store,
-                state_payload=state_payload,
-                authored=authored,
-                today=today,
+        for raw_item in group.get("items") or []:
+            item = dict(raw_item)
+            item["source_path"] = str(item.get("source_path") or source_path)
+            item["source_content_hash"] = str(
+                item.get("source_content_hash") or source_hash
             )
-            if reason is not None:
-                filtered[reason] += 1
-                continue
-            items.append(enriched)
-            # The display budget bounds what is SHOWN, now that generation
-            # reaches past it. Stopping here also keeps the over-fetch from
-            # costing classification work nobody will see.
-            if len(items) >= max(0, int(limit_per_page)):
-                break
-        if items:
-            groups.append(
-                {
-                    "path": page.rel_path,
-                    "title": page.title,
-                    "content_hash": _page_content_hash(page),
-                    "items": items,
-                }
-            )
-
-    eligible_pages_total = int(scan.coverage.get("eligible_pages", 0))
-    shown_items = sum(len(group["items"]) for group in groups)
-
-    coverage = dict(scan.coverage)
-    coverage["relation_pages_scanned"] = pages_scanned
-    coverage["relation_candidate_pages_found"] = len(groups)
-    coverage["relation_candidates_found"] = shown_items
-    coverage["relation_scan_complete"] = scan_complete
-
+            items.append(item)
+        group["items"] = items
+        groups.append(group)
     return {
+        **batch,
+        "status": "available",
         "mode": "relation-queue",
         "mutated": False,
         "groups": groups,
-        "shown": shown_items,
-        "pages_shown": len(groups),
-        "pages_scanned": pages_scanned,
-        "pages_truncated": not scan_complete,
-        "pages_unscanned": max(0, eligible_pages_total - pages_scanned),
-        "filtered": filtered,
-        "coverage": coverage,
+        "retryable": False,
     }
 
 
-def resolve_candidate(vault_root: Path, ref: str) -> ResolvedCandidate:
-    """Re-derive a queue candidate from the live signal by its relation ref."""
+def _refresh_required(ref: str) -> ValueError:
+    return ValueError(
+        "REVIEW_REFRESH_REQUIRED: the relation candidate is not present in the "
+        f"bounded current queue prefix; refresh the queue and inspect {ref} again"
+    )
+
+
+def resolve_candidate(
+    vault_root: Path,
+    ref: str,
+    *,
+    source_path: str | None = None,
+) -> ResolvedCandidate:
+    """Resolve one current candidate from a hint or the bounded legacy prefix."""
     vault_root = Path(vault_root)
     wanted = parse_relation_review_ref(ref)
-    scan = activation_module.scan(vault_root)
-    for page in _ordered_pages(vault_root, scan):
-        for candidate in _page_candidates(
-            vault_root, page, limit_per_page=_DEFAULT_LIMIT_PER_PAGE
-        ):
-            if _candidate_identity(candidate) != wanted:
-                continue
-            enriched = _enrich(vault_root, page, candidate)
-            return ResolvedCandidate(
-                review_id=enriched["review_id"],
-                ref=enriched["ref"],
-                fingerprint=enriched["fingerprint"],
-                candidate=candidate,
-                target_ref=enriched["target_ref"],
-            )
-    raise ValueError(
-        f"REVIEW_ITEM_NOT_FOUND: no current relation candidate for {ref}"
-    )
+    if source_path is None:
+        queue = build_queue(
+            vault_root,
+            limit_pages=_DEFAULT_LIMIT_PAGES,
+            limit_per_page=_DEFAULT_LIMIT_PER_PAGE,
+        )
+        if queue.get("status") != "available":
+            raise _refresh_required(ref)
+        for group in queue.get("groups") or []:
+            for item in group.get("items") or []:
+                if str(item.get("review_id") or "") != wanted:
+                    continue
+                candidate = {
+                    key: item.get(key)
+                    for key in (
+                        "from",
+                        "to",
+                        "relation_type",
+                        "method",
+                        "evidence",
+                    )
+                }
+                return ResolvedCandidate(
+                    review_id=str(item["review_id"]),
+                    ref=str(item["ref"]),
+                    fingerprint=str(item["fingerprint"]),
+                    candidate=candidate,
+                    target_ref=str(item["target_ref"]),
+                )
+        raise _refresh_required(ref)
+
+    rel_path = epistemic_graph_module._with_md(str(source_path or ""))
+    if not epistemic_graph_module.EpistemicGraphIndex(vault_root).available():
+        raise _refresh_required(ref)
+    page = _page_for(vault_root, rel_path)
+    if page is None or not activation_module._eligible(vault_root, page):
+        raise _refresh_required(ref)
+    for candidate in _page_candidates(
+        vault_root, page, limit_per_page=_MAX_GENERATED_PER_METHOD
+    ):
+        if str(candidate.get("from") or page.rel_path) != rel_path:
+            continue
+        if _candidate_identity(candidate) != wanted:
+            continue
+        identity_refs = _hinted_candidate_refs(vault_root, candidate)
+        if identity_refs is None:
+            raise _refresh_required(ref)
+        enriched = _enrich(
+            vault_root,
+            page,
+            candidate,
+            exact_refs=identity_refs,
+        )
+        return ResolvedCandidate(
+            review_id=enriched["review_id"],
+            ref=enriched["ref"],
+            fingerprint=enriched["fingerprint"],
+            candidate=candidate,
+            target_ref=enriched["target_ref"],
+            source_page=page,
+            identity_refs=identity_refs,
+        )
+    raise _refresh_required(ref)
 
 
 def triage(
@@ -435,9 +748,10 @@ def triage(
     until: str | None = None,
     why: str | None = None,
     expected_fingerprint: str | None = None,
+    source_path: str | None = None,
 ) -> dict[str, Any]:
     """Persist a fingerprint-bound dismiss/snooze/reopen for a relation candidate."""
-    resolved = resolve_candidate(vault_root, ref)
+    resolved = resolve_candidate(vault_root, ref, source_path=source_path)
     if expected_fingerprint and resolved.fingerprint != expected_fingerprint:
         raise ValueError(
             "REVIEW_ITEM_CHANGED: the relation candidate signal changed; refresh "
@@ -464,6 +778,7 @@ def accept(
     expected_hash: str | None,
     why: str | None,
     expected_fingerprint: str | None = None,
+    source_path: str | None = None,
     edit_memory: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
     """Governed server-side accept: validate signal + hash, then author the bullet.
@@ -489,22 +804,44 @@ def accept(
             "INVALID_ACCEPT: accept-relation requires `expected_fingerprint` from the queue read"
         )
     vault_root = Path(vault_root)
-    resolved = resolve_candidate(vault_root, ref)
+    resolved = resolve_candidate(vault_root, ref, source_path=source_path)
     if resolved.fingerprint != expected_fingerprint:
         raise ValueError(
             "REVIEW_ITEM_CHANGED: the relation candidate signal changed; refresh "
             f"the queue and inspect {ref} again"
         )
     candidate = resolved.candidate
-    page = _page_for(vault_root, str(candidate.get("from") or ""))
+    page = resolved.source_page or _page_for(
+        vault_root, str(candidate.get("from") or "")
+    )
     if page is None:
         raise ValueError(
             "REVIEW_ITEM_CHANGED: the relation candidate's source page no longer "
             f"exists; refresh the queue and inspect {ref} again"
         )
+    authored_now = _current_candidate_is_authored(vault_root, page, candidate)
+    if authored_now is None:
+        raise _refresh_required(ref)
     store = review_state_module.ReviewStateStore(vault_root)
     reason, _enriched = _classify_candidate(
-        vault_root, page, candidate, store=store, state_payload=store.load()
+        vault_root,
+        page,
+        candidate,
+        store=store,
+        state_payload=store.load(),
+        exact_refs=resolved.identity_refs,
+        authored=(
+            {
+                (
+                    str(candidate.get("relation_type") or ""),
+                    epistemic_graph_module._with_md(
+                        str(candidate.get("to") or "")
+                    ),
+                )
+            }
+            if authored_now
+            else set()
+        ),
     )
     if reason is not None:
         raise ValueError(

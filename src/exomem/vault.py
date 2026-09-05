@@ -30,7 +30,7 @@ from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
 import yaml
 from slugify import slugify as _slugify
 
-from . import freshness, held_fs, privacy_log, reserved_paths
+from . import call_ledger, call_spans, freshness, held_fs, privacy_log, reserved_paths
 from .kbdir import kb_dirname, kb_prefix
 
 if TYPE_CHECKING:
@@ -57,6 +57,7 @@ _WINDOWS_DEFAULT_SHARE = 0x00000001 | 0x00000002 | 0x00000004
 _WINDOWS_FILE_LIST_DIRECTORY = 0x00000001
 
 log = logging.getLogger(__name__)
+_fast_ack_monotonic = time.monotonic
 
 
 SLUG_MAX_LENGTH = 100
@@ -2110,6 +2111,13 @@ class _BatchWorkspace:
         if vault_root is not None:
             root = Path(os.path.abspath(vault_root))
             absolute_final = Path(os.path.abspath(final))
+            if _batch_state_target(root, absolute_final):
+                # Machine-local epoch artifacts flip inside the external state
+                # root; the held anchor moves with them, and the identity
+                # compare-and-swap below is anchor-agnostic.
+                from . import state_paths
+
+                root = Path(os.path.abspath(state_paths.vault_state_dir(vault_root)))
             try:
                 relative = absolute_final.relative_to(root)
             except ValueError as error:
@@ -4396,6 +4404,109 @@ def _enqueue_graph_debt(vault_root: Path, checkpoint_write: PlannedWrite) -> Non
         log.warning("graph dirty-path enqueue failed; reconcile will repair", exc_info=True)
 
 
+def _advisory_applies_to_page_type(page_type: str | None) -> bool:
+    """Whether the default duplicate/overlap sweep can say anything about this page.
+
+    Design section 6 scopes the deferred advisory to an *applicable compiled
+    page*, and the sweep's own vocabulary is what makes a page applicable: it
+    compares a written page against active compiled conclusions, and the three
+    synchronous routes that own it pass exactly the compiled types and
+    ``source``. A page whose declared type is outside that vocabulary -- a
+    dataset, a plan, an index -- is one the advisory can never produce a
+    candidate for, so preparing custody for it would mint a component that is
+    guaranteed to converge to nothing.
+
+    An *undeclared* type is deliberately treated as applicable. The advisory is
+    noncanonical and fail-open with respect to the committed write, and a page
+    whose frontmatter cannot be read is not proven inapplicable -- only
+    unparsed. Refusing custody on a parse miss would make applicability depend
+    on frontmatter health rather than on the sweep's own rules.
+    """
+    if page_type is None:
+        return True
+    from .find_policy import COMPILED_TYPES, SOURCE_TYPES
+
+    return page_type in COMPILED_TYPES or page_type in SOURCE_TYPES
+
+
+def _planned_page_types(
+    root: Path, writes: Iterable[Any]
+) -> dict[str, str | None]:
+    """Declared ``type`` per staged governed path, from the bytes about to land.
+
+    Read from the planned content rather than from disk: the batch has not been
+    replaced yet, and for a creation the canonical path does not exist at all.
+    Frontmatter only, so this stays O(changed paths) and never parses a body.
+    """
+    types: dict[str, str | None] = {}
+    for write in writes:
+        content = getattr(write, "content", None)
+        if not isinstance(content, str):
+            continue
+        try:
+            relative = Path(os.path.abspath(write.path)).relative_to(root)
+        except (OSError, ValueError):
+            continue
+        try:
+            frontmatter, _body, _rest = parse_frontmatter(content)
+        except Exception:  # noqa: BLE001 - an unparsed page is simply undeclared
+            frontmatter = {}
+        declared = frontmatter.get("type") if isinstance(frontmatter, Mapping) else None
+        types[relative.as_posix()] = (
+            str(declared) if isinstance(declared, str) and declared else None
+        )
+    return types
+
+
+def _governed_advisory_target(
+    root: Path,
+    paths: Iterable[Any],
+    semantic_states: Mapping[str, Any] | None,
+    page_types: Mapping[str, str | None] | None = None,
+) -> str | None:
+    """Name the one governed note this canonical batch is about, or nothing.
+
+    Write-advisory custody is about a single compiled page, so it needs one
+    exact target rather than a whole-batch digest. The batch already declares
+    which of its paths are governed semantic parents, through the two shapes
+    the semantic writers actually emit: the ``semantic_states`` argument the
+    existing-page commit passes here, and the coordinator-owned parent-state
+    binding the creation commit sets around the batch. A note that survives
+    the batch with an after-hash is a candidate.
+
+    Exactly one candidate is the advisory target. Zero or several -- an
+    auxiliary-only batch, or a governed multi-write touching more than one
+    page -- cannot name one, so advisory custody does not apply to that batch
+    and the terminal reports it as ``not_required`` rather than binding the
+    result to an arbitrary page.
+    """
+    from . import semantic_index
+
+    declared = set(semantic_states or ())
+    targets = [
+        path.rel_path
+        for path in paths
+        if path.after_hash is not None
+        and (
+            path.rel_path in declared
+            or semantic_index.parent_state_for_path(root, root / path.rel_path)
+            is not None
+        )
+    ]
+    if len(targets) != 1:
+        return None
+    target = targets[0]
+    # Applicability is decided last, on the one page that could be the target:
+    # a batch whose single governed page the sweep can never compare carries no
+    # advisory custody, and its terminal says `not_required` rather than
+    # promising a result that would only ever be empty.
+    if page_types is not None and not _advisory_applies_to_page_type(
+        page_types.get(target)
+    ):
+        return None
+    return target
+
+
 def batch_atomic_write(
     writes: Iterable[PlannedWrite],
     *,
@@ -4457,9 +4568,9 @@ def _batch_atomic_write_locked(
     batch for exact higher-level retry. This does not claim cross-file power-loss
     atomicity.
 
-    When `vault_root` is supplied, the embedding sidecar at
-    `<vault>/Knowledge Base/.embeddings.sqlite` is refreshed for every
-    embeddable file in the batch after the markdown writes succeed. Failures
+    When `vault_root` is supplied, the embedding sidecar in that vault's
+    external machine-local state directory is refreshed for every embeddable
+    file in the batch after the markdown writes succeed. Failures
     in the embedding pass are logged and swallowed — keyword-mode find()
     still works, and `audit_fix(rebuild_embeddings=True)` recovers drift.  An
     opt-in ``index_reports`` collector receives the report from that same
@@ -4654,14 +4765,27 @@ def _batch_atomic_write_locked(
     staged: list[tuple[Path, _BatchWorkspace, _WorkspaceArtifact]] = []
     snapshots: list[_BatchSnapshot | None] = []
     source_guards: list[_BatchArtifactGuard | None] = []
+    fast_receipt: Any | None = None
+    canonical_commit_monotonic: float | None = None
     try:
         for write in writes:
+            state_target = vault_root is not None and _batch_state_target(
+                Path(vault_root), write.path
+            )
+            if state_target:
+                # A machine-local epoch write stages beside its destination in
+                # the external state root (same volume, atomic replace); the
+                # held vault anchor cannot retain a parent outside the vault,
+                # and the seam applies the private-state posture at creation.
+                from . import state_paths
+
+                state_paths.ensure_vault_state_dir(Path(vault_root))
             for directory in write.ensure_directories:
-                if vault_root is None:
+                if vault_root is None or state_target:
                     _create_parent_dirs(directory, created_dirs)
                 else:
                     _create_parent_dirs_held(Path(vault_root), directory, created_dirs)
-            if vault_root is None:
+            if vault_root is None or state_target:
                 _create_parent_dirs(write.path.parent, created_dirs)
             else:
                 _create_parent_dirs_held(
@@ -4671,7 +4795,11 @@ def _batch_atomic_write_locked(
             if parent not in workspace_by_parent:
                 workspace_by_parent[parent] = _BatchWorkspace.create(
                     parent,
-                    vault_root=Path(vault_root) if vault_root is not None else None,
+                    vault_root=(
+                        Path(vault_root)
+                        if vault_root is not None and not state_target
+                        else None
+                    ),
                 )
         for index, write in enumerate(writes):
             workspace = workspace_by_parent[Path(os.path.abspath(write.path.parent))]
@@ -4698,14 +4826,111 @@ def _batch_atomic_write_locked(
                     "PATH_GUARD_INVALID", "batch content type is unsupported"
                 )
             staged.append((write.path, workspace, artifact))
-        for final, _workspace, _artifact in staged:
+        for write, (final, _workspace, _artifact) in zip(writes, staged, strict=True):
             if not os.path.lexists(final):
                 snapshots.append(None)
                 source_guards.append(None)
+                if (
+                    write.expected_hash is not None
+                    and write.expected_hash != MISSING_CONTENT_HASH
+                ):
+                    raise ContentHashMismatchError(final, write.expected_hash, None)
                 continue
             snapshot, source_guard = _capture_batch_snapshot(final)
             snapshots.append(snapshot)
             source_guards.append(source_guard)
+            if not (
+                write.create_only and write.expected_hash == MISSING_CONTENT_HASH
+            ) and write.expected_hash is not None:
+                if isinstance(write.content, PreparedBinaryContent):
+                    actual_hash = snapshot.content_hash
+                else:
+                    actual_hash = content_hash(
+                        snapshot.content.decode("utf-8")
+                        .replace("\r\n", "\n").replace("\r", "\n")
+                    )
+                if (
+                    write.expected_hash == MISSING_CONTENT_HASH
+                    or actual_hash != write.expected_hash
+                ):
+                    raise ContentHashMismatchError(final, write.expected_hash, actual_hash)
+        if vault_root is not None:
+            from . import derived_receipts
+            from .writer_lease import (
+                active_derived_batch_custody,
+                prepare_active_derived_batch,
+            )
+
+            root = Path(os.path.abspath(vault_root))
+            if active_derived_batch_custody(root):
+                receipt_paths = []
+                for (final, _workspace, artifact), snapshot in zip(
+                    staged, snapshots, strict=True
+                ):
+                    try:
+                        relative = Path(os.path.abspath(final)).relative_to(root)
+                    except ValueError:
+                        continue
+                    # The receipt store's own named predicate is the single
+                    # judgement of what is a governed canonical Markdown
+                    # identity. A path it refuses carries no derived custody and
+                    # is skipped rather than allowed to fail a canonical write
+                    # that is otherwise sound.
+                    #
+                    # Asking the predicate rather than catching every
+                    # ``ValueError`` matters: the constructor also refuses a
+                    # malformed digest and a path absent both before and after,
+                    # neither of which is a path judgement. Swallowing those
+                    # would hide a real defect inside a skip.
+                    rel_path = relative.as_posix()
+                    if not derived_receipts.is_governed_receipt_path(rel_path):
+                        continue
+                    receipt_paths.append(
+                        derived_receipts.DerivedBatchPath(
+                            rel_path=rel_path,
+                            before_hash=(
+                                snapshot.content_hash
+                                if snapshot is not None
+                                else None
+                            ),
+                            after_hash=artifact.content_hash,
+                        )
+                    )
+                selected_checkpoint = deferred_checkpoint
+                if (
+                    selected_checkpoint is None
+                    and graph_debt_checkpoint is not None
+                    and isinstance(graph_debt_checkpoint.content, str)
+                ):
+                    selected_checkpoint = graph_sync.GraphSyncCheckpoint.parse(
+                        graph_debt_checkpoint.content
+                    )
+                ordered_paths = tuple(
+                    sorted(receipt_paths, key=lambda item: item.rel_path)
+                )
+                with call_spans.span("derived.receipt_prepare"):
+                    fast_receipt = prepare_active_derived_batch(
+                        root,
+                        ordered_paths,
+                        canonical_generation=(
+                            str(selected_checkpoint.generation)
+                            if selected_checkpoint is not None
+                            else None
+                        ),
+                        checkpoint_id=(
+                            selected_checkpoint.checkpoint_sha256
+                            if selected_checkpoint is not None
+                            else None
+                        ),
+                        advisory_target_rel_path=_governed_advisory_target(
+                            root,
+                            ordered_paths,
+                            semantic_states,
+                            page_types=_planned_page_types(root, writes),
+                        ),
+                    )
+                if fast_receipt is not None:
+                    call_ledger.note_derived_event("receipt_prepared")
     except BaseException as stage_error:
         if not isinstance(stage_error, Exception):
             _cleanup_batch_workspaces(workspace_by_parent.values())
@@ -4741,6 +4966,11 @@ def _batch_atomic_write_locked(
     )
     replaced: list[Path] = []
     final_guards: dict[Path, _BatchArtifactGuard] = {}
+    # The canonical transaction's own clock. Recorded as a span rather than
+    # wrapped in a `with`, so timing this region does not reindent it: the
+    # measurement that matters is how long the caller holds authority, and a
+    # diff about whitespace hides that.
+    canonical_started_monotonic = _fast_ack_monotonic()
     try:
         from .writer_lease import (
             log_active_mutation_phase,
@@ -4835,6 +5065,12 @@ def _batch_atomic_write_locked(
         for guard in final_guards.values():
             guard.recheck()
         log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))
+        call_spans.record_span(
+            "derived.canonical_commit",
+            (_fast_ack_monotonic() - canonical_started_monotonic) * 1000.0,
+        )
+        if fast_receipt is not None:
+            canonical_commit_monotonic = _fast_ack_monotonic()
         if replaced and commit_point:
             mark_active_mutation_committed()
     except Exception as commit_error:
@@ -4913,7 +5149,17 @@ def _batch_atomic_write_locked(
     else:
         cleanup_retained = _cleanup_batch_workspaces(workspace_by_parent.values())
 
-    if post_commit_fanout:
+    if fast_receipt is not None:
+        if canonical_commit_monotonic is None:  # pragma: no cover - receipt implies a batch
+            raise RuntimeError("derived receipt has no canonical commit timestamp")
+        from .writer_lease import complete_active_derived_batch
+
+        complete_active_derived_batch(
+            fast_receipt,
+            canonical_commit_monotonic=canonical_commit_monotonic,
+        )
+
+    if post_commit_fanout and fast_receipt is None:
         created_paths = [
             final
             for (final, _workspace, _artifact), snapshot in zip(
@@ -4946,6 +5192,29 @@ def _batch_atomic_write_locked(
     return [write.path for write in caller_writes]
 
 
+def _batch_state_target(vault_root: Path, target: Path) -> bool:
+    """Whether one batch target is a machine-local state file in the external root.
+
+    The graph epoch floor/checkpoint ride inside the content batch for their
+    ordering guarantees, and they live under the per-vault state root now.
+    Only a target that is BOTH under this vault's state directory AND a
+    registered machine-local family passes; anything else outside the vault
+    keeps failing closed.
+    """
+    from . import reserved_paths, state_paths
+
+    state_dir = Path(state_paths.vault_state_dir(vault_root))
+    try:
+        Path(os.path.abspath(target)).relative_to(Path(os.path.abspath(state_dir)))
+    except ValueError:
+        return False
+    descriptor_id = reserved_paths.state_target_descriptor_id(vault_root, target)
+    return any(
+        descriptor.id == descriptor_id
+        for descriptor in reserved_paths.external_state_descriptors()
+    )
+
+
 def _validate_batch_write_access(
     vault_root: Path,
     writes: Iterable[PlannedWrite],
@@ -4956,6 +5225,10 @@ def _validate_batch_write_access(
     vault_resolved = vault_root.resolve()
     for write in writes:
         for target in (write.path, *write.ensure_directories):
+            if _batch_state_target(vault_root, target):
+                # Machine-local state is not access-tiered vault content; its
+                # placement authority is the state seam, not `_access.yaml`.
+                continue
             try:
                 rel = target.resolve().relative_to(vault_resolved).as_posix()
             except (ValueError, OSError) as error:

@@ -65,23 +65,16 @@ item_presentation:
 """
 
 
-def _item(item_id: str, title: str, *, parent: str | None = None) -> str:
-    parent_line = "" if parent is None else f"parent: {parent}\n"
-    return f"""---
-type: plan
-collection_id: {COLLECTION_ID}
-plan_id: {item_id}
-schema_version: 1
-title: {title}
-kind: work-item
-status: captured
-{parent_line}---
-
-Authored note.
-"""
-
-
 def _seed(tmp_path: Path) -> tuple[str, Path, Path]:
+    return _seed_audited(tmp_path)
+
+
+def _seed_audited(
+    tmp_path: Path,
+    *,
+    first_title: str = "Improve onboarding",
+    second_title: str = "Ship follow-up",
+) -> tuple[str, Path, Path]:
     kb = tmp_path / "Knowledge Base"
     kb.mkdir()
     (kb / "log.md").write_text("# Log\n", encoding="utf-8")
@@ -90,22 +83,103 @@ def _seed(tmp_path: Path) -> tuple[str, Path, Path]:
         tmp_path,
         manifest_path,
         _manifest(),
-        why="create migration fixture",
-        scaffold=True,
+        why="create legacy migration fixture",
     )
-    items = kb / "Planning" / "Work" / "Items"
-    first = items / f"{FIRST_ID}.md"
-    second = items / f"{SECOND_ID}.md"
-    first.write_text(_item(FIRST_ID, "Improve onboarding"), encoding="utf-8")
-    second.write_text(
-        _item(
-            SECOND_ID,
-            "Ship follow-up",
-            parent=f"exomem://plan/{COLLECTION_ID}/{FIRST_ID}",
-        ),
-        encoding="utf-8",
+    current = (tmp_path / manifest_path).read_text(encoding="utf-8")
+    legacy = current.replace(
+        "item_filename:\n"
+        "  version: 1\n"
+        "  fields: [title]\n"
+        "item_presentation:\n"
+        "  version: 1\n"
+        "  title: title\n"
+        "  summary: [kind, status]\n"
+        "  relationships: [parent]\n",
+        "",
     )
-    return manifest_path, first, second
+    legacy_validation = planning.validate(
+        tmp_path,
+        mode="revision",
+        collection=manifest_path,
+        manifest_text=legacy,
+    )
+    planning.revise(
+        tmp_path,
+        manifest_path,
+        manifest_text=legacy,
+        **legacy_validation["lifecycle_guards"],
+        why="retain legacy UUID item paths for the migration fixture",
+    )
+    first_receipt = planning.add(
+        tmp_path,
+        manifest_path,
+        item={"title": first_title, "kind": "initiative"},
+        plan_id=FIRST_ID,
+        body="Authored note.",
+        why="seed first audited item",
+    )
+    second_receipt = planning.add(
+        tmp_path,
+        manifest_path,
+        item={
+            "title": second_title,
+            "kind": "work-item",
+            "parent": f"exomem://plan/{COLLECTION_ID}/{FIRST_ID}",
+        },
+        plan_id=SECOND_ID,
+        body="Authored note.",
+        why="seed related audited item",
+    )
+    current = (tmp_path / manifest_path).read_text(encoding="utf-8")
+    proposal = current.replace(
+        "plan_audit:",
+        "item_filename:\n"
+        "  version: 1\n"
+        "  fields: [title]\n"
+        "item_presentation:\n"
+        "  version: 1\n"
+        "  title: title\n"
+        "  summary: [kind, status]\n"
+        "  relationships: [parent]\n"
+        "plan_audit:",
+        1,
+    )
+    validation = planning.validate(
+        tmp_path,
+        mode="revision",
+        collection=manifest_path,
+        manifest_text=proposal,
+    )
+    planning.revise(
+        tmp_path,
+        manifest_path,
+        manifest_text=proposal,
+        **validation["lifecycle_guards"],
+        why="adopt human-readable representation",
+    )
+    return (
+        manifest_path,
+        tmp_path / first_receipt["affected_paths"][0],
+        tmp_path / second_receipt["affected_paths"][0],
+    )
+
+
+def _update_title(tmp_path: Path, manifest_path: str, item_key: str, title: str) -> None:
+    from exomem import record_formats
+    from exomem import structured_collections as collections
+
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    record = next(item for item in snapshot.records if item.identity.key == item_key)
+    planning.update(
+        tmp_path,
+        manifest_path,
+        plan_id=item_key,
+        changes={"title": title},
+        expected_container_hash=snapshot.snapshot,
+        expected_item_version=record.source.hash,
+        why="exercise readable filename projection",
+    )
 
 
 def _tree_hash(root: Path) -> str:
@@ -119,6 +193,14 @@ def _tree_hash(root: Path) -> str:
         payload.append(path.relative_to(root).as_posix().encode())
         payload.append(path.read_bytes())
     return hashlib.sha256(b"\0".join(payload)).hexdigest()
+
+
+def _migration_tree(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file())
+        if path.suffix == ".md" or "_Governance/structured-files" in path.as_posix()
+    }
 
 
 def test_preview_is_deterministic_exact_and_read_only(tmp_path: Path) -> None:
@@ -160,8 +242,8 @@ def test_preview_is_deterministic_exact_and_read_only(tmp_path: Path) -> None:
 def test_preview_resolves_collisions_with_stable_identity_suffixes(tmp_path: Path) -> None:
     from exomem import structured_files
 
-    manifest_path, _first, second = _seed(tmp_path)
-    second.write_text(_item(SECOND_ID, "Improve onboarding"), encoding="utf-8")
+    manifest_path, _first, _second = _seed(tmp_path)
+    _update_title(tmp_path, manifest_path, SECOND_ID, "Improve onboarding?")
 
     result = structured_files.preview(tmp_path, manifest_path)
 
@@ -175,6 +257,67 @@ def test_preview_resolves_collisions_with_stable_identity_suffixes(tmp_path: Pat
         for item_id in (FIRST_ID, SECOND_ID)
         for path in collision["resolved_paths"]
     )
+
+
+def test_preview_uses_the_held_portable_compatibility_spelling(tmp_path: Path) -> None:
+    from exomem import structured_files
+
+    manifest_path, _first, _second = _seed(tmp_path)
+    _update_title(tmp_path, manifest_path, FIRST_ID, "Breathing and CO₂ tolerance")
+
+    result = structured_files.preview(tmp_path, manifest_path)
+    move = next(item for item in result["moves"] if item["item_key"] == FIRST_ID)
+
+    assert move["to"].endswith("/Breathing and CO2 tolerance.md")
+    assert "CO₂" not in move["to"]
+
+
+def test_preview_collides_compatibility_equivalent_filenames_before_apply(
+    tmp_path: Path,
+) -> None:
+    from exomem import structured_files
+
+    manifest_path, _first, _second = _seed(tmp_path)
+    _update_title(tmp_path, manifest_path, FIRST_ID, "Breathing and CO2 tolerance")
+    _update_title(tmp_path, manifest_path, SECOND_ID, "Breathing and CO₂ tolerance")
+
+    result = structured_files.preview(tmp_path, manifest_path)
+
+    assert len(result["collisions"]) == 1
+    collision = result["collisions"][0]
+    assert collision["path"] == (
+        "Knowledge Base/Planning/Work/Items/Breathing and CO2 tolerance.md"
+    )
+    assert collision["item_keys"] == sorted([FIRST_ID, SECOND_ID])
+    assert set(collision["resolved_paths"]) == {move["to"] for move in result["moves"]}
+    assert len(set(collision["resolved_paths"])) == 2
+
+
+def test_apply_publishes_the_previewed_compatibility_path_once(tmp_path: Path) -> None:
+    from exomem import structured_files
+
+    manifest_path, first, _second = _seed_audited(
+        tmp_path, first_title="Breathing and CO₂ tolerance"
+    )
+    plan = structured_files.preview(tmp_path, manifest_path)
+    move = next(item for item in plan["moves"] if item["item_key"] == FIRST_ID)
+
+    structured_files.apply(
+        tmp_path,
+        manifest_path,
+        plan_id=plan["plan_id"],
+        source_snapshot=plan["source_snapshot"],
+        why="publish the previewed portable spelling",
+    )
+
+    target = tmp_path / move["to"]
+    assert not first.exists()
+    assert target.name == "Breathing and CO2 tolerance.md"
+    assert "# Breathing and CO₂ tolerance" in target.read_text(encoding="utf-8")
+    assert planning.inspect(tmp_path, manifest_path)["audit"]["status"] == "ok"
+    second = structured_files.preview(tmp_path, manifest_path)
+    assert second["moves"] == []
+    assert second["presentations"] == []
 
 
 def test_preview_plans_mutable_inbound_rewrites_and_blocks_append_only_links(
@@ -293,6 +436,95 @@ def test_apply_moves_and_renders_atomically_then_replays(tmp_path: Path) -> None
     assert committed["inverse"] == replay["inverse"]
 
 
+def test_apply_extends_the_healthy_collection_audit_chain(tmp_path: Path) -> None:
+    from exomem import records, structured_files
+
+    manifest_path, first, second = _seed_audited(tmp_path)
+    before = planning.inspect(tmp_path, manifest_path)
+    plan = structured_files.preview(tmp_path, manifest_path)
+
+    receipt = structured_files.apply(
+        tmp_path,
+        manifest_path,
+        plan_id=plan["plan_id"],
+        source_snapshot=plan["source_snapshot"],
+        why="make the audited collection readable",
+    )
+
+    after = planning.inspect(tmp_path, manifest_path)
+    history = records.agent_audit_history(tmp_path, manifest_path)
+    assert before["audit"]["status"] == "ok"
+    assert receipt["outcome"] == "committed"
+    assert not first.exists()
+    assert not second.exists()
+    assert after["audit"]["status"] == "ok"
+    assert [event["operation"] for event in history["events"][:2]] == [
+        "plan_update",
+        "plan_update",
+    ]
+    assert structured_files.preview(tmp_path, manifest_path)["moves"] == []
+    assert structured_files.preview(tmp_path, manifest_path)["presentations"] == []
+
+
+def test_apply_preserves_an_acknowledged_collection_gap(tmp_path: Path) -> None:
+    from exomem import structured_files
+
+    manifest_path, _first, _second = _seed_audited(tmp_path)
+    manifest_file = tmp_path / manifest_path
+    manifest_file.write_text(
+        manifest_file.read_text(encoding="utf-8").replace(
+            "title: Planning work", "title: Direct planning work", 1
+        ),
+        encoding="utf-8",
+    )
+    changed = planning.inspect(tmp_path, manifest_path)
+    planning.rebaseline(
+        tmp_path,
+        manifest_path,
+        **changed["lifecycle_guards"],
+        acknowledged_gap_codes=changed["audit"]["gaps"],
+        why="acknowledge the exact direct title edit",
+    )
+    checkpoint = planning.inspect(tmp_path, manifest_path)
+    plan = structured_files.preview(tmp_path, manifest_path)
+
+    structured_files.apply(
+        tmp_path,
+        manifest_path,
+        plan_id=plan["plan_id"],
+        source_snapshot=plan["source_snapshot"],
+        why="make the checkpointed collection readable",
+    )
+
+    restarted = planning.inspect(tmp_path, manifest_path)
+    assert checkpoint["audit"]["status"] == "acknowledged_gap"
+    assert restarted["audit"]["status"] == "acknowledged_gap"
+    assert restarted["audit"]["discontinuities"] == checkpoint["audit"]["discontinuities"]
+
+
+def test_preview_blocks_a_preexisting_structural_audit_gap(tmp_path: Path) -> None:
+    from exomem import records, structured_files
+
+    manifest_path, first, _second = _seed_audited(tmp_path)
+    history = records.agent_audit_history(tmp_path, manifest_path)
+    transition = next(
+        event["transition_id"]
+        for event in history["events"]
+        if event["item_key"] == FIRST_ID
+    )
+    first.write_text(
+        first.read_text(encoding="utf-8").replace(transition, "deadbeefdeadbeefdeadbeef", 1),
+        encoding="utf-8",
+    )
+
+    result = structured_files.preview(tmp_path, manifest_path)
+
+    assert {
+        "code": "STRUCTURED_FILE_AUDIT_GAP",
+        "reason": "the collection audit history must be repaired before migration",
+    } in result["blockers"]
+
+
 def test_apply_rewrites_mutable_inbound_links_in_the_same_terminal(
     tmp_path: Path,
 ) -> None:
@@ -350,9 +582,14 @@ def test_apply_rolls_back_every_rename_when_publication_fails(
 ) -> None:
     from exomem import structured_files
 
-    manifest_path, first, second = _seed(tmp_path)
+    manifest_path, first, second = _seed_audited(
+        tmp_path, first_title="Breathing and CO₂ tolerance"
+    )
     plan = structured_files.preview(tmp_path, manifest_path)
-    before = _tree_hash(tmp_path)
+    before = _migration_tree(tmp_path)
+    before_audit = planning.inspect(tmp_path, manifest_path)["audit"]
+    before_manifest = (tmp_path / manifest_path).read_bytes()
+    before_activity = (tmp_path / "Knowledge Base" / "log.md").read_bytes()
 
     def fail(*_args: object, **_kwargs: object) -> None:
         raise OSError("injected publication failure")
@@ -370,9 +607,13 @@ def test_apply_rolls_back_every_rename_when_publication_fails(
 
     assert first.is_file()
     assert second.is_file()
-    assert not first.with_name("Improve onboarding.md").exists()
+    assert not first.with_name("Breathing and CO2 tolerance.md").exists()
     assert not second.with_name("Ship follow-up.md").exists()
-    assert _tree_hash(tmp_path) == before
+    assert _migration_tree(tmp_path) == before
+    assert planning.inspect(tmp_path, manifest_path)["audit"] == before_audit
+    assert (tmp_path / manifest_path).read_bytes() == before_manifest
+    assert (tmp_path / "Knowledge Base" / "log.md").read_bytes() == before_activity
+    assert not (tmp_path / "Knowledge Base" / "_Governance" / "structured-files").exists()
 
 
 def test_maintain_memory_exposes_preview_and_exact_apply_once(tmp_path: Path) -> None:
@@ -490,15 +731,8 @@ def _seed_acceptance_vault(root: Path) -> dict[str, str]:
     """Build a copied-vault analogue without touching a live Obsidian vault."""
     from exomem import structured_collections as collections
 
-    planning_manifest, first, second = _seed(root)
-    second.write_text(
-        _item(
-            SECOND_ID,
-            "Improve onboarding",
-            parent=f"exomem://plan/{COLLECTION_ID}/{FIRST_ID}",
-        ),
-        encoding="utf-8",
-    )
+    planning_manifest, first, _second = _seed(root)
+    _update_title(root, planning_manifest, SECOND_ID, "Improve onboarding?")
     mutable_linker = root / "Knowledge Base" / "Notes" / "migration-context.md"
     mutable_linker.parent.mkdir(parents=True, exist_ok=True)
     mutable_linker.write_text(

@@ -23,6 +23,17 @@ class _SchemaHit:
     path: str
 
 
+def test_clean_env_constructs_an_external_state_root(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    vault = tmp_path / "vault"
+
+    env = e2e_product_loop._clean_env(home, vault)
+
+    assert env["EXOMEM_VAULT_PATH"] == str(vault)
+    assert env["EXOMEM_STATE_ROOT"] == str(home / "state")
+    assert Path(env["EXOMEM_STATE_ROOT"]).parent != vault
+
+
 def test_port_reservations_are_distinct_and_release_individually() -> None:
     reservations = e2e_product_loop._reserve_port_reservations(3)
     ports = [reservation.getsockname()[1] for reservation in reservations]

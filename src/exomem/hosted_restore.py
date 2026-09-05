@@ -10,7 +10,7 @@ import stat
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import __version__
@@ -23,6 +23,7 @@ from .hosted_runtime import (
     HostedConfigError,
     HostedMigrationLimits,
     _converge_tree_ownership,
+    _migrate_hosted_machine_state_under_lifetime_lock,
     _preflight_migration_tree,
     _sync_directory,
     _validate_v2_marker,
@@ -37,9 +38,29 @@ _PHASES = (
     "roots_bound",
     "archive_prepared",
     "canonical_published",
+    "state_migrated",
     "derived_ready",
     "derived_degraded",
     "complete",
+)
+_JOURNAL_IDENTITY_KEYS = frozenset(
+    {
+        "journal_version",
+        "operation_id",
+        "request_digest",
+        "artifact_reference",
+        "artifact_reference_digest",
+        "archive_sha256",
+        "manifest_sha256",
+        "source_cell_id",
+        "source_vault_id",
+        "target_cell_id",
+        "target_vault_id",
+        "binding_digest",
+        "credential_version",
+        "hosted_protocol",
+        "phase",
+    }
 )
 
 
@@ -337,6 +358,98 @@ def _journal_identity(
     }
 
 
+def _valid_sha256(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _state_placement_identity(binding: HostedBindingV2) -> str:
+    from . import state_paths
+
+    payload = {
+        "state_store_root": os.path.normcase(
+            os.path.abspath(binding.state_root / "vault-state")
+        ),
+        "vault_state_key": state_paths.vault_state_key(binding.vault_root),
+    }
+    return hashlib.sha256(_canonical_bytes(payload)).hexdigest()
+
+
+def _expected_state_dir(binding: HostedBindingV2) -> Path:
+    from . import state_paths
+
+    return binding.state_root / "vault-state" / state_paths.vault_state_key(
+        binding.vault_root
+    )
+
+
+def _state_manifest_sha256(state_dir: Path) -> str:
+    from . import state_migration
+
+    path = Path(state_dir) / state_migration.MANIFEST_NAME
+    try:
+        value = path.lstat()
+        if (
+            stat.S_ISLNK(value.st_mode)
+            or not stat.S_ISREG(value.st_mode)
+            or value.st_nlink != 1
+        ):
+            raise OSError("state manifest is unsafe")
+        return portability._hash_file(path)
+    except OSError as exc:
+        raise OperatorFailure("HOSTED_RESTORE_CANONICAL_INTEGRITY") from exc
+
+
+def _validate_journal_phase(record: Mapping[str, Any], binding: HostedBindingV2) -> None:
+    phase = record.get("phase")
+    if phase not in _PHASES:
+        raise OperatorFailure("HOSTED_RESTORE_JOURNAL_CONFLICT")
+    phase_index = _PHASES.index(str(phase))
+    known = set(_JOURNAL_IDENTITY_KEYS)
+    relocated = phase_index >= _PHASES.index("state_migrated")
+    if relocated:
+        known.update({"state_manifest_sha256", "state_placement_identity"})
+        if (
+            not _valid_sha256(record.get("state_manifest_sha256"))
+            or record.get("state_placement_identity")
+            != _state_placement_identity(binding)
+        ):
+            raise OperatorFailure("HOSTED_RESTORE_JOURNAL_CONFLICT")
+    elif "state_manifest_sha256" in record or "state_placement_identity" in record:
+        raise OperatorFailure("HOSTED_RESTORE_JOURNAL_CONFLICT")
+
+    derived = phase in {"derived_ready", "derived_degraded", "complete"}
+    if derived:
+        known.update({"derived_state", "derived_error_code"})
+        state = record.get("derived_state")
+        error = record.get("derived_error_code")
+        if state not in {"ready", "degraded"} or (
+            (state == "ready" and error is not None)
+            or (state == "degraded" and error != "DERIVED_REBUILD_FAILED")
+        ):
+            raise OperatorFailure("HOSTED_RESTORE_JOURNAL_CONFLICT")
+    elif "derived_state" in record or "derived_error_code" in record:
+        raise OperatorFailure("HOSTED_RESTORE_JOURNAL_CONFLICT")
+
+    if phase == "complete":
+        known.add("credential_revision")
+        revision = record.get("credential_revision")
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+            raise OperatorFailure("HOSTED_RESTORE_JOURNAL_CONFLICT")
+    elif "credential_revision" in record:
+        raise OperatorFailure("HOSTED_RESTORE_JOURNAL_CONFLICT")
+    if set(record) != known:
+        raise OperatorFailure("HOSTED_RESTORE_JOURNAL_CONFLICT")
+
+
+def _verify_state_manifest_proof(record: Mapping[str, Any], state_dir: Path) -> None:
+    if _state_manifest_sha256(state_dir) != record.get("state_manifest_sha256"):
+        raise OperatorFailure("HOSTED_RESTORE_CANONICAL_INTEGRITY")
+
+
 def _read_journal(
     path: Path, identity: Mapping[str, Any], binding: HostedBindingV2
 ) -> dict[str, Any] | None:
@@ -368,8 +481,7 @@ def _read_journal(
         raise OperatorFailure("HOSTED_RESTORE_JOURNAL_CONFLICT") from exc
     if not isinstance(record, dict) or any(record.get(key) != item for key, item in identity.items()):
         raise OperatorFailure("HOSTED_RESTORE_JOURNAL_CONFLICT")
-    if record.get("phase") not in _PHASES:
-        raise OperatorFailure("HOSTED_RESTORE_JOURNAL_CONFLICT")
+    _validate_journal_phase(record, binding)
     return record
 
 
@@ -378,6 +490,7 @@ def _write_journal(
     record: Mapping[str, Any],
     binding: HostedBindingV2,
 ) -> None:
+    _validate_journal_phase(record, binding)
     directory_existed = path.parent.exists()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     _ensure_private_directory(path.parent, binding)
@@ -435,6 +548,106 @@ def _verify_published(
             binding.vault_root, manifest, allow_derived_extras=True
         )
     except (HostedConfigError, portability.PortabilityError) as exc:
+        raise OperatorFailure("HOSTED_RESTORE_CANONICAL_INTEGRITY") from exc
+
+
+def _verify_migrated_published(
+    binding: HostedBindingV2,
+    manifest: Mapping[str, Any],
+    state_dir: Path,
+    *,
+    allow_state_extras: bool,
+) -> None:
+    """Verify canonical archive bytes at their post-migration placements."""
+
+    try:
+        if os.path.normcase(os.path.abspath(state_dir)) != os.path.normcase(
+            os.path.abspath(_expected_state_dir(binding))
+        ):
+            raise portability.PortabilityError(
+                "CANONICAL_INTEGRITY_VIOLATION",
+                "portable state resolved outside the request-bound target",
+            )
+        _validate_v2_marker(binding.vault_root, "vault", binding)
+        canonical_records = [
+            record
+            for record in manifest["files"]
+            if record["classification"] == portability.ArtifactClass.CANONICAL.value
+        ]
+        canonical_manifest = {**manifest, "files": canonical_records}
+        portability._verify_staged_files(
+            binding.vault_root,
+            canonical_manifest,
+            allow_derived_extras=True,
+        )
+        expected_state_members = {
+            PurePosixPath(*PurePosixPath(str(record["path"])).parts[1:]).as_posix()
+            for record in manifest["files"]
+            if record["classification"] == portability.ArtifactClass.PORTABLE_DERIVED.value
+        }
+        if not allow_state_extras:
+            from . import state_migration
+
+            allowed_state_members = expected_state_members | {
+                state_migration.MANIFEST_NAME,
+                state_migration._LOCK_NAME,
+            }
+            found_state_members = portability._walk_regular_files(Path(state_dir))
+            if found_state_members != allowed_state_members:
+                raise portability.PortabilityError(
+                    "CANONICAL_INTEGRITY_VIOLATION",
+                    "pre-derived external state contains an unregistered member",
+                )
+        for record in manifest["files"]:
+            relative = PurePosixPath(str(record["path"]))
+            if record["classification"] != portability.ArtifactClass.PORTABLE_DERIVED.value:
+                wrong_side = Path(state_dir).joinpath(*relative.parts)
+                if os.path.lexists(wrong_side):
+                    raise portability.PortabilityError(
+                        "CANONICAL_INTEGRITY_VIOLATION",
+                        "canonical archive member also exists in external state",
+                    )
+                continue
+            parts = relative.parts
+            if len(parts) < 2:
+                raise portability.PortabilityError(
+                    "CANONICAL_INTEGRITY_VIOLATION",
+                    "portable state path has no state member",
+                )
+            wrong_side = binding.vault_root.joinpath(*parts)
+            if os.path.lexists(wrong_side):
+                raise portability.PortabilityError(
+                    "CANONICAL_INTEGRITY_VIOLATION",
+                    "portable state also exists under the vault",
+                )
+            target = Path(state_dir)
+            for part in parts[1:-1]:
+                target = target / part
+                value = target.lstat()
+                if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
+                    raise portability.PortabilityError(
+                        "CANONICAL_INTEGRITY_VIOLATION",
+                        "portable state parent is unsafe",
+                    )
+            target = target / parts[-1]
+            value = target.lstat()
+            if (
+                stat.S_ISLNK(value.st_mode)
+                or not stat.S_ISREG(value.st_mode)
+                or value.st_nlink != 1
+            ):
+                raise portability.PortabilityError(
+                    "CANONICAL_INTEGRITY_VIOLATION",
+                    "portable state member is unsafe",
+                )
+            if value.st_size != record["size"] or portability._hash_file(target) != record[
+                "sha256"
+            ]:
+                raise portability.PortabilityError(
+                    "STAGING_DIGEST_MISMATCH",
+                    "portable state bytes do not match the archive manifest",
+                )
+    except (HostedConfigError, portability.PortabilityError, OSError, KeyError, TypeError) as exc:
         raise OperatorFailure("HOSTED_RESTORE_CANONICAL_INTEGRITY") from exc
 
 
@@ -629,6 +842,51 @@ def restore_candidate(
     rebuild_derived: Callable[[Path], None] | None = None,
     crash_hook: Callable[[str], None] | None = None,
 ) -> HostedRestoreResult:
+    """Restore under the exact request-bound vault/state environment."""
+    request = decode_request("restore-candidate", _canonical_bytes(raw_request))
+    try:
+        binding = HostedBindingV2(
+            cell_id=request["target_cell_id"],
+            vault_id=request["target_vault_id"],
+            vault_root=Path(request["target_vault_root"]),
+            state_root=Path(request["target_state_root"]),
+            log_root=Path(request["target_log_root"]),
+            runtime_uid=request["runtime_uid"],
+            runtime_gid=request["runtime_gid"],
+        )
+    except HostedConfigError as exc:
+        raise OperatorFailure("HOSTED_RESTORE_TARGET_CONFLICT") from exc
+    overrides = {
+        "EXOMEM_VAULT_PATH": str(binding.vault_root),
+        "EXOMEM_HOSTED_STATE_ROOT": str(binding.state_root),
+        "EXOMEM_STATE_ROOT": str(binding.state_root / "vault-state"),
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(binding.state_root),
+        "EXOMEM_LOG_DIR": str(binding.log_root),
+    }
+    previous = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
+    try:
+        return _restore_candidate_bound(
+            raw_request,
+            bootstrap_security=bootstrap_security,
+            rebuild_derived=rebuild_derived,
+            crash_hook=crash_hook,
+        )
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _restore_candidate_bound(
+    raw_request: Mapping[str, Any],
+    *,
+    bootstrap_security: Callable[..., int] | None = None,
+    rebuild_derived: Callable[[Path], None] | None = None,
+    crash_hook: Callable[[str], None] | None = None,
+) -> HostedRestoreResult:
     """Restore one pinned archive into a new, exclusively locked target cell."""
 
     encoded = _canonical_bytes(raw_request)
@@ -676,7 +934,16 @@ def restore_candidate(
             )
         if record["phase"] == "complete":
             validate_hosted_binding_v2(binding, require_scaffold=True)
-            _verify_published(binding, verified.manifest)
+            from . import state_migration
+
+            resolution = state_migration.require_vault_state_ready(binding.vault_root)
+            _verify_state_manifest_proof(record, resolution.state_dir)
+            _verify_migrated_published(
+                binding,
+                verified.manifest,
+                resolution.state_dir,
+                allow_state_extras=True,
+            )
             return _result_from_record(record)
 
         if record["phase"] == "roots_bound":
@@ -708,7 +975,6 @@ def restore_candidate(
                     reads_allowed=False,
                 ),
             )
-
         if record["phase"] == "archive_prepared":
             if os.path.lexists(binding.vault_root):
                 # Crash after rename and before the journal advance: exact
@@ -728,6 +994,39 @@ def restore_candidate(
             )
 
         if record["phase"] == "canonical_published":
+            resolution = _migrate_hosted_machine_state_under_lifetime_lock(
+                binding,
+                authority_source="hosted restore candidate",
+            )
+            _verify_migrated_published(
+                binding,
+                verified.manifest,
+                resolution.state_dir,
+                allow_state_extras=False,
+            )
+            _event(crash_hook, "state_migrated")
+            record = _advance(
+                journal_path,
+                record,
+                "state_migrated",
+                binding,
+                crash_hook,
+                state_manifest_sha256=_state_manifest_sha256(resolution.state_dir),
+                state_placement_identity=_state_placement_identity(binding),
+            )
+
+        if record["phase"] == "state_migrated":
+            from . import state_migration
+
+            expected_state_dir = _expected_state_dir(binding)
+            resolution = state_migration.require_vault_state_ready(binding.vault_root)
+            _verify_state_manifest_proof(record, expected_state_dir)
+            _verify_migrated_published(
+                binding,
+                verified.manifest,
+                resolution.state_dir,
+                allow_state_extras=False,
+            )
             derived_state = "ready"
             derived_error: str | None = None
             if rebuild_derived is not None:
@@ -737,12 +1036,33 @@ def restore_candidate(
                     derived_state = "degraded"
                     derived_error = "DERIVED_REBUILD_FAILED"
             try:
-                _verify_published(binding, verified.manifest)
-            except OperatorFailure as exc:
+                resolution = state_migration.require_vault_state_ready(binding.vault_root)
+                _verify_state_manifest_proof(record, expected_state_dir)
+                _verify_migrated_published(
+                    binding,
+                    verified.manifest,
+                    resolution.state_dir,
+                    allow_state_extras=True,
+                )
+            except (OperatorFailure, state_migration.StateMigrationOfflineRequired) as exc:
                 try:
-                    portability._repair_canonical_from_archive(prepared, binding.vault_root)
+                    portability._repair_canonical_from_archive(
+                        prepared,
+                        binding.vault_root,
+                        portable_state_root=expected_state_dir,
+                    )
+                    resolution = state_migration.require_vault_state_ready(binding.vault_root)
+                    _verify_state_manifest_proof(record, expected_state_dir)
+                    _verify_migrated_published(
+                        binding,
+                        verified.manifest,
+                        resolution.state_dir,
+                        allow_state_extras=True,
+                    )
                 except Exception as repair_error:
-                    raise OperatorFailure("HOSTED_RESTORE_CANONICAL_INTEGRITY") from repair_error
+                    raise OperatorFailure(
+                        "HOSTED_RESTORE_CANONICAL_INTEGRITY"
+                    ) from repair_error
                 raise OperatorFailure("HOSTED_RESTORE_CANONICAL_INTEGRITY") from exc
             _event(crash_hook, "derived_rebuilt")
             record = _advance(
@@ -757,7 +1077,16 @@ def restore_candidate(
 
         if record["phase"] in {"derived_ready", "derived_degraded"}:
             revision = _bootstrap_security(binding, request, bootstrap_security)
-            _verify_published(binding, verified.manifest)
+            from . import state_migration
+
+            resolution = state_migration.require_vault_state_ready(binding.vault_root)
+            _verify_state_manifest_proof(record, resolution.state_dir)
+            _verify_migrated_published(
+                binding,
+                verified.manifest,
+                resolution.state_dir,
+                allow_state_extras=True,
+            )
             record = _advance(
                 journal_path,
                 record,
@@ -769,7 +1098,16 @@ def restore_candidate(
             _event(crash_hook, "proof_written")
 
         validate_hosted_binding_v2(binding, require_scaffold=True)
-        _verify_published(binding, verified.manifest)
+        from . import state_migration
+
+        resolution = state_migration.require_vault_state_ready(binding.vault_root)
+        _verify_state_manifest_proof(record, resolution.state_dir)
+        _verify_migrated_published(
+            binding,
+            verified.manifest,
+            resolution.state_dir,
+            allow_state_extras=True,
+        )
         return _result_from_record(record)
 
 

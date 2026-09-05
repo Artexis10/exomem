@@ -86,6 +86,7 @@ def test_provisioner_classifier_covers_every_reserved_descriptor_family(tmp_path
         "idempotency-store": ".idempotency.jsonl",
         "voice-profile-store": ".voice_profiles.json",
         "graph-handoff": ".graph-sync.json",
+        "graph-coordination": ".graph-coordination/lock",
         "graph-receipts": ".graph-commit-receipts/private.json",
         "review-state": ".review-state.json",
         "due-state": ".due-state.json",

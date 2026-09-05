@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import relation_queue
+from exomem import epistemic_graph, relation_queue
 
 
 def _write_page(
@@ -52,6 +52,7 @@ def _seed(vault: Path) -> None:
         "# delta\n\nA claim with a dangling source.\n",
         encoding="utf-8",
     )
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
 
 
 # Derived, rebuildable index sidecars that read paths may lazily (re)build.
@@ -153,31 +154,33 @@ def test_coverage_counters_align_with_activation(tmp_path: Path) -> None:
 def test_cap_stops_candidate_generation_early_and_reports_honestly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Several candidate-bearing eligible pages, but cap at one group. Bug:
-    # candidate generation (suggest_relations, which can invoke embedding
-    # scoring) ran for EVERY eligible page before slicing the result down to
-    # the cap — unacceptable on a large vault. The fix must stop generating
-    # once `limit_pages` groups with open items are collected.
+    # The public cap is handed directly to one bounded graph batch. Per-page
+    # queue generation is retired and cannot run beyond the cap.
     _write_page(tmp_path, "page-a", "See [[Knowledge Base/Notes/Insights/page-z]].")
     _write_page(tmp_path, "page-b", "See [[Knowledge Base/Notes/Insights/page-z]].")
     _write_page(tmp_path, "page-c", "See [[Knowledge Base/Notes/Insights/page-z]].")
     _write_page(tmp_path, "page-z", "See [[Knowledge Base/Notes/Insights/page-a]].")
 
-    calls: list[str] = []
-    real_page_candidates = relation_queue._page_candidates
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    calls: list[tuple[int, int]] = []
+    real_batch = epistemic_graph.EpistemicGraphIndex.relation_review_batch
 
-    def counting_page_candidates(vault_root, page, *, limit_per_page):
-        calls.append(page.rel_path)
-        return real_page_candidates(vault_root, page, limit_per_page=limit_per_page)
+    def counting_batch(self, *, limit_pages, limit_per_page):
+        calls.append((limit_pages, limit_per_page))
+        return real_batch(
+            self, limit_pages=limit_pages, limit_per_page=limit_per_page
+        )
 
-    monkeypatch.setattr(relation_queue, "_page_candidates", counting_page_candidates)
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "relation_review_batch",
+        counting_batch,
+    )
 
     capped = relation_queue.build_queue(tmp_path, limit_pages=1)
 
     assert capped["pages_shown"] == 1
-    # The defect: this call would equal 4 (every eligible page) before the fix.
-    assert len(calls) < 4, f"candidate generation ran for {calls}, not just the capped prefix"
-    assert capped["pages_scanned"] == len(calls)
+    assert calls == [(1, relation_queue._DEFAULT_LIMIT_PER_PAGE)]
     # Honest capped-surfacing signal: we stopped before the corpus was fully
     # scanned, so totals beyond the shown prefix are explicitly NOT claimed.
     assert capped["pages_truncated"] is True
@@ -185,51 +188,37 @@ def test_cap_stops_candidate_generation_early_and_reports_honestly(
     assert capped["coverage"]["relation_scan_complete"] is False
 
 
-def test_dismissed_candidate_resurfaces_when_evidence_changes_without_source_edit(
+def test_explicit_page_suggestions_keep_embedding_discovery_outside_batch_queue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Some candidate methods (shared_sources, embedding_proximity) derive
-    # evidence from ANOTHER page or the corpus index, not from the "from"
-    # page's own content. If the fingerprint only folds in the source page's
-    # signal_version (as review_state.fingerprint does whenever meta.signal_
-    # version is supplied — it then ignores `detail` entirely), an evidence
-    # change driven by something other than an edit to the source page keeps
-    # the same fingerprint, and a stale dismissal never expires.
-    _write_page(tmp_path, "alpha", "See [[Knowledge Base/Notes/Insights/beta]].")
+    alpha = _write_page(tmp_path, "alpha", "An embedding-shaped source.")
     _write_page(tmp_path, "beta", "A measured fact.")
-    evidence_holder = {"cosine": 0.42}
-    real_page_candidates = relation_queue._page_candidates
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
 
-    def fake_page_candidates(vault_root, page, *, limit_per_page):
-        if not page.rel_path.endswith("alpha.md"):
-            return real_page_candidates(vault_root, page, limit_per_page=limit_per_page)
+    def fake_embedding(_vault_root, page):
+        if page.rel_path != alpha.relative_to(tmp_path).as_posix():
+            return []
         return [
             {
                 "from": page.rel_path,
                 "to": "Knowledge Base/Notes/Insights/beta.md",
                 "relation_type": "relates_to",
                 "method": "embedding_proximity",
-                "evidence": dict(evidence_holder),
+                "evidence": {"cosine": 0.91},
             }
         ]
 
-    monkeypatch.setattr(relation_queue, "_page_candidates", fake_page_candidates)
-
-    first = relation_queue.build_queue(tmp_path)
-    item = next(it for it in _all_items(first) if it["from"].endswith("alpha.md"))
-    relation_queue.triage(tmp_path, ref=item["ref"], action="dismiss")
-    still_dismissed = relation_queue.build_queue(tmp_path)
-    assert item["ref"] not in {it["ref"] for it in _all_items(still_dismissed)}
-
-    # The evidence changes (e.g. corpus-wide embedding drift from an edit to
-    # SOME OTHER page) — alpha.md itself is untouched on disk.
-    evidence_holder["cosine"] = 0.91
-    resurfaced = relation_queue.build_queue(tmp_path)
-    resurfaced_item = next(
-        it for it in _all_items(resurfaced) if it["from"].endswith("alpha.md")
+    monkeypatch.setattr(
+        epistemic_graph, "_embedding_proximity_candidates", fake_embedding
     )
-    assert resurfaced_item["fingerprint"] != item["fingerprint"]
-    assert resurfaced_item["ref"] in {it["ref"] for it in _all_items(resurfaced)}
+    explicit = epistemic_graph.suggest_relations(
+        tmp_path, path=alpha.relative_to(tmp_path).as_posix()
+    )
+    assert any(item["method"] == "embedding_proximity" for item in explicit["candidates"])
+    assert not any(
+        item["method"] == "embedding_proximity"
+        for item in _all_items(relation_queue.build_queue(tmp_path))
+    )
 
 
 def test_accept_refuses_when_target_deleted_between_read_and_accept(
@@ -256,6 +245,7 @@ def test_accept_refuses_when_target_deleted_between_read_and_accept(
         "# Ephemeral source\n\nWill be deleted before accept.\n",
         encoding="utf-8",
     )
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
 
     result = relation_queue.build_queue(tmp_path)
     group = next(g for g in result["groups"] if g["path"].endswith("epsilon.md"))
@@ -271,6 +261,7 @@ def test_accept_refuses_when_target_deleted_between_read_and_accept(
         relation_queue.accept(
             tmp_path,
             ref=item["ref"],
+            source_path=item["source_path"],
             expected_hash=group["content_hash"],
             why="Accepted reviewed relation",
             expected_fingerprint=item["fingerprint"],

@@ -46,9 +46,18 @@ Planning and Records use separate semantic profiles on one structured-collection
 substrate. Planning owns durable intent and prioritisation. Records do not infer
 goals, completion, medical conclusions, or personal judgments. A collection may
 hold opaque links between a plan and a bounded Records query, but does not resolve
-or duplicate the other side. For software work, OpenSpec and the repository own
-accepted change contracts and execution truth; git, specs, tests, and code remain
-the authority.
+or duplicate the other side. A resolved workflow contract may declare a companion
+owner for execution artifacts; without one, Planning works standalone. Companion
+references remain opaque, and governance, tool availability, and external
+permissions remain separate from the declaration.
+
+Before proactive Planning or Records capture, resolve the current workflow
+posture when the workflow route is available, using explicit known-absent scope
+values where applicable. Its capture posture is capped by the active prominence
+level. Inspect the relevant Planning collection before writing: update a matching
+item before creating another. Records are observations, not a transition engine:
+only an explicit user change of intent may make a guarded Planning transition;
+an outcome under a propose-after-outcome posture may only propose that change.
 
 ## Proactive engagement
 
@@ -124,19 +133,16 @@ is made**, or **an observed outcome or event is reported** — capture it:
   **failure** note. A one-off with nothing reusable stays unwritten.
 - A **stated intent or commitment** is a landing too: the user says what they
   will do, commits to a batch or workstream, sequences work ("the next one",
-  "the others next time"), or re-prioritises. Route it to Planning —
-  `plan_memory(action="add")` into the inbox state, or `triage`/`update` on an
-  item that already exists.
+  "the others next time"), or re-prioritises. Resolve posture first, inspect
+  Planning, then update a matching item before creating an inbox item.
 - An **observed outcome or event** is the mirror class: the conversation reports
   that something happened, was produced, measured, delivered, approved,
   published, or failed. Route it to Records — `record_memory(action="append")`
   into the one compatible collection.
-- **Pairing rule.** An observed outcome that lands on an open committed Planning
-  item is *one landing with two consequences*: append the record first (it is the
-  canonical observation), then transition the item (status, and lifecycle where
-  the collection's convention archives completed work). Do both together and
-  report them once, in the user's own words, citing the collection the way recall
-  cites a page. A **tentative** claim ("probably posted, not sure") is never
+- **Pairing rule.** Append an observed outcome to Records first; it is the
+  canonical observation. It never changes Planning automatically. An explicit
+  user intent may request a guarded transition; otherwise a
+  propose-after-outcome posture may only propose one. A **tentative** claim ("probably posted, not sure") is never
   written as an event — say so in a note field if the manifest offers one — and
   elapsed time is never an outcome.
 - Pause and ask only when type or scope is genuinely ambiguous (research vs.
@@ -148,6 +154,65 @@ landing, not during the flight.
 
 Do not wait to be asked. "Did you save that?" arriving after a result already
 landed is the failure, not the prompt.
+
+## What Exomem does on its own
+
+Prominence says how much Exomem speaks up. The **delegation envelope** says what
+it may do on its own, per kind of action. `bootstrap()` reports the active one
+under `engagement.envelope`; read it there rather than assuming, because a user
+can move a class below its ceiling and the served envelope is the only place
+that shows it.
+
+Each action class carries a hard **ceiling** — product law. No prominence level,
+override or adaptation authorizes behaviour above it. Below the ceiling the
+class carries a **disposition**, either derived from the prominence level, fixed,
+or explicitly overridden by the user.
+
+| Action class | Ceiling | What it covers |
+|---|---|---|
+| `hygiene_writes` | silent | index, log and back-reference upkeep riding a governed write |
+| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself |
+| `link_acceptance` | confirm | accepting a suggested relation |
+| `structural_suggestions` | advisory | structural advice on any channel — surface only |
+| `restructure_execution` | confirm-required | restructure application, supersession commit, entity creation, deletion |
+| `disclosure` | governed by the governance plane | no disposition; not envelope-configurable |
+
+**The decider protocol**, for every action you are about to take:
+
+1. **Name the action class.** An action that fits none of them has no envelope
+   cell and therefore no authority — propose it instead.
+2. **Check the ceiling.** An intent above it becomes a proposal, never an act.
+3. **Check the disposition.** `off`: do not initiate — an explicit request from
+   the user is never blocked. `advisory`: surface it in the user's own language
+   and stop. `silent`: act, narrating as the prominence contract says.
+   `confirm` / `confirm-shortcut`: obtain the confirmation first; a
+   confirm-shortcut is an inline one-action approval of that one named item, so
+   the confirmation step is never skipped.
+4. **Record the outcome through triage**, so the decision is durable and the
+   signal family is countable.
+
+Confirm-required binds at three tiers: the served envelope marks the class, you
+obtain the confirmation in the conversation, and the server-side gates still
+apply — deletion needs its explicit confirm, and the adoption apply surface
+commits only a plan that was previewed. Supersession and entity creation have no
+server-side gate today; that is named future work, not an implied gate, so the
+confirmation is yours to obtain.
+
+**Standing delegation does not exist in v1.** "Always allow this" or "do this
+kind of thing from now on" for restructure execution is refused by name: it
+would be an envelope cell above the current ceiling, and only a deliberate
+founder ratification may ever create one. Say that, rather than improvising
+either a refusal or a consent.
+
+When the user asks to stop hearing about a KIND of suggestion, that is a signal
+family rather than an envelope class: quiet the family through
+`triage_memory(ref="exomem://review/family/<family>", action="quiet",
+why="<code>: ...")` rather than lowering prominence, which silences everything.
+`review_memory(mode="dispositions")` lists the registered family vocabulary
+alongside the envelope block and what is currently quiet and why.
+
+Set or reset a served envelope class through the same triage surface:
+`triage_memory(ref="exomem://envelope/<action-class>", action="<disposition>|reset")`.
 
 ## Agent write loop
 
@@ -655,8 +720,8 @@ reference for the canonical operation leaves that product commands route to.
 - topic maps to a project/domain/entity, or "what did I conclude about X" -> proactive **ask_memory** first, fold the hits into the answer
 - a decision is made or a problem just got solved -> stepping-stone: capture via **capture_source**/**remember**, then report the path
 - a method was run and the user says how it turned out -> stepping-stone: capture the method, the adjustment and the outcome, then report the path
-- the user states an intent or commits to work -> stepping-stone: **plan_memory** (`add` into the inbox, or `triage`/`update` an existing item)
-- the user reports that something happened, was produced, delivered, approved, published or failed -> stepping-stone: **record_memory** (`append` into the one compatible collection); when it lands on an open committed plan item, do the Planning transition in the same turn and report both once
+- the user states an intent or commits to work -> resolve workflow posture, inspect Planning, then update an existing matching item before creating an inbox item
+- the user reports that something happened, was produced, delivered, approved, published or failed -> resolve workflow posture and append a Record to one compatible collection; never transition Planning automatically
 
 When you say something oblique like "interesting, save it," default to
 **capture_source** and ask whether to compile only if there is a durable
@@ -833,8 +898,9 @@ data files aren't `find`-searchable. To make a dataset findable, write a
 `query_dataset(aggregate="profile")` emits a ready-to-write card; pull exact rows
 from the `data_file` with `query_dataset`.
 
-Vector embeddings live in a per-machine sidecar at
-`<vault>/Knowledge Base/.embeddings.sqlite` (a dotfile that file-sync tools like Obsidian Sync ignore).
+Vector embeddings live in a per-machine sidecar under the configured external
+state root (`EXOMEM_STATE_ROOT`, or the platform default), keyed by vault identity.
+The machine-local sidecar stays outside synced vault content.
 Writers refresh it incrementally after every atomic batch. To bootstrap or after
 drift, call `audit_fix(rebuild_embeddings=true)`.
 
@@ -1095,12 +1161,16 @@ not yet count as a graph edge, and does not connect the page. That is deliberate
 the label stays visible as review debt instead of being silently downgraded to a
 generic link.
 
-So the vocabulary is extensible, not fixed. When a label recurs and earns its
-place, promote it: `schema_memory(subject="relations", operation="infer")` to see
-what recurs, then `save=true` (with `expected_hash` when overwriting) to register
-it for the vault. Registered labels immediately become real typed edges everywhere
-— gate, graph, and review queues. Prefer an existing registered relation when one
-genuinely fits; promote when none does, rather than forcing a poor match.
+So the vocabulary is extensible, not fixed. Resolve before authoring with
+`connect_memory(operation="resolve-relation")`, and reuse a specific truthful
+registered relation when one fits. `relates_to` is honest only for a real generic
+connection; no edge is better than invented meaning. For a durable recurring
+distinction, use `schema_memory(subject="relations", operation="propose-relation")`,
+review the complete delta and duplicate evidence, then persist that exact delta
+with `operation="save-relations"`, its `expected_hash`, and `why`. Meaning is
+immutable: corrections create a new canonical key and deprecate the old one.
+Registered labels become real typed edges everywhere — gate, graph, and review
+queues — while clean aliases remain the authoring labels.
 
 **The writer normalizes on your behalf.** Exomem's writers run every wikilink
 through `vault.normalize_wikilink()` before writing — bare names, KB-relative

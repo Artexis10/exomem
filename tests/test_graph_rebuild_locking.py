@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import graph_sync
+from exomem import epistemic_graph, graph_sync
 from exomem.cli_ops import OpError
 from exomem.writer_lease import LeaseConfig, LeaseManager
 
@@ -188,7 +188,7 @@ def test_explicit_temp_sweep_uses_the_bound_runtime_root(
     manager_root = tmp_path / "manager-state"
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(ambient_root))
     vault_root = tmp_path / "vault"
-    live = vault_root / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(vault_root)
     live.parent.mkdir(parents=True)
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint())
     temporary.write_bytes(b"private")
@@ -456,7 +456,7 @@ def test_full_rebuild_constructor_failure_releases_owned_resources(
 
 
 def test_temp_sweep_never_removes_an_in_process_registered_temp(tmp_path: Path) -> None:
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint())
     temporary.write_bytes(b"private")
@@ -585,6 +585,10 @@ def test_graph_swap_waits_for_a_real_lease_manager_writer(
     )
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
     index = epistemic_graph.EpistemicGraphIndex(vault_root)
+    # This test targets the private build/final sidecar swap. Establish its
+    # recall baseline first: cold registry publication itself now correctly
+    # waits for a writer's canonical-bytes/freshness-event boundary.
+    index._reconcile_recall_publication()
     writer_entered = threading.Event()
     release_writer = threading.Event()
     private_build_finished = threading.Event()

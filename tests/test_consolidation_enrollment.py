@@ -399,9 +399,11 @@ def test_hosted_init_enrolls_while_lifetime_lock_is_held(
     assert observed
 
 
+@pytest.mark.parametrize("through_operator", [False, True])
 def test_hosted_init_helper_publishes_identity_and_revision_zero(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    through_operator: bool,
 ) -> None:
     from exomem import hosted_runtime
     from exomem.governance import (
@@ -465,7 +467,38 @@ def test_hosted_init_helper_publishes_identity_and_revision_zero(
         lambda _root, *, now: custody,
     )
 
-    hosted_runtime._enroll_initialized_hosted_cell(binding, now=now)
+    if through_operator:
+        monkeypatch.delenv("EXOMEM_WRITER_LEASE_STATE_DIR", raising=False)
+        writer_lease.reset_managers_for_tests()
+        monkeypatch.setattr(
+            Path, "home",
+            lambda: pytest.fail("Hosted initialization must not use ambient home state"),
+        )
+        monkeypatch.setattr(
+            hosted_runtime, "initialize_hosted_cell_v2",
+            lambda *_args, **_kwargs: SimpleNamespace(as_operator_data=lambda: {}),
+        )
+        monkeypatch.setattr(hosted_runtime, "_prepare_hosted_enrollment_custody", lambda: None)
+        monkeypatch.setattr(hosted_runtime.time, "time", lambda: now)
+        code, _data = hosted_runtime.execute_hosted_init_v2({
+            "request_id": "123e4567-e89b-42d3-a456-426614174000",
+            "operation_id": "provision-enrollment-state",
+            "cell_id": binding.cell_id,
+            "vault_id": binding.vault_id,
+            "vault_root": str(binding.vault_root),
+            "state_root": str(binding.state_root),
+            "log_root": str(binding.log_root),
+            "runtime_uid": binding.runtime_uid,
+            "runtime_gid": binding.runtime_gid,
+            "expected_release": hosted_runtime.__version__,
+            "expected_protocol": hosted_runtime.HOSTED_PROTOCOL_VERSION,
+            "active_credential_version": "credential-v1",
+        })
+        assert code == "HOSTED_CELL_INITIALIZED"
+        assert "EXOMEM_WRITER_LEASE_STATE_DIR" not in os.environ
+        monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(binding.state_root))
+    else:
+        hosted_runtime._enroll_initialized_hosted_cell(binding, now=now)
 
     identity = consolidation_identity.load_hosted_identity(
         binding,
@@ -636,6 +669,48 @@ def test_legacy_direct_cli_registers_before_vault_work(
     assert cli_main.main(
         ["backfill-media", "--vault", str(vault_root), "--dry-run"]
     ) == 0
+    assert observed
+
+
+@pytest.mark.parametrize("inherited_vault", [False, True])
+def test_doctor_retains_the_vault_selected_after_loading_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolated_writer_state: Path,
+    inherited_vault: bool,
+) -> None:
+    from exomem import doctor, graph_sync
+    from exomem.governance import consolidation_enrollment
+
+    vault_root = tmp_path / "selected-vault"
+    vault_root.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "EXOMEM_VAULT_PATH", str(tmp_path / "old-vault") if inherited_vault else "",
+    )
+    (tmp_path / ".env").write_text(
+        f'EXOMEM_VAULT_PATH="{vault_root.as_posix()}"\n', encoding="utf-8",
+    )
+    observed = False
+
+    def run_doctor(**_kwargs):
+        nonlocal observed
+        assert os.environ["EXOMEM_VAULT_PATH"] == str(vault_root)
+        registry = consolidation_enrollment.LocalRuntimePresenceRegistry(
+            vault_root, state_root=_isolated_writer_state,
+        )
+        with pytest.raises(
+            consolidation_enrollment.ConsolidationEnrollmentUnavailable,
+            match="^CONSOLIDATION_ENROLLMENT_BUSY$",
+        ):
+            with registry.offline_enrollment(timeout_seconds=0):
+                pass
+        observed = True
+        return SimpleNamespace(success=True, as_dict=lambda: {})
+
+    monkeypatch.setattr(doctor, "doctor", run_doctor)
+    monkeypatch.setattr(graph_sync, "drain_active_rebuilds", lambda: True)
+    assert cli_main.main(["doctor", "--json"]) == 0
     assert observed
 
 

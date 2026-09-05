@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # exomem — Docker
 
 The fastest way to try exomem with Claude Code: no `uv`, no Python, no clone.
