@@ -1706,7 +1706,7 @@ def test_rebuild_publication_hold_runs_no_disk_or_sqlite_work(
     freshness.seed(vault, "vault", [(str(note), freshness.stat_signature(note))])
     index = epistemic_graph.EpistemicGraphIndex(vault)
     state_root = tmp_path / "state"
-    state_root.mkdir()
+    state_root.mkdir(mode=0o700)
     holding = False
 
     class Coordinator:

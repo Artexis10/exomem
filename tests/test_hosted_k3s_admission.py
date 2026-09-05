@@ -762,6 +762,23 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
             },
         },
     }
+    # Type-check status belongs to a separate controller; it does not prove
+    # that admission has observed the binding. Probe without creating anything
+    # until this exact policy is enforcing, then exercise the real CREATE below.
+    for _ in range(30):
+        probe = _kubectl(
+            k3s,
+            ["apply", "--dry-run=server", "--filename=-"],
+            documents=[insecure_namespace],
+            check=False,
+        )
+        if probe.returncode != 0:
+            assert "exomem-tenant-namespace-contract" in probe.stderr, probe.stderr
+            assert "restricted-v1.35 tenant namespace contract" in probe.stderr, probe.stderr
+            break
+        time.sleep(1)
+    else:
+        raise AssertionError("K3s did not enforce the tenant namespace contract")
     insecure_create = _kubectl(
         k3s,
         ["apply", "--filename=-"],

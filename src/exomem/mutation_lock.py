@@ -1869,16 +1869,18 @@ class VaultMutationCoordinator:
     ) -> Iterator[None]:
         """Hold both the local and OS mutation guards for the bounded interval.
 
-        Synthetic reserved-state locks may omit the diagnostic holder sidecar:
+        Synthetic reserved-state and runtime-presence locks may omit the holder sidecar:
         their high-frequency filesystem-identity coordination needs the OS lock,
         not a durable attribution record for every short hold. Command and
         lifecycle mutation boundaries remain attributable.
         """
         if type(publish_holder_metadata) is not bool:
             raise TypeError("holder metadata publication flag must be boolean")
-        if not publish_holder_metadata and holder_kind != "reserved-state":
+        if not publish_holder_metadata and holder_kind not in {
+            "reserved-state", "runtime-presence",
+        }:
             raise ValueError(
-                "metadata-free holds are limited to reserved-state coordination"
+                "metadata-free holds are limited to reserved-state or runtime-presence coordination"
             )
         timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         if timeout < 0:
@@ -2422,13 +2424,19 @@ def _snapshot_state(
 
 
 def active_mutation_snapshot() -> dict[str, object]:
-    """Return the oldest process-local holder without exposing vault identity."""
+    """Return the oldest process-local mutation, excluding runtime presence.
+
+    A presence slot prevents offline enrollment while a runtime is alive; it
+    does not hold that vault's mutation boundary. Its OS lock remains visible
+    to the enrollment coordinator through the slot's own snapshot.
+    """
     with _LOCAL_STATES_GUARD:
         states = tuple(_LOCAL_STATES.values())
     held = [
         snapshot
         for state in states
         if (snapshot := _snapshot_state(state, emit_warning=True))["state"] == "held"
+        and snapshot["holder_kind"] != "runtime-presence"
     ]
     if not held:
         return {"state": "free"}

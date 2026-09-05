@@ -108,7 +108,7 @@ class LocalRuntimePresenceRegistry:
         return coordinator.hold(
             timeout_seconds=timeout_seconds,
             operation="consolidation-presence",
-            holder_kind="reserved-state",
+            holder_kind="runtime-presence",
             publish_holder_metadata=False,
         )
 

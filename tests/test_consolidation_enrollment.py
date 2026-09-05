@@ -80,6 +80,41 @@ def test_local_offline_enrollment_refuses_live_presence_then_succeeds(
         pass
 
 
+def test_runtime_presence_does_not_report_a_vault_mutation(
+    tmp_path: Path,
+    _isolated_writer_state: Path,
+) -> None:
+    from exomem.governance import consolidation_enrollment
+    from exomem.mutation_lock import (
+        VaultMutationCoordinator,
+        active_mutation_snapshot,
+        process_local_mutation_boundary,
+    )
+
+    vault = tmp_path / "vault"
+    registry = consolidation_enrollment.LocalRuntimePresenceRegistry(
+        vault, state_root=_isolated_writer_state, slots=2,
+    )
+    mutation = VaultMutationCoordinator(_isolated_writer_state, vault)
+    with registry.runtime_presence():
+        assert active_mutation_snapshot() == {"state": "free"}
+        assert process_local_mutation_boundary() == {
+            "state": "unknown", "reason": "process_local_only",
+        }
+        assert mutation.snapshot()["state"] == "free"
+        with mutation.hold(
+            request_id="actual-mutation", operation="edit_memory", holder_kind="command",
+        ):
+            assert active_mutation_snapshot()["request_id"] == "actual-mutation"
+        assert active_mutation_snapshot() == {"state": "free"}
+        with pytest.raises(
+            consolidation_enrollment.ConsolidationEnrollmentUnavailable,
+            match="^CONSOLIDATION_ENROLLMENT_BUSY$",
+        ):
+            with registry.offline_enrollment(timeout_seconds=0):
+                pytest.fail("diagnostic classification must not weaken exclusion")
+
+
 def test_local_offline_gate_blocks_new_runtime_registration(
     tmp_path: Path,
     _isolated_writer_state: Path,
