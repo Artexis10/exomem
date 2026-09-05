@@ -398,6 +398,8 @@ def _observe_publication_intent(
                 if watcher is not None
                 else None
             )
+            start_disposition = intent.disposition
+            start_phase = intent.phase
             intent.inflight += 1
         if notifications:
             _notify_publication_observers(notifications, intent, intent.disposition)
@@ -423,6 +425,18 @@ def _observe_publication_intent(
             and proof[0] == intent.before_content_hash
             and proof[2] == intent.before_size
         )
+        if (
+            not matches_after
+            and proof is not None
+            and (disposition != start_disposition or phase != start_phase)
+            and not fenced
+            and not changed
+            and attempt == 0
+        ):
+            # A descriptor proof that crossed a publication boundary cannot
+            # authorize BEFORE bytes. Re-read once; only exact current AFTER
+            # bytes remain admissible after that boundary.
+            continue
         if not (matches_before or matches_after):
             return "external", intent
         if disposition == "active":

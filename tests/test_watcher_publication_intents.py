@@ -175,10 +175,17 @@ def test_late_after_proof_remains_held_through_installation(
     entered = threading.Event()
     release = threading.Event()
     real_digest = file_watcher._bounded_descriptor_digest
+    old_proof = real_digest(target, None)
+    assert old_proof is not None
+    calls = 0
 
     def delayed_digest(path: Path, size: int | None):
+        nonlocal calls
+        calls += 1
         entered.set()
         assert release.wait(timeout=2.0)
+        if calls == 1:
+            return old_proof
         return real_digest(path, size)
 
     monkeypatch.setattr(file_watcher, "_bounded_descriptor_digest", delayed_digest)
@@ -192,6 +199,7 @@ def test_late_after_proof_remains_held_through_installation(
     event.join(timeout=2.0)
 
     assert not event.is_alive()
+    assert calls == 2
     assert freshness.external_pending(vault) is False
     assert watcher._pending_publication_intents[target] is intent
 
