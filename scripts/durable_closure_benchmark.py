@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime as dt
+import hashlib
 import json
 import os
 import shutil
@@ -34,6 +36,81 @@ REQUIRED_PUBLIC_TOOLS = (
 )
 MODEL_FREE_PROFILE = "model-free"
 REAL_EXTRACTION_PROFILE = "real-extraction"
+
+
+def load_artifact_manifest(path: Path) -> list[dict[str, str]]:
+    """Validate the operator-provided public file handles before timing."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("artifact manifest is unreadable") from error
+    items = payload.get("artifacts") if isinstance(payload, Mapping) else None
+    if not isinstance(items, list) or len(items) != 3:
+        raise ValueError("artifact manifest must contain exactly one PDF and two images")
+    normalized: list[dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            raise ValueError("artifact manifest item is invalid")
+        entry = {key: str(item.get(key) or "") for key in ("file_id", "download_url", "mime_type", "file_name", "sha256")}
+        if item.get("expected_text") is not None:
+            entry["expected_text"] = str(item["expected_text"])
+        if not all(entry.values()) or not entry["download_url"].startswith("https://"):
+            raise ValueError("artifact handles require non-empty HTTPS URLs and metadata")
+        if len(entry["sha256"]) != 64 or any(char not in "0123456789abcdef" for char in entry["sha256"].lower()):
+            raise ValueError("artifact handle sha256 is invalid")
+        normalized.append(entry)
+    if sum(item["mime_type"] == "application/pdf" for item in normalized) != 1 or sum(item["mime_type"].startswith("image/") for item in normalized) != 2:
+        raise ValueError("artifact manifest must contain one PDF and two images")
+    return normalized
+
+
+def workflow_status(*, core_passed: bool, media_status: str) -> str:
+    """Do not promote a partial media workflow to an acceptance pass."""
+    if not core_passed:
+        return "fail"
+    if media_status != "ready":
+        return "blocked"
+    return "pass"
+
+
+def validated_evidence_paths(
+    artifacts: Sequence[Mapping[str, Any]], files: Sequence[Mapping[str, Any]]
+) -> list[str] | None:
+    """Return citeable paths only for the exact requested stored bytes."""
+    stored = {str(item.get("file_id") or ""): item for item in files}
+    paths: list[str] = []
+    for artifact in artifacts:
+        result = stored.get(str(artifact.get("file_id") or ""))
+        if not isinstance(result, Mapping) or result.get("outcome") != "stored":
+            return None
+        if result.get("hash") != artifact.get("sha256") or result.get("hash_algorithm", "sha256") != "sha256":
+            return None
+        path = result.get("stored_path")
+        if not isinstance(path, str) or not path:
+            return None
+        paths.append(path)
+    return paths if len(paths) == len(artifacts) else None
+
+
+def extraction_proof(
+    artifacts: Sequence[Mapping[str, Any]], reads: Sequence[Mapping[str, Any]]
+) -> dict[str, Any] | None:
+    """Accept completed extraction only when every expected unique text is public."""
+    if len(artifacts) != len(reads):
+        return None
+    expected = [str(item.get("expected_text") or "").strip() for item in artifacts]
+    if len(expected) != 3 or len(set(expected)) != 3 or any(not item for item in expected):
+        return None
+    engines: list[str] = []
+    for marker, read in zip(expected, reads, strict=True):
+        frontmatter = read.get("frontmatter")
+        engine = frontmatter.get("extracted_by") if isinstance(frontmatter, Mapping) else None
+        if not isinstance(engine, str) or not engine.strip() or engine.lower() in {"pending", "unavailable"}:
+            return None
+        if not _contains_marker(read.get("body"), marker):
+            return None
+        engines.append(engine)
+    return {"engine_versions": sorted(set(engines)), "expected_text_verified": expected}
 
 
 def workflow_plan(variant: str) -> list[dict[str, Any]]:
@@ -160,16 +237,43 @@ def summarize_ledger_calls(calls: Sequence[Mapping[str, Any]]) -> dict[str, floa
     }
 
 
+def ledger_intervals(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, float]]:
+    """Derive occupied server intervals from ledger completion UTC and total time."""
+    intervals: list[dict[str, float]] = []
+    for row in rows:
+        timestamp = row.get("ts_utc")
+        total = row.get("total_ms")
+        if not isinstance(timestamp, str) or not isinstance(total, (int, float)) or total < 0:
+            raise ValueError("ledger row has no usable completion timestamp and total duration")
+        try:
+            ended = dt.datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp() * 1000.0
+        except ValueError as error:
+            raise ValueError("ledger row timestamp is malformed") from error
+        intervals.append({"started_ms": ended - float(total), "ended_ms": ended})
+    return intervals
+
+
+def lifecycle_timings(*, workflow_started: float, closure_finished: float, shutdown_finished: float) -> dict[str, float]:
+    """Keep public-workflow wall time distinct from transport teardown."""
+    return {
+        "workflow_wall_ms": (closure_finished - workflow_started) * 1000.0,
+        "server_shutdown_ms": (shutdown_finished - closure_finished) * 1000.0,
+    }
+
+
 def attach_ledger_measurements(
     calls: Sequence[Mapping[str, Any]], ledger_rows: Sequence[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
     """Join ordered public calls to their same-process ledger rows conservatively.
 
-    The ledger records no client monotonic timestamps, so this adds per-call
-    server durations but leaves an interval explicitly null.  An unexpected
-    tool ordering is unmeasured rather than guessed from a similarly named row.
+    The ledger completion timestamp plus total duration supplies an occupied
+    server interval. An unexpected count or tool ordering invalidates the
+    measurement rather than guessing from a similarly named row.
     """
     joined: list[dict[str, Any]] = []
+    if len(calls) != len(ledger_rows):
+        raise ValueError("ledger row count does not match public call count")
+    intervals = ledger_intervals(ledger_rows)
     row_index = 0
     for call in calls:
         result = dict(call)
@@ -180,7 +284,10 @@ def attach_ledger_measurements(
             row = ledger_rows[row_index]
             result["server_duration_ms"] = float(row["duration_ms"]) if row.get("duration_ms") is not None else None
             result["server_total_ms"] = float(row["total_ms"]) if row.get("total_ms") is not None else None
+            result["server_interval"] = intervals[row_index]
             row_index += 1
+        else:
+            raise ValueError("ledger tool order does not match public call order")
         joined.append(result)
     return joined
 
@@ -217,6 +324,66 @@ def benchmark_environment(state: Path, vault: Path) -> dict[str, str]:
     return env
 
 
+def install_subprocess_instrumentation(state: Path) -> Path:
+    """Install a child-only import hook that counts actual graph/scanning calls."""
+    directory = state / "instrumentation"
+    directory.mkdir(parents=True, exist_ok=True)
+    hook = directory / "sitecustomize.py"
+    hook.write_text(
+        '''import atexit, json, os
+from pathlib import Path
+
+out = Path(os.environ["DURABLE_CLOSURE_INSTRUMENTATION"])
+data = {"graph_incremental_calls": 0, "graph_rebuild_calls": 0, "source_scan_pages": 0, "source_scan_bytes": 0}
+
+def wrap(module, name, counter):
+    original = getattr(module, name, None)
+    if original is None:
+        return
+    def counted(*args, **kwargs):
+        data[counter] += 1
+        return original(*args, **kwargs)
+    setattr(module, name, counted)
+
+try:
+    from exomem import index_sync, epistemic_graph, find
+    wrap(index_sync, "epistemic_graph_drain_paths", "graph_incremental_calls")
+    wrap(epistemic_graph.EpistemicGraphIndex, "rebuild_all", "graph_rebuild_calls")
+    original_walk = find._walk_md
+    def walk(root):
+        for path in original_walk(root):
+            data["source_scan_pages"] += 1
+            try:
+                data["source_scan_bytes"] += path.stat().st_size
+            except OSError:
+                pass
+            yield path
+    find._walk_md = walk
+except Exception as error:
+    data["instrumentation_error"] = type(error).__name__
+
+@atexit.register
+def save():
+    out.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+''',
+        encoding="utf-8",
+    )
+    return directory
+
+
+def read_instrumentation(state: Path) -> dict[str, Any]:
+    path = state / "instrumentation.json"
+    if not path.is_file():
+        raise RuntimeError("benchmark subprocess did not emit instrumentation")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("benchmark instrumentation is malformed") from error
+    if not isinstance(data, dict) or any(key not in data for key in ("graph_incremental_calls", "graph_rebuild_calls", "source_scan_pages", "source_scan_bytes")):
+        raise RuntimeError("benchmark instrumentation is incomplete")
+    return data
+
+
 def materialize_corpus(vault: Path, *, pages: int) -> dict[str, Any]:
     """Build realistic, deterministic Markdown before timing begins.
 
@@ -229,42 +396,69 @@ def materialize_corpus(vault: Path, *, pages: int) -> dict[str, Any]:
     schema = kb / "_Schema"
     if not schema.exists():
         shutil.copytree(ROOT / "src" / "exomem" / "_scaffold" / "_Schema", schema)
-    tracker = kb / "Notes" / "Operations" / "active-tracker.md"
-    archived = kb / "Notes" / "Operations" / "archived-runbook.md"
-    critique = kb / "Notes" / "Research" / "critique.md"
+    tracker = kb / "Notes" / "Insights" / "active-tracker.md"
+    archived = kb / "Notes" / "Insights" / "archived-runbook.md"
+    critique = kb / "Notes" / "Insights" / "critique.md"
+    stale_relation = kb / "Reference" / "stale-relation.md"
     documents = {
         tracker: (
-            "---\ntype: insight\ntitle: Active tracker\nstatus: active\nupdated: 2026-09-05\n---\n\n"
+            "---\ntype: insight\ntitle: Active tracker\nstatus: active\nupdated: 2026-09-05\n"
+            "exomem_id: 00000000-0000-4000-8000-000000000101\n---\n\n"
             "# Active tracker\n\n## Observations\n- [constraint] Keep workflow evidence durable #benchmark ^tracker\n"
         ),
         archived: (
-            "---\ntype: insight\ntitle: Archived operational note\nstatus: archived\nupdated: 2026-08-01\n---\n\n"
+            "---\ntype: insight\ntitle: Archived operational note\nstatus: archived\nupdated: 2026-08-01\n"
+            "exomem_id: 00000000-0000-4000-8000-000000000102\n---\n\n"
             "# Archived operational note\n\n## Observations\n- [history] Previous recovery sequence is retained #operations ^archived\n"
         ),
         critique: (
-            "---\ntype: insight\ntitle: Workflow critique\nstatus: active\nupdated: 2026-09-04\n---\n\n"
+            "---\ntype: insight\ntitle: Workflow critique\nstatus: active\nupdated: 2026-09-04\n"
+            "exomem_id: 00000000-0000-4000-8000-000000000103\n---\n\n"
             "# Workflow critique\n\n## Observations\n- [finding] Retrieval must survive writes #benchmark ^critique\n"
+        ),
+        stale_relation: (
+            "---\ntype: entity\ntitle: Stale relation fixture\nstatus: active\n---\n\n"
+            "# Stale relation fixture\n\n- supports [[Knowledge Base/Notes/Insights/archived-runbook]]\n"
         ),
     }
     for index in range(max(0, pages - len(documents))):
+        padding = "detail " * (1 + index % 5)
+        related = f"[[Knowledge Base/Notes/Reference/reference-{max(0, index - 1):05d}]]"
         documents[kb / "Notes" / "Reference" / f"reference-{index:05d}.md"] = (
             "---\n"
             f"type: insight\ntitle: Reference {index}\nstatus: active\nupdated: 2026-08-01\n"
             "---\n\n"
-            f"# Reference {index}\n\n## Observations\n- [fact] Heterogeneous reference {index} #benchmark ^ref-{index}\n"
+            f"# Reference {index}\n\n## Observations\n- [fact] {padding.strip()} {index} #benchmark ^ref-{index}\n\n"
+            f"## Links\n- depends on {related}\n"
         )
     total_bytes = 0
+    inventory: list[dict[str, Any]] = []
     for path, content in documents.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8", newline="\n")
-        total_bytes += len(content.encode("utf-8"))
+        encoded = content.encode("utf-8")
+        total_bytes += len(encoded)
+        inventory.append(
+            {
+                "path": path.relative_to(vault).as_posix(),
+                "bytes": len(encoded),
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+            }
+        )
+    inventory.sort(key=lambda item: item["path"])
+    corpus_digest = hashlib.sha256(
+        "".join(f"{item['path']}:{item['sha256']}\n" for item in inventory).encode("utf-8")
+    ).hexdigest()
     return {
         "generator": "durable-closure-markdown-v1",
         "pages": len(documents),
         "bytes": total_bytes,
+        "inventory": inventory,
+        "corpus_sha256": corpus_digest,
         "active_tracker": tracker.relative_to(vault).as_posix(),
         "archived_note": archived.relative_to(vault).as_posix(),
         "critique": critique.relative_to(vault).as_posix(),
+        "stale_relation": stale_relation.relative_to(vault).as_posix(),
         "media_fixture": {
             "pdf": "fixture-required-via-public-handle",
             "images": 2,
@@ -304,6 +498,62 @@ def _result_outcome(payload: Mapping[str, Any]) -> tuple[str, str | None]:
     return "ok", None
 
 
+def _contains_marker(payload: Any, marker: str) -> bool:
+    try:
+        return marker in json.dumps(payload, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return False
+
+
+def _contains_path(payload: Any, path: str) -> bool:
+    if isinstance(payload, Mapping):
+        if payload.get("path") == path or payload.get("parent_path") == path:
+            return True
+        return any(_contains_path(value, path) for value in payload.values())
+    if isinstance(payload, list):
+        return any(_contains_path(value, path) for value in payload)
+    return False
+
+
+def _warming_components(payload: Any) -> list[str]:
+    """Retain disclosed optional warming without manufacturing a default."""
+    found: set[str] = set()
+    if isinstance(payload, Mapping):
+        warming = payload.get("warming")
+        if isinstance(warming, Mapping):
+            components = warming.get("components")
+            if isinstance(components, list):
+                found.update(str(item) for item in components)
+        for value in payload.values():
+            found.update(_warming_components(value))
+    elif isinstance(payload, list):
+        for value in payload:
+            found.update(_warming_components(value))
+    return sorted(found)
+
+
+def _semantic_diagnostics(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    direct = payload.get("semantic")
+    if isinstance(direct, Mapping):
+        return direct
+    diagnostics = payload.get("diagnostics")
+    if isinstance(diagnostics, Mapping) and isinstance(diagnostics.get("semantic"), Mapping):
+        return diagnostics["semantic"]
+    return {}
+
+
+def is_mutation_ack(tool: str, arguments: Mapping[str, Any]) -> bool:
+    """Count only accepted durable mutations, never planning/read previews."""
+    if tool not in {"remember", "observe_memory", "edit_memory", "preserve_artifacts", "process_media"}:
+        return False
+    operation = arguments.get("operation")
+    if arguments.get("validate_only") or (isinstance(operation, str) and operation in {"validate", "status"}):
+        return False
+    if isinstance(operation, Mapping) and operation.get("validate_only"):
+        return False
+    return True
+
+
 async def _call(client: Any, calls: list[dict[str, Any]], tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
     # The raw MCP response is intentional: a public refusal is valid protocol
@@ -312,6 +562,11 @@ async def _call(client: Any, calls: list[dict[str, Any]], tool: str, arguments: 
     ended = time.perf_counter()
     payload = _decode_call(result)
     outcome, code = _result_outcome(payload)
+    request_shape = {
+        key: arguments[key]
+        for key in ("mode", "graph", "rerank", "operation", "validate_only")
+        if key in arguments
+    }
     calls.append(
         {
             "tool": tool,
@@ -320,9 +575,42 @@ async def _call(client: Any, calls: list[dict[str, Any]], tool: str, arguments: 
             "started_ms": (started - calls[0]["_origin"]) * 1000.0 if calls else 0.0,
             "ended_ms": (ended - calls[0]["_origin"]) * 1000.0 if calls else (ended - started) * 1000.0,
             "client_elapsed_ms": (ended - started) * 1000.0,
+            "mutation_ack": is_mutation_ack(tool, arguments),
+            "request_shape": request_shape,
         }
     )
     return payload
+
+
+async def _observe_reviewed(
+    client: Any,
+    calls: list[dict[str, Any]],
+    *,
+    path: str,
+    category: str,
+    content: str,
+    anchor: str,
+    call_tool: Any,
+) -> dict[str, Any]:
+    """Use the product's validate/transition/commit public mutation protocol."""
+    preview = await call_tool(
+        "observe_memory", {"path": path, "operation": "validate", "category": category, "content": content, "id": anchor}
+    )
+    semantic = _semantic_diagnostics(preview)
+    return await call_tool(
+        "observe_memory",
+        {
+            "path": path,
+            "operation": "add",
+            "category": category,
+            "content": content,
+            "id": anchor,
+            "transition_token": semantic.get("transition_token"),
+            "relation_disposition": "reviewed_none",
+            "relation_review_hash": semantic.get("transition_hash"),
+            "relation_review_reason": "No honest relation is added by the isolated benchmark observation.",
+        },
+    )
 
 
 async def _warm_public_recall(client: Any, *, timeout: float) -> None:
@@ -366,16 +654,14 @@ def _read_ledger(path: Path, workflow_started: float) -> list[dict[str, Any]]:
     if not ledger.is_file():
         return []
     rows: list[dict[str, Any]] = []
-    for line in ledger.read_text(encoding="utf-8").splitlines():
+    for line_number, line in enumerate(ledger.read_text(encoding="utf-8").splitlines(), start=1):
         try:
             row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            # Ledger lacks a monotonic client start, so only server sums are
-            # measured here. Interval occupancy remains null unless a trace has
-            # an observed interval.
-            rows.append(row)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"ledger row {line_number} is malformed") from error
+        if not isinstance(row, dict):
+            raise ValueError(f"ledger row {line_number} is not an object")
+        rows.append(row)
     return rows
 
 
@@ -383,8 +669,7 @@ def _ack_percentiles(calls: Sequence[Mapping[str, Any]]) -> dict[str, float | No
     values = sorted(
         float(call["client_elapsed_ms"])
         for call in calls
-        if call.get("tool") in {"remember", "observe_memory", "edit_memory"}
-        and call.get("outcome") == "ok"
+        if call.get("mutation_ack") and call.get("outcome") == "ok"
     )
     if not values:
         return {"p50_ms": None, "p95_ms": None}
@@ -401,13 +686,9 @@ async def run_public_workflow(
     profile: str,
     timeout: float,
     variant: str = "optimized",
+    artifacts_manifest: Path | None = None,
 ) -> dict[str, Any]:
-    """Run the non-media core through one persistent installed stdio MCP session.
-
-    A media-handle adapter is deliberately a separate concern: absent a real
-    HTTPS handle it returns a blocked media row rather than pretending a local
-    fixture file exercised public preservation.
-    """
+    """Run the complete public workflow through one persistent stdio session."""
     from fastmcp import Client
     from fastmcp.client.transports import StdioTransport
 
@@ -417,7 +698,11 @@ async def run_public_workflow(
     state.mkdir(parents=True, exist_ok=True)
     vault.mkdir(parents=True, exist_ok=True)
     corpus = materialize_corpus(vault, pages=pages)
+    artifacts = load_artifact_manifest(artifacts_manifest) if artifacts_manifest else None
     env = benchmark_environment(state, vault)
+    instrumentation_dir = install_subprocess_instrumentation(state)
+    env["DURABLE_CLOSURE_INSTRUMENTATION"] = str(state / "instrumentation.json")
+    env["PYTHONPATH"] = os.pathsep.join((str(instrumentation_dir), env["PYTHONPATH"]))
     if profile == MODEL_FREE_PROFILE:
         env.update({"EXOMEM_DISABLE_MEDIA_EXTRACTION": "1", "EXOMEM_DISABLE_CLIP": "1"})
     transport = StdioTransport(
@@ -430,6 +715,25 @@ async def run_public_workflow(
     )
     calls: list[dict[str, Any]] = []
     workflow_started = time.perf_counter()
+    closure_finished = workflow_started
+    media: dict[str, Any] = {
+        "status": "blocked",
+        "reason": "--artifacts-manifest with public HTTPS file handles is required",
+        "extraction_convergence_ms": None,
+        "engine_versions": None,
+    }
+    marker = ""
+    path = ""
+    remembered: dict[str, Any] = {"success": False}
+    remembered_observation: dict[str, Any] = {"success": False}
+    tracker_observation: dict[str, Any] = {"success": False}
+    critique_observation: dict[str, Any] = {"success": False}
+    tracker_correction: dict[str, Any] = {"success": False}
+    archived_read: dict[str, Any] = {"success": False}
+    direct: dict[str, Any] = {"success": False}
+    tracker_read: dict[str, Any] = {"success": False}
+    stale_relation_read: dict[str, Any] = {"success": False}
+    recall: dict[str, Any] = {"success": False}
     client = Client(transport, timeout=timeout, init_timeout=timeout)
     async with client:
         tools = {tool.name for tool in await client.list_tools()}
@@ -442,24 +746,103 @@ async def run_public_workflow(
         workflow_started = time.perf_counter()
         ledger_before = len(_read_ledger(state / "ledger", workflow_started))
         calls.append({"_origin": workflow_started})
-        await _call(client, calls, "bootstrap", {"profile": "compact"})
         marker = f"durable-closure-{uuid.uuid4().hex}"
+
+        async def workflow_call(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            payload = await _call(client, calls, tool, arguments)
+            if variant == "stress" and calls[-1]["mutation_ack"]:
+                await _call(
+                    client,
+                    calls,
+                    "ask_memory",
+                    {"query": marker, "mode": "hybrid", "graph": True, "rerank": False, "limit": 5},
+                )
+            return payload
+
+        await workflow_call("bootstrap", {"profile": "compact"})
+
+        # Evidence is preserved and queued before any compiled note can cite it.
+        evidence_paths: list[str] = []
+        if artifacts is not None:
+            preserved = await workflow_call(
+                "preserve_artifacts",
+                {
+                    "scope": "durable-closure",
+                    "category": "benchmark-evidence",
+                    "files": [
+                        {key: item[key] for key in ("file_id", "download_url", "mime_type", "file_name")}
+                        for item in artifacts
+                    ],
+                },
+            )
+            files = preserved.get("files") if isinstance(preserved.get("files"), list) else []
+            evidence_paths = validated_evidence_paths(
+                artifacts, [item for item in files if isinstance(item, Mapping)]
+            ) or []
+            hashes_match = len(evidence_paths) == len(artifacts)
+            process_results = [
+                await workflow_call("process_media", {"path": evidence_path, "operation": "process"})
+                for evidence_path in evidence_paths
+                if evidence_path
+            ]
+            process_ok = len(process_results) == 3 and all(result.get("success") is not False for result in process_results)
+            media = {
+                "status": "ready" if hashes_match and len(evidence_paths) == 3 and process_ok else "fail",
+                "fixture_provenance": [{key: item[key] for key in item} for item in artifacts],
+                "preserved_hashes_match": hashes_match,
+                "evidence_paths": evidence_paths,
+                "process_calls": len(process_results),
+                "extraction_convergence_ms": None,
+                "engine_versions": None,
+            }
+            # Model-free only demonstrates custody. A real-extraction run
+            # polls public exact reads until all distinct fixture text and named
+            # engines are observable, otherwise keeps the row explicitly blocked.
+            if profile == REAL_EXTRACTION_PROFILE:
+                sidecar_paths = [
+                    str(result.get("sidecar_path") or "")
+                    for result in process_results
+                    if result.get("success") is not False
+                ]
+                extraction_started = time.perf_counter()
+                proof: dict[str, Any] | None = None
+                while sidecar_paths and time.perf_counter() < extraction_started + timeout:
+                    reads = [
+                        await workflow_call("read_memory", {"path": sidecar_path})
+                        for sidecar_path in sidecar_paths
+                    ]
+                    proof = extraction_proof(artifacts, reads)
+                    if proof is not None:
+                        break
+                    await asyncio.sleep(0.2)
+                if proof is None:
+                    media.update(
+                        {
+                            "status": "blocked",
+                            "reason": "public extraction-content and engine-version verification did not converge",
+                        }
+                    )
+                else:
+                    media.update(
+                        {
+                            "status": "ready",
+                            "extraction_convergence_ms": (time.perf_counter() - extraction_started) * 1000.0,
+                            **proof,
+                        }
+                    )
         remember_arguments = {
             "title": "Durable closure benchmark result",
             "note_type": "insight",
             "content": "## Observations\n\n"
             f"- [finding] {marker} survives the public workflow #benchmark ^durable-closure\n",
             "response_detail": "full",
+            "sources": evidence_paths,
         }
-        validation = await _call(
-            client,
-            calls,
+        validation = await workflow_call(
             "remember",
             {**remember_arguments, "validate_only": True},
         )
-        remembered = await _call(
-            client,
-            calls,
+        remembered = await workflow_call(
             "remember",
             {
                 **remember_arguments,
@@ -472,56 +855,124 @@ async def run_public_workflow(
             },
         )
         path = str(remembered.get("path") or "")
-        if variant == "stress":
-            await _call(
-                client, calls, "ask_memory", {"query": marker, "mode": "keyword", "graph": True, "limit": 5}
-            )
         if path:
-            await _call(
+            remembered_observation = await _observe_reviewed(
                 client,
                 calls,
-                "observe_memory",
-                {"path": path, "category": "evidence", "content": f"{marker} observation", "id": "follow-up"},
+                path=path,
+                category="evidence",
+                content=f"{marker} observation",
+                anchor="follow-up",
+                call_tool=workflow_call,
             )
-            if variant == "stress":
-                await _call(
-                    client, calls, "ask_memory", {"query": marker, "mode": "keyword", "graph": True, "limit": 5}
-                )
-        await _call(client, calls, "ask_memory", {"query": marker, "mode": "keyword", "graph": True, "limit": 5})
-        direct = await _call(client, calls, "read_memory", {"path": path}) if path else {"success": False}
+        else:
+            remembered_observation = {"success": False}
+
+        tracker_path = corpus["active_tracker"]
+        tracker_observation = await _observe_reviewed(
+            client,
+            calls,
+            path=tracker_path,
+            category="action",
+            content=f"{marker} tracker update",
+            anchor="benchmark-tracker",
+            call_tool=workflow_call,
+        )
+        critique_observation = await _observe_reviewed(
+            client,
+            calls,
+            path=corpus["critique"],
+            category="finding",
+            content=f"{marker} critique update",
+            anchor="benchmark-critique",
+            call_tool=workflow_call,
+        )
+        archived_read = await workflow_call("read_memory", {"path": corpus["archived_note"]})
+
+        stale_line = "- supports [[Knowledge Base/Notes/Insights/archived-runbook]]"
+        edit_operation = {"kind": "replace_string", "old_string": stale_line, "new_string": "", "replace_all": False}
+        tracker_correction = await workflow_call(
+            "edit_memory",
+            {
+                "path": corpus["stale_relation"],
+                "why": "correct stale benchmark relation",
+                "operation": edit_operation,
+            },
+        )
+
+        recall = await workflow_call(
+            "ask_memory",
+            {"query": marker, "mode": "hybrid", "graph": True, "rerank": False, "limit": 10},
+        )
+        direct = await workflow_call("read_memory", {"path": path}) if path else {"success": False}
+        tracker_read = await workflow_call("read_memory", {"path": tracker_path})
+        stale_relation_read = await workflow_call("read_memory", {"path": corpus["stale_relation"]})
+
+        closure_finished = time.perf_counter()
+    shutdown_finished = time.perf_counter()
 
     # Drop the private clock anchor before persisting/reporting measurements.
     call_records = calls[1:]
-    final_exact = bool(path and direct and direct.get("success") is not False)
+    required_payloads = (remembered, remembered_observation, tracker_observation, critique_observation, tracker_correction, archived_read)
+    mutation_success = all(payload.get("success") is not False for payload in required_payloads)
+    final_exact = bool(
+        path
+        and mutation_success
+        and direct.get("success") is not False
+        and tracker_read.get("success") is not False
+        and _contains_marker(direct, marker)
+        and _contains_marker(tracker_read, marker)
+        and _contains_path(recall, path)
+        and not _contains_marker(stale_relation_read, stale_line)
+    )
     closure = evaluate_useful_closure(
         calls=call_records,
         final_read_your_write=final_exact,
-        graph_warming_components=(),
+        graph_warming_components=_warming_components(recall),
     )
     ledger_rows = _read_ledger(state / "ledger", workflow_started)[ledger_before:]
     call_records = attach_ledger_measurements(call_records, ledger_rows)
-    ledger_measurements = summarize_ledger_calls(ledger_rows)
+    ledger_measurements = summarize_ledger_calls(
+        [{**row, **interval} for row, interval in zip(ledger_rows, ledger_intervals(ledger_rows), strict=True)]
+    )
+    instrumentation = read_instrumentation(state)
     return {
         "variant": variant,
         "profile": profile,
-        "status": "pass" if closure["passed"] else "fail",
+        "status": workflow_status(core_passed=closure["passed"], media_status=media["status"]),
         "corpus": corpus,
-        "workflow_wall_ms": (time.perf_counter() - workflow_started) * 1000.0,
+        **lifecycle_timings(
+            workflow_started=workflow_started,
+            closure_finished=closure_finished,
+            shutdown_finished=shutdown_finished,
+        ),
         "public_call_count": len(call_records),
         "calls": call_records,
         "write_ack": _ack_percentiles(call_records),
         "useful_closure": closure,
+        "verification": {
+            "direct_marker": _contains_marker(direct, marker),
+            "tracker_marker": _contains_marker(tracker_read, marker),
+            "recall_path": _contains_path(recall, path),
+            "stale_relation_absent": not _contains_marker(stale_relation_read, stale_line),
+            "mutations_succeeded": mutation_success,
+        },
         "ledger": ledger_measurements,
         "connector_overhead_ms": None,
         "connector_overhead_reason": "stdio client wall and server ledger are independently measured but not request-correlated",
-        "graph_invocations": {"incremental": None, "rebuild": None, "reason": "no measured hook installed"},
-        "source_scans": {"pages": None, "bytes": None, "reason": "no measured hook installed"},
-        "media": {
-            "status": "blocked",
-            "reason": "a real HTTPS client-file handle adapter is required; local fixture bytes are not public preservation evidence",
-            "extraction_convergence_ms": None,
-            "engine_versions": None,
+        "graph_invocations": {
+            "incremental": instrumentation["graph_incremental_calls"],
+            "rebuild": instrumentation["graph_rebuild_calls"],
         },
+        "source_scans": {
+            "pages": instrumentation["source_scan_pages"],
+            "bytes": instrumentation["source_scan_bytes"],
+        },
+        "instrumentation": {
+            "method": "child-process sitecustomize wrappers",
+            "error": instrumentation.get("instrumentation_error"),
+        },
+        "media": media,
         "full_convergence_ms": None,
     }
 
@@ -535,11 +986,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--state", type=Path, required=True, help="empty disposable benchmark state root")
     parser.add_argument("--vault", type=Path, required=True, help="empty disposable benchmark vault")
     parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--artifacts-manifest", type=Path, default=None)
     args = parser.parse_args(argv)
-    if args.pages > 50:
-        parser.error("workers may only run <=50 pages; root owns serial large-corpus samples")
     if args.vault.exists() and any(args.vault.iterdir()):
         parser.error("--vault must be empty and disposable")
+    if args.state.exists() and any(args.state.iterdir()):
+        parser.error("--state must be empty and disposable")
     args.state.mkdir(parents=True, exist_ok=True)
     args.vault.mkdir(parents=True, exist_ok=True)
     report = asyncio.run(
@@ -551,10 +1003,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             profile=args.profile,
             timeout=args.timeout,
             variant=args.variant,
+            artifacts_manifest=args.artifacts_manifest,
         )
     )
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0 if report["status"] == "pass" else 1
+    return 0 if report["status"] in {"pass", "blocked"} else 1
 
 
 if __name__ == "__main__":
