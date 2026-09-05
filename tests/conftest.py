@@ -741,6 +741,13 @@ def _isolate_state_root(tmp_path: Path):
         "EXOMEM_WRITER_LEASE_STATE_DIR",
         str(state_root / "writer-lease"),
     )
+    # Pin the runtime principal to the calling token. Without this the suite's
+    # behaviour depends on whether the developer's machine happens to have an
+    # `exomem`/`kb-mcp` service registered: the offline migration seals the state
+    # root to that service's account, which would lock every test — and tmpdir
+    # teardown — out of its own fixture. A test that asserts on cross-principal
+    # behaviour sets this itself (tests/test_cross_principal_state_root.py).
+    private.setenv("EXOMEM_RUNTIME_PRINCIPAL", "current-token")
     writer_lease_module = None
     try:
         try:

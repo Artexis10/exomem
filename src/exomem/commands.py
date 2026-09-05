@@ -7193,6 +7193,54 @@ def op_adoption_studio(
         raise
 
 
+def _assert_state_root_usable(vault_root: Path) -> None:
+    """Refuse an unusable state root before any maintenance work starts.
+
+    Every maintenance mode reads or writes machine-local state, so a root this
+    token cannot work with is fatal to all of them -- the only question is how
+    far in it gets before saying so. `maintain --reconcile --rebuild-graph`
+    under the operator's token against a LocalSystem-owned root took the
+    mutation hold and reached `census_unavailable_graph_lineage` before dying on
+    `[Errno 5] cannot safely open .graph.sqlite-wal`, leaving the operator with
+    a half-run repair and no statement of the actual problem. The structured
+    code is what lets the CLI and the MCP envelope both carry the remediation.
+
+    Both halves refuse, not just "cannot open". A LocalSystem service opens an
+    operator-created root through its own `SY` ACE and only then rejects the
+    trustee set, so gating on openability alone let the SERVICE -- the principal
+    the incident was actually about -- walk straight past this into
+    `ensure_vault_state_dir` and die there with a raw `WindowsRuntimeDaclError`.
+    """
+    from . import state_paths
+    from .cli_ops import OpError
+
+    try:
+        state_paths.assert_state_root_accessible(vault_root)
+    except state_paths.StateRootAccessDenied as error:
+        raise OpError(
+            error.code,
+            str(error),
+            (
+                "Run this as the principal that owns the machine-local state root "
+                "(for a service install, the service account), or re-ACL the root "
+                "with: " + (error.remediation or "")
+            ),
+            details={"state_root": str(error.posture.directory)},
+        ) from error
+    except (OSError, ValueError) as error:
+        # The pre-flight's OWN inspection can fail: a relative or in-vault
+        # `EXOMEM_STATE_ROOT` raises `ValueError` out of `vault_state_dir`, and
+        # an unestablishable token identity raises `OSError`. Letting those
+        # through would have this guard emit exactly the kind of raw error it
+        # exists to replace.
+        raise OpError(
+            "STATE_ROOT_UNREADABLE",
+            f"the machine-local state root could not be inspected: {error}",
+            "Check EXOMEM_STATE_ROOT resolves to an absolute path outside the "
+            "vault, then rerun as the principal that owns the state root.",
+        ) from error
+
+
 def op_maintain_memory(
     vault_root: Path,
     mode: str = "audit",
@@ -7256,6 +7304,7 @@ def op_maintain_memory(
     """
     if rebuild_graph and mode != "reconcile":
         raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
+    _assert_state_root_usable(vault_root)
     if mode == "structured-files":
         if (
             not isinstance(collection, str)

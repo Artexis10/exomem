@@ -3016,7 +3016,16 @@ def _simple_maintain_main(argv: list[str]) -> int:
             )
         except (OSError, RuntimeError, ValueError) as error:
             if args.json:
-                print(json.dumps({"success": False, "error": {"message": str(error)}}))
+                # `upgrade.ps1` consumes this envelope, and a message-only one
+                # cannot be branched on. Errors that carry a stable code emit it.
+                payload: dict[str, object] = {"message": str(error)}
+                code = getattr(error, "code", None)
+                if isinstance(code, str) and code:
+                    payload["code"] = code
+                remediation = getattr(error, "remediation", None)
+                if isinstance(remediation, str) and remediation:
+                    payload["remediation"] = remediation
+                print(json.dumps({"success": False, "error": payload}))
             else:
                 print(f"Error: {error}", file=sys.stderr)
             return 1
