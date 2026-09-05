@@ -732,9 +732,15 @@ class LiveLifecyclePlane:
                     )
                 except MetadataConflict as error:
                     # Prove the refusal really is expiry rather than trusting that
-                    # `_require_fresh` gates nothing else. A future-dated bundle
-                    # also passes the call above and fails this one, and that is
-                    # not elapsed time -- fail closed on anything still in date.
+                    # `_require_fresh` gates nothing else. The control and
+                    # membership windows are tied to identical bounds
+                    # unconditionally (`authorization_membership` requires
+                    # membership.issued_at == control.issued_at and the same for
+                    # expires_at), so the call above can only have failed because
+                    # `current` fell outside one shared window -- either past its
+                    # end, which is age, or before its start, which is not. This
+                    # comparison separates exactly those two, and fails closed on
+                    # anything still in date.
                     if bundle.expires_at > current:
                         raise
                     # The bundle is sound and merely expired. A cell that has never
