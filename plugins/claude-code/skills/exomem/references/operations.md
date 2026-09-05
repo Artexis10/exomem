@@ -641,15 +641,19 @@ profiles through one proposal-first surface.
    CLI/CI outcome but does not block normal writes.
 5. Use `operation="diff"` to compare a saved contract with current corpus
    reality or another named contract.
-6. Use `subject="relations"` to count core, extension, alias, deprecated,
-   out-of-scope, and unregistered typed observations. Core meanings are packaged
-   and universal. A vault extension must be a lowercase namespaced refinement
-   of one core parent with a reviewed description. Inference never supplies
-   missing semantics or saves automatically.
-7. Return a complete reviewed `proposal` with `save=true` to adopt extensions.
-   Alias collisions, incomplete parents/descriptions, stale hashes, invalid
-   scopes, and deletion of observed keys are refused atomically. Deprecate an
-   observed relation with a valid replacement instead of deleting its history.
+6. Before authoring a typed edge, call
+   `connect_memory(operation="resolve-relation")`; reuse a specific truthful
+   registered meaning. Use `relates_to` only for a real generic connection, and
+   prefer no edge to an invented label.
+7. For a durable recurring distinction, call
+   `schema_memory(subject="relations", operation="propose-relation")` with a
+   reviewed parent, description, and direction. Review its full duplicate
+   evidence and delta, then call `operation="save-relations"` with that delta,
+   its `expected_hash`, and `why`. The hash is mandatory. Add aliases rather
+   than removing them; correct meaning through a new canonical key and deprecate
+   the old key with a valid replacement. Explicit `infer` remains the bounded
+   operator census for core, extension, deprecated, scoped, and unregistered
+   observations; it never supplies missing semantics or saves automatically.
 8. Use `subject="traversal-profiles"` for custom read-only graph lenses. A custom
    profile must extend a built-in and may only narrow its bounds. Profiles change
    context selection, never Markdown, graph truth, confidence, or search ranking.

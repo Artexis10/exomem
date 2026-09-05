@@ -19,9 +19,13 @@ pattern note predicted would survive a site-by-site fix.
 
 ## What Changes
 
-- Bound the corpus-context flight join by a caller-side interactive budget rather than
-  by how long the owner's build takes. A waiter that exceeds the bound returns a typed
-  deferred outcome instead of continuing to block.
+- Bound the corpus-context flight join by one fixed 2.0-second caller-side interactive
+  budget rather than by how long the owner's build takes. A waiter that exceeds the
+  bound returns the existing retryable `MUTATION_WARMING` outcome with
+  `committed: false` and `retry_after_ms: 2000` instead of continuing to block.
+- Return immediately when the joined flight is already settled. The zero-work path
+  MUST NOT invoke the timed wait or spend the 2.0-second budget merely to discover
+  completion that is already observable.
 - Keep the bound non-configurable. A knob for raising it is a knob for reintroducing
   the stall; genuine convergence belongs in an explicit opt-in path, not in the default
   interactive budget.
@@ -38,8 +42,10 @@ pattern note predicted would survive a site-by-site fix.
 ### New Capabilities
 
 - `corpus-context-availability`: an interactive caller joining an in-flight corpus-context
-  build must be bounded by its own latency budget, must observe a typed deferred outcome
-  on timeout, and must never have a build error laundered into a deferral.
+  build must be bounded by one fixed 2.0-second caller budget, must return immediately
+  when the flight is already settled, must observe the existing pre-commit
+  `MUTATION_WARMING` outcome only on timeout, and must never have a build error
+  laundered into a deferral.
 
 ### Modified Capabilities
 

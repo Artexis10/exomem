@@ -440,7 +440,15 @@ def selected_pack_state(root: Path | str) -> dict:
         "updated": updated,
         "packs": _pack_summaries(pack_ids),
         "warnings": warnings,
+        "workflow_contract": workflow_contract_projection(),
     }
+
+
+def workflow_contract_projection() -> dict[str, Any]:
+    """Expose the same portable workflow protocol without pack-specific semantics."""
+    from .workflow_contracts import portable_projection
+
+    return portable_projection()
 
 
 def write_selected_packs(

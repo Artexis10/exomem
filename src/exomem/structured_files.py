@@ -22,6 +22,7 @@ from . import (
     vault,
     writer_lease,
 )
+from . import records as record_events
 from . import structured_collections as collections
 
 _MAX_PLAN_ITEMS = 512
@@ -51,6 +52,21 @@ class _Plan:
     final_text: dict[str, str]
     guards: dict[str, vault.PathGuard]
     item_paths: dict[str, str]
+    audit_events: tuple[_RepresentationEvent, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _RepresentationEvent:
+    transition_id: str
+    parent_id: str
+    item_key: str
+    canonical_path: str
+    before_manifest_hash: str
+    after_manifest_hash: str
+    before_item_hash: str
+    after_item_hash: str
+    before_container_hash: str
+    after_container_hash: str
 
 
 def _canonical_hash(value: Any) -> str:
@@ -229,6 +245,142 @@ def _render_presentation(
     return removed, "remove" if removed != text else None
 
 
+def _representation_transition_id(
+    *,
+    source_snapshot: str,
+    collection_id: str,
+    item_key: str,
+    source_path: str,
+    source_hash: str,
+    target_path: str,
+    rendered_hash: str,
+) -> str:
+    payload = {
+        "version": 1,
+        "source_snapshot": source_snapshot,
+        "collection_id": collection_id,
+        "item_key": item_key,
+        "source_path": source_path,
+        "source_hash": source_hash,
+        "target_path": target_path,
+        "rendered_hash": rendered_hash,
+    }
+    return hashlib.sha256(
+        b"exomem-structured-files-audit:v1\0"
+        + json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+
+
+def _items_container_hash(
+    manifest_path: str,
+    manifest_hash: str,
+    inventory: list[tuple[str, str, str]],
+) -> str:
+    pairs = [(manifest_path, manifest_hash)] + [
+        (f"{kind}:{path}", digest) for path, kind, digest in sorted(inventory)
+    ]
+    return _canonical_hash(pairs)
+
+
+def _plan_representation_audit(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    snapshot: record_formats.AdapterSnapshot,
+    collection_records: list[record_formats.Record],
+    item_paths: Mapping[str, str],
+    texts: Mapping[str, str],
+    final_text: dict[str, str],
+    source_snapshot: str,
+) -> tuple[tuple[_RepresentationEvent, ...], dict[str, str]]:
+    affected = [
+        record
+        for record in collection_records
+        if record.source.path in final_text
+        or record.source.path != item_paths[record.identity.key]
+    ]
+    if not affected:
+        return (), {}
+
+    manifest_text = texts[manifest.path]
+    manifest_hash = manifest.manifest_version.hash
+    inventory = list(snapshot.source_inventory)
+    container_hash = _items_container_hash(manifest.path, manifest_hash, inventory)
+    if container_hash != snapshot.snapshot:
+        raise collections.CollectionError(
+            "INVALID_STRUCTURED_FILE_PLAN", "collection snapshot cannot be audited exactly"
+        )
+    parent = manifest.audit_head or "baseline"
+    events: list[_RepresentationEvent] = []
+    final_hashes: dict[str, str] = {}
+
+    for record in sorted(affected, key=lambda item: item.identity.key):
+        source = record.source.path
+        target = item_paths[record.identity.key]
+        rendered = final_text.get(source, texts[source])
+        transition_id = _representation_transition_id(
+            source_snapshot=source_snapshot,
+            collection_id=manifest.collection_id,
+            item_key=record.identity.key,
+            source_path=source,
+            source_hash=record.source.hash,
+            target_path=target,
+            rendered_hash=_text_hash(rendered),
+        )
+        marked = record_formats.render_markdown_item_update(
+            rendered,
+            {},
+            transition_id,
+            semantic_profile=manifest.semantic_profile,
+        )
+        after_item_hash = _text_hash(marked)
+        after_manifest_text = record_formats.render_manifest_audit_head(
+            manifest_text,
+            transition_id,
+            semantic_profile=manifest.semantic_profile,
+        )
+        after_manifest = collections.parse_manifest_bytes(
+            root, root / manifest.path, after_manifest_text.encode("utf-8")
+        )
+        inventory = [entry for entry in inventory if entry[0] != source]
+        inventory.append((target, "file", after_item_hash))
+        after_container_hash = _items_container_hash(
+            manifest.path, after_manifest.manifest_version.hash, inventory
+        )
+        events.append(
+            _RepresentationEvent(
+                transition_id=transition_id,
+                parent_id=parent,
+                item_key=record.identity.key,
+                canonical_path=target,
+                before_manifest_hash=manifest_hash,
+                after_manifest_hash=after_manifest.manifest_version.hash,
+                before_item_hash=record.source.hash,
+                after_item_hash=after_item_hash,
+                before_container_hash=container_hash,
+                after_container_hash=after_container_hash,
+            )
+        )
+        final_text[source] = marked
+        final_hashes[record.identity.key] = after_item_hash
+        parent = transition_id
+        manifest_text = after_manifest_text
+        manifest_hash = after_manifest.manifest_version.hash
+        container_hash = after_container_hash
+
+    if len({event.transition_id for event in events}) != len(events):
+        raise collections.CollectionError(
+            "INVALID_STRUCTURED_FILE_PLAN", "representation audit identities collide"
+        )
+    final_text[manifest.path] = manifest_text
+    return tuple(events), final_hashes
+
+
 def _build_plan(root: Path, collection: str | Path) -> _Plan:
     manifest = record_governance.resolve_collection(root, collection)
     if manifest.semantic_profile not in {"planning", "records"}:
@@ -248,6 +400,13 @@ def _build_plan(root: Path, collection: str | Path) -> _Plan:
         diagnostic = snapshot.diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)
     corpus, corpus_guards, blockers, truncated = _corpus(root)
+    audit = record_events._inspect_audit_chain(root, manifest, authorize_path=authorize)
+    if audit.status not in {"baseline", "ok", "acknowledged_gap"}:
+        _add_blocker(
+            blockers,
+            "STRUCTURED_FILE_AUDIT_GAP",
+            "the collection audit history must be repaired before migration",
+        )
     if len(snapshot.records) > _MAX_PLAN_ITEMS:
         truncated = True
         _add_blocker(
@@ -402,6 +561,29 @@ def _build_plan(root: Path, collection: str | Path) -> _Plan:
         if text != original:
             final_text[relative] = text
 
+    audit_events: tuple[_RepresentationEvent, ...] = ()
+    final_item_hashes: dict[str, str] = {}
+    if audit.status in {"baseline", "ok", "acknowledged_gap"}:
+        audit_events, final_item_hashes = _plan_representation_audit(
+            root,
+            manifest,
+            snapshot,
+            records,
+            item_paths,
+            texts,
+            final_text,
+            source_snapshot,
+        )
+        presentations = [
+            {
+                **presentation,
+                "after_hash": final_item_hashes.get(
+                    presentation["item_key"], presentation["after_hash"]
+                ),
+            }
+            for presentation in presentations
+        ]
+
     moves: list[_Move] = []
     record_by_key = {record.identity.key: record for record in records}
     for key, source, target in provisional_moves:
@@ -452,6 +634,7 @@ def _build_plan(root: Path, collection: str | Path) -> _Plan:
         "inbound_rewrites": inbound_rewrites,
         "collisions": collisions,
         "blockers": blockers,
+        "audit_transitions": [event.transition_id for event in audit_events],
     }
     plan_id = _canonical_hash(identity_payload)
     public = {
@@ -481,6 +664,7 @@ def _build_plan(root: Path, collection: str | Path) -> _Plan:
         final_text,
         corpus_guards,
         item_paths,
+        audit_events,
     )
 
 
@@ -671,7 +855,26 @@ def apply(
         receipt_path = _receipt_path(root, plan_id)
         receipt_rel = receipt_path.relative_to(root).as_posix()
         receipt_guard = vault.PathGuard.capture(root, receipt_rel, leaf_policy="absent")
-        audit_body = "Applied structured-file migration " + json.dumps(
+        event_bodies = [
+            record_events._audit_body(
+                transition_id=event.transition_id,
+                parent_id=event.parent_id,
+                operation="update",
+                manifest=plan.manifest,
+                item_key=event.item_key,
+                canonical_path=event.canonical_path,
+                before_manifest_hash=event.before_manifest_hash,
+                after_manifest_hash=event.after_manifest_hash,
+                before_item_hash=event.before_item_hash,
+                after_item_hash=event.after_item_hash,
+                before_container_hash=event.before_container_hash,
+                after_container_hash=event.after_container_hash,
+                payload_hash=None,
+                why=why,
+            )
+            for event in plan.audit_events
+        ]
+        summary = "Applied structured-file migration " + json.dumps(
             {
                 "collection_id": plan.manifest.collection_id,
                 "plan_id": plan_id,
@@ -685,6 +888,7 @@ def apply(
             separators=(",", ":"),
             sort_keys=True,
         )
+        audit_body = "\n".join([*event_bodies, summary])
         log_plan = vault.plan_log_writes(
             root,
             date_iso=dt.date.today().isoformat(),

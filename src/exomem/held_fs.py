@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -254,6 +255,33 @@ def _capability_cache_key(root: Path) -> tuple[int, str, int, int] | None:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class PlatformSupport:
+    """Whether this host has a held-filesystem backend, and why not when it has none."""
+
+    supported: bool
+    reason: str = ""
+
+
+def platform_support() -> PlatformSupport:
+    """Answer the host question without a root, so a caller can refuse early.
+
+    `probe` answers a question about one filesystem and can differ per vault.
+    This answers a question about the build: on a platform with no backend, no
+    vault will ever work, so the only honest response is to say so once rather
+    than let every reserved-path acquisition fail separately and describe
+    itself as an unavailable route.
+    """
+    backend = _backend()
+    if backend.platform_supported():
+        return PlatformSupport(True)
+    return PlatformSupport(
+        False,
+        f"exomem has no held-filesystem backend for {sys.platform!r}; "
+        "Linux and Windows are the platforms it can serve today",
+    )
+
+
 def probe(root: Path) -> Capabilities:
     """Probe one stable root once per process; no failed probe gets a fallback."""
     root = Path(root)
@@ -273,6 +301,40 @@ def acquire(root: Path) -> HeldResult[HeldFilesystem]:
     """Acquire a root anchor or return a content-free capability/IO refusal."""
     root = Path(root)
     return _backend().acquire(root, capability=probe(root))
+
+
+def flush_directory_path(path: Path) -> HeldResult[None]:
+    """Durably flush one exact no-follow directory path.
+
+    The ordinary held API flushes descendant handles.  External owner files
+    can live directly under the acquired anchor, where Windows deliberately
+    refuses an elevated root handle.  Reuse the platform's secure directory
+    open for that one root-level durability cut instead of silently skipping
+    it or importing migration code into owner operations.
+    """
+
+    from . import mutation_lock
+
+    try:
+        directory = Path(path)
+        if os.name == "nt":
+            mutation_lock._windows_flush_directory(directory)
+        else:
+            with mutation_lock._open_secure_directory(
+                directory, create=False
+            ) as retained:
+                if retained.fd is None:
+                    raise OSError("directory durability handle is unavailable")
+                os.fsync(retained.fd)
+        return HeldResult(value=None)
+    except OSError as error:
+        return HeldResult(
+            error=HeldFsError(
+                "IO_REFUSED",
+                "directory durability flush was refused",
+                cause=error,
+            )
+        )
 
 
 def reset_capability_cache_for_tests() -> None:

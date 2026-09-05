@@ -55,6 +55,7 @@ it.
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,21 @@ def result(
         "read_after_write_p95_ms": read_after_write * 1.4,
         "cold_read_after_write_ms": cold_read_after_write,
         "cold_preflight_ms": cold_preflight,
+        # Healthy defaults for the fast-acknowledgement rows, so every
+        # historical sample set above still exercises the row it was recorded
+        # for. `check()` hard-indexes every key by design, and a sample missing
+        # one must fail loudly rather than skip -- which is what
+        # `test_a_missing_fast_ack_key_fails_loudly` deletes them to prove.
+        "public_write_median_ms": 900.0,
+        "public_write_p95_ms": 1_080.0,
+        "immediate_keyword_read_median_ms": 300.0,
+        "immediate_keyword_read_p95_ms": 360.0,
+        "immediate_hybrid_read_median_ms": 400.0,
+        "immediate_hybrid_read_p95_ms": 480.0,
+        "immediate_stable_ref_read_median_ms": 10.0,
+        "immediate_stable_ref_read_p95_ms": 14.0,
+        "paired_write_read_p95_ms": 1_400.0,
+        "post_canonical_max_ms": 120.0,
     }
 
 
@@ -466,3 +482,226 @@ def test_activation_warmup_refuses_to_sample_an_unsettled_graph(monkeypatch) -> 
 
     with pytest.raises(RuntimeError, match="initial graph rebuild did not finish"):
         module._warm_activation_boundary(Path("/synthetic-vault"), "Knowledge Base/target.md")
+
+
+# ------------------------------------------------------------------ Lane 5
+#
+# The rows above bound the mutation boundary and the read that follows it. They
+# cannot see the acknowledgement the caller actually waits for, which is the
+# whole quantity this change moves: a boundary-only measurement would report a
+# pure improvement for work relocated onto the public leaf. These rows close
+# that, and their thresholds are the ones the design fixes rather than any this
+# gate may tune.
+
+
+def fast_ack_result(
+    pages: int,
+    *,
+    public_write: float = 900.0,
+    keyword_read: float = 300.0,
+    hybrid_read: float = 400.0,
+    paired: float = 1_400.0,
+    post_canonical_max: float = 120.0,
+) -> dict[str, float | int]:
+    measured = result(pages, commit=51.5)
+    measured.update(
+        {
+            "public_write_median_ms": public_write,
+            "public_write_p95_ms": public_write * 1.2,
+            "immediate_keyword_read_median_ms": keyword_read,
+            "immediate_keyword_read_p95_ms": keyword_read * 1.2,
+            "immediate_hybrid_read_median_ms": hybrid_read,
+            "immediate_hybrid_read_p95_ms": hybrid_read * 1.2,
+            "paired_write_read_p95_ms": paired,
+            "post_canonical_max_ms": post_canonical_max,
+        }
+    )
+    return measured
+
+
+def test_the_fixed_fast_ack_thresholds_are_the_designs_numbers() -> None:
+    module = load_module()
+    assert module.PUBLIC_WRITE_P95_MS == 4_000.0
+    assert module.IMMEDIATE_READ_P95_MS == 1_500.0
+    assert module.PAIRED_WRITE_READ_P95_MS == 5_000.0
+    assert module.POST_CANONICAL_BOUND_MS == 2_000.0
+
+
+def test_healthy_fast_ack_rows_pass() -> None:
+    load_module().check([fast_ack_result(2_000), fast_ack_result(8_000)])
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"public_write": 3_400.0}, "public_write_p95_ms"),
+        ({"keyword_read": 1_300.0}, "immediate_keyword_read_p95_ms"),
+        ({"hybrid_read": 1_300.0}, "immediate_hybrid_read_p95_ms"),
+        ({"paired": 5_100.0}, "paired_write_read_p95_ms"),
+        ({"post_canonical_max": 2_000.0}, "post_canonical_max_ms"),
+    ],
+)
+def test_each_fast_ack_ceiling_is_load_bearing(kwargs: dict, expected: str) -> None:
+    """Every new row must be able to fail the build on its own."""
+    with pytest.raises(SystemExit, match=expected):
+        load_module().check([fast_ack_result(2_000, **kwargs), fast_ack_result(8_000)])
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "public_write_p95_ms",
+        "immediate_keyword_read_p95_ms",
+        "immediate_hybrid_read_p95_ms",
+        "paired_write_read_p95_ms",
+        "post_canonical_max_ms",
+    ],
+)
+def test_a_missing_fast_ack_key_fails_loudly(key: str) -> None:
+    """A relocated cost that lands on no row must not pass by a silent skip."""
+    module = load_module()
+    incomplete = fast_ack_result(2_000)
+    del incomplete[key]
+    with pytest.raises(KeyError, match=key):
+        module.check([incomplete])
+
+
+def test_the_post_canonical_bound_is_a_maximum_not_a_percentile() -> None:
+    """One sample outside the shared budget fails; the design says every one."""
+    module = load_module()
+    with pytest.raises(SystemExit, match="post_canonical_max_ms"):
+        module.check([fast_ack_result(2_000, post_canonical_max=2_500.0)])
+
+
+# ------------------------------------------------------------------ Ruling R4
+#
+# Which rung a row is measured on is part of what the row means. The historical
+# boundary series is pinned to the deliberately-O(N) Python backend because its
+# value is comparability across releases; the fast-acknowledgement rows are
+# promises about what a served reader waits for, so they have to run on the
+# backend a served reader gets.
+
+
+def test_the_historical_baseline_stays_pinned_to_the_python_rung(monkeypatch) -> None:
+    """`measure` still hands `_measure` the deterministic rung."""
+    module = load_module()
+    seen: list[str | None] = []
+
+    monkeypatch.setattr(
+        module,
+        "_measure",
+        lambda *_a, **_k: seen.append(os.environ.get("EXOMEM_LEXICAL_BACKEND")) or {},
+    )
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "sentinel")
+
+    module.measure(Path("/synthetic-vault"), 2_000, 5)
+
+    assert seen == ["python"]
+    # And the caller's own selection is handed back untouched.
+    assert os.environ.get("EXOMEM_LEXICAL_BACKEND") == "sentinel"
+
+
+def test_the_fast_ack_rows_run_on_the_production_backend_selection(monkeypatch) -> None:
+    """`auto` inside, warmed and quiet before any sample, restored after."""
+    module = load_module()
+    events: list[object] = []
+
+    monkeypatch.setattr(
+        module.lexstore,
+        "ensure_fresh",
+        lambda root: events.append(("ensure_fresh", os.environ.get("EXOMEM_LEXICAL_BACKEND"))),
+    )
+    monkeypatch.setattr(
+        module,
+        "_wait_for_lexical_repair_idle",
+        lambda root: events.append(("wait", os.environ.get("EXOMEM_LEXICAL_BACKEND"))),
+    )
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+
+    with module._production_read_backend(Path("/synthetic-vault")):
+        events.append(("sample", os.environ.get("EXOMEM_LEXICAL_BACKEND")))
+
+    # Built and quiet BEFORE the first sample, all three on `auto`.
+    assert events == [
+        ("ensure_fresh", "auto"),
+        ("wait", "auto"),
+        ("sample", "auto"),
+    ]
+    # The surrounding baseline scope is unchanged by the excursion.
+    assert os.environ.get("EXOMEM_LEXICAL_BACKEND") == "python"
+
+
+def test_the_warmup_wait_is_a_named_budget_and_still_fails_the_run() -> None:
+    """A wait that can fail a run is a budget, so it names itself when it ends.
+
+    It must keep failing: proceeding with repairs in flight would time a
+    catalogue that is still being built.
+    """
+    module = load_module()
+    assert isinstance(module.LEXICAL_WARMUP_BUDGET_SECONDS, float)
+    assert module.LEXICAL_WARMUP_BUDGET_SECONDS >= 60.0
+
+    root = Path("/synthetic-vault-never-idle")
+    key = root.resolve()
+    with module.lexstore._REPAIRS_LOCK:
+        module.lexstore._REPAIRS_IN_FLIGHT.add(key)
+    try:
+        with pytest.raises(RuntimeError, match=r"warm-up budget"):
+            module._wait_for_lexical_repair_idle(root, timeout=0.01)
+    finally:
+        with module.lexstore._REPAIRS_LOCK:
+            module.lexstore._REPAIRS_IN_FLIGHT.discard(key)
+
+
+def test_managed_recall_warmup_actually_admits(tmp_path) -> None:
+    """The warm-up must publish the catalogue proof, not just open the window.
+
+    `begin_warm`/`finish_warm` only bracket the warm window. What admits
+    retrieval is `readiness.admit_retrieval_proof`, the sole writer of the
+    `retrieval_catalog` event. A warm-up that opens and closes the window
+    without publishing that proof leaves `_warm_finished` set and the event
+    unset, which reads as `unavailable` -- and that shipped once, killing the
+    gate a minute into a two-size run. This node drives the real function on a
+    real vault root so the script cannot ship a warm-up that cannot admit.
+    """
+    module = load_module()
+
+    vault_root = tmp_path / "vault"
+    (vault_root / "Knowledge Base" / "Notes").mkdir(parents=True)
+    (vault_root / "Knowledge Base" / "Notes" / "seed.md").write_text(
+        "---\ntype: insight\nstatus: active\n---\n\n## Observations\n\n- [test] seed\n",
+        encoding="utf-8",
+    )
+
+    try:
+        module._enter_managed_recall(vault_root)
+        admission = module.readiness.retrieval_admission(vault_root)
+        assert admission.get("admitted") is True, admission
+        assert admission.get("state") == "ready", admission
+        # The proof itself, not merely a finished warm window.
+        assert module.readiness.is_ready("retrieval_catalog")
+    finally:
+        module.readiness.unmanage_runtime()
+
+
+def test_the_file_watcher_switch_does_not_gate_admission(tmp_path, monkeypatch) -> None:
+    """`EXOMEM_DISABLE_FILE_WATCHER` is inert on the admission path.
+
+    Stated as a test rather than a comment because the gate is run with it set,
+    and "we believe it does not matter" is not evidence.
+    """
+    module = load_module()
+    monkeypatch.setenv("EXOMEM_DISABLE_FILE_WATCHER", "1")
+
+    vault_root = tmp_path / "vault"
+    (vault_root / "Knowledge Base" / "Notes").mkdir(parents=True)
+    (vault_root / "Knowledge Base" / "Notes" / "seed.md").write_text(
+        "---\ntype: insight\nstatus: active\n---\n\n## Observations\n\n- [test] seed\n",
+        encoding="utf-8",
+    )
+
+    try:
+        module._enter_managed_recall(vault_root)
+        assert module.readiness.retrieval_admission(vault_root).get("admitted") is True
+    finally:
+        module.readiness.unmanage_runtime()

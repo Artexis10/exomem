@@ -489,6 +489,33 @@ def _check_python() -> DoctorCheck:
     return _check("python.version", "pass", f"Python {version} satisfies >=3.11.")
 
 
+def _check_held_filesystem_platform() -> DoctorCheck:
+    """Report a host with no held-filesystem backend as a platform fact.
+
+    This is deliberately a `fail` rather than a `warn`: every governed write
+    acquires a reserved-path root through this substrate, so where it has no
+    backend the vault is not degraded, it is unusable. Reporting it here is
+    what makes the CLI's one-line refusal answerable.
+    """
+    from . import held_fs
+
+    support = held_fs.platform_support()
+    if support.supported:
+        return _check(
+            "platform.held_filesystem",
+            "pass",
+            f"The held-filesystem substrate has a backend for {sys.platform!r}.",
+        )
+    return _check(
+        "platform.held_filesystem",
+        "fail",
+        f"{support.reason}.",
+        "Run exomem on Linux or Windows. Nothing about this vault can repair it: "
+        "the substrate has no implementation for this platform, so every governed "
+        "write would refuse.",
+    )
+
+
 def _check_uv() -> DoctorCheck:
     uv = shutil.which("uv")
     if uv:
@@ -671,6 +698,7 @@ def _check_resource_posture(profile: Profile) -> DoctorCheck:
     if runtime.get("variant"):
         runtime_label += f"({runtime['variant']})"
     gpu = posture["gpu"]
+    asr = posture["asr"]
     mode_name = posture["mode"]
     if gpu.get("usable") is False:
         status: Status = "pass" if profile == "lean" else "warn"
@@ -679,7 +707,7 @@ def _check_resource_posture(profile: Profile) -> DoctorCheck:
             "resource.posture",
             status,
             f"Runtime is {runtime_label}; resource mode is {mode_name}; CPU is the "
-            f"supported baseline. {reason}.",
+            f"supported baseline. ASR policy is {asr['effective_policy']}. {reason}.",
             "Use `exomem mode quiet` before foreground GPU work, or `exomem mode "
             "performance` only when enough free VRAM is available.",
             details=posture,
@@ -689,15 +717,15 @@ def _check_resource_posture(profile: Profile) -> DoctorCheck:
             "resource.posture",
             "pass",
             f"Runtime is {runtime_label}; resource mode is {mode_name}; GPU headroom "
-            "probe is capable, but GPU use remains explicit policy opt-in.",
+            f"probe is capable; ASR policy is {asr['effective_policy']}.",
             details=posture,
         )
     return _check(
         "resource.posture",
         "pass",
         f"Runtime is {runtime_label}; resource mode is {mode_name}; CPU is the "
-        "supported baseline and GPU headroom is unknown without an available "
-        "non-torch probe.",
+        f"supported baseline; ASR policy is {asr['effective_policy']}; GPU headroom is "
+        "unknown without an available non-torch probe.",
         details=posture,
     )
 
@@ -962,6 +990,150 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
     )
 
 
+def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
+    """Machine-local state placement: external root, marker, in-vault leftovers.
+
+    The registry's explicit external-state placement drives the leftover scan,
+    so a consumer that keeps writing a flagged family into the vault surfaces
+    here without this check learning any names. Dual state — in-vault copies
+    beside an external root — is a FAIL that names both paths and the explicit
+    remediation; nothing is ever preferred or deleted from a diagnosis path.
+    """
+    from . import state_migration, state_paths
+
+    if vault_root is None:
+        return _check(
+            "state.placement",
+            "pass",
+            "No vault configured; machine-local state placement not applicable.",
+        )
+    state_dir = state_paths.vault_state_dir(vault_root)
+    try:
+        leftovers = state_migration.scan_vault_state(vault_root)
+    except OSError:
+        return _check(
+            "state.placement",
+            "fail",
+            "The in-vault machine-local state location could not be inspected.",
+            "Restore read access to the vault and rerun `exomem doctor`; do not "
+            "adopt or delete either state authority while the scan is unavailable.",
+            details={
+                "state_root": str(state_dir),
+                "in_vault_state_root": str(Path(vault_root) / kb_dirname()),
+                "in_vault_scan": "unavailable",
+            },
+        )
+    try:
+        manifest = state_migration._load_manifest(state_dir, vault_root=vault_root)
+        manifest_error = None
+    except state_migration.StateMigrationManifestError as error:
+        manifest = None
+        manifest_error = error
+    if manifest is None:
+        migration_status = "invalid" if manifest_error is not None else "absent"
+    elif manifest["state"] != "complete":
+        migration_status = "in-progress"
+    elif tuple(manifest["descriptors"]) != state_migration._descriptor_ids():
+        migration_status = "stale"
+    else:
+        migration_status = "complete"
+    completed = migration_status == "complete"
+    details = {
+        "state_root": str(state_dir),
+        "migration_completed": completed,
+        "migration_status": migration_status,
+        "in_vault_leftovers": sorted(
+            str(path) for members in leftovers.values() for path in members
+        ),
+    }
+    if manifest_error is not None:
+        details["migration_manifest"] = str(manifest_error.path)
+        return _check(
+            "state.placement",
+            "fail",
+            "The external state migration manifest is unreadable or invalid.",
+            "Repair or explicitly adopt the state authority before restarting; "
+            "do not delete either copy based on an unreadable manifest.",
+            details=details,
+        )
+    if manifest is not None and (
+        manifest.get("governance_rollback") is not None
+        or manifest.get("governance_adoption") is not None
+    ):
+        details["governance_rollback"] = manifest.get("governance_rollback")
+        details["governance_adoption"] = manifest.get("governance_adoption")
+        return _check(
+            "state.placement",
+            "fail",
+            "A governance rollback or adoption marker is present; ordinary relocated startup is fenced.",
+            "Resume the offline governance rollback or explicitly adopt `governance-store=vault`; "
+            "do not delete either governance database.",
+            details=details,
+        )
+    if leftovers:
+        leftover_names = ", ".join(
+            sorted(path.name for members in leftovers.values() for path in members)
+        )
+        unexplained_external = False
+        if migration_status == "absent":
+            try:
+                unexplained_external = state_migration._external_state_present(state_dir)
+            except OSError:
+                return _check(
+                    "state.placement",
+                    "fail",
+                    "The external machine-local state root could not be inspected.",
+                    "Restore read access and rerun `exomem doctor`; do not adopt "
+                    "or delete either state authority while the scan is unavailable.",
+                    details=details,
+                )
+        if completed or unexplained_external:
+            return _check(
+                "state.placement",
+                "fail",
+                (
+                    "Machine-local state exists both under the vault "
+                    f"({Path(vault_root) / kb_dirname()}: {leftover_names}) and in "
+                    f"the external state root ({state_dir})."
+                ),
+                "Stop every writer, then run `exomem maintain --migrate-state "
+                "--offline --adopt-state external` to keep the "
+                "external state root and remove the in-vault copies, or "
+                "`exomem maintain --migrate-state --offline --adopt-state vault` "
+                "to discard the external "
+                "root and re-migrate from the vault.",
+                details=details,
+            )
+        return _check(
+            "state.placement",
+            "fail",
+            (
+                f"Machine-local state still lives under the vault ({leftover_names}); "
+                "ordinary startup refuses until an explicit offline migration completes."
+            ),
+            "Stop every process that can write this vault, then run `exomem maintain "
+            "--migrate-state --offline` before restarting Exomem.",
+            details=details,
+        )
+    if migration_status != "complete":
+        return _check(
+            "state.placement",
+            "fail",
+            "Machine-local state migration is required before startup "
+            f"(manifest status: {migration_status}).",
+            "Stop every process that can write this vault, then run `exomem maintain "
+            "--migrate-state --offline` before restarting Exomem.",
+            details=details,
+        )
+    return _check(
+        "state.placement",
+        "pass",
+        f"Machine-local state resolves to {state_dir}"
+        + (" (migration completed)." if completed else "."),
+        details=details,
+    )
+
+
 def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
     """Leaked rebuild-temporary files from interrupted background rebuilds.
 
@@ -1022,11 +1194,21 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
             details=details,
         )
 
-    kb = Path(vault_root) / kb_dirname()
+    from . import state_paths
+
+    # Rebuild temporaries are siblings of their store, which lives in the
+    # external state root now; the KB is still scanned for pre-relocation
+    # leftovers.
+    scan_roots = (
+        Path(vault_root) / kb_dirname(),
+        state_paths.vault_state_dir(vault_root),
+    )
     graph_orphans: list[Path] = []
     lexical_orphans: list[Path] = []
-    if kb.is_dir():
-        for entry in kb.iterdir():
+    for scan_root in scan_roots:
+        if not scan_root.is_dir():
+            continue
+        for entry in scan_root.iterdir():
             try:
                 if not entry.is_file():
                     continue
@@ -1204,6 +1386,77 @@ def _check_write_path_env_flags(vault_root: Path | None) -> DoctorCheck:
         "pass",
         "No write-path kill switches are set.",
         details=details,
+    )
+
+
+
+def _check_frozen_verifier() -> DoctorCheck:
+    """The frozen stance verifier's tier: admitted, absent, or refused-with-reason.
+
+    Never `fail`. The tier is optional and default-off by design, so its absence
+    is the NORMAL state and reporting that as a failure would only train an
+    operator to ignore doctor. It warns exactly where a stated intent is not
+    being met: the gate is on but the verifier is refused, or a value is sitting
+    in the retired `EXOMEM_CLAIM_NLI_MODEL` knob selecting nothing.
+
+    Stays inside doctor's "never fetches anything" guarantee: admission resolves
+    the weights digest from the local model cache first and refuses before any
+    load when nothing is resident, so the only load it can reach is an
+    offline-first one over weights already on disk.
+    """
+    from . import claims
+
+    status = claims.verifier_status()
+    ignored = status.get("ignored_model_env")
+    ignored_note = (
+        f" {status['retired_model_env']}={ignored!r} is RETIRED and selected nothing."
+        if ignored
+        else ""
+    )
+    ignored_fix = (
+        f"Unset {status['retired_model_env']}: model identity comes only from the "
+        "in-repo pin registry, so the value is inert."
+        if ignored
+        else None
+    )
+    if status["admitted"]:
+        return _check(
+            "verifier.frozen_stance",
+            "pass",
+            (
+                f"Frozen stance verifier admitted: {status['model_name']} "
+                f"(digest {str(status['model_digest'])[:12]}…, label map "
+                f"{status['label_map_version']}, fixtures {status['fixture_set']})."
+                f"{ignored_note}"
+            ),
+            ignored_fix,
+            details=status,
+        )
+    if status["reason"] == "gate-off":
+        return _check(
+            "verifier.frozen_stance",
+            "warn" if ignored else "pass",
+            (
+                "Frozen stance verifier is off (EXOMEM_CLAIM_POLARITY_NLI unset); "
+                f"review-queue entries carry no model polarity label.{ignored_note}"
+            ),
+            ignored_fix,
+            details=status,
+        )
+    return _check(
+        "verifier.frozen_stance",
+        "warn",
+        (
+            f"Frozen stance verifier refused ({status['reason']}): {status['detail']} "
+            f"Review-queue entries carry no model polarity label.{ignored_note}"
+        ),
+        ignored_fix
+        or (
+            "Either unset EXOMEM_CLAIM_POLARITY_NLI, or install `uv sync --extra nli` "
+            "and make the resident weights match a pin in the repository registry. "
+            "A pin is only ever added in a reviewed diff."
+        ),
+        details=status,
     )
 
 
@@ -1416,20 +1669,26 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             "media.runtime",
             "warn",
             "The durable media job store is unreadable.",
-            "Check permissions on Knowledge Base/.media-jobs.sqlite or remove the derived "
-            "sidecar and restart so pending evidence can be reconstructed.",
+            "Check permissions on .media-jobs.sqlite in the state root (see the "
+            "state.placement check) or remove the derived sidecar and restart so "
+            "pending evidence can be reconstructed.",
             details=status,
         )
     counts = status["counts"]
     blocked = int(counts.get("blocked", 0))
     failed = int(counts.get("failed", 0))
     if blocked or failed:
+        compute_blocked = int(status.get("compute_runtime_count", 0)) > 0
+        remediation = (
+            "Repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry."
+            if compute_blocked
+            else "Install the missing media engine or fix the failed input, then restart the service to retry blocked work."
+        )
         return _check(
             "media.runtime",
             "warn",
             f"Media work needs attention: {blocked} blocked, {failed} failed.",
-            "Install the missing media engine or fix the failed input, then restart the "
-            "service to retry blocked work.",
+            remediation,
             details=status,
         )
     queued = int(counts.get("pending", 0)) + int(counts.get("running", 0))
@@ -1681,7 +1940,9 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     """
     if vault_root is None:
         return None
-    sidecar = vault_root / kb_dirname() / ".embeddings.sqlite"
+    from . import index_paths
+
+    sidecar = index_paths.sidecar_path(vault_root)
     if not sidecar.exists():
         return _check(
             "embeddings.sidecar",
@@ -1707,9 +1968,7 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "so it can't be probed.",
             f"Install it with `uv sync --extra {extra}` to enable hybrid search.",
         )
-    from . import embeddings
-
-    from . import model_cache
+    from . import embeddings, model_cache
 
     if not _model_cached(_hf_hub_dir(), model_cache.snapshot_dirname(embeddings.MODEL_NAME)):
         # doctor must never trigger a download — skip the live probe rather than
@@ -2888,6 +3147,7 @@ def doctor(
     lock_parity = _check_editable_lock_parity(profile)
     checks: list[DoctorCheck] = [
         _check_python(),
+        _check_held_filesystem_platform(),
         _check_uv(),
         *([lock_parity] if lock_parity is not None else []),
         _check_console_scripts(),
@@ -2900,8 +3160,10 @@ def doctor(
         _check_lexical(vault_root),
         _check_deferred_index_backlog(vault_root),
         _check_graph_sync_state(vault_root),
+        _check_state_placement(vault_root),
         _check_rebuild_temp_orphans(vault_root),
         _check_write_path_env_flags(vault_root),
+        _check_frozen_verifier(),
         check_graph_recovery_age(vault_root),
     ]
     runtime_processes = _check_runtime_processes()

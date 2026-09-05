@@ -8,18 +8,27 @@ emission rather than N. Both are claims about what a runtime does, so this
 driver runs the episode against the installed CLI and projects only what the
 runtime produced.
 
-**The counter half is structurally undecidable on this runtime, and the journey
-says so rather than manufacturing a green.** It was measured: no product
-command commits more than one governed write through `due_state.block_for_write`
-— `adoption_studio` apply (12 writes), `maintain_memory` fix (12),
-`preserve_artifacts` (8) and `process_media` (12) each reach the write carrier
-ZERO times. A batch therefore delivers no block, the served denominator is 0,
-and "one emission rather than twelve" is true for a reason that has nothing to
-do with governance. The bulk batch stays — it exercises the writes and the
-write counter, which are real — and the assertion reports `unsupported`, which
-is the bench's word for "this run cannot decide the family". The batch-once
-requirement is proven where it is decidable: at the carrier, twelve runs inside
-one scope emitting at most once.
+**The counter half is decided on this runtime, and it was not always.** The
+zero-carrier inventory this docstring used to record — `adoption_studio` apply,
+`maintain_memory` fix, `preserve_artifacts` and `process_media` each reaching
+the write carrier ZERO times, so a batch delivered no block and the assertion
+reported `unsupported` — was retired by
+`openspec/changes/extend-due-state-to-bulk-carriers`, which made the operation
+leaves carriers. The bulk step's `adopt --mode copy-as-sources` now commits
+twelve governed writes and delivers exactly one block at its terminal, so the
+assertion evaluates on an emission delta of ONE against a write delta of TWELVE.
+
+Two things about that block, because the shape of the evidence matters more
+than its sign. First, the leaves still reach `due_state.block_for_write` zero
+times: the block is a BATCH block served once at the invocation's terminal
+(`due_state.block_for_batch`), which is why the batch-once claim is a property
+of the terminal rather than of the scope. Second, and this is the part easiest
+to misread, the twelve pages do NOT move the counts — `copy-as-sources` wraps
+each original inside a fenced Capture block on a `type: source` page, so they
+add zero due items (see :func:`seed_bulk_documents`). The block is delivered as
+the FIRST QUALIFYING RESPONSE of the session, and every CLI step here is its own
+process and therefore its own session. Reading a delivered block as evidence
+that the bulk pages changed the totals would be reading it wrong.
 
 **The envelope is discovered, never assumed.** The discovery, the refusal, and
 the subprocess wrapper are :mod:`.f26_carrier`'s, imported rather than copied:
@@ -44,8 +53,9 @@ The episode, in order:
    which is what an engine restart is from the vault's point of view.
 5. One bulk ingest: ``adopt --mode copy-as-sources`` over
    :data:`BULK_DOCUMENTS` legacy files in a single command. Twelve governed
-   writes, zero trips through the write carrier, therefore zero delivered
-   blocks and a served ``due_total`` of 0 — recorded honestly, not smoothed.
+   writes, still zero trips through the per-write carrier, and exactly one
+   block delivered at the invocation's terminal — recorded honestly, not
+   smoothed.
 
 **What is projected as an unsolicited signal, and what is not.** Anything the
 default review union re-lists under the dismissed identity is projected as a
@@ -127,10 +137,9 @@ PROMINENCE_LEVELS: tuple[str, ...] = _prominence_levels()
 
 #: Files the single bulk-ingest command absorbs. Two would satisfy the
 #: assertion's `writes >= 2` floor; twelve makes the difference between one
-#: emission and one-per-write impossible to read as noise — on a runtime where
-#: the leaf reaches the carrier at all. On this one it does not (see the module
-#: docstring), so twelve is what the write counter records and the emission
-#: comparison is reported `unsupported`.
+#: emission and one-per-write impossible to read as noise. The leaf carries as
+#: of `extend-due-state-to-bulk-carriers`, so twelve is what the write counter
+#: records and the emission comparison is decided at one.
 BULK_DOCUMENTS = 12
 BULK_DIRECTORY = "legacy"
 

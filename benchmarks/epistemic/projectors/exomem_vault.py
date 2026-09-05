@@ -241,16 +241,9 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
 
 #: The documented triage store. Decisions live here, not in note frontmatter,
 #: so the dismissal projection reads it rather than inferring from pages.
-#:
-#: A real vault keeps it inside the governed Knowledge Base directory; the
-#: synthetic corpora write it at the vault root. Both are looked for, in that
-#: order, because a projector that only knew the fixture layout reported every
-#: real run's triage store as unavailable.
 REVIEW_STATE_FILE = ".review-state.json"
 #: The maintained due-state projection, carrying the persisted emission ledger.
 DUE_STATE_FILE = ".due-state.json"
-#: Where a vault-local state file may live, relative to the vault root.
-STATE_DIRECTORIES: tuple[str, ...] = ("Knowledge Base", "")
 
 #: ``surface name -> (projection status, why)`` for the four surfaces a quiet
 #: assertion must prove absence on. Only ``review_queue`` has a file surface at
@@ -723,15 +716,15 @@ class VaultProjector(Projector):
         return tuple(projected)
 
     def _state_file(self, filename: str) -> Path | None:
-        for directory in STATE_DIRECTORIES:
-            candidate = (
-                self.vault_root / directory / filename
-                if directory
-                else self.vault_root / filename
-            )
-            if candidate.is_file():
-                return candidate
-        return None
+        """Resolve one registered portable-derived file through product placement."""
+
+        from exomem import reserved_paths, state_paths
+
+        classification = reserved_paths.classify_logical(filename)
+        if classification.descriptor_id not in {"review-state", "due-state"}:
+            raise ValueError(f"unregistered projector state file {filename!r}")
+        candidate = state_paths.vault_state_dir(self.vault_root) / filename
+        return candidate if candidate.is_file() else None
 
     def _project_due_state_counters(self) -> StateItem:
         """The persisted emission ledger, or an honest absence.

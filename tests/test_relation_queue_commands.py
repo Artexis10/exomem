@@ -12,7 +12,15 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import attention, commands, find, relation_queue, server, temporal
+from exomem import (
+    attention,
+    commands,
+    epistemic_graph,
+    find,
+    relation_queue,
+    server,
+    temporal,
+)
 
 
 def _write_page(
@@ -41,6 +49,7 @@ def _seed(vault: Path) -> None:
     )
     _write_page(vault, "birch", "A measured fact.")
     find.clear_cache()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
 
 
 def _first_item(vault: Path) -> dict:
@@ -108,6 +117,7 @@ def test_accept_relation_creates_relations_section_when_absent(tmp_path: Path) -
     )
     _write_page(tmp_path, "birch", "A measured fact.")
     find.clear_cache()
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
 
     result = commands.op_review_memory(tmp_path, mode="relation-queue")
     item = next(
@@ -276,6 +286,7 @@ def test_dismissed_item_absent_until_fingerprint_changes(tmp_path: Path) -> None
         encoding="utf-8",
     )
     find.clear_cache()
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
     resurfaced = commands.op_review_memory(tmp_path, mode="relation-queue")
     resurfaced_refs = {
         it["ref"] for group in resurfaced["groups"] for it in group["items"]
@@ -291,6 +302,7 @@ def test_relation_triage_does_not_resolve_activation_items(tmp_path: Path) -> No
     )
     _write_page(tmp_path, "birch", "A measured fact.")
     find.clear_cache()
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
 
     relation_item = next(
         item

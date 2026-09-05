@@ -7,7 +7,9 @@ OpenAPI document, and the CLI, so adding or removing an operation requires no
 per-surface code and MCP tool schemas stay byte-identical to their committed
 baseline. The CLI and REST facade share one result/error envelope so a given
 failure carries the same machine-readable code on both surfaces.
+
 ## Requirements
+
 ### Requirement: Single Command Registry Generates Every Surface
 
 The system SHALL define a single declarative command registry (`commands.py`) that enumerates each operation with its name, leaf function, description, parameter specs, and exposed surfaces, and the MCP tools, the REST facade, the OpenAPI document, and the CLI SHALL all be generated from it. No surface may maintain its own separate list of operations. The governed entity-type registry save SHALL be exposed by mirroring the existing relation-registry save command as operation `save-entity-types`, with the same validate-first proposal, rationale, and expected-hash argument shape.
@@ -159,6 +161,31 @@ REST binary-blob guard for text fields SHALL be preserved.
 - **WHEN** a REST request passes an oversized base64 blob in a text field
 - **THEN** it is rejected with the existing `BINARY_BLOB_REJECTED`-class error,
   as before
+
+### Requirement: Connector-encoded batch edits preserve canonical validation
+
+The public `edit_memory` tool SHALL advertise batch items as an object array.
+At runtime, its typed pre-validation adapter SHALL also accept connector-supplied JSON-object strings
+for individual items. Each such string SHALL be decoded
+before canonical edit validation; malformed JSON, non-object JSON, missing
+fields, and all other unsupported item types SHALL be rejected through the
+existing `INVALID_EDIT` path. Encoding SHALL NOT relax content safety: decoded text still passes the binary-blob guard in both middleware and the edit leaf.
+Expected hashes, semantic preflight, idempotency, and guarded commit behavior
+remain unchanged.
+
+#### Scenario: Connector stringifies valid batch items
+
+- **WHEN** a connector sends an `edit_memory` batch whose items are valid
+  JSON-object strings representing the advertised object shape
+- **THEN** the adapter decodes them and the canonical edit validator processes
+  them exactly as object items
+
+#### Scenario: Encoded input cannot bypass edit validation
+
+- **WHEN** a connector sends malformed JSON, non-object JSON, an incomplete
+  object, or encoded binary-blob content as a batch item
+- **THEN** the request is rejected through `INVALID_EDIT` or the unchanged
+  binary-blob rejection path before mutation
 
 ### Requirement: Bootstrap Is Exposed On Every Generated Surface
 The system SHALL expose `bootstrap` through the single command registry on MCP,
@@ -368,24 +395,77 @@ The CLI SHALL expose simple action aliases for common workflows while preserving
 - **THEN** the output uses the same success/error envelope semantics as canonical CLI operations
 - **AND** failures carry stable error codes and remediation where the canonical operation provides them
 
+### Requirement: Governed server-side relation acceptance
+
+`connect_memory(operation="accept-relation")` SHALL accept exactly one selected
+queue item through the existing governed edit path, with its ref, fingerprint,
+source hint, current content hash, and non-empty audit reason. The operation
+SHALL append one canonical relation bullet under `## Relations` only after
+revalidation. Hash or fingerprint drift MUST refuse without writing. A committed
+response SHALL preserve explicit pending graph synchronization rather than
+claiming the derived edge is already current.
+
+#### Scenario: Accept writes one canonical bullet
+- **WHEN** the selected candidate's source hint, ref, fingerprint, and page hash
+  are current and the caller supplies an audit reason
+- **THEN** exactly one canonical relation bullet is committed by the governed
+  writer with its normal receipt and recovery semantics
+
+#### Scenario: Drift refuses the write
+- **WHEN** the source hash or candidate fingerprint no longer matches
+- **THEN** the operation writes nothing and returns refresh-required guidance
+
+#### Scenario: Accepted item leaves the queue
+- **WHEN** an accepted relation is present in the newly current graph snapshot
+- **THEN** the queue excludes that already-authored edge
+
 ### Requirement: Relation governance preserves registry-generated surface parity
-The product registry SHALL expose relation registry and traversal-profile
-infer/validate/diff/save behavior through the schema-governance command, and
-traversal profile selection through the context command, with identical
-parameters and error semantics across MCP, REST, CLI, OpenAPI, generated docs,
-annotations, and schema-fidelity fixtures. Existing schema/context calls SHALL
-remain compatible when the new subject/profile parameters are omitted.
+The product registry SHALL expose relation-intent resolution through the
+connection command; relation registry infer, validate, diff, proposal, and
+delta-save behavior through the schema-governance command; relation review
+through the review, triage, and connection commands; and traversal profile
+selection through the context command. Requested-relation, relation census
+date scope, source-hint, proposal, reason, and hash-guard parameters SHALL have
+identical semantics across MCP, REST, CLI, OpenAPI, generated docs,
+annotations, and schema-fidelity fixtures. Newly returned relation-review items
+SHALL require their supplied source hint on accept/triage. Existing hintless
+relation-review calls SHALL receive bounded-prefix compatibility or a typed
+refresh-required response rather than unbounded recovery work.
+
+Read-only relation resolution, proposal, inventory, inference without save,
+validation, diff, queue, and context selectors SHALL not acquire writer
+authority. Relation delta save, candidate accept, and triage SHALL use the
+existing mutation boundary, idempotency, receipt, terminal, and retry
+contracts; unknown or uncovered selectors MUST fail closed.
 
 #### Scenario: One registry definition exposes relation governance everywhere
 - **WHEN** the generated surfaces are inspected after this change
-- **THEN** schema governance accepts relation/profile subjects and reviewed
-  proposals, context accepts traversal profiles, and every surface exposes the
-  same defaults, bounds, hash guards, and validation codes
+- **THEN** connection accepts relation resolution and source-hinted acceptance,
+  schema governance accepts relation/profile subjects and reviewed
+  propose/save operations, review and triage preserve source hints, context
+  accepts traversal profiles, and every surface exposes the same defaults,
+  bounds, hash guards, and validation codes
 
 #### Scenario: Existing callers retain prior behavior
-- **WHEN** callers omit relation-governance subjects and traversal profiles
-- **THEN** existing schema contract behavior and broad context traversal remain
-  unchanged
+- **WHEN** callers omit relation-governance subjects, requested relation,
+  census dates, source hints, and traversal profiles
+- **THEN** existing schema contract behavior, review refs, and broad context
+  traversal remain unchanged, except that a hintless relation decision outside
+  the bounded current queue prefix requires refresh rather than an unbounded
+  compatibility scan
+
+#### Scenario: Proposal and resolution remain lease-free
+- **WHEN** a caller resolves relation intent, proposes a relation delta, or
+  infers relation vocabulary with save disabled
+- **THEN** invocation classification treats the operation as read-only and does
+  not contact the writer coordinator
+
+#### Scenario: Relation delta save enters the governed mutation path
+- **WHEN** a caller saves a reviewed relation delta
+- **THEN** invocation classification enters writer authority and preserves the
+  shared idempotency, receipt, terminal, and retry semantics
+- **AND** an unregistered future selector cannot default to either read or write
+  behavior without explicit coverage
 
 ### Requirement: Filename Slug Is Consistent Across Generated Surfaces
 
@@ -609,7 +689,7 @@ unchanged-draft, hash-match, reason, or replay requirements.
 - **AND** the stored receipt remains underscore-only
 
 ### Requirement: One multiplexed Planning product command
-The product surface SHALL expose one `plan_memory` command rather than separate capture, horizon, hierarchy, manifest-lifecycle, or storage-specific tools. Its finite selector SHALL contain exactly nine actions: read-only `inspect`, `validate`, and `query`, plus mutating `create`, `add`, `update`, `triage`, `revise`, and `rebaseline`. Query SHALL cover bounded horizon/date/history/hierarchy/render/export-shaped responses through explicit arguments; generic derived-index repair and previewed structured-file migration SHALL remain under `maintain_memory`.
+The product surface SHALL expose one `plan_memory` command rather than separate capture, horizon, hierarchy, manifest-lifecycle, or storage-specific tools. Its finite selector SHALL contain exactly nine actions: read-only `inspect`, `validate`, and `query`, plus mutating `create`, `add`, `update`, `triage`, `revise`, and `rebaseline`. `inspect` without a collection SHALL return the Planning inventory; with a collection it SHALL inspect that collection. Query SHALL cover bounded horizon/date/history/hierarchy/render/export-shaped responses through explicit arguments; generic derived-index repair and previewed structured-file migration SHALL remain under `maintain_memory`.
 
 #### Scenario: Natural planning intent uses one front door
 - **WHEN** an agent receives “save this feature idea”, “file this bug for later”, “make this a quarterly initiative”, “what matters this week”, “show my multi-year outcomes”, or “revise this Planning collection”
@@ -623,6 +703,10 @@ The product surface SHALL expose one `plan_memory` command rather than separate 
 - **WHEN** an agent needs to validate, revise, or explicitly rebaseline an existing Planning collection manifest
 - **THEN** it uses the finite lifecycle actions on `plan_memory` rather than a generic file editor or storage-specific tool
 
+#### Scenario: Inventory before a collection is known
+- **WHEN** an agent calls `plan_memory(action="inspect")` with no collection
+- **THEN** the response is the bounded Planning inventory and nothing is created or resolved
+
 #### Scenario: Review does not hide inside query
 - **WHEN** a caller queries a plan that carries Records evidence descriptors
 - **THEN** `plan_memory` returns authored Planning state and descriptors without evaluating planned-versus-recorded progress or silently invoking epistemic `review_memory`
@@ -632,11 +716,11 @@ The generated signature SHALL expose exactly `action`, `collection`, `manifest_p
 
 | Action | Required | Optional and defaults |
 | --- | --- | --- |
-| `inspect` | `collection: string` | none |
+| `inspect` | none | `collection: string` — omitted returns the Planning inventory |
 | `validate` | create mode: `manifest_path: string`, `manifest_text: string`; revision mode: `collection: string`, `manifest_text: string` | none |
 | `create` | `manifest_path: string`, `manifest_text: string`, `why: string` | `scaffold: boolean=true` |
 | `query` | `collection: string` | `view: string`; existing structured `filters`, `columns`, `sort_by`, `aggregate`, `date_from`, `date_to`, `date_column`; `descending: boolean=false`; `limit: integer=100` capped at 1,000; `lifecycle: active|archived|all=active`; `hierarchy_mode: none|ancestors|descendants=none`; `hierarchy_depth: integer=3` capped at 8; `hierarchy_limit: integer=100` capped at 500; `continuation: string`; `include_agent_history: boolean=false`; `output_format: json|markdown|csv=json` |
-| `add` | `collection: string`, `item: object`, `why: string` | `plan_id: UUID`, `expected_container_hash: sha256`, `body: string=""` |
+| `add` | `collection: string`, `item: object`, `why: string` | `plan_id: UUID` — omitted derives the identity from the declared natural key when every key field is present, `expected_container_hash: sha256`, `body: string=""` |
 | `update` | `collection: string`, `plan_id: UUID`, `expected_container_hash: sha256`, `expected_item_version: sha256`, `why: string`, at least one of `changes` or `body` | `changes: non-empty object` using the Planning spec's exact null-as-delete rules; `body: complete string replacement` |
 | `triage` | `collection: string`, `plan_id: UUID`, `transition: non-empty object`, `expected_container_hash: sha256`, `expected_item_version: sha256`, `why: string` | none |
 | `revise` | `collection: string`, `manifest_text: string`, `expected_manifest_hash: sha256`, `expected_container_hash: sha256`, `why: string` | none |
@@ -647,6 +731,10 @@ The two `validate` forms SHALL be mutually exclusive and read-only. Revision-mod
 #### Scenario: Read action rejects mutation payload
 - **WHEN** `inspect`, `validate`, or `query` receives an argument outside its declared shape
 - **THEN** validation refuses rather than ignoring the ambiguous payload
+
+#### Scenario: Collection-bound actions do not treat inventory as a fallback
+- **WHEN** `query`, `add`, `update`, `triage`, `revise`, or `rebaseline` omits `collection`
+- **THEN** validation refuses, while `inspect` without a collection returns the inventory
 
 #### Scenario: Create refuses existing canonical files
 - **WHEN** the requested manifest target or its declared canonical source already exists, including an ordinary note at either target
@@ -1611,8 +1699,8 @@ A journey driver SHALL execute the f23 scenario's operations against an installe
 - **WHEN** the f23 journey runs against the current runtime
 - **THEN** `dismissal_respected_across_passes` passes for the dismissed subject
 - **AND** `counter_emission_not_repeated_per_write` is evaluated on the emission delta between the two snapshots, so it is decided only for a batch that delivered at least one block, and otherwise reports `unsupported` rather than passing vacuously or inheriting an earlier batch's delivery
-- **AND** on this runtime it reports `unsupported`, because no product leaf reaches the write carrier, so the bulk batch delivers no block and its emission delta is zero
-- **AND** the batch-once requirement is proven where it is decidable: twelve write carriers inside one batch scope emit at most one block, plus the measured zero carrier trips at every product leaf
+- **AND** on this runtime it is decided: the bulk ingest commits through a carrying operation leaf, the batch delivers exactly one block, and the assertion passes on an emission delta of one against a write delta of twelve
+- **AND** the batch-once requirement is proven where it is decidable: twelve write carriers inside one batch scope emit at most one block
 
 #### Scenario: Removing the batch scope turns the counter assertion red
 
@@ -2085,3 +2173,233 @@ returned.
 - **THEN** each returns the shared stable code/remediation, performs no write, and emits
   no resolved path or tree metadata
 
+### Requirement: Structured-collection mutations are due-state carriers
+
+`record_memory` `append` and `update` and `plan_memory` `add`, `update` and `triage` responses SHALL carry the bounded advisory due-state block under the same carrier contract and emission governance as page writes: the write applies its delta, the block is served through the release plane, emission is recorded once per delivered block, a batch scope delivers at most once, family dispositions apply, and an unreadable review state yields no block while the write still commits. The leaves SHALL reuse the shared due-state helpers rather than re-deriving any of it.
+
+#### Scenario: The append that opens a gap reports it
+
+- **WHEN** a record append joins an open Planning item for the first time
+- **THEN** that append's own response carries a due-state block counting one `unreflected_outcomes` item
+
+#### Scenario: A batch of appends delivers once
+
+- **WHEN** twelve appends run inside one batch scope
+- **THEN** at most one block is delivered and the emission ledger records one emission
+
+#### Scenario: Silence on an unreadable store
+
+- **WHEN** the review state cannot be read
+- **THEN** the append commits, the response carries no block, and no error is raised for the advisory
+
+### Requirement: Planned-versus-recorded review is discoverable in the tool surface
+
+The `review_memory` `mode` documentation in the generated tool surface SHALL list `plan-progress` with its one-line purpose, and the `plan_memory` description SHALL document the inventory form of `inspect`. The pinned tool-surface digest SHALL move once for both, with the packaged contract, the schema fixture, the release-identities fixture, the hosted generated locks and directory packets, and the ChatGPT plugin contract's pending digest regenerated together; no input parameter is added or removed.
+
+#### Scenario: An MCP client can find plan-progress
+
+- **WHEN** a client reads the `review_memory` tool description from the packaged contract
+- **THEN** `plan-progress` is listed among the modes
+
+#### Scenario: One pin move
+
+- **WHEN** the tool surface is regenerated for this change
+- **THEN** exactly one digest change is recorded and every generated consumer the repository gates agrees on it; the OpenAI directory packet binds a release input rather than the tool-surface pin and is regenerated at that release step
+
+### Requirement: Write-path advisories are suppressed for exactly-dismissed fingerprints
+
+Each write-path advisory — the near-duplicate warning and the overlap
+warning — SHALL carry a stable review reference and a signal fingerprint
+derived from the advisory's endpoints and their content signal versions.
+Before emitting an advisory, the system SHALL consult the portable review
+state: an advisory whose exact `(review identity, fingerprint)` pair was
+dismissed SHALL NOT be emitted; a snoozed pair SHALL NOT be emitted before its
+expiry.
+
+The `contradiction-band` advisory kind is retired: write-time warning
+generation SHALL invoke no polarity classification, so no advisory
+distinguishes a proximity pair by claimed stance. A dismissal recorded against
+a retired contradiction-band identity SHALL NOT suppress the same pair's
+overlap advisory; such a pair may resurface once under the overlap identity.
+
+A material change to the counterpart endpoint SHALL produce a different
+fingerprint, and the advisory SHALL then be emitted again. A change to the
+written page itself SHALL resurface a dismissed advisory only when it changes
+the detected signal class for the pair. Ranking drift, unrelated writes, the
+triggering write's own change to the written page, and repeated identical page
+states SHALL NOT change the fingerprint.
+
+Suppression SHALL be failure-isolated in the emitting direction: review state
+that cannot be read or parsed SHALL cause the advisory to be emitted, and
+SHALL NOT fail, delay, or alter the committed mutation.
+
+#### Scenario: A dismissed duplicate warning stays quiet on the next write
+
+- **WHEN** a near-duplicate advisory for a page pair is dismissed through triage, and a further write commits to the same page with the counterpart materially unchanged and the detected signal class unchanged
+- **THEN** the committed result carries no near-duplicate advisory for that pair
+- **AND** the mutation outcome, status, and path are unchanged from an emission-free write
+
+#### Scenario: A material change resurfaces the advisory
+
+- **WHEN** a previously dismissed advisory's counterpart page is materially edited, and a further write commits to the original page
+- **THEN** the advisory is emitted again with a new fingerprint
+- **AND** the earlier dismissal record does not suppress it
+
+#### Scenario: Unreadable review state fails open to emission
+
+- **WHEN** the portable review state cannot be read during a compiled write that would emit an advisory
+- **THEN** the advisory is emitted
+- **AND** the write commits with its existing terminal unchanged
+
+#### Scenario: A declared rival pair produces no duplicate advisory
+
+- **WHEN** a page pair carries a recorded competing-alternatives stance and a further write commits to either page
+- **THEN** no near-duplicate advisory is emitted for that pair
+- **AND** the suppression follows from the stance contract, not from a dismissal record
+
+#### Scenario: The claim-level gate no longer changes write-path advisories
+
+- **WHEN** the claim-level subsystem is enabled and a draft lands in the proximity band against an active note
+- **THEN** the advisory emitted is the overlap kind with no polarity clause, exactly as on the default path
+
+### Requirement: Write feedback and the audit report the same relation-debt predicate
+
+The write-result feedback SHALL report relation debt using the same predicate as the audit's relation-debt category and the semantic connectivity lane: the presence of `sources:` provenance alone SHALL NOT clear the debt flag. The feedback SHALL report provenance presence as its own fact, distinct from debt, so a page with citations but no connections is described as exactly that.
+
+#### Scenario: A cited but unconnected page reports debt consistently
+
+- **WHEN** a compiled write commits to a page whose only outward reference is its `sources:` frontmatter, with no typed relations and no body wikilinks
+- **THEN** the write-result feedback reports relation debt
+- **AND** a subsequent audit reports the same page under the same debt condition
+- **AND** the feedback separately reports that provenance is present
+
+### Requirement: Compact responses may carry one bounded advisory due-state block
+
+Default compact mutating responses and recall responses MAY carry one `due_state` block: per-category open counts and a bounded list of top item references drawn from the maintained projection for the requesting audience. The block SHALL follow the established advisory posture: validated and projected from the leaf, bounded in size, never a key a client branches on for mutation outcome, and absent — never null or empty — when there is nothing to report. It SHALL NOT alter `status`, `mutated`, `path`, `warnings_count`, mutation identity, or replay behaviour. The legacy response detail SHALL omit the block. Tool input schemas SHALL NOT change.
+
+#### Scenario: A due prediction reaches the agent on an unrelated write
+
+- **WHEN** a prediction became due earlier in the session and any compiled write commits
+- **THEN** the default compact response carries a `due_state` block naming the category count and the item reference
+- **AND** the mutation outcome keys are byte-identical to a projection-free response apart from the advisory block
+
+#### Scenario: Recall responses carry deltas only
+
+- **WHEN** consecutive recall calls execute with no change in the projection between them
+- **THEN** at most the first response carries the `due_state` block
+- **AND** a later call after the projection changes carries the block again
+
+#### Scenario: The legacy detail omits the block
+
+- **WHEN** a mutation is invoked with the legacy response detail
+- **THEN** the response carries no `due_state` block and is otherwise unchanged
+
+### Requirement: Emission is governed so the carrier cannot nag
+
+The block SHALL be emitted on change of count, or on the first qualifying response of a session; identical totals SHALL NOT be repeated on consecutive responses. A bulk or batch operation SHALL emit at most one block, at its end, regardless of how many writes it contains. Emission governance SHALL be deterministic and testable without an agent.
+
+#### Scenario: A bulk import does not emit forty blocks
+
+- **WHEN** a batch operation commits forty compiled writes while the projection's totals change once
+- **THEN** at most one `due_state` block is emitted for the batch
+
+#### Scenario: An unchanged total goes quiet
+
+- **WHEN** three consecutive writes commit with no change in any category count
+- **THEN** at most the first of the three responses carries the block
+
+### Requirement: Operation leaves are due-state carriers
+
+An invocation of the operation leaves — `adopt_vault` mutating modes,
+`adoption_studio` `apply` and `apply-proposal`, `maintain_memory` in `fix`
+with `dry_run=false`, `reconcile`, `backfill-ids` with `dry_run=false`, or
+`structured-files` with `apply=true`, `preserve_artifacts`, and
+`process_media` mutating operations — that commits at least one governed
+write SHALL carry the bounded advisory due-state block under the same
+carrier contract as page writes: served from the committed terminal
+projection, validated and bounded, never a key a client branches on for
+operation outcome, family dispositions applied, emission recorded in the
+ledger once per delivered block, and an unreadable review state yielding no
+block while the operation still completes. Emission SHALL follow the
+canonical emission-governance and emission-ledger requirements unchanged —
+the invocation is one batch scope, change-only, delivered at the end.
+
+An invocation that commits no governed write — a clean-vault repair pass,
+already-valid media, a `retry` re-enqueue — SHALL carry no block even when
+the projection has open items: it produces no committed terminal, and
+extending carriage to non-committing responses is a response-contract change
+outside this requirement. A partially failed invocation that committed at
+least one governed write SHALL still carry under the change-only rule.
+Read-only and dry-run invocations of these leaves SHALL NOT carry the block.
+The leaves SHALL reuse the shared due-state projection helpers (the
+`due_state.block_for_write` family behind the due-state helpers'
+`due_state_advisory` disclosure boundary) rather than re-deriving any of it,
+and tool input schemas SHALL NOT change.
+
+#### Scenario: A bulk apply reports accumulation exactly once, at the end
+
+- **WHEN** an `adoption_studio` `apply` commits twelve governed writes whose
+  deltas change the due-state counts
+- **THEN** the invocation's response carries exactly one `due_state` block
+  reflecting the projection after the batch
+- **AND** the operation outcome keys are byte-identical to a projection-free
+  response apart from the advisory block
+
+#### Scenario: Unchanged totals stay quiet on a carrying leaf
+
+- **WHEN** a `preserve_artifacts` invocation commits its artifacts while no
+  category count differs from the last delivered block
+- **THEN** the response carries no `due_state` block
+
+#### Scenario: A committing-nothing invocation carries nothing
+
+- **WHEN** `maintain_memory` in `fix` with `dry_run=false` runs over a clean
+  vault and commits no write, while the projection holds open items
+- **THEN** the response carries no `due_state` block and the operation's
+  existing terminal is unchanged
+
+#### Scenario: Previews and scans stay clean
+
+- **WHEN** `adopt_vault` runs in scan-only mode, or `maintain_memory` `fix`
+  runs with its default dry-run preview
+- **THEN** the response carries no `due_state` block
+
+#### Scenario: Unreadable review state never blocks the operation
+
+- **WHEN** the review state cannot be read while a `process_media` processing
+  invocation commits a transcript sidecar
+- **THEN** the invocation completes with its existing terminal unchanged and
+  no `due_state` block
+
+### Requirement: The dispositions view carries the envelope beside the families
+
+The dispositions review mode SHALL list the envelope's action classes in a
+block structurally separate from the signal-family rows, so the two
+vocabularies never share a column and the word `off` is never ambiguous
+between them: a family `off` is annotated review-state, an envelope `off` is
+"the agent does not initiate this class". Each envelope row SHALL carry the
+class, its ceiling, its disposition or governance-owned marker, and whether the
+disposition is fixed, derived, or overridden. If landing this changes a
+recorded response contract or moves the packaged tool-surface digest, the
+documented two-phase rollout SHALL be followed; no tool schema changes.
+
+#### Scenario: One view, two clearly separated vocabularies
+
+- **WHEN** the dispositions view is read while one family is `quiet` and one
+  envelope class is overridden
+- **THEN** the family appears in the family block with its review-state
+  disposition, the class appears in the envelope block with its ceiling and
+  override marker, and neither block contains rows of the other kind
+
+### Requirement: Resource diagnostics expose the active compute envelope
+No-allocation resource status and doctor output SHALL report the effective native CPU budget, synchronous request-worker budget, bounded model-admission posture, whether each came from a default or override, any unsafe native-thread escape hatch, the background scheduling posture, and the configured ASR device/computation policy. Collecting these fields MUST NOT import model stacks, initialize an accelerator, or start a media worker.
+
+#### Scenario: Idle status on a CPU-only host
+- **WHEN** resource status is requested before a media job has run
+- **THEN** it reports the bounded CPU posture and unresolved or CPU ASR policy
+- **AND** no model or accelerator state is created
+
+#### Scenario: Accelerator job is blocked
+- **WHEN** a durable media job is blocked by a compute-runtime failure
+- **THEN** status reports the failure class and bounded remediation
+- **AND** it does not present source-file repair as the next action

@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Backup and restore
 
 ## Preconditions

@@ -89,6 +89,47 @@ async def test_creating_a_vault_writes_a_pinned_receipt(make_app, tmp_path):
         assert "packs" in _text(app, "#question")
 
 
+async def test_create_excludes_enrollment_before_starting_the_worker(
+    make_app,
+    tmp_path,
+    monkeypatch,
+):
+    from exomem import writer_lease
+    from exomem.governance import consolidation_enrollment
+
+    state_root = tmp_path / "writer-state"
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(state_root))
+    writer_lease.reset_managers_for_tests()
+    observed: list[str] = []
+    backend = FakeBackend(initialized=False)
+    original_init = backend.init_vault
+    vault_root = tmp_path / "new-vault"
+
+    def init(folder):
+        registry = consolidation_enrollment.LocalRuntimePresenceRegistry(
+            vault_root,
+            state_root=state_root,
+        )
+        try:
+            with registry.offline_enrollment(timeout_seconds=0):
+                observed.append("admitted")
+        except consolidation_enrollment.ConsolidationEnrollmentUnavailable as error:
+            observed.append(error.code)
+        return original_init(folder)
+
+    monkeypatch.setattr(backend, "init_vault", init)
+    app = make_app(backend)
+
+    try:
+        with consolidation_enrollment.cli_runtime_scope():
+            async with app.run_test(size=(80, 24)) as pilot:
+                await _create_vault(app, pilot, vault_root)
+    finally:
+        writer_lease.reset_managers_for_tests()
+
+    assert observed == ["CONSOLIDATION_ENROLLMENT_BUSY"]
+
+
 async def test_create_on_an_existing_vault_connects_instead_of_failing(make_app, tmp_path):
     existing = tmp_path / "already-a-vault"
     backend = FakeBackend(initialized=False)

@@ -1041,6 +1041,7 @@ def test_operator_cli_collects_three_authorities_and_writes_private_phase_facts(
     assert facts == module.execution_inventory_facts(inventory)
     assert provisioner_arguments == {
         "timeout_seconds": 15,
+        "kubectl": "kubectl",
         "bootstrap_image": observer_image,
     }
     if os.name != "nt":
@@ -1070,3 +1071,51 @@ def test_collector_failures_never_echo_tokens_paths_or_remote_output(
     message = str(captured.value)
     assert message == "substrate collector failed"
     assert "secret" not in message and os.fspath(token) not in message
+
+
+def _collect_argv(tmp_path, *extra: str) -> list[str]:
+    return [
+        "collect",
+        "--substrate-endpoint",
+        "https://example.invalid",
+        "--substrate-token-file",
+        str(tmp_path / "token"),
+        "--runtime-catalog",
+        str(tmp_path / "catalog.json"),
+        "--target",
+        str(tmp_path / "target.json"),
+        "--observed-at",
+        "2026-09-02T00:00:00Z",
+        "--inventory-output",
+        str(tmp_path / "inventory.json"),
+        "--facts-output",
+        str(tmp_path / "facts.json"),
+        *extra,
+    ]
+
+
+def test_collect_accepts_an_explicit_kubectl_executable(tmp_path) -> None:
+    """A k3s node has no bare kubectl, so the operator must be able to name one."""
+
+    module = _module()
+    parsed = module._parser().parse_args(
+        _collect_argv(tmp_path, "--kubectl", "/opt/exomem/bin/kubectl")
+    )
+    assert parsed.kubectl == "/opt/exomem/bin/kubectl"
+
+
+def test_collect_kubectl_defaults_to_the_environment_then_plain_kubectl(
+    tmp_path, monkeypatch
+) -> None:
+    module = _module()
+
+    monkeypatch.delenv("EXOMEM_KUBECTL", raising=False)
+    assert module._parser().parse_args(_collect_argv(tmp_path)).kubectl == "kubectl"
+
+    monkeypatch.setenv("EXOMEM_KUBECTL", "/opt/exomem/bin/kubectl")
+    assert module._parser().parse_args(_collect_argv(tmp_path)).kubectl == "/opt/exomem/bin/kubectl"
+    # An explicit flag still wins over the environment default.
+    assert (
+        module._parser().parse_args(_collect_argv(tmp_path, "--kubectl", "kubectl")).kubectl
+        == "kubectl"
+    )

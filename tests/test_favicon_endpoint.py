@@ -6,13 +6,20 @@ authenticated MCP session, so a 401 here would leave the connector unbranded.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+
 import pytest
 from starlette.testclient import TestClient
 
 from exomem import server
 
 
-def _client(vault, monkeypatch: pytest.MonkeyPatch, *, require_auth: bool = False) -> TestClient:
+@contextmanager
+def _client(
+    vault, monkeypatch: pytest.MonkeyPatch, *, require_auth: bool = False
+) -> Iterator[TestClient]:
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     if require_auth:
         monkeypatch.setenv("EXOMEM_BASE_URL", "https://example.test")
@@ -21,18 +28,27 @@ def _client(vault, monkeypatch: pytest.MonkeyPatch, *, require_auth: bool = Fals
         monkeypatch.setenv("EXOMEM_GITHUB_USERNAME", "z")
         monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", "123456")
         monkeypatch.setenv("EXOMEM_JWT_SIGNING_KEY", "stable-test-signing-root")
-    return TestClient(server.build_server(require_auth=require_auth).http_app())
+    mcp = server.build_server(require_auth=require_auth)
+    with TestClient(mcp.http_app()) as client:
+        yield client
+    # Health schedules background activation. It must finish before monkeypatch
+    # restores the environment, or it can start workers in the next test.
+    activation = mcp._exomem_local_runtime_activation
+    assert activation._shutdown.is_set()
+    assert activation._thread is None or not activation._thread.is_alive()
 
 
 def test_favicon_ico_served(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    r = _client(vault, monkeypatch).get("/favicon.ico")
+    with _client(vault, monkeypatch) as client:
+        r = client.get("/favicon.ico")
     assert r.status_code == 200, r.text
     assert r.headers["content-type"] == "image/x-icon"
     assert r.content[:4] == b"\x00\x00\x01\x00"  # ICO magic
 
 
 def test_favicon_svg_served(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    r = _client(vault, monkeypatch).get("/favicon.svg")
+    with _client(vault, monkeypatch) as client:
+        r = client.get("/favicon.svg")
     assert r.status_code == 200, r.text
     assert r.headers["content-type"].startswith("image/svg+xml")
     assert b"<svg" in r.content
@@ -40,7 +56,8 @@ def test_favicon_svg_served(vault, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_favicon_public_even_with_auth_enabled(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     # The whole point: no bearer token, auth turned ON, favicon still 200.
-    r = _client(vault, monkeypatch, require_auth=True).get("/favicon.ico")
+    with _client(vault, monkeypatch, require_auth=True) as client:
+        r = client.get("/favicon.ico")
     assert r.status_code == 200, r.text
 
 
@@ -48,21 +65,24 @@ def test_health_endpoint_public_and_reports_version(vault, monkeypatch: pytest.M
     """`/health` is an unauthenticated liveness probe (tunnels/orchestrators need
     an HTTP readiness check; previously only CLI `doctor` existed). Public even
     with auth on, returns status + version, and leaks no vault data."""
-    r = _client(vault, monkeypatch).get("/health")
+    with _client(vault, monkeypatch) as client:
+        r = client.get("/health")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "ok"
     assert body["service"] == "exomem"
     assert "version" in body
     # Public even with OAuth enabled.
-    r2 = _client(vault, monkeypatch, require_auth=True).get("/health")
+    with _client(vault, monkeypatch, require_auth=True) as client:
+        r2 = client.get("/health")
     assert r2.status_code == 200, r2.text
 
 
 def test_health_reports_install_provenance(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     """Answers "what is deployed, and from where" without inspecting the service
     manager — the gap that let a wheel-backed service hide behind a checkout."""
-    body = _client(vault, monkeypatch).get("/health").json()
+    with _client(vault, monkeypatch) as client:
+        body = client.get("/health").json()
     assert body["install_source"] in {"editable", "wheel", "unknown"}
     for key in ("revision", "torch", "accelerated", "extras"):
         assert key in body
@@ -71,13 +91,57 @@ def test_health_reports_install_provenance(vault, monkeypatch: pytest.MonkeyPatc
 def test_health_omits_host_identifying_detail(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     """This route is unauthenticated and publicly reachable through the tunnel, so
     absolute paths would leak the OS username and host layout."""
-    r = _client(vault, monkeypatch).get("/health")
+    with _client(vault, monkeypatch) as client:
+        r = client.get("/health")
     body = r.json()
     assert "interpreter" not in body
     assert "package_path" not in body
     assert "checkout" not in body
+    assert body["state"]["placement"] == "external-state"
+    assert body["state"]["migration"] in {
+        "absent",
+        "in-progress",
+        "complete",
+        "conflict",
+        "invalid",
+        "stale",
+        "unavailable",
+    }
+    assert "state_root" not in body
+    assert "path" not in body["state"]
+    assert str(vault) not in r.text
+    assert str(Path(__file__).resolve().parents[1]) not in r.text
     assert "C:" + r"\Users" not in r.text
     assert "/home/" not in r.text
+
+
+def test_health_uses_cached_or_manifest_only_migration_status_without_enumeration(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import state_migration
+
+    state_migration.migrate_vault_state_offline(
+        vault,
+        authority=state_migration.assert_offline_migration_authority(
+            source="favicon endpoint test setup"
+        ),
+    )
+    with _client(vault, monkeypatch) as client:
+        monkeypatch.setattr(
+            state_migration,
+            "scan_vault_state",
+            lambda _root: pytest.fail("health enumerated the knowledge base"),
+        )
+        monkeypatch.setattr(
+            state_migration,
+            "_external_state_present",
+            lambda _root: pytest.fail("health enumerated the external state root"),
+        )
+
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["state"]["migration"] == "complete"
 
 
 def test_health_survives_provenance_failure(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -88,7 +152,8 @@ def test_health_survives_provenance_failure(vault, monkeypatch: pytest.MonkeyPat
         raise RuntimeError("metadata unavailable")
 
     monkeypatch.setattr(deploy_provenance, "provenance", _boom)
-    r = _client(vault, monkeypatch).get("/health")
+    with _client(vault, monkeypatch) as client:
+        r = client.get("/health")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "ok"
@@ -121,7 +186,8 @@ def test_readiness_endpoint_is_public_and_content_free(
         },
     )
 
-    response = _client(vault, monkeypatch, require_auth=True).get("/health/ready")
+    with _client(vault, monkeypatch, require_auth=True) as client:
+        response = client.get("/health/ready")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     assert response.json()["runtime_contract"] == 1
@@ -156,7 +222,6 @@ def test_readiness_endpoint_returns_503_without_changing_liveness(
             "reasons": ["coordinator_unavailable"],
         },
     )
-    client = _client(vault, monkeypatch)
-
-    assert client.get("/health").status_code == 200
-    assert client.get("/health/ready").status_code == 503
+    with _client(vault, monkeypatch) as client:
+        assert client.get("/health").status_code == 200
+        assert client.get("/health/ready").status_code == 503

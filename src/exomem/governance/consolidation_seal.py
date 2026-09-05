@@ -428,6 +428,51 @@ class ConsolidationSealStore:
                 _fail("SEAL_STORE_CORRUPT")
             raise
 
+    def _recover_initial_locked(
+        self,
+        *,
+        vault_binding_digest: str,
+    ) -> ConsolidationSealState:
+        """Load the one recoverable partial enrollment shape."""
+
+        try:
+            if self._linked(self.base) or not stat.S_ISDIR(
+                os.stat(self.base, follow_symlinks=False).st_mode
+            ):
+                _fail("SEAL_STORE_CORRUPT")
+            top = {entry.name: entry for entry in os.scandir(self.base)}
+            if set(top) != {"snapshots"}:
+                _fail("SEAL_STORE_CORRUPT")
+            snapshots_path = self.base / "snapshots"
+            if self._linked(snapshots_path) or not top["snapshots"].is_dir(
+                follow_symlinks=False
+            ):
+                _fail("SEAL_STORE_CORRUPT")
+            snapshots = {entry.name: entry for entry in os.scandir(snapshots_path)}
+            if set(snapshots) != {"0.json"}:
+                _fail("SEAL_STORE_CORRUPT")
+            initial = snapshots["0.json"]
+            if initial.is_symlink() or not initial.is_file(follow_symlinks=False):
+                _fail("SEAL_STORE_CORRUPT")
+            raw = self._read_optional(
+                self._snapshot_path(0),
+                limit=_MAX_SNAPSHOT_BYTES,
+            )
+            if raw is None:
+                _fail("SEAL_STORE_CORRUPT")
+            state = self._restore_snapshot(raw, expected_digest=_snapshot_digest(raw))
+            if (
+                state.kind != "open"
+                or state.revision != 0
+                or state.vault_binding_digest != vault_binding_digest
+            ):
+                _fail("SEAL_STORE_CORRUPT")
+            return state
+        except ConsolidationSealUnavailable:
+            raise
+        except (OSError, ValueError):
+            _fail("SEAL_STORE_CORRUPT")
+
     def load_optional(self) -> ConsolidationSealState | None:
         """Load a complete store, returning ``None`` only for exact absence."""
 
@@ -509,22 +554,23 @@ class ConsolidationSealStore:
                 current, _active = self._load_locked()
             except ConsolidationSealUnavailable as error:
                 if error.code == "SEAL_STORE_CORRUPT":
-                    initial_raw = self._read_optional(
-                        self._snapshot_path(0),
-                        limit=_MAX_SNAPSHOT_BYTES,
+                    recovered = self._recover_initial_locked(
+                        vault_binding_digest=expected_vault,
                     )
-                    later_raw = self._read_optional(
-                        self._snapshot_path(1),
-                        limit=_MAX_SNAPSHOT_BYTES,
+                    committed = self._commit_locked(
+                        recovered,
+                        current_active_raw=None,
                     )
-                    if initial_raw == self._snapshot_bytes(target) and later_raw is None:
-                        return self._commit_locked(target, current_active_raw=None)
-                    raise
+                    self._validate_layout_locked(committed)
+                    return committed
                 if error.code != "SEAL_NOT_INITIALIZED":
                     raise
+                if os.path.lexists(self.base):
+                    _fail("SEAL_STORE_CORRUPT")
                 current = None
             if current is not None:
                 self._require_vault(current, expected_vault)
+                self._validate_layout_locked(current)
                 if current.kind == "deletion-sealed":
                     _fail("DELETION_SEAL_IRREVERSIBLE")
                 if current.kind != "open":
@@ -532,7 +578,9 @@ class ConsolidationSealStore:
                 if current.recorded_at != checked_time:
                     _fail("SEAL_STATE_CONFLICT")
                 return current
-            return self._commit_locked(target, current_active_raw=None)
+            committed = self._commit_locked(target, current_active_raw=None)
+            self._validate_layout_locked(committed)
+            return committed
 
     def begin_consolidation(
         self,

@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Measured retrieval quality
 
 exomem ships a golden-set eval harness, so retrieval quality is a number you can
@@ -6,6 +8,23 @@ results. It is deliberately transparent about what the numbers are and are not:
 a small, single-vault, self-graded benchmark — strictly more evidence than "no
 published results" or "no harness at all", but not an independent third-party
 benchmark.
+
+## Relation lifecycle evidence
+
+The graph-value lifecycle harness is synthetic and is run with
+`uv run python scripts/graph_value_benchmark.py`. It measures an explicit
+caller decision separately from resolver evidence: a resolver candidate does
+not count as selection, registry promotion, or edge authoring. Relation-review
+scale and concurrency checks likewise measure graph-native queue work bounds
+separately from latency; queue responses distinguish `available` from typed
+`warming`, `pending`, and `unavailable` results.
+
+The relation census is not a benchmark score. Its aggregate
+`relation_counts`, `page_counts`, and `denominators` compare caller-supplied
+origin-date and page-type cohorts without paths, bodies, source snippets, or
+examples. In particular, `zero_authored_relation_rows` and
+`zero_body_connections` are distinct counts, not a debt score or a backfill
+target.
 
 > The results table below was measured with `scripts/eval_retrieval.py` against
 > the **bundled fixture vault** (`tests/fixtures/`) — a deterministic, tiny,

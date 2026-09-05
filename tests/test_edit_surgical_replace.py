@@ -32,6 +32,39 @@ def _make_page(vault: Path, body: str) -> str:
     return rel
 
 
+@pytest.mark.parametrize(
+    "address",
+    (
+        "Knowledge Base/Notes/Research/Records/personal-archive-architecture.md",
+        "Notes/Research/Records/personal-archive-architecture.md",
+    ),
+)
+def test_surgical_replace_accepts_exempt_research_hub(
+    vault: Path, address: str
+) -> None:
+    rel = "Knowledge Base/Notes/Research/Records/personal-archive-architecture.md"
+    page = vault / rel
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntype: research-note\nproject: records\nstatus: active\n"
+        "created: 2026-05-18\nupdated: 2026-05-18\ntags: [hub]\n---\n"
+        "# Personal Archive\n\nBefore.\n",
+        encoding="utf-8",
+    )
+
+    result = edit_module.edit(
+        vault,
+        path=address,
+        why="refresh archive hub",
+        old_string="Before.",
+        new_string="After.",
+        today=TODAY,
+    )
+
+    assert result.path == rel
+    assert "After." in page.read_text(encoding="utf-8")
+
+
 def test_surgical_replace_fills_a_take(vault: Path) -> None:
     rel = _make_page(
         vault,

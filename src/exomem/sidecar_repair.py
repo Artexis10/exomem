@@ -13,8 +13,8 @@ one left behind. It is deliberately conservative:
 
 * The longest surviving `## Extracted text` block wins. That matters — for the
   sidecars whose top-level block was blanked by a re-render, the ONLY copy of the
-  extraction lives in a nested `## Preserved notes` section, so truncating at the
-  first heading (the obvious repair) would destroy it.
+  extraction can live in a nested `## Preserved notes` section, so truncating at
+  the first heading (the obvious repair) would destroy it.
 * Prose that is not regenerated scaffolding is kept, deduplicated, under a single
   `## Preserved notes` heading.
 * Frontmatter is never rewritten here. A sidecar left `extracted_by: pending`
@@ -35,6 +35,7 @@ from .vault import parse_frontmatter, walk_vault_md
 
 PRESERVED_HEADING = "## Preserved notes"
 EXTRACTED_HEADING = "## Extracted text"
+PRESERVED_NOTES_SENTINEL = "<!-- exomem:sidecar-preserved-notes -->"
 
 # Title + locator lines that `_render_sidecar` re-emits on every render.
 _BOILERPLATE_RE = re.compile(
@@ -57,13 +58,33 @@ def _segments(body: str) -> list[tuple[str, str]]:
     and would silently drop the whole table on repair.
     """
     out: list[tuple[str, str]] = []
-    for segment in body.split(PRESERVED_HEADING):
+    owned_boundary = f"{PRESERVED_NOTES_SENTINEL}\n{PRESERVED_HEADING}"
+    boundaries = (
+        body.rsplit(owned_boundary, 1)
+        if owned_boundary in body
+        else body.split(PRESERVED_HEADING)
+    )
+    for segment in boundaries:
         index = segment.find(EXTRACTED_HEADING)
         if index == -1:
             out.append((segment, ""))
             continue
         out.append((segment[:index], segment[index + len(EXTRACTED_HEADING) :]))
     return out
+
+
+def _is_repeated_extraction_residual(residual: str, extraction: str) -> bool:
+    """Whether a preserved residual is only whole copies of the extraction."""
+    if not extraction:
+        return False
+    copy = re.escape(extraction)
+    return re.fullmatch(rf"{copy}(?:\s+{copy})*", residual) is not None
+
+
+def _selected_extraction(segments: list[tuple[str, str]]) -> str:
+    """Return the longest actual extraction block, if one survives."""
+    blocks = [extraction.strip() for _prose, extraction in segments if extraction.strip()]
+    return max(blocks, key=len) if blocks else ""
 
 
 @dataclass(frozen=True)
@@ -88,33 +109,39 @@ class SidecarDamage:
         """
         return self.top_level_chars == 0 and self.recovered_chars > 0
 
+    @property
+    def source_reextraction_required(self) -> bool:
+        """Whether no surviving extraction can safely anchor a repair."""
+        return self.top_level_chars == 0 and self.recovered_chars == 0
+
 
 def analyze(content: str, path: Path) -> SidecarDamage | None:
     """Describe the duplication in `content`, or None when it is clean."""
-    content = _logical_text(content)
-    _frontmatter, body, raw = parse_frontmatter(content)
-    body = body if raw is not None else content
+    logical_content = _logical_text(content)
+    _frontmatter, body, raw = parse_frontmatter(logical_content)
+    body = body if raw is not None else logical_content
     if PRESERVED_HEADING not in body:
-        return None
-    # A single `## Preserved notes` holding genuine prose is the correct end
-    # state, not damage — so "damaged" means "the repair would change this",
-    # which also makes a repaired vault report clean on the next pass.
-    repaired = repair(content)
-    if repaired == content:
         return None
     segments = _segments(body)
     blocks = _extraction_blocks(body)
     # Deliberately the FIRST segment's block, empty or not — an empty one is what
     # makes a sidecar recovery-only.
     top = segments[0][1].strip() if segments else ""
-    best = max(blocks, key=len) if blocks else ""
+    best = _selected_extraction(segments)
+    # A single `## Preserved notes` holding genuine prose is the correct end
+    # state, not damage — so "damaged" means "the repair would change this",
+    # which also makes a repaired vault report clean on the next pass.
+    repaired = repair(content)
+    if _logical_text(repaired) == logical_content:
+        if top or best:
+            return None
     return SidecarDamage(
         path=path,
         depth=body.count(PRESERVED_HEADING),
         distinct_extractions=len(set(blocks)),
         top_level_chars=len(top),
         recovered_chars=len(best),
-        duplicate_chars=max(0, len(content) - len(repaired)),
+        duplicate_chars=max(0, len(logical_content) - len(_logical_text(repaired))),
     )
 
 
@@ -124,31 +151,45 @@ def repair(content: str) -> str:
     Keeps frontmatter verbatim so a still-`pending` sidecar stays queued for a
     real re-extraction.
     """
-    content = _logical_text(content)
     frontmatter_text, body = _split_frontmatter(content)
+    body = _logical_text(body)
     if PRESERVED_HEADING not in body:
         return content
 
+    has_preserved_sentinel = f"{PRESERVED_NOTES_SENTINEL}\n{PRESERVED_HEADING}" in body
     segments = _segments(body)
-    blocks = [extraction.strip() for _prose, extraction in segments if extraction.strip()]
-    best = max(blocks, key=len) if blocks else ""
+    best = _selected_extraction(segments)
+    if not best:
+        # Repetition alone cannot prove what one authored preserved unit was.
+        # A fresh worker extraction is the only safe candidate for that cleanup.
+        return content
 
     head_text = "\n\n".join(
         line.strip() for line in _BOILERPLATE_RE.findall(segments[0][0]) if line.strip()
     )
 
     notes: list[str] = []
-    for prose, _extraction in segments:
+    for index, (prose, _extraction) in enumerate(segments):
         residual = _BOILERPLATE_RE.sub("", prose).strip()
+        if index and _is_repeated_extraction_residual(residual, best):
+            continue
         if residual and residual not in notes:
             notes.append(residual)
 
     parts = [head_text] if head_text else []
     parts.append(f"{EXTRACTED_HEADING}\n\n{best}".rstrip("\n"))
     if notes:
-        parts.append(f"{PRESERVED_HEADING}\n\n" + "\n\n".join(notes))
+        heading = (
+            f"{PRESERVED_NOTES_SENTINEL}\n{PRESERVED_HEADING}"
+            if has_preserved_sentinel
+            else PRESERVED_HEADING
+        )
+        parts.append(f"{heading}\n\n" + "\n\n".join(notes))
     rebuilt = "\n\n".join(parts) + "\n"
-    return f"{frontmatter_text}\n{rebuilt}" if frontmatter_text else rebuilt
+    if frontmatter_text:
+        separator = "" if frontmatter_text.endswith(("\n", "\r")) else "\n"
+        return f"{frontmatter_text}{separator}{rebuilt}"
+    return rebuilt
 
 
 def repair_is_safe(original: str, repaired: str) -> bool:
@@ -187,8 +228,9 @@ def _extraction_blocks(body: str) -> list[str]:
 
 def _longest_extraction(content: str) -> int:
     content = _logical_text(content)
-    blocks = _extraction_blocks(content)
-    return len(max(blocks, key=len)) if blocks else 0
+    _frontmatter, body, raw = parse_frontmatter(content)
+    body = body if raw is not None else content
+    return len(_selected_extraction(_segments(body)))
 
 
 def _split_frontmatter(content: str) -> tuple[str, str]:
@@ -199,4 +241,8 @@ def _split_frontmatter(content: str) -> tuple[str, str]:
     if end == -1:
         return "", content
     boundary = end + len("\n---")
-    return content[:boundary], content[boundary:].lstrip("\n")
+    if content.startswith("\r\n", boundary):
+        boundary += 2
+    elif content.startswith("\n", boundary):
+        boundary += 1
+    return content[:boundary], content[boundary:]

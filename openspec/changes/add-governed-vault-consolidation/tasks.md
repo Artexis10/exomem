@@ -500,7 +500,10 @@ binds that reference and observed digest; no caller field selects K.
   deletion-seal semantics irreversible. Add explicit owner-only pre-start
   enrollment over an existing authenticated identity, Hosted lifetime exclusion,
   and a vault-keyed local runtime-presence registry; do not lazily initialize or
-  adopt through product dispatch.
+  adopt through product dispatch. Expose local enrollment only through
+  `exomem governance-enroll`; keep it out of MCP, REST, and Hosted agent command
+  registries, while Hosted provisioning uses the trusted seam under its lifetime
+  lock.
 - [ ] 6.6 Add red Hosted owner-control admission tests in
   `tests/test_consolidation_control_admission.py` proving apply and its
   identical tagged-request/operation-id resume,

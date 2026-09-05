@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from exomem import find as find_mod
-from exomem import preserve, scene_frames, semantic_contract
+from exomem import find_candidates
+from exomem import lexstore, preserve, scene_frames, semantic_contract
+from exomem.find_types import ParsedPage
 from exomem.embeddings import Scene
 from exomem.find import find
 
@@ -159,3 +161,132 @@ def test_collapse_keeps_parent_best_rank(vault: Path) -> None:
     assert collapsed == [VIDEO_REL + ".md"]
     assert scores[VIDEO_REL + ".md"] == 0.9  # parent's own score kept (keep-best)
     assert (VIDEO_REL + ".md") in attribution  # frame still attributed for enrichment
+
+
+def _frame_page(vault: Path, rel: str, parent_media: str | None) -> ParsedPage:
+    return ParsedPage(
+        path=vault / rel,
+        rel_path=rel,
+        frontmatter={
+            "type": "source",
+            **({"parent_media": parent_media} if parent_media else {}),
+            "evidence_file": rel.removesuffix(".md"),
+            "frame_ts": 5.0,
+        },
+        body="frame",
+        title="frame",
+        mtime=0.0,
+    )
+
+
+def test_collapse_hints_skip_ordinary_hydration_and_keep_child_authoritative(vault: Path) -> None:
+    parent = "Knowledge Base/video.mp4.md"
+    child = "Knowledge Base/video.mp4.frames/scene-000-005.000.jpg.md"
+    ordinary = "Knowledge Base/ordinary.md"
+    for rel in (parent, child, ordinary):
+        path = vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("---\ntype: insight\n---\n# page\n", encoding="utf-8")
+
+    calls: list[str] = []
+
+    def page_of(rel: str) -> ParsedPage | None:
+        calls.append(rel)
+        return _frame_page(vault, rel, "Knowledge Base/video.mp4") if rel == child else None
+
+    attribution: dict[str, tuple[str, float | None]] = {}
+    collapsed = find_candidates.collapse_frame_children(
+        [ordinary, child],
+        vault,
+        page_of,
+        attribution,
+        parent_hints={ordinary: None, child: parent},
+        recall_paths={ordinary, child, parent},
+    )
+
+    assert collapsed == [ordinary, parent]
+    assert calls == [child]
+    assert attribution == {parent: (child.removesuffix(".md"), 5.0)}
+
+
+def test_collapse_large_hints_match_legacy_and_hydrate_only_child(vault: Path) -> None:
+    parent = "Knowledge Base/video.mp4.md"
+    child = "Knowledge Base/video.mp4.frames/scene-000-005.000.jpg.md"
+    ordinary = [f"Knowledge Base/ordinary-{number:03d}.md" for number in range(449)]
+    for rel in [parent, child, *ordinary]:
+        path = vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("---\ntype: insight\n---\n# page\n", encoding="utf-8")
+    ranking = [*ordinary, child]
+    recall_paths = set(ranking) | {parent}
+
+    def page_of(rel: str) -> ParsedPage | None:
+        return _frame_page(vault, rel, "Knowledge Base/video.mp4") if rel == child else None
+
+    legacy_attribution: dict[str, tuple[str, float | None]] = {}
+    legacy_aux = {child: 0.4, ordinary[0]: 0.9}
+    legacy = find_candidates.collapse_frame_children(
+        ranking, vault, page_of, legacy_attribution, legacy_aux, recall_paths=recall_paths
+    )
+
+    calls: list[str] = []
+
+    def counting_page_of(rel: str) -> ParsedPage | None:
+        calls.append(rel)
+        return page_of(rel)
+
+    hinted_attribution: dict[str, tuple[str, float | None]] = {}
+    hinted_aux = {child: 0.4, ordinary[0]: 0.9}
+    hinted = find_candidates.collapse_frame_children(
+        ranking,
+        vault,
+        counting_page_of,
+        hinted_attribution,
+        hinted_aux,
+        parent_hints={**{rel: None for rel in ordinary}, child: parent},
+        recall_paths=recall_paths,
+    )
+
+    assert calls == [child]
+    assert hinted == legacy
+    assert hinted_attribution == legacy_attribution
+    assert hinted_aux == legacy_aux
+
+
+def test_collapse_hinted_child_stays_standalone_when_parent_disappears(vault: Path) -> None:
+    parent = "Knowledge Base/video.mp4.md"
+    child = "Knowledge Base/video.mp4.frames/scene-000-005.000.jpg.md"
+    child_path = vault / child
+    child_path.parent.mkdir(parents=True, exist_ok=True)
+    child_path.write_text("---\ntype: source\n---\n# frame\n", encoding="utf-8")
+
+    collapsed = find_candidates.collapse_frame_children(
+        [child],
+        vault,
+        lambda rel: _frame_page(vault, rel, None),
+        {},
+        parent_hints={child: parent},
+        recall_paths={child, parent},
+    )
+
+    assert collapsed == [child]
+
+
+def test_incomplete_parent_hints_fall_back_to_legacy_hydration(
+    vault: Path, monkeypatch
+) -> None:
+    _setup_video_with_frames(vault)
+    calls = 0
+
+    def incomplete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return lexstore.CatalogQueryResult(
+            None, lexstore.CatalogReadiness("stale", False, lexstore.backend())
+        )
+
+    monkeypatch.setattr(lexstore, "emitted_parent_hints_result", incomplete)
+    hits = find(vault, query="unobtainium flux", mode="hybrid")
+
+    assert [hit.path for hit in hits] == [VIDEO_REL + ".md"]
+    assert calls == 1

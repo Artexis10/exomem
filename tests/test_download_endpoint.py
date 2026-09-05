@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import server, upload_tokens
+from exomem import index_paths, server, upload_tokens
 
 
 def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
@@ -116,7 +116,8 @@ def test_download_nonexistent_file(vault, monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_download_hides_private_state_hardlink_before_release(vault, monkeypatch) -> None:
-    private = vault / "Knowledge Base" / ".embeddings.sqlite"
+    private = index_paths.sidecar_path(vault)
+    private.parent.mkdir(parents=True, exist_ok=True)
     private.write_bytes(b"private-index")
     alias = vault / "Knowledge Base" / "Notes" / "ordinary-looking.bin"
     try:

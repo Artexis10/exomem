@@ -35,7 +35,8 @@ KEYRING_FILE_ENV = "EXOMEM_AUTH_SESSION_KEYRING_FILE"
 CONTROL_FILE_ENV = "EXOMEM_AUTH_SESSION_CONTROL_FILE"
 MEMBERSHIP_FILE_ENV = "EXOMEM_AUTH_SESSION_MEMBERSHIP_FILE"
 REPLICA_ID_ENV = "EXOMEM_AUTH_SESSION_REPLICA_ID"
-HOSTED_CUSTODY_ROOT = Path("/run/exomem/authorization-session")
+HOSTED_CUSTODY_VOLUME_ROOT = Path("/run/exomem/authorization-session")
+HOSTED_CUSTODY_ROOT = HOSTED_CUSTODY_VOLUME_ROOT / "private"
 HOSTED_KEYRING_FILE = HOSTED_CUSTODY_ROOT / "keyring.json"
 HOSTED_CONTROL_FILE = HOSTED_CUSTODY_ROOT / "control.json"
 HOSTED_MEMBERSHIP_FILE = HOSTED_CUSTODY_ROOT / "serving-membership.json"
@@ -2017,6 +2018,33 @@ def _governance_negative_scan(vault_root: Path) -> None:
                         raise AuthorizationCustodyUnavailable
                 if not filesystem.validate_directory(knowledge_base).ok:
                     raise AuthorizationCustodyUnavailable
+        # The compiled governance store is machine-local and lives under the
+        # external per-vault state root now; a negative scan that ignored it
+        # would pass while a local compiled authority still exists.
+        from .. import state_paths
+
+        state_dir = state_paths.vault_state_dir(vault_root)
+        if state_dir.is_dir():
+            external = held_fs.acquire(state_dir)
+            if not external.ok:
+                raise AuthorizationCustodyUnavailable
+            with external.require() as external_filesystem:
+                root_result = external_filesystem.parent(".")
+                if not root_result.ok:
+                    raise AuthorizationCustodyUnavailable
+                with root_result.require() as state_root_directory:
+                    for name in _GOVERNANCE_AUTHORITY_NAMES:
+                        candidate = external_filesystem.file(
+                            state_root_directory, name
+                        )
+                        if candidate.ok:
+                            candidate.require().close()
+                            raise AuthorizationCustodyUnavailable
+                        if (
+                            candidate.error is None
+                            or candidate.error.code != "MISSING"
+                        ):
+                            raise AuthorizationCustodyUnavailable
     except AuthorizationCustodyUnavailable:
         raise
     except (OSError, RuntimeError, ValueError, held_fs.HeldFsError):

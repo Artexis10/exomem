@@ -958,7 +958,19 @@ class HostedSecurityAuthority:
                 "SELECT 1 FROM credential_state WHERE singleton=1"
             ).fetchone()
             if existing is not None:
-                raise HostedCredentialTransitionInvalid()
+                row = self._read_state(connection)
+                if row["phase"] != "stable" or row["active_version"] != active_version:
+                    raise HostedCredentialTransitionInvalid()
+                self._validate_recorded_bundle(row, bundle)
+                snapshot = self._snapshot(row)
+                self._record_operation(
+                    connection,
+                    operation_id=operation_id,
+                    action="bootstrap",
+                    request_digest=request_digest,
+                    result={"snapshot": _snapshot_payload(snapshot)},
+                )
+                return snapshot
             connection.execute(
                 """
                 INSERT INTO credential_state(

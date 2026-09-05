@@ -189,19 +189,25 @@ def test_unix_always_may_install_and_never_skips() -> None:
 
 def test_upgrade_scripts_defer_cli_sync_until_live_version_is_verified() -> None:
     windows = (ROOT / "scripts" / "upgrade.ps1").read_text(encoding="utf-8")
+    windows_common = (ROOT / "scripts" / "_service-common.ps1").read_text(encoding="utf-8")
     unix = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
 
     assert 'ValidateSet("auto", "always", "never")' in windows
     assert '$CliSync = "auto"' in windows
     assert "Sync-ExomemUvCli" in windows
-    assert windows.index("if ($SkipRestart)") < windows.index("Sync-ExomemUvCli")
+    assert "Assert-ExomemInstallApplied" in windows_common
+    assert windows.index("Install-ExomemPackage") < windows.index("Offline state migration...")
+    assert windows.index("Offline state migration...") < windows.index("Preflight: exomem doctor")
+    assert windows.index("Preflight: exomem doctor") < windows.index("Restarting $ServiceName")
+    assert windows.index("Restarting $ServiceName") < windows.index("Serving version:")
     assert windows.index("Serving version:") < windows.index("Sync-ExomemUvCli")
 
     assert "--cli-sync" in unix
     assert 'exomem_sync_uv_cli "$CLI_SYNC" "$SERVED"' in unix
-    assert unix.index('if [[ "$SKIP_RESTART" -eq 1 ]]') < unix.index(
-        'exomem_sync_uv_cli "$CLI_SYNC" "$SERVED"'
-    )
+    assert unix.index("exomem_assert_install_applied") < unix.index("Offline state migration...")
+    assert unix.index("Offline state migration...") < unix.index("Preflight: exomem doctor")
+    assert unix.index("Preflight: exomem doctor") < unix.index("Starting $SERVICE_ID...")
+    assert unix.index("Starting $SERVICE_ID...") < unix.index("Serving version:")
     assert unix.index("Serving version:") < unix.index('exomem_sync_uv_cli "$CLI_SYNC" "$SERVED"')
 
 

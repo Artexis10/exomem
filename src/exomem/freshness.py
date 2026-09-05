@@ -62,8 +62,10 @@ import ntpath
 import os
 import threading
 import uuid
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections import deque
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple, overload
 
@@ -87,6 +89,9 @@ class ReconcileDelta(NamedTuple):
     drifted: bool
     changed: list[str]
     deleted: list[str]
+    # A walk superseded by invalidation did not establish a new baseline and
+    # must not acknowledge an external event merely because it found no drift.
+    published: bool = True
 
 
 FileSignature = tuple[int, int, int]
@@ -744,6 +749,26 @@ def _cold_recall_projection_scope_snapshot(
     )
 
 
+def recall_pending_coverage(vault_root: Path):
+    """Bounded pending-visibility coverage managed recall must prove before ready.
+
+    The persistent projections above describe what the sidecars have published.
+    A committed write whose derived components have not converged yet is covered
+    instead by exact durable receipts, and recall may only be declared ready once
+    that bounded set has been hydrated and fenced. This is the seam that answers
+    it, kept beside the other recall projection identities so a consumer proves
+    both through one module.
+
+    Returns the typed coverage; ``ready`` means the whole outstanding set was
+    proven, and every other outcome is the caller's cue to return its existing
+    warming/temporarily-unavailable result rather than the last published
+    catalogue.
+    """
+    from . import pending_recall
+
+    return pending_recall.overlay(Path(vault_root))
+
+
 def recall_projection_scope_snapshot(
     vault_root: Path,
     scope: str,
@@ -1083,7 +1108,11 @@ def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLik
 
 
 def reconcile(
-    vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLike]]
+    vault_root: Path,
+    scope: str,
+    entries: Iterable[tuple[str, SignatureLike]],
+    *,
+    publication_guard: AbstractContextManager[object] | None = None,
 ) -> ReconcileDelta:
     """Replace the map from a fresh walk; return the drift delta.
 
@@ -1093,15 +1122,25 @@ def reconcile(
     changed/deleted paths (this function holds both the old map and the fresh
     walk) so the caller can dispatch them through the event fan-out; the map is
     always fully replaced regardless of what the caller does with the delta.
+
+    Production callers supply the canonical writer's publication guard. The
+    walk and policy projection stay off-boundary; only the final map swap waits
+    for an in-flight writer's event. Its retained target state then wins over
+    any observation made between canonical replacement and event publication.
     """
+    from . import recall_policy
+
     key = _key(vault_root, scope)
     replacement_lock, replacement_epoch = _begin_replacement(key)
     try:
         fresh = {sp: _normalize_signature(signature) for sp, signature in entries}
         recall_fresh, recall_identity = _project_recall_entries(vault_root, fresh.items())
-        with _lock:
-            if not _replacement_is_current(key, replacement_epoch):
-                return ReconcileDelta(drifted=False, changed=[], deleted=[])
+        with (publication_guard if publication_guard is not None else nullcontext()), _lock:
+            if (
+                not _replacement_is_current(key, replacement_epoch)
+                or recall_policy.recall_policy_identity(vault_root) != recall_identity
+            ):
+                return ReconcileDelta(drifted=False, changed=[], deleted=[], published=False)
             _merge_replacement_pending(key, fresh, recall_fresh)
             old = _maps.get(key)
             # The map swap and the drift generation/history transition happen in ONE
@@ -1186,6 +1225,14 @@ def reconcile(
             scope,
             len(changed),
             len(deleted),
+        )
+        # Drift is the receipt-less case by definition: the walk found a change
+        # no governed write announced, so no path set is authoritative and the
+        # scope is what gets invalidated. The delta is still dispatched by the
+        # caller through the ordinary fan-out; this is the substrate caches'
+        # half, and it is the ONE remaining role of a whole-scope key.
+        invalidate_scope_for_drift(
+            vault_root, scope=scope, reason="receiptless_drift"
         )
     return ReconcileDelta(drifted=drifted, changed=changed, deleted=deleted)
 
@@ -1550,6 +1597,353 @@ def rebaseline(vault_root: Path) -> dict[str, bool]:
     return result
 
 
+# --------------------------------------------------------------------------- #
+# Exact path custody for the read-side substrate caches
+# --------------------------------------------------------------------------- #
+#
+# A governed write already names every path it touched. The whole-scope triple
+# above cannot tell a change to ONE page from a change anywhere in the scope, so
+# a cache keyed on it discards on every write what the previous write built.
+# Design Decision 2 splits the two questions: a change that arrives WITH a
+# receipt is applied to a per-path seam on each substrate cache and nothing else
+# moves; a change that arrives WITHOUT one (an external edit reconciliation
+# finds) invalidates the scope it drifted in, because there is no path set to be
+# exact about.
+#
+# The seams live here rather than in one of the caches because the report has to
+# be one report: "an exact update of that page's rows only, rebuild counters
+# unchanged" is a statement about ALL of them, and an audit that fails closed has
+# to fail closed for the request, not for one cache.
+
+
+@dataclass(frozen=True, slots=True)
+class CustodySeam:
+    """One substrate cache's per-path invalidation seam.
+
+    ``apply`` takes exact custody of a receipt's paths: it refreshes or evicts
+    the rows for those paths and touches nothing else. ``verify`` reports which
+    of a set of paths this cache does NOT hold at the page's current identity,
+    changing nothing -- and it is what COUNTS the apply, so a seam that skipped
+    its work reports zero updates rather than being believed. ``invalidate_scope``
+    is the receipt-less counterpart and is optional: a durable store heals
+    through its own repair worker, so only the in-process caches implement it.
+
+    Both callables receive ``digests``: the sha256 of each path's canonical
+    bytes right now, or ``None`` for a path that is not a readable file. It is
+    computed ONCE per batch and threaded through, because four seams each
+    hashing every path meant four full reads of every page a receipt named, on
+    the thread that had just written them.
+    """
+
+    name: str
+    apply: Callable[[Path, tuple[str, ...], tuple[str, ...], Mapping[str, str | None]], None]
+    verify: (
+        Callable[[Path, tuple[str, ...], Mapping[str, str | None]], tuple[str, ...]] | None
+    ) = None
+    invalidate_scope: Callable[[Path, str], None] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CustodyReport:
+    """What one receipt's path set did to every substrate cache."""
+
+    reason: str
+    paths: tuple[str, ...]
+    updated: Mapping[str, int] = field(default_factory=dict)
+    retired: Mapping[str, int] = field(default_factory=dict)
+    mismatches: tuple[tuple[str, str], ...] = ()
+    rebuilt: Mapping[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CustodyAudit:
+    """A cache-versus-page comparison and whether it had to fail closed."""
+
+    reason: str
+    paths: tuple[str, ...]
+    mismatches: tuple[tuple[str, str], ...] = ()
+    invalidated: bool = False
+
+
+#: Modules that own a substrate cache, in the order their seams report.
+_CUSTODY_SEAM_MODULES = ("find_corpus", "lexstore", "memory_refs")
+_CUSTODY_REPORT_HISTORY = 64
+
+_custody_lock = threading.RLock()
+_custody_seams: dict[str, CustodySeam] = {}
+_custody_seams_loaded = False
+_custody_rebuilds: dict[str, int] = {}
+#: Bounded like the report history. A long-lived cell that keeps hitting
+#: receipt-less drift would otherwise grow this list without limit, and it is
+#: diagnostics: the last N are what anyone reads.
+_custody_scope_invalidations: deque[tuple[str, str]] = deque(
+    maxlen=_CUSTODY_REPORT_HISTORY
+)
+_custody_reports: deque[CustodyReport] = deque(maxlen=_CUSTODY_REPORT_HISTORY)
+
+
+def register_custody_seam(seam: CustodySeam) -> None:
+    """Register (or replace) one substrate cache's per-path seam."""
+    with _custody_lock:
+        _custody_seams[seam.name] = seam
+
+
+def _ensure_custody_seams() -> None:
+    """Import the cache modules once so every seam is registered.
+
+    Lazy on purpose: `find_corpus` imports this module, so a top-level import
+    the other way would be a cycle. Every entry point below funnels through
+    here, so a seam can never be missed because of import order -- which would
+    otherwise read as "that cache took no custody" rather than as a defect.
+    """
+    global _custody_seams_loaded
+    with _custody_lock:
+        if _custody_seams_loaded:
+            return
+    from importlib import import_module
+
+    loaded = True
+    for name in _CUSTODY_SEAM_MODULES:
+        try:
+            import_module(f".{name}", __package__).register_path_custody()
+        except Exception:  # noqa: BLE001 - retried on the next receipt
+            log.warning("custody seam module %s did not register", name, exc_info=True)
+            loaded = False
+    with _custody_lock:
+        _custody_seams_loaded = loaded
+
+
+def custody_seams() -> tuple[str, ...]:
+    _ensure_custody_seams()
+    with _custody_lock:
+        return tuple(_custody_seams)
+
+
+def note_custody_rebuild(name: str) -> None:
+    """Record that a substrate cache re-derived itself from the whole scope.
+
+    Called by the caches themselves, at the one place each of them rebuilds. It
+    is the counter the exact-custody invariant is stated against: a governed
+    write that moves this has discarded work an exact receipt already covered.
+    """
+    with _custody_lock:
+        _custody_rebuilds[name] = _custody_rebuilds.get(name, 0) + 1
+
+
+def custody_rebuilds() -> dict[str, int]:
+    with _custody_lock:
+        return {name: count for name, count in _custody_rebuilds.items() if count}
+
+
+def custody_scope_invalidations() -> tuple[tuple[str, str], ...]:
+    with _custody_lock:
+        return tuple(_custody_scope_invalidations)
+
+
+def last_custody_report() -> CustodyReport | None:
+    with _custody_lock:
+        return _custody_reports[-1] if _custody_reports else None
+
+
+def custody_reports_for(rel_path: str) -> tuple[CustodyReport, ...]:
+    """Every retained report whose receipt named this path.
+
+    A move is two receipts -- the destination is an upsert, the source a
+    removal -- so a caller asking what happened to one path has to be able to
+    see both.
+    """
+    target = _custody_rel(rel_path)
+    with _custody_lock:
+        return tuple(report for report in _custody_reports if target in report.paths)
+
+
+def reset_custody_telemetry() -> None:
+    """Drop the counters and the report history; keep the registered seams."""
+    with _custody_lock:
+        _custody_rebuilds.clear()
+        _custody_scope_invalidations.clear()
+        _custody_reports.clear()
+
+
+def _custody_rel(value: object) -> str:
+    return str(value or "").replace("\\", "/").lstrip("/")
+
+
+def custody_digests(vault_root: Path, rel_paths: Iterable[str]) -> dict[str, str | None]:
+    """sha256 of each path's canonical bytes now, or None when it is not a file.
+
+    One read per path for the whole batch. Every seam compares against this
+    rather than reading the page again: the frontmatter cache, both lexstore
+    seams and the reference sidecar were each hashing the same bytes, so a
+    receipt naming N pages cost 4N reads on the writer's thread.
+    """
+    from . import find_corpus
+
+    root = Path(vault_root)
+    digests: dict[str, str | None] = {}
+    for rel in rel_paths:
+        if rel in digests:
+            continue
+        content = find_corpus._read_page_bytes(root.joinpath(*rel.split("/")), root)
+        digests[rel] = None if content is None else hashlib.sha256(content).hexdigest()
+    return digests
+
+
+def _custody_rels(values: Iterable[object]) -> tuple[str, ...]:
+    seen: dict[str, None] = {}
+    for value in values:
+        rel = _custody_rel(value)
+        if rel:
+            seen.setdefault(rel, None)
+    return tuple(seen)
+
+
+def apply_receipt_paths(
+    vault_root: Path,
+    *,
+    changed: Iterable[object] = (),
+    deleted: Iterable[object] = (),
+    reason: str = "governed_write",
+) -> CustodyReport:
+    """Apply one committed receipt's path set to every substrate cache seam.
+
+    Rows for those paths are refreshed or retired; nothing else moves. A path a
+    seam cannot bring to exact custody is a mismatch, and a mismatch fails
+    closed to a scope invalidation rather than leaving a row that answers.
+    """
+    _ensure_custody_seams()
+    changed_rels = _custody_rels(changed)
+    deleted_rels = _custody_rels(deleted)
+    if not (changed_rels or deleted_rels):
+        return CustodyReport(reason=reason, paths=())
+    with _custody_lock:
+        seams = tuple(_custody_seams.values())
+        before = dict(_custody_rebuilds)
+    all_rels = (*changed_rels, *deleted_rels)
+    digests = custody_digests(vault_root, all_rels)
+    updated: dict[str, int] = {}
+    retired: dict[str, int] = {}
+    mismatches: list[tuple[str, str]] = []
+    for seam in seams:
+        try:
+            seam.apply(Path(vault_root), changed_rels, deleted_rels, digests)
+            # The count is the PROOF, not the seam's own word for it: a seam
+            # that skipped its work leaves a row its verify still calls stale,
+            # so the update it did not make cannot be reported as made.
+            stale = frozenset(
+                seam.verify(Path(vault_root), all_rels, digests)
+                if seam.verify is not None
+                else ()
+            )
+        except Exception:  # noqa: BLE001 - one seam must not stop the others
+            log.warning("custody seam %s failed to apply", seam.name, exc_info=True)
+            # An unapplied seam is not a pass. Name every path it was asked
+            # about so the batch fails closed rather than reading as exact.
+            mismatches.extend((seam.name, rel) for rel in (*changed_rels, *deleted_rels))
+            continue
+        updated[seam.name] = sum(1 for rel in changed_rels if rel not in stale)
+        retired[seam.name] = sum(1 for rel in deleted_rels if rel not in stale)
+        mismatches.extend((seam.name, rel) for rel in sorted(stale))
+    with _custody_lock:
+        rebuilt = {
+            name: count - before.get(name, 0)
+            for name, count in _custody_rebuilds.items()
+            if count - before.get(name, 0) > 0
+        }
+    report = CustodyReport(
+        reason=reason,
+        paths=(*changed_rels, *deleted_rels),
+        updated=updated,
+        retired=retired,
+        mismatches=tuple(mismatches),
+        rebuilt=rebuilt,
+    )
+    with _custody_lock:
+        _custody_reports.append(report)
+    if mismatches:
+        _fail_closed_to_scope_invalidation(vault_root, reason=f"{reason}_mismatch")
+    return report
+
+
+def audit_custody(
+    vault_root: Path,
+    paths: Iterable[object],
+    *,
+    reason: str = "custody_audit",
+) -> CustodyAudit:
+    """Compare every substrate cache's rows against the pages themselves.
+
+    The burst's own check, run again on demand. A row that does not describe
+    the page it names is not a slow answer, it is a wrong one, so a mismatch
+    invalidates the scope instead of being reported and served through. The
+    result names seams and paths and never page content.
+    """
+    _ensure_custody_seams()
+    rels = _custody_rels(paths)
+    if not rels:
+        return CustodyAudit(reason=reason, paths=())
+    with _custody_lock:
+        seams = tuple(_custody_seams.values())
+    digests = custody_digests(vault_root, rels)
+    mismatches: list[tuple[str, str]] = []
+    for seam in seams:
+        if seam.verify is None:
+            continue
+        try:
+            seam_mismatches = seam.verify(Path(vault_root), rels, digests)
+        except Exception:  # noqa: BLE001 - an unverifiable seam is not a pass
+            log.warning("custody seam %s failed to verify", seam.name, exc_info=True)
+            mismatches.extend((seam.name, rel) for rel in rels)
+            continue
+        mismatches.extend((seam.name, rel) for rel in seam_mismatches)
+    invalidated = False
+    if mismatches:
+        _fail_closed_to_scope_invalidation(vault_root, reason=f"{reason}_mismatch")
+        invalidated = True
+    return CustodyAudit(
+        reason=reason,
+        paths=rels,
+        mismatches=tuple(mismatches),
+        invalidated=invalidated,
+    )
+
+
+def _fail_closed_to_scope_invalidation(vault_root: Path, *, reason: str) -> None:
+    """A cache row that cannot be proven exact takes its whole scope with it."""
+    for scope in SCOPES:
+        invalidate_scope_for_drift(vault_root, scope=scope, reason=reason)
+
+
+def invalidate_scope_for_drift(
+    vault_root: Path,
+    *,
+    scope: str,
+    reason: str,
+) -> None:
+    """Invalidate one scope for a change no receipt covers.
+
+    The whole-scope key keeps exactly this role and no other: reconciliation
+    found drift, or an audit found a row it cannot prove, and neither can name
+    a path set to be exact about.
+    """
+    _ensure_custody_seams()
+    with _custody_lock:
+        seams = tuple(_custody_seams.values())
+        _custody_scope_invalidations.append((scope, reason))
+    for seam in seams:
+        if seam.invalidate_scope is None:
+            continue
+        try:
+            seam.invalidate_scope(Path(vault_root), scope)
+        except Exception:  # noqa: BLE001 - one seam must not stop the others
+            log.warning(
+                "custody seam %s failed to invalidate scope %s",
+                seam.name,
+                scope,
+                exc_info=True,
+            )
+
+
 def snapshot() -> dict:
     """Diagnostics: live scopes and their file counts."""
     with _lock:
@@ -1568,6 +1962,7 @@ def clear() -> None:
     """
     global _external_pending_clock, _instance_id
     invalidate(None)
+    reset_custody_telemetry()
     with _lock:
         _instance_id = uuid.uuid4().hex
         _external_pending_clock = 0

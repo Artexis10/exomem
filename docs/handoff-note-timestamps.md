@@ -1,4 +1,11 @@
+<!-- authority:non-specification -->
+
+<!-- authority:implementation-reference -->
+
 # Handoff — second-granularity timestamps for note knowledge-time
+
+Historical implementation handoff only. OpenSpec is the durable specification
+authority; this file preserves execution context from the original work.
 
 Self-contained brief for a fresh session. Everything needed is here; no prior
 conversation context is assumed.

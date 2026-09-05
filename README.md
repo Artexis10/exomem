@@ -282,7 +282,10 @@ idle; opt into GPU residency with `EXOMEM_MODE=performance` when you want it.
 The image also runs as an always-on remote server via `docker compose` with a
 tunnel sidecar — see [docs/docker.md](docs/docker.md). Windows users with a live
 vault should usually prefer the native install (WSL2 bind mounts miss live
-file-watch events); macOS Apple Silicon users need native install for MPS/MLX.
+file-watch events). macOS cannot serve a vault today: exomem's held-filesystem
+substrate, which every governed write acquires a reserved-path root through, has
+a Linux backend and a Windows backend and no darwin implementation, so `exomem`
+refuses there and `exomem doctor` says why.
 
 </details>
 
@@ -485,6 +488,34 @@ The server reads environment variables or a `.env` file. The main ones are:
 | `EXOMEM_ASR_BACKEND` | ASR engine: `mlx` (Apple Silicon Metal GPU, needs the `media-mlx` extra) or `faster-whisper` (CUDA/CPU). Default auto-selects MLX on Apple Silicon, else faster-whisper. |
 | `EXOMEM_MLX_WHISPER_MODEL` | HF repo for the MLX ASR model (default `mlx-community/whisper-large-v3-mlx`; use `mlx-community/whisper-large-v3-turbo` for speed). |
 | `EXOMEM_TESSERACT_CMD` | Path to the `tesseract` binary if not auto-discovered. |
+| `EXOMEM_CLAIM_LEVEL` | `1` enables the claim-level subsystem (default off). |
+| `EXOMEM_CLAIM_POLARITY_NLI` | `1` opts into the frozen stance verifier (default off). It still runs only if the exact repository-pinned revision and declared artifact manifest are resident and verified. |
+| `EXOMEM_CONTRADICTION_TOP_N` | Caps the surfaced contradiction queue and therefore verifier enrichment (default `40`; `0` is uncapped). This is the sole polarity-work bound. |
+
+`EXOMEM_CLAIM_NLI_MODEL` is **retired**. Model identity comes only from the
+in-repo pin registry; a value left in it selects nothing and is reported as
+ignored by `exomem doctor`.
+
+The shipped pin is the multilingual
+[`MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7`](https://huggingface.co/MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7)
+checkpoint at one exact upstream revision. Its admission fixtures check English,
+German, French, Estonian, and mixed English/Estonian examples. That is bounded
+evidence for those examples, not a promise of equal quality across every language
+in the model card. Its labels are NLI relations: `contradict`, `duplicate`,
+`refine`, or `neutral`. `neutral` includes unrelated, compatible, and uncertain
+pairs; it never means “proved unrelated.”
+
+### Degradation modes
+
+Optional tiers are absent by default and degrade to silence, not to a
+substitute. What "absent" means, per tier:
+
+| Tier | Install | When absent |
+| --- | --- | --- |
+| Semantic search | `--extra embeddings` | Keyword/BM25 retrieval; every surface still answers. |
+| Media extraction | `--extra media` | Server-side OCR/ASR/PDF extraction is skipped; the model-driven upload `text` path still works. |
+| Vector KNN (`sqlite-vec`) | with `embeddings` | Exact in-memory scan over the same vectors; identical results, more work. |
+| Frozen stance verifier | `--extra nli` | Review-queue entries carry **no** model polarity label — never a differently-produced label under the verifier's name. Write responses, rankings, and every other surface are byte-identical to a build with no verifier tier at all; only `exomem doctor` names the absence. The verifier runs only under an exact pinned revision and artifact-manifest digest, a versioned label map, and a green bounded multilingual fixture set, and it labels review-queue entries only. Hosted cells do not install or enable it. |
 
 Legacy `EXOMEM_*` names (from the project's former working name, exomem) remain
 honored: each is promoted to its `EXOMEM_*` equivalent at startup, with an

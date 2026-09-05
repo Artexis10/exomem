@@ -11,6 +11,7 @@ import time
 import tomllib
 import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -25,8 +26,112 @@ RUNTIME_GATE = ROOT / "infra/contracts/exomem-hosted-runtime-k3s-gate-v1.json"
 HELM = Path(os.environ["HELM_BIN"]) if "HELM_BIN" in os.environ else None
 RUN_LIVE = os.environ.get("RUN_K3S_ADMISSION_TEST") == "1"
 RUN_RUNTIME = os.environ.get("RUN_K3S_RUNTIME_TEST") == "1"
+RUN_REVIEWED_RUNTIME = os.environ.get("RUN_K3S_REVIEWED_RUNTIME_TEST") == "1"
 RUNTIME_REPOSITORY = Path(os.environ.get("EXOMEM_RUNTIME_REPO", ROOT))
 K3S_IMAGE = json.loads(RUNTIME_GATE.read_text(encoding="utf-8"))["k3sImage"]
+
+
+def _authorization_session_secret(
+    *,
+    namespace: str,
+    release: str,
+    annotations: dict[str, str],
+) -> dict[str, Any]:
+    """Build one deterministic runtime-valid Hosted custody Secret."""
+
+    from exomem.governance import authorization_custody
+    from exomem.governance import authorization_serving_membership as membership
+
+    now = int(time.time())
+    key = authorization_custody.AuthorizationVerifierKey(
+        key_id="hosted-runtime-gate-key-v1",
+        key=hashlib.sha256(b"hosted-runtime-gate-authorization").digest(),
+        not_before=now - 60,
+        not_after=now + 86_400,
+    )
+    keyring = authorization_custody.AuthorizationKeyring(
+        version=1,
+        keyring_id="hosted-runtime-gate-keyring-v1",
+        cell_id="alpha-test-original",
+        logical_vault_id="vault-alpha-original",
+        active_key_id=key.key_id,
+        accepted_keys=(key,),
+    )
+    control = authorization_custody.AuthorizationControlRecord(
+        version=1,
+        keyring_id=keyring.keyring_id,
+        cell_id=keyring.cell_id,
+        logical_vault_id=keyring.logical_vault_id,
+        registry_attachment_id="hosted-runtime-gate-attachment-v1",
+        attachment_epoch=1,
+        governance_enrolled=False,
+        activation_store_id=None,
+        activation_epoch=None,
+        activation_state_digest=None,
+        serving_membership_epoch=1,
+        serving_membership_digest="0" * 64,
+        issued_at=now - 60,
+        expires_at=now + 3_600,
+        signing_key_id=key.key_id,
+    )
+    attestation = membership.ReplicaReadinessAttestation(
+        version=1,
+        epoch=1,
+        replica_id="cell-alpha-0",
+        state="SERVING",
+        software_version=release,
+        schema_version=4,
+        cell_id=keyring.cell_id,
+        active_key_id=key.key_id,
+        accepted_key_ids=(key.key_id,),
+        control_digest=authorization_custody.control_attestation_digest(control),
+        keyring_digest=authorization_custody.keyring_attestation_digest(keyring),
+        attested_at=now - 1,
+        expires_at=now + 299,
+        issuance_stopped=False,
+        no_in_flight=False,
+        signing_key_id=key.key_id,
+    )
+    epoch = membership.ServingMembershipEpoch(
+        version=1,
+        epoch=1,
+        cell_id=keyring.cell_id,
+        logical_vault_id=keyring.logical_vault_id,
+        previous_epoch_digest=None,
+        issued_at=now - 1,
+        expires_at=now + 299,
+        replicas=(attestation,),
+        signing_key_id=key.key_id,
+    )
+    membership_raw = membership.encode_serving_membership(
+        epoch,
+        verifier_keys={key.key_id: key.key},
+    )
+    control = replace(
+        control,
+        serving_membership_digest=hashlib.sha256(membership_raw).hexdigest(),
+    )
+    files = {
+        "keyring.json": authorization_custody._keyring_bytes(keyring).decode("utf-8"),  # noqa: SLF001
+        "control.json": authorization_custody._signed_control_bytes(  # noqa: SLF001
+            control,
+            signing_key=key.key,
+        ).decode("utf-8"),
+        "serving-membership.json": membership_raw.decode("utf-8"),
+    }
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": "exomem-authorization-session",
+            "namespace": namespace,
+            "labels": {"exomem.io/resource-name": "cell-alpha"},
+            "annotations": annotations | {"exomem.io/recovery-envelope": "q" * 64},
+        },
+        "type": "Opaque",
+        "immutable": False,
+        "stringData": files,
+    }
 
 
 def _run(
@@ -359,6 +464,75 @@ def _build_reviewed_runtime_image(gate: dict[str, Any], source_checkout: Path) -
     return image
 
 
+def _build_current_runtime_image() -> tuple[str, dict[str, str]]:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    release = project["project"]["version"]
+    gate = json.loads(RUNTIME_GATE.read_text(encoding="utf-8"))
+    image = f"exomem-hosted-private-modes:{uuid.uuid4().hex[:12]}"
+    _run(
+        [
+            "docker",
+            "build",
+            "--target",
+            gate["dockerTarget"],
+            "--build-arg",
+            f"EXOMEM_RELEASE_BUILD_TIME={gate['releaseBuildTime']}",
+            "--tag",
+            image,
+            str(ROOT),
+        ]
+    )
+    return image, {"release": release, "hostedProtocol": "1"}
+
+
+def _build_initial_authorization_bundle(
+    *, cell_id: str, vault_id: str, replica_id: str, release: str, recovery_envelope: str
+) -> dict[str, Any]:
+    source = """
+import json, sys
+from exomem_provisioner.authorization_membership import (
+    AUTHORIZATION_SESSION_SCHEMA_VERSION,
+    build_initial_hosted_authorization_bundle,
+)
+bundle = build_initial_hosted_authorization_bundle(
+    cell_id=sys.argv[1],
+    logical_vault_id=sys.argv[2],
+    replica_id=sys.argv[3],
+    software_version=sys.argv[4],
+    schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+    recovery_envelope=sys.argv[5],
+    now=int(sys.argv[6]),
+)
+print(json.dumps({
+    "epoch": bundle.epoch,
+    "membership_digest": bundle.membership_digest,
+    "revision": bundle.revision,
+    "files": {name: value.decode("utf-8") for name, value in bundle.files.items()},
+}, sort_keys=True, separators=(",", ":")))
+"""
+    result = _run(
+        [
+            "uv",
+            "run",
+            "--frozen",
+            "--project",
+            str(ROOT / "infra/provisioner"),
+            "python",
+            "-c",
+            source,
+            cell_id,
+            vault_id,
+            replica_id,
+            release,
+            recovery_envelope,
+            str(int(time.time())),
+        ]
+    )
+    bundle = json.loads(result.stdout)
+    assert isinstance(bundle, dict)
+    return bundle
+
+
 def _build_provisioner_fingerprint_image() -> str:
     image = f"exomem-provisioner-fingerprint-gate:{uuid.uuid4().hex[:12]}"
     _run(
@@ -605,7 +779,10 @@ def _run_authenticated_probe(
             return envelope
         time.sleep(1)
     assert last_result is not None
-    raise AssertionError(last_result.stdout + last_result.stderr + _pod_logs(k3s, namespace, pod))
+    pod_logs = _pod_logs(k3s, namespace, pod)
+    raise AssertionError(
+        last_result.stdout + last_result.stderr + "\n--- pod log tail ---\n" + pod_logs[-4000:]
+    )
 
 
 def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
@@ -658,6 +835,23 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
             },
         },
     }
+    # Type-check status belongs to a separate controller; it does not prove
+    # that admission has observed the binding. Probe without creating anything
+    # until this exact policy is enforcing, then exercise the real CREATE below.
+    for _ in range(30):
+        probe = _kubectl(
+            k3s,
+            ["apply", "--dry-run=server", "--filename=-"],
+            documents=[insecure_namespace],
+            check=False,
+        )
+        if probe.returncode != 0:
+            assert "exomem-tenant-namespace-contract" in probe.stderr, probe.stderr
+            assert "restricted-v1.35 tenant namespace contract" in probe.stderr, probe.stderr
+            break
+        time.sleep(1)
+    else:
+        raise AssertionError("K3s did not enforce the tenant namespace contract")
     insecure_create = _kubectl(
         k3s,
         ["apply", "--filename=-"],
@@ -927,7 +1121,32 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     init_pod = _pod(init_job, name="cell-alpha-init-positive", namespace=namespace)
     assert _server_dry_run(k3s, init_pod).returncode == 0
 
+    migration_env = init_pod["spec"]["containers"][0]["env"]
+    custody_env = [
+        env for env in migration_env
+        if env["name"] != "EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION"
+    ]
+    ordinary_init = copy.deepcopy(init_pod)
+    ordinary_init["metadata"]["name"] = "cell-alpha-init-without-state-migration"
+    ordinary_init["spec"]["containers"][0]["env"] = custody_env
+    assert _server_dry_run(k3s, ordinary_init).returncode == 0
+
     init_env_variants = (
+        (
+            "bad-migration-flag",
+            custody_env + [{"name": "EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION", "value": "0"}],
+            "exact approved operator command",
+        ),
+        (
+            "duplicate-custody",
+            custody_env + [custody_env[-1]],
+            "exact approved operator command",
+        ),
+        (
+            "additional-migration-env",
+            migration_env + [{"name": "UNTRUSTED", "value": "1"}],
+            "exact approved operator command",
+        ),
         ("missing-env", [], "exact approved operator command"),
         (
             "alternate-env",
@@ -1328,6 +1547,23 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         container["name"] for container in serving_pod["spec"]["initContainers"]
     ] == ["authorization-session-custody"]
     assert _server_dry_run(k3s, serving_pod).returncode == 0
+
+    serving_group_rewrite = copy.deepcopy(serving_pod)
+    serving_group_rewrite["metadata"]["name"] = "cell-alpha-serve-fsgroup"
+    serving_group_rewrite["spec"]["securityContext"].update(
+        {"fsGroup": 10001, "fsGroupChangePolicy": "OnRootMismatch"}
+    )
+    _assert_denied(k3s, serving_group_rewrite, message="runtime-default profile")
+
+    serving_broad_source = copy.deepcopy(serving_pod)
+    serving_broad_source["metadata"]["name"] = "cell-alpha-serve-broad-source"
+    authorization_source = next(
+        volume
+        for volume in serving_broad_source["spec"]["volumes"]
+        if volume["name"] == "authorization-session-source"
+    )
+    authorization_source["secret"]["defaultMode"] = 0o440
+    _assert_denied(k3s, serving_broad_source, message="exact control-plane Secrets")
 
     serving_init_escape = copy.deepcopy(serving_pod)
     serving_init_escape["metadata"]["name"] = "cell-alpha-serve-init-escape"
@@ -2336,11 +2572,26 @@ def test_exact_k3s_deletion_dispatcher_accepts_defaulted_lock_job_and_rejects_ot
 
 @pytest.mark.skipif(
     not RUN_RUNTIME,
-    reason="set RUN_K3S_RUNTIME_TEST=1 to run the reviewed hosted runtime in exact K3s",
+    reason="set RUN_K3S_RUNTIME_TEST=1 to run the hosted runtime in exact K3s",
+)
+@pytest.mark.parametrize(
+    "runtime_source",
+    [
+        pytest.param("current", id="current-private-modes"),
+        pytest.param(
+            "reviewed",
+            id="reviewed-private-modes",
+            marks=pytest.mark.skipif(
+                not RUN_REVIEWED_RUNTIME,
+                reason="set RUN_K3S_REVIEWED_RUNTIME_TEST=1 after advancing the signed runtime gate",
+            ),
+        ),
+    ],
 )
 @pytest.mark.timeout(900)
-def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: Path) -> None:
-    gate = json.loads(RUNTIME_GATE.read_text(encoding="utf-8"))
+def test_exact_k3s_preserves_private_modes_across_serving_pod_replacement(
+    k3s: str, tmp_path: Path, runtime_source: str
+) -> None:
     namespace = "cell-runtime-gate"
     worker_policy_digest = "b" * 64
     credential = base64.urlsafe_b64encode(hashlib.sha256(b"k3s-runtime-gate").digest())
@@ -2350,7 +2601,11 @@ def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: 
         "credentials": {"active-v1": credential},
     }
 
-    image = _build_reviewed_runtime_image(gate, tmp_path)
+    if runtime_source == "reviewed":
+        gate = json.loads(RUNTIME_GATE.read_text(encoding="utf-8"))
+        image = _build_reviewed_runtime_image(gate, tmp_path)
+    else:
+        image, gate = _build_current_runtime_image()
     try:
         runtime_image = _import_runtime_image(k3s, image)
         # The tenant admission policy pins the exact runtime image, and that image
@@ -2465,6 +2720,23 @@ def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: 
                 + "\n"
             },
         }
+        identity_annotations = {
+            key: namespace_document["metadata"]["annotations"][key]
+            for key in (
+                "exomem.io/tenant-id",
+                "exomem.io/cell-id",
+                "exomem.io/operation-id",
+                "exomem.io/tenant-digest",
+                "exomem.io/subject-digest",
+                "exomem.io/operation-digest",
+                "exomem.io/fence",
+            )
+        }
+        authorization_secret = _authorization_session_secret(
+            namespace=namespace,
+            release=gate["release"],
+            annotations=identity_annotations,
+        )
         claim = next(item for item in initialize if item.get("kind") == "PersistentVolumeClaim")
         claim["spec"]["volumeName"] = "exomem-runtime-gate-pv"
         init_job = next(item for item in initialize if item.get("kind") == "Job")
@@ -2478,7 +2750,7 @@ def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: 
                 "Job",
             }
         ]
-        namespaced_prerequisites.append(secret)
+        namespaced_prerequisites.extend((secret, authorization_secret))
         _kubectl(
             k3s,
             ["apply", "--namespace", namespace, "--filename=-"],
@@ -2544,11 +2816,69 @@ def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: 
         assert init_envelope["data"]["runtime_gid"] == 10001
         credential_revision = init_envelope["data"]["credential_revision"]
 
+        authorization_bundle = _build_initial_authorization_bundle(
+            cell_id="alpha-test-original",
+            vault_id="vault-alpha-original",
+            replica_id="cell-alpha-0",
+            release=gate["release"],
+            recovery_envelope=namespace_document["metadata"]["annotations"][
+                "exomem.io/recovery-envelope"
+            ],
+        )
+        authorization_secret = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": "exomem-authorization-session",
+                "namespace": namespace,
+                "labels": {
+                    "exomem.io/cell": "cell-alpha",
+                    "exomem.io/resource-name": "cell-alpha",
+                },
+                "annotations": {
+                    key: namespace_document["metadata"]["annotations"][key]
+                    for key in (
+                        "exomem.io/tenant-id",
+                        "exomem.io/cell-id",
+                        "exomem.io/operation-id",
+                        "exomem.io/tenant-digest",
+                        "exomem.io/subject-digest",
+                        "exomem.io/operation-digest",
+                        "exomem.io/fence",
+                        "exomem.io/recovery-envelope",
+                    )
+                }
+                | {
+                    "exomem.io/authorization-membership-epoch": str(
+                        authorization_bundle["epoch"]
+                    ),
+                    "exomem.io/authorization-membership-digest": (
+                        authorization_bundle["membership_digest"]
+                    ),
+                    "exomem.io/authorization-session-revision": (
+                        authorization_bundle["revision"]
+                    ),
+                },
+            },
+            "type": "Opaque",
+            "immutable": False,
+            "stringData": authorization_bundle["files"],
+        }
+        _kubectl(
+            k3s,
+            ["apply", "--namespace", namespace, "--filename=-"],
+            documents=[authorization_secret],
+        )
+
         serving = _render(
             CELL,
             CELL / "values.validation.yaml",
             namespace,
-            extra_args=helm_overrides,
+            extra_args=(
+                *helm_overrides,
+                "--set-string",
+                f"authorizationSessionRevision={authorization_bundle['revision']}",
+            ),
         )
         serving_resources = [
             item
@@ -2580,12 +2910,15 @@ def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: 
         assert {volume["name"] for volume in pod_spec["volumes"]} == {
             "data",
             "credentials",
+            "authorization-session-source",
+            "authorization-session-custody",
         }
         assert {mount["mountPath"] for mount in container["volumeMounts"]} == {
             "/var/lib/exomem/vault",
             "/var/lib/exomem/state",
             "/var/lib/exomem/logs",
             "/run/exomem/credentials",
+            "/run/exomem/authorization-session",
         }
         assert (
             next(volume for volume in pod_spec["volumes"] if volume["name"] == "data")[
@@ -2600,12 +2933,24 @@ def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: 
             "defaultMode": 0o444,
             "secretName": "exomem-cell-credentials",
         }
+        authorization_source = next(
+            volume
+            for volume in pod_spec["volumes"]
+            if volume["name"] == "authorization-session-source"
+        )
+        assert authorization_source["secret"] == {
+            "defaultMode": 0o444,
+            "secretName": "exomem-authorization-session",
+        }
+        assert [item["name"] for item in pod_spec["initContainers"]] == [
+            "authorization-session-custody"
+        ]
         image_status = live_pod["status"]["containerStatuses"][0]
         assert image_status["ready"] is True
         assert image_status["containerID"].startswith("containerd://")
 
         inspection_source = """
-import json, os, pathlib, stat
+import hashlib, json, os, pathlib, stat
 from exomem.hosted_transfer import TRANSFER_RUNTIME_TEMP_QUOTA_BYTES, TRANSFER_TEMP_QUOTA_BYTES
 
 def details(path):
@@ -2615,6 +2960,13 @@ def details(path):
 roots = ["/var/lib/exomem/vault", "/var/lib/exomem/state", "/var/lib/exomem/logs"]
 markers = [str(pathlib.Path(root) / ".exomem-hosted-cell.json") for root in roots]
 credential = pathlib.Path("/run/exomem/credentials/credentials.json")
+authorization_root = pathlib.Path("/run/exomem/authorization-session")
+authorization_private = authorization_root / "private"
+authorization_files = [
+    authorization_private / "control.json",
+    authorization_private / "keyring.json",
+    authorization_private / "serving-membership.json",
+]
 bundle = json.loads(credential.read_text())
 tmp_write_errno = None
 tmp_probe = pathlib.Path("/tmp/exomem-runtime-gate-write")
@@ -2645,6 +2997,15 @@ print(json.dumps({
     "credential_write_errno": credential_write_errno,
     "credential_schema": bundle.get("schema_version"),
     "credential_versions": sorted(bundle.get("credentials", {})),
+    "authorization_root": details(authorization_root),
+    "authorization_root_entries": sorted(path.name for path in authorization_root.iterdir()),
+    "authorization_private": details(authorization_private),
+    "authorization_private_entries": sorted(path.name for path in authorization_private.iterdir()),
+    "authorization_files": {str(path): details(path) for path in authorization_files},
+    "marker_sha256": {
+        marker: hashlib.sha256(pathlib.Path(marker).read_bytes()).hexdigest()
+        for marker in markers
+    },
     "runtime_tmp": details("/var/lib/exomem/state/tmp/runtime"),
     "transfer_tmp": details("/var/lib/exomem/state/tmp/transfers-v2"),
     "runtime_tmp_limit": TRANSFER_RUNTIME_TEMP_QUOTA_BYTES,
@@ -2672,33 +3033,75 @@ print(json.dumps({
         assert inspection["credential_write_errno"] == 30
         assert inspection["credential_schema"] == 1
         assert inspection["credential_versions"] == ["active-v1"]
+        assert inspection["authorization_root"]["uid"] == 0
+        assert inspection["authorization_root"]["gid"] == 0
+        assert inspection["authorization_root_entries"] == ["private"]
+        assert inspection["authorization_private"] == {
+            "uid": 10001,
+            "gid": 10001,
+            "mode": 0o700,
+        }
+        assert inspection["authorization_private_entries"] == [
+            "control.json",
+            "keyring.json",
+            "serving-membership.json",
+        ]
+        assert all(
+            value == {"uid": 10001, "gid": 10001, "mode": 0o600}
+            for value in inspection["authorization_files"].values()
+        )
         assert inspection["runtime_tmp"] == {"uid": 10001, "gid": 10001, "mode": 0o700}
         assert inspection["transfer_tmp"] == {"uid": 10001, "gid": 10001, "mode": 0o700}
         assert inspection["runtime_tmp_limit"] == 16 * 1024 * 1024
         assert inspection["transfer_tmp_limit"] == 96 * 1024 * 1024
         assert inspection["tmp_write_errno"] == 30
 
-        probe = _run_authenticated_probe(
-            k3s,
-            namespace=namespace,
-            pod=pod_name,
-            gate=gate,
-            credential_revision=credential_revision,
-            worker_policy_digest=worker_policy_digest,
+        readiness_source = """
+import base64, hashlib, http.client, json, pathlib, uuid
+bundle = json.loads(pathlib.Path("/run/exomem/credentials/credentials.json").read_text())
+credential = bundle["credentials"]["active-v1"]
+principal = base64.urlsafe_b64encode(hashlib.sha256(b"k3s-readiness-principal").digest()).rstrip(b"=").decode()
+connection = http.client.HTTPConnection("127.0.0.1", 8765, timeout=3)
+connection.request("GET", "/private/exomem/v1/ready", headers={
+    "Authorization": "Bearer " + credential,
+    "X-Exomem-Cell-Id": "alpha-test-original",
+    "X-Exomem-Protocol-Version": "1",
+    "X-Exomem-Request-Id": str(uuid.uuid4()),
+    "X-Exomem-Principal-Scope": principal,
+})
+response = connection.getresponse()
+body = response.read()
+print(json.dumps({"status": response.status, "media": response.getheader("content-type"), "body": json.loads(body)}))
+"""
+
+        def assert_pre_activation_readiness(result: dict[str, Any]) -> None:
+            assert result["status"] == 200
+            assert result["media"] == "application/json"
+            assert result["body"]["success"] is True
+            data = result["body"]["data"]
+            assert data["cell_id"] == "alpha-test-original"
+            assert data["vault_id"] == "vault-alpha-original"
+            assert data["exomem_release"] == gate["release"]
+            assert data["hosted_protocol"] == gate["hostedProtocol"]
+            assert data["authenticated_credential_version"] == "active-v1"
+            assert data["security_revision"] == credential_revision
+            assert data["service_authenticated"] is True
+            assert data["mutation_authority"] is True
+            assert data["admission_phase"] == "active"
+            assert data["read_admission"] is True
+            assert data["write_admission"] is True
+            assert data["worker_policy_digest"] == worker_policy_digest
+            assert data["authorization_session"] == {
+                "ready": False,
+                "code": "AUTHORIZATION_MEMBERSHIP_UNAVAILABLE",
+                "servingMembershipEpoch": None,
+                "servingReplicaCount": 0,
+                "drainingReplicaCount": 0,
+            }
+
+        assert_pre_activation_readiness(
+            _exec_python_json(k3s, namespace, pod_name, readiness_source)
         )
-        probe_data = probe["data"]
-        assert probe_data["cell_id"] == "alpha-test-original"
-        assert probe_data["vault_id"] == "vault-alpha-original"
-        assert probe_data["exomem_release"] == gate["release"]
-        assert probe_data["hosted_protocol"] == gate["hostedProtocol"]
-        assert probe_data["authenticated_credential_version"] == "active-v1"
-        assert probe_data["security_revision"] == credential_revision
-        assert probe_data["service_authenticated"] is True
-        assert probe_data["mutation_authority"] is True
-        assert probe_data["admission_phase"] == "active"
-        assert probe_data["read_admission"] is True
-        assert probe_data["write_admission"] is True
-        assert probe_data["worker_policy_digest"] == worker_policy_digest
 
         contract_source = """
 import base64, hashlib, http.client, json, pathlib, uuid
@@ -2735,7 +3138,7 @@ print(json.dumps({"status": response.status, "media": response.getheader("conten
         assert contract["commands"]
 
         sentinel_source = """
-import json, pathlib
+import hashlib, json, pathlib, stat
 runtime = pathlib.Path("/var/lib/exomem/state/tmp/runtime/k3s-stale-runtime.tmp")
 transfer = pathlib.Path(
     "/var/lib/exomem/state/tmp/transfers-v2/"
@@ -2743,38 +3146,80 @@ transfer = pathlib.Path(
 )
 runtime.write_text("stale")
 transfer.write_text("stale")
-print(json.dumps({"runtime": runtime.exists(), "transfer": transfer.exists()}))
+vault = pathlib.Path("/var/lib/exomem/vault/k3s-private-mode-preservation.md")
+vault.write_bytes(b"private bytes survive pod replacement\\n")
+vault.chmod(0o600)
+value = vault.stat()
+print(json.dumps({
+    "runtime": runtime.exists(),
+    "transfer": transfer.exists(),
+    "vault": {
+        "uid": value.st_uid,
+        "gid": value.st_gid,
+        "mode": stat.S_IMODE(value.st_mode),
+        "sha256": hashlib.sha256(vault.read_bytes()).hexdigest(),
+    },
+}))
 """
-        assert _exec_python_json(k3s, namespace, pod_name, sentinel_source) == {
-            "runtime": True,
-            "transfer": True,
+        sentinel = _exec_python_json(k3s, namespace, pod_name, sentinel_source)
+        assert sentinel["runtime"] is True
+        assert sentinel["transfer"] is True
+        assert sentinel["vault"] == {
+            "uid": 10001,
+            "gid": 10001,
+            "mode": 0o600,
+            "sha256": hashlib.sha256(b"private bytes survive pod replacement\n").hexdigest(),
         }
+        original_pod_uid = live_pod["metadata"]["uid"]
         _kubectl(
             k3s,
             ["delete", "pod", "--namespace", namespace, pod_name, "--wait=true"],
         )
         _wait_for_pod_ready(k3s, namespace, pod_name)
+        replacement_pod = json.loads(
+            _kubectl(
+                k3s,
+                ["get", "pod", "--namespace", namespace, pod_name, "--output=json"],
+            ).stdout
+        )
+        assert replacement_pod["metadata"]["uid"] != original_pod_uid
         cleanup_source = """
-import json, pathlib
+import hashlib, json, pathlib, stat
+vault = pathlib.Path("/var/lib/exomem/vault/k3s-private-mode-preservation.md")
+value = vault.stat()
+private = pathlib.Path("/run/exomem/authorization-session/private")
 print(json.dumps({
     "runtime": pathlib.Path("/var/lib/exomem/state/tmp/runtime/k3s-stale-runtime.tmp").exists(),
     "transfer": pathlib.Path(
         "/var/lib/exomem/state/tmp/transfers-v2/"
         "upload-00000000-0000-4000-8000-000000000000.tmp"
     ).exists(),
+    "vault": {
+        "uid": value.st_uid,
+        "gid": value.st_gid,
+        "mode": stat.S_IMODE(value.st_mode),
+        "sha256": hashlib.sha256(vault.read_bytes()).hexdigest(),
+    },
+    "authorization_private": {
+        "uid": private.stat().st_uid,
+        "gid": private.stat().st_gid,
+        "mode": stat.S_IMODE(private.stat().st_mode),
+        "entries": sorted(path.name for path in private.iterdir()),
+    },
 }))
 """
-        assert _exec_python_json(k3s, namespace, pod_name, cleanup_source) == {
-            "runtime": False,
-            "transfer": False,
+        replacement = _exec_python_json(k3s, namespace, pod_name, cleanup_source)
+        assert replacement["runtime"] is False
+        assert replacement["transfer"] is False
+        assert replacement["vault"] == sentinel["vault"]
+        assert replacement["authorization_private"] == {
+            "uid": 10001,
+            "gid": 10001,
+            "mode": 0o700,
+            "entries": ["control.json", "keyring.json", "serving-membership.json"],
         }
-        _run_authenticated_probe(
-            k3s,
-            namespace=namespace,
-            pod=pod_name,
-            gate=gate,
-            credential_revision=credential_revision,
-            worker_policy_digest=worker_policy_digest,
+        assert_pre_activation_readiness(
+            _exec_python_json(k3s, namespace, pod_name, readiness_source)
         )
     finally:
         _run(["docker", "image", "rm", "--force", image], check=False)

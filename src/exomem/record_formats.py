@@ -41,6 +41,12 @@ _MAX_RECORDS = 10_000
 _MAX_CHILD_ROWS = 10_000
 _MAX_CHILD_FIELDS = 16
 _MAX_PRESENTATION_BLOCK_BYTES = 256 * 1024
+#: A free-string field carries no declared vocabulary, so inspection reports the
+#: values already in use. Both bounds are payload ceilings, not sampling limits:
+#: every loaded item is counted at full value, and the cap only stops the emitted
+#: distinct-value list from growing with the collection.
+_MAX_OBSERVED_VALUES = 20
+_MAX_OBSERVED_VALUE_CHARS = 120
 _EXPANDED_METADATA_FIELDS = frozenset({"parent_record_id", "child_field", "child_index"})
 _PRESENTATION_OPEN = re.compile(
     r"(?m)^<!-- exomem-record-presentation:v1 digest=sha256:([0-9a-f]{64}) -->\r?$"
@@ -71,6 +77,15 @@ def _profile_system_fields(manifest: collections.CollectionManifest) -> frozense
             "parent_record_id",
         }
     )
+
+
+def _profile_compatibility_envelope_fields(
+    manifest: collections.CollectionManifest,
+) -> frozenset[str]:
+    """Return legacy frontmatter the adapter owns rather than the item schema."""
+    if manifest.semantic_profile == "planning" and "updated" not in manifest.schema.fields:
+        return frozenset({"updated"})
+    return frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,10 +513,18 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 raise collections.CollectionError(
                     "UNSUPPORTED_ITEM_SCHEMA_VERSION", "item schema version differs"
                 )
+            compatibility_envelope = _profile_compatibility_envelope_fields(self.manifest)
             values = {
                 name: _json_value(value)
                 for name, value in frontmatter.items()
-                if name not in {"type", "collection_id", profile.item_id_property, "schema_version"}
+                if name
+                not in {
+                    "type",
+                    "collection_id",
+                    profile.item_id_property,
+                    "schema_version",
+                    *compatibility_envelope,
+                }
             }
             self._validate_values(values)
             identity = collections.ItemIdentity(collection_id, item_id)
@@ -847,11 +870,7 @@ def _presentation_payload(
             ) from error
         selected[field_name] = value
     for table in recipe.tables:
-        rows = values.get(table.field)
-        if not isinstance(rows, list):
-            raise collections.CollectionError(
-                "UNRENDERABLE_RECORD_PRESENTATION", "presentation table is not an array"
-            )
+        rows = _presentation_table_rows(manifest, values, table)
         projected: list[dict[str, Any]] = []
         for index, row in enumerate(rows):
             projected.append(_presentation_child(row, table, index))
@@ -861,6 +880,23 @@ def _presentation_payload(
         "recipe": _presentation_recipe_identity(recipe),
         "values": selected,
     }
+
+
+def _presentation_table_rows(
+    manifest: collections.CollectionManifest,
+    values: Mapping[str, Any],
+    table: collections.RecordPresentationTable,
+) -> list[Any]:
+    rows = values.get(table.field)
+    if rows is None and not manifest.schema.fields[table.field].required:
+        return []
+    if not isinstance(rows, list):
+        raise collections.CollectionError(
+            "UNRENDERABLE_RECORD_PRESENTATION",
+            f"presentation table '{table.field}' must be an array when present",
+            {"field": table.field},
+        )
+    return rows
 
 
 def _presentation_recipe_identity(recipe: collections.RecordPresentation) -> dict[str, Any]:
@@ -940,7 +976,7 @@ def _presentation_block(
         lines.extend(
             ["| " + " | ".join(labels) + " |", "| " + " | ".join("---" for _ in labels) + " |"]
         )
-        for row in _presentation_payload(manifest, values)["values"][table.field]:
+        for row in payload["values"][table.field]:
             lines.append(
                 "| "
                 + " | ".join(_presentation_cell(row[column.field]) for column in table.columns)
@@ -1650,6 +1686,9 @@ class CollectionInspection:
     diagnostics: tuple[collections.CollectionDiagnostic, ...]
     record_count: int = 0
     presentation: tuple[dict[str, Any], ...] = ()
+    #: `None` when no item pass ran, so an unreadable collection never reports an
+    #: empty vocabulary as if it had been swept.
+    observed_values: Mapping[str, dict[str, Any]] | None = None
 
 
 def inspect_collection(
@@ -1711,7 +1750,64 @@ def inspect_collection(
         diagnostics=tuple(diagnostics),
         record_count=len(parsed.records),
         presentation=presentation,
+        observed_values=_observed_field_values(manifest, parsed.records),
     )
+
+
+def _observed_field_values(
+    manifest: collections.CollectionManifest,
+    records: Sequence[Record],
+) -> dict[str, dict[str, Any]]:
+    """Summarize the vocabulary free-string fields already carry.
+
+    A declared `enum` IS the vocabulary, so those fields are left alone. The pass
+    reads only the records the adapter already authorized and parsed; a value that
+    reached no released item cannot reach this summary.
+
+    Two decisions are load-bearing and easy to get subtly wrong:
+
+    * The counter is keyed on the FULL surrounding-whitespace-stripped value, never
+      on the display form. Keying on the cut value silently merges two distinct terms
+      that happen to share a 120-character prefix into one entry with a summed count,
+      which is a wrong answer rather than a bounded one. Two distinct values may
+      therefore emit the same display string; `value_truncated` is what says so.
+    * Selection is by frequency, decided AFTER the whole pass, because the payload
+      presents the values in frequency order and a first-seen cap would silently
+      drop the collection's most common term. The intermediate counter holds
+      references into records the adapter already materialized, so it adds no state
+      the read did not already carry.
+    """
+    names = [
+        name
+        for name, spec in manifest.schema.fields.items()
+        if spec.type == "string" and not spec.enum
+    ]
+    counts: dict[str, dict[str, int]] = {name: {} for name in names}
+    for record in records:
+        for name in names:
+            value = record.values.get(name)
+            if type(value) is not str:
+                continue
+            text = value.strip()
+            if not text:
+                continue
+            observed = counts[name]
+            observed[text] = observed.get(text, 0) + 1
+    summary: dict[str, dict[str, Any]] = {}
+    for name in names:
+        ranked = sorted(counts[name].items(), key=lambda entry: (-entry[1], entry[0]))
+        summary[name] = {
+            "values": [
+                {
+                    "value": value[:_MAX_OBSERVED_VALUE_CHARS],
+                    "count": count,
+                    "value_truncated": len(value) > _MAX_OBSERVED_VALUE_CHARS,
+                }
+                for value, count in ranked[:_MAX_OBSERVED_VALUES]
+            ],
+            "truncated": len(ranked) > _MAX_OBSERVED_VALUES,
+        }
+    return summary
 
 
 def _inspect_presentation(
@@ -2057,7 +2153,7 @@ def query_collection(
         vault_root, manifest, authorize_path=authorize_path, project_values=project_values
     )
     parsed = adapter.read()
-    _enforce_selected_child_cap(parsed.records, selected_child)
+    _enforce_selected_child_cap(parsed.records, selected_child, manifest)
     parsed = replace(
         parsed,
         records=tuple(
@@ -2670,11 +2766,7 @@ def _safe_presentation_values(
         return dict(values)
     result = dict(values)
     for table in recipe.tables:
-        rows = values.get(table.field)
-        if not isinstance(rows, list):
-            raise collections.CollectionError(
-                "UNRENDERABLE_RECORD_PRESENTATION", "presentation table is not an array"
-            )
+        rows = _presentation_table_rows(manifest, values, table)
         safe_rows: list[dict[str, Any]] = []
         for index, row in enumerate(rows):
             child = _presentation_child(row, table, index)
@@ -2793,19 +2885,40 @@ def _validate_query_projection_fields(
             )
 
 
-def _enforce_selected_child_cap(records: tuple[Record, ...], selected_child: str | None) -> None:
+def _enforce_selected_child_cap(
+    records: tuple[Record, ...],
+    selected_child: str | None,
+    manifest: collections.CollectionManifest,
+) -> None:
     """Count selected arrays only; never project a child before the global cap holds."""
     if selected_child is None:
         return
+    presentation_table = next(
+        (
+            table
+            for table in (
+                ()
+                if manifest.record_presentation is None
+                else manifest.record_presentation.tables
+            )
+            if table.field == selected_child
+        ),
+        None,
+    )
     total = 0
     for record in records:
-        if record.children and selected_child not in record.values:
+        if presentation_table is not None:
+            values = _presentation_table_rows(manifest, record.values, presentation_table)
+            total += len(values)
+        elif record.children and selected_child not in record.values:
             total += len(record.children)
         else:
             values = record.values.get(selected_child)
             if not isinstance(values, list):
                 raise collections.CollectionError(
-                    "UNRENDERABLE_RECORD_PRESENTATION", "selected child field is not an array"
+                    "UNRENDERABLE_RECORD_PRESENTATION",
+                    f"selected child field '{selected_child}' must be an array",
+                    {"field": selected_child},
                 )
             total += len(values)
         if total > _MAX_CHILD_ROWS:

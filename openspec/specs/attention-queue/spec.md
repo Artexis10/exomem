@@ -8,7 +8,9 @@ to registered typed semantic categories. The operation deterministically ranks
 and deduplicates existing audit findings via Reciprocal Rank Fusion, never mutates
 the vault or changes `find` ranking, reports explicit truncation, and keeps
 bridge-review causes private and read-only.
+
 ## Requirements
+
 ### Requirement: Unified Review Surface Composed From The Epistemic Queues
 
 The default `attention` category union SHALL preserve the existing review queues and the already-shipped `relation_debt` queue while adding `bridge_review` and deterministic `entity_type_unregistered` audit findings. Its default category and tiebreak-preference order SHALL retain the existing ordering and SHALL compose unregistered entity types without giving them a dismiss-to-silence path. The broader registered attention category set SHALL continue to admit its existing typed semantic categories. `attention` SHALL consume one audit pass over its selected categories and SHALL remain read-only.
@@ -828,3 +830,215 @@ Finding identity SHALL be deterministic from the derived page identity and norma
 - **WHEN** another source with similar text is captured but the cited value remains unresolved
 - **THEN** the finding identity and open audit result remain unchanged
 
+### Requirement: Unreflected outcomes is a default family derived from authored bindings
+
+The audit SHALL register an `unreflected_outcomes` category. For each Records manifest whose Planning link carries a `join` and whose reference resolves to a Planning manifest, each open Planning item — lifecycle `active` and status not `completed` or `cancelled` — that at least one record joins to on the declared fields SHALL be one finding carrying the item reference, the Records collection, the joined record references (the first eight plus the total) and the binding that produced it, with the severity of a review candidate and a `signal_version` derived from authored state only. The finding's fingerprint SHALL be the item reference plus the sorted joined record keys, so a new joined record resurfaces a dismissed item under the existing material-change rule while the dismissal record stands. The finding SHALL resolve only when the item leaves the open state, the binding is removed, or the joined records are gone — never by time and never by the runtime mutating either side. The category SHALL be in the default attention union, in the due-state projection categories and in the delta categories, and therefore a registered family for dispositions. An unresolvable reference — or a join naming a plan-side field the target does not declare — SHALL produce no finding and SHALL be reported as unevaluated, never silently skipped. Disclosure SHALL follow every other category: a withheld record or item contributes nothing to the finding, the count or the reference list. Because the projection is shared across audiences and written by whichever audience wrote last, a withheld joined record SHALL be removed at serve and the served fingerprint SHALL be recomposed from the surviving records through the same composer a full audit uses, so the served view equals the vault with the withheld record absent; an entry whose joined records are all withheld SHALL be dropped rather than served with a smaller count.
+
+#### Scenario: A recorded event on an open item is a candidate
+
+- **WHEN** a Records collection joined on `title` holds a `produced` event for a deliverable whose Planning work item is still queued
+- **THEN** the audit reports one `unreflected_outcomes` finding for that item naming the event, and the item appears in the default attention listing
+
+#### Scenario: Twins stay quiet
+
+- **WHEN** the same event exists in a Records collection without a `join`, or the joined work item is already `completed`
+- **THEN** no finding is produced
+
+#### Scenario: The transition clears it by state change
+
+- **WHEN** the work item is triaged to `completed` or archived
+- **THEN** the finding is gone on the next read without any dismissal being recorded
+
+#### Scenario: A new event resurfaces a dismissed item
+
+- **WHEN** a user dismissed the finding and a second joined record lands on the same open item
+- **THEN** the item resurfaces with the new fingerprint and the earlier dismissal record is retained
+
+#### Scenario: Family disposition applies
+
+- **WHEN** the family's disposition is `quiet`
+- **THEN** the audit still measures it, and it leaves the default union, the carriers and the write advisories exactly as any other quiet family
+
+#### Scenario: The runtime never performs the transition
+
+- **WHEN** a finding is open
+- **THEN** no command, sweep or carrier edits the Planning item or the record; the decider acts through `plan_memory`
+
+### Requirement: A structured write settles its own unreflected outcomes
+
+A record append or update SHALL apply a bounded delta that re-evaluates the open Planning items whose join values equal the written record's, reading one snapshot of the bound Planning collection; a Planning add, update or triage SHALL re-evaluate that one item against the Records collections bound to its collection, reading their snapshots. The read SHALL be bounded by the declared bindings and the bound collections, never by the vault, and its cost SHALL be measured. `reconcile` SHALL remain the healer and the only full recomputation.
+
+#### Scenario: Delta equals recompute for the touched pair
+
+- **WHEN** a record append opens a gap on one item
+- **THEN** the projection after the delta equals the projection after a full reconcile for that item, and no other item changed
+
+#### Scenario: Out-of-band edits heal on reconcile
+
+- **WHEN** a person edits the Planning item's status by hand
+- **THEN** the projection is stale until `reconcile`, which removes the finding
+
+### Requirement: Write-advisory decisions live in their own review-state namespace
+
+The portable review-state store SHALL record decisions about write-path advisories under a dedicated identity namespace that cannot collide with attention, activation, relation, or adoption identities. Dismiss, snooze, and reopen SHALL carry the same semantics as for queue items: a dismissal binds to one exact `(review identity, fingerprint)` pair; snooze expires by date; reopen clears every historical fingerprint for the identity.
+
+Recording a write-advisory decision SHALL NOT create a queue item, alter any queue's ranking, or modify any note.
+
+#### Scenario: Triage accepts a write-advisory reference
+
+- **WHEN** a write-path advisory's review reference is dismissed through the explicit triage surface with a reason
+- **THEN** the decision is recorded in the portable review state under the write-advisory namespace
+- **AND** no attention, activation, relation, or adoption item is created or modified
+
+#### Scenario: Namespaces stay isolated
+
+- **WHEN** a write-advisory identity and an attention-queue identity are derived from the same underlying page
+- **THEN** the two identities are distinct
+- **AND** a decision recorded against one has no effect on the other
+
+### Requirement: Question aging and supersession integrity complete the due-state consumer set
+
+The audit registry SHALL add two categories, each producing review items with the standard
+reference, fingerprint, dismiss/snooze/reopen, and material-change-resurfacing semantics:
+
+- `question_aging`: a governed question unit on an active page SHALL surface once the page's
+  authored date is at least a configured age old and the unit carries no answering structure,
+  reported as a review candidate, never a defect. The answering test SHALL be unit-local — no
+  `verdict` on the unit and no outbound relation authored on the unit whose registry-resolved
+  canonical kind is one of `supports`, `contradicts`, `resolves`, or `evidenced_by`.
+  Because its age threshold is system-invented rather than authored, the category SHALL be
+  registered and selectable but SHALL NOT join the default attention union.
+- `supersession_integrity`: a supersession pointer (`supersedes` or `superseded_by`) whose
+  target does not resolve, and a supersession chain carrying more than one current head,
+  SHALL surface as defects. Because the pointer is human-authored and no threshold is
+  invented, the category SHALL join the default attention union, ranked immediately after
+  the queues that fire on an authored date and immediately before the queues that infer
+  their own candidates: a defect in authored state outranks an inference, and is outranked
+  by an obligation that expires. Parked page statuses SHALL NOT exclude a page from this
+  category, because a `superseded` page is where a dangling forward pointer lives.
+
+This change's delta to the default union is stated here rather than as a further MODIFIED
+requirement against `Unified Review Surface Composed From The Epistemic Queues`, because two
+unarchived changes already carry one and a third would collide at archive-sync.
+
+The remaining two due-state categories, `prediction_window` and `unfinished_experiments`,
+are owned by the `add-prediction-window-review` and `close-experiment-lifecycle` changes
+respectively; this change consumes them through the projection unchanged and neither restates
+nor redefines their predicates.
+
+A review reference produced by a registered opt-in category SHALL resolve for triage without
+that category joining the default attention union, so that any reference a due-state count
+publishes can be dismissed, snoozed, or reopened by the agent it was published to; resolution
+SHALL consult the default union first, so references already resolvable keep the identity and
+fingerprint they have today.
+
+Absent optional fields SHALL mean what they mean today: a page carrying no supersession
+pointer and a page whose authored date is unparseable SHALL never surface in these
+categories. No category SHALL alter retrieval ranking.
+
+#### Scenario: An aging unanswered question surfaces as a candidate
+
+- **WHEN** a governed question unit sits on an active page older than the configured age with
+  no `verdict` and no answering relation authored on the unit
+- **THEN** the unit appears as an open review item in the `question_aging` category at `info`
+  severity, described as a review candidate rather than a defect
+- **AND** an `attention` call made without a category filter does not surface it
+
+#### Scenario: A dangling supersession pointer surfaces as a defect
+
+- **WHEN** a page's `superseded_by` or `supersedes` pointer names a target that does not
+  resolve to a page in the vault
+- **THEN** a `supersession_integrity` finding is emitted for that page at `warn` severity
+- **AND** an `attention` call made without a category filter surfaces it
+
+#### Scenario: A forked chain reports more than one current head
+
+- **WHEN** two pages both supersede the same predecessor and neither is itself superseded
+- **THEN** a `supersession_integrity` finding reports the chain as carrying more than one
+  current head
+
+#### Scenario: Dismissal and material change behave like every other queue
+
+- **WHEN** a due-state item is dismissed and the underlying page later changes materially
+- **THEN** the same fingerprint never reappears
+- **AND** the changed state surfaces as a new fingerprint
+
+### Requirement: A maintained due-state projection with honest invalidation
+
+The system SHALL maintain a due-state projection holding, per category, the count of open items
+and a bounded list of top item references. The projection SHALL be updated incrementally on write
+for the categories a write can affect, SHALL re-bucket at day boundaries so a `check_by` passing
+at midnight surfaces without any write, SHALL be healed by the reconcile path after out-of-band
+edits, and SHALL fall back to full recomputation when its persisted state is missing or
+unreadable. The projection SHALL never be computed by running the full audit synchronously
+inside a mutation.
+
+Day-boundary re-bucketing SHALL be a comparison against stored dates rather than a re-scan: the
+projection SHALL persist, per category and per page, both the open items and the pending
+candidates that are not yet due together with the date each becomes due.
+
+The projection SHALL be computed per audience after egress projection: an item the requesting
+audience may not see SHALL contribute nothing to any count, reference list, or ordering, on any
+surface, and the absence SHALL be indistinguishable from the item not existing.
+
+#### Scenario: Midnight surfaces a prediction without a write
+
+- **WHEN** a prediction's `check_by` date passes with no intervening mutation
+- **THEN** the next served projection reflects the new open item
+
+#### Scenario: A hidden item counts zero everywhere
+
+- **WHEN** a due item exists on a page the requesting audience may not see
+- **THEN** every count, reference list, and ordering served to that audience is identical to a
+  vault where the item does not exist
+
+#### Scenario: Damaged projection state recovers by recomputation
+
+- **WHEN** the persisted projection is missing or unreadable at serve time
+- **THEN** the current response remains silent for the advisory and returns without waiting
+  for a vault-wide scan
+- **AND** exactly one process-local background rebuild recomputes the projection from
+  canonical state and persists it when possible
+- **AND** a later response may serve the rebuilt projection after it is ready
+- **AND** no mutation fails or is delayed beyond the write-latency gates
+
+### Requirement: Batched deterministic relation queue
+
+`review_memory(mode="relation-queue")` SHALL return a read-only deterministic
+batch of graph-native relation candidates grouped by source page. Each item
+SHALL carry a stable `exomem://review/relation/<id>` ref, signal fingerprint,
+candidate triple, method, evidence, and source hint. The queue SHALL exclude
+already-authored edges, unresolved placeholders, and unchanged candidates with
+unexpired dismiss or snooze decisions. It SHALL report `mutated: false`,
+activation-aligned coverage, and explicit truncation. A non-current graph SHALL
+produce its typed retryable state, never a Markdown or embedding fallback.
+
+#### Scenario: Deterministic batch with filtering
+- **WHEN** the queue is read twice on an unchanged current graph
+- **THEN** both reads return the same items in the same order without authored
+  duplicates, unresolved placeholders, or unexpired suppressed fingerprints
+
+#### Scenario: Read never mutates
+- **WHEN** the queue is read
+- **THEN** no Markdown, accepted graph edge, or review-state entry changes
+- **AND** the response reports `mutated: false`
+
+### Requirement: Fingerprint-bound rejection via triage
+
+`triage_memory` SHALL accept relation-queue refs through the existing dismiss,
+snooze, and reopen actions, binding decisions to the review ID and signal
+fingerprint. Newly returned items SHALL echo their source hint for bounded
+revalidation. Relation identities SHALL remain namespaced so triage never
+resolves an activation or attention item, or vice versa.
+
+#### Scenario: Dismissed candidate stays gone
+- **WHEN** a candidate is dismissed and the unchanged queue is reread
+- **THEN** the candidate remains absent while that decision is effective
+
+#### Scenario: Changed signal resurfaces
+- **WHEN** a dismissed candidate's underlying signal changes its fingerprint
+- **THEN** the new candidate may reappear without inheriting the old dismissal
+
+#### Scenario: Review namespaces remain isolated
+- **WHEN** a relation candidate is triaged
+- **THEN** activation and attention review decisions remain unchanged

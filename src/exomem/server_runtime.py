@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 from . import (
     env_compat,
     hosted_runtime,
@@ -44,6 +46,12 @@ log = logging.getLogger(__name__)
 # background catalogue warm/repair path from starting indefinitely.
 RECALL_SEED_WAIT_SECONDS = 120.0
 
+# An application can be collected after lifespan shutdown while daemon workers
+# still exist. Keep its entered presence context owned by the process, not by
+# that application's object graph (which can be collected on another thread).
+_LOCAL_PROCESS_PRESENCE_LOCK = threading.Lock()
+_LOCAL_PROCESS_PRESENCES: list[AbstractContextManager[None]] = []
+
 
 @dataclass(frozen=True)
 class ServerRuntime:
@@ -53,11 +61,13 @@ class ServerRuntime:
     base_url: str
     media_worker: Any | None = None
     file_watcher: Any | None = None
+    derived_drain: Any | None = None
     hosted_config: HostedCellConfig | None = None
     hosted_lifecycle: HostedCellLifecycle | None = None
     hosted_security_authority: Any | None = None
     hosted_binding: HostedBindingV2 | None = None
     hosted_lifetime_lock: AbstractContextManager[None] | None = None
+    local_runtime_presence: AbstractContextManager[None] | None = None
 
 
 def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRuntime:
@@ -77,25 +87,42 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     env_compat.promote_legacy()
 
     vault_root = resolve_vault()
-    source_schema = schema.load_source_schema(vault_root)
-    log.info("vault=%s source_types=%s", vault_root, source_schema.source_types)
+    from . import state_migration
+    from .governance import consolidation_enrollment
 
-    project_keys_hint = project_keys.keys_hint(vault_root)
-    projection_runtime.preactivate_projection_runtime(vault_root)
-    _start_metrics_persistence()
-    base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
-    return ServerRuntime(
-        vault_root=vault_root,
-        source_schema=source_schema,
-        project_keys_hint=project_keys_hint,
-        base_url=base_url,
-    )
+    runtime_presence = consolidation_enrollment.local_runtime_presence(vault_root)
+    runtime_presence.__enter__()
+    try:
+        state_migration.require_vault_state_ready(vault_root)
+        source_schema = schema.load_source_schema(vault_root)
+        log.info("vault=%s source_types=%s", vault_root, source_schema.source_types)
+
+        project_keys_hint = project_keys.keys_hint(vault_root)
+        projection_runtime.preactivate_projection_runtime(vault_root)
+        _start_metrics_persistence()
+        base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
+        return ServerRuntime(
+            vault_root=vault_root,
+            source_schema=source_schema,
+            project_keys_hint=project_keys_hint,
+            base_url=base_url,
+            local_runtime_presence=runtime_presence,
+        )
+    except BaseException:
+        runtime_presence.__exit__(*sys.exc_info())
+        raise
 
 
 class LocalRuntimeActivation:
     """Start local background workers after transport liveness is observable."""
 
-    def __init__(self, vault_root: Path, *, fallback_seconds: float = 5.0) -> None:
+    def __init__(
+        self,
+        vault_root: Path,
+        *,
+        fallback_seconds: float = 5.0,
+        runtime_presence: AbstractContextManager[None] | None = None,
+    ) -> None:
         from . import readiness, warmup
 
         if warmup.warmup_enabled():
@@ -104,10 +131,17 @@ class LocalRuntimeActivation:
         self.fallback_seconds = fallback_seconds
         self._lock = threading.Lock()
         self._started = False
+        self._shutdown = threading.Event()
         self._timer: threading.Timer | None = None
         self._thread: threading.Thread | None = None
         self.media_worker: Any | None = None
         self.file_watcher: Any | None = None
+        self._runtime_presence = runtime_presence
+        if runtime_presence is not None:
+            with _LOCAL_PROCESS_PRESENCE_LOCK:
+                if not any(held is runtime_presence for held in _LOCAL_PROCESS_PRESENCES):
+                    _LOCAL_PROCESS_PRESENCES.append(runtime_presence)
+        self.derived_drain: Any | None = None
 
     def start(self) -> None:
         """Launch local workers once; safe from health and timer races."""
@@ -116,31 +150,48 @@ class LocalRuntimeActivation:
         if not consolidation_runtime.readiness(self.vault_root)["admitted"]:
             return
         with self._lock:
-            if self._started:
+            if self._started or self._shutdown.is_set():
                 return
             self._started = True
             timer = self._timer
+            thread = threading.Thread(
+                target=self._activate,
+                name="exomem-local-activation",
+                daemon=True,
+            )
+            self._thread = thread
+            thread.start()
         if timer is not None:
             timer.cancel()
-        thread = threading.Thread(
-            target=self._activate,
-            name="exomem-local-activation",
-            daemon=True,
-        )
-        with self._lock:
-            self._thread = thread
-        thread.start()
 
     def _activate(self) -> None:
+        if self._shutdown.is_set():
+            return
+        self._start_component("derived drain", self._start_derived_drain)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         self._start_component("file watcher", self._start_file_watcher)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         if self.file_watcher is None:
             # A maintained projection is authoritative only while something is
             # actually maintaining it.  The explicit watcher-off mode and a
             # watcher startup failure retain the supported walk-backed path.
             self._downgrade_recall_runtime()
         self._wait_for_recall_seed()
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         self._start_component("retrieval", _start_compute_runtime)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         self._wait_for_required_admission()
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         self._start_component(
             "file watcher recovery",
             self._finish_file_watcher_startup,
@@ -150,7 +201,11 @@ class LocalRuntimeActivation:
             ("media", self._start_media_worker),
         )
         for label, starter in starters:
+            if self._shutdown.is_set():
+                break
             self._start_component(label, starter)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
 
     def _wait_for_recall_seed(self) -> None:
         """Order maintained-catalog verification behind watcher authority."""
@@ -198,7 +253,7 @@ class LocalRuntimeActivation:
 
         if not warmup.warmup_enabled():
             return
-        while True:
+        while not self._shutdown.is_set():
             catalog_ready = readiness.is_ready("retrieval_catalog")
             semantic_ready = readiness.is_ready("semantic_corpus")
             if catalog_ready and (semantic_ready or not readiness.is_warming()):
@@ -213,6 +268,21 @@ class LocalRuntimeActivation:
             missing = "retrieval_catalog" if not catalog_ready else "semantic_corpus"
             readiness.wait(missing, timeout=0.1)
 
+    def _stop_background_workers(self) -> None:
+        """Stop workers already owned by this activation during shutdown."""
+        for label, worker in (
+            ("derived drain", self.derived_drain),
+            ("media", self.media_worker),
+            ("file watcher", self.file_watcher),
+        ):
+            stop = getattr(worker, "stop", None)
+            if not callable(stop):
+                continue
+            try:
+                stop()
+            except Exception:  # noqa: BLE001 - shutdown still has to join activation
+                log.warning("%s runtime shutdown failed", label, exc_info=True)
+
     def _start_component(self, label: str, starter: Callable[[Path], Any]) -> None:
         try:
             starter(self.vault_root)
@@ -225,6 +295,9 @@ class LocalRuntimeActivation:
 
     def _start_media_worker(self, vault_root: Path) -> None:
         self.media_worker = _start_media_worker(vault_root)
+
+    def _start_derived_drain(self, vault_root: Path) -> None:
+        self.derived_drain = _start_derived_drain(vault_root)
 
     def _start_file_watcher(self, vault_root: Path) -> None:
         self.file_watcher = _start_file_watcher(vault_root)
@@ -250,7 +323,19 @@ class LocalRuntimeActivation:
             try:
                 yield {}
             finally:
-                timer.cancel()
+                with self._lock:
+                    self._shutdown.set()
+                    timer = self._timer
+                    self._timer = None
+                    thread = self._thread
+                if timer is not None:
+                    timer.cancel()
+                self._stop_background_workers()
+                if thread is not None and thread is not threading.current_thread():
+                    await anyio.to_thread.run_sync(thread.join)
+                # Retain presence until process exit: best-effort worker
+                # shutdown does not prove every daemon thread has stopped.
+                # The OS releases the slot on clean exit or crash.
 
         return _lifespan
 
@@ -311,6 +396,9 @@ def _initialize_locked_hosted_runtime(
     """Finish hosted startup while retaining exclusive target-root ownership."""
 
     config.apply_process_environment()
+    from . import state_migration
+
+    state_migration.require_vault_state_ready(config.vault_root)
     _start_metrics_persistence()
     lifecycle = HostedCellLifecycle(
         config,
@@ -358,6 +446,15 @@ def _initialize_locked_hosted_runtime(
 
     media_worker = None
     file_watcher = None
+    derived_drain = None
+    if mutation_ready and startup.phase == "active" and lifecycle.readiness().ready:
+        derived_drain = _start_derived_drain(vault_root)
+        if derived_drain is not None:
+            _register_derived_drain_worker(lifecycle, derived_drain)
+    elif mutation_ready and startup.phase == "quiesced" and consolidation["admitted"]:
+        derived_drain = _create_derived_drain(vault_root)
+        if derived_drain is not None:
+            _register_derived_drain_worker(lifecycle, derived_drain)
     if mutation_ready and startup.phase == "active" and lifecycle.readiness().ready:
         # Retrieval catalog warm-up is core service work, not an optional
         # hosted worker.  A zero optional-worker budget must still converge
@@ -451,6 +548,7 @@ def _initialize_locked_hosted_runtime(
         base_url="",
         media_worker=media_worker,
         file_watcher=file_watcher,
+        derived_drain=derived_drain,
         hosted_config=config,
         hosted_lifecycle=lifecycle,
         hosted_security_authority=security_authority,
@@ -680,6 +778,47 @@ def _start_graph_drain(vault_root: Path) -> Any | None:
     except Exception as exc:  # noqa: BLE001 - convergence must not break startup
         log.warning("graph drain start failed: %s", exc)
         return None
+
+
+def _start_derived_drain(vault_root: Path) -> Any | None:
+    """Start exact component convergence independently of the file watcher.
+
+    The three production callbacks the drain needs -- the component router, the
+    canonical-generation observer and Lane 2's pending publisher -- are the
+    drain module's own defaults, so the server keeps naming only the cell it is
+    starting and there is exactly one place that knows what production wiring
+    is.
+    """
+    from . import derived_drain
+
+    try:
+        return derived_drain.start(vault_root)
+    except Exception as exc:  # noqa: BLE001 - custody survives startup failure
+        log.warning("derived component drain start failed: %s", exc)
+        return None
+
+
+def _create_derived_drain(vault_root: Path) -> Any | None:
+    """Construct dormant exact-custody convergence for a quiesced hosted cell."""
+    from . import derived_drain
+
+    try:
+        return derived_drain.DerivedDrain(vault_root)
+    except Exception as exc:  # noqa: BLE001 - custody survives startup failure
+        log.warning("derived component drain unavailable: %s", exc)
+        return None
+
+
+def _register_derived_drain_worker(lifecycle: HostedCellLifecycle, worker: Any) -> None:
+    """Register hosted stop/start for the exact component drain.
+
+    The lifecycle calls a stopper with no arguments and keeps its quiesce
+    deadline private, so the registered stopper is the drain's bounded
+    fail-closed stop.  A pass that is still dispatching leaves the cell
+    quiescing instead of reporting a drained cell the deadline never proved.
+    """
+
+    lifecycle.register_background_worker(stopper=worker.stop, starter=worker.start)
 
 
 def _start_file_watcher(vault_root: Path) -> Any | None:

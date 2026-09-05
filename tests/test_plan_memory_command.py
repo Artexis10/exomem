@@ -51,6 +51,43 @@ def test_plan_memory_create_uses_shared_preflight_for_planning(tmp_path: Path) -
     assert created["operation"] == "create"
 
 
+@pytest.mark.parametrize(
+    ("item", "expected_message"),
+    (
+        (
+            {"title": "Invalid kind", "kind": "project"},
+            "kind must be one of: area, outcome, initiative, work-item",
+        ),
+        (
+            {"title": "Invalid area", "area": "not-a-plan-reference"},
+            "area must be exomem://plan/<collection-uuid>/<plan-uuid>",
+        ),
+    ),
+)
+def test_plan_memory_add_exposes_bounded_planning_self_correction_guidance(
+    tmp_path: Path, item: dict[str, str], expected_message: str
+) -> None:
+    from exomem import planning
+    from exomem.plan_memory import plan_memory
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    planning.create_collection(tmp_path, collection, _manifest(), why="create planning collection")
+
+    with pytest.raises(OpError) as raised:
+        plan_memory(
+            tmp_path,
+            "add",
+            collection=collection,
+            item=item,
+            why="attempt invalid Planning capture",
+        )
+
+    assert raised.value.code == "INVALID_PLAN"
+    assert raised.value.message == expected_message
+
+
 def test_plan_memory_validate_supports_exact_create_and_revision_forms(
     tmp_path: Path,
 ) -> None:
@@ -246,3 +283,60 @@ def test_collection_dependent_actions_reject_a_missing_selector(
         plan_memory(tmp_path, action, **arguments)
 
     assert raised.value.code == "INVALID_PLAN_ARGUMENTS"
+
+
+def test_plan_memory_update_names_the_unexpected_argument(tmp_path: Path) -> None:
+    from exomem.plan_memory import plan_memory
+
+    with pytest.raises(OpError) as raised:
+        plan_memory(
+            tmp_path,
+            "update",
+            collection="Knowledge Base/Planning/Work/_collection.md",
+            plan_id="991acdd4-16b9-4396-8220-2cb37b7e8516",
+            expected_container_hash="a" * 64,
+            expected_item_version="b" * 64,
+            why="update",
+            changes={"status": "done"},
+            item={"title": "not allowed here"},
+        )
+
+    assert raised.value.code == "INVALID_PLAN_ARGUMENTS"
+    assert "unexpected for update: item" in raised.value.message
+    assert "not allowed here" not in raised.value.message
+
+
+def test_plan_memory_update_names_the_missing_argument(tmp_path: Path) -> None:
+    from exomem.plan_memory import plan_memory
+
+    with pytest.raises(OpError) as raised:
+        plan_memory(
+            tmp_path,
+            "update",
+            collection="Knowledge Base/Planning/Work/_collection.md",
+            plan_id="991acdd4-16b9-4396-8220-2cb37b7e8516",
+            expected_container_hash="a" * 64,
+            why="update",
+            changes={"status": "done"},
+        )
+
+    assert raised.value.code == "INVALID_PLAN_ARGUMENTS"
+    assert "missing for update: expected_item_version" in raised.value.message
+    assert "991acdd4-16b9-4396-8220-2cb37b7e8516" not in raised.value.message
+
+
+def test_plan_memory_query_view_names_the_excluded_shaping_field(tmp_path: Path) -> None:
+    from exomem.plan_memory import plan_memory
+
+    with pytest.raises(OpError) as raised:
+        plan_memory(
+            tmp_path,
+            "query",
+            collection="Knowledge Base/Planning/Work/_collection.md",
+            view="inbox",
+            columns=["title"],
+        )
+
+    assert raised.value.code == "INVALID_PLAN_ARGUMENTS"
+    assert "view excludes shaping fields: columns" in raised.value.message
+    assert "inbox" not in raised.value.message

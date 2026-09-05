@@ -184,6 +184,11 @@ def _hosted_refusal_guidance() -> dict[str, tuple[str, str]]:
     findings = semantic_authoring.AUTHORING_CONTRACT.findings
     unit = findings["missing_semantic_unit"]
     empty = findings["empty_rich_unit"]
+    record_recovery = cli_ops.OpError(
+        "RECORD_RECOVERY_REQUIRED",
+        "private transaction residue blocks safe record publication",
+    )
+    assert record_recovery.remediation is not None
 
     disposition = (
         "This memory needs a link to something already saved before it can be "
@@ -195,6 +200,10 @@ def _hosted_refusal_guidance() -> dict[str, tuple[str, str]]:
         "MAINTENANCE_REQUIRES_CLI": (
             REMOTE_MAINTENANCE_MESSAGE,
             REMOTE_MAINTENANCE_REMEDIATION,
+        ),
+        "RECORD_RECOVERY_REQUIRED": (
+            record_recovery.message,
+            record_recovery.remediation,
         ),
         "missing_semantic_unit": (
             "the memory has no semantic unit to record",

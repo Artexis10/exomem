@@ -283,6 +283,11 @@ class Param:
     help: str = ""
     cli_positional: bool = False
     choices: tuple[str, ...] = ()
+    schema: Mapping[str, typing.Any] | None = field(default=None, compare=False, hash=False)
+    schema_description: str = field(default="", compare=False, hash=False)
+    schema_default: object = field(
+        default=inspect.Parameter.empty, compare=False, hash=False
+    )
 
 
 @dataclass(frozen=True)
@@ -717,7 +722,7 @@ def _annotate_description(annotation: object, description: str) -> object:
     return typing.Annotated[annotation, Field(description=description)]
 
 
-def parse_args_help(doc: str | None) -> dict[str, str]:
+def parse_args_help(doc: str | None, *, continuation: str = " ") -> dict[str, str]:
     """Best-effort `{param: one-line help}` from a Google-style `Args:` block."""
     if not doc:
         return {}
@@ -736,18 +741,20 @@ def parse_args_help(doc: str | None) -> dict[str, str]:
         head, sep, rest = stripped.partition(":")
         if sep and head and head.replace("_", "").isalnum() and " " not in head:
             if cur is not None:
-                out[cur] = " ".join(buf).strip()
+                out[cur] = continuation.join(buf).strip()
             cur, buf = head, [rest.strip()]
         elif cur is not None:
             buf.append(stripped)
     if cur is not None:
-        out[cur] = " ".join(buf).strip()
+        out[cur] = continuation.join(buf).strip()
     return out
 
 
 def type_tag(annotation: object) -> str:
     """Map a resolved type annotation to a REST/CLI coercion tag."""
     origin = typing.get_origin(annotation)
+    if origin is typing.Annotated:
+        return type_tag(typing.get_args(annotation)[0])
     if origin is typing.Literal:
         values = typing.get_args(annotation)
         if values and all(isinstance(value, str) for value in values):
@@ -785,24 +792,46 @@ def _literal_string_values(annotation: object) -> tuple[str, ...]:
     return ()
 
 
+def _is_nullable_dict(annotation: object) -> bool:
+    """Whether an annotated public mapping also admits JSON null."""
+    if typing.get_origin(annotation) is typing.Annotated:
+        annotation = typing.get_args(annotation)[0]
+    origin = typing.get_origin(annotation)
+    if origin is not typing.Union and origin is not types.UnionType:
+        return False
+    args = typing.get_args(annotation)
+    non_none = [item for item in args if item is not type(None)]
+    return type(None) in args and len(non_none) == 1 and type_tag(non_none[0]) == "dict"
+
+
 def derive_params(
     leaf: Callable, *, skip: int, positional: str | None = None
 ) -> tuple[Param, ...]:
     """Derive the declarative `Param` tuple from a leaf signature + docstring."""
     sig = inspect.signature(leaf)
     try:
-        hints = typing.get_type_hints(leaf)
+        hints = typing.get_type_hints(leaf, include_extras=True)
     except Exception:  # noqa: BLE001
         hints = {}
     helps = parse_args_help(leaf.__doc__)
+    schema_descriptions = parse_args_help(leaf.__doc__, continuation="\n")
     params: list[Param] = []
     for p in list(sig.parameters.values())[skip:]:
         ann = hints.get(p.name, p.annotation)
+        schema = next(
+            (
+                metadata.json_schema
+                for metadata in typing.get_args(ann)[1:]
+                if isinstance(metadata, WithJsonSchema)
+            ),
+            None,
+        ) if typing.get_origin(ann) is typing.Annotated else None
         literal_values = _literal_string_values(ann)
+        param_type = "nullable_dict" if schema and _is_nullable_dict(ann) else type_tag(ann)
         params.append(
             Param(
                 name=p.name,
-                type=type_tag(ann),
+                type=param_type,
                 required=p.default is inspect.Parameter.empty,
                 help=helps.get(p.name, ""),
                 cli_positional=(p.name == positional),
@@ -812,6 +841,9 @@ def derive_params(
                     and all(isinstance(value, str) for value in literal_values)
                     else ()
                 ),
+                schema=schema,
+                schema_description=schema_descriptions.get(p.name, "") if schema else "",
+                schema_default=p.default if schema else inspect.Parameter.empty,
             )
         )
     return tuple(params)

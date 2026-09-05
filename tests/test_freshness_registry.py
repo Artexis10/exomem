@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -270,6 +271,36 @@ def test_scope_boundary_schema_dir_updates_neither(vault: Path) -> None:
 
 
 # ---------------- reconcile() ----------------
+
+
+def test_policy_change_before_publication_supersedes_the_off_boundary_projection(
+    vault: Path,
+) -> None:
+    from exomem import recall_policy
+
+    _seed_both_scopes(vault)
+    before = freshness.consumer_checkpoint(vault, "kb")
+    old_identity = recall_policy.recall_policy_identity(vault)
+    entries = [
+        (str(path), freshness.stat_signature(path))
+        for path in find_module._walk_md(vault / "Knowledge Base")
+    ]
+
+    @contextmanager
+    def policy_writer_finishes():
+        # The projection is already prepared when the publication guard is
+        # entered. Model a policy-tightening writer completing during that wait.
+        (vault / "Knowledge Base" / "_access.yaml").write_text(
+            "excluded:\n  - Notes\n", encoding="utf-8"
+        )
+        assert recall_policy.recall_policy_identity(vault) != old_identity
+        yield
+
+    result = freshness.reconcile(
+        vault, "kb", entries, publication_guard=policy_writer_finishes()
+    )
+    assert result.published is False
+    assert freshness.consumer_checkpoint(vault, "kb") == before
 
 
 def test_reconcile_detects_and_heals_a_missed_event(vault: Path) -> None:

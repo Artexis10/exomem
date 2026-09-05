@@ -974,6 +974,22 @@ than a complete authenticated store—including a crash between revision-0
 snapshot and active-pointer publication—fails closed and is recovered only by
 the explicit enrollment operation.
 
+The local operator entrypoint is `exomem governance-enroll`. It is CLI-only,
+requires an existing authenticated local identity, and returns only content-free
+enrollment state. It is not exported through MCP, REST, or Hosted agent command
+registries. Hosted provisioning calls the corresponding trusted enrollment seam
+while holding the existing cell lifetime lock rather than exposing an agent tool.
+The Hosted init job mounts the fixed control-plane authorization custody, adopts
+the private cell identity, publishes revision 0 under that lock, and reconverges
+the new private bytes to the runtime UID before reporting initialization success.
+The local server retains its presence slot for process lifetime (ASGI lifespan
+shutdown is not proof that every daemon has exited), while a direct CLI retains
+its slot from pre-authorization vault resolution through its final graph-rebuild
+drain. The CLI process boundary also covers legacy one-shot commands that bypass
+product dispatch. The TUI acquires the same process slot on its app thread for
+both its initial and first-run-adopted vault, so worker-thread ContextVar isolation
+cannot create an enrollment window between calls.
+
 Apply first acquires the destination writer authority and transitions to a
 durable destination-wide seal. The seal drains admitted reads, writes,
 transfers, and background writers, then rejects all new ordinary content reads

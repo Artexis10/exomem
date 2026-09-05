@@ -48,10 +48,16 @@ from exomem.server_hosted import register_hosted_routes
 SENSITIVE_QUERY = "sensitive-query-sentinel-7f3c"
 SENSITIVE_PATH = "Knowledge Base/private-path-sentinel-91d2.md"
 DEFAULT_REQUEST_ID = "11111111-1111-4111-8111-111111111111"
-# Maps whose KEYS are vocabulary rather than tool names. `contract` is the prominence
-# engagement contract, keyed by behavioural axis (recall/capture/narration) — `capture`
-# there names a behaviour, not the `capture` action, and advertises nothing callable.
-_ACTION_VOCABULARY_MAPS = {"front_door_actions", "simple_actions", "contract"}
+# Maps whose KEYS are vocabulary rather than tool names. The engagement contract,
+# workflow fallback, and agent protocol use keys such as `capture` and `review` for
+# behaviour; they do not advertise the same-named actions as callable.
+_ACTION_VOCABULARY_MAPS = {
+    "agent_protocol",
+    "builtin_fallback",
+    "contract",
+    "front_door_actions",
+    "simple_actions",
+}
 
 
 def _principal(label: str) -> str:
@@ -677,13 +683,15 @@ def test_hosted_bootstrap_extractor_distinguishes_tool_keys_from_actions() -> No
         },
         "front_door_actions": {"review": {"intent": "action label"}},
         "knowledge_packs": {"available": [{"actions": ["ask", "review"]}]},
+        "builtin_fallback": {"capture": "propose"},
+        "agent_protocol": {"review": {"mode": "read-only"}},
     }
 
     refs = _hosted_bootstrap_tool_refs(payload)
 
     assert "read_media" in refs
     assert "ask_memory" in refs
-    assert {"ask", "review"}.isdisjoint(refs)
+    assert {"ask", "capture", "review"}.isdisjoint(refs)
 
 
 @pytest.mark.parametrize("tier2_enabled", [True, False])

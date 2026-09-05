@@ -300,14 +300,14 @@ class SelectedDeploymentRuntime(BaseModel):
     recordsReaderVersion: Literal[2] | None = None
     lifecycleActionsEnabled: bool = False
     compatibilityDigest: str | None = Field(default=None, pattern=_SHA256)
-    migrationMode: Literal["none", "binding-v1-to-v2"] = "none"
+    migrationMode: Literal["none", "binding-v1-to-v2", "state-root-v1"] = "none"
 
 
 class DeploymentRuntimeUpgrade(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     compatibilityDigest: str = Field(pattern=_SHA256)
-    migrationMode: Literal["none", "binding-v1-to-v2"]
+    migrationMode: Literal["none", "binding-v1-to-v2", "state-root-v1"]
     substrateConsumerCommit: str = Field(pattern=_COMMIT)
     substrateTrustSha256: str = Field(pattern=_SHA256)
 

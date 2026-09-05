@@ -46,6 +46,7 @@ _READINESS_FIELDS = frozenset(
         "security_revision",
         "service_authenticated",
         "mutation_authority",
+        "authorization_session",
         "admission_phase",
         "read_admission",
         "write_admission",
@@ -130,6 +131,7 @@ class HostedProbeResult:
     security_revision: int
     service_authenticated: bool
     mutation_authority: bool
+    authorization_session: dict[str, Any]
     admission_phase: str
     read_admission: bool
     write_admission: bool
@@ -147,6 +149,7 @@ class HostedProbeResult:
             "security_revision": self.security_revision,
             "service_authenticated": self.service_authenticated,
             "mutation_authority": self.mutation_authority,
+            "authorization_session": self.authorization_session,
             "admission_phase": self.admission_phase,
             "read_admission": self.read_admission,
             "write_admission": self.write_admission,
@@ -199,6 +202,51 @@ def _parse_readiness(raw: bytes) -> dict[str, Any]:
     )
     if any(not isinstance(data[field], str) for field in string_fields):
         raise HostedProbeError("HOSTED_PROBE_SCHEMA_INVALID")
+    authorization_session = data["authorization_session"]
+    authorization_fields = {
+        "ready",
+        "code",
+        "servingMembershipEpoch",
+        "servingReplicaCount",
+        "drainingReplicaCount",
+    }
+    if (
+        not isinstance(authorization_session, dict)
+        or set(authorization_session) != authorization_fields
+        or not isinstance(authorization_session["ready"], bool)
+        or authorization_session["code"]
+        not in {
+            "AUTHORIZATION_MEMBERSHIP_READY",
+            "AUTHORIZATION_MEMBERSHIP_UNAVAILABLE",
+        }
+        or (
+            authorization_session["ready"]
+            and authorization_session["code"] != "AUTHORIZATION_MEMBERSHIP_READY"
+        )
+        or (
+            not authorization_session["ready"]
+            and authorization_session["code"]
+            != "AUTHORIZATION_MEMBERSHIP_UNAVAILABLE"
+        )
+        or (
+            authorization_session["servingMembershipEpoch"] is not None
+            and (
+                isinstance(authorization_session["servingMembershipEpoch"], bool)
+                or not isinstance(authorization_session["servingMembershipEpoch"], int)
+                or authorization_session["servingMembershipEpoch"] < 1
+            )
+        )
+        or any(
+            isinstance(authorization_session[field], bool)
+            or not isinstance(authorization_session[field], int)
+            or not 0 <= authorization_session[field] <= 1
+            for field in ("servingReplicaCount", "drainingReplicaCount")
+        )
+        or authorization_session["servingReplicaCount"]
+        + authorization_session["drainingReplicaCount"]
+        > 1
+    ):
+        raise HostedProbeError("HOSTED_PROBE_SCHEMA_INVALID")
     if (
         not _OPAQUE_ID.fullmatch(data["cell_id"])
         or not _OPAQUE_ID.fullmatch(data["vault_id"])
@@ -247,7 +295,18 @@ def _validate_contract(data: dict[str, Any], request: HostedProbeRequest) -> Non
         "write_admission": True,
         "worker_policy_digest": request.expected_worker_policy_digest,
     }
-    if data != expected:
+    authorization_session = data["authorization_session"]
+    compared = {name: value for name, value in data.items() if name != "authorization_session"}
+    if (
+        compared != expected
+        or authorization_session["ready"] is not True
+        or authorization_session["code"] != "AUTHORIZATION_MEMBERSHIP_READY"
+        or not isinstance(authorization_session["servingMembershipEpoch"], int)
+        or isinstance(authorization_session["servingMembershipEpoch"], bool)
+        or authorization_session["servingMembershipEpoch"] < 1
+        or authorization_session["servingReplicaCount"] != 1
+        or authorization_session["drainingReplicaCount"] != 0
+    ):
         raise HostedProbeError("HOSTED_PROBE_CONTRACT_MISMATCH")
 
 

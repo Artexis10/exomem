@@ -7,11 +7,14 @@ import pytest
 
 from exomem import (
     activation_manifest,
+    freshness,
+    memory_refs,
     memory_schema,
     relation_registry,
     semantic_contract,
     semantic_language_registry,
     semantic_units,
+    vault,
 )
 
 _ID_A = "00000000-0000-0000-0000-000000000001"
@@ -89,6 +92,225 @@ def _identity_census(
             for state in states
         )
     )
+
+
+def _cached_reference_snapshot(
+    root: Path,
+    entries: tuple[tuple[str, str], ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> semantic_contract.ReferenceIdentitySnapshot:
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    for rel_path, title in entries:
+        path = root / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_source(title=title), encoding="utf-8")
+    freshness.clear()
+    freshness.rebaseline(root)
+    semantic_contract.build_corpus_context(root)
+    snapshot = semantic_contract.current_reference_identity_snapshot(root)
+    assert snapshot is not None
+    return snapshot
+
+
+def test_reference_snapshot_wikilink_resolution_is_unicode_exact_and_io_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "vault"
+    prefix = "Knowledge Base/Notes/Insights"
+    unicode_path = f"{prefix}/unicode-opaque.md"
+    ascii_path = f"{prefix}/ascii-opaque.md"
+    stem_path = f"{prefix}/unique-stem.md"
+    explicit_path = f"{prefix}/Area/explicit.md"
+    snapshot = _cached_reference_snapshot(
+        root,
+        (
+            (unicode_path, "Älpha Target"),
+            (ascii_path, "Readable Target"),
+            (stem_path, "Stem target"),
+            (explicit_path, "Explicit target"),
+            (f"{prefix}/Area-A/ambiguous.md", "Ambiguous A"),
+            (f"{prefix}/Area-B/ambiguous.md", "Ambiguous B"),
+            (f"{prefix}/Area-A/collision.md", "Stem collision"),
+            (f"{prefix}/Area-B/title-collision.md", "collision"),
+            (f"{prefix}/Area-A/twin-a.md", "Twin Title"),
+            (f"{prefix}/Area-B/twin-b.md", "Twin Title"),
+            (f"{prefix}/Area-A/fold-a.md", "Älpha Collision"),
+            (f"{prefix}/Area-B/fold-b.md", "älpha collision"),
+        ),
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        semantic_contract,
+        "_corpus_census",
+        lambda *_args, **_kwargs: pytest.fail("cached resolver walked the corpus"),
+    )
+    monkeypatch.setattr(
+        semantic_contract,
+        "_build_corpus_context_uncached",
+        lambda *_args, **_kwargs: pytest.fail("cached resolver rebuilt the corpus"),
+    )
+    monkeypatch.setattr(
+        vault.WikilinkResolver,
+        "_build",
+        lambda *_args, **_kwargs: pytest.fail("cached resolver built a resolver"),
+    )
+
+    cases = (
+        ("[[älpha target]]", "resolved", unicode_path),
+        ("[[READABLE TARGET]]", "resolved", ascii_path),
+        ("[[unique-stem]]", "resolved", stem_path),
+        (f"[[{explicit_path.removesuffix('.md')}]]", "resolved", explicit_path),
+        ("[[ambiguous]]", "ambiguous", None),
+        ("[[collision]]", "ambiguous", None),
+        ("[[Twin Title]]", "ambiguous", None),
+        ("[[ÄLPHA COLLISION]]", "ambiguous", None),
+        ("[[missing target]]", "unresolved", None),
+    )
+    for raw_target, status, path in cases:
+        result = semantic_contract.resolve_reference_wikilink(
+            root,
+            snapshot,
+            raw_target,
+        )
+        assert (result.status, result.path) == (status, path)
+
+
+def test_reference_snapshot_wikilink_resolution_fails_closed_when_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "vault"
+    target = "Knowledge Base/Notes/Insights/target.md"
+    snapshot = _cached_reference_snapshot(
+        root,
+        ((target, "Target"),),
+        monkeypatch,
+    )
+    assert semantic_contract.evict_corpus_context(root) is True
+
+    result = semantic_contract.resolve_reference_wikilink(root, snapshot, "[[Target]]")
+
+    assert (result.status, result.path) == ("unavailable", None)
+
+
+def test_reference_snapshot_wikilink_resolution_fences_context_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "vault"
+    target = "Knowledge Base/Notes/Insights/target.md"
+    snapshot = _cached_reference_snapshot(
+        root,
+        ((target, "Target"),),
+        monkeypatch,
+    )
+    original_resolve = semantic_contract._resolve_reference_wikilink_from_context
+
+    def replace_context(*args, **kwargs):
+        result = original_resolve(*args, **kwargs)
+        cache_key = semantic_contract._corpus_cache_key(root)
+        with semantic_contract._CORPUS_CONTEXT_UPDATE_LOCK:
+            with semantic_contract._CORPUS_CONTEXT_CACHE_LOCK:
+                entry = semantic_contract._CORPUS_CONTEXT_CACHE[cache_key]
+                semantic_contract._CORPUS_CONTEXT_CACHE[cache_key] = (
+                    entry[0],
+                    replace(entry[1]),
+                )
+        return result
+
+    monkeypatch.setattr(
+        semantic_contract,
+        "_resolve_reference_wikilink_from_context",
+        replace_context,
+    )
+
+    result = semantic_contract.resolve_reference_wikilink(root, snapshot, "[[Target]]")
+
+    assert (result.status, result.path) == ("unavailable", None)
+
+
+def test_identity_census_precomputes_immutable_reference_index_equivalent_view() -> None:
+    unique = "Knowledge Base/Notes/Insights/unique.md"
+    duplicate = "Knowledge Base/Notes/Insights/duplicate.md"
+    duplicate_record = "Knowledge Base/Records/duplicate.md"
+    missing = "Knowledge Base/Notes/Insights/missing.md"
+    excluded_duplicate = "Knowledge Base/_Schema/excluded.md"
+    census = semantic_contract.StableIdentityCensus(
+        (
+            semantic_contract.StableIdentityEntry(unique, _ID_A),
+            semantic_contract.StableIdentityEntry(excluded_duplicate, _ID_A),
+            semantic_contract.StableIdentityEntry(duplicate, _ID_B),
+            semantic_contract.StableIdentityEntry(duplicate_record, _ID_B),
+            semantic_contract.StableIdentityEntry(missing, None),
+        )
+    )
+
+    serialized = census.as_dict()
+    assert serialized["entry_count"] == 5
+    assert "reference_paths" not in serialized
+    assert "canonical_refs_by_path" not in serialized
+    assert census._reference_paths == frozenset(
+        {unique, duplicate, duplicate_record, missing}
+    )
+    assert dict(census._canonical_refs_by_path) == {
+        unique: memory_refs.memory_ref(_ID_A),
+        duplicate: None,
+        duplicate_record: None,
+        missing: None,
+    }
+    with pytest.raises(TypeError):
+        census._canonical_refs_by_path[unique] = None  # type: ignore[index]
+
+
+def test_identity_census_reference_view_matches_real_reference_index_semantics(
+    tmp_path: Path,
+) -> None:
+    paths = {
+        "unique": "Knowledge Base/Notes/Insights/unique.md",
+        "duplicate": "Knowledge Base/Notes/Insights/duplicate.md",
+        "duplicate_record": "Knowledge Base/Records/duplicate.md",
+        "malformed": "Knowledge Base/Notes/Insights/malformed.md",
+        "missing": "Knowledge Base/Notes/Insights/missing.md",
+        "excluded": "Knowledge Base/_Schema/excluded.md",
+    }
+    identities = {
+        "unique": _ID_A,
+        "duplicate": _ID_B,
+        "duplicate_record": _ID_B,
+        "malformed": "not-a-canonical-id",
+        "missing": None,
+        "excluded": _ID_A,
+    }
+    for name, rel in paths.items():
+        page = tmp_path / rel
+        page.parent.mkdir(parents=True, exist_ok=True)
+        identity = identities[name]
+        page.write_text(
+            "---\ntitle: Page\n"
+            + (f"exomem_id: {identity}\n" if identity is not None else "")
+            + "---\n# Page\n",
+            encoding="utf-8",
+        )
+
+    census, _sources = semantic_contract._build_identity_census(tmp_path)
+    reference_index = memory_refs.ReferenceIndex(tmp_path)
+    reference_index.rebuild_all()
+    admitted = [
+        path for name, path in paths.items() if name != "excluded"
+    ]
+
+    assert census._reference_paths == frozenset(admitted)
+    assert dict(census._canonical_refs_by_path) == reference_index.refs_for_paths(
+        admitted
+    )
+    assert census._canonical_refs_by_path[paths["unique"]] == memory_refs.memory_ref(
+        _ID_A
+    )
+    assert census._canonical_refs_by_path[paths["duplicate"]] is None
+    assert census._canonical_refs_by_path[paths["duplicate_record"]] is None
+    assert census._canonical_refs_by_path[paths["malformed"]] is None
+    assert census._canonical_refs_by_path[paths["missing"]] is None
 
 
 def _contracts(
@@ -204,6 +426,41 @@ def test_compiled_type_normalization_drives_eligibility_for_all_types(
     assert semantic_contract.compiled_intent(state) is True
     assert semantic_contract.compiled_structure_finding(state) is None
     assert semantic_contract.requires_semantic_unit(state) is True
+
+
+@pytest.mark.parametrize(
+    ("path", "extra"),
+    (
+        ("Knowledge Base/Notes/Research/Records/archive-architecture.md", ""),
+        ("Knowledge Base/Notes/Research/Records/archive.md", "tags: [hub]"),
+        ("Knowledge Base/Notes/Research/Records/archive-snapshot.md", ""),
+    ),
+)
+def test_exempt_compiled_page_keeps_valid_destination_structure(
+    tmp_path: Path, path: str, extra: str
+) -> None:
+    state = _state(
+        tmp_path,
+        path,
+        _source(page_type="research-note", project="records", extra=extra),
+    )
+
+    assert semantic_contract.compiled_intent(state) is True
+    assert semantic_contract.compiled_structure_finding(state) is None
+    assert semantic_contract.requires_semantic_unit(state) is False
+
+
+def test_tag_only_exemption_cannot_hide_noncompiled_type(tmp_path: Path) -> None:
+    state = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/ordinary.md",
+        _source(page_type="memo", extra="tags: [hub]"),
+    )
+
+    finding = semantic_contract.compiled_structure_finding(state)
+
+    assert finding is not None
+    assert finding.code == "COMPILED_TYPE_MISMATCH"
 
 
 @pytest.mark.parametrize(
@@ -706,6 +963,48 @@ def test_build_corpus_reads_and_parses_each_page_once_and_reuses_pure_census(
     assert parses == 2
     assert set(reads.values()) == {1}
     assert len(corpus.activation_census.candidates) == 2
+
+
+def test_build_corpus_context_preserves_immutable_replacement_closure(
+    tmp_path: Path,
+) -> None:
+    registry = relation_registry.load_registry(
+        proposal={
+            "schema_version": 1,
+            "extensions": {
+                "vault.old": {
+                    "parent": "relates_to",
+                    "description": "Old relation",
+                    "status": "deprecated",
+                    "replaced_by": "vault.middle",
+                },
+                "vault.middle": {
+                    "parent": "relates_to",
+                    "description": "Middle relation",
+                    "status": "deprecated",
+                    "replaced_by": "vault.current",
+                },
+                "vault.current": {
+                    "parent": "relates_to",
+                    "description": "Current relation",
+                },
+            },
+        }
+    )
+    page = tmp_path / "Knowledge Base/Notes/Insights/page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(_source(body="## Relations\n- vault.old [[Target]]\n"), encoding="utf-8")
+
+    corpus = semantic_contract.build_corpus_context(tmp_path, registry=registry)
+
+    assert corpus.registry.terminal_replacement("vault.old") == "vault.current"
+    assert corpus.registry.predecessors("vault.current") == frozenset(
+        {"vault.old", "vault.middle"}
+    )
+    with pytest.raises(TypeError):
+        corpus.registry.terminal_replacements["vault.old"] = "relates_to"
+    with pytest.raises(TypeError):
+        corpus.registry.predecessor_closure["vault.current"] = frozenset()
 
 
 def test_candidate_insertion_reresolves_forward_and_ambiguous_facts_without_io(

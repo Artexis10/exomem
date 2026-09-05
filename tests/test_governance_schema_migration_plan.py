@@ -11,10 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from exomem import mutation_lock, writer_lease
+from exomem import mutation_lock, state_migration, state_paths, writer_lease
 from exomem.governance import (
     authorization_custody,
     authorization_session_lifecycle,
+    legacy_v3_placement,
     projection_store,
     projections,
     receipts,
@@ -71,6 +72,12 @@ def _vault(tmp_path: Path) -> Path:
     notes = vault / "Knowledge Base" / "Notes"
     notes.mkdir()
     (notes / "governed.md").write_bytes(NOTE_BYTES)
+    state_migration.migrate_vault_state_offline(
+        vault,
+        authority=state_migration.assert_offline_migration_authority(
+            source="governance schema migration fixture",
+        ),
+    )
     connection = store.open_connection(vault)
     connection.close()
     return vault
@@ -713,6 +720,26 @@ def test_pre_migration_backup_restore_is_drained_receipt_first_and_replayable(
     assert restored.backup_reference == committed.backup_reference
     assert restored.replayed is False
     assert _schema_version(vault) == 3
+    manifest = state_migration._load_manifest(  # noqa: SLF001 - durable marker contract
+        state_paths.vault_state_dir(vault),
+        vault_root=vault,
+    )
+    assert manifest is not None
+    marker = manifest["governance_rollback"]
+    assert marker is not None
+    assert marker["operation"] == "governance_schema_v3_backup_restore"
+    assert marker["event_id"] == restored.recovery_event_id
+    assert marker["phase"] == "complete"
+    assert marker["plan_digest"] == restored.recovery_plan_digest
+    assert marker["backup_reference"] == committed.backup_reference
+    assert marker["backup_plan_digest"] == committed.plan_digest
+    assert marker["source_store_digest"] == committed.source_store_digest
+    assert marker["schema_fence_generation"] is None
+    assert marker["timestamp"] == now + 3
+    assert marker["legacy_path"] == "Knowledge Base/.governance.sqlite"
+    assert marker["stage_leaf"] == (
+        f".governance-v3-rollback-{restored.recovery_event_id}.sqlite"
+    )
     connection = store.open_readonly_connection(vault)
     assert connection is not None
     try:
@@ -746,8 +773,12 @@ def test_pre_migration_backup_restore_is_drained_receipt_first_and_replayable(
     [
         ("after_restore_receipt_intent", 4),
         ("after_store_restore", 3),
-        ("after_restore_schema_fence", 3),
+        ("after_legacy_v3_publication", 3),
+        ("after_restore_terminal_durable", 3),
         ("after_restore_receipt_commit", 3),
+        ("after_restore_legacy_aligned", 3),
+        ("after_restore_schema_fence", 3),
+        ("after_restore_complete_marker", 3),
     ],
 )
 def test_pre_migration_backup_restore_replays_every_durable_boundary(
@@ -1311,6 +1342,14 @@ def test_pre_migration_backup_restore_replays_store_commit_before_schema_fence(
         )
 
     assert _schema_version(vault) == 3
+    legacy = legacy_v3_placement.legacy_v3_path(vault)
+    assert not legacy.exists()
+    external = store.open_readonly_connection(vault)
+    assert external is not None
+    try:
+        schema_v4.require_exact_v3_connection(external)
+    finally:
+        external.close()
     assert state == [writer_lease.SchemaFenceState(True, 4, 17)]
     assert transitions == []
 
@@ -1325,3 +1364,185 @@ def test_pre_migration_backup_restore_replays_store_commit_before_schema_fence(
     assert replay.replayed is True
     assert state == [writer_lease.SchemaFenceState(True, 3, 18)]
     assert transitions == [(17, 3, 3)]
+
+
+@pytest.mark.parametrize("backup_mutation", ("missing", "corrupt"))
+def test_pre_migration_backup_restore_seals_after_fence_without_reading_legacy_successors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backup_mutation: str,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = _stage_reviewed_migration(vault, now=now)
+    committed = schema_migration.commit_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+    _drain_verified_membership(monkeypatch)
+    state = [writer_lease.SchemaFenceState(True, 4, 17)]
+
+    class Client:
+        def schema_fence(self) -> writer_lease.SchemaFenceState:
+            return state[0]
+
+        def transition_schema_fence(
+            self,
+            *,
+            expected_generation: int,
+            schema_version: int,
+        ) -> writer_lease.SchemaFenceState:
+            state[0] = writer_lease.SchemaFenceState(
+                True,
+                schema_version,
+                expected_generation + 1,
+            )
+            return state[0]
+
+    monkeypatch.setattr(
+        writer_lease,
+        "configured_schema_fence_operator_client",
+        lambda: Client(),
+    )
+
+    def crash(point: str) -> None:
+        if point == "after_restore_schema_fence":
+            raise schema_migration._ForwardMigrationCrash(point)
+
+    monkeypatch.setattr(schema_migration, "_forward_migration_barrier", crash)
+    with pytest.raises(schema_migration._ForwardMigrationCrash):
+        schema_migration.restore_forward_migration_backup(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            expected_backup_reference=committed.backup_reference,
+            now=now + 3,
+        )
+
+    legacy = legacy_v3_placement.legacy_v3_path(vault)
+    legacy_connection = sqlite3.connect(legacy)
+    try:
+        instance = legacy_connection.execute(
+            "SELECT instance_id FROM receipt_instance WHERE singleton=1"
+        ).fetchone()
+        assert instance is not None
+        current = legacy_connection.execute(
+            "SELECT durable_seq, observed_seq, byte_offset FROM receipts_head "
+            "WHERE instance_id=?",
+            instance,
+        ).fetchone()
+        assert current is not None
+        legacy_connection.execute(
+            "UPDATE receipts_head SET durable_seq=?, durable_hash=?, observed_seq=?, "
+            "observed_hash=?, path=?, byte_offset=? WHERE instance_id=?",
+            (
+                int(current[0]) + 1,
+                "f" * 64,
+                int(current[1]) + 1,
+                "f" * 64,
+                "_Governance/events/legacy-successor.jsonl",
+                int(current[2]) + 1,
+                instance[0],
+            ),
+        )
+        legacy_connection.commit()
+    finally:
+        legacy_connection.close()
+
+    backup_path = schema_migration.forward_migration_backup_path(
+        vault,
+        plan_digest=plan.plan_digest,
+    )
+    if backup_mutation == "missing":
+        backup_path.unlink()
+    else:
+        raw = bytearray(backup_path.read_bytes())
+        raw[-1] ^= 1
+        backup_path.write_bytes(raw)
+
+    monkeypatch.setattr(schema_migration, "_forward_migration_barrier", lambda _point: None)
+    replay = schema_migration.restore_forward_migration_backup(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        expected_backup_reference=committed.backup_reference,
+        now=now + 4,
+    )
+
+    assert replay.replayed is True
+    assert state == [writer_lease.SchemaFenceState(True, 3, 18)]
+
+
+@pytest.mark.parametrize("drift", ("external-d1", "fence-generation"))
+def test_pre_migration_backup_restore_refuses_postfence_proof_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = _stage_reviewed_migration(vault, now=now)
+    committed = schema_migration.commit_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+    _drain_verified_membership(monkeypatch)
+    state = [writer_lease.SchemaFenceState(True, 4, 17)]
+
+    class Client:
+        def schema_fence(self) -> writer_lease.SchemaFenceState:
+            return state[0]
+
+        def transition_schema_fence(
+            self,
+            *,
+            expected_generation: int,
+            schema_version: int,
+        ) -> writer_lease.SchemaFenceState:
+            state[0] = writer_lease.SchemaFenceState(
+                True,
+                schema_version,
+                expected_generation + 1,
+            )
+            return state[0]
+
+    monkeypatch.setattr(
+        writer_lease,
+        "configured_schema_fence_operator_client",
+        lambda: Client(),
+    )
+
+    def crash(point: str) -> None:
+        if point == "after_restore_schema_fence":
+            raise schema_migration._ForwardMigrationCrash(point)
+
+    monkeypatch.setattr(schema_migration, "_forward_migration_barrier", crash)
+    with pytest.raises(schema_migration._ForwardMigrationCrash):
+        schema_migration.restore_forward_migration_backup(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            expected_backup_reference=committed.backup_reference,
+            now=now + 3,
+        )
+
+    if drift == "external-d1":
+        connection = sqlite3.connect(store.sidecar_path(vault))
+        try:
+            connection.execute(
+                "UPDATE receipt_instance SET instance_id=? WHERE singleton=1",
+                ("f" * 32,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    else:
+        state[0] = writer_lease.SchemaFenceState(True, 3, 19)
+
+    monkeypatch.setattr(schema_migration, "_forward_migration_barrier", lambda _point: None)
+    with pytest.raises(schema_migration.ForwardMigrationRestoreUnavailable):
+        schema_migration.restore_forward_migration_backup(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            expected_backup_reference=committed.backup_reference,
+            now=now + 4,
+        )

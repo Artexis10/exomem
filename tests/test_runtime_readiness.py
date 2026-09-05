@@ -413,13 +413,14 @@ def test_runtime_readiness_measures_the_configured_vault(
     }
 
 
-def test_runtime_readiness_fails_closed_within_a_tight_bound_when_status_blocks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _block_coordination_status(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[threading.Event, threading.Event]:
+    """Wire a coordination probe that never answers inside the readiness deadline."""
     from exomem import readiness, session_validation_cache, writer_lease
     from exomem import runtime_readiness as readiness_module
 
-    vault = tmp_path / "blocked-vault"
     entered = threading.Event()
     release = threading.Event()
 
@@ -443,6 +444,22 @@ def test_runtime_readiness_fails_closed_within_a_tight_bound_when_status_blocks(
         "retrieval_admission",
         lambda _vault_root=None: {"state": "ready", "admitted": True},
     )
+    return entered, release
+
+
+def test_runtime_readiness_fails_closed_within_a_tight_bound_when_status_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A *coordinated* replica whose probe blocks must fail closed, and fast.
+
+    The lease state is unmeasured, so takeover must not be attempted on it.
+    """
+    from exomem import runtime_readiness as readiness_module
+
+    vault = tmp_path / "blocked-vault"
+    entered, release = _block_coordination_status(vault, monkeypatch)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", "http://127.0.0.1:9/lease")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_REPLICA_ID", "replica-a")
 
     assert readiness_module.COORDINATION_STATUS_TIMEOUT_SECONDS < 1.0
     started = time.monotonic()
@@ -458,11 +475,87 @@ def test_runtime_readiness_fails_closed_within_a_tight_bound_when_status_blocks(
     assert time.monotonic() - started < 1.25
     assert snapshot["status"] == "not_ready"
     assert snapshot["takeover_eligible"] is False
-    assert snapshot["reasons"] == ["coordination_status_timeout"]
+    assert snapshot["reasons"] == [
+        "coordination_status_timeout",
+        "coordinator_unavailable",
+        "coordination_role_unknown",
+    ]
     assert snapshot["coordination"]["mutation_boundary"] == {
         "state": "unknown",
         "reason": "status_timeout",
     }
+
+
+def test_coordinated_timeout_without_a_replica_id_names_every_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 4-reason variant: nothing about the replica is knowable either."""
+    from exomem import runtime_readiness as readiness_module
+
+    vault = tmp_path / "no-replica-vault"
+    _, release = _block_coordination_status(vault, monkeypatch)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", "http://127.0.0.1:9/lease")
+    monkeypatch.delenv("EXOMEM_WRITER_LEASE_REPLICA_ID", raising=False)
+
+    try:
+        snapshot = readiness_module.runtime_readiness(
+            mcp_tool_surface_sha256="a" * 64, traffic={}
+        )
+    finally:
+        release.set()
+
+    assert snapshot["status"] == "not_ready"
+    assert snapshot["reasons"] == [
+        "coordination_status_timeout",
+        "coordinator_unavailable",
+        "coordination_role_unknown",
+        "replica_identity_missing",
+    ]
+
+
+def test_standalone_readiness_survives_a_blocked_coordination_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Standalone stays ready when the coordination probe times out.
+
+    "Standalone Exomem SHALL remain ready without multi-host coordination" —
+    with no coordinator configured there is no lease to confirm, so a diagnostic
+    probe that misses its deadline has nothing to report about admission.  The
+    timeout stays visible in the payload for operators; it just no longer pins a
+    single-cell deployment to 503.
+    """
+    from exomem import runtime_readiness as readiness_module
+
+    vault = tmp_path / "standalone-vault"
+    entered, release = _block_coordination_status(vault, monkeypatch)
+    monkeypatch.delenv("EXOMEM_WRITER_LEASE_URL", raising=False)
+    monkeypatch.delenv("EXOMEM_WRITER_LEASE_REPLICA_ID", raising=False)
+
+    started = time.monotonic()
+    try:
+        snapshot = readiness_module.runtime_readiness(
+            mcp_tool_surface_sha256="a" * 64,
+            traffic={},
+        )
+    finally:
+        release.set()
+
+    assert entered.is_set()
+    assert time.monotonic() - started < 1.25
+    assert snapshot["status"] == "ready"
+    assert snapshot["reasons"] == []
+    assert snapshot["takeover_eligible"] is True
+    assert snapshot["retrieval"]["admitted"] is True
+    # The unmeasured boundary must still be reported, not swallowed.
+    assert snapshot["coordination"]["enabled"] is False
+    assert snapshot["coordination"]["mutation_boundary"] == {
+        "state": "unknown",
+        "reason": "status_timeout",
+    }
+    # An unmeasured standalone cell must describe itself the way a measured one
+    # does (`LeaseManager.status()`), not contradict its own 200 payload.
+    assert snapshot["coordination"]["role"] == "standalone"
+    assert snapshot["coordination"]["coordinator_healthy"] is True
 
 
 def test_runtime_readiness_admits_a_slow_but_bounded_real_vault_snapshot(

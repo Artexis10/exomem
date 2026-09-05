@@ -78,6 +78,68 @@ class ProfileRegistry:
         return profile
 
 
+@dataclass(frozen=True)
+class RelationQueryPlan:
+    """One registry-derived expansion shared by every graph relation reader."""
+
+    requested: tuple[str, ...]
+    resolved: tuple[str, ...]
+    exact_keys: frozenset[str]
+    replacement_keys: frozenset[str]
+    parent_keys: frozenset[str]
+    replacements: dict[str, tuple[str | None, str | None]]
+    findings: tuple[dict[str, str], ...] = ()
+
+
+def relation_query_plan(
+    registry: relation_registry.RelationRegistry,
+    requested: list[str] | tuple[str, ...],
+) -> RelationQueryPlan:
+    """Resolve aliases and survivor-directed history without successor overreach."""
+    raw_values = tuple(dict.fromkeys(str(item) for item in requested if item))
+    resolved: list[str] = []
+    exact: set[str] = set()
+    replacements: set[str] = set()
+    parents: set[str] = set()
+    replacement_metadata: dict[str, tuple[str | None, str | None]] = {}
+    findings: list[dict[str, str]] = []
+    for raw in raw_values:
+        resolution = registry.resolve(raw)
+        canonical = resolution.canonical
+        if canonical is None or resolution.definition is None:
+            continue
+        if canonical not in resolved:
+            resolved.append(canonical)
+        exact.add(canonical)
+        parents.add(canonical)
+        replacement_metadata[canonical] = (
+            resolution.replacement,
+            resolution.terminal_replacement,
+        )
+        definition = resolution.definition
+        if definition.status == "active":
+            replacements.update(registry.predecessors(canonical))
+        elif definition.status == "deprecated":
+            finding = {
+                "code": "relation_deprecated",
+                "relation": canonical,
+            }
+            if resolution.replacement:
+                finding["replaced_by"] = resolution.replacement
+            if resolution.terminal_replacement:
+                finding["terminal_replacement"] = resolution.terminal_replacement
+            findings.append(finding)
+    return RelationQueryPlan(
+        requested=raw_values,
+        resolved=tuple(resolved),
+        exact_keys=frozenset(exact),
+        replacement_keys=frozenset(replacements - exact),
+        parent_keys=frozenset(parents),
+        replacements=replacement_metadata,
+        findings=tuple(findings),
+    )
+
+
 def builtin_profiles(
     registry: relation_registry.RelationRegistry | None = None,
 ) -> dict[str, TraversalProfile]:
@@ -207,18 +269,15 @@ def narrow_relations(
 ) -> frozenset[str] | None:
     if not requested:
         return None
+    plan = relation_query_plan(registry, requested)
     selected: set[str] = set()
-    for raw in requested:
-        resolution = registry.resolve(raw)
-        if resolution.canonical is None or resolution.definition is None:
-            continue
-        requested_definition = resolution.definition
-        for definition in (*registry.core.values(), *registry.extensions.values()):
-            if definition.key == requested_definition.key or (
-                profile.include_extensions and definition.parent == requested_definition.key
-            ):
-                if relation_allowed(profile, definition):
-                    selected.add(definition.key)
+    direct = plan.exact_keys | plan.replacement_keys
+    for definition in (*registry.core.values(), *registry.extensions.values()):
+        if definition.key in direct or (
+            profile.include_extensions and definition.parent in plan.parent_keys
+        ):
+            if relation_allowed(profile, definition):
+                selected.add(definition.key)
     return frozenset(selected)
 
 

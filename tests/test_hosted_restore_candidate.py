@@ -10,7 +10,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import __version__, server_runtime
+from exomem import (
+    __version__,
+    hosted_runtime,
+    server_runtime,
+    state_migration,
+    state_paths,
+)
 from exomem import hosted_portability as portability
 from exomem import init as init_module
 from exomem.hosted_operator import OperatorFailure
@@ -29,11 +35,18 @@ from exomem.hosted_runtime import (
 )
 
 
-def _export(tmp_path: Path) -> portability.ExportResult:
+def _export(
+    tmp_path: Path,
+    *,
+    portable_state: bool = False,
+) -> portability.ExportResult:
     source = tmp_path / "source"
     init_module.init_vault(source)
     note = source / "Knowledge Base/Notes/restore-proof.md"
     note.write_text("# Restore proof\n\ncanonical-sentinel\n", encoding="utf-8")
+    if portable_state:
+        review = state_paths.vault_state_dir(source) / ".review-state.json"
+        review.write_text('{"restored":true}\n', encoding="utf-8")
     return portability.export_quiesced_vault(
         source,
         tmp_path / "artifacts",
@@ -94,6 +107,25 @@ def _binding(tmp_path: Path, *, runtime_uid: int | None = None) -> HostedBinding
     )
 
 
+def _require_bound_state_ready(binding: HostedBindingV2):
+    """Read the restore proof through the exact bound external state root."""
+    overrides = {
+        "EXOMEM_HOSTED_STATE_ROOT": str(binding.state_root),
+        "EXOMEM_STATE_ROOT": str(binding.state_root / "vault-state"),
+    }
+    previous = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
+    try:
+        state_migration.reset_state_resolution_cache_for_tests()
+        return state_migration.require_vault_state_ready(binding.vault_root)
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def _configure_hosted_server(
     monkeypatch: pytest.MonkeyPatch,
     binding: HostedBindingV2,
@@ -104,6 +136,7 @@ def _configure_hosted_server(
         "EXOMEM_HOSTED_VAULT_ID": binding.vault_id,
         "EXOMEM_VAULT_PATH": str(binding.vault_root),
         "EXOMEM_HOSTED_STATE_ROOT": str(binding.state_root),
+        "EXOMEM_STATE_ROOT": str(binding.state_root / "vault-state"),
         "EXOMEM_LOG_DIR": str(binding.log_root),
         "EXOMEM_HOSTED_RUNTIME_UID": str(binding.runtime_uid),
         "EXOMEM_HOSTED_RUNTIME_GID": str(binding.runtime_gid),
@@ -129,6 +162,60 @@ def _configure_hosted_server(
         lambda _root: SimpleNamespace(source_types=()),
     )
     monkeypatch.setattr(server_runtime.project_keys, "keys_hint", lambda _root: "")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hosted lifetime locking requires POSIX flock")
+def test_fresh_initialize_workload_creates_state_manifest_before_server_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding = _binding(tmp_path)
+    monkeypatch.setattr(hosted_runtime, "_default_security_bootstrap", _bootstrap)
+    monkeypatch.setenv("EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION", "1")
+    enrollment_events: list[str] = []
+
+    def prepare_custody() -> None:
+        enrollment_events.append("custody")
+
+    def enroll(owner: HostedBindingV2, *, now: int) -> None:
+        assert owner == binding
+        assert now > 0
+        # This test owns state migration; enrollment's real custody and
+        # revision-zero publication are exercised in test_consolidation_enrollment.
+        assert state_migration.migration_completed(owner.vault_root)
+        _require_bound_state_ready(owner)
+        enrollment_events.append("enroll")
+
+    monkeypatch.setattr(hosted_runtime, "_prepare_hosted_enrollment_custody", prepare_custody)
+    monkeypatch.setattr(hosted_runtime, "_enroll_initialized_hosted_cell", enroll)
+
+    code, _data = hosted_runtime.execute_hosted_init_v2(
+        {
+            "request_id": "123e4567-e89b-42d3-a456-426614174000",
+            "operation_id": "fresh-initialize-operation",
+            "cell_id": binding.cell_id,
+            "vault_id": binding.vault_id,
+            "vault_root": str(binding.vault_root),
+            "state_root": str(binding.state_root),
+            "log_root": str(binding.log_root),
+            "expected_release": __version__,
+            "expected_protocol": HOSTED_PROTOCOL_VERSION,
+            "runtime_uid": binding.runtime_uid,
+            "runtime_gid": binding.runtime_gid,
+            "active_credential_version": "credential-v1",
+        }
+    )
+
+    assert code == "HOSTED_CELL_INITIALIZED"
+    assert enrollment_events == ["custody", "enroll"]
+    _require_bound_state_ready(binding)
+    _configure_hosted_server(monkeypatch, binding)
+    runtime = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+    try:
+        assert runtime.vault_root == binding.vault_root
+    finally:
+        assert runtime.hosted_lifetime_lock is not None
+        runtime.hosted_lifetime_lock.__exit__(None, None, None)
 
 
 def test_restore_candidate_pins_archive_identity_and_publishes_fresh_target_binding(
@@ -171,10 +258,203 @@ def test_restore_candidate_pins_archive_identity_and_publishes_fresh_target_bind
         runtime_gid=os.getgid(),
     )
     validate_hosted_binding_v2(binding, require_scaffold=True)
+    _require_bound_state_ready(binding)
     assert (
         binding.vault_root / "Knowledge Base/Notes/restore-proof.md"
     ).read_text(encoding="utf-8").endswith("canonical-sentinel\n")
     assert not (binding.vault_root / "hosted-security.sqlite").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hosted lifetime locking requires POSIX flock")
+def test_restore_candidate_migrates_portable_state_before_server_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exported = _export(tmp_path, portable_state=True)
+    request = _request(tmp_path, exported)
+
+    restore_candidate(request, bootstrap_security=_bootstrap)
+
+    binding = _binding(tmp_path)
+    resolution = _require_bound_state_ready(binding)
+    assert (resolution.state_dir / ".review-state.json").read_text(
+        encoding="utf-8"
+    ) == '{"restored":true}\n'
+    assert not (binding.vault_root / "Knowledge Base/.review-state.json").exists()
+
+    _configure_hosted_server(monkeypatch, binding)
+    runtime = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+    try:
+        assert runtime.vault_root == binding.vault_root
+    finally:
+        assert runtime.hosted_lifetime_lock is not None
+        runtime.hosted_lifetime_lock.__exit__(None, None, None)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hosted lifetime locking requires POSIX flock")
+def test_restore_uses_request_bound_state_root_not_ambient_process_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ambient = tmp_path / "ambient-state"
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(ambient))
+    exported = _export(tmp_path, portable_state=True)
+    request = _request(tmp_path, exported)
+
+    restore_candidate(request, bootstrap_security=_bootstrap)
+
+    binding = _binding(tmp_path)
+    target_state = (
+        binding.state_root
+        / "vault-state"
+        / state_paths.vault_state_key(binding.vault_root)
+    )
+    assert (target_state / ".review-state.json").read_text(encoding="utf-8") == (
+        '{"restored":true}\n'
+    )
+    assert not (ambient / state_paths.vault_state_key(binding.vault_root)).exists()
+    assert os.environ["EXOMEM_STATE_ROOT"] == str(ambient)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hosted lifetime locking requires POSIX flock")
+def test_state_migrated_journal_binds_manifest_digest_and_placement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ambient = tmp_path / "ambient-state"
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(ambient))
+    exported = _export(tmp_path, portable_state=True)
+    request = _request(tmp_path, exported)
+
+    def crash_after_state_proof(event: str) -> None:
+        if event == "journal:state_migrated":
+            raise HostedRestoreCrash(event)
+
+    with pytest.raises(HostedRestoreCrash):
+        restore_candidate(
+            request,
+            bootstrap_security=_bootstrap,
+            crash_hook=crash_after_state_proof,
+        )
+
+    binding = _binding(tmp_path)
+    from exomem import hosted_restore
+
+    journal_path = hosted_restore._journal_path(binding, "restore-operation")
+    record = json.loads(journal_path.read_text(encoding="utf-8"))
+    state_dir = (
+        binding.state_root
+        / "vault-state"
+        / state_paths.vault_state_key(binding.vault_root)
+    )
+    assert record["phase"] == "state_migrated"
+    assert record["state_manifest_sha256"] == hashlib.sha256(
+        (state_dir / state_migration.MANIFEST_NAME).read_bytes()
+    ).hexdigest()
+    assert len(record["state_placement_identity"]) == 64
+
+    manifest_path = state_dir / state_migration.MANIFEST_NAME
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(OperatorFailure) as error:
+        restore_candidate(request, bootstrap_security=_bootstrap)
+    assert error.value.code == "HOSTED_RESTORE_CANONICAL_INTEGRITY"
+    assert not (ambient / state_paths.vault_state_key(binding.vault_root)).exists()
+
+    manifest_path.write_bytes(manifest_bytes)
+    record.pop("state_placement_identity")
+    journal_path.write_text(
+        json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(OperatorFailure) as journal_error:
+        restore_candidate(request, bootstrap_security=_bootstrap)
+    assert journal_error.value.code == "HOSTED_RESTORE_JOURNAL_CONFLICT"
+    assert not (ambient / state_paths.vault_state_key(binding.vault_root)).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hosted lifetime locking requires POSIX flock")
+def test_relocated_repair_restores_portable_bytes_only_to_external_state(
+    tmp_path: Path,
+) -> None:
+    from exomem import hosted_restore
+
+    exported = _export(tmp_path, portable_state=True)
+    request = _request(tmp_path, exported)
+    binding = _binding(tmp_path)
+
+    def corrupt_split_placement(vault_root: Path) -> None:
+        (vault_root / "Knowledge Base/Notes/restore-proof.md").write_bytes(b"corrupt")
+        (vault_root / "Knowledge Base/.review-state.json").write_bytes(b"wrong-side")
+        state_dir = (
+            binding.state_root
+            / "vault-state"
+            / state_paths.vault_state_key(binding.vault_root)
+        )
+        (state_dir / ".review-state.json").write_bytes(b"corrupt")
+
+    with pytest.raises(OperatorFailure) as error:
+        restore_candidate(
+            request,
+            bootstrap_security=_bootstrap,
+            rebuild_derived=corrupt_split_placement,
+        )
+
+    assert error.value.code == "HOSTED_RESTORE_CANONICAL_INTEGRITY"
+    assert (
+        binding.vault_root / "Knowledge Base/Notes/restore-proof.md"
+    ).read_text(encoding="utf-8").endswith("canonical-sentinel\n")
+    assert not (binding.vault_root / "Knowledge Base/.review-state.json").exists()
+    state_dir = (
+        binding.state_root
+        / "vault-state"
+        / state_paths.vault_state_key(binding.vault_root)
+    )
+    assert (state_dir / ".review-state.json").read_text(encoding="utf-8") == (
+        '{"restored":true}\n'
+    )
+    journal_path = hosted_restore._journal_path(binding, "restore-operation")
+    record = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert record["phase"] == "state_migrated"
+    assert record["state_manifest_sha256"] == hashlib.sha256(
+        (state_dir / state_migration.MANIFEST_NAME).read_bytes()
+    ).hexdigest()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hosted lifetime locking requires POSIX flock")
+def test_state_migrated_replay_rejects_unregistered_external_member(
+    tmp_path: Path,
+) -> None:
+    exported = _export(tmp_path, portable_state=True)
+    request = _request(tmp_path, exported)
+
+    def crash_after_state_proof(event: str) -> None:
+        if event == "journal:state_migrated":
+            raise HostedRestoreCrash(event)
+
+    with pytest.raises(HostedRestoreCrash):
+        restore_candidate(
+            request,
+            bootstrap_security=_bootstrap,
+            crash_hook=crash_after_state_proof,
+        )
+
+    binding = _binding(tmp_path)
+    state_dir = (
+        binding.state_root
+        / "vault-state"
+        / state_paths.vault_state_key(binding.vault_root)
+    )
+    unexpected = state_dir / "unregistered.bin"
+    unexpected.write_bytes(b"not archive-owned")
+
+    with pytest.raises(OperatorFailure) as error:
+        restore_candidate(request, bootstrap_security=_bootstrap)
+    assert error.value.code == "HOSTED_RESTORE_CANONICAL_INTEGRITY"
+
+    unexpected.unlink()
+    assert restore_candidate(request, bootstrap_security=_bootstrap).status == "ready"
 
 
 def test_restore_candidate_converges_all_canonical_modes_to_private(
@@ -409,6 +689,8 @@ def test_server_startup_clears_runtime_temp_without_following_stale_links(
         "journal:archive_prepared",
         "canonical_renamed",
         "journal:canonical_published",
+        "state_migrated",
+        "journal:state_migrated",
         "derived_rebuilt",
         "journal:derived_ready",
         "journal:complete",
@@ -418,7 +700,7 @@ def test_server_startup_clears_runtime_temp_without_following_stale_links(
 def test_restore_candidate_resumes_exact_request_at_every_durable_boundary(
     tmp_path: Path, crash_event: str
 ) -> None:
-    exported = _export(tmp_path)
+    exported = _export(tmp_path, portable_state=True)
     request = _request(tmp_path, exported)
     crashed = False
 
@@ -440,6 +722,10 @@ def test_restore_candidate_resumes_exact_request_at_every_durable_boundary(
     assert result.status == "ready"
     canonical = tmp_path / "target-vault/Knowledge Base/Notes/restore-proof.md"
     assert canonical.read_text(encoding="utf-8").endswith("canonical-sentinel\n")
+    binding = _binding(tmp_path)
+    resolution = _require_bound_state_ready(binding)
+    assert (resolution.state_dir / ".review-state.json").is_file()
+    assert not (binding.vault_root / "Knowledge Base/.review-state.json").exists()
     staging = list(tmp_path.glob(".target-vault.restore-*"))
     assert staging == []
 

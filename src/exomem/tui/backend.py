@@ -29,6 +29,14 @@ _LEAN_FALLBACK_VARS = (
 )
 
 
+def retain_runtime_presence(vault_root: Path) -> bool:
+    """Retain a TUI vault on the app thread for the process lifetime."""
+
+    from ..governance import consolidation_enrollment
+
+    return consolidation_enrollment.ensure_cli_runtime_presence(vault_root)
+
+
 class BackendError(Exception):
     """A structured service failure: stable code, message, remediation."""
 
@@ -180,6 +188,12 @@ class ExomemBackend:
         self._apply_lean_fallback()
         if self._vault is None:
             return
+        # Placement/migration is a hard startup gate. It must run before the
+        # soft-failing background warm-up can open any relocated family, and a
+        # conflict or invalid manifest must not be swallowed as a warm-up miss.
+        from .. import state_migration
+
+        state_migration.require_vault_state_ready(self._vault)
         try:
             from .. import warmup
 

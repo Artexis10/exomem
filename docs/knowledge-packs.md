@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Knowledge packs
 
 Knowledge packs are product-level guidance for Exomem. They let a fresh user pick

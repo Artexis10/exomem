@@ -57,7 +57,7 @@
 {{- end -}}
 {{- if hasKey $lock "runtimeUpgrade" -}}
 {{- $upgrade := $lock.runtimeUpgrade -}}
-{{- if or (not (kindIs "map" $upgrade)) (ne (len $upgrade) 4) (not (hasKey $upgrade "compatibilityDigest")) (not (hasKey $upgrade "migrationMode")) (not (hasKey $upgrade "substrateConsumerCommit")) (not (hasKey $upgrade "substrateTrustSha256")) (not (regexMatch "^[0-9a-f]{64}$" $upgrade.compatibilityDigest)) (not (has $upgrade.migrationMode (list "none" "binding-v1-to-v2"))) (not (regexMatch "^[0-9a-f]{40}$" $upgrade.substrateConsumerCommit)) (not (regexMatch "^[0-9a-f]{64}$" $upgrade.substrateTrustSha256)) -}}
+{{- if or (not (kindIs "map" $upgrade)) (ne (len $upgrade) 4) (not (hasKey $upgrade "compatibilityDigest")) (not (hasKey $upgrade "migrationMode")) (not (hasKey $upgrade "substrateConsumerCommit")) (not (hasKey $upgrade "substrateTrustSha256")) (not (regexMatch "^[0-9a-f]{64}$" $upgrade.compatibilityDigest)) (not (has $upgrade.migrationMode (list "none" "binding-v1-to-v2" "state-root-v1"))) (not (regexMatch "^[0-9a-f]{40}$" $upgrade.substrateConsumerCommit)) (not (regexMatch "^[0-9a-f]{64}$" $upgrade.substrateTrustSha256)) -}}
 {{- fail "deployment lock runtime upgrade is invalid" -}}
 {{- end -}}
 {{- end -}}

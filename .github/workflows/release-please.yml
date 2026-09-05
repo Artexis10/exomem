@@ -101,7 +101,14 @@ jobs:
           print(app["apps"]["exomem"]["id"])
           PY
           )"
+          parity_candidate="$(uv run --frozen python - <<'PY'
+          from exomem.hosted_plugins import PARITY_CANDIDATE
+
+          print(PARITY_CANDIDATE)
+          PY
+          )"
           uv run --frozen python scripts/hosted-plugin.py render --candidate hosted-alpha-agent-v2 --platform all --openai-app-id "$openai_app_id"
+          uv run --frozen python scripts/hosted-plugin.py render --candidate "$parity_candidate" --platform all --openai-app-id "$openai_app_id"
 
       - name: Verify the regenerated artifacts are current
         run: |
@@ -118,7 +125,14 @@ jobs:
           print(app["apps"]["exomem"]["id"])
           PY
           )"
+          parity_candidate="$(uv run --frozen python - <<'PY'
+          from exomem.hosted_plugins import PARITY_CANDIDATE
+
+          print(PARITY_CANDIDATE)
+          PY
+          )"
           uv run --frozen python scripts/hosted-plugin.py check --candidate hosted-alpha-agent-v2 --platform all --openai-app-id "$openai_app_id"
+          uv run --frozen python scripts/hosted-plugin.py check --candidate "$parity_candidate" --platform all --openai-app-id "$openai_app_id"
 
       - name: Commit the resync onto the release PR
         run: |

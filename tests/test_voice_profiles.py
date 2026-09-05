@@ -5,15 +5,17 @@ from pathlib import Path
 
 import numpy as np
 
+from exomem import state_paths
 from exomem import voice_profiles as vp
 
 
 def test_store_path_is_operational_infra_not_a_note_tree():
     p = vp.voice_profiles_path(Path("/vault"))
-    # Dot-prefixed file in the KB root, beside the embedding sidecars — never under a note tree.
+    # Dot-prefixed file in external state, beside the embedding sidecars.
     assert p.name == ".voice_profiles.json"
     assert p.name.startswith(".")
-    assert "Knowledge Base" in p.parts
+    assert p.parent == state_paths.vault_state_dir(Path("/vault"))
+    assert "Knowledge Base" not in p.parts
     assert not any(seg in ("Notes", "Entities", "Sources", "Evidence") for seg in p.parts)
 
 

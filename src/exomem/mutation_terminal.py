@@ -7,6 +7,8 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
+from . import relation_registry
+
 log = logging.getLogger(__name__)
 
 ResponseDetail = Literal["compact", "full", "legacy"]
@@ -68,6 +70,33 @@ TERMINAL_STATES = frozenset({"committed", "rejected"})
 #: CI, so a second hand-maintained copy of this vocabulary would drift silently
 #: until someone ran the script against a real build. One definition, imported.
 GRAPH_SYNC_OUTCOMES = frozenset({"completed", "failed", "pending"})
+DERIVED_SYNC_OUTCOMES = frozenset({"completed", "failed", "pending"})
+ADVISORY_SYNC_OUTCOMES = frozenset(
+    {"completed", "failed", "not_required", "pending"}
+)
+
+_DERIVED_COMPONENT_NAMES = frozenset(
+    {
+        "freshness",
+        "memory_refs",
+        "resolver",
+        "semantic_purge",
+        "lexstore",
+        "embeddings",
+        "claims",
+    }
+)
+_DERIVED_FAILURE = (
+    "DERIVED_COMPONENT_FAILED",
+    "Run reconcile to repair derived state.",
+)
+_ADVISORY_FAILURE = (
+    "WRITE_ADVISORY_FAILED",
+    "Query the advisory result or retry reconciliation.",
+)
+#: Bounds the diagnostics carried by one acknowledgement, not one batch: a
+#: multi-batch mutation shares this budget rather than multiplying it.
+_MAX_DERIVED_DIAGNOSTICS = 9
 
 #: Keys a client may branch on. Everything else in a response is advisory.
 _ENVELOPE_KEYS = (
@@ -91,6 +120,9 @@ _ENVELOPE_KEYS = (
 #: `delete_directory` emits one warning per path.
 _MAX_WARNINGS = 8
 _MAX_WARNING_CHARS = 300
+_MAX_RELATION_ADVISORY_LABELS = 8
+_MAX_RELATION_ADVISORY_EXAMPLES = 5
+_MAX_RELATION_ADVISORY_LABEL_CHARS = 128
 
 
 def _operation_id(result: Any) -> str | None:
@@ -567,6 +599,170 @@ def _without_advisory_due_state(result: Any) -> Any:
     return stripped if changed else result
 
 
+def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
+    """Project just-parsed unregistered facts plus optional indexed recurrence.
+
+    The fact scan is bounded by the semantic feedback renderer. Recurrence is a
+    point lookup against one already-current graph snapshot and is deliberately
+    fail-open: unavailable or malformed evidence leaves the committed advisory
+    useful without changing the mutation outcome.
+    """
+    if not isinstance(leaf, Mapping):
+        return None
+    context = leaf.get("_relation_advisory_context")
+    labels: set[str] = set()
+    facts_truncated = False
+    registry_hash: str | None = None
+    vault_hint: str | None = None
+    if isinstance(context, Mapping):
+        candidate_hash = context.get("registry_hash")
+        if isinstance(candidate_hash, str) and 0 < len(candidate_hash) <= 256:
+            registry_hash = candidate_hash
+        candidate_vault = context.get("vault")
+        if isinstance(candidate_vault, str) and candidate_vault:
+            vault_hint = candidate_vault
+    for container_key in ("creation", "semantic", None):
+        container = leaf if container_key is None else leaf.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        contract = container.get("contract_result")
+        if not isinstance(contract, Mapping):
+            continue
+        disposition = contract.get("relation_disposition")
+        if not isinstance(disposition, Mapping):
+            continue
+        omitted = disposition.get("omitted_counts")
+        if isinstance(omitted, Mapping) and type(omitted.get("rejected_facts")) is int:
+            facts_truncated = omitted["rejected_facts"] > 0
+        rejected = disposition.get("rejected_facts")
+        if not isinstance(rejected, (list, tuple)):
+            continue
+        for rejected_fact in rejected:
+            if not isinstance(rejected_fact, Mapping):
+                continue
+            fact = rejected_fact.get("fact")
+            if not isinstance(fact, Mapping) or fact.get("registry_status") != "unregistered":
+                continue
+            raw = fact.get("raw_relation")
+            if not isinstance(raw, str):
+                continue
+            normalized = relation_registry.normalize_relation(raw)
+            if (
+                normalized
+                and normalized != "relates_to"
+                and len(normalized) <= _MAX_RELATION_ADVISORY_LABEL_CHARS
+            ):
+                labels.add(normalized)
+    if not labels:
+        return None
+    ordered = sorted(labels)
+    retained = ordered[:_MAX_RELATION_ADVISORY_LABELS]
+    truncated = facts_truncated or len(ordered) > len(retained)
+    occurrences: list[dict[str, Any]] = []
+    recurrence_available = False
+    if vault_hint:
+        try:
+            from pathlib import Path
+
+            from . import memory_schema
+
+            indexed = memory_schema.indexed_relation_observations(
+                Path(vault_hint),
+                raw_relations=retained,
+                limit=len(retained),
+                offset=0,
+            )
+            recurrence_available = indexed is not None
+            rows = indexed.get("items", ()) if isinstance(indexed, Mapping) else ()
+            aggregated: dict[str, dict[str, Any]] = {}
+            example_keys: dict[str, set[tuple[str, str | None]]] = {}
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    continue
+                label = row.get("raw_relation")
+                count = row.get("count")
+                examples = row.get("examples")
+                normalized_label = (
+                    relation_registry.normalize_relation(label)
+                    if isinstance(label, str)
+                    else ""
+                )
+                if (
+                    normalized_label not in retained
+                    or type(count) is not int
+                    or count < 0
+                    or not isinstance(examples, (list, tuple))
+                ):
+                    continue
+                occurrence = aggregated.setdefault(
+                    normalized_label,
+                    {
+                        "raw_relation": normalized_label,
+                        "count": 0,
+                        "examples": [],
+                    },
+                )
+                occurrence["count"] += count
+                seen = example_keys.setdefault(normalized_label, set())
+                for example in examples:
+                    if len(occurrence["examples"]) >= _MAX_RELATION_ADVISORY_EXAMPLES:
+                        break
+                    if not isinstance(example, Mapping):
+                        continue
+                    path = example.get("path")
+                    anchor = example.get("anchor")
+                    if not isinstance(path, str) or not (
+                        anchor is None or isinstance(anchor, str)
+                    ):
+                        continue
+                    example_key = (path, anchor)
+                    if example_key in seen:
+                        continue
+                    seen.add(example_key)
+                    occurrence["examples"].append(
+                        {"path": path, "anchor": anchor}
+                    )
+            occurrences = list(aggregated.values())
+            occurrences.sort(key=lambda item: (-item["count"], item["raw_relation"]))
+        except Exception:  # noqa: BLE001 - advisory evidence never breaks a commit
+            recurrence_available = False
+            occurrences = []
+    return {
+        "raw_relations": retained,
+        "registry_hash": registry_hash,
+        "recurrence_available": recurrence_available,
+        "occurrences": occurrences,
+        "truncated": truncated,
+        "message": "Raw observations are preserved but untraversed until registered.",
+        "next_action": {
+            "tool": "connect_memory",
+            "args": {"operation": "resolve-relation"},
+        },
+    }
+
+
+def _without_relation_advisory_context(result: Any) -> Any:
+    """Remove local lookup hints from legacy and diagnostic representations."""
+    if not isinstance(result, Mapping):
+        return result
+    changed = False
+    stripped: dict[str, Any] = {}
+    for key, value in result.items():
+        if key == "_relation_advisory_context":
+            changed = True
+            continue
+        if isinstance(value, Mapping) and "_relation_advisory_context" in value:
+            stripped[key] = {
+                inner: value[inner]
+                for inner in value
+                if inner != "_relation_advisory_context"
+            }
+            changed = True
+            continue
+        stripped[key] = value
+    return stripped if changed else result
+
+
 def _bounded_tokens(value: Any, limit: int) -> bool:
     return (
         isinstance(value, (list, tuple))
@@ -619,6 +815,98 @@ def committed_terminal(
     if idempotency_key is not None:
         terminal["idempotency_key"] = idempotency_key
     return terminal
+
+
+def with_fast_acknowledgement(
+    terminal: Mapping[str, Any],
+    *,
+    derived_sync: str,
+    derived_sync_components: Sequence[str] = (),
+    component_diagnostics: Sequence[Mapping[str, Any]] = (),
+    advisory_sync: str,
+    advisory_result_ref: str | None = None,
+) -> dict[str, Any]:
+    """Freeze one bounded derived-custody snapshot into a committed terminal.
+
+    ``graph_sync`` is deliberately absent. Graph convergence has one author --
+    the existing graph pipeline -- and its outcome always travels with its own
+    code and remediation. A second writer here would strip those and let the
+    receipt store reinterpret a field this contract says it must not touch.
+    The receipt's own graph component stays visible under the derived
+    diagnostics instead.
+    """
+    if (
+        terminal.get("_terminal") != _TERMINAL_MARKER
+        or terminal.get("version") != _TERMINAL_VERSION
+        or terminal.get("state") != "committed"
+    ):
+        raise ValueError("fast acknowledgement requires a committed mutation terminal")
+    if derived_sync not in DERIVED_SYNC_OUTCOMES:
+        raise ValueError("unknown derived acknowledgement outcome")
+    if advisory_sync not in ADVISORY_SYNC_OUTCOMES:
+        raise ValueError("unknown advisory acknowledgement outcome")
+
+    components = tuple(sorted(set(derived_sync_components)))
+    if len(components) > len(_DERIVED_COMPONENT_NAMES) or any(
+        component not in _DERIVED_COMPONENT_NAMES for component in components
+    ):
+        raise ValueError("derived acknowledgement components are invalid")
+    if derived_sync == "completed" and components:
+        raise ValueError("completed derived acknowledgement cannot name unfinished work")
+
+    diagnostics: list[dict[str, str | None]] = []
+    for item in component_diagnostics:
+        if len(diagnostics) >= _MAX_DERIVED_DIAGNOSTICS:
+            break
+        component = item.get("component")
+        state = item.get("state")
+        code = item.get("code")
+        if (
+            not isinstance(component, str)
+            or not component
+            or len(component) > 32
+            or not isinstance(state, str)
+            or not state
+            or len(state) > 32
+            or (code is not None and (not isinstance(code, str) or len(code) > 64))
+        ):
+            raise ValueError("derived acknowledgement diagnostic is invalid")
+        diagnostics.append({"component": component, "state": state, "code": code})
+    diagnostics.sort(key=lambda item: item["component"] or "")
+
+    applicable_advisory = advisory_sync != "not_required"
+    if applicable_advisory != (
+        isinstance(advisory_result_ref, str)
+        and advisory_result_ref.startswith("exomem://write-advisory-result/")
+        and len(advisory_result_ref) <= 256
+    ):
+        raise ValueError("applicable advisory acknowledgement requires one stable result ref")
+
+    frozen = dict(terminal)
+    frozen["derived_sync"] = derived_sync
+    if components:
+        frozen["derived_sync_components"] = list(components)
+    else:
+        frozen.pop("derived_sync_components", None)
+    if derived_sync == "failed":
+        frozen["derived_sync_code"], frozen["derived_sync_next_action"] = _DERIVED_FAILURE
+    else:
+        frozen.pop("derived_sync_code", None)
+        frozen.pop("derived_sync_next_action", None)
+    frozen["advisory_sync"] = advisory_sync
+    if advisory_result_ref is not None:
+        frozen["advisory_result_ref"] = advisory_result_ref
+    else:
+        frozen.pop("advisory_result_ref", None)
+    if advisory_sync == "failed":
+        frozen["advisory_sync_code"], frozen["advisory_sync_next_action"] = (
+            _ADVISORY_FAILURE
+        )
+    else:
+        frozen.pop("advisory_sync_code", None)
+        frozen.pop("advisory_sync_next_action", None)
+    frozen["_derived_diagnostics"] = diagnostics
+    return frozen
 
 
 def replayed_terminal(
@@ -737,12 +1025,53 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         return result
     raw_leaf = result["leaf_result"]
     due_state, due_state_vault = _due_state_projection(raw_leaf)
-    leaf = _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
+    relation_advisory = (
+        _relation_advisory_projection(raw_leaf)
+        if result.get("state") == "committed"
+        else None
+    )
+    leaf = _without_relation_advisory_context(
+        _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
+    )
     if detail == "legacy":
         return leaf
     compact = {key: result[key] for key in _ENVELOPE_KEYS if key in result}
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]
+    if result.get("derived_sync") in DERIVED_SYNC_OUTCOMES:
+        compact["derived_sync"] = result["derived_sync"]
+        components = result.get("derived_sync_components")
+        if isinstance(components, (list, tuple)):
+            bounded_components = sorted(
+                {
+                    component
+                    for component in components
+                    if isinstance(component, str)
+                    and component in _DERIVED_COMPONENT_NAMES
+                }
+            )
+            if bounded_components:
+                compact["derived_sync_components"] = bounded_components
+        if result["derived_sync"] == "failed":
+            if result.get("derived_sync_code") == _DERIVED_FAILURE[0]:
+                compact["derived_sync_code"] = _DERIVED_FAILURE[0]
+            if result.get("derived_sync_next_action") == _DERIVED_FAILURE[1]:
+                compact["derived_sync_next_action"] = _DERIVED_FAILURE[1]
+    if result.get("advisory_sync") in ADVISORY_SYNC_OUTCOMES:
+        compact["advisory_sync"] = result["advisory_sync"]
+        advisory_ref = result.get("advisory_result_ref")
+        if (
+            result["advisory_sync"] != "not_required"
+            and isinstance(advisory_ref, str)
+            and advisory_ref.startswith("exomem://write-advisory-result/")
+            and len(advisory_ref) <= 256
+        ):
+            compact["advisory_result_ref"] = advisory_ref
+        if result["advisory_sync"] == "failed":
+            if result.get("advisory_sync_code") == _ADVISORY_FAILURE[0]:
+                compact["advisory_sync_code"] = _ADVISORY_FAILURE[0]
+            if result.get("advisory_sync_next_action") == _ADVISORY_FAILURE[1]:
+                compact["advisory_sync_next_action"] = _ADVISORY_FAILURE[1]
     if _is_record_receipt(leaf):
         if leaf["receipt_version"] == _LIFECYCLE_RECEIPT_VERSION:
             compact.update(
@@ -810,6 +1139,8 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact["structure_suggestion"] = structure_suggestion
     if due_state is not None and _admit_due_state(due_state, due_state_vault):
         compact["due_state"] = due_state
+    if relation_advisory is not None:
+        compact["relation_advisory"] = relation_advisory
     compact["warnings_count"] = result["warnings_count"]
     # Projected from the leaf, never from the receipt. Receipt recovery replaces
     # `leaf_result` with `{}` on purpose (the portable receipt must not retain
@@ -819,7 +1150,16 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     if warnings:
         compact["warnings"] = warnings
     if detail == "full":
-        compact["diagnostics"] = leaf
+        derived_diagnostics = result.get("_derived_diagnostics")
+        if isinstance(derived_diagnostics, (list, tuple)):
+            compact["diagnostics"] = {
+                "leaf_result": leaf,
+                "derived_components": list(
+                    derived_diagnostics[:_MAX_DERIVED_DIAGNOSTICS]
+                ),
+            }
+        else:
+            compact["diagnostics"] = leaf
     return compact
 
 

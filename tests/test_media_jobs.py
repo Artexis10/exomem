@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -1053,3 +1054,418 @@ def _rows(path: Path) -> list[dict]:
         return [dict(row) for row in conn.execute("SELECT * FROM jobs ORDER BY id")]
     finally:
         conn.close()
+
+
+def test_recover_compute_runtime_failures_only_promotes_known_cuda_signatures(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault, name="known.mp3"))
+    store.enqueue(_job(vault, name="unknown.mp3"))
+    known_claimed = store.claim_next()
+    unknown_claimed = store.claim_next()
+    assert known_claimed is not None and unknown_claimed is not None
+    store.mark(known_claimed.id, media_jobs.FAILED, "RuntimeError: cuBLAS failed")
+    store.mark(unknown_claimed.id, media_jobs.FAILED, "RuntimeError: corrupt audio")
+
+    assert store.recover_compute_runtime_failures() == 1
+    assert store.get(known_claimed.id).state == media_jobs.BLOCKED
+    assert store.get(unknown_claimed.id).state == media_jobs.FAILED
+
+
+def test_legacy_blocked_cuda_error_keeps_runtime_repair_guidance(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault, name="legacy.mp3"))
+    job = store.claim_next()
+    assert job is not None
+    store.mark(job.id, media_jobs.BLOCKED, "RuntimeError: cuBLAS failed")
+
+    [status] = media_jobs.status(vault)["jobs"]
+    assert "CUDA/cuBLAS/cuDNN runtime" in status["next_action"]
+
+
+def test_failed_cuda_runtime_row_alone_wakes_recovery_worker(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault, name="wake-cublas.mp3"))
+    job = store.claim_next()
+    assert job is not None
+    store.mark(job.id, media_jobs.FAILED, "RuntimeError: cuBLAS failed")
+
+    assert store.needs_worker() is True
+
+
+def test_false_positive_cuda_filename_does_not_wake_worker(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault, name="cublas-demo.m4a"))
+    job = store.claim_next()
+    assert job is not None
+    store.mark(job.id, media_jobs.FAILED, "RuntimeError: cublas-demo.m4a is corrupt")
+    assert store.needs_worker() is False
+
+
+def test_compute_recovery_limit_applies_after_false_positive_classification(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    for index in range(100):
+        store.enqueue(_job(vault, name=f"cublas-demo-{index}.m4a"))
+        claimed = store.claim_next()
+        assert claimed is not None
+        store.mark(claimed.id, media_jobs.FAILED, "RuntimeError: cublas-demo.m4a is corrupt")
+    store.enqueue(_job(vault, name="real-cublas.m4a"))
+    real = store.claim_next()
+    assert real is not None
+    store.mark(real.id, media_jobs.FAILED, "RuntimeError: cuBLAS failed")
+
+    assert store.recover_compute_runtime_failures(limit=1) == 1
+    assert store.get(real.id).state == media_jobs.BLOCKED
+
+
+def test_compute_recovery_streams_past_false_positives_without_fetchall(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    for index in range(100):
+        store.enqueue(_job(vault, name=f"cublas-demo-{index}.m4a"))
+        claimed = store.claim_next()
+        assert claimed is not None
+        store.mark(claimed.id, media_jobs.FAILED, "RuntimeError: cublas-demo.m4a is corrupt")
+    store.enqueue(_job(vault, name="actual-cublas.m4a"))
+    actual = store.claim_next()
+    assert actual is not None
+    store.mark(actual.id, media_jobs.FAILED, "RuntimeError: cuBLAS failed")
+
+    original_connect = store._connect
+    seen = 0
+
+    class _NoFetchallCursor:
+        def __init__(self, cursor: sqlite3.Cursor) -> None:
+            self._cursor = cursor
+
+        def __iter__(self):
+            nonlocal seen
+            for row in self._cursor:
+                seen += 1
+                yield row
+
+        def fetchall(self):
+            pytest.fail("compute recovery must stream the candidate cursor")
+
+        def __getattr__(self, name: str):
+            return getattr(self._cursor, name)
+
+    class _NoFetchallConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        def __enter__(self):
+            self._connection.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._connection.__exit__(*args)
+
+        def execute(self, sql: str, params: object = ()):
+            cursor = self._connection.execute(sql, params)
+            if "state = 'failed' AND" in sql:
+                return _NoFetchallCursor(cursor)
+            return cursor
+
+        def __getattr__(self, name: str):
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(store, "_connect", lambda: _NoFetchallConnection(original_connect()))
+
+    assert store.recover_compute_runtime_failures(limit=1) == 1
+    assert seen == 101
+
+
+def test_compute_runtime_jobs_streams_and_stops_after_genuine_limit(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    for name in ("first.m4a", "second.m4a"):
+        store.enqueue(_job(vault, name=name))
+        claimed = store.claim_next()
+        assert claimed is not None
+        store.mark(claimed.id, media_jobs.BLOCKED, "RuntimeError: cuBLAS failed")
+
+    original_connect = store._connect
+    seen = 0
+
+    class _NoFetchallCursor:
+        def __init__(self, cursor: sqlite3.Cursor) -> None:
+            self._cursor = cursor
+
+        def __iter__(self):
+            nonlocal seen
+            for row in self._cursor:
+                seen += 1
+                yield row
+
+        def fetchall(self):
+            pytest.fail("compute status must stream the candidate cursor")
+
+        def __getattr__(self, name: str):
+            return getattr(self._cursor, name)
+
+    class _NoFetchallConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        def execute(self, sql: str, params: object = ()):
+            cursor = self._connection.execute(sql, params)
+            if "state IN ('blocked', 'failed')" in sql:
+                return _NoFetchallCursor(cursor)
+            return cursor
+
+        def __getattr__(self, name: str):
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(store, "_connect", lambda: _NoFetchallConnection(original_connect()))
+
+    assert [job.binary_path.name for job in store.compute_runtime_jobs(limit=1)] == ["first.m4a"]
+    assert seen == 1
+
+
+def test_needs_worker_streams_failed_compute_candidates(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    for index in range(100):
+        store.enqueue(_job(vault, name=f"cublas-demo-{index}.m4a"))
+        claimed = store.claim_next()
+        assert claimed is not None
+        store.mark(claimed.id, media_jobs.FAILED, "RuntimeError: cublas-demo.m4a is corrupt")
+    store.enqueue(_job(vault, name="wake-actual-cublas.m4a"))
+    actual = store.claim_next()
+    assert actual is not None
+    store.mark(actual.id, media_jobs.FAILED, "RuntimeError: cuBLAS failed")
+
+    original_connect = store._connect
+    seen = 0
+
+    class _NoFetchallCursor:
+        def __init__(self, cursor: sqlite3.Cursor) -> None:
+            self._cursor = cursor
+
+        def __iter__(self):
+            nonlocal seen
+            for row in self._cursor:
+                seen += 1
+                yield row
+
+        def fetchall(self):
+            pytest.fail("worker wake must stream failed compute candidates")
+
+        def __getattr__(self, name: str):
+            return getattr(self._cursor, name)
+
+    class _NoFetchallConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        def execute(self, sql: str, params: object = ()):
+            cursor = self._connection.execute(sql, params)
+            if "state = 'failed' AND" in sql:
+                return _NoFetchallCursor(cursor)
+            return cursor
+
+        def __getattr__(self, name: str):
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(store, "_connect", lambda: _NoFetchallConnection(original_connect()))
+
+    assert store.needs_worker() is True
+    assert seen == 101
+
+
+def test_blocked_compute_selector_ignores_body_and_decodes_json_frontmatter(vault: Path) -> None:
+    error = 'ASRRuntimeRefusal: CUDA "float16" is unavailable: try CPU'
+    action = "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
+    canonical = (
+        "---\nprocessing_state: blocked\nprocessing_retryable: true\n"
+        f"processing_error: {vault_module.yaml_scalar(error)}\n"
+        f"processing_next_action: {vault_module.yaml_scalar(action)}\n---\n"
+    )
+    assert media_jobs._blocked_presentation_is_current(
+        canonical + "\nprocessing_error: stale body value\n", error
+    )
+    assert not media_jobs._blocked_presentation_is_current(
+        "---\nprocessing_state: pending\n---\n" + canonical, error
+    )
+    assert not media_jobs._blocked_presentation_is_current(
+        canonical.replace("processing_state: blocked", "processing_state: blocked\nprocessing_state: pending"),
+        error,
+    )
+
+
+def test_blocked_compute_selector_sql_filters_ordinary_blocked_rows(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    now = time.time()
+    conn = store._connect()
+    try:
+        with conn:
+            conn.executemany(
+                """
+                INSERT INTO jobs(
+                    job_key, binary_rel, sidecar_rel, media_type, state, attempts, created_at,
+                    updated_at, last_error
+                ) VALUES (?, ?, ?, 'audio', 'blocked', 1, ?, ?, ?)
+                """,
+                [
+                    (
+                        f"ordinary-blocked-{index}",
+                        f"Knowledge Base/Evidence/ordinary-{index}.m4a",
+                        f"Knowledge Base/Evidence/ordinary-{index}.m4a.md",
+                        now,
+                        now,
+                        "ExtractionUnavailable: install the media extra",
+                    )
+                    for index in range(50_000)
+                ],
+            )
+    finally:
+        conn.close()
+
+    original_connect = store._connect
+    blocked_query = ""
+
+    class _NoOrdinaryRowsCursor:
+        def __init__(self, cursor: sqlite3.Cursor) -> None:
+            self._cursor = cursor
+
+        def __iter__(self):
+            for row in self._cursor:
+                pytest.fail("ordinary blocked rows must be filtered by SQLite before iteration")
+                yield row
+
+        def __getattr__(self, name: str):
+            return getattr(self._cursor, name)
+
+    class _FilteringConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        def execute(self, sql: str, params: object = ()):
+            nonlocal blocked_query
+            cursor = self._connection.execute(sql, params)
+            if "state = 'blocked'" in sql:
+                blocked_query = sql
+                return _NoOrdinaryRowsCursor(cursor)
+            return cursor
+
+        def __getattr__(self, name: str):
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(store, "_connect", lambda: _FilteringConnection(original_connect()))
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: pytest.fail("no sidecar I/O"))
+
+    assert store.blocked_compute_presentations_needing_convergence(limit=1) == []
+    assert "lower(last_error) LIKE ?" in blocked_query
+
+
+def test_blocked_compute_selector_rejects_marker_like_artifact_errors(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    source = _job(vault, name="cublas-demo.m4a")
+    store.enqueue(source)
+    job = store.claim_next()
+    assert job is not None
+    store.mark(job.id, media_jobs.BLOCKED, "RuntimeError: cublas-demo.m4a is corrupt")
+
+    assert store.blocked_compute_presentations_needing_convergence(limit=1) == []
+    assert store.needs_worker() is False
+
+
+def test_blocked_compute_selector_finds_stale_row_after_canonical_limit(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    error = "ASRRuntimeRefusal: no CTranslate2 CUDA device"
+    action = "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
+    canonical = (
+        "---\nprocessing_state: blocked\nprocessing_retryable: true\n"
+        f"processing_error: {vault_module.yaml_scalar(error)}\n"
+        f"processing_next_action: {vault_module.yaml_scalar(action)}\n---\n"
+    )
+    stale = None
+    for index in range(101):
+        source = _job(vault, name=f"blocked-{index}.m4a")
+        store.enqueue(source)
+        job = store.claim_next()
+        assert job is not None
+        store.mark(job.id, media_jobs.BLOCKED, error)
+        if index < 100:
+            source.sidecar_path.write_text(canonical, encoding="utf-8")
+        else:
+            stale = source
+    assert stale is not None
+
+    [candidate] = store.blocked_compute_presentations_needing_convergence(limit=1)
+    assert candidate.binary_path == stale.binary_path
+    assert store.needs_worker() is True
+    stale.sidecar_path.write_text(canonical, encoding="utf-8")
+    assert store.needs_worker() is False
+
+
+def test_stale_compute_blocked_sidecar_wakes_once_but_converged_sidecar_does_not(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    source = _job(vault, name="blocked.m4a")
+    store.enqueue(source)
+    job = store.claim_next()
+    assert job is not None
+    store.mark(job.id, media_jobs.BLOCKED, "ASRRuntimeRefusal: no CTranslate2 CUDA device")
+    assert store.needs_worker() is True
+    source.sidecar_path.write_text(
+        "---\nprocessing_state: blocked\nprocessing_retryable: true\n"
+        "processing_error: ASRRuntimeRefusal: no CTranslate2 CUDA device\n"
+        "processing_next_action: repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry\n---\n",
+        encoding="utf-8",
+    )
+    assert store.needs_worker() is False
+
+
+def test_needs_worker_reads_the_store_once_on_the_idle_path(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The idle path opened the store TWICE — more expensive than the busy one.
+
+    `needs_worker()` opens a connection, finds no pending/running/rescuable
+    job, and then called `blocked_compute_presentations_needing_convergence()`,
+    which opened a second one.  Every open takes the reserved-identity
+    boundary twice, so the cheapest possible answer ("nothing to do") cost the
+    most.  One connection answers both questions.
+    """
+    store = media_jobs.MediaJobStore(vault)
+    opened: list[bool] = []
+    original = media_jobs.MediaJobStore._connect
+
+    def counting_connect(self, **kwargs):
+        opened.append(True)
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(media_jobs.MediaJobStore, "_connect", counting_connect)
+
+    assert store.needs_worker() is False
+    assert len(opened) == 1, (
+        f"an idle needs_worker() opened the store {len(opened)} times; each open "
+        "takes the mutation boundary twice"
+    )
+
+
+def test_blocked_compute_presentations_still_reach_needs_worker(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Folding the second query in must not lose the stale-blocked rescue arm.
+
+    A compute-blocked job whose sidecar no longer matches its recorded error
+    is work: it needs a worker to converge the presentation.  That arm is the
+    reason the second connection existed, so it gets its own assertion.
+    """
+    store = media_jobs.MediaJobStore(vault)
+    job_id = store.enqueue(_job(vault, name="blocked-convergence.mp4"))
+    store.mark(job_id, media_jobs.BLOCKED, "ASRComputeRuntimeError: cuDNN failed to initialize")
+
+    monkeypatch.setattr(
+        media_jobs, "_blocked_presentation_is_current", lambda _content, _error: False
+    )
+    assert store.needs_worker() is True
+
+    monkeypatch.setattr(
+        media_jobs, "_blocked_presentation_is_current", lambda _content, _error: True
+    )
+    assert store.needs_worker() is False

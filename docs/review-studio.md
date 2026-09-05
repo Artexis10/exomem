@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Epistemic Review Studio
 
 The Review Studio is Exomem's browser control plane for the daily epistemic
@@ -80,6 +82,22 @@ Conclusion-changing work has a proposal step and a separate confirmation:
 Validation failures leave the dialog and draft intact. Proposal generation and
 cancellation never mutate the vault. Existing server validation, expected-hash
 guards, write logs, access policy, and audit behavior remain authoritative.
+
+## Relation queue states
+
+The Relation worklist is graph-native and preserves server order. Its `status`
+is one of `available`, `warming`, `pending`, or `unavailable`; these states are
+not empty queue results. `warming`, `pending`, and `unavailable` are retryable
+and show no fabricated fallback candidates. `truncated` and coverage fields
+remain visible whenever a bounded response omitted work.
+
+An accept action sends the queue item's `source_path`, maps its
+`source_content_hash` to `expected_hash`, and maps its `fingerprint` to
+`expected_fingerprint`. A triage action sends `source_path` and
+`expected_fingerprint`; triage has no content-hash input. A changed signal
+produces `REVIEW_ITEM_CHANGED`; a legacy reference outside the bounded current
+prefix produces `REVIEW_REFRESH_REQUIRED`. The Studio refreshes instead of
+widening a search or re-ranking candidates client-side.
 
 ## Recorded evolution, not generated narrative
 

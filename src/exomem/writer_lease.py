@@ -33,6 +33,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
+from . import call_spans
 from . import capabilities as capabilities_module
 from .cli_ops import OpError, leaf_contract_code
 from .mutation_lock import (
@@ -52,6 +53,7 @@ from .mutation_terminal import (
     split_response_detail,
     valid_collection_receipt,
     valid_structured_files_receipt,
+    with_fast_acknowledgement,
 )
 from .privacy_log import content_private_logging_enabled
 
@@ -181,6 +183,468 @@ def _mark_verification_component_failure(component: str) -> None:
     if failures is not None:
         failures.append(component)
 
+_FAST_ACK_DEADLINE_SECONDS = 2.0
+
+
+def _publish_pending_visibility(vault_root: Path, receipt: Any) -> bool:
+    """The production callee behind the frozen pending-visibility seam.
+
+    Lane 2 owns the projection; Lane 1 owns the durable custody transition;
+    this is the one place the two are joined. Imported lazily so the writer
+    module keeps its current import graph -- ``pending_recall`` reaches recall
+    and the lexical store, neither of which may be pulled in at writer import.
+    """
+    from . import pending_recall
+
+    return pending_recall.publish(vault_root, receipt)
+
+
+#: Overridable for tests that exercise the terminal boundary without a store.
+#: In production it is always Lane 2's publisher: a ``None`` here makes every
+#: governed fast-ack write fail closed into committed-uncertain.
+_PENDING_VISIBILITY_PUBLISHER: Callable[[Path, Any], bool] | None = (
+    _publish_pending_visibility
+)
+_fast_ack_monotonic = time.monotonic
+
+
+@dataclass(slots=True)
+class _FastAcknowledgementBatch:
+    receipt: Any
+    canonical_commit_monotonic: float
+    advisory_target: str | None = None
+
+
+@dataclass(slots=True)
+class _FastAcknowledgementSession:
+    vault_root: Path
+    request_id: str
+    mutation_attempt_digest: str
+    terminal_replay_until: float
+    advisory_required: bool
+    sequence: int = 0
+    #: One acknowledgement carries one stable advisory result ref, so the first
+    #: canonical batch that *commits* with a named target claims the session's
+    #: advisory job and later batches in the same mutation carry none. The
+    #: claim is taken at the committed handoff, never at preparation: a
+    #: prepared batch that rolls back must leave the claim for its successor.
+    advisory_claimed: bool = False
+    advisory_prepared_target: str | None = None
+    batches: list[_FastAcknowledgementBatch] = field(default_factory=list)
+
+
+_ACTIVE_FAST_ACK_SESSION: ContextVar[_FastAcknowledgementSession | None] = ContextVar(
+    "exomem_active_fast_ack_session", default=None
+)
+
+
+def _fast_ack_enabled() -> bool:
+    return os.environ.get("EXOMEM_FAST_DURABLE_ACK") == "1"
+
+
+def fast_durable_ack_active() -> bool:
+    """Whether the fast durable acknowledgement capability is currently active.
+
+    ``EXOMEM_FAST_DURABLE_ACK=1`` enables the fast path. Any other value --
+    including the shipped default of absent -- restores the prior wide
+    synchronous fanout and declares this capability, and its latency SLO,
+    inactive. It is deliberately not a knob that widens the enabled path's
+    fixed 2.0-second budget (design decision 3); it only chooses which of the
+    two behaviours is in force.
+    """
+    return _fast_ack_enabled()
+
+
+def _fast_ack_root_key(value: os.PathLike[str] | str) -> Path:
+    """Normalize both sides of every fast-ack root comparison identically.
+
+    The session root is produced with ``resolve`` while the batch seam passes
+    an ``abspath``. Comparing those two forms directly would silently disable
+    fast acknowledgement for a vault reached through a symlink, so both sides
+    go through one normalization instead of two nearly-equal ones.
+    """
+    return Path(os.path.realpath(value))
+
+
+def active_derived_batch_custody(vault_root: Path) -> bool:
+    """Whether this exact vault currently owns a governed fast-ack session."""
+    session = _ACTIVE_FAST_ACK_SESSION.get()
+    return session is not None and _fast_ack_root_key(vault_root) == _fast_ack_root_key(
+        session.vault_root
+    )
+
+
+def current_canonical_generation(vault_root: Path) -> str | None:
+    """Public reader for the vault's current canonical generation.
+
+    The component drain needs exactly the observation the acknowledgement
+    makes, and a second implementation of it would be a second answer to the
+    question every proof is bound to.
+    """
+    return _current_canonical_generation(vault_root)
+
+
+def _current_canonical_generation(vault_root: Path) -> str | None:
+    """The vault's current canonical generation, or None when unreadable.
+
+    Proof must compare a receipt against what the vault holds *now*. Passing
+    the receipt's own generation makes that comparison a tautology and searches
+    for a superseding batch at the generation being superseded, so a real
+    supersession can never be recognized. This reads the same graph-checkpoint
+    family ``_batch_atomic_write_locked`` selects a receipt's generation from.
+    """
+    try:
+        from . import graph_sync
+
+        checkpoint = graph_sync.read_checkpoint(Path(vault_root))
+    except Exception as error:  # noqa: BLE001 - fall back to the receipt
+        # Name the class only. Silence here would reinstate the tautology this
+        # function exists to remove, with nothing to show it happened.
+        logger.debug(
+            "canonical generation probe failed; proof falls back to the receipt (%s)",
+            type(error).__name__,
+        )
+        return None
+    return None if checkpoint is None else str(checkpoint.generation)
+
+
+def _release_superseded_advisory_claim(
+    session: _FastAcknowledgementSession,
+    paths: tuple[Any, ...],
+) -> None:
+    """Hand the session's one advisory job back when its holder is superseded.
+
+    A batch that took the claim and is then covered by a later batch of the
+    same mutation publishes nothing, carries no result reference, and has its
+    advisory work superseded in the store. Keeping the claim there would leave
+    the batch that actually survives with no advisory custody at all -- and
+    custody cannot be added after the receipt is durable, so the decision has
+    to be made here, while this batch is still being prepared.
+
+    The cover test is the store's own: the holder's paths must all appear in
+    this batch. Anything narrower would release a claim whose holder is going
+    to survive.
+    """
+    holder = next(
+        (batch for batch in reversed(session.batches) if batch.advisory_target),
+        None,
+    )
+    if holder is None:
+        return
+    covered = {path.rel_path for path in paths}
+    if {path.rel_path for path in holder.receipt.paths} <= covered:
+        session.advisory_claimed = False
+
+
+def prepare_active_derived_batch(
+    vault_root: Path,
+    paths: tuple[Any, ...],
+    *,
+    canonical_generation: str | None = None,
+    checkpoint_id: str | None = None,
+    advisory_target_rel_path: str | None = None,
+) -> Any | None:
+    """Prepare exact receipt custody for the active governed mutation batch.
+
+    ``advisory_target_rel_path`` is the one governed note this canonical batch
+    is about, as named by the batch's own semantic-page declaration. Advisory
+    custody applies only when that target is present in this batch with a
+    surviving after-hash, and its fingerprint is exactly that after-hash -- the
+    sha256 the advisory worker will later be asked to re-observe. When no
+    single target exists the component is not required for this batch.
+    """
+    session = _ACTIVE_FAST_ACK_SESSION.get()
+    root = Path(vault_root)
+    if (
+        session is None
+        or _fast_ack_root_key(root) != _fast_ack_root_key(session.vault_root)
+        or not paths
+    ):
+        return None
+    from . import derived_receipts
+
+    session.sequence += 1
+    identity_material = json.dumps(
+        {
+            "request_id": session.request_id,
+            "sequence": session.sequence,
+            "mutation_attempt_digest": session.mutation_attempt_digest,
+            "paths": [
+                [path.rel_path, path.before_hash, path.after_hash] for path in paths
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    batch_id = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()
+    canonical_generation = canonical_generation or batch_id
+    checkpoint_id = checkpoint_id or batch_id
+    if session.advisory_claimed:
+        _release_superseded_advisory_claim(session, paths)
+    advisory_target: str | None = None
+    advisory_fingerprint: str | None = None
+    if (
+        session.advisory_required
+        and not session.advisory_claimed
+        and advisory_target_rel_path is not None
+    ):
+        after_hash = next(
+            (
+                path.after_hash
+                for path in paths
+                if path.rel_path == advisory_target_rel_path
+            ),
+            None,
+        )
+        if after_hash is not None:
+            advisory_target = advisory_target_rel_path
+            advisory_fingerprint = after_hash
+    session.advisory_prepared_target = advisory_target
+    required_components = set(derived_receipts.DerivedComponent)
+    if advisory_target is None:
+        required_components.remove(derived_receipts.DerivedComponent.WRITE_ADVISORY)
+    return derived_receipts.prepare_batch(
+        root,
+        batch_id=batch_id,
+        mutation_attempt_digest=session.mutation_attempt_digest,
+        canonical_generation=canonical_generation,
+        checkpoint_id=checkpoint_id,
+        paths=paths,
+        required_components=required_components,
+        advisory_target_rel_path=advisory_target,
+        advisory_target_fingerprint=advisory_fingerprint,
+        terminal_replay_until=(
+            session.terminal_replay_until if advisory_target is not None else None
+        ),
+        advisory_retention_until=(
+            session.terminal_replay_until if advisory_target is not None else None
+        ),
+    )
+
+
+def complete_active_derived_batch(
+    receipt: Any | None,
+    *,
+    canonical_commit_monotonic: float,
+) -> None:
+    """Retain a successfully committed receipt for the post-authority handoff."""
+    if receipt is None:
+        return
+    session = _ACTIVE_FAST_ACK_SESSION.get()
+    if session is None:
+        raise RuntimeError("derived receipt committed outside its acknowledgement session")
+    advisory_target = session.advisory_prepared_target
+    session.advisory_prepared_target = None
+    if advisory_target is not None:
+        # The canonical batch is known committed, so this is the point the
+        # session's one advisory job becomes real. A batch that prepared a
+        # target and then rolled back never reaches here and leaves the claim
+        # available to the next governed batch in the same mutation.
+        session.advisory_claimed = True
+    session.batches.append(
+        _FastAcknowledgementBatch(
+            receipt,
+            float(canonical_commit_monotonic),
+            advisory_target=advisory_target,
+        )
+    )
+
+
+def _wait_for_derived_component(
+    vault_root: Path,
+    receipt: Any,
+    status: Any,
+    *,
+    deadline_monotonic: float,
+) -> Any:
+    """Observe one already-running component without ever extending the deadline."""
+    from . import derived_receipts
+
+    current = status
+    while current.state == "claimed" and _fast_ack_monotonic() < deadline_monotonic:
+        time.sleep(min(0.025, max(0.0, deadline_monotonic - _fast_ack_monotonic())))
+        current = derived_receipts.component_status(
+            vault_root, receipt, current.component
+        )
+    return current
+
+
+def _fast_ack_outcome(values: Iterable[str], *, not_required: bool = False) -> str:
+    outcomes = tuple(values)
+    if not_required and outcomes and all(value == "not_required" for value in outcomes):
+        return "not_required"
+    if "failed" in outcomes:
+        return "failed"
+    if "pending" in outcomes:
+        return "pending"
+    return "completed"
+
+
+def _acknowledge_derived_batches(
+    result: Any,
+    session: _FastAcknowledgementSession,
+) -> Any:
+    """Prove, publish, signal and freeze one post-canonical status snapshot."""
+    if not session.batches:
+        return result
+    with call_spans.span("derived.acknowledgement"):
+        return _acknowledge_derived_batches_timed(result, session)
+
+
+def _acknowledge_derived_batches_timed(
+    result: Any,
+    session: _FastAcknowledgementSession,
+) -> Any:
+    try:
+        from . import derived_receipts, index_sync
+
+        snapshots = []
+        advisory_refs: list[str] = []
+        deadline = (
+            min(batch.canonical_commit_monotonic for batch in session.batches)
+            + _FAST_ACK_DEADLINE_SECONDS
+        )
+        # Prove and publish newest first. An older batch is superseded only once
+        # the newer batch covering it holds live pending custody, and when both
+        # batches belong to one mutation the newer one is published by this same
+        # loop -- so proving in commit order would ask the store about a
+        # supersession it cannot yet see and fail closed into
+        # committed-uncertain on a write that is entirely sound. The projection
+        # below still runs in commit order, so terminal field order is
+        # unchanged.
+        superseded_batches: set[str] = set()
+        for batch in reversed(session.batches):
+            receipt = batch.receipt
+            observed_generation = (
+                _current_canonical_generation(session.vault_root)
+                or receipt.canonical_generation
+            )
+            with call_spans.span("derived.receipt_proof"):
+                proof = derived_receipts.prove_committed(
+                    session.vault_root,
+                    receipt,
+                    current_generation=observed_generation,
+                )
+            if proof.batch_id != receipt.batch_id or proof.canonical_replay_authorized:
+                raise RuntimeError("derived receipt proof does not match this batch")
+            if proof.outcome == "superseded":
+                superseded_batches.add(receipt.batch_id)
+                continue
+            # No generation comparison here: the store echoes
+            # ``current_generation`` straight back into the proof, and its
+            # ``ready`` outcome is what already enforces that the stored
+            # generation matches the observed one.
+            if proof.outcome != "ready":
+                raise RuntimeError(
+                    "derived receipt did not prove the committed generation"
+                )
+            with call_spans.span("derived.pending_visibility"):
+                published = derived_receipts.publish_pending_visibility(
+                    session.vault_root,
+                    receipt,
+                    publisher=_PENDING_VISIBILITY_PUBLISHER,
+                )
+            if not published:
+                raise RuntimeError("pending visibility publication was not proven")
+            derived_receipts.signal_components(session.vault_root, receipt)
+
+        for batch in session.batches:
+            receipt = batch.receipt
+            superseded = receipt.batch_id in superseded_batches
+            statuses = []
+            for component in derived_receipts.DerivedComponent:
+                status = derived_receipts.component_status(
+                    session.vault_root, receipt, component
+                )
+                if superseded:
+                    # Read the store, never the as-prepared memory state: the
+                    # store has already closed these components as superseded,
+                    # and a terminal built from memory would advertise pending
+                    # work that no longer belongs to this batch.
+                    statuses.append(status)
+                    continue
+                if status.state == "claimed":
+                    status = _wait_for_derived_component(
+                        session.vault_root,
+                        receipt,
+                        status,
+                        deadline_monotonic=deadline,
+                    )
+                statuses.append(status)
+            if superseded:
+                # The newer batch that superseded this one owns both the
+                # convergence and the applicable advisory job, so no advisory
+                # ref is resolved or carried here.
+                snapshots.append(
+                    index_sync.superseded_acknowledgement_snapshot(statuses)
+                )
+                continue
+            snapshots.append(index_sync.derived_acknowledgement_snapshot(statuses))
+            advisory_status = next(
+                status
+                for status in statuses
+                if status.component is derived_receipts.DerivedComponent.WRITE_ADVISORY
+            )
+            if advisory_status.state != "not_required":
+                result_ref = derived_receipts.advisory_result_ref(
+                    session.vault_root, receipt
+                )
+                if not result_ref:
+                    raise RuntimeError("applicable advisory custody has no stable result ref")
+                advisory_refs.append(result_ref)
+
+        if len(advisory_refs) > 1:  # pragma: no cover - one job per session
+            raise RuntimeError(
+                "one acknowledgement cannot carry several advisory result refs"
+            )
+        derived_sync = _fast_ack_outcome(
+            snapshot.derived_sync for snapshot in snapshots
+        )
+        advisory_sync = _fast_ack_outcome(
+            (snapshot.advisory_sync for snapshot in snapshots),
+            not_required=True,
+        )
+        diagnostics = [
+            {"component": component, "state": state, "code": code}
+            for snapshot in snapshots
+            for component, state, code in snapshot.diagnostics
+        ]
+        call_spans.record_span(
+            "derived.post_canonical",
+            (
+                _fast_ack_monotonic()
+                - min(batch.canonical_commit_monotonic for batch in session.batches)
+            )
+            * 1000.0,
+        )
+        return with_fast_acknowledgement(
+            result,
+            derived_sync=derived_sync,
+            derived_sync_components=tuple(
+                sorted(
+                    {
+                        component
+                        for snapshot in snapshots
+                        for component in snapshot.derived_sync_components
+                    }
+                )
+            ),
+            component_diagnostics=diagnostics,
+            advisory_sync=advisory_sync,
+            advisory_result_ref=advisory_refs[0] if advisory_refs else None,
+        )
+    except _PostCommitOutcomeUncertain:
+        raise
+    except Exception as error:
+        # Name the class only -- never the message, which can carry a path.
+        # Without it a projection defect is indistinguishable from a storage
+        # failure in the caller's committed-uncertain terminal.
+        logger.warning(
+            "fast acknowledgement failed; returning committed-uncertain (%s)",
+            type(error).__name__,
+        )
+        raise _PostCommitOutcomeUncertain() from error
+
 
 def _direct_mutation_boundary(
     vault_root: os.PathLike[str] | str, state_root: Path
@@ -240,11 +704,11 @@ def _durable_graph_outcome(vault_root: Path) -> Any:
 
 
 def _windows_library(ctypes_module: Any, name: str) -> Any:
-    return getattr(ctypes_module, "WinDLL")(name, use_last_error=True)
+    return ctypes_module.WinDLL(name, use_last_error=True)
 
 
 def _windows_last_error(ctypes_module: Any) -> int:
-    return int(getattr(ctypes_module, "get_last_error")())
+    return int(ctypes_module.get_last_error())
 
 
 def _log_mutation_event(phase: str, *, level: int = logging.INFO, **fields: Any) -> None:
@@ -2111,7 +2575,7 @@ class IdempotencyStore:
             for expired_key, expired_payload in expired_completed:
                 try:
                     completed = pickle.loads(expired_payload)  # noqa: S301 - trusted runtime state
-                except Exception:
+                except Exception:  # noqa: BLE001 - probe the alternate fail-closed encoding
                     try:
                         _deserialize_committed_failure_payload(expired_payload)
                     except Exception:  # noqa: BLE001 - corrupt terminals remain fail-closed
@@ -2148,7 +2612,7 @@ class IdempotencyStore:
         if row[1] == "completed":
             try:
                 completed = pickle.loads(row[2])  # noqa: S301 - trusted runtime state
-            except Exception:
+            except Exception:  # noqa: BLE001 - probe the alternate fail-closed encoding
                 try:
                     _deserialize_committed_failure_payload(row[2])
                 except Exception:  # noqa: BLE001 - corrupt terminals remain fail-closed
@@ -2181,7 +2645,7 @@ class IdempotencyStore:
         if state == "completed":
             try:
                 completed = pickle.loads(row[2])  # noqa: S301 - trusted runtime state
-            except Exception:
+            except Exception:  # noqa: BLE001 - probe the alternate fail-closed encoding
                 try:
                     failure = _CachedCommittedFailure(
                         _deserialize_committed_failure_payload(row[2])
@@ -3008,6 +3472,21 @@ class LeaseManager:
         request_id = mutation_request_id or str(uuid.uuid4())
         receipt = _receipt_tag(key) if key else None
         commit_state = {"observed": False}
+        fast_ack_session = (
+            _FastAcknowledgementSession(
+                vault_root=receipt_vault_root,
+                request_id=request_id,
+                mutation_attempt_digest=digest,
+                terminal_replay_until=self.idempotency.clock()
+                + (expires_after or _IMPLICIT_RETRY_TTL_SECONDS),
+                advisory_required=True,
+            )
+            if _fast_ack_enabled()
+            and not kwargs.get("suggestions")
+            and receipt_vault_root is not None
+            and _is_receipt_vault_root(receipt_vault_root)
+            else None
+        )
         _log_mutation_event(
             "received",
             request_id=request_id,
@@ -3045,6 +3524,11 @@ class LeaseManager:
             trace_token = _ACTIVE_MUTATION_TRACE.set((request_id, command.name, receipt or "none"))
             commit_token = _ACTIVE_MUTATION_COMMITTED.set(False)
             manager_token = _ACTIVE_LEASE_MANAGER.set(self)
+            fast_ack_token = (
+                _ACTIVE_FAST_ACK_SESSION.set(fast_ack_session)
+                if fast_ack_session is not None
+                else None
+            )
             try:
                 leaf_result = command.leaf(*injected, **kwargs)
                 if _ACTIVE_MUTATION_COMMITTED.get():
@@ -3081,6 +3565,8 @@ class LeaseManager:
                 raise
             finally:
                 commit_state["observed"] = _ACTIVE_MUTATION_COMMITTED.get()
+                if fast_ack_token is not None:
+                    _ACTIVE_FAST_ACK_SESSION.reset(fast_ack_token)
                 _ACTIVE_LEASE_MANAGER.reset(manager_token)
                 _ACTIVE_MUTATION_COMMITTED.reset(commit_token)
                 _ACTIVE_MUTATION_TRACE.reset(trace_token)
@@ -3257,6 +3743,14 @@ class LeaseManager:
             if isinstance(terminal_result, Mapping):
                 return with_graph_outcome(terminal_result, {"graph_sync": "completed"})
             return terminal_result
+
+        def finish_fast_ack_and_graph(result: Any) -> Any:
+            acknowledged = (
+                _acknowledge_derived_batches(result, fast_ack_session)
+                if fast_ack_session is not None
+                else result
+            )
+            return wait_for_graph_sync(acknowledged)
 
         def persist_graph_sync_progress(
             result: Any, attempt: _ExecutionAttempt, canonical_disposition: str = "success"
@@ -3601,10 +4095,17 @@ class LeaseManager:
             and bool(kwargs.get("files"))
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
+        narrow_relation_registry_commit = (
+            command.name == "schema_memory"
+            and kwargs.get("subject", "contract") == "relations"
+            and kwargs.get("operation") == "save-relations"
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+        )
         narrow_boundary = (
             narrow_media_commit
             or narrow_tier2_file_commit
             or narrow_source_artifact_commit
+            or narrow_relation_registry_commit
             or (
                 command.name in _NARROW_BOUNDARY_COMMANDS
                 and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
@@ -3629,7 +4130,7 @@ class LeaseManager:
                 ),
                 commit_observed=lambda: commit_state["observed"],
                 after_canonical_persisted=persist_graph_sync_progress,
-                after_operation_guard=wait_for_graph_sync,
+                after_operation_guard=finish_fast_ack_and_graph,
                 resume_canonically_committed=resume_graph_sync,
                 commit_evidence=exact_commit_evidence,
                 legacy_graph_pending_proof=legacy_graph_pending_proof,
@@ -4134,6 +4635,17 @@ def active_mutation_request_id() -> str | None:
     """Return the current content-free request identity for commit attribution."""
     trace = _ACTIVE_MUTATION_TRACE.get()
     return trace[0] if trace is not None else None
+
+
+def active_mutation_committed() -> bool:
+    """Whether this invocation's canonical writer already crossed its commit boundary.
+
+    The read side of `mark_active_mutation_committed`, and the one honest signal
+    for "this invocation will have a committed terminal to carry an advisory on".
+    False outside an invocation, on a verified replay (which writes nothing), and
+    on any pass that found nothing to commit.
+    """
+    return _ACTIVE_MUTATION_COMMITTED.get()
 
 
 def active_direct_mutation_guard(vault_root: os.PathLike[str] | str, *, state_root: Path) -> bool:

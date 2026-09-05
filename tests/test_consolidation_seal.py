@@ -194,6 +194,37 @@ def test_durable_seal_requires_explicit_open_and_survives_restart(tmp_path: Path
         )
 
 
+def test_initial_open_refuses_noncanonical_partial_store(tmp_path: Path) -> None:
+    store = _seal_store(tmp_path)
+    store.base.mkdir(parents=True)
+
+    with _assert_seal_error("SEAL_STORE_CORRUPT"):
+        store.initialize_open(
+            vault_binding_digest=VAULT_BINDING,
+            recorded_at=T0,
+        )
+
+
+def test_initial_open_retry_recovers_snapshot_without_changing_timestamp(
+    tmp_path: Path,
+) -> None:
+    store = _seal_store(tmp_path)
+    target = store.initialize_open(
+        vault_binding_digest=VAULT_BINDING,
+        recorded_at=T0,
+    )
+    (store.base / "active.json").unlink()
+
+    recovered = store.initialize_open(
+        vault_binding_digest=VAULT_BINDING,
+        recorded_at=T2,
+    )
+
+    assert recovered == target
+    assert recovered.recorded_at == T0
+    assert store.load(vault_binding_digest=VAULT_BINDING) == target
+
+
 def test_consolidation_seal_is_exactly_journal_bound_and_revisioned(tmp_path: Path) -> None:
     from exomem.governance import consolidation_authority
 
@@ -347,15 +378,19 @@ def test_snapshot_before_pointer_crash_keeps_prior_state_and_retries_exactly(
     assert not other_snapshot.exists()
 
 
-def test_missing_active_after_initialization_is_corrupt_not_open(tmp_path: Path) -> None:
+def test_missing_active_stays_corrupt_until_explicit_initialization_retry(
+    tmp_path: Path,
+) -> None:
     store = _seal_store(tmp_path)
-    store.initialize_open(vault_binding_digest=VAULT_BINDING, recorded_at=T0)
+    opened = store.initialize_open(vault_binding_digest=VAULT_BINDING, recorded_at=T0)
     (store.base / "active.json").unlink()
 
     with _assert_seal_error("SEAL_STORE_CORRUPT"):
         store.load(vault_binding_digest=VAULT_BINDING)
-    with _assert_seal_error("SEAL_STORE_CORRUPT"):
-        store.initialize_open(vault_binding_digest=VAULT_BINDING, recorded_at=T1)
+    assert store.initialize_open(
+        vault_binding_digest=VAULT_BINDING,
+        recorded_at=T1,
+    ) == opened
 
 
 def test_missing_active_after_later_revision_cannot_republish_initial_open(

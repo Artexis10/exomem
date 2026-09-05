@@ -364,9 +364,16 @@ def build_runtime_readiness(
     reasons: list[str] = []
     if mcp_tool_surface_sha256 is None:
         reasons.append("mcp_tool_surface_unavailable")
-    if coordination.get("status_timed_out") is True:
-        reasons.append("coordination_status_timeout")
     if enabled:
+        # A blocked status probe leaves the lease state unmeasured, and an
+        # unmeasured lease is exactly what takeover must not be attempted on.
+        # It says nothing about a standalone cell: with no coordinator there is
+        # no lease to confirm, and the contract is that standalone stays ready
+        # without multi-host coordination.  `enabled` is safe to trust in the
+        # timed-out payload because it is read from the environment rather than
+        # from the probe that failed.
+        if coordination.get("status_timed_out") is True:
+            reasons.append("coordination_status_timeout")
         if not healthy:
             reasons.append("coordinator_unavailable")
         if role not in {"writer", "follower"}:
@@ -494,6 +501,35 @@ def _measure_observability() -> dict[str, Any]:
     }
 
 
+def _unmeasured_coordination(reason: str) -> dict[str, Any]:
+    """Coordination state for a probe that did not answer.
+
+    `role` and `coordinator_healthy` derive from `enabled` the same way
+    `LeaseManager.status()` derives them, so an unmeasured standalone cell
+    describes itself the way a measured one does. The parity is exact only for
+    the standalone branch: for an enabled cell `LeaseManager.status()` treats
+    `enabled` as an initial default and then overwrites it with a real
+    measurement, which this helper has no way to take — so `enabled=True` here
+    is a deliberate fail-closed approximation, not the same derivation.
+
+    Every read is stripped, matching `LeaseConfig.from_env()`. An unstripped
+    replica id would publish whitespace as an identity and suppress
+    `replica_identity_missing` on a config that `from_env()` rejects outright. Hardcoding `unknown`/`False`
+    here made a standalone cell contradict its own successful payload — which
+    was invisible while the response was a 503, and is not once it is a 200.
+    """
+    enabled = bool(os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip())
+    return {
+        "enabled": enabled,
+        "role": "unknown" if enabled else "standalone",
+        "replica_id": (
+            os.environ.get("EXOMEM_WRITER_LEASE_REPLICA_ID", "").strip() or None
+        ),
+        "coordinator_healthy": not enabled,
+        "mutation_boundary": {"state": "unknown", "reason": reason},
+    }
+
+
 def _bounded_coordination_status(
     vault_root: Path | None,
     probe: Callable[[Path | None], Mapping[str, Any]],
@@ -589,29 +625,14 @@ def runtime_readiness(
             coordination_status,
         )
         if measured is None:
-            coordination = {
-                "enabled": bool(os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip()),
-                "role": "unknown",
-                "replica_id": os.environ.get("EXOMEM_WRITER_LEASE_REPLICA_ID") or None,
-                "coordinator_healthy": False,
-                "status_timed_out": True,
-                "mutation_boundary": {
-                    "state": "unknown",
-                    "reason": "status_timeout",
-                },
-            }
+            coordination = _unmeasured_coordination("status_timeout")
+            coordination["status_timed_out"] = True
         else:
             coordination = measured
     except Exception:  # noqa: BLE001 - readiness must return structured 503 state
-        coordination = {
-            "enabled": bool(os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip()),
-            "role": "unknown",
-            "replica_id": os.environ.get("EXOMEM_WRITER_LEASE_REPLICA_ID") or None,
-            "coordinator_healthy": False,
-            # The probe failed; the boundary was not measured. Saying "free"
-            # here is what made MUTATION_LOCK_UNAVAILABLE read as healthy.
-            "mutation_boundary": {"state": "unknown", "reason": "status_error"},
-        }
+        # The probe failed; the boundary was not measured. Saying "free"
+        # here is what made MUTATION_LOCK_UNAVAILABLE read as healthy.
+        coordination = _unmeasured_coordination("status_error")
     retrieval = readiness.retrieval_admission(configured_vault)
     if configured_vault is not None:
         try:

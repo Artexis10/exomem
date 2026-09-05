@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Competitive evaluation audit — 2026-08
 
 Status: **authoritative Phase-0 audit** for the competitive benchmark programme

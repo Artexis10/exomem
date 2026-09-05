@@ -32,7 +32,7 @@ from textual.message import Message
 from textual.widgets import Input, OptionList, SelectionList, Static, TextArea
 from textual.widgets.selection_list import Selection
 
-from ..backend import AskOutcome, BackendError, VaultState
+from ..backend import AskOutcome, BackendError, VaultState, retain_runtime_presence
 from ..format import LABEL_FIELD, first_words, fit, truncate_path, wrap
 from ..widgets import (
     AppFooter,
@@ -378,6 +378,9 @@ class FirstRunScreen(ExomemScreen):
     # ------------------------------------------------------------------ #
     def _create_vault(self, folder: Path) -> None:
         backend = self.app.backend
+        # Input handlers run on the app thread. Retain before dispatching the
+        # scaffold worker; worker ContextVars do not inherit the CLI scope.
+        retain_runtime_presence(folder)
         self._reset_blocks()
         self._question("vault", "Where?")
         self._set_static(
@@ -397,6 +400,7 @@ class FirstRunScreen(ExomemScreen):
 
     def _connect_vault(self, folder: Path) -> None:
         backend = self.app.backend
+        retain_runtime_presence(folder)
 
         def job():
             state = backend.adopt_vault_root(folder)

@@ -177,6 +177,39 @@ def test_batch_write_streams_binary_larger_than_copy_chunk(tmp_path: Path) -> No
     assert binary.read_bytes() == payload
 
 
+@pytest.mark.parametrize("before", [b"\x00binary\xff", b"binary\r\nbytes\r"])
+@pytest.mark.parametrize("race", [False, True])
+def test_batch_binary_snapshot_recheck_uses_exact_byte_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before: bytes, race: bool,
+) -> None:
+    target = tmp_path / "artifact.bin"
+    target.write_bytes(before)
+    after = b"\x00replacement\xfe"
+    concurrent = b"concurrent\xff"
+    capture = vault._capture_batch_snapshot
+
+    def capture_after_race(path: Path):
+        if race and path == target:
+            target.write_bytes(concurrent)
+        return capture(path)
+
+    monkeypatch.setattr(vault, "_capture_batch_snapshot", capture_after_race)
+    writes = [vault.PlannedWrite(
+        target,
+        vault.PreparedBinaryContent(
+            io.BytesIO(after), len(after), hashlib.sha256(after).hexdigest(),
+        ),
+        expected_hash=hashlib.sha256(before).hexdigest(),
+    )]
+    if race:
+        with pytest.raises(vault.ContentHashMismatchError):
+            vault.batch_atomic_write(writes, vault_root=tmp_path, post_commit_fanout=False)
+        assert target.read_bytes() == concurrent
+    else:
+        vault.batch_atomic_write(writes, vault_root=tmp_path, post_commit_fanout=False)
+        assert target.read_bytes() == after
+
+
 def test_batch_binary_create_only_refuses_existing_non_utf8_leaf(
     tmp_path: Path,
 ) -> None:

@@ -8,6 +8,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from exomem import state_migration
+
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = ROOT / "tests" / "fixtures"
 HEAVY_MODULES = ("torch", "sentence_transformers", "fastmcp", "textual")
@@ -15,6 +19,15 @@ HEAVY_MODULES = ("torch", "sentence_transformers", "fastmcp", "textual")
 
 def _run_cli_with_module_probe(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess[str], set[str]]:
     modules_path = tmp_path / "modules.json"
+    state_root = (tmp_path / "external-state").resolve()
+    with pytest.MonkeyPatch.context() as migration_env:
+        migration_env.setenv("EXOMEM_STATE_ROOT", str(state_root))
+        state_migration.migrate_vault_state_offline(
+            FIXTURE_VAULT,
+            authority=state_migration.assert_offline_migration_authority(
+                source="CLI lazy-import subprocess setup"
+            ),
+        )
     (tmp_path / "sitecustomize.py").write_text(
         """
 import atexit
@@ -37,6 +50,7 @@ atexit.register(dump_modules)
         {
             "EXOMEM_DISABLE_EMBEDDINGS": "1",
             "EXOMEM_MODULES_PATH": str(modules_path),
+            "EXOMEM_STATE_ROOT": str(state_root),
             "EXOMEM_VAULT_PATH": str(FIXTURE_VAULT),
             "PYTHONPATH": os.pathsep.join(
                 part for part in (str(tmp_path), str(ROOT / "src"), env.get("PYTHONPATH")) if part

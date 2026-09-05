@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import shutil
+import subprocess
 import threading
 import time
 from collections.abc import Iterator
@@ -38,6 +39,7 @@ _HOSTED_PROCESS_ENV_KEYS = (
     "EXOMEM_CF_ACCESS_TEAM_DOMAIN",
     "EXOMEM_GITHUB_USERNAME",
     "EXOMEM_HOSTED_STATE_ROOT",
+    "EXOMEM_STATE_ROOT",
     "EXOMEM_LARGE_UPLOAD_BASE_URL",
     "EXOMEM_LOG_DIR",
     "EXOMEM_REST_API_KEY",
@@ -221,6 +223,61 @@ def test_hosted_config_rejects_symlinked_roots(tmp_path: Path) -> None:
     assert error.value.code == "HOSTED_ROOT_SYMLINK"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX symlink semantics")
+def test_hosted_state_anchor_refuses_a_symlink_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import state_paths
+
+    hosted_root = tmp_path / "hosted-state"
+    outside = tmp_path / "outside"
+    hosted_root.mkdir()
+    outside.mkdir()
+    (hosted_root / "vault-state").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("EXOMEM_HOSTED_STATE_ROOT", str(hosted_root))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(hosted_root / "vault-state"))
+
+    with pytest.raises(OSError, match="hosted state anchor"):
+        state_paths.ensure_vault_state_dir(tmp_path / "vault")
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires live Windows junction semantics")
+def test_hosted_state_anchor_refuses_a_junction_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import state_paths
+
+    hosted_root = tmp_path / "hosted-state"
+    outside = tmp_path / "outside"
+    hosted_root.mkdir()
+    outside.mkdir()
+    completed = subprocess.run(
+        [
+            "cmd",
+            "/d",
+            "/c",
+            "mklink",
+            "/J",
+            str(hosted_root / "vault-state"),
+            str(outside),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        pytest.skip(f"junction creation unavailable: {completed.stderr or completed.stdout}")
+    monkeypatch.setenv("EXOMEM_HOSTED_STATE_ROOT", str(hosted_root))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(hosted_root / "vault-state"))
+
+    with pytest.raises(OSError, match="hosted state anchor"):
+        state_paths.ensure_vault_state_dir(tmp_path / "vault")
+
+    assert list(outside.iterdir()) == []
+
+
 def test_hosted_runtime_requires_existing_owned_roots(tmp_path: Path) -> None:
     values = _env(tmp_path)
     with pytest.raises(HostedConfigError) as error:
@@ -286,6 +343,10 @@ def test_feature_grants_limits_and_privacy_defaults_are_deterministic(
         "GITHUB_CLIENT_SECRET": "github-client-secret-sentinel",
     }
     applied = config.apply_process_environment(process_env)
+    assert process_env["EXOMEM_STATE_ROOT"] == str(config.state_root / "vault-state")
+    assert process_env["EXOMEM_WRITER_LEASE_STATE_DIR"] == str(config.state_root)
+    assert Path(process_env["EXOMEM_STATE_ROOT"]).parent == config.state_root
+    assert Path(process_env["EXOMEM_STATE_ROOT"]) != config.vault_root
     assert process_env["EXOMEM_DISABLE_QUERY_LOG"] == "1"
     assert process_env["EXOMEM_DISABLE_USAGE_BOOST"] == "1"
     assert process_env["EXOMEM_DISABLE_FILE_WATCHER"] == "1"
@@ -449,6 +510,15 @@ def test_hosted_initialize_preactivates_projection_before_readiness(
         monkeypatch.setenv(key, value)
     events: list[str] = []
 
+    from exomem import state_migration
+
+    monkeypatch.setattr(
+        state_migration,
+        "require_vault_state_ready",
+        lambda root: events.append(f"ready:{root}"),
+        raising=False,
+    )
+
     monkeypatch.setattr(
         server_runtime.projection_runtime,
         "preactivate_projection_runtime",
@@ -464,7 +534,11 @@ def test_hosted_initialize_preactivates_projection_before_readiness(
         load_dotenv_func=lambda **_kwargs: pytest.fail("hosted startup loaded dotenv")
     )
 
-    assert events[:2] == [f"projection:{config.vault_root}", "mutation-probe"]
+    assert events[:3] == [
+        f"ready:{config.vault_root}",
+        f"projection:{config.vault_root}",
+        "mutation-probe",
+    ]
     assert runtime.hosted_lifecycle is not None
 
 
@@ -552,6 +626,11 @@ def test_hosted_initialize_starts_no_workers_while_consolidation_sealed(
         monkeypatch.setenv(key, value)
     calls: list[str] = []
     monkeypatch.setattr(
+        server_runtime,
+        "probe_hosted_mutation_authority",
+        lambda _vault: (True, "HOSTED_READY"),
+    )
+    monkeypatch.setattr(
         consolidation_runtime,
         "readiness",
         lambda _vault: {"admitted": False},
@@ -570,6 +649,16 @@ def test_hosted_initialize_starts_no_workers_while_consolidation_sealed(
         server_runtime,
         "_start_file_watcher",
         lambda _vault: calls.append("watcher"),
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_derived_drain",
+        lambda _vault: calls.append("derived-drain"),
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_create_derived_drain",
+        lambda _vault: calls.append("derived-drain-created"),
     )
 
     runtime = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
@@ -1065,6 +1154,23 @@ def test_provisioning_is_idempotent_machine_readable_and_non_destructive(
     assert sentinel.read_text(encoding="utf-8") == "owned data"
     assert not conflict.state_root.exists()
     assert not conflict.log_root.exists()
+
+
+def test_provisioning_publishes_bound_external_state_before_return(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provisioned cell may be started without another state-creation path."""
+    from exomem import state_migration
+
+    values = _env(tmp_path)
+    config = HostedCellConfig.from_env(values, require_provisioned=False)
+    monkeypatch.setenv("EXOMEM_HOSTED_STATE_ROOT", str(config.state_root))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(config.state_root / "vault-state"))
+
+    provision_hosted_cell(config)
+
+    resolution = state_migration.require_vault_state_ready(config.vault_root)
+    assert resolution.state_dir.parent == config.state_root / "vault-state"
 
 
 def test_provisioning_converges_after_interrupted_staged_publication(

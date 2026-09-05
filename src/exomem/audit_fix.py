@@ -342,6 +342,23 @@ def _plan_sidecar_repairs(
         damage = sidecar_repair.analyze(original, sidecar)
         if damage is None:
             continue
+        if damage.source_reextraction_required:
+            report.proposed.append(
+                audit_module.AuditFinding(
+                    category="duplicated_sidecar",
+                    severity="error",
+                    path=rel,
+                    detail=(
+                        f"{damage.depth} nested copies; source re-extraction required "
+                        "(no surviving extracted text)"
+                    ),
+                    proposed_fix=(
+                        "retry media processing to produce a source-derived extraction; "
+                        "automatic sidecar repair cannot determine a safe unit"
+                    ),
+                )
+            )
+            continue
         repaired = sidecar_repair.repair(original)
         if repaired == original:
             continue
@@ -416,7 +433,7 @@ def audit_fix(
     """Run audit + auto-apply safe fixes. Read-only if dry_run=True.
 
     When `rebuild_embeddings=True`, wipes and rebuilds the vector sidecar
-    at `<vault>/Knowledge Base/.embeddings.sqlite` from the current
+    (`.embeddings.sqlite` in the machine-local state root) from the current
     markdown state of every compiled page. Use on first run, after a
     machine swap, or whenever the sidecar drifts from disk.
     """
@@ -581,7 +598,8 @@ def audit_fix(
         # broken_wikilink residuals after canonicalization are forward refs
         # or audit limitations — propose only.
         # Other categories are propose-only by category-level policy.
-        report.proposed.append(f)
+        if f not in report.proposed:
+            report.proposed.append(f)
 
     # ---- Optional full rebuild of the embedding sidecar ----
     if rebuild_embeddings and not dry_run:

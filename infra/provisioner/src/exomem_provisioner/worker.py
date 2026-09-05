@@ -3,22 +3,69 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 from typing import Any, Protocol
 
 from .capacity import CapacityIdentityConflict
+from .conflict_reason import ConflictReason, coerce_conflict_reason
 from .driver import (
     DriverFinal,
     DriverPending,
+    DriverResource,
     DriverRetryable,
     DriverTerminal,
     EffectContext,
     LostAcknowledgement,
     ProvisionerDriver,
 )
+from .lifecycle import _digest
 from .models import OperationAction
-from .repository import ClaimConflict, OperationRepository, OperationSnapshot, StaleFence
+from .repository import (
+    ClaimConflict,
+    ImmutableMetadataConflict,
+    OperationRepository,
+    OperationSnapshot,
+    StaleFence,
+)
 from .wire_protocol import FINAL_MODELS_BY_PROTOCOL, WIRE_PROTOCOL_V2, runtime_identity
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _log_terminal_failure(
+    operation: OperationSnapshot,
+    *,
+    code: str,
+    reason: object = None,
+) -> None:
+    """Name the condition behind a terminal failure where an operator will see it.
+
+    One stable code stands for a dozen distinct provider conditions and the worker
+    logged nothing at all on that path, so a terminal provision failure left only
+    the code -- true of every one of them. The line carries allowlisted operational
+    metadata and a closed-set condition label, never provider or caller text.
+
+    The internal operation ID is confidential -- the recovery runbook admits it
+    only through an operator-owned mode-0600 file and forbids it in any log -- so
+    the line carries a digest of it instead, which correlates against the
+    operations table without publishing the identity.
+
+    `reason` is re-validated here rather than trusted: `DriverTerminal` is the
+    public exception any driver raises, so an attribute set after construction
+    degrades to `UNCLASSIFIED` instead of reaching the log or raising inside the
+    handler that still has to fail the operation.
+    """
+
+    extra: dict[str, Any] = {
+        "event": "operation_failed",
+        "action": operation.action.value,
+        "operation_digest": _digest(operation.id),
+        "code": code,
+    }
+    if reason is not None:
+        extra["reason"] = coerce_conflict_reason(reason)
+    _LOGGER.warning("operation failed", extra=extra)
 
 
 def _validate_final(
@@ -168,6 +215,63 @@ class ProvisionerWorker:
                     lost.set()
                     return
 
+    async def _record_resources(
+        self,
+        operation: OperationSnapshot,
+        resources: tuple[DriverResource, ...],
+        *,
+        claim: dict[str, Any],
+        claim_lost: asyncio.Event,
+    ) -> bool:
+        """Record each driver resource, or terminally fail the operation.
+
+        A recorded resource is immutable, so a provider reference that no longer
+        matches one can never be reconciled by retrying -- the provider resource it
+        named is gone. Letting that escape kills the process, and the restarted pod
+        re-claims this same operation and re-drives its effect without bound.
+
+        Scoped deliberately to these calls. `complete()` raises the same exception for
+        unrelated capacity-ledger integrity violations, and converting those here would
+        park a DISCARD or DESTROY under a provider-metadata code that `reopen()` cannot
+        recover, because it admits only PROVISION.
+
+        Returns False when the operation was failed and the caller must stop.
+        """
+
+        try:
+            for resource in resources:
+                await self._repository.record_resource(
+                    operation_id=operation.id,
+                    worker_id=self._worker_id,
+                    tenant_id=operation.tenant_id,
+                    cell_id=operation.cell_id,
+                    kind=resource.kind,
+                    recoverable_reference=resource.recoverable_reference,
+                    provider_operation_id=operation.external_operation_id,
+                    provider_fence_generation=operation.fence_generation,
+                    **claim,
+                )
+        except ImmutableMetadataConflict:
+            if not claim_lost.is_set():
+                _log_terminal_failure(
+                    operation,
+                    code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+                    reason=ConflictReason.DURABLE_RESOURCE_IDENTITY_IMMUTABLE,
+                )
+                try:
+                    await self._repository.fail(
+                        operation.id,
+                        self._worker_id,
+                        code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+                        **claim,
+                    )
+                except (ClaimConflict, StaleFence):
+                    # The claim expired while handling the conflict. The row becomes
+                    # claimable again and the next holder reaches the same outcome.
+                    pass
+            return False
+        return True
+
     async def _run_claimed(
         self,
         operation: OperationSnapshot,
@@ -184,6 +288,7 @@ class ProvisionerWorker:
         if claim_lost.is_set():
             return True
         if provider_fence > operation.fence_generation:
+            _log_terminal_failure(operation, code="PROVISIONER_STALE_FENCE")
             await self._repository.fail(
                 operation.id,
                 self._worker_id,
@@ -209,6 +314,7 @@ class ProvisionerWorker:
             except CapacityIdentityConflict:
                 if claim_lost.is_set():
                     return True
+                _log_terminal_failure(operation, code="PROVISIONER_CAPACITY_CONFLICT")
                 await self._repository.fail(
                     operation.id,
                     self._worker_id,
@@ -257,6 +363,7 @@ class ProvisionerWorker:
             )
             return True
         except DriverTerminal as error:
+            _log_terminal_failure(operation, code=error.code, reason=error.reason)
             await self._repository.fail(
                 operation.id,
                 self._worker_id,
@@ -267,18 +374,10 @@ class ProvisionerWorker:
         if claim_lost.is_set():
             return True
         if isinstance(outcome, DriverPending):
-            for resource in outcome.resources:
-                await self._repository.record_resource(
-                    operation_id=operation.id,
-                    worker_id=self._worker_id,
-                    tenant_id=operation.tenant_id,
-                    cell_id=operation.cell_id,
-                    kind=resource.kind,
-                    recoverable_reference=resource.recoverable_reference,
-                    provider_operation_id=operation.external_operation_id,
-                    provider_fence_generation=operation.fence_generation,
-                    **claim,
-                )
+            if not await self._record_resources(
+                operation, outcome.resources, claim=claim, claim_lost=claim_lost
+            ):
+                return True
             await self._repository.mark_pending(
                 operation.id,
                 self._worker_id,
@@ -288,6 +387,7 @@ class ProvisionerWorker:
             )
             return True
         if not isinstance(outcome, DriverFinal):
+            _log_terminal_failure(operation, code="PROVISIONER_DRIVER_INVALID")
             await self._repository.fail(
                 operation.id,
                 self._worker_id,
@@ -298,6 +398,7 @@ class ProvisionerWorker:
         try:
             _validate_final(operation, request, outcome.result)
         except DriverTerminal as error:
+            _log_terminal_failure(operation, code=error.code, reason=error.reason)
             await self._repository.fail(
                 operation.id,
                 self._worker_id,
@@ -310,18 +411,10 @@ class ProvisionerWorker:
             self._worker_id,
             **claim,
         )
-        for resource in outcome.resources:
-            await self._repository.record_resource(
-                operation_id=operation.id,
-                worker_id=self._worker_id,
-                tenant_id=operation.tenant_id,
-                cell_id=operation.cell_id,
-                kind=resource.kind,
-                recoverable_reference=resource.recoverable_reference,
-                provider_operation_id=operation.external_operation_id,
-                provider_fence_generation=operation.fence_generation,
-                **claim,
-            )
+        if not await self._record_resources(
+            operation, outcome.resources, claim=claim, claim_lost=claim_lost
+        ):
+            return True
         await self._repository.complete(
             operation.id,
             outcome.result,

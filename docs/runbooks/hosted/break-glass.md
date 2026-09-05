@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Break-glass recovery
 
 ## Preconditions

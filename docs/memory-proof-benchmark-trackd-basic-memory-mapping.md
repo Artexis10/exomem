@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Track D journeys on Basic Memory — event → command mapping (doc only)
 
 Status: published mapping table for task 7.4 of `add-memory-proof-benchmark`.

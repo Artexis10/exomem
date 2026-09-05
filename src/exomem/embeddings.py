@@ -3,8 +3,8 @@
 Loads `BAAI/bge-base-en-v1.5` lazily (heavy import — torch +
 sentence-transformers stays off the keyword-mode hot path). Chunks each
 KB page paragraph-wise with title prepended, normalizes vectors so
-cosine = dot product, and persists to a per-machine sqlite sidecar at
-`<vault>/Knowledge Base/.embeddings.sqlite`.
+cosine = dot product, and persists to a per-machine sqlite sidecar
+(`.embeddings.sqlite` under the machine-local state root; see `state_paths`).
 
 Sidecar lives outside `_Schema/` deliberately:
 - Dotfile → Obsidian Sync ignores it (each machine maintains its own)
@@ -29,7 +29,15 @@ from typing import Any, BinaryIO
 
 import numpy as np
 
-from . import accel, embedding_backend, index_paths, model_cache, recall_policy, vecstore
+from . import (
+    accel,
+    embedding_backend,
+    index_paths,
+    model_cache,
+    recall_policy,
+    runtime_resources,
+    vecstore,
+)
 from .clip_index import CLIP_DIM, ClipIndex
 from .embedding_index import VECTOR_DIM, EmbeddingIndex
 from .vector_index_common import vec_gate as _vec_gate
@@ -223,34 +231,37 @@ def get_model():
     for the same reason this function did — a lean install must not pay it.
     """
     global _MODEL
-    if _MODEL is not None:
-        return _MODEL
-    with _MODEL_LOCK:
+    with runtime_resources.model_execution():
         if _MODEL is not None:
             return _MODEL
-        _MODEL = embedding_backend.load_encoder(MODEL_NAME)
-    BGE_GUARD.touch()  # start the idle clock at load, not epoch 0
-    return _MODEL
+        with _MODEL_LOCK:
+            if _MODEL is not None:
+                return _MODEL
+            _MODEL = embedding_backend.load_encoder(MODEL_NAME)
+        BGE_GUARD.touch()  # start the idle clock at load, not epoch 0
+        return _MODEL
 
 
 def get_reranker():
     """Lazy cross-encoder reranker sharing the configured text-path device."""
     global _RERANKER
-    if _RERANKER is not None:
-        return _RERANKER
-    with _RERANKER_LOCK:
+    with runtime_resources.model_execution():
         if _RERANKER is not None:
             return _RERANKER
-        from sentence_transformers import CrossEncoder
+        with _RERANKER_LOCK:
+            if _RERANKER is not None:
+                return _RERANKER
+            runtime_resources.configure_torch()
+            from sentence_transformers import CrossEncoder
 
-        device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
-        log.info("loading reranker %s on %s", RERANKER_NAME, device)
-        _RERANKER = model_cache.load_offline_first(
-            RERANKER_NAME,
-            lambda **kw: CrossEncoder(RERANKER_NAME, device=device, **kw),
-        )
-    RERANKER_GUARD.touch()
-    return _RERANKER
+            device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
+            log.info("loading reranker %s on %s", RERANKER_NAME, device)
+            _RERANKER = model_cache.load_offline_first(
+                RERANKER_NAME,
+                lambda **kw: CrossEncoder(RERANKER_NAME, device=device, **kw),
+            )
+        RERANKER_GUARD.touch()
+        return _RERANKER
 
 
 # Run bge/CLIP in fp16 on Apple Silicon (MPS): ~half the memory and faster encodes, and
@@ -295,24 +306,26 @@ def _clip_device() -> str:
 def get_clip_model():
     """Lazy CLIP singleton (encodes BOTH images and text). Device via _clip_device()."""
     global _CLIP_MODEL
-    if _CLIP_MODEL is not None:
-        return _CLIP_MODEL
-    with _CLIP_LOCK:
+    with runtime_resources.model_execution():
         if _CLIP_MODEL is not None:
             return _CLIP_MODEL
-        from sentence_transformers import SentenceTransformer
+        with _CLIP_LOCK:
+            if _CLIP_MODEL is not None:
+                return _CLIP_MODEL
+            runtime_resources.configure_torch()
+            from sentence_transformers import SentenceTransformer
 
-        device = _clip_device()
-        log.info("loading CLIP model %s on %s", CLIP_MODEL_NAME, device)
-        _CLIP_MODEL = _maybe_half(
-            model_cache.load_offline_first(
-                CLIP_MODEL_NAME,
-                lambda **kw: SentenceTransformer(CLIP_MODEL_NAME, device=device, **kw),
-            ),
-            device,
-        )
-    CLIP_GUARD.touch()
-    return _CLIP_MODEL
+            device = _clip_device()
+            log.info("loading CLIP model %s on %s", CLIP_MODEL_NAME, device)
+            _CLIP_MODEL = _maybe_half(
+                model_cache.load_offline_first(
+                    CLIP_MODEL_NAME,
+                    lambda **kw: SentenceTransformer(CLIP_MODEL_NAME, device=device, **kw),
+                ),
+                device,
+            )
+        CLIP_GUARD.touch()
+        return _CLIP_MODEL
 
 
 def embed_image(path: Path) -> np.ndarray:
@@ -328,7 +341,7 @@ def embed_image(path: Path) -> np.ndarray:
         model = get_clip_model()
     except ImportError as e:
         raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
-    with Image.open(path) as img, CLIP_GUARD.active():
+    with Image.open(path) as img, CLIP_GUARD.active(), runtime_resources.model_execution():
         vec = model.encode(img.convert("RGB"), convert_to_numpy=True, normalize_embeddings=True)
     return vec.astype(np.float32, copy=False)
 
@@ -339,7 +352,7 @@ def embed_clip_text(query: str) -> np.ndarray:
         model = get_clip_model()
     except ImportError as e:
         raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
-    with CLIP_GUARD.active():
+    with CLIP_GUARD.active(), runtime_resources.model_execution():
         vec = model.encode([query], convert_to_numpy=True, normalize_embeddings=True)[0]
     return vec.astype(np.float32, copy=False)
 
@@ -357,7 +370,7 @@ def embed_clip_texts(texts: list[str]) -> np.ndarray:
         model = get_clip_model()
     except ImportError as e:
         raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
-    with CLIP_GUARD.active():
+    with CLIP_GUARD.active(), runtime_resources.model_execution():
         vecs = model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
     return vecs.astype(np.float32, copy=False)
 
@@ -770,7 +783,7 @@ def embed_video_scenes(
     pairs = sample_video_scenes(path)
     if not pairs:
         raise ClipUnavailable(f"no decodable video frames in {path.name}")
-    with CLIP_GUARD.active():
+    with CLIP_GUARD.active(), runtime_resources.model_execution():
         vecs = model.encode(
             [img for _, img in pairs], convert_to_numpy=True, normalize_embeddings=True
         )
@@ -814,7 +827,7 @@ def embed_video_frames(path: Path) -> list[tuple[float, np.ndarray]]:
         idx = sorted(set(np.linspace(0, len(kept) - 1, cap).round().astype(int).tolist()))
         kept = [kept[i] for i in idx]
     images = [img for _, img in kept]
-    with CLIP_GUARD.active():
+    with CLIP_GUARD.active(), runtime_resources.model_execution():
         vecs = model.encode(images, convert_to_numpy=True, normalize_embeddings=True)
     return [(float(ts), vecs[i].astype(np.float32, copy=False)) for i, (ts, _) in enumerate(kept)]
 
@@ -829,7 +842,7 @@ def rerank_pairs(query: str, passages: list[str]) -> np.ndarray:
         return np.zeros(0, dtype=np.float32)
     model = get_reranker()
     pairs = [(query, p) for p in passages]
-    with RERANKER_GUARD.active():
+    with RERANKER_GUARD.active(), runtime_resources.model_execution():
         scores = model.predict(
             pairs,
             batch_size=32,
@@ -930,7 +943,7 @@ def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     model = get_model()
     if is_query:
         texts = [QUERY_PREFIX + t for t in texts]
-    with BGE_GUARD.active():
+    with BGE_GUARD.active(), runtime_resources.model_execution():
         vecs = model.encode(
             texts,
             batch_size=encode_batch_size(model),
@@ -1364,6 +1377,136 @@ def _embed_live_chunks(chunks: list[str]) -> np.ndarray:
     if len(parts) == 1:
         return np.asarray(parts[0], dtype=np.float32)
     return np.concatenate(parts, axis=0)
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationVectors:
+    """One page generation's exact chunks and vectors, encoded at most once.
+
+    ``reused`` is True when the vectors came from the already-published
+    sidecar rows rather than a fresh encode.  It is the observable a caller
+    needs to prove that two consumers of one generation did not both pay for
+    it, and it is content-free.
+    """
+
+    rel_path: str
+    fingerprint: str
+    title: str
+    body: str
+    chunks: tuple[str, ...]
+    vectors: np.ndarray
+    reused: bool
+
+
+def published_generation_vectors(
+    vault_root: Path, rel_path: str, *, chunks: list[str]
+) -> np.ndarray | None:
+    """The sidecar's own vectors for exactly `chunks`, or None.
+
+    Exactness is decided on the stored chunk TEXT, not on an mtime or a row
+    count: a page whose current chunking differs by one character is a
+    different generation and must not borrow the previous one's vectors.
+    """
+    if not chunks:
+        return np.zeros((0, VECTOR_DIM), dtype=np.float32)
+    try:
+        index = get_embedding_index(vault_root)
+        metadata, matrix = index.all_vectors()
+    except Exception as e:  # noqa: BLE001 - sidecar reuse is an optimisation
+        log.debug("published generation vectors unavailable for %s: %s", rel_path, e)
+        return None
+    rows = sorted(
+        (
+            (chunk_index, row)
+            for row, (file_path, chunk_index) in enumerate(metadata)
+            if file_path == rel_path
+        )
+    )
+    if [chunk_index for chunk_index, _row in rows] != list(range(len(chunks))):
+        return None
+    try:
+        texts = index._texts_for([(rel_path, chunk_index) for chunk_index, _row in rows])
+    except Exception as e:  # noqa: BLE001 - sidecar reuse is an optimisation
+        log.debug("published chunk text unavailable for %s: %s", rel_path, e)
+        return None
+    if [texts.get((rel_path, chunk_index)) for chunk_index, _row in rows] != list(chunks):
+        return None
+    return np.asarray([matrix[row] for _chunk_index, row in rows], dtype=np.float32)
+
+
+def prepare_generation_vectors(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    expected_fingerprint: str,
+    allow_encode: bool = True,
+) -> GenerationVectors | None:
+    """Resolve one exact page generation's chunks and vectors for reuse.
+
+    The handoff between the embedding consumer and the advisory consumer is the
+    published sidecar itself: whichever runs first pays the encode, and the
+    other reads those exact rows back.  That is what also makes a post-crash
+    replay free — the vectors for the generation are already durable.
+
+    Returns None when the page is absent, unreadable, no longer the expected
+    generation, or when encoding would be required and is not allowed.  It
+    never falls back to a different generation's vectors.
+    """
+    from . import find as find_module
+    from .vault import content_hash
+
+    target = Path(vault_root).joinpath(*str(rel_path).split("/"))
+    try:
+        if target.is_symlink() or not target.is_file():
+            return None
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    fingerprint = content_hash(text)
+    if fingerprint != expected_fingerprint:
+        return None
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return None
+    try:
+        page = find_module._CACHE.get(target, Path(vault_root))
+        if page is None:
+            return None
+        chunks = _chunks_for_page(Path(vault_root), page)
+    except Exception as e:  # noqa: BLE001 - chunk extraction is best-effort
+        log.debug("generation chunks could not be prepared for %s: %s", rel_path, e)
+        return None
+
+    published = published_generation_vectors(vault_root, rel_path, chunks=chunks)
+    if published is not None and len(published) == len(chunks):
+        vectors, reused = published, True
+    elif not allow_encode:
+        return None
+    else:
+        try:
+            get_model()
+        except Exception as e:  # noqa: BLE001 - model backends soft-fail by contract
+            log.debug("generation vectors need a model that did not load: %s", e)
+            return None
+        try:
+            vectors, reused = _embed_live_chunks(chunks), False
+        except Exception as e:  # noqa: BLE001 - one bad encode must not fail a worker
+            log.debug("generation vectors could not be encoded for %s: %s", rel_path, e)
+            return None
+    # The page can move under a slow encode; re-prove before handing it on.
+    try:
+        if content_hash(target.read_text(encoding="utf-8")) != expected_fingerprint:
+            return None
+    except (OSError, UnicodeDecodeError):
+        return None
+    return GenerationVectors(
+        rel_path=str(rel_path),
+        fingerprint=fingerprint,
+        title=page.title,
+        body=page.body,
+        chunks=tuple(chunks),
+        vectors=np.asarray(vectors, dtype=np.float32),
+        reused=reused,
+    )
 
 
 def delete_after_remove_status(

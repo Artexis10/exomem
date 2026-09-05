@@ -1,7 +1,8 @@
 ---
 name: exomem-continue
 description: Resume prior project or session context from Exomem when the user wants to continue, pick something back up, or remember what was happening on a topic.
-version: 0.1.0
+metadata:
+  version: "0.1.0"
 ---
 
 # exomem-continue
@@ -12,6 +13,26 @@ Resume prior context without guessing from chat history alone.
 ## When to use
 Use when the user asks to continue, resume, pick up a project, recover prior state, or asks what they were doing on a topic.
 
+## Portable operating rules
+
+Before the first operation, obtain `bootstrap(profile="compact")` if current
+policy or capabilities are missing; honor `engagement.envelope` and
+`available_product_tools`. Use the harness's supported discovery mechanism and
+load only the tools needed now. If neither the applicable local procedure nor
+the portable operating contract is available, do not improvise a write.
+
+Sources/Evidence are immutable, and content outside the managed Knowledge Base
+is read-only. Before a compiled write: search/read for duplicates, draft, run
+`connect_memory(operation="suggest-links")`, and include known source references
+and reviewed connections in the first write. Honor the live confirmation ceiling;
+a workflow or standing capture preference does not grant restructure authority.
+
+Inspect mutation results before reporting success. On `success: false`, follow
+the structured error. For warming, busy, pending, or
+`MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, preserve the same mutation identity
+and unchanged payload; wait/reconcile/retry only as instructed, never with a new
+identity after an uncertain commit.
+
 ## Workflow
 1. Search first with `ask_memory(detail="compact", rerank=false)`, preferring active compiled notes and project-relevant terms from the prompt.
 2. Use `ask_memory(deep=true)` when several hits matter or the state needs synthesis.
@@ -20,6 +41,12 @@ Use when the user asks to continue, resume, pick up a project, recover prior sta
 5. Read the Planning inventory with `plan_memory(action="inspect")` (no collection) when the topic has one, and read the due-state block any response already carried rather than re-deriving it. Both are read-only and create nothing.
 6. Summarize current state, decisions already made, blockers, and likely next actions.
 
+## Relation governance
+Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`; corrections use a new canonical key and deprecate the old one.
+
 ## Output contract
 Return a compact continuation brief with cited Exomem pages and a short next-action list. Say when the search missed or was thin.
 
@@ -27,7 +54,7 @@ Return a compact continuation brief with cited Exomem pages and a short next-act
 Save only if the resumed work produces a new durable decision, solved problem, failure, pattern, or research finding. Use `remember`, `edit_memory`, or `replace_memory` as appropriate.
 
 ## Lifecycle
-Resuming reads Planning; it never moves it. A work item's state changes only when the user states an intent or reports an outcome in this session — then route the intent to `plan_memory` and the outcome to `record_memory`, and when one landing does both, do them together and report it once in the user's own words. Elapsed time since the last session is not an outcome, and nothing in the runtime transitions an item on your behalf.
+Resuming reads Planning; it never moves it. Route explicit user intent to Planning and observed outcomes to Records. An outcome alone never transitions Planning: explicit user intent may request a guarded transition, and `propose-after-outcome` may only propose one. Elapsed time since the last session is not an outcome, and nothing in the runtime transitions an item on your behalf.
 
 ## Mistakes to avoid
 Do not invent prior context from memory. Do not treat a scoped miss as absence. Do not dump long note bodies when a state brief is enough.

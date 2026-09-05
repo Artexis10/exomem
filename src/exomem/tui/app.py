@@ -24,7 +24,7 @@ from textual.command import DiscoveryHit, Hit, Hits, Provider
 from textual.reactive import reactive
 
 from . import theme as theme_module
-from .backend import ExomemBackend, VaultState
+from .backend import ExomemBackend, VaultState, retain_runtime_presence
 from .screens import (
     AdoptScreen,
     AskScreen,
@@ -195,6 +195,10 @@ class ExomemTuiApp(App):
     def _apply_vault_state(self, state: VaultState) -> None:
         self._vault_state = state
         if state.initialized and state.root is not None:
+            # This callback runs on the Textual app thread. Retain the process
+            # slot here so first-run vault adoption is covered even though the
+            # backend discovery and later product calls run in worker threads.
+            retain_runtime_presence(state.root)
             self.context_label = state.root.name
             return
         if state.root is None:

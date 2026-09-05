@@ -112,6 +112,7 @@ def invoke_prepared(
     """Invoke one already-coerced registry command under the shared bindings."""
     from . import capabilities
     from . import schema as schema_module
+    from .governance import consolidation_enrollment
     from .governance import principal as principal_module
     from .writer_lease import invoke_command
 
@@ -129,20 +130,36 @@ def invoke_prepared(
         )
 
     root = resolve_vault_for(cmd.name, kwargs, vault_root)
-    if cmd.needs_schema:
-        injected = (root, schema_module.load_source_schema(root))
-    else:
-        injected = (root,)
+    from . import state_migration
 
-    descriptor = cli_surface_descriptor(expose_tier2=expose_tier2)
-    if principal is None:
-        from .governance.authorization_request import AuthorizationContextUnavailable
+    try:
+        with consolidation_enrollment.invocation_runtime_presence(root):
+            # Ordinary invocation refuses legacy or ambiguous machine-local
+            # state placement until an explicit offline migration completes.
+            if not allows_uninitialized_vault(cmd.name, kwargs):
+                state_migration.require_vault_state_ready(root)
+            injected: tuple[Any, ...]
+            if cmd.needs_schema:
+                injected = (root, schema_module.load_source_schema(root))
+            else:
+                injected = (root,)
 
-        raise AuthorizationContextUnavailable
-    with capabilities.active_surface(descriptor), principal_module.request_scope(
-        principal
-    ):
-        return invoke_command(cmd, *injected, idempotency_key=idempotency_key, **kwargs)
+            descriptor = cli_surface_descriptor(expose_tier2=expose_tier2)
+            if principal is None:
+                from .governance.authorization_request import AuthorizationContextUnavailable
+
+                raise AuthorizationContextUnavailable
+            with capabilities.active_surface(descriptor), principal_module.request_scope(
+                principal
+            ):
+                return invoke_command(
+                    cmd,
+                    *injected,
+                    idempotency_key=idempotency_key,
+                    **kwargs,
+                )
+    except consolidation_enrollment.ConsolidationEnrollmentUnavailable:
+        raise cli_ops.OpError("VAULT_UNAVAILABLE", "vault is unavailable") from None
 
 
 def prepare_local_authorization(
@@ -179,10 +196,19 @@ def verify_local_authorization_transport(
     """Consume and verify the protected carrier before argument validation."""
     import time
 
-    from .governance import authorization_request, authorization_transport
+    from .governance import (
+        authorization_request,
+        authorization_transport,
+        consolidation_enrollment,
+    )
     from .governance import principal as principal_module
 
     root = resolve_vault_for(cmd.name, raw_for_vault, vault_root)
+    if surface == "cli":
+        try:
+            consolidation_enrollment.ensure_cli_runtime_presence(root)
+        except consolidation_enrollment.ConsolidationEnrollmentUnavailable:
+            raise cli_ops.OpError("VAULT_UNAVAILABLE", "vault is unavailable") from None
     carrier = authorization_carrier
     if carrier is None:
         carrier = (

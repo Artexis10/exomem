@@ -26,7 +26,7 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from . import __version__, reserved_paths
+from . import __version__, reserved_paths, state_paths
 from .kbdir import kb_dirname
 
 MANIFEST_NAME = "exomem-manifest.json"
@@ -693,6 +693,65 @@ def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_Sour
                 _fail("RESOURCE_LIMIT_EXCEEDED", "the vault exceeds the export file limit")
             if total_bytes > limits.max_total_bytes:
                 _fail("RESOURCE_LIMIT_EXCEEDED", "the vault exceeds the export byte limit")
+
+    # Two portable-derived families now live outside the vault.  Preserve
+    # their established logical archive names so old/new archives share one
+    # format and restore can publish the verified vault atomically; the
+    # restore candidate's explicit offline phase then relocates those logical
+    # paths before any target runtime may start. All other external state
+    # remains disposable by classification.
+    state_dir = state_paths.vault_state_dir(vault_root)
+    if os.path.lexists(state_dir):
+        state_stat = _safe_lstat(state_dir)
+        if stat.S_ISLNK(state_stat.st_mode) or not stat.S_ISDIR(state_stat.st_mode):
+            _fail("UNSAFE_SOURCE_ENTRY", "external state root is unsafe")
+        for current, directory_names, file_names in os.walk(
+            state_dir, topdown=True, followlinks=False
+        ):
+            current_path = Path(current)
+            directory_names.sort()
+            file_names.sort()
+            for name in directory_names:
+                child_stat = _safe_lstat(current_path / name)
+                if stat.S_ISLNK(child_stat.st_mode) or not stat.S_ISDIR(
+                    child_stat.st_mode
+                ):
+                    _fail("UNSAFE_SOURCE_ENTRY", "external state tree is unsafe")
+            for name in file_names:
+                source = current_path / name
+                state_relative = source.relative_to(state_dir).as_posix()
+                logical = _normalized_relative_path(
+                    f"{kb_dirname()}/{state_relative}"
+                )
+                classification = classify_artifact(logical)
+                if classification.artifact_class is not ArtifactClass.PORTABLE_DERIVED:
+                    source_stat = _safe_lstat(source)
+                    if stat.S_ISLNK(source_stat.st_mode) or not stat.S_ISREG(
+                        source_stat.st_mode
+                    ):
+                        _fail("UNSAFE_SOURCE_ENTRY", "external state entry is unsafe")
+                    continue
+                size, digest, source_signature = _digest_regular_source(source)
+                if size > limits.max_file_bytes:
+                    _fail(
+                        "RESOURCE_LIMIT_EXCEEDED",
+                        "a source file exceeds the export limit",
+                    )
+                snapshots.append(
+                    _SourceSnapshot(
+                        path=logical,
+                        source_path=source,
+                        size=size,
+                        sha256=digest,
+                        classification=classification.artifact_class.value,
+                        source_signature=source_signature,
+                    )
+                )
+                total_bytes += size
+                if len(snapshots) > limits.max_files:
+                    _fail("RESOURCE_LIMIT_EXCEEDED", "the vault exceeds the export file limit")
+                if total_bytes > limits.max_total_bytes:
+                    _fail("RESOURCE_LIMIT_EXCEEDED", "the vault exceeds the export byte limit")
     snapshots.sort(key=lambda snapshot: snapshot.path)
     folded: set[str] = set()
     directory_spellings: dict[str, str] = {}
@@ -1390,7 +1449,12 @@ def _verify_staged_files(
                 )
     for path, record in expected.items():
         target = root.joinpath(*PurePosixPath(path).parts)
-        if target.stat().st_size != record["size"] or _hash_file(target) != record["sha256"]:
+        target_value = target.lstat()
+        if (
+            target_value.st_nlink != 1
+            or target_value.st_size != record["size"]
+            or _hash_file(target) != record["sha256"]
+        ):
             _fail("STAGING_DIGEST_MISMATCH", "canonical staged bytes do not match the manifest")
 
 
@@ -1512,8 +1576,20 @@ def _safe_restore_parent(root: Path, relative: str) -> Path:
     return current
 
 
-def _repair_canonical_from_archive(prepared: PreparedRestore, live: Path) -> None:
-    """Restore manifest-owned bytes after an unsafe derived-index callback."""
+def _repair_canonical_from_archive(
+    prepared: PreparedRestore,
+    live: Path,
+    *,
+    portable_state_root: Path | None = None,
+) -> None:
+    """Restore manifest-owned bytes at their current placement.
+
+    Before state-root relocation every archive member was published under the
+    vault. After relocation, portable-derived members are repaired under the
+    supplied external state root and are treated as forbidden extras in the
+    vault. This keeps a repair callback from resurrecting a legacy writer
+    authority after the migration journal has advanced.
+    """
 
     verified = verify_export_archive(
         prepared.source_archive,
@@ -1525,15 +1601,41 @@ def _repair_canonical_from_archive(prepared: PreparedRestore, live: Path) -> Non
     ):
         _fail("CANONICAL_INTEGRITY_VIOLATION", "restore source changed before repair")
     expected = {str(record["path"]): record for record in prepared.manifest["files"]}
+    expected_in_vault = {
+        relative: record
+        for relative, record in expected.items()
+        if portable_state_root is None
+        or record["classification"] != ArtifactClass.PORTABLE_DERIVED.value
+    }
     found = _walk_regular_files(live)
-    for extra in found - set(expected):
+    for extra in found - set(expected_in_vault):
         if classify_artifact(extra).artifact_class is not ArtifactClass.DISPOSABLE_RUNTIME:
             live.joinpath(*PurePosixPath(extra).parts).unlink()
 
+    if portable_state_root is not None:
+        portable_state_root = Path(portable_state_root)
+        state_value = portable_state_root.lstat()
+        if stat.S_ISLNK(state_value.st_mode) or not stat.S_ISDIR(state_value.st_mode):
+            _fail("CANONICAL_INTEGRITY_VIOLATION", "portable state root is unsafe")
+
     with zipfile.ZipFile(prepared.source_archive, "r") as archive:
         for relative, record in expected.items():
-            parent = _safe_restore_parent(live, relative)
-            target = parent / PurePosixPath(relative).name
+            repair_root = live
+            repair_relative = relative
+            if (
+                portable_state_root is not None
+                and record["classification"] == ArtifactClass.PORTABLE_DERIVED.value
+            ):
+                parts = PurePosixPath(relative).parts
+                if len(parts) < 2:
+                    _fail(
+                        "CANONICAL_INTEGRITY_VIOLATION",
+                        "portable state path has no state member",
+                    )
+                repair_root = portable_state_root
+                repair_relative = PurePosixPath(*parts[1:]).as_posix()
+            parent = _safe_restore_parent(repair_root, repair_relative)
+            target = parent / PurePosixPath(repair_relative).name
             descriptor, temporary_name = tempfile.mkstemp(
                 prefix=f".{target.name}.",
                 suffix=".repair",
@@ -1555,7 +1657,27 @@ def _repair_canonical_from_archive(prepared: PreparedRestore, live: Path) -> Non
                 os.replace(temporary, target)
             finally:
                 temporary.unlink(missing_ok=True)
-    _verify_staged_files(live, prepared.manifest, allow_derived_extras=True)
+    verification_manifest = {**prepared.manifest, "files": list(expected_in_vault.values())}
+    _verify_staged_files(live, verification_manifest, allow_derived_extras=True)
+    if portable_state_root is not None:
+        for relative, record in expected.items():
+            if record["classification"] != ArtifactClass.PORTABLE_DERIVED.value:
+                continue
+            parts = PurePosixPath(relative).parts
+            target = portable_state_root.joinpath(*parts[1:])
+            target_value = target.lstat()
+            if stat.S_ISLNK(target_value.st_mode) or not stat.S_ISREG(target_value.st_mode):
+                _fail(
+                    "CANONICAL_INTEGRITY_VIOLATION",
+                    "repaired portable state member is unsafe",
+                )
+            if target_value.st_size != record["size"] or _hash_file(target) != record[
+                "sha256"
+            ]:
+                _fail(
+                    "CANONICAL_INTEGRITY_VIOLATION",
+                    "repaired portable state bytes are invalid",
+                )
 
 
 def publish_prepared_restore(

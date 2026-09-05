@@ -1182,7 +1182,7 @@ def render_item_path(
             text = str(normalized).strip()
         if text:
             parts.append(text)
-    stem = vault.sanitize_title_filename(" — ".join(parts))
+    stem = vault.sanitize_title_filename(unicodedata.normalize("NFKC", " — ".join(parts)))
     if not stem:
         raise CollectionError(
             "UNRENDERABLE_ITEM_FILENAME",
@@ -2673,7 +2673,7 @@ def _require_profile_layer(profile: str, path: str, name: str) -> None:
 
 
 def _portable_path_key(path: str) -> str:
-    return "/".join(unicodedata.normalize("NFC", part).casefold() for part in path.split("/"))
+    return "/".join(unicodedata.normalize("NFKC", part).casefold() for part in path.split("/"))
 
 
 def _is_safe_vault_target(root: Path, target: Path) -> bool:

@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Exomem assistant guide
 
 This guide is for agents using Exomem after the MCP server or connector is
@@ -34,7 +36,16 @@ conversation already contains fresh KB evidence.
 
 An empty search means "not found with that query and scope." It is not proof that
 the knowledge does not exist. Try synonyms, adjacent terms, singular/plural
-forms, or `scope="vault"` before saying there is no relevant material.
+forms, `widen_outside_kb=true`, or `scope="vault"` before saying there is no
+relevant material.
+
+`scope="kb"` (the default) searches the knowledge base and nothing else.
+`widen_outside_kb` is off by default: set it to true to also reserve up to
+`limit - 1` slots for curated vault pages outside the knowledge base, which is
+what surfaces a terse tracker or handbook whose title is the query. Reserved
+hits carry `outside_kb: true`. Earlier releases widened on every `scope="kb"`
+recall; the reserve is now something the caller asks for, so the default costs
+nothing for the callers that never read it.
 
 Use page recall for conclusions, unit recall for exact observations, and mixed
 recall when both are useful. An empty query with structured filters is a
@@ -67,6 +78,22 @@ Do not make the user choose `Sources`, `Evidence`, `Notes`, `Entities`, pack
 metadata, graph sidecars, or schema terms unless the distinction changes the
 outcome. With the user, say "ask", "remember", "capture", "review", "connect",
 "adopt", or "maintain"; use canonical leaf names only when debugging internals.
+
+## Typed relation loop
+
+For a request to connect two memories, first call
+`connect_memory(operation="resolve-relation")`. Reuse a specific truthful
+registered relation when one fits. `relates_to` and no edge remain valid outcomes;
+candidate ordering is not a semantic decision. When a reviewed distinction is
+missing, call `schema_memory(subject="relations", operation="propose-relation")`.
+Only a separate `save-relations` call with `expected_hash` and `why` changes the
+registry; never treat a proposal, recurrence count, or queue item as approval.
+
+`schema_memory(subject="relations", operation="infer")` is read-only. Its
+aggregate `census` is privacy-safe evidence: `relation_counts`, `page_counts`,
+and `denominators` contain counts only. Optional `project`, `page_type`,
+`date_from`, and `date_to` scope it. Origin dates use `created`, then `captured`;
+undated pages remain explicit and `updated` is not used as a cohort date.
 
 For CLI use, these actions are also available as friendly aliases:
 

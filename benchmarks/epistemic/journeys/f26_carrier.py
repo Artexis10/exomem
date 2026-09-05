@@ -85,6 +85,12 @@ class Envelope:
         timeout: float = 60.0,
         extra_env: Mapping[str, str] | None = None,
     ) -> str:
+        state_root = os.environ.get("EXOMEM_STATE_ROOT")
+        if not state_root:
+            raise JourneyStepFailed(
+                "journey state root is absent; the installed envelope must use the seeded "
+                "external state root"
+            )
         completed = subprocess.run(  # noqa: S603 - resolved executable, fixed argv
             [str(self.executable), *args],
             cwd=str(cwd),
@@ -101,6 +107,10 @@ class Envelope:
                 # failure would look like a product one.
                 **dict(extra_env or {}),
                 "EXOMEM_DISABLE_EMBEDDINGS": "1",
+                # State roots are part of a vault's identity. Keep the one that
+                # completed the seed migration when each journey step starts a
+                # fresh installed CLI process.
+                "EXOMEM_STATE_ROOT": state_root,
                 # The envelope locates the vault from the environment, not from
                 # the working directory. Passing only ``cwd`` produced a
                 # well-formed refusal that looked like a product failure and was
@@ -183,7 +193,17 @@ def seed_journey_vault(destination: Path, *, repo_root: Path) -> Path:
     state rather than from whatever the last run left behind.
     """
 
+    if not os.environ.get("EXOMEM_STATE_ROOT"):
+        raise JourneyStepFailed(
+            "journey seed requires an explicit EXOMEM_STATE_ROOT outside the vault"
+        )
     shutil.copytree(repo_root / SAMPLE_VAULT_PATH, destination)
+    from exomem import state_migration
+
+    authority = state_migration.assert_offline_migration_authority(
+        source="epistemic installed-envelope journey seed"
+    )
+    state_migration.migrate_vault_state_offline(destination, authority=authority)
     return destination
 
 

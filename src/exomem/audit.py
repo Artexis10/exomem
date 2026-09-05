@@ -105,6 +105,7 @@ from . import (
     source_closure,
     temporal,
 )
+from . import entity_recurrence as entity_recurrence_module
 from . import entity_types as entity_types_module
 from . import find as find_module
 from . import vault as vault_module
@@ -147,6 +148,8 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "supersession_integrity",
     "entity_type_unregistered",
     "unreflected_outcomes",
+    "scope_divergence_semantic",
+    "entity_recurrence",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -184,6 +187,15 @@ TYPED_SEMANTIC_CATEGORIES: tuple[str, ...] = (
 # opt-in only hides the queue from the people it exists for.
 EPISTEMIC_REVIEW_CATEGORIES: tuple[str, ...] = (
     "unfinished_experiments",
+    # Structural, not lifecycle — and it belongs here anyway, because this tuple's
+    # gate is BACKLOG PROFILE rather than category kind (see the note above). A
+    # geometric scope check meets an existing corpus with every page it will ever
+    # flag already written, which is the grandfathered population the opt-in rule
+    # exists to keep off the daily surface. It is registered, selectable, and
+    # triageable from the first run; it simply does not displace what is already
+    # there. Whether it graduates into the default union is a calibration
+    # decision, on evidence this change deliberately does not yet have.
+    "scope_divergence_semantic",
     # Same exclusion, a different reason for it, and the difference matters.
     # `unfinished_experiments` is held back by a grandfathered POPULATION;
     # `question_aging` is held back because its trigger is a THRESHOLD THIS
@@ -192,6 +204,15 @@ EPISTEMIC_REVIEW_CATEGORIES: tuple[str, ...] = (
     # surface; a queue that fires on a number the product picked has not, and
     # admitting one would let a tuning decision quietly displace authored work.
     "question_aging",
+    # A third reason for the same exclusion, and the one this tuple's BACKLOG
+    # PROFILE gate was written for. A recurrence sensor meets an existing corpus
+    # in which every candidate it will ever name is ALREADY linked — the whole
+    # grandfathered population arrives on the first run. It is registered,
+    # selectable and triageable from that run; it simply does not displace a
+    # surface someone already relies on. Whether it graduates into the default
+    # union is a calibration decision, on evidence this change deliberately does
+    # not yet have (f21 stays withheld).
+    "entity_recurrence",
 )
 _SEMANTIC_AUDIT_CATEGORIES = frozenset({"semantic_contract_drift", *TYPED_SEMANTIC_CATEGORIES})
 _LEGACY_BACKLOG_CODE = "RELATION_DISPOSITION_MISSING"
@@ -504,6 +525,10 @@ def audit(
         findings.extend(_check_supersession_integrity(vault_root, pages))
     if "corpus_contradictions" in selected:
         findings.extend(_check_corpus_contradictions(vault_root, pages, today=today))
+    if "scope_divergence_semantic" in selected:
+        findings.extend(_check_scope_divergence_semantic(vault_root, pages))
+    if "entity_recurrence" in selected:
+        findings.extend(_check_entity_recurrence(vault_root, pages))
     if "relation_registry" in selected:
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
@@ -618,7 +643,22 @@ def _check_duplicated_sidecars(vault_root: Path) -> list[AuditFinding]:
         if damage is None:
             continue
         rel = sidecar.relative_to(vault_root).as_posix()
-        detail = f"{damage.depth} nested copies; {damage.duplicate_chars:,} duplicate chars"
+        if damage.source_reextraction_required:
+            detail = (
+                f"{damage.depth} nested copies; source re-extraction required "
+                "(no surviving extracted text)"
+            )
+            severity = "error"
+            proposed_fix = (
+                "retry media processing to produce a source-derived extraction; "
+                "automatic sidecar repair cannot determine a safe unit"
+            )
+        else:
+            detail = f"{damage.depth} nested copies; {damage.duplicate_chars:,} duplicate chars"
+            severity = "error" if damage.recovery_only else "warn"
+            proposed_fix = (
+                "maintain_memory(mode='fix') keeps the longest extraction and drops the nesting"
+            )
         if damage.recovery_only:
             detail += "; extraction survives ONLY in a nested copy"
         elif damage.distinct_extractions > 1:
@@ -626,12 +666,10 @@ def _check_duplicated_sidecars(vault_root: Path) -> list[AuditFinding]:
         findings.append(
             AuditFinding(
                 category="duplicated_sidecar",
-                severity="error" if damage.recovery_only else "warn",
+                severity=severity,
                 path=rel,
                 detail=detail,
-                proposed_fix=(
-                    "maintain_memory(mode='fix') keeps the longest extraction and drops the nesting"
-                ),
+                proposed_fix=proposed_fix,
             )
         )
     return findings
@@ -2788,7 +2826,9 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
     one wipe-and-rebuild.
     """
     findings: list[AuditFinding] = []
-    sidecar = vault_root / kb_dirname() / ".embeddings.sqlite"
+    from . import index_paths
+
+    sidecar = index_paths.sidecar_path(vault_root)
     if not sidecar.exists():
         return findings
     import sqlite3
@@ -5065,25 +5105,130 @@ def _claim_level_enabled() -> bool:
 
 
 def _pair_polarity(vault_root: Path, a: str, b: str) -> dict | None:
-    """Claim-level polarity for one flagged pair, or None (best-effort).
+    """Claim-level polarity for one flagged pair, through the ADMITTED verifier only.
 
-    Pulls each page's stored/live claim (`claims.claim_text_for_page`) and runs
-    `claims.classify_polarity`. Returns `{label, score, method}` or None when a
-    claim is missing / the check fails — the audit finding then degrades to the
-    proximity-only detail. Never raises into the sweep.
+    Returns `{label, score, method, model_digest, label_map_version}` or None.
+    None when either claim is missing, or — the important case — when the frozen
+    verifier is not admitted: the entry then carries NO label at all. The lexical
+    heuristic is never consulted here. It had no admission control, which is the
+    seam the ratified authority-and-effects matrix names non-compliant, so it may
+    not produce queue metadata under any method name.
+
+    Deliberately does NOT swallow exceptions: a forward pass that blows up on one
+    pair is the caller's to record as a degraded entry, and swallowing it here
+    would make a soft-failed entry indistinguishable from an unlabelled one.
     """
-    try:
-        from . import claims
+    from . import claims
 
-        claim_a = claims.claim_text_for_page(vault_root, a)
-        claim_b = claims.claim_text_for_page(vault_root, b)
-        if not claim_a or not claim_b:
-            return None
-        res = claims.classify_polarity(claim_a, claim_b)
-        return {"label": res.label, "score": res.score, "method": res.method}
-    except Exception as e:  # noqa: BLE001
-        log.debug("audit pair polarity failed for (%s, %s): %s", a, b, e)
+    admission = claims.verifier_admission()
+    if not admission.admitted:
+        log.debug(
+            "contradiction polarity unavailable (%s): %s",
+            admission.reason,
+            admission.detail,
+        )
         return None
+    claim_a = claims.claim_text_for_page(vault_root, a)
+    claim_b = claims.claim_text_for_page(vault_root, b)
+    if not claim_a or not claim_b:
+        return None
+    result = claims.verifier_polarity(claim_a, claim_b)
+    if result is None:
+        return None
+    return {
+        "label": result.label,
+        "score": result.score,
+        "method": result.method,
+        "model_digest": admission.model_digest,
+        "label_map_version": admission.label_map_version,
+    }
+
+
+def _attach_polarity_label(finding: AuditFinding, label: dict) -> bool:
+    """Attach one admitted label to one finding, or drop it as stale. Returns
+    whether it was attached.
+
+    The label records the `signal_version` it was computed against, and a label
+    whose recorded version differs from the entry's is DROPPED, not served: a
+    verdict about one state of two pages says nothing about another, and serving
+    it anyway would be the one way labelling could mislead a reader. Within a
+    single sweep the two always agree, because the label is computed right after
+    the entry's signal version is read — this guard is what keeps that true for
+    any label reaching an entry from anywhere else.
+
+    Attaching NEVER touches `signal_version`, `provenance`, `priority`, or any
+    other key: it only adds the polarity namespace and appends the rendered note.
+    """
+    meta = finding.meta
+    if meta is None:
+        return False
+    if label.get("signal_version") != meta.get("signal_version"):
+        log.debug(
+            "dropping stale polarity label for %s (computed against %s, entry is %s)",
+            finding.paths,
+            label.get("signal_version"),
+            meta.get("signal_version"),
+        )
+        return False
+    meta["polarity"] = label["label"]
+    meta["polarity_score"] = label["score"]
+    meta["polarity_method"] = label["method"]
+    meta["polarity_model_digest"] = label["model_digest"]
+    meta["polarity_label_map_version"] = label["label_map_version"]
+    meta["polarity_signal_version"] = label["signal_version"]
+    finding.detail += (
+        f" Claim-level check: likely {label['label'].upper()} "
+        f"(via {label['method']}, label map {label['label_map_version']})."
+    )
+    return True
+
+
+def _enrich_contradiction_polarity(
+    vault_root: Path, findings: list[AuditFinding]
+) -> None:
+    """Attach admitted-verifier polarity labels to the SURFACED contradiction set.
+
+    The single admitted channel (design D3). Four properties hold by
+    construction rather than by configuration:
+
+    - **Bounded.** It runs over the list it is handed, which the caller has
+      already ordered and capped at `EXOMEM_CONTRADICTION_TOP_N`, so enrichment
+      can never widen the work the sweep does.
+    - **Proximity only.** An asserted pair is skipped: the author's `contradicts`
+      edge outranks a model's guess, and a label on it would be the server
+      forming an opinion about which side is right.
+    - **Additive.** Nothing here writes `signal_version`, `provenance`,
+      `priority`, ordering, or the omitted-count summary. A dismissal cannot
+      resurface because a label arrived.
+    - **Failure-isolated per entry.** An exception leaves that entry unenriched
+      and recorded as degraded; the pass continues.
+    """
+    if not findings or not _claim_level_enabled():
+        return
+    degraded = 0
+    for finding in findings:
+        meta = finding.meta
+        if not meta or meta.get("provenance") != "proximity":
+            continue
+        paths = finding.paths or []
+        if len(paths) != 2:
+            continue
+        try:
+            label = _pair_polarity(vault_root, paths[0], paths[1])
+        except Exception as error:  # noqa: BLE001 — one bad pair never aborts the pass
+            degraded += 1
+            log.debug("polarity enrichment degraded for %s: %s", paths, error)
+            continue
+        if label is None:
+            continue
+        label["signal_version"] = meta.get("signal_version")
+        _attach_polarity_label(finding, label)
+    if degraded:
+        log.info(
+            "contradiction polarity enrichment degraded on %d of %d surfaced entr(ies)",
+            degraded,
+            len(findings),
+        )
 
 
 _ASSERTED_FIX = (
@@ -5145,6 +5290,305 @@ def _asserted_contradictions(
             )
         )
     return findings, keys
+
+
+def _scope_divergence_semantic_finding(
+    rel_path: str, advisory: dict
+) -> AuditFinding:
+    """One advisory -> one finding, with the ONE signal version this family uses.
+
+    The fingerprint a review decision binds to is composed by `review_state` from
+    the finding's category, path and `signal_version`; this is the only place the
+    latter is chosen, and it is composed over the SORTED LABEL TERMS rather than
+    the page's bytes. That is deliberate and it is the whole dismissal contract:
+    material change means the divergent group's vocabulary changed, so editing a
+    typo elsewhere on the page cannot resurrect advice somebody already put down,
+    and a genuinely different group cannot inherit the old decision.
+    """
+    from . import structure_promotion_semantic as sensor
+
+    skipped = advisory.get("skipped")
+    if skipped:
+        return AuditFinding(
+            category="scope_divergence_semantic",
+            severity="info",
+            path=rel_path,
+            detail=(
+                f"{advisory['units']} semantic units is over the "
+                f"{sensor.MAX_JUDGED_UNITS}-unit cap for the geometric scope check, "
+                "so this page was NOT judged for scope divergence."
+            ),
+            proposed_fix=(
+                "No action is implied. The page is too large for the pairwise pass; "
+                "splitting it for other reasons would also bring it back into range."
+            ),
+            meta={
+                "skipped": skipped,
+                "units": advisory["units"],
+                "signal_version": content_hash(skipped)[:16],
+            },
+        )
+
+    terms = list(advisory["cluster_terms"])
+    return AuditFinding(
+        category="scope_divergence_semantic",
+        severity="info",
+        path=rel_path,
+        detail=(
+            f"{advisory['off_scope_units']} durable units on this page form a group "
+            "that holds together on its own and sits apart from what the page says "
+            f"it is about ({', '.join(terms)})."
+        ),
+        proposed_fix=(
+            "Surfaced for REVIEW only — a measurement of how this page's material is "
+            "distributed, not a judgment that anything is wrong. If the group is its "
+            "own subject, a focused note is its home; if it belongs here, nothing "
+            "needs doing. Nothing is auto-moved or auto-written."
+        ),
+        meta={
+            "reasons": list(advisory["reasons"]),
+            "strength": advisory["strength"],
+            "off_scope_units": advisory["off_scope_units"],
+            "cluster_terms": terms,
+            "signal_version": content_hash("\n".join(terms))[:16],
+        },
+    )
+
+
+def _check_scope_divergence_semantic(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Corpus sweep for pages whose unit GEOMETRY has outgrown their declared scope.
+
+    The lexical write-time advisory (`structure_promotion`) compares vocabulary and
+    is blind when the divergent material wears the parent domain's words. This is
+    the semantic counterpart, and it runs here rather than at commit time for one
+    reason: this is where the vectors already are. Nothing is embedded, no model is
+    called, and no index is added — it reads rows the indexing pipeline already
+    wrote.
+
+    Cost is bounded by construction: EXACTLY ONE corpus-level unit-vector load per
+    sweep, never a per-page query. Pages with no stored vectors are skipped without
+    being judged, because absence of evidence must never become advice.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return []
+    eligible = {
+        page.rel_path: page for page in pages if _is_active_compiled_rw(vault_root, page)
+    }
+    if not eligible:
+        return []
+    try:
+        from . import embeddings as embeddings_module
+        from . import semantic_index
+        from . import structure_promotion_semantic as sensor
+    except ImportError as e:  # numpy is core, but stay defensive
+        log.debug("scope_divergence_semantic sweep unavailable (%s)", e)
+        return []
+
+    try:
+        grouped = embeddings_module.get_embedding_index(
+            vault_root
+        ).all_semantic_unit_vectors()
+    except Exception:  # noqa: BLE001 — a derived sidecar never breaks the audit
+        log.warning("unit-vector read failed; scope_divergence_semantic skipped", exc_info=True)
+        return []
+    if not grouped:
+        return []
+
+    corpus = sensor.destination_corpus(
+        {path: page.frontmatter for path, page in eligible.items()}
+    )
+    findings: list[AuditFinding] = []
+    for rel_path in sorted(eligible):
+        rows = grouped.get(rel_path)
+        if not rows:
+            continue  # no stored geometry -> not judged, never advised about
+        try:
+            state = semantic_index.build_parent_index_state(vault_root, rel_path)
+        except (OSError, ValueError):
+            # Unreadable or unparseable here means unjudgeable, not divergent.
+            continue
+        # Geometry may only be read against the parse it was written for. An
+        # anchored `unit_ref` is `{parent_ref}#{anchor}` and carries no content,
+        # so a page rewritten in place without reindexing still JOINS perfectly
+        # while its vectors describe deleted text — the sensor would relabel the
+        # group from stale geometry and new vocabulary, and because the label set
+        # is the fingerprint, that fabricated change REOPENS settled dismissals.
+        # The generation binds `parent_source_hash`, so any edit moves it. It also
+        # covers partial coverage: units added without reindexing shift the
+        # generation, and judging the vectored subset would measure mass and
+        # retained scope over a fraction of the page and call it the page's shape.
+        # Not judged until the pipeline catches up — absence semantics, D1.
+        if any(row.parent_generation != state.parent_generation for row in rows):
+            continue
+        advisory = sensor.detect(
+            sensor.shape_from_parse(
+                path=rel_path,
+                frontmatter=eligible[rel_path].frontmatter,
+                units=state.document.units,
+                vectors_by_ref={row.unit_ref: row.vector for row in rows},
+            ),
+            corpus=corpus,
+        )
+        if advisory is not None:
+            findings.append(_scope_divergence_semantic_finding(rel_path, advisory))
+    return findings
+
+
+def _entity_recurrence_finding(
+    candidate: entity_recurrence_module.Candidate,
+) -> AuditFinding:
+    """One recurring identity -> one finding, with the ONE signal version it uses.
+
+    The fingerprint a review decision binds to is composed by `review_state` from
+    the finding's category, path and `signal_version`; this is the only place the
+    latter is chosen, and it is composed over the IDENTITY rather than over any
+    page's bytes. That is the whole dismissal contract for this family: the
+    identity IS the signal, so "I have decided not to create this entity" survives
+    every incidental edit to every page that mentions it, and a different identity
+    can never inherit that decision. v1 deliberately defines no material-change
+    reopen — a candidate that grows from three mentioning pages to nine does not
+    re-raise a dismissal (design D4, PROVISIONAL, revisit with calibration).
+    """
+    near = [match["title"] for match in candidate.near_matches]
+    return AuditFinding(
+        category=entity_recurrence_module.KIND,
+        severity="info",
+        path=candidate.anchor,
+        # The mentioning pages ride `meta`, NOT the `paths` group field, and that
+        # is the dismissal contract rather than a stylistic choice (design D4).
+        # `review_state.fingerprint` folds a finding's `paths` into the item
+        # identity, so putting a list that grows every time somebody links the
+        # name again there would move the fingerprint on exactly the event v1
+        # says must not re-raise a settled candidate. `attention` carries `meta`
+        # into the reason payload, so the reader still sees every page.
+        detail=(
+            f"[[{candidate.candidate}]] is linked from {len(candidate.pages)} distinct "
+            "pages and resolves to neither a page nor a registry entity"
+            + (f" (nearest registry names: {', '.join(near)})" if near else "")
+        ),
+        proposed_fix=(
+            "Surfaced for REVIEW only — a count of how often the corpus reaches for "
+            "this name, not a judgment that an entity is missing. Check the "
+            "near-matches first: a recurring name is often one the registry already "
+            "holds under a different spelling, and an alias belongs on that page "
+            "rather than on a new one. If it is genuinely a new entity, creating it "
+            "is your call, as is creating the linked page itself. Nothing is "
+            "auto-created."
+        ),
+        meta={
+            "reasons": [entity_recurrence_module.REASON_UNRESOLVED_IDENTITY_RECURS],
+            "candidate": candidate.candidate,
+            "identity": candidate.identity,
+            # Two identities recurring across the same corpus routinely share an
+            # anchor — whichever page sorts smallest mentions both. Without a
+            # partition `attention` fuses them onto one review id, so ONE
+            # dismissal puts down several unrelated candidates and a THIRD
+            # identity arriving on that anchor changes the fused fingerprint and
+            # REOPENS the settled decision. The identity is the partition for the
+            # same reason it is the signal version: it is what a decision here is
+            # about. Same mechanism `prediction_window`, `question_aging`,
+            # `bridge_review` and `unreflected_outcomes` already use.
+            "review_partition": candidate.identity,
+            "pages": list(candidate.pages),
+            "page_count": len(candidate.pages),
+            "near_matches": [dict(match) for match in candidate.near_matches],
+            "signal_version": content_hash(candidate.identity)[:16],
+        },
+    )
+
+
+def _entity_recurrence_resolution_entries(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> dict[str, str | None]:
+    """Path + title entries for an I/O-FREE wikilink resolver.
+
+    `WikilinkResolver(vault_root)` would re-read and YAML-parse every Markdown
+    file in the vault, which is precisely the second corpus scan this sweep must
+    not pay. Titles come from the pages the audit already parsed (`parse_page`
+    and the resolver derive a title through the same `resolve_display_title`, so
+    the title edges are the ones a full build would have produced); the walk adds
+    PATHS ONLY, opening no file, so links into curated sibling trees outside the
+    Knowledge Base resolve instead of reading as unwritten identities.
+
+    The residual gap is recorded rather than hidden: a page OUTSIDE the Knowledge
+    Base that is reachable only by its frontmatter title contributes no title
+    edge, so a bare-title link to it reads as unresolved. Closing it costs a read
+    of every file in the vault, which is the cost this sweep exists to avoid.
+    """
+    entries: dict[str, str | None] = {}
+    # `ParsedPage.rel_path` is derived through `resolve()`, and so is
+    # `WikilinkResolver._build`'s. The walk must agree with them or one file
+    # reaches the resolver under two spellings — two stem edges, two title
+    # candidates, and a bare name that looks ambiguous because of how it was
+    # enumerated rather than because of what the vault holds.
+    vault_resolved = vault_root.resolve()
+    for md_path in _walk_vault_md(vault_root):
+        try:
+            entries[md_path.resolve().relative_to(vault_resolved).as_posix()] = None
+        except (OSError, ValueError):
+            continue
+    for page in pages:
+        entries[str(page.rel_path)] = page.title
+    return entries
+
+
+def _check_entity_recurrence(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Corpus sweep for identities the vault keeps reaching for and never wrote.
+
+    The per-page link check (`forward_reference`) says "this page points at
+    something that does not exist"; it has never been able to say "and so do four
+    others". This counts across pages, which is the only place that arithmetic can
+    happen, and it runs here rather than at write time for one reason: this is
+    where the parsed bodies already are.
+
+    Cost is bounded by construction: EXACTLY ONE path-only vault walk per sweep
+    for the existence set, one registry index built from those same parsed pages,
+    and then one pass over the bodies. Nothing is embedded, no model is called,
+    and no `Entities/` glob runs per candidate. The sweep opens exactly one file —
+    the digest-cached entity-type registry — plus, for each identity that has
+    ALREADY cleared spread and the registry and whose name carries a dot, one
+    existence probe per distinct suffixed target. That probe is what stops the
+    sensor deciding from punctuation that `Node.js` or `Dr. Ines Roth` is a file.
+    """
+    if not pages:
+        return []
+    resolver = vault_module.WikilinkResolver.from_entries(
+        vault_root, _entity_recurrence_resolution_entries(vault_root, pages).items()
+    )
+    registry = entity_recurrence_module.registry_index(
+        pages, entity_types=entity_types_module.load_entity_types(vault_root)
+    )
+
+    def attachment_probe(target: str) -> bool:
+        """Is an ordinary file standing at this suffixed target?
+
+        The same two spellings `_check_wikilinks` probes — vault-rooted and
+        KB-relative — through the same `_ordinary_file_exists`, so the two agree
+        on what an attachment is.
+        """
+        normalized = target.removeprefix(kb_prefix()).lstrip("/")
+        return _ordinary_file_exists(
+            vault_root, vault_root / target.lstrip("/")
+        ) or _ordinary_file_exists(vault_root, vault_root / kb_dirname() / normalized)
+
+    return [
+        _entity_recurrence_finding(candidate)
+        for candidate in entity_recurrence_module.collect(
+            pages,
+            vault_root=vault_root,
+            resolver=resolver,
+            registry=registry,
+            indexable=lambda rel_path: access.is_indexable(vault_root, rel_path),
+            attachment_probe=attachment_probe,
+        )
+    ]
 
 
 def _check_corpus_contradictions(
@@ -5304,22 +5748,11 @@ def _proximity_contradictions(
     capped = top_n > 0 and len(scored) > top_n
     shown = scored[:top_n] if capped else scored
 
-    # Sharpen PROXIMITY → POLARITY on the surfaced (already-capped) pairs. Opt-in
-    # via EXOMEM_CLAIM_LEVEL; off → `_pair_polarity` returns None so every finding
-    # is byte-identical to baseline. Bounded by top_n (shown is already capped).
-    claim_level = _claim_level_enabled()
-
     findings: list[AuditFinding] = []
     for same_family, priority, a, b, cos, dormancy in shown:
         family_note = (
             " Same-family adjacency (likely architecture-cluster noise) — demoted."
             if same_family
-            else ""
-        )
-        polarity = _pair_polarity(vault_root, a, b) if claim_level else None
-        polarity_note = (
-            f" Claim-level check: likely {polarity['label'].upper()} (via {polarity['method']})."
-            if polarity
             else ""
         )
         meta = {
@@ -5332,10 +5765,6 @@ def _proximity_contradictions(
             "same_family": same_family,
             "provenance": "proximity",
         }
-        if polarity:
-            meta["polarity"] = polarity["label"]
-            meta["polarity_score"] = polarity["score"]
-            meta["polarity_method"] = polarity["method"]
         findings.append(
             AuditFinding(
             category="corpus_contradictions",
@@ -5344,7 +5773,7 @@ def _proximity_contradictions(
             detail=(
                 f"Active conclusion overlaps active conclusion {b!r} "
                 f"(cosine {round(cos, 4)}) — close enough to restate, refine, or "
-                f"contradict. Do they conflict?{family_note}{polarity_note}"
+                f"contradict. Do they conflict?{family_note}"
             ),
             proposed_fix=(
                 "Surfaced for REVIEW only — a proximity measurement, not an asserted "
@@ -5356,6 +5785,13 @@ def _proximity_contradictions(
             meta=meta,
             )
         )
+
+    # Sharpen PROXIMITY → POLARITY on the surfaced (already-capped) pairs, and
+    # only there. Opt-in via EXOMEM_CLAIM_LEVEL and the verifier's own admission;
+    # refused → no label at all, so every finding stays byte-identical to
+    # baseline. Runs before the omitted-count summary is appended, so the cap
+    # accounting is never in the enrichment's reach.
+    _enrich_contradiction_polarity(vault_root, findings)
 
     if capped:
         omitted = len(scored) - top_n

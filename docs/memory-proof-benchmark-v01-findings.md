@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Memory-proof benchmark v0.1 — baseline findings (2026-07-31)
 
 > **WITHDRAWN — every cross-contender figure in this document (2026-08-09).**

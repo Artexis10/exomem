@@ -70,6 +70,7 @@ _RESERVED_TREES = {
     "_governance",
     "_consolidation",
     ".graph-commit-receipts",
+    ".graph-coordination",
     ".authorization-projections",
 }
 _RESERVED_ROOT_PATTERNS = (

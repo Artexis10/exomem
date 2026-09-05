@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Records
 
 Records are Exomem's human-owned layer for observed events and current state:
@@ -43,10 +45,10 @@ authorized saved view, default-deny envelope — and takes counts rather than
 rows. A view read as plan evidence is exactly the same neutral view it is when
 read directly.
 
-For software work, Exomem owns durable intent and multi-horizon planning.
-OpenSpec and the repository own accepted software change contracts and execution
-truth; git, specifications, tests, and code remain authoritative. Outcomes and
-reusable lessons can then become governed Notes.
+Planning owns durable intent and multi-horizon planning. A resolved workflow
+contract may declare a companion owner for external execution artifacts; Records
+preserves only observed outcomes and opaque references, never companion state.
+Outcomes and reusable lessons can then become governed Notes.
 
 ## One public action surface
 

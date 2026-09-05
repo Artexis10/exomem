@@ -1,7 +1,8 @@
 ---
 name: exomem-media
 description: Search, inspect, cite, and preserve Exomem media artifacts such as PDFs, images, audio, and video.
-version: 0.1.0
+metadata:
+  version: "0.1.0"
 ---
 
 # exomem-media
@@ -12,13 +13,39 @@ Use Exomem's multimodal substrate without flattening every artifact into text.
 ## When to use
 Use when the user asks to find media evidence, look inside a recording, inspect a PDF/image/audio/video, or recall where something appeared.
 
+## Portable operating rules
+
+Before the first operation, obtain `bootstrap(profile="compact")` if current
+policy or capabilities are missing; honor `engagement.envelope` and
+`available_product_tools`. Use the harness's supported discovery mechanism and
+load only the tools needed now. If neither the applicable local procedure nor
+the portable operating contract is available, do not improvise a write.
+
+Sources/Evidence are immutable, and content outside the managed Knowledge Base
+is read-only. Before a compiled write: search/read for duplicates, draft, run
+`connect_memory(operation="suggest-links")`, and include known source references
+and reviewed connections in the first write. Honor the live confirmation ceiling;
+a workflow or standing capture preference does not grant restructure authority.
+
+Inspect mutation results before reporting success. On `success: false`, follow
+the structured error. For warming, busy, pending, or
+`MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, preserve the same mutation identity
+and unchanged payload; wait/reconcile/retry only as instructed, never with a new
+identity after an uncertain commit.
+
 ## Workflow
 1. Search with media-aware filters or artifact terms using `ask_memory`.
 2. Use artifact-specific product tools: extracted text/OCR/transcripts, `process_media` status/retry, `read_media`, `preserve_artifacts` for file handles, fallback `transfer_artifact`, upload metadata, or preserved evidence paths.
 3. Cite raw artifact paths and timestamps/pages/frames when available.
-4. Compile textual conclusions with `remember` only when there is a durable finding, naming the artifact path from step 2 or 5 in `sources:` so the note points back at the artifact it describes.
-5. Preserve new raw artifacts with `capture_source`, `preserve_evidence`, `preserve_artifacts` for file handles, or fallback `transfer_artifact` before analyzing them.
-6. Run `connect_memory(operation="suggest-links")` before writing a compiled note, and accept the links that genuinely clarify context.
+4. Preserve new raw artifacts with `capture_source`, `preserve_evidence`, `preserve_artifacts` for file handles, or fallback `transfer_artifact` before analyzing them.
+5. Draft textual conclusions only when there is a durable finding, naming the preserved artifact in `sources:`.
+6. Run `connect_memory(operation="suggest-links")` on the draft and review the links. Then write with `remember`, carrying the sources and accepted connections in the first write.
+
+## Relation governance
+Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`; corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
 Return matching artifacts, what was inspected, citations, and any compiled conclusion path.
