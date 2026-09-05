@@ -874,9 +874,11 @@ def test_release_evidence_commands_work_without_a_checkout(tmp_path: Path, job_n
     assert "submitted: " + expected in result.stdout
 
 
-#: The worst cross-platform session observed, in seconds. A floor rather than a
-#: maximum: three six-way Windows shards were censored at the 2700s cap they hit,
-#: so the true worst is at least this.
+#: The worst cross-platform session observed, in seconds. No longer censored:
+#: with the cap above real runtime, all six Windows shards ran to completion at
+#: 1950s, 2575s, 2698s, 2788s, 2886s and 2896s. The previous value of 2705 was a
+#: floor taken from a shard the old cap had truncated, which is exactly the kind
+#: of number that reads as a measurement while being a bound.
 #:
 #: Measured rather than predicted, and the measurement is why. `.test_durations.json`
 #: is Linux-recorded and this lane does not run on Linux, so a prediction from it
@@ -886,7 +888,7 @@ def test_release_evidence_commands_work_without_a_checkout(tmp_path: Path, job_n
 #: execution that splits, and no linear model over the durations file describes it.
 #: Finding that fixed cost is its own change; until then the cap clears the
 #: measurement.
-MEASURED_WORST_CROSS_PLATFORM_SESSION = 2705
+MEASURED_WORST_CROSS_PLATFORM_SESSION = 2896
 
 _FOLDED_RUN_RE = re.compile(
     r"^(?P<indent>\s*)-?\s*run:\s*>[-+]?\s*$(?P<body>(?:\n(?:(?P=indent)\s+.*|\s*))*)",
