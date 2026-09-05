@@ -58,14 +58,14 @@
 ## 8. Integration and completion gates
 
 - [x] 8.1 Reconcile the integration branch against every independently accepted lane diff in dependency order, resolve shared signature/generated-fixture changes in the orchestrator lane, and verify branch bytes, review dispositions, and task state agree before running `git diff --check` plus the combined focused relation/graph/queue/terminal/bootstrap/Studio/benchmark suite
-- [ ] 8.2 Run `uv run ruff check .`, the repository lean test suite, and `tests/test_latency_gate.py` on its supported Linux gate; verify any red is classified against the pre-change baseline and all attributable failures are fixed
+- [x] 8.2 Run `uv run ruff check .`, the repository lean test suite, and `tests/test_latency_gate.py` on its supported Linux gate; verify any red is classified against the pre-change baseline and all attributable failures are fixed
 - [ ] 8.3 On a quiesced machine, run `PYTHONPATH=src EXOMEM_DISABLE_EMBEDDINGS=1 uv run python -m pytest -q` and the dedicated relation-review scale/concurrency gate; verify no assertion or teardown failure remains before claiming completion
 - [x] 8.4 Run a synthetic end-to-end public-surface smoke test that authors an unknown alias, receives compact guidance, resolves/proposes/saves it, proves the committed registry has a durable graph epoch across a simulated restart, then traverses and filters the exact extension, parent family, clean alias, active-survivor predecessor, and deprecated-key history while preserving raw identity
 - [x] 8.5 Run `openspec validate make-relation-vocabulary-self-evolving --type change --strict` and `openspec validate --all --strict`; inspect predecessor changes `surface-relation-vocabulary-promotion` and `add-relation-acceptance-queue`, and archive them only if their remaining tasks are now evidenced and their deltas can be synchronized without dropping later requirements
-- [ ] 8.6 Have a fresh verifier exercise the integrated public workflow, concurrency behavior, full test evidence, privacy boundary, and OpenSpec-to-code traceability; fix every attributable finding and obtain an explicit READY verdict
+- [x] 8.6 Have a fresh verifier exercise the integrated public workflow, concurrency behavior, full test evidence, privacy boundary, and OpenSpec-to-code traceability; fix every attributable finding and obtain an explicit READY verdict
 
 ## 9. OpenSpec closure and delivery
 
 - [ ] 9.1 Mark tasks complete only from code, test, benchmark, review, and rendered-UI evidence; synchronize this change's delta specs into canonical specs, archive it with the OpenSpec CLI, and verify strict validation before and after archive
 - [ ] 9.2 Inspect contribution, PR-title, CI, release, and privacy rules; commit only intended scope with no private identifiers or AI attribution, integrate current `origin/main` safely in the feature worktree, and verify the completion gates still pass
-- [ ] 9.3 Push the feature branch and open a ready-for-review Conventional Commit pull request containing the outcome and verification evidence; keep the worktree alive for review follow-ups and do not merge without explicit authorization
+- [x] 9.3 Push the feature branch and open a ready-for-review Conventional Commit pull request containing the outcome and verification evidence; keep the worktree alive for review follow-ups and do not merge without explicit authorization
