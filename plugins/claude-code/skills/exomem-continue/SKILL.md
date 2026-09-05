@@ -20,6 +20,12 @@ Use when the user asks to continue, resume, pick up a project, recover prior sta
 5. Read the Planning inventory with `plan_memory(action="inspect")` (no collection) when the topic has one, and read the due-state block any response already carried rather than re-deriving it. Both are read-only and create nothing.
 6. Summarize current state, decisions already made, blockers, and likely next actions.
 
+## Relation governance
+Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`; corrections use a new canonical key and deprecate the old one.
+
 ## Output contract
 Return a compact continuation brief with cited Exomem pages and a short next-action list. Say when the search missed or was thin.
 

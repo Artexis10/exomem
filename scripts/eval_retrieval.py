@@ -75,9 +75,9 @@ def _load_golden(path: Path) -> list[dict]:
             continue
         relevant = {p for p, g in relevance.items() if g > 0}
         # Per-query retrieval scope. Defaults to "kb-only" so every existing entry
-        # scores exactly as before (KB-only, no auto-widen). An entry whose target
-        # lives OUTSIDE Knowledge Base/ sets `scope: kb` to exercise the auto-widen
-        # reserve (the out-of-KB slots find() reserves under the default kb scope).
+        # scores exactly as before (KB-only, no widening). The golden format's
+        # historical `scope: kb` explicitly requests the outside-KB reserve;
+        # find() now requires that opt-in separately from the scope.
         scope = entry.get("scope", "kb-only")
         out.append({
             "query": query, "relevance": relevance, "relevant": relevant, "scope": scope,
@@ -106,11 +106,10 @@ def _evaluate(
             query=g["query"],
             limit=k_max,
             mode=mode,
-            # Per-query scope (default "kb-only"): most golden targets are KB paths,
-            # so KB-only skips the auto-widen scan over the wider vault that would
-            # dominate eval wall-time. An entry targeting an out-of-KB page sets
-            # `scope: kb` to deliberately exercise that auto-widen reserve.
+            # Preserve the golden format's reserve cases without changing
+            # find()'s KB-only product default or the golden relevance labels.
             scope=g.get("scope", "kb-only"),
+            widen_outside_kb=g.get("scope", "kb-only") == "kb",
             rerank=rerank,
             config=config,
         )
@@ -149,7 +148,7 @@ def rank_queries(
     for q in queries:
         hits = find_module.find(
             vault_root, query=q, limit=k, mode="hybrid",
-            scope="kb-only",  # mined-pair targets are KB paths; skip the auto-widen scan
+            scope="kb-only",  # mined-pair targets are KB paths; no outside-KB reserve
             rerank=rerank, config=config,
         )
         out[q] = [_canon(h.path) for h in hits]
@@ -264,6 +263,7 @@ def _sample_latencies(
             find_module.find(
                 vault_root, query=g["query"], limit=k, mode=mode,
                 scope=g.get("scope", "kb-only"), rerank=rerank, config=config,
+                widen_outside_kb=g.get("scope", "kb-only") == "kb",
             )
             latencies.append((time.perf_counter() - t0) * 1000.0)
     return latencies

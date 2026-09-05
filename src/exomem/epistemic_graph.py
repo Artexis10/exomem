@@ -62,7 +62,7 @@ def _sqlite_connect_owned(
 ) -> sqlite3.Connection:
     return sqlite3.connect(database, *args, **kwargs)
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
 EDGE_INSPECTION_MULTIPLIER = 4
@@ -178,6 +178,22 @@ class GraphNode:
     line_start: int | None = None
     line_end: int | None = None
     metadata: dict[str, Any] | None = None
+    page_type: str | None = None
+    lifecycle_status: str | None = None
+    tags: tuple[str, ...] = ()
+    project: str | None = None
+    origin_date: str | None = None
+    updated_date: str | None = None
+    access_tier: str | None = None
+    review_eligible: bool = False
+    activation_signal_version: str | None = None
+    exomem_id: str | None = None
+    activation_priority: int = 4
+    activation_connected: bool = False
+    activation_typed_relations: int = 0
+    activation_assertion_blocks: int = 0
+    activation_provenance_relations: int = 0
+    activation_unregistered: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -209,6 +225,12 @@ class GraphEdge:
     source_path: str
     source_anchor: str | None = None
     metadata: dict[str, Any] | None = None
+    resolver_project: str | None = None
+    resolver_page_type: str | None = None
+    resolver_source_kind: str | None = None
+    resolver_target_kind: str | None = None
+    resolver_origin: str | None = None
+    review_evidence: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -259,6 +281,8 @@ class RelationMatch:
     direction: str
     counterpart: str
     matched_via: str
+    requested_relation: str | None = None
+    resolved_relation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1350,6 +1374,18 @@ class _GraphPublicationTicket:
     temporary_identity: tuple[int, int, int, int, int]
 
 
+@dataclass(frozen=True)
+class _RegistryRebindProof:
+    """Bounded live-sidecar facts that must still hold at publication."""
+
+    generation: str
+    instance: str
+    extension_registry_hash: str
+    recall_checkpoint: str
+    recall_identity: str
+    resolver_topology: str
+
+
 def _source_signature(path: Path, source: str) -> GraphSourceSignature:
     """Bind graph rows to the exact bytes and file identity used to derive them."""
     info = path.stat()
@@ -1516,18 +1552,56 @@ class EpistemicGraphIndex:
         conn: sqlite3.Connection,
     ) -> sqlite3.Connection:
         edge_columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
-        if edge_columns and "raw_relation" not in edge_columns:
+        required_edge_columns = {
+            "raw_relation",
+            "resolver_project",
+            "resolver_page_type",
+            "resolver_source_kind",
+            "resolver_target_kind",
+            "resolver_origin",
+            "review_evidence",
+        }
+        if edge_columns and not required_edge_columns <= edge_columns:
             conn.execute("DROP TABLE graph_edges")
         node_columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_nodes)").fetchall()}
-        required_unit_columns = {"unit_ref", "unit_category", "unit_kind"}
-        if node_columns and not required_unit_columns <= node_columns:
+        required_node_columns = {
+            "unit_ref",
+            "unit_category",
+            "unit_kind",
+            "page_type",
+            "lifecycle_status",
+            "tags_json",
+            "project",
+            "origin_date",
+            "updated_date",
+            "access_tier",
+            "review_eligible",
+            "activation_signal_version",
+            "exomem_id",
+            "activation_priority",
+            "activation_connected",
+            "activation_typed_relations",
+            "activation_assertion_blocks",
+            "activation_provenance_relations",
+            "activation_unregistered",
+        }
+        if node_columns and not required_node_columns <= node_columns:
             conn.execute("DROP TABLE graph_nodes")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS graph_nodes (
                 node_key TEXT PRIMARY KEY, kind TEXT NOT NULL, path TEXT NOT NULL,
                 anchor TEXT, title TEXT, text TEXT NOT NULL, source_hash TEXT NOT NULL,
                 line_start INTEGER, line_end INTEGER, metadata TEXT NOT NULL,
-                unit_ref TEXT, unit_category TEXT, unit_kind TEXT
+                unit_ref TEXT, unit_category TEXT, unit_kind TEXT,
+                page_type TEXT, lifecycle_status TEXT, tags_json TEXT NOT NULL,
+                project TEXT, origin_date TEXT, updated_date TEXT, access_tier TEXT,
+                review_eligible INTEGER NOT NULL, activation_signal_version TEXT,
+                exomem_id TEXT, activation_priority INTEGER NOT NULL,
+                activation_connected INTEGER NOT NULL,
+                activation_typed_relations INTEGER NOT NULL,
+                activation_assertion_blocks INTEGER NOT NULL,
+                activation_provenance_relations INTEGER NOT NULL,
+                activation_unregistered INTEGER NOT NULL
             )
         """)
         conn.execute("""
@@ -1536,7 +1610,10 @@ class EpistemicGraphIndex:
                 relation_type TEXT, raw_relation TEXT NOT NULL, parent_relation TEXT,
                 registry_status TEXT NOT NULL, registry_version INTEGER NOT NULL,
                 registry_hash TEXT NOT NULL, origin TEXT NOT NULL, source_path TEXT NOT NULL,
-                source_anchor TEXT, metadata TEXT NOT NULL
+                source_anchor TEXT, metadata TEXT NOT NULL,
+                resolver_project TEXT, resolver_page_type TEXT,
+                resolver_source_kind TEXT, resolver_target_kind TEXT,
+                resolver_origin TEXT, review_evidence TEXT NOT NULL
             )
         """)
         conn.execute("""
@@ -1568,6 +1645,18 @@ class EpistemicGraphIndex:
             "ON graph_nodes(unit_kind, kind, path, node_key)"
         )
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_nodes_relation_review "
+            "ON graph_nodes(review_eligible, activation_priority, path, source_hash)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_nodes_relation_census "
+            "ON graph_nodes(kind, origin_date, page_type, project, path)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_nodes_exomem_id "
+            "ON graph_nodes(exomem_id, kind, path)"
+        )
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_parent_refs_ref "
             "ON graph_parent_refs(parent_ref, path)"
         )
@@ -1586,6 +1675,14 @@ class EpistemicGraphIndex:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_parent_relation "
             "ON graph_edges(parent_relation, src_key, dst_key)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_relation_review "
+            "ON graph_edges(source_path, origin, relation_type, dst_key, source_anchor)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_unregistered "
+            "ON graph_edges(registry_status, raw_relation, source_path, source_anchor)"
         )
         return conn
 
@@ -2166,8 +2263,15 @@ class EpistemicGraphIndex:
             (str(path), freshness.stat_signature(path))
             for path in vault_module.walk_vault_md(self.vault_root)
         )
-        freshness.reconcile(self.vault_root, "vault", entries)
-        if pending is not None:
+        result = freshness.reconcile(
+            self.vault_root,
+            "vault",
+            entries,
+            publication_guard=self._mutation_coordinator.hold(
+                operation="epistemic_graph_reconcile_recall", holder_kind="graph"
+            ),
+        )
+        if result.published and pending is not None:
             freshness.clear_external_pending(self.vault_root, through=pending)
 
     @staticmethod
@@ -2353,6 +2457,232 @@ class EpistemicGraphIndex:
             return checkpoint
         except (OSError, sqlite3.Error):
             return None
+
+    def _registry_rebind_source_proof(
+        self,
+        conn: sqlite3.Connection,
+        recall: freshness.RecallPublicationState,
+    ) -> _RegistryRebindProof | None:
+        """Prove a current schema/current recall source without walking Markdown."""
+        values = dict(
+            conn.execute(
+                "SELECT key, value FROM graph_meta WHERE key IN "
+                "('schema_version', 'core_registry_version', 'extension_registry_hash', "
+                "'recall_policy_version', 'recall_access_fingerprint', "
+                "'recall_projection_identity', 'recall_projection_checkpoint', "
+                "'recall_resolver_topology', 'read_barrier', 'generation', 'instance')"
+            ).fetchall()
+        )
+        expected_identity = _availability_freshness_value(
+            (
+                recall.triple,
+                recall.policy_version,
+                recall.access_policy_fingerprint,
+            )
+        )
+        expected_checkpoint = _checkpoint_value(recall.checkpoint)
+        old_hash = values.get("extension_registry_hash")
+        topology = values.get(_RESOLVER_TOPOLOGY_KEY)
+        if (
+            values.get("schema_version") != str(SCHEMA_VERSION)
+            or values.get("core_registry_version") != str(self.registry.core_version)
+            or not old_hash
+            or old_hash == self.registry.extension_hash
+            or values.get("recall_policy_version") != recall.policy_version
+            or values.get("recall_access_fingerprint")
+            != recall.access_policy_fingerprint
+            or values.get(_AVAILABILITY_FRESHNESS_KEY) != expected_identity
+            or values.get(_RECALL_CHECKPOINT_KEY) != expected_checkpoint
+            or values.get(_READ_BARRIER_KEY) is not None
+            or not isinstance(topology, str)
+            or len(topology) != 64
+            or not values.get("generation")
+            or not values.get("instance")
+        ):
+            return None
+        return _RegistryRebindProof(
+            generation=values["generation"],
+            instance=values["instance"],
+            extension_registry_hash=old_hash,
+            recall_checkpoint=expected_checkpoint,
+            recall_identity=expected_identity,
+            resolver_topology=topology,
+        )
+
+    def _registry_rebind_source_still_matches(
+        self,
+        proof: _RegistryRebindProof,
+        recall: freshness.RecallPublicationState,
+    ) -> bool:
+        try:
+            conn = self._connect_existing(readonly=True)
+            try:
+                return self._registry_rebind_source_proof(conn, recall) == proof
+            finally:
+                conn.close()
+        except (OSError, sqlite3.Error):
+            return False
+
+    def _rebind_registry_candidate(
+        self,
+        conn: sqlite3.Connection,
+        checkpoint: graph_sync.GraphSyncCheckpoint,
+        recall: freshness.RecallPublicationState,
+    ) -> None:
+        """Re-resolve only registry-owned edge fields in one private copy."""
+        rows = conn.execute(
+            "SELECT edge_key, raw_relation, metadata, resolver_project, "
+            "resolver_page_type, resolver_source_kind, resolver_target_kind, "
+            "resolver_origin FROM graph_edges ORDER BY edge_key"
+        ).fetchall()
+        for (
+            edge_key,
+            raw_relation,
+            rendered_metadata,
+            project,
+            page_type,
+            source_kind,
+            target_kind,
+            origin,
+        ) in rows:
+            resolution = self.registry.resolve(
+                str(raw_relation),
+                project=project,
+                page_type=page_type,
+                source_kind=source_kind,
+                target_kind=target_kind,
+                origin=origin,
+            )
+            metadata = _json(rendered_metadata)
+            metadata["replacement"] = resolution.replacement
+            metadata["registry_findings"] = list(resolution.findings)
+            conn.execute(
+                "UPDATE graph_edges SET relation_type = ?, parent_relation = ?, "
+                "registry_status = ?, registry_version = ?, registry_hash = ?, metadata = ? "
+                "WHERE edge_key = ?",
+                (
+                    resolution.canonical,
+                    resolution.parent,
+                    resolution.status,
+                    self.registry.core_version,
+                    self.registry.extension_hash,
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                    edge_key,
+                ),
+            )
+        profile_hash = traversal_profiles.load_profiles(
+            self.vault_root, registry=self.registry
+        ).content_hash
+        conn.executemany(
+            "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+            (
+                ("core_registry_version", str(self.registry.core_version)),
+                ("extension_registry_hash", self.registry.extension_hash),
+                ("traversal_profile_hash", profile_hash),
+            ),
+        )
+        self._publish_available_marker_in_transaction(
+            conn,
+            (
+                recall.triple,
+                recall.policy_version,
+                recall.access_policy_fingerprint,
+            ),
+            checkpoint=recall.checkpoint,
+            graph_checkpoint=checkpoint,
+        )
+
+    def rebind_registry(
+        self,
+        checkpoint: graph_sync.GraphSyncCheckpoint,
+    ) -> bool:
+        """Publish a proven private registry-only rebind, or decline safely."""
+        if checkpoint.scope != "full" or not self.path.exists():
+            return False
+        recall = freshness.prepare_recall_publication(self.vault_root, "vault")
+        policy_snapshot = access.publication_policy_snapshot(self.vault_root)
+        if recall is None or policy_snapshot is None:
+            return False
+        epoch = graph_sync.canonical_publication_epoch(self.vault_root)
+        if epoch.checkpoint != checkpoint:
+            return False
+        temporary = graph_sync.temporary_sidecar_path(self.path, checkpoint)
+        registered = False
+        claimed = False
+        publication_hold: str | None = None
+        try:
+            _remove_graph_rebuild_artifact(self.vault_root, temporary, missing_ok=True)
+            graph_sync.register_temporary(temporary)
+            registered = True
+            claimed = graph_sync.claim_rebuild_owner(
+                self.vault_root,
+                temporary,
+                state_root=self._mutation_coordinator.state_root,
+            )
+            if not claimed:
+                raise graph_sync.GraphRebuildInProgress()
+            source = self._connect_existing(readonly=True)
+            try:
+                proof = self._registry_rebind_source_proof(source, recall)
+                if proof is None:
+                    return False
+                destination = self._connect(temporary)
+                try:
+                    source.backup(destination)
+                finally:
+                    destination.close()
+            finally:
+                source.close()
+            candidate = self._connect_existing(temporary, readonly=False)
+            try:
+                with candidate:
+                    self._rebind_registry_candidate(candidate, checkpoint, recall)
+                candidate.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                if candidate.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+                    raise sqlite3.DatabaseError("registry rebind candidate failed integrity check")
+            finally:
+                candidate.close()
+            ticket = _GraphPublicationTicket(
+                epoch,
+                recall,
+                (recall.policy_version, recall.access_policy_fingerprint),
+                policy_snapshot,
+                proof.recall_identity,
+                (),
+                temporary,
+                self._temporary_identity(temporary),
+            )
+            with self._mutation_coordinator.hold(
+                operation="epistemic_graph_publish_registry_rebind",
+                holder_kind="graph",
+            ):
+                if (
+                    not self._publication_ticket_matches(ticket)
+                    or not self._registry_rebind_source_still_matches(proof, recall)
+                ):
+                    return False
+                publication_hold = self._before_publish_replacement(temporary, self.path)
+                if (
+                    not self._publication_ticket_matches(ticket)
+                    or not self._registry_rebind_source_still_matches(proof, recall)
+                ):
+                    return False
+                graph_sync.replace_sidecar(temporary, self.path, vault_root=self.vault_root)
+            return True
+        finally:
+            _release_publication_hold(publication_hold)
+            if claimed:
+                graph_sync.release_rebuild_owner(
+                    self.vault_root,
+                    temporary,
+                    state_root=self._mutation_coordinator.state_root,
+                )
+            if registered:
+                graph_sync.unregister_temporary(temporary.resolve())
+            try:
+                _remove_graph_rebuild_artifact(self.vault_root, temporary, missing_ok=True)
+            except OSError:
+                pass
 
     def _publication_ticket_matches(self, ticket: _GraphPublicationTicket) -> bool:
         """The complete bounded publication gate; no walk, policy read, or SQLite."""
@@ -4164,7 +4494,13 @@ class EpistemicGraphIndex:
             source=raw,
         )
         document = state.document
-        file_node = _file_node(page, raw)
+        file_node = _file_node(
+            self.vault_root,
+            page,
+            raw,
+            document=document,
+            registry=self.registry,
+        )
         unit_nodes = [
             _unit_node(page, unit, state) for unit in document.units if unit.unit_ref is not None
         ]
@@ -4388,7 +4724,9 @@ class EpistemicGraphIndex:
         sidecar is missing or stale; "temporarily_unavailable" means the graph
         index is disabled. It never scans the corpus and never false-empties.
         """
-        key_set = {str(k) for k in keys if k}
+        requested_keys = [str(k) for k in keys if k]
+        plan = traversal_profiles.relation_query_plan(self.registry, requested_keys)
+        key_set = set(plan.exact_keys)
         anchor_rel = _with_md(anchor) if anchor else None
         allowed_paths: dict[str, bool] = {}
 
@@ -4412,25 +4750,35 @@ class EpistemicGraphIndex:
         conn = self._open_read_snapshot()
         if conn is None:
             return RelationFilterResult(status="warming")
-        select = (
-            "SELECT s.path, d.path, e.relation_type, e.rowid "
+        select_columns = "SELECT s.path, d.path, e.relation_type, e.rowid"
+        select_from = (
             "FROM graph_edges e "
             "JOIN graph_nodes s ON s.node_key = e.src_key "
             "JOIN graph_nodes d ON d.node_key = e.dst_key "
         )
+        select = f"{select_columns} {select_from}"
         try:
             if key_set:
-                # Edges whose canonical relation_type or parent_relation matches a
-                # requested key (two indexed lookups UNIONed — an OR across the two
-                # columns would defeat both indexes). Anchor narrowing, when set, is
-                # applied in Python below.
-                placeholders = ",".join("?" for _ in key_set)
-                params = list(key_set)
+                branches: list[str] = []
+                params: list[str] = []
+                for match_keys, priority, matched_via, column in (
+                    (plan.exact_keys, 0, "relation_type", "relation_type"),
+                    (plan.replacement_keys, 1, "replacement", "relation_type"),
+                    (plan.parent_keys, 2, "parent_relation", "parent_relation"),
+                ):
+                    if not match_keys:
+                        continue
+                    placeholders = ",".join("?" for _ in match_keys)
+                    branches.append(
+                        f"{select_columns}, {priority} AS match_priority, "
+                        f"'{matched_via}' AS matched_via, e.{column} AS matched_key "
+                        f"{select_from}"
+                        f"WHERE e.{column} IN ({placeholders})"
+                    )
+                    params.extend(sorted(match_keys))
                 rows = conn.execute(
-                    f"{select} WHERE e.relation_type IN ({placeholders}) "
-                    f"UNION {select} WHERE e.parent_relation IN ({placeholders}) "
-                    "ORDER BY 4",
-                    params + params,
+                    " UNION ALL ".join(branches) + " ORDER BY 5, 4",
+                    params,
                 ).fetchall()
             else:
                 # Anchor alone (no relation keys): every typed edge touching the
@@ -4459,24 +4807,57 @@ class EpistemicGraphIndex:
         paths: set[str] = set()
         provenance: dict[str, RelationMatch] = {}
 
-        def _add(page: str, counterpart: str, relation_type: str | None, cand_dir: str) -> None:
+        def _query_identity(
+            matched_key: str | None, matched_via: str
+        ) -> tuple[str | None, str | None]:
+            for requested in plan.requested:
+                resolved = self.registry.resolve(requested).canonical
+                if resolved is None:
+                    continue
+                if matched_via in {"relation_type", "parent_relation"} and (
+                    resolved == matched_key
+                ):
+                    return requested, resolved
+                if matched_via == "replacement" and matched_key in self.registry.predecessors(
+                    resolved
+                ):
+                    return requested, resolved
+            return None, None
+
+        def _add(
+            page: str,
+            counterpart: str,
+            relation_type: str | None,
+            cand_dir: str,
+            matched_via: str,
+            matched_key: str | None,
+        ) -> None:
             if (
                 (anchor_rel is not None and page == anchor_rel)
                 or not _path_allowed(str(page))
                 or not _path_allowed(str(counterpart))
             ):
                 return
-            # In anchor-alone mode there is no requested key; the edge's canonical
-            # relation is what matched.
-            matched_via = (
-                "relation_type" if (not key_set or relation_type in key_set) else "parent_relation"
-            )
             paths.add(page)
+            requested_relation, resolved_relation = _query_identity(
+                matched_key, matched_via
+            )
             provenance.setdefault(
-                page, RelationMatch(relation_type, cand_dir, counterpart, matched_via)
+                page,
+                RelationMatch(
+                    relation_type,
+                    cand_dir,
+                    counterpart,
+                    matched_via,
+                    requested_relation,
+                    resolved_relation,
+                ),
             )
 
-        for src_path, dst_path, relation_type, _rowid in rows:
+        for row in rows:
+            src_path, dst_path, relation_type, _rowid = row[:4]
+            matched_via = str(row[5]) if len(row) > 5 else "relation_type"
+            matched_key = str(row[6]) if len(row) > 6 else relation_type
             if src_path == dst_path:
                 continue
             edge_def = self.registry.definition(str(relation_type or ""))
@@ -4500,12 +4881,33 @@ class EpistemicGraphIndex:
                     continue
                 if not is_symmetric and direction != "any" and direction != anchor_dir:
                     continue
-                _add(candidate, counterpart, relation_type, cand_dir)
+                _add(
+                    candidate,
+                    counterpart,
+                    relation_type,
+                    cand_dir,
+                    matched_via,
+                    matched_key,
+                )
             else:
                 if is_symmetric or direction in ("any", "outbound"):
-                    _add(src_path, dst_path, relation_type, "outbound")
+                    _add(
+                        src_path,
+                        dst_path,
+                        relation_type,
+                        "outbound",
+                        matched_via,
+                        matched_key,
+                    )
                 if is_symmetric or direction in ("any", "inbound"):
-                    _add(dst_path, src_path, relation_type, "inbound")
+                    _add(
+                        dst_path,
+                        src_path,
+                        relation_type,
+                        "inbound",
+                        matched_via,
+                        matched_key,
+                    )
 
         return RelationFilterResult(
             status="available", paths=frozenset(paths), provenance=provenance
@@ -4531,7 +4933,9 @@ class EpistemicGraphIndex:
         means the sidecar is missing or stale, "temporarily_unavailable" means the
         graph index is disabled. It never scans the corpus and never false-empties.
         """
-        key_set = {str(k) for k in keys if k}
+        requested_keys = [str(k) for k in keys if k]
+        plan = traversal_profiles.relation_query_plan(self.registry, requested_keys)
+        key_set = set(plan.exact_keys)
         if not key_set:
             return RelationEdgeResult(status="available")
         if not graph_enabled():
@@ -4543,22 +4947,31 @@ class EpistemicGraphIndex:
         conn = self._open_read_snapshot()
         if conn is None:
             return RelationEdgeResult(status="warming")
-        select = (
-            "SELECT s.path, d.path, e.rowid "
+        select_columns = "SELECT s.path, d.path, e.rowid"
+        select_from = (
             "FROM graph_edges e "
             "JOIN graph_nodes s ON s.node_key = e.src_key "
             "JOIN graph_nodes d ON d.node_key = e.dst_key "
         )
-        placeholders = ",".join("?" for _ in key_set)
-        params = list(key_set)
         try:
-            # Two indexed lookups UNIONed, exactly as `relation_participants` does —
-            # an OR across relation_type/parent_relation would defeat both indexes.
+            branches: list[str] = []
+            params: list[str] = []
+            for match_keys, priority, column in (
+                (plan.exact_keys, 0, "relation_type"),
+                (plan.replacement_keys, 1, "relation_type"),
+                (plan.parent_keys, 2, "parent_relation"),
+            ):
+                if not match_keys:
+                    continue
+                placeholders = ",".join("?" for _ in match_keys)
+                branches.append(
+                    f"{select_columns}, {priority} AS match_priority {select_from}"
+                    f"WHERE e.{column} IN ({placeholders})"
+                )
+                params.extend(sorted(match_keys))
             rows = conn.execute(
-                f"{select} WHERE e.relation_type IN ({placeholders}) "
-                f"UNION {select} WHERE e.parent_relation IN ({placeholders}) "
-                "ORDER BY 3",
-                params + params,
+                " UNION ALL ".join(branches) + " ORDER BY 4, 3",
+                params,
             ).fetchall()
         except sqlite3.Error:
             return RelationEdgeResult(status="warming")
@@ -4576,7 +4989,8 @@ class EpistemicGraphIndex:
 
         edges: list[tuple[str, str]] = []
         seen: set[tuple[str, str]] = set()
-        for src_path, dst_path, _rowid in rows:
+        for row in rows:
+            src_path, dst_path, _rowid = row[:3]
             edge = (str(src_path), str(dst_path))
             if edge[0] == edge[1] or edge in seen:
                 continue
@@ -4585,6 +4999,867 @@ class EpistemicGraphIndex:
             seen.add(edge)
             edges.append(edge)
         return RelationEdgeResult(status="available", edges=tuple(edges))
+
+    def relation_review_batch(
+        self,
+        *,
+        limit_pages: int = 50,
+        limit_per_page: int = 10,
+    ) -> dict[str, Any]:
+        """Assemble the deterministic relation queue from one bounded snapshot.
+
+        The eight statements below are a fixed plan: eligibility, sources, and
+        one set query for each graph-representable candidate family.  Nothing in
+        this path opens Markdown, invokes embeddings, or acquires writer authority.
+        """
+        from . import context_refs, relation_queue, review_state, semantic_contract
+
+        page_cap = min(50, max(0, int(limit_pages)))
+        item_cap = min(64, max(0, int(limit_per_page)))
+        source_cap = min(200, max(page_cap, page_cap * 4))
+        per_source_cap = min(64, max(1, item_cap * 4))
+        branch_cap = max(1, source_cap * max(200, per_source_cap))
+        identity_snapshot = semantic_contract.current_reference_identity_snapshot(
+            self.vault_root
+        )
+        conn = self._open_read_snapshot()
+        if conn is None:
+            return {
+                "status": "warming",
+                "groups": [],
+                "shown": 0,
+                "pages_shown": 0,
+                "pages_scanned": 0,
+                "pages_truncated": False,
+                "items_truncated": False,
+                "filtered": {"authored_edge": 0, "placeholder_target": 0, "decided": 0},
+                "coverage": {"eligible_pages": 0, "relation_scan_complete": False},
+            }
+        try:
+            coverage_row = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(activation_connected), 0), "
+                "COALESCE(SUM(activation_typed_relations > 0), 0), "
+                "COALESCE(SUM(activation_connected = 1 "
+                "AND activation_typed_relations = 0), 0), "
+                "COALESCE(SUM(activation_connected = 0), 0), "
+                "COALESCE(SUM(activation_assertion_blocks > 0), 0), "
+                "COALESCE(SUM(activation_assertion_blocks > 0 "
+                "AND activation_provenance_relations > 0), 0), "
+                "COALESCE(SUM(activation_unregistered), 0) "
+                "FROM graph_nodes WHERE kind = 'file' AND review_eligible = 1"
+            ).fetchone()
+            coverage = dict(
+                zip(
+                    (
+                        "eligible_pages",
+                        "connected_pages",
+                        "typed_relation_pages",
+                        "generic_only_pages",
+                        "disconnected_pages",
+                        "provenance_candidate_pages",
+                        "provenance_linked_pages",
+                        "unregistered_relation_observations",
+                    ),
+                    (int(value or 0) for value in coverage_row),
+                    strict=True,
+                )
+            )
+            eligible_total = coverage["eligible_pages"]
+            source_rows = conn.execute(
+                "SELECT n.path, n.title, n.source_hash, n.activation_signal_version, "
+                "n.exomem_id, CASE WHEN n.exomem_id IS NULL THEN 0 ELSE "
+                "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
+                "AND ids.exomem_id = n.exomem_id) END "
+                "FROM graph_nodes n WHERE n.kind = 'file' AND n.review_eligible = 1 "
+                "ORDER BY n.activation_priority, n.path LIMIT ?",
+                (source_cap + 1,),
+            ).fetchall()
+            selected_rows = source_rows[:source_cap]
+            selected = [str(row[0]) for row in selected_rows]
+            if not selected or page_cap == 0 or item_cap == 0:
+                return {
+                    "status": "available",
+                    "groups": [],
+                    "shown": 0,
+                    "pages_shown": 0,
+                    "pages_scanned": 0,
+                    "pages_truncated": eligible_total > 0,
+                    "items_truncated": False,
+                    "filtered": {
+                        "authored_edge": 0,
+                        "placeholder_target": 0,
+                        "decided": 0,
+                    },
+                    "coverage": {
+                        **coverage,
+                        "relation_pages_scanned": 0,
+                        "relation_candidate_pages_found": 0,
+                        "relation_candidates_found": 0,
+                        "relation_scan_complete": eligible_total == 0,
+                    },
+                }
+            placeholders = ",".join("?" for _ in selected)
+            target_identity = (
+                "d.exomem_id, CASE WHEN d.exomem_id IS NULL THEN 0 ELSE "
+                "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
+                "AND ids.exomem_id = d.exomem_id) END"
+            )
+            wiki_and_authored_rows = conn.execute(
+                "WITH combined AS ("
+                "SELECT 0 AS candidate_kind, e.source_path AS source_path, "
+                "d.path AS target_path, e.review_evidence AS review_evidence, "
+                "e.raw_relation AS raw_relation, COALESCE(CAST(json_extract("
+                "e.review_evidence, '$.internal.occurrence') AS INTEGER), e.rowid) "
+                "AS producer_order, EXISTS (SELECT 1 FROM graph_edges p "
+                "WHERE p.origin = 'markdown_relation' "
+                "AND p.src_key = ('file:' || e.source_path) "
+                "AND p.dst_key = e.dst_key AND p.raw_relation = 'links_to') "
+                "AS authored_match, "
+                f"{target_identity} FROM graph_edges e "
+                "JOIN graph_nodes d ON d.node_key = e.dst_key AND d.kind = 'file' "
+                f"WHERE e.origin = 'wikilink' AND e.source_path IN ({placeholders})), "
+                "ranked AS (SELECT *, ROW_NUMBER() OVER ("
+                "PARTITION BY source_path "
+                "ORDER BY producer_order, target_path, raw_relation) "
+                "AS source_rank, COUNT(*) OVER ("
+                "PARTITION BY source_path) AS source_total "
+                "FROM combined) "
+                "SELECT candidate_kind, source_path, target_path, review_evidence, "
+                "raw_relation, exomem_id, "
+                "CASE WHEN exomem_id IS NULL THEN 0 ELSE "
+                "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
+                "AND ids.exomem_id = ranked.exomem_id) END, authored_match, source_total "
+                "FROM ranked WHERE source_rank <= ? "
+                "ORDER BY source_path, candidate_kind, source_rank, target_path LIMIT ?",
+                (*selected, per_source_cap, branch_cap + 1),
+            ).fetchall()
+            unit_rows = conn.execute(
+                "WITH ranked AS (SELECT e.source_path, "
+                "COALESCE(d.path, SUBSTR(e.dst_key, 6)) AS target_path, "
+                "e.raw_relation, e.relation_type, e.source_anchor, n.unit_ref, "
+                f"{target_identity}, CASE WHEN d.node_key IS NULL THEN 0 ELSE 1 END "
+                "AS target_exists, EXISTS (SELECT 1 FROM graph_edges p "
+                "WHERE p.origin = 'markdown_relation' "
+                "AND p.src_key = ('file:' || e.source_path) "
+                "AND p.dst_key = e.dst_key AND p.raw_relation = "
+                "LOWER(REPLACE(TRIM(e.raw_relation), '-', '_'))) AS authored_match, "
+                "ROW_NUMBER() OVER ("
+                "PARTITION BY e.source_path ORDER BY d.path, e.raw_relation, "
+                "e.source_anchor) AS source_rank, COUNT(*) OVER ("
+                "PARTITION BY e.source_path) AS source_total FROM graph_edges e "
+                "LEFT JOIN graph_nodes n ON n.node_key = e.src_key "
+                "LEFT JOIN graph_nodes d ON d.node_key = e.dst_key AND d.kind = 'file' "
+                f"WHERE e.source_path IN ({placeholders}) "
+                "AND e.origin = 'semantic_relation' "
+                "AND e.src_key <> ('file:' || e.source_path) "
+                "AND e.dst_key <> ('file:' || e.source_path) "
+                "AND e.dst_key LIKE 'file:%' "
+                "AND e.registry_status IN ('core', 'alias', 'extension') "
+                "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
+                "WHERE p.src_key = ('file:' || e.source_path) "
+                "AND p.dst_key = e.dst_key AND p.relation_type = e.relation_type)) "
+                "SELECT source_path, target_path, raw_relation, relation_type, "
+                "source_anchor, unit_ref, exomem_id, "
+                "CASE WHEN exomem_id IS NULL THEN 0 ELSE "
+                "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
+                "AND ids.exomem_id = ranked.exomem_id) END, target_exists, "
+                "authored_match, source_total "
+                "FROM ranked WHERE source_rank <= ? "
+                "ORDER BY source_path, target_path, raw_relation, source_anchor LIMIT ?",
+                (*selected, _STRUCTURAL_ROW_LIMIT, branch_cap + 1),
+            ).fetchall()
+            question = _NORMALIZED_QUESTION_SQL.format(column="text")
+            question_rows = conn.execute(
+                "WITH selected_questions AS ("
+                f"SELECT path, {question} AS question, unit_ref, anchor FROM graph_nodes "
+                f"WHERE path IN ({placeholders}) AND unit_kind = 'open_question' UNION "
+                f"SELECT path, {question}, unit_ref, anchor FROM graph_nodes "
+                f"WHERE path IN ({placeholders}) "
+                "AND unit_category IN ('question', 'open_question')), "
+                "other_questions AS ("
+                f"SELECT path, {question} AS question, unit_ref, anchor FROM graph_nodes "
+                "WHERE unit_kind = 'open_question' UNION "
+                f"SELECT path, {question}, unit_ref, anchor FROM graph_nodes "
+                "WHERE unit_category IN ('question', 'open_question')) "
+                ", matches AS (SELECT mine.path AS source_path, "
+                "theirs.path AS target_path, mine.question, "
+                "mine.unit_ref AS unit_ref, mine.anchor AS anchor, "
+                "theirs.unit_ref AS other_unit_ref, "
+                "theirs.anchor AS other_anchor, d.exomem_id, "
+                "CASE WHEN d.exomem_id IS NULL THEN 0 ELSE "
+                "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
+                "AND ids.exomem_id = d.exomem_id) END, "
+                "EXISTS (SELECT 1 FROM graph_edges p "
+                "WHERE p.origin = 'markdown_relation' "
+                "AND p.src_key = ('file:' || mine.path) "
+                "AND p.dst_key = ('file:' || theirs.path) "
+                "AND p.raw_relation = 'relates_to') AS authored_match "
+                "FROM selected_questions mine JOIN other_questions theirs "
+                "ON theirs.question = mine.question AND theirs.path <> mine.path "
+                "JOIN graph_nodes d ON d.path = theirs.path AND d.kind = 'file' "
+                "WHERE mine.question <> '' AND NOT EXISTS ("
+                "SELECT 1 FROM graph_edges p "
+                "WHERE p.src_key = ('file:' || mine.path) "
+                "AND p.dst_key = ('file:' || theirs.path) "
+                "AND p.relation_type = 'relates_to')), "
+                "ranked AS (SELECT *, ROW_NUMBER() OVER ("
+                "PARTITION BY source_path ORDER BY target_path, question, unit_ref) "
+                "AS source_rank, COUNT(*) OVER ("
+                "PARTITION BY source_path) AS source_total FROM matches) "
+                "SELECT source_path, target_path, question, unit_ref, anchor, "
+                "other_unit_ref, other_anchor, exomem_id, "
+                "CASE WHEN exomem_id IS NULL THEN 0 ELSE "
+                "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
+                "AND ids.exomem_id = ranked.exomem_id) END, authored_match, source_total "
+                "FROM ranked WHERE source_rank <= ? "
+                "ORDER BY source_path, target_path, question LIMIT ?",
+                (*selected, *selected, _STRUCTURAL_ROW_LIMIT, branch_cap + 1),
+            ).fetchall()
+            resolution_rows = conn.execute(
+                "WITH matches AS (SELECT e1.source_path AS source_path, "
+                "e2.source_path AS target_path, e1.dst_key, "
+                "e1.raw_relation AS raw_relation, e1.source_anchor, "
+                "n1.unit_ref, e2.raw_relation AS other_relation, "
+                "e2.source_anchor AS other_anchor, n2.unit_ref AS other_unit_ref, "
+                "d.exomem_id, CASE WHEN d.exomem_id IS NULL THEN 0 ELSE "
+                "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
+                "AND ids.exomem_id = d.exomem_id) END, "
+                "EXISTS (SELECT 1 FROM graph_edges p "
+                "WHERE p.origin = 'markdown_relation' "
+                "AND p.src_key = ('file:' || e1.source_path) "
+                "AND p.dst_key = ('file:' || e2.source_path) "
+                "AND p.raw_relation = 'relates_to') AS authored_match "
+                "FROM graph_edges e1 JOIN graph_edges e2 ON e2.dst_key = e1.dst_key "
+                "LEFT JOIN graph_nodes n1 ON n1.node_key = e1.src_key "
+                "LEFT JOIN graph_nodes n2 ON n2.node_key = e2.src_key "
+                "JOIN graph_nodes d ON d.node_key = ('file:' || e2.source_path) "
+                f"WHERE e1.source_path IN ({placeholders}) "
+                "AND e1.origin = 'semantic_relation' "
+                "AND e1.src_key <> ('file:' || e1.source_path) "
+                "AND e1.relation_type IN ('answers', 'resolves') "
+                "AND e2.origin = 'semantic_relation' "
+                "AND e2.relation_type IN ('answers', 'resolves') "
+                "AND e2.source_path <> e1.source_path "
+                "AND e2.src_key <> ('file:' || e2.source_path) "
+                "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
+                "WHERE p.src_key = ('file:' || e1.source_path) "
+                "AND p.dst_key = ('file:' || e2.source_path) "
+                "AND p.relation_type = 'relates_to')), "
+                "ranked AS (SELECT *, ROW_NUMBER() OVER ("
+                "PARTITION BY source_path ORDER BY target_path, dst_key, other_anchor) "
+                "AS source_rank, COUNT(*) OVER ("
+                "PARTITION BY source_path) AS source_total FROM matches) "
+                "SELECT source_path, target_path, dst_key, raw_relation, source_anchor, "
+                "unit_ref, other_relation, other_anchor, other_unit_ref, exomem_id, "
+                "CASE WHEN exomem_id IS NULL THEN 0 ELSE "
+                "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
+                "AND ids.exomem_id = ranked.exomem_id) END, authored_match, source_total "
+                "FROM ranked WHERE source_rank <= ? "
+                "ORDER BY source_path, target_path, dst_key, other_anchor LIMIT ?",
+                (*selected, _STRUCTURAL_ROW_LIMIT, branch_cap + 1),
+            ).fetchall()
+            frontmatter_rows = conn.execute(
+                "WITH ranked AS (SELECT e.source_path, "
+                "COALESCE(d.path, SUBSTR(e.dst_key, 6)) AS target_path, "
+                "d.exomem_id, "
+                "CASE WHEN d.exomem_id IS NULL THEN 0 ELSE "
+                "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
+                "AND ids.exomem_id = d.exomem_id) END, "
+                "CASE WHEN d.node_key IS NULL THEN 0 ELSE 1 END AS target_exists, "
+                "EXISTS (SELECT 1 FROM graph_edges p "
+                "WHERE p.origin = 'markdown_relation' "
+                "AND p.src_key = ('file:' || e.source_path) "
+                "AND p.dst_key = e.dst_key AND p.raw_relation = 'derived_from') "
+                "AS authored_match, "
+                "ROW_NUMBER() OVER (PARTITION BY e.source_path ORDER BY "
+                "COALESCE(CAST(json_extract(e.review_evidence, "
+                "'$.internal.occurrence') AS INTEGER), e.rowid), "
+                "COALESCE(d.path, SUBSTR(e.dst_key, 6))) "
+                "AS source_rank, COUNT(*) OVER ("
+                "PARTITION BY e.source_path) AS source_total "
+                "FROM graph_edges e LEFT JOIN graph_nodes d "
+                "ON d.node_key = e.dst_key AND d.kind = 'file' "
+                f"WHERE e.source_path IN ({placeholders}) AND e.origin = 'frontmatter' "
+                "AND e.source_anchor = 'sources' AND e.relation_type = 'derived_from' "
+                "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
+                "WHERE p.src_key = ('file:' || e.source_path) "
+                "AND p.dst_key = e.dst_key AND p.origin = 'markdown_relation' "
+                "AND p.relation_type = 'derived_from')) "
+                "SELECT source_path, target_path, exomem_id, "
+                "CASE WHEN exomem_id IS NULL THEN 0 ELSE "
+                "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
+                "AND ids.exomem_id = ranked.exomem_id) END, target_exists, "
+                "authored_match, source_total "
+                "FROM ranked WHERE source_rank <= ? "
+                "ORDER BY source_path, source_rank, target_path LIMIT ?",
+                (*selected, per_source_cap, branch_cap + 1),
+            ).fetchall()
+            shared_source_rows = conn.execute(
+                "WITH ranked AS (SELECT e1.source_path, "
+                "e2.source_path AS target_path, e1.dst_key, d.exomem_id, "
+                "CASE WHEN d.exomem_id IS NULL THEN 0 ELSE "
+                "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
+                "AND ids.exomem_id = d.exomem_id) END, "
+                "EXISTS (SELECT 1 FROM graph_edges p "
+                "WHERE p.origin = 'markdown_relation' "
+                "AND p.src_key = ('file:' || e1.source_path) "
+                "AND p.dst_key = ('file:' || e2.source_path) "
+                "AND p.raw_relation = 'relates_to') AS authored_match, "
+                "ROW_NUMBER() OVER (PARTITION BY e1.source_path "
+                "ORDER BY e2.source_path, e1.dst_key) AS source_rank, "
+                "COUNT(*) OVER (PARTITION BY e1.source_path) AS source_total "
+                "FROM graph_edges e1 JOIN graph_edges e2 ON e2.dst_key = e1.dst_key "
+                "JOIN graph_nodes d ON d.node_key = ('file:' || e2.source_path) "
+                f"WHERE e1.source_path IN ({placeholders}) "
+                "AND e1.origin = 'frontmatter' AND e1.source_anchor = 'sources' "
+                "AND e1.relation_type = 'derived_from' "
+                "AND e2.origin = 'frontmatter' AND e2.source_anchor = 'sources' "
+                "AND e2.relation_type = 'derived_from' "
+                "AND e2.source_path <> e1.source_path "
+                "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
+                "WHERE p.src_key = ('file:' || e1.source_path) "
+                "AND p.dst_key = ('file:' || e2.source_path) "
+                "AND p.relation_type = 'relates_to')) "
+                "SELECT source_path, target_path, dst_key, exomem_id, "
+                "CASE WHEN exomem_id IS NULL THEN 0 ELSE "
+                "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
+                "AND ids.exomem_id = ranked.exomem_id) END, authored_match, source_total "
+                "FROM ranked WHERE source_rank <= ? "
+                "ORDER BY source_path, target_path, dst_key LIMIT ?",
+                (*selected, per_source_cap, branch_cap + 1),
+            ).fetchall()
+        except sqlite3.Error:
+            return {
+                "status": "warming",
+                "groups": [],
+                "shown": 0,
+                "pages_shown": 0,
+                "pages_scanned": 0,
+                "pages_truncated": False,
+                "items_truncated": False,
+                "filtered": {"authored_edge": 0, "placeholder_target": 0, "decided": 0},
+                "coverage": {"eligible_pages": 0, "relation_scan_complete": False},
+            }
+        finally:
+            conn.close()
+
+        source_info = {
+            str(path): {
+                "title": str(title or Path(str(path)).stem),
+                "content_hash": str(source_hash or ""),
+                "signal_version": str(signal_version or ""),
+                "exomem_id": exomem_id,
+                "id_count": int(id_count or 0),
+            }
+            for path, title, source_hash, signal_version, exomem_id, id_count in selected_rows
+        }
+        target_info: dict[str, tuple[str | None, int]] = {}
+        placeholder_targets: set[str] = set()
+        items_truncated = (
+            any(
+                len(rows) > branch_cap
+                for rows in (
+                    wiki_and_authored_rows,
+                    unit_rows,
+                    question_rows,
+                    resolution_rows,
+                    frontmatter_rows,
+                    shared_source_rows,
+                )
+            )
+            or any(int(row[-1] or 0) > per_source_cap for row in wiki_and_authored_rows)
+            or any(int(row[-1] or 0) > _STRUCTURAL_ROW_LIMIT for row in unit_rows)
+            or any(int(row[-1] or 0) > _STRUCTURAL_ROW_LIMIT for row in question_rows)
+            or any(int(row[-1] or 0) > _STRUCTURAL_ROW_LIMIT for row in resolution_rows)
+            or any(int(row[-1] or 0) > per_source_cap for row in frontmatter_rows)
+            or any(int(row[-1] or 0) > per_source_cap for row in shared_source_rows)
+        )
+
+        def remember(
+            path: Any, exomem_id: Any, count: Any, target_exists: Any = 1
+        ) -> str:
+            rel = _with_md(str(path or ""))
+            target_info.setdefault(rel, (exomem_id, int(count or 0)))
+            if not bool(target_exists):
+                placeholder_targets.add(rel)
+            return rel
+
+        methods: dict[str, dict[str, list[dict[str, Any]]]] = {
+            rel: {
+                name: []
+                for name in (
+                    "unit_relation_lift",
+                    "shared_open_question",
+                    "shared_resolution_target",
+                    "wikilink",
+                    "frontmatter_sources",
+                    "shared_sources",
+                )
+            }
+            for rel in selected
+        }
+        for row in wiki_and_authored_rows[:branch_cap]:
+            (
+                kind,
+                source,
+                target,
+                evidence_raw,
+                raw_relation,
+                target_id,
+                target_count,
+                authored_match,
+                _source_total,
+            ) = row
+            target_rel = remember(target, target_id, target_count)
+            review_evidence = _json(evidence_raw)
+            evidence = review_evidence.get("evidence")
+            if not isinstance(evidence, dict):
+                continue
+            methods[str(source)]["wikilink"].append(
+                {
+                    "from": str(source),
+                    "to": target_rel,
+                    "relation_type": "links_to",
+                    "method": "wikilink",
+                    "evidence": evidence,
+                    "internal_evidence": review_evidence.get("internal") or {},
+                    "_authored": bool(authored_match),
+                }
+            )
+
+        lifted: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for row in unit_rows[:branch_cap]:
+            (
+                source,
+                target,
+                raw_relation,
+                relation_type,
+                anchor,
+                unit_ref,
+                target_id,
+                target_count,
+                target_exists,
+                authored_match,
+                _source_total,
+            ) = row
+            definition = self.registry.definition(str(relation_type or ""))
+            authored_relation = relation_registry.normalize_relation(str(raw_relation or ""))
+            if (
+                definition is None
+                or definition.family not in _LIFT_RELATION_FAMILIES
+                or not _is_writable_relation_label(authored_relation)
+            ):
+                continue
+            target_rel = remember(target, target_id, target_count, target_exists)
+            entry = lifted.setdefault(
+                (str(source), target_rel, authored_relation),
+                {
+                    "family": definition.family,
+                    "units": [],
+                    "authored": bool(authored_match),
+                },
+            )
+            entry["units"].append(
+                {
+                    "unit_ref": unit_ref,
+                    "anchor": anchor,
+                    "raw_relation": authored_relation,
+                    "relation_type": str(relation_type),
+                }
+            )
+        lifted_per_source: dict[str, int] = {}
+        for (source, target, relation), entry in sorted(lifted.items()):
+            if lifted_per_source.get(source, 0) >= _STRUCTURAL_CANDIDATE_LIMIT:
+                items_truncated = True
+                continue
+            lifted_per_source[source] = lifted_per_source.get(source, 0) + 1
+            units = sorted(
+                entry["units"],
+                key=lambda unit: (str(unit["anchor"] or ""), str(unit["unit_ref"] or "")),
+            )
+            methods[source]["unit_relation_lift"].append(
+                {
+                    "from": source,
+                    "to": target,
+                    "relation_type": relation,
+                    "method": "unit_relation_lift",
+                    "evidence": {
+                        "source_path": source,
+                        "relation_family": entry["family"],
+                        "authoring_units": len(units),
+                        "units": units[:_STRUCTURAL_EVIDENCE_MATCHES],
+                    },
+                    "_authored": bool(entry["authored"]),
+                }
+            )
+
+        question_matches: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        question_authored: dict[tuple[str, str], bool] = {}
+        for row in question_rows[:branch_cap]:
+            (
+                source,
+                target,
+                question_text,
+                unit_ref,
+                anchor,
+                other_unit_ref,
+                other_anchor,
+                target_id,
+                target_count,
+                authored_match,
+                _source_total,
+            ) = row
+            target_rel = remember(target, target_id, target_count)
+            key = (str(source), target_rel)
+            question_authored[key] = bool(authored_match)
+            question_matches.setdefault(key, []).append(
+                {
+                    "question": question_text,
+                    "unit_ref": unit_ref,
+                    "anchor": anchor,
+                    "other_unit_ref": other_unit_ref,
+                    "other_anchor": other_anchor,
+                }
+            )
+        question_per_source: dict[str, int] = {}
+        for (source, target), matches in sorted(question_matches.items()):
+            if question_per_source.get(source, 0) >= _STRUCTURAL_CANDIDATE_LIMIT:
+                items_truncated = True
+                continue
+            question_per_source[source] = question_per_source.get(source, 0) + 1
+            methods[source]["shared_open_question"].append(
+                {
+                    "from": source,
+                    "to": target,
+                    "relation_type": "relates_to",
+                    "method": "shared_open_question",
+                    "evidence": {
+                        "shared_questions": len(matches),
+                        "matches": _ordered_matches(
+                            matches, ("question", "other_unit_ref", "unit_ref")
+                        ),
+                    },
+                    "_authored": question_authored[(source, target)],
+                }
+            )
+
+        resolution_matches: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        resolution_authored: dict[tuple[str, str], bool] = {}
+        for row in resolution_rows[:branch_cap]:
+            (
+                source,
+                other,
+                target_key,
+                relation,
+                anchor,
+                unit_ref,
+                other_relation,
+                other_anchor,
+                other_unit_ref,
+                target_id,
+                target_count,
+                authored_match,
+                _source_total,
+            ) = row
+            target_rel = remember(other, target_id, target_count)
+            key = (str(source), target_rel)
+            resolution_authored[key] = bool(authored_match)
+            resolution_matches.setdefault(key, []).append(
+                {
+                    "target": _with_md(str(target_key or "").removeprefix("file:")),
+                    "relation": relation,
+                    "anchor": anchor,
+                    "unit_ref": unit_ref,
+                    "other_relation": other_relation,
+                    "other_anchor": other_anchor,
+                    "other_unit_ref": other_unit_ref,
+                }
+            )
+        resolution_per_source: dict[str, int] = {}
+        for (source, target), matches in sorted(resolution_matches.items()):
+            if resolution_per_source.get(source, 0) >= _STRUCTURAL_CANDIDATE_LIMIT:
+                items_truncated = True
+                continue
+            resolution_per_source[source] = resolution_per_source.get(source, 0) + 1
+            methods[source]["shared_resolution_target"].append(
+                {
+                    "from": source,
+                    "to": target,
+                    "relation_type": "relates_to",
+                    "method": "shared_resolution_target",
+                    "evidence": {
+                        "shared_targets": len(matches),
+                        "matches": _ordered_matches(
+                            matches, ("target", "other_unit_ref", "unit_ref")
+                        ),
+                    },
+                    "_authored": resolution_authored[(source, target)],
+                }
+            )
+        for row in frontmatter_rows[:branch_cap]:
+            (
+                source,
+                target,
+                target_id,
+                target_count,
+                target_exists,
+                authored_match,
+                _source_total,
+            ) = row
+            target_rel = remember(target, target_id, target_count, target_exists)
+            methods[str(source)]["frontmatter_sources"].append(
+                {
+                    "from": str(source),
+                    "to": target_rel,
+                    "relation_type": "derived_from",
+                    "method": "frontmatter_sources",
+                    "evidence": {"source_path": str(source), "field": "sources"},
+                    "_authored": bool(authored_match),
+                }
+            )
+        for (
+            source,
+            target,
+            shared_key,
+            target_id,
+            target_count,
+            authored_match,
+            _source_total,
+        ) in shared_source_rows[:branch_cap]:
+            target_rel = remember(target, target_id, target_count)
+            methods[str(source)]["shared_sources"].append(
+                {
+                    "from": str(source),
+                    "to": target_rel,
+                    "relation_type": "relates_to",
+                    "method": "shared_sources",
+                    "evidence": {
+                        "shared_source": _with_md(
+                            str(shared_key or "").removeprefix("file:")
+                        )
+                    },
+                    "_authored": bool(authored_match),
+                }
+            )
+
+        canonical_refs: dict[str, str | None] | None = None
+        identity_census_needed = any(
+            info["exomem_id"] is not None for info in source_info.values()
+        ) or any(exomem_id is not None for exomem_id, _count in target_info.values())
+        if identity_census_needed:
+            wanted_refs = list(
+                dict.fromkeys(
+                    (
+                        *source_info,
+                        *(
+                            path
+                            for path in target_info
+                            if path not in placeholder_targets
+                        ),
+                    )
+                )
+            )
+            if identity_snapshot is None or not set(wanted_refs).issubset(
+                identity_snapshot.reference_paths
+            ):
+                return {
+                    "status": "warming",
+                    "groups": [],
+                    "shown": 0,
+                    "pages_shown": 0,
+                    "pages_scanned": 0,
+                    "pages_truncated": False,
+                    "items_truncated": False,
+                    "filtered": {
+                        "authored_edge": 0,
+                        "placeholder_target": 0,
+                        "decided": 0,
+                    },
+                    "coverage": {
+                        "eligible_pages": 0,
+                        "relation_scan_complete": False,
+                    },
+                }
+            canonical_refs = {
+                path: identity_snapshot.canonical_refs_by_path[path]
+                for path in wanted_refs
+            }
+
+        def ref_for(rel: str) -> str:
+            if canonical_refs is not None:
+                canonical = canonical_refs.get(rel)
+                if canonical is not None:
+                    return canonical
+                if rel.startswith(f"{kb_dirname()}/Sources/"):
+                    return context_refs.source_ref(rel)
+                return context_refs.vault_ref(rel)
+            info = source_info.get(rel)
+            identity = (
+                (info.get("exomem_id"), info.get("id_count"))
+                if info is not None
+                else target_info.get(rel, (None, 0))
+            )
+            exomem_id, count = identity
+            if exomem_id and int(count or 0) == 1:
+                try:
+                    return memory_refs.memory_ref(str(exomem_id))
+                except ValueError:
+                    pass
+            if rel.startswith(f"{kb_dirname()}/Sources/"):
+                return context_refs.source_ref(rel)
+            return context_refs.vault_ref(rel)
+
+        state_store = review_state.ReviewStateStore(self.vault_root)
+        state_payload = state_store.load()
+        filtered = {"authored_edge": 0, "placeholder_target": 0, "decided": 0}
+        groups: list[dict[str, Any]] = []
+        pages_scanned = 0
+        method_order = (
+            "unit_relation_lift",
+            "shared_open_question",
+            "shared_resolution_target",
+            "wikilink",
+            "frontmatter_sources",
+            "shared_sources",
+        )
+        for source in selected:
+            if len(groups) >= page_cap:
+                break
+            pages_scanned += 1
+            structural_seen: set[tuple[str, str]] = set()
+            ordered: list[dict[str, Any]] = []
+            for method in method_order:
+                for candidate in methods[source][method]:
+                    key = (str(candidate["to"]), str(candidate["relation_type"]))
+                    if method in method_order[:3]:
+                        if key in structural_seen:
+                            continue
+                        structural_seen.add(key)
+                    ordered.append(candidate)
+            ordered = _dedupe_candidates(ordered)
+            visible: list[dict[str, Any]] = []
+            info = source_info[source]
+            for candidate in ordered:
+                target = str(candidate["to"])
+                relation_type = str(candidate["relation_type"])
+                if bool(candidate.get("_authored")):
+                    filtered["authored_edge"] += 1
+                    continue
+                if target in placeholder_targets:
+                    filtered["placeholder_target"] += 1
+                    continue
+                payload = "|".join(
+                    str(candidate.get(key) or "")
+                    for key in ("from", "to", "relation_type", "method")
+                )
+                review_id = review_state.item_id(f"relation:{payload}")
+                signal_payload = {
+                    "page_signal_version": info["signal_version"],
+                    "method": str(candidate.get("method") or ""),
+                    "relation_type": relation_type,
+                    "to": target,
+                    "evidence": candidate.get("evidence") or {},
+                }
+                signal_version = vault_module.content_hash(
+                    json.dumps(
+                        signal_payload,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )[:16]
+                from_ref = ref_for(source)
+                to_ref = ref_for(target)
+                fingerprint = relation_queue._candidate_fingerprint(
+                    candidate,
+                    from_ref=from_ref,
+                    to_ref=to_ref,
+                    signal_version=signal_version,
+                )
+                effective, _decision = state_store.effective_state(
+                    review_id,
+                    fingerprint,
+                    payload=state_payload,
+                )
+                if effective != "open":
+                    filtered["decided"] += 1
+                    continue
+                item = {
+                    "review_id": review_id,
+                    "ref": relation_queue.relation_review_ref(review_id),
+                    "fingerprint": fingerprint,
+                    "from": source,
+                    "to": target,
+                    "relation_type": relation_type,
+                    "method": candidate["method"],
+                    "evidence": candidate.get("evidence") or {},
+                    "bullet": relation_queue._bullet(candidate),
+                    "target_ref": from_ref,
+                    "state": "open",
+                    "signal_version": signal_version,
+                    "source_path": source,
+                }
+                if candidate.get("internal_evidence"):
+                    item["internal_evidence"] = candidate["internal_evidence"]
+                visible.append(item)
+            if len(visible) > item_cap:
+                items_truncated = True
+            visible = visible[:item_cap]
+            if visible:
+                groups.append(
+                    {
+                        "path": source,
+                        "title": info["title"],
+                        "content_hash": info["content_hash"],
+                        "items": visible,
+                    }
+                )
+        pages_truncated = pages_scanned < eligible_total
+        shown = sum(len(group["items"]) for group in groups)
+        if identity_census_needed and (
+            identity_snapshot is None
+            or not semantic_contract.reference_identity_snapshot_is_current(
+                self.vault_root, identity_snapshot
+            )
+        ):
+            return {
+                "status": "warming",
+                "groups": [],
+                "shown": 0,
+                "pages_shown": 0,
+                "pages_scanned": 0,
+                "pages_truncated": False,
+                "items_truncated": False,
+                "filtered": {
+                    "authored_edge": 0,
+                    "placeholder_target": 0,
+                    "decided": 0,
+                },
+                "coverage": {
+                    "eligible_pages": 0,
+                    "relation_scan_complete": False,
+                },
+            }
+        return {
+            "status": "available",
+            "mode": "relation-queue",
+            "mutated": False,
+            "groups": groups,
+            "shown": shown,
+            "pages_shown": len(groups),
+            "pages_scanned": pages_scanned,
+            "pages_truncated": pages_truncated,
+            "pages_unscanned": max(0, eligible_total - pages_scanned),
+            "items_truncated": items_truncated,
+            "filtered": filtered,
+            "coverage": {
+                **coverage,
+                "relation_pages_scanned": pages_scanned,
+                "relation_candidate_pages_found": len(groups),
+                "relation_candidates_found": shown,
+                "relation_scan_complete": not pages_truncated,
+            },
+        }
 
 
 def graph_context(
@@ -4614,6 +5889,11 @@ def graph_context(
         for definition in (*idx.registry.core.values(), *idx.registry.extensions.values())
         if traversal_profiles.relation_allowed(profile, definition)
     }
+    relation_plan = (
+        traversal_profiles.relation_query_plan(idx.registry, relation_types)
+        if relation_types
+        else None
+    )
     narrowed = traversal_profiles.narrow_relations(profile, relation_types, idx.registry)
     if narrowed is not None:
         allowed &= set(narrowed)
@@ -4818,6 +6098,43 @@ def graph_context(
         excluded_profile = 0
         excluded_scope = 0
         unknown: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+        def _relation_diagnostics(edge: dict[str, Any]) -> dict[str, str]:
+            if relation_plan is None:
+                return {}
+            relation_type = str(edge.get("relation_type") or "")
+            parent_relation = str(edge.get("parent_relation") or "")
+            if relation_type in relation_plan.exact_keys:
+                matched_via = "relation_type"
+                matched_key = relation_type
+            elif relation_type in relation_plan.replacement_keys:
+                matched_via = "replacement"
+                matched_key = relation_type
+            elif parent_relation in relation_plan.parent_keys:
+                matched_via = "parent_relation"
+                matched_key = parent_relation
+            else:
+                return {}
+            for requested in relation_plan.requested:
+                resolved = idx.registry.resolve(requested).canonical
+                if resolved is None:
+                    continue
+                if matched_via != "replacement" and resolved == matched_key:
+                    return {
+                        "matched_via": matched_via,
+                        "requested_relation": requested,
+                        "resolved_relation": resolved,
+                    }
+                if matched_via == "replacement" and matched_key in idx.registry.predecessors(
+                    resolved
+                ):
+                    return {
+                        "matched_via": matched_via,
+                        "requested_relation": requested,
+                        "resolved_relation": resolved,
+                    }
+            return {"matched_via": matched_via}
+
         frontier = set(seen_nodes)
         for _ in range(max(0, depth)):
             if not frontier:
@@ -4868,6 +6185,9 @@ def graph_context(
                     continue
                 if profile.direction == "incoming" and edge["dst_key"] not in frontier:
                     continue
+                diagnostics = _relation_diagnostics(edge)
+                if diagnostics:
+                    edge = {**edge, **diagnostics}
                 # An `excluded` page is never a neighbour and never either edge
                 # endpoint: resolve both not-yet-seen endpoints first (`seen_nodes`
                 # only ever holds non-excluded keys, so anything already there is
@@ -4974,6 +6294,15 @@ def graph_context(
                 "core_version": idx.registry.core_version,
                 "extension_hash": idx.registry.extension_hash,
                 "profile_hash": profile_registry.content_hash,
+                **(
+                    {
+                        "requested_relations": list(relation_plan.requested),
+                        "resolved_relations": list(relation_plan.resolved),
+                        "relation_findings": list(relation_plan.findings),
+                    }
+                    if relation_plan is not None
+                    else {}
+                ),
             },
             "included_relation_families": sorted(profile.families),
             "excluded": {
@@ -5123,6 +6452,90 @@ class GraphDispatchResult:
     @classmethod
     def not_required(cls) -> GraphDispatchResult:
         return cls("not_required", "no_graph_input")
+
+
+def converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
+    """Converge one observed full marker through rebind or the full-rebuild fallback."""
+    root = Path(vault_root)
+    checkpoint: graph_sync.GraphSyncCheckpoint | None = None
+    try:
+        from .writer_lease import active_manager
+
+        coordinator = active_manager()._mutation_coordinator_for(root)
+        # A full marker is enqueued before the canonical registry replacement.
+        # Sample the marker, settled epoch, current registry and bounded graph
+        # identity together under the same canonical boundary so that wake-up
+        # can never choose work from the ordered batch's interior.
+        with coordinator.hold(
+            timeout_seconds=0,
+            operation="epistemic_graph_dispatch_full_marker",
+            holder_kind="graph",
+        ):
+            observed = deferred_index.graph_full_rebuild_pending(root)
+            if observed is None:
+                return GraphDispatchResult.not_required()
+            state = graph_sync.classify_epoch(root)
+            if state.kind in {"pre_floor", "recoverable"}:
+                graph_sync.recover_checkpoint(root)
+                state = graph_sync.classify_epoch(root)
+            checkpoint = graph_sync.read_checkpoint(root)
+            if state.kind not in {"legacy", "coherent"}:
+                if checkpoint is None:
+                    return GraphDispatchResult("failed", "graph_epoch_unavailable")
+                return GraphDispatchResult(
+                    "deferred", "graph_epoch_unavailable", checkpoint
+                )
+            index = EpistemicGraphIndex(root, mutation_coordinator=coordinator)
+            graph_identity: dict[str, str] = {}
+            if index.path.exists():
+                connection = index._connect_existing(readonly=True)
+                try:
+                    graph_sync.limit_graph_metadata_read(connection)
+                    graph_identity = dict(
+                        connection.execute(
+                            "SELECT key, value FROM graph_meta WHERE key IN "
+                            "('schema_version', 'core_registry_version', "
+                            "'extension_registry_hash', 'generation', 'instance')"
+                        ).fetchall()
+                    )
+                finally:
+                    connection.close()
+            try_rebind = bool(
+                checkpoint is not None
+                and graph_identity.get("schema_version") == str(SCHEMA_VERSION)
+                and graph_identity.get("core_registry_version")
+                == str(index.registry.core_version)
+                and graph_identity.get("extension_registry_hash")
+                and graph_identity.get("extension_registry_hash")
+                != index.registry.extension_hash
+                and graph_identity.get("generation")
+                and graph_identity.get("instance")
+            )
+        rebound = try_rebind and checkpoint is not None and index.rebind_registry(checkpoint)
+        if rebound:
+            code = "registry_rebind_completed"
+        else:
+            if checkpoint is None:
+                index.rebuild_all()
+            else:
+                _rebuild_outcome(index, checkpoint)
+            code = "graph_rebuild_completed"
+    except OpError:
+        # The durable marker is the retry handle.  Do not re-enter owner state
+        # after failing to acquire the canonical boundary merely to decorate
+        # the outcome with a checkpoint sampled outside that boundary.
+        return GraphDispatchResult("failed", "graph_boundary_busy")
+    except graph_sync.GraphRebuildInProgress:
+        if checkpoint is None:
+            return GraphDispatchResult("failed", "graph_rebuild_in_progress")
+        return GraphDispatchResult("deferred", "graph_rebuild_in_progress", checkpoint)
+    except Exception:  # noqa: BLE001 - never retire the exact durable marker on failure
+        log.warning("full graph convergence failed; marker remains", exc_info=True)
+        if checkpoint is None:
+            return GraphDispatchResult("failed", "graph_convergence_failed")
+        return GraphDispatchResult("deferred", "graph_convergence_deferred", checkpoint)
+    deferred_index.clear_graph_full_rebuild(root, generation=observed)
+    return GraphDispatchResult("completed", code, checkpoint)
 
 
 def _registered_or_failure(
@@ -5569,7 +6982,30 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
     return drift
 
 
-def _file_node(page, raw_text: str) -> GraphNode:
+def _file_node(
+    vault_root: Path,
+    page,
+    raw_text: str,
+    *,
+    document: semantic_units.SemanticUnitDocument,
+    registry: relation_registry.RelationRegistry,
+) -> GraphNode:
+    from . import activation
+
+    frontmatter = page.frontmatter
+    origin_date = frontmatter.get("created") or frontmatter.get("captured")
+    updated = frontmatter.get("updated")
+    measurement = _activation_measurement_from_document(page, document, registry)
+    if measurement["unregistered"]:
+        activation_priority = 0
+    elif measurement["assertion_blocks"] and not measurement["provenance_relations"]:
+        activation_priority = 1
+    elif measurement["connected"] and not measurement["typed_relations"]:
+        activation_priority = 2
+    elif not measurement["connected"]:
+        activation_priority = 3
+    else:
+        activation_priority = 4
     return GraphNode(
         node_key=_file_key(page.rel_path),
         kind="file",
@@ -5584,7 +7020,103 @@ def _file_node(page, raw_text: str) -> GraphNode:
             "scope": page.scope,
             "origin": "file",
         },
+        page_type=page.page_type,
+        lifecycle_status=page.status,
+        tags=tuple(str(tag) for tag in page.tags),
+        project=_page_project(frontmatter),
+        origin_date=str(origin_date) if origin_date not in (None, "") else None,
+        updated_date=str(updated) if updated not in (None, "") else None,
+        access_tier=access.access_tier(vault_root, page.rel_path),
+        review_eligible=activation.is_eligible_governed_page(vault_root, page),
+        activation_signal_version=activation._signal_version(page),
+        exomem_id=memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD)),
+        activation_priority=activation_priority,
+        activation_connected=bool(measurement["connected"]),
+        activation_typed_relations=int(measurement["typed_relations"]),
+        activation_assertion_blocks=int(measurement["assertion_blocks"]),
+        activation_provenance_relations=int(measurement["provenance_relations"]),
+        activation_unregistered=len(measurement["unregistered"]),
     )
+
+
+def _activation_measurement_from_document(
+    page,
+    document: semantic_units.SemanticUnitDocument,
+    registry: relation_registry.RelationRegistry,
+) -> dict[str, Any]:
+    """Project activation counters without reparsing the indexed document."""
+    from . import activation
+
+    project = activation._page_project(page.frontmatter)
+    registered: list[str] = []
+    unregistered: list[dict[str, str | int]] = []
+    for relation in document.note_relations:
+        resolution = registry.resolve(
+            relation.kind,
+            project=project,
+            page_type=page.page_type,
+            source_kind="file",
+            origin="semantic_relation",
+        )
+        if resolution.canonical is None:
+            unregistered.append(
+                {"label": relation.kind, "anchor": f"line-{relation.line}"}
+            )
+        else:
+            registered.append(resolution.canonical)
+
+    for unit in document.rich_units:
+        for relation in unit.relations:
+            raw = relation.raw.split(":", 1)[0].strip()
+            resolution = registry.resolve(
+                raw,
+                project=project,
+                page_type=page.page_type,
+                source_kind=unit.kind,
+                origin="semantic_relation",
+            )
+            if resolution.canonical is None:
+                unregistered.append(
+                    {
+                        "label": relation_registry.normalize_relation(raw),
+                        "anchor": unit.anchor or f"line-{relation.line}",
+                    }
+                )
+            else:
+                registered.append(resolution.canonical)
+
+    frontmatter_links = 0
+    for field, relation_kind in activation._FRONTMATTER_TYPED_FIELDS.items():
+        count = len(activation._frontmatter_links(page.frontmatter.get(field)))
+        frontmatter_links += count
+        registered.extend([relation_kind] * count)
+    related_count = len(activation._frontmatter_links(page.frontmatter.get("related")))
+    frontmatter_links += related_count
+
+    body_wikilinks = sum(1 for _ in activation.find_body_wikilinks(page.body))
+    assertion_blocks = sum(
+        1
+        for unit in document.rich_units
+        if unit.kind in activation._ASSERTION_BLOCK_TYPES
+    )
+    provenance_relations = sum(
+        1 for kind in registered if kind in activation._PROVENANCE_RELATIONS
+    )
+    authored_relations = len(document.note_relations) + sum(
+        len(unit.relations) for unit in document.rich_units
+    )
+    unique_unknown = {
+        (str(item["label"]), str(item["anchor"])): item for item in unregistered
+    }
+    return {
+        "connected": bool(body_wikilinks or frontmatter_links or authored_relations),
+        "typed_relations": len(registered),
+        "body_wikilinks": body_wikilinks,
+        "frontmatter_links": frontmatter_links,
+        "assertion_blocks": assertion_blocks,
+        "provenance_relations": provenance_relations,
+        "unregistered": list(unique_unknown.values()),
+    }
 
 
 def _block_key(page, unit: semantic_units.SemanticUnit) -> str:
@@ -5779,7 +7311,7 @@ def _edges_for_page(
                     },
                 )
             )
-    for target in _frontmatter_links(page.frontmatter.get("sources")):
+    for occurrence, target in enumerate(_frontmatter_links(page.frontmatter.get("sources"))):
         edges.append(
             page_edge(
                 file_key,
@@ -5788,6 +7320,7 @@ def _edges_for_page(
                 "frontmatter",
                 source_path=rel,
                 source_anchor="sources",
+                review_evidence={"internal": {"occurrence": occurrence}},
             )
         )
     for field in ("evidence", "evidences", "evidence_paths"):
@@ -5846,12 +7379,23 @@ def _edges_for_page(
         page_type=page.page_type,
         source_hash=source_hash,
     )
-    for target in _body_wikilink_paths(
+    for observation in _body_wikilink_observations(
         vault_root, page.body, skip_lines=canonical_lines, resolver=resolver
     ):
         edges.append(
             page_edge(
-                file_key, _file_key(_with_md(target)), "links_to", "wikilink", source_path=rel
+                file_key,
+                _file_key(observation["target_path"]),
+                "links_to",
+                "wikilink",
+                source_path=rel,
+                review_evidence={
+                    "evidence": {
+                        "source_path": rel,
+                        "target": observation["target"],
+                    },
+                    "internal": observation,
+                },
             )
         )
     edges.extend(relation_edges)
@@ -5917,13 +7461,29 @@ def _body_wikilink_paths(
     resolver: vault_module.WikilinkResolver,
 ) -> list[str]:
     """Resolve body links while omitting canonical relation bullets themselves."""
-    out: list[str] = []
+    return [
+        str(item["target_path"])
+        for item in _body_wikilink_observations(
+            vault_root, body, skip_lines=skip_lines, resolver=resolver
+        )
+    ]
+
+
+def _body_wikilink_observations(
+    vault_root: Path,
+    body: str,
+    *,
+    skip_lines: set[int],
+    resolver: vault_module.WikilinkResolver,
+) -> list[dict[str, Any]]:
+    """First authored occurrence and spelling for each resolved body target."""
+    out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for match in vault_module.find_body_wikilinks(body):
+    for occurrence, match in enumerate(vault_module.find_body_wikilinks(body)):
         line = body.count("\n", 0, match.start()) + 1
         if line in skip_lines:
             continue
-        target = match.group(0)[2:-2].split("|", 1)[0].strip()
+        target = match.group(1).strip()
         if not target or target.endswith("/"):
             continue
         try:
@@ -5936,7 +7496,16 @@ def _body_wikilink_paths(
         if warning or not target_path.startswith(kb_prefix()) or target_path in seen:
             continue
         seen.add(target_path)
-        out.append(target_path)
+        out.append(
+            {
+                "target_path": target_path,
+                "target": target,
+                "occurrence": occurrence,
+                "start": match.start(),
+                "end": match.end(),
+                "line": line,
+            }
+        )
     return out
 
 
@@ -6013,16 +7582,18 @@ def _edge(
     source_kind: str | None = None,
     target_kind: str | None = None,
     source_hash: str = "",
+    review_evidence: dict[str, Any] | None = None,
 ) -> GraphEdge:
     registry = registry or relation_registry.core_registry()
     raw_relation = raw_relation or relation_type
+    resolver_origin = "semantic_relation" if origin == "markdown_relation" else origin
     resolution = registry.resolve(
         raw_relation,
         project=project,
         page_type=page_type,
         source_kind=source_kind,
         target_kind=target_kind,
-        origin="semantic_relation" if origin == "markdown_relation" else origin,
+        origin=resolver_origin,
     )
     canonical = resolution.canonical
     key_material = "\n".join(
@@ -6048,6 +7619,12 @@ def _edge(
             "replacement": resolution.replacement,
             "registry_findings": list(resolution.findings),
         },
+        project,
+        page_type,
+        source_kind,
+        target_kind,
+        resolver_origin,
+        dict(review_evidence or {}),
     )
 
 
@@ -6057,8 +7634,13 @@ def _insert_node(conn: sqlite3.Connection, node: GraphNode) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO graph_nodes "
         "(node_key, kind, path, anchor, title, text, source_hash, line_start, "
-        "line_end, metadata, unit_ref, unit_category, unit_kind) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "line_end, metadata, unit_ref, unit_category, unit_kind, page_type, "
+        "lifecycle_status, tags_json, project, origin_date, updated_date, access_tier, "
+        "review_eligible, activation_signal_version, exomem_id, activation_priority, "
+        "activation_connected, activation_typed_relations, activation_assertion_blocks, "
+        "activation_provenance_relations, activation_unregistered) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+        "?, ?, ?, ?, ?, ?)",
         (
             node.node_key,
             node.kind,
@@ -6073,6 +7655,22 @@ def _insert_node(conn: sqlite3.Connection, node: GraphNode) -> None:
             metadata.get("unit_ref") if is_unit else None,
             metadata.get("category") if is_unit else None,
             metadata.get("kind") if is_unit else None,
+            node.page_type,
+            node.lifecycle_status,
+            json.dumps(list(node.tags), ensure_ascii=False, sort_keys=True),
+            node.project,
+            node.origin_date,
+            node.updated_date,
+            node.access_tier,
+            int(node.review_eligible),
+            node.activation_signal_version,
+            node.exomem_id,
+            node.activation_priority,
+            int(node.activation_connected),
+            node.activation_typed_relations,
+            node.activation_assertion_blocks,
+            node.activation_provenance_relations,
+            node.activation_unregistered,
         ),
     )
 
@@ -6082,7 +7680,9 @@ def _insert_edge(conn: sqlite3.Connection, edge: GraphEdge) -> None:
         "INSERT OR REPLACE INTO graph_edges "
         "(edge_key, src_key, dst_key, relation_type, raw_relation, parent_relation, "
         "registry_status, registry_version, registry_hash, origin, source_path, "
-        "source_anchor, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "source_anchor, metadata, resolver_project, resolver_page_type, "
+        "resolver_source_kind, resolver_target_kind, resolver_origin, review_evidence) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             edge.edge_key,
             edge.src_key,
@@ -6097,6 +7697,12 @@ def _insert_edge(conn: sqlite3.Connection, edge: GraphEdge) -> None:
             edge.source_path,
             edge.source_anchor,
             json.dumps(edge.metadata or {}, sort_keys=True),
+            edge.resolver_project,
+            edge.resolver_page_type,
+            edge.resolver_source_kind,
+            edge.resolver_target_kind,
+            edge.resolver_origin,
+            json.dumps(edge.review_evidence or {}, ensure_ascii=False, sort_keys=True),
         ),
     )
 

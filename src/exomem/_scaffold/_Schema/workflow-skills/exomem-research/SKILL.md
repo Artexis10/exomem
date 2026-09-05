@@ -19,6 +19,12 @@ Use when the user asks to research a topic, compare options, investigate a claim
 4. Compile the result with `remember` as a `research-note` unless another type clearly fits, listing every source preserved in step 2 in `sources:`.
 5. Use `connect_memory(operation="suggest-links")` and connect related prior notes.
 
+## Relation governance
+Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`; corrections use a new canonical key and deprecate the old one.
+
 ## Output contract
 Return findings, cited sources, limits, saved path, and follow-up questions.
 

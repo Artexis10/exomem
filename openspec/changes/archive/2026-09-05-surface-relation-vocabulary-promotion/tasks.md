@@ -23,5 +23,5 @@
 ## 4. Verification
 
 - [x] 4.1 Run focused note, memory-schema, and relation-registry tests.
-- [ ] 4.2 Run the full pytest suite and `ruff check . --select F` on Linux.
+- [x] 4.2 Run the full pytest suite and `ruff check . --select F` on Linux.
 - [x] 4.3 Validate the OpenSpec change in strict mode.

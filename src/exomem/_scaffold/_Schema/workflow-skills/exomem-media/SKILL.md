@@ -20,6 +20,12 @@ Use when the user asks to find media evidence, look inside a recording, inspect 
 5. Preserve new raw artifacts with `capture_source`, `preserve_evidence`, `preserve_artifacts` for file handles, or fallback `transfer_artifact` before analyzing them.
 6. Run `connect_memory(operation="suggest-links")` before writing a compiled note, and accept the links that genuinely clarify context.
 
+## Relation governance
+Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`; corrections use a new canonical key and deprecate the old one.
+
 ## Output contract
 Return matching artifacts, what was inspected, citations, and any compiled conclusion path.
 

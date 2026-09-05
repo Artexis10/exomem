@@ -96,10 +96,12 @@ def _seed_suppressed_sidecars(vault: Path, rel: str) -> None:
 
     graph = epistemic_graph.EpistemicGraphIndex(vault)
     with _committed(graph._connect()) as conn:
-        conn.execute(
-            "INSERT INTO graph_nodes(node_key, kind, path, text, source_hash, metadata) "
-            "VALUES ('raw', 'file', ?, 'private', 'hash', '{}')",
-            (rel,),
+        epistemic_graph._insert_node(
+            conn,
+            epistemic_graph.GraphNode(
+                node_key="raw", kind="file", path=rel, anchor=None, title=None,
+                text="private", source_hash="hash",
+            ),
         )
 
     claim = claims.ClaimIndex(vault)
@@ -200,7 +202,9 @@ def test_watcher_raw_record_burst_does_not_consume_semantic_cap(
         lambda: mode.WatcherPolicy(0.5, 300.0, 1, 1, False),
     )
 
-    watcher._dispatch_batch(paths, [path.relative_to(tmp_path).as_posix() for path in paths], [], cap=False)
+    watcher._dispatch_batch(
+        paths, [path.relative_to(tmp_path).as_posix() for path in paths], [], cap=False
+    )
 
     assert calls == [
         (
@@ -214,7 +218,9 @@ def test_watcher_raw_record_burst_does_not_consume_semantic_cap(
     ]
 
 
-def test_access_policy_transition_purges_stale_vector_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_access_policy_transition_purges_stale_vector_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from exomem import embedding_index, recall_policy
 
     page = tmp_path / "Knowledge Base" / "Notes" / "Private" / "row.md"
@@ -514,7 +520,9 @@ def test_sidecar_rows_maps_actual_safe_open_failure_to_unreadable(
 ) -> None:
     from exomem import index_paths
 
-    monkeypatch.setattr(audit_module, "_bind_sidecar", lambda *_args, **_kwargs: ("unreadable", None))
+    monkeypatch.setattr(
+        audit_module, "_bind_sidecar", lambda *_args, **_kwargs: ("unreadable", None)
+    )
 
     assert audit_module._sidecar_rows(
         tmp_path,
@@ -626,7 +634,9 @@ def test_windows_census_rejects_reparse_before_sqlite_connect(
         except OSError:
             pytest.skip("cannot create native Windows ancestor reparse fixture")
 
-    monkeypatch.setattr(sqlite3, "connect", lambda *_args, **_kwargs: pytest.fail("SQLite followed reparse"))
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *_args, **_kwargs: pytest.fail("SQLite followed reparse")
+    )
     _rows, _truncated, _last, failure = audit_module._sidecar_rows(
         tmp_path,
         sidecar,
@@ -639,7 +649,9 @@ def test_windows_census_rejects_reparse_before_sqlite_connect(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows retained handles")
-def test_windows_sidecar_binding_allows_sqlite_reads_and_releases_replacement(tmp_path: Path) -> None:
+def test_windows_sidecar_binding_allows_sqlite_reads_and_releases_replacement(
+    tmp_path: Path,
+) -> None:
     from exomem import embedding_index, index_paths
 
     index = embedding_index.EmbeddingIndex(tmp_path)
@@ -663,7 +675,9 @@ def test_windows_sidecar_binding_allows_sqlite_reads_and_releases_replacement(tm
     try:
         conn = sqlite3.connect(f"{binding.path.as_uri()}?mode=ro", uri=True)
         try:
-            assert conn.execute("SELECT file_path FROM chunks").fetchall() == [("../../corrupt.md",)]
+            assert conn.execute("SELECT file_path FROM chunks").fetchall() == [
+                ("../../corrupt.md",)
+            ]
         finally:
             conn.close()
         with pytest.raises(OSError):
@@ -730,7 +744,9 @@ def test_windows_binder_closes_partial_open_handles_in_reverse_order(
     monkeypatch.setattr(mutation_lock, "_windows_close_handle", closed.append)
     monkeypatch.setattr(mutation_lock, "_windows_child_is_in_directory", lambda *_args: True)
     monkeypatch.setattr(mutation_lock, "_windows_handle_identity", lambda handle: (0, 0, handle))
-    monkeypatch.setattr(audit_module, "_windows_handle_signature", lambda handle: (0, 0, handle, 0, 0))
+    monkeypatch.setattr(
+        audit_module, "_windows_handle_signature", lambda handle: (0, 0, handle, 0, 0)
+    )
 
     assert audit_module._bind_sidecar(sidecar, writable=False) == ("unreadable", None)
     assert opened == [1, 2, 3, 4]
@@ -1149,19 +1165,37 @@ def test_census_purges_graph_edge_placeholders_and_corrupt_rows(
     _raw, rel = _raw_record(tmp_path)
     graph = epistemic_graph.EpistemicGraphIndex(tmp_path)
     with _committed(graph._connect()) as conn:
-        conn.execute(
-            "INSERT INTO graph_edges(edge_key, src_key, dst_key, raw_relation, registry_status, "
-            "registry_version, registry_hash, origin, source_path, metadata) "
-            "VALUES ('edge', ?, 'file:Knowledge Base/Notes/target.md', 'links_to', 'known', 1, "
-            "'registry', 'wikilink', ?, '{}')",
-            (f"file:{rel}", rel),
+        epistemic_graph._insert_edge(
+            conn,
+            epistemic_graph.GraphEdge(
+                edge_key="edge",
+                src_key=f"file:{rel}",
+                dst_key="file:Knowledge Base/Notes/target.md",
+                relation_type=None,
+                raw_relation="links_to",
+                parent_relation=None,
+                registry_status="known",
+                registry_version=1,
+                registry_hash="registry",
+                origin="wikilink",
+                source_path=rel,
+            ),
         )
-        conn.execute(
-            "INSERT INTO graph_edges(edge_key, src_key, dst_key, raw_relation, registry_status, "
-            "registry_version, registry_hash, origin, source_path, metadata) "
-            "VALUES ('edge-target', 'file:Knowledge Base/Notes/source.md', ?, 'links_to', 'known', 1, "
-            "'registry', 'wikilink', 'Knowledge Base/Notes/source.md', '{}')",
-            (f"file:{rel}",),
+        epistemic_graph._insert_edge(
+            conn,
+            epistemic_graph.GraphEdge(
+                edge_key="edge-target",
+                src_key="file:Knowledge Base/Notes/source.md",
+                dst_key=f"file:{rel}",
+                relation_type=None,
+                raw_relation="links_to",
+                parent_relation=None,
+                registry_status="known",
+                registry_version=1,
+                registry_hash="registry",
+                origin="wikilink",
+                source_path="Knowledge Base/Notes/source.md",
+            ),
         )
     with deferred_index._connect(tmp_path, create=True) as conn:
         for index in range(2):
@@ -1223,10 +1257,12 @@ def test_corrupt_purge_uses_sidecar_model_cleanup_and_invalidates_warm_state(
 
     graph = epistemic_graph.EpistemicGraphIndex(tmp_path)
     with _committed(graph._connect()) as conn:
-        conn.execute(
-            "INSERT INTO graph_nodes(node_key, kind, path, text, source_hash, metadata) "
-            "VALUES ('corrupt', 'file', ?, 'private', 'hash', '{}')",
-            (bad_markdown,),
+        epistemic_graph._insert_node(
+            conn,
+            epistemic_graph.GraphNode(
+                node_key="corrupt", kind="file", path=bad_markdown, anchor=None,
+                title=None, text="private", source_hash="hash",
+            ),
         )
         epistemic_graph._bump_generation(conn)
         generation_before = conn.execute(
@@ -1241,7 +1277,9 @@ def test_corrupt_purge_uses_sidecar_model_cleanup_and_invalidates_warm_state(
             "VALUES (?, 1, '2026-01-01', 1, 1, 0)",
             (bad_markdown,),
         )
-        rowid = conn.execute("SELECT rowid FROM pages WHERE path = ?", (bad_markdown,)).fetchone()[0]
+        rowid = conn.execute(
+            "SELECT rowid FROM pages WHERE path = ?", (bad_markdown,)
+        ).fetchone()[0]
         if lexstore.fts5_available():
             conn.execute("INSERT INTO fts(rowid, stemmed) VALUES (?, 'private')", (rowid,))
             conn.execute(

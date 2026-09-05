@@ -47,6 +47,22 @@ Windows cannot share a single `RotatingFileHandler` across processes, which is
 why the server, CLI, and media worker each get their own file instead of one
 shared `exomem.log`.
 
+## Derived graph recovery
+
+Graph status is typed: `current`, `recovery_required`, or `unavailable`.
+Relation-queue reads project that state as `available`, `warming`, `pending`, or
+`unavailable`, rather than serving an old graph as current. A registry-only
+change may complete by rebinding the existing sidecar when its source proof
+remains valid; if that proof is absent, the same durable recovery path uses a
+rebuild. The public write terminal reports successful convergence as
+`graph_sync="completed"`; graph status reports whether the derived graph is
+current.
+
+Use `maintain_memory(mode="reconcile", rebuild_graph=true)` for an unavailable
+derived graph lineage. This recovery concerns rebuildable sidecar state only;
+it neither changes Markdown nor selects, promotes, deprecates, or authors a
+relation.
+
 ## Event schema
 
 A structured log record (`src/exomem/log_events.py`) carries:

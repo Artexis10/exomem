@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).parents[1]
-MODEL = ROOT / "src/exomem/studio/model.v1.js"
+MODEL = ROOT / "src/exomem/studio/model.v2.js"
 STATE = ROOT / "src/exomem/studio/state.v2.js"
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="Node is not installed")
@@ -107,6 +107,102 @@ def test_section_states_distinguish_empty_unavailable_and_truncated() -> None:
         "unavailable": "unavailable",
         "truncated": "truncated",
         "available": "available",
+    }
+
+
+def test_relation_queue_model_distinguishes_every_server_state() -> None:
+    source = f"""
+      import {{relationQueueModel, relationQueueStatus}} from {MODEL.as_uri()!r};
+      const response = (status, groups = []) => ({{
+        status,
+        groups,
+        shown: groups.flatMap((group) => group.items).length,
+        pages_shown: groups.length,
+        retryable: status !== 'available',
+        next_action: status !== 'available' ? 'retry-relation-queue' : null,
+      }});
+      const queues = {{
+        available: response('available', [{{path: 'source.md', items: [{{ref: 'candidate'}}]}}]),
+        empty: response('available'),
+        warming: response('warming'),
+        pending: response('pending'),
+        unavailable: response('unavailable'),
+      }};
+      console.log(JSON.stringify(Object.fromEntries(
+        Object.entries(queues).map(([name, queue]) => {{
+          const model = relationQueueModel(queue);
+          return [name, {{state: model.state, status: relationQueueStatus(model)}}];
+        }}),
+      )));
+    """
+
+    result = _node(source)
+
+    assert {name: value["state"] for name, value in result.items()} == {
+        "available": "available",
+        "empty": "empty",
+        "warming": "warming",
+        "pending": "pending",
+        "unavailable": "unavailable",
+    }
+    assert "retry" in result["warming"]["status"].lower()
+    assert "retry" in result["pending"]["status"].lower()
+    assert "retry" in result["unavailable"]["status"].lower()
+    assert "loading" not in " ".join(value["status"].lower() for value in result.values())
+
+
+def test_relation_queue_model_preserves_server_order_hints_and_bounded_truth() -> None:
+    source = f"""
+      import {{relationQueueModel, relationQueueStatus}} from {MODEL.as_uri()!r};
+      const queue = {{
+        status: 'available',
+        shown: 3,
+        pages_shown: 2,
+        pages_truncated: 7,
+        coverage: {{eligible_pages: 120, pages_with_candidates: 9}},
+        groups: [
+          {{
+            path: 'z-source.md',
+            source_path: 'z-source.md',
+            source_content_hash: 'hash-z',
+            items: [
+              {{ref: 'z-second', source_path: 'z-source.md', source_content_hash: 'hash-z', fingerprint: 'fp-z2'}},
+              {{ref: 'z-first', source_path: 'z-source.md', source_content_hash: 'hash-z', fingerprint: 'fp-z1'}},
+            ],
+          }},
+          {{
+            path: 'a-source.md',
+            source_path: 'a-source.md',
+            source_content_hash: 'hash-a',
+            items: [
+              {{ref: 'a-only', source_path: 'a-source.md', source_content_hash: 'hash-a', fingerprint: 'fp-a'}},
+            ],
+          }},
+        ],
+      }};
+      const model = relationQueueModel(queue);
+      console.log(JSON.stringify({{
+        refs: model.groups.map((group) => group.items.map((item) => item.ref)),
+        sourcePaths: model.groups.map((group) => group.source_path),
+        hashes: model.groups.map((group) => group.source_content_hash),
+        coverage: model.coverage,
+        pagesTruncated: model.pagesTruncated,
+        status: relationQueueStatus(model),
+      }}));
+    """
+
+    result = _node(source)
+
+    assert result == {
+        "refs": [["z-second", "z-first"], ["a-only"]],
+        "sourcePaths": ["z-source.md", "a-source.md"],
+        "hashes": ["hash-z", "hash-a"],
+        "coverage": {"eligible_pages": 120, "pages_with_candidates": 9},
+        "pagesTruncated": 7,
+        "status": (
+            "3 candidates across 2 pages in this bounded server view. "
+            "7 additional pages were omitted; this is not the complete vault backlog."
+        ),
     }
 
 

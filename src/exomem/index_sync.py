@@ -983,7 +983,7 @@ def _drain_graph_work(
     `epoch_admits_incremental_repair`, which re-reads under the canonical
     boundary rather than condemning a lineage on one sample taken mid-batch.
     """
-    from . import epistemic_graph, graph_sync
+    from . import epistemic_graph
 
     pending_generation = deferred_index.graph_full_rebuild_pending(vault_root)
     receipts = deferred_index.snapshot_graph(
@@ -993,25 +993,23 @@ def _drain_graph_work(
         return 0
 
     index = epistemic_graph.EpistemicGraphIndex(vault_root)
+    if pending_generation is not None:
+        result = epistemic_graph.converge_full_graph_marker(vault_root)
+        if result.outcome != "completed":
+            log.info(
+                "deferred full graph convergence retained marker outcome=%s code=%s",
+                result.outcome,
+                result.code,
+            )
+            return 0
+        # Whole-vault convergence covers every receipt in this exact snapshot;
+        # compare-and-swap receipt clearing preserves anything newer.
+        return 1 + deferred_index.clear_graph_receipts(vault_root, receipts)
     if not index.epoch_admits_incremental_repair():
         # Not a warning: under a live writer the ordinary cause is a batch
         # mid-flight, which the next tick clears. The work stays queued.
         log.info("deferred graph drain skipped; graph epoch is not settled")
         return 0
-    if pending_generation is not None:
-        try:
-            index.rebuild_all()
-        except graph_sync.GraphRebuildInProgress:
-            log.info("deferred graph rebuild joined an active external owner")
-            return 0
-        except Exception:  # noqa: BLE001 - durable work must survive a failed rebuild
-            log.warning("deferred graph rebuild failed; marker remains", exc_info=True)
-            return 0
-        deferred_index.clear_graph_full_rebuild(vault_root, generation=pending_generation)
-        # A whole-vault rebuild covers every path queued at snapshot time; a
-        # path enqueued after it started carries a newer revision and survives.
-        return 1 + deferred_index.clear_graph_receipts(vault_root, receipts)
-
     processed = 0
     batch = [vault_root / receipt.rel_path for receipt in receipts]
     try:
@@ -1367,6 +1365,49 @@ def _dispatch_upsert_components(
     return components
 
 
+def _apply_exact_path_custody(
+    vault_root: Path,
+    *,
+    changed: list[str],
+    deleted: list[str],
+    reason: str,
+) -> None:
+    """Hand this batch's committed path set to the read-side custody seams.
+
+    Design Decision 2's write half. The fan-out above already brought each
+    sidecar's rows current one path at a time; this tells the read-side caches
+    the SAME path set, so their rows move with it and no whole-scope key has to
+    stand in for a change it cannot describe. It also re-checks each seam
+    against the pages, so a component that degraded above cannot leave a row
+    that answers -- a path no seam can prove exact fails the scope closed.
+
+    It never fails a write that has already committed -- the caches are derived
+    -- but it does not fail OPEN either. An individual seam that raises is
+    already handled inside `apply_receipt_paths`, which names its paths as
+    mismatches and invalidates the scope; if the whole call fails, the batch's
+    custody is simply unknown, and unknown custody is exactly the state a
+    whole-scope invalidation exists for. Logging and returning would leave rows
+    that answer with nothing having checked them.
+    """
+    if not (changed or deleted):
+        return
+    from . import freshness
+
+    try:
+        freshness.apply_receipt_paths(
+            vault_root, changed=changed, deleted=deleted, reason=reason
+        )
+    except Exception:  # noqa: BLE001 - canonical bytes are already committed
+        log.warning("read-side exact custody could not be applied", exc_info=True)
+        try:
+            for scope in freshness.SCOPES:
+                freshness.invalidate_scope_for_drift(
+                    vault_root, scope=scope, reason=f"{reason}_custody_unavailable"
+                )
+        except Exception:  # noqa: BLE001 - the write itself must still return
+            log.warning("custody fallback invalidation failed", exc_info=True)
+
+
 @call_spans.timed("index.upsert_after_write")
 def upsert_after_write(
     vault_root: Path,
@@ -1430,11 +1471,18 @@ def upsert_after_write(
     requested_report, requested_truncated = _bounded_paths(requested_rels)
     eligible_report, eligible_truncated = _bounded_paths(eligible_rels)
     if not eligible and not watcher_mode:
+        from . import epistemic_graph
+
+        graph_component = (
+            _graph_component(lambda: epistemic_graph.converge_full_graph_marker(vault_root))
+            if deferred_index.graph_full_rebuild_pending(vault_root) is not None
+            else None
+        )
         return IndexSyncReport(
             "upsert",
             requested_report,
             eligible_report,
-            (),
+            () if graph_component is None else (graph_component,),
             requested_truncated or eligible_truncated,
         )
     from . import recall_policy
@@ -1564,6 +1612,17 @@ def upsert_after_write(
         semantic_index.reset_parent_states(token)
     if not batch.revalidate(vault_root):
         return stale_report()
+    _apply_exact_path_custody(
+        vault_root,
+        # `batch.identity_paths` rather than `identity_items`: the latter is
+        # narrowed to the knowledge base in watcher mode so the heavier derived
+        # components stay KB-only, and the read-side caches serve both scopes.
+        # This is the batch's whole markdown path set, which is what a receipt
+        # names.
+        changed=[item.rel_path for item in batch.identity_paths],
+        deleted=watcher_deleted_rels or [],
+        reason="governed_write",
+    )
     report = IndexSyncReport(
         "upsert",
         requested_report,
@@ -1677,6 +1736,9 @@ def delete_after_remove(
             scene_frames.clear_scene_frames(vault_root, vault_root / rel)
         except Exception:  # noqa: BLE001 - frame cleanup is best-effort
             log.warning("scene-frame cleanup failed for %s", rel, exc_info=True)
+    _apply_exact_path_custody(
+        vault_root, changed=[], deleted=md_rels, reason="governed_delete"
+    )
     report = IndexSyncReport(
         "delete",
         requested_report,

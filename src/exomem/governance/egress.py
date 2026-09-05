@@ -3029,6 +3029,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "resolve-entity": "structure",
         "create-entity": "mutation",
         "accept-relation": "mutation",
+        "resolve-relation": "structure",
     },
     ("adopt_vault", "mode"): {
         "scan-only": "structure",
@@ -3088,6 +3089,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "save": "mutation",
         "refresh": "mutation",
         "save-entity-types": "mutation",
+        "propose-relation": "structure",
+        "save-relations": "mutation",
     },
     ("record_memory", "action"): {
         "describe": "structure",

@@ -64,6 +64,7 @@ from . import envelope as envelope_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
+from . import find_types, query_log, retrieval_models, semantic_census, upload_tokens, vault
 from . import get_page as get_page_module
 from . import knowledge_packs as knowledge_packs_module
 from . import link as link_module
@@ -83,7 +84,6 @@ from . import plan_memory as plan_memory_module
 from . import plan_progress as plan_progress_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
-from . import query_log, retrieval_models, semantic_census, upload_tokens, vault
 from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import record_memory as record_memory_module
@@ -91,6 +91,7 @@ from . import recover_from_trash as recover_from_trash_module
 from . import referent_runtime as referent_runtime_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
+from . import relation_vocabulary as relation_vocabulary_module
 from . import replace as replace_module
 from . import reserved_paths as reserved_paths_module
 from . import retrieval_explain as retrieval_explain_module
@@ -176,6 +177,24 @@ _WorkflowContextArgument = Annotated[
                 },
                 {"type": "null"},
             ]
+        }
+    ),
+]
+_OptionalRelationText = Annotated[
+    str | None,
+    WithJsonSchema({"anyOf": [{"type": "string"}, {"type": "null"}]}),
+]
+_OptionalRelationProposal = Annotated[
+    dict | None,
+    WithJsonSchema({"anyOf": [{"type": "object"}, {"type": "null"}]}),
+]
+_RelationCandidateLimit = Annotated[
+    int,
+    WithJsonSchema(
+        {
+            "type": "integer",
+            "minimum": relation_vocabulary_module.RELATION_CANDIDATE_LIMIT_MIN,
+            "maximum": relation_vocabulary_module.RELATION_CANDIDATE_LIMIT_MAX,
         }
     ),
 ]
@@ -519,6 +538,25 @@ def op_bootstrap(
             "status": workflow_public_status,
         }
     entity_type_registry = entity_types_module.load_entity_types(vault_root)
+    relation_registry = relation_registry_module.load_registry(vault_root)
+    relation_vocabulary_projection = {
+        "contract_version": "2026-09-01.1",
+        "core_version": relation_registry.core_version,
+        "core_vocabulary": sorted(relation_registry.core),
+        "extension_hash": relation_registry.extension_hash,
+        "extension_count": len(relation_registry.extensions),
+        "inventory_route": {
+            "tool": "connect_memory",
+            "args": {"operation": "resolve-relation"},
+        },
+        "workflow": (
+            "Choose a specific truthful registered relation: resolve-relation and reuse it. "
+            "Otherwise use relates_to for a real generic connection, or no edge. Use "
+            "propose-relation only for durable recurring meaning; save-relations is "
+            "proposal-first and hash guarded. Corrections create a new canonical key and "
+            "deprecate the old key."
+        ),
+    }
     source_taxonomy_projection = _source_taxonomy_projection(vault_root, profile=profile)
     simple_actions = simple_action_catalog(selected_packs, available_tools=active_product_names)
     front_door_actions = product_front_door_catalog(
@@ -835,6 +873,7 @@ def op_bootstrap(
         "semantic_authoring": semantic_authoring_projection,
         "planning": planning_contract,
         "workflow_contracts": workflow_contract_projection,
+        "relation_vocabulary": relation_vocabulary_projection,
         "epistemic_contract": epistemic_contract,
         "memory_model": {
             "built_in_ai_memory": (
@@ -1025,18 +1064,26 @@ def op_bootstrap(
                 "contract": semantic_authoring_projection,
                 "compact_syntax": semantic_authoring_module.AUTHORING_CONTRACT.compact["syntax"],
                 "compact_kind": semantic_authoring_module.AUTHORING_CONTRACT.compact["kind"],
-                "category_rule": semantic_authoring_module.AUTHORING_CONTRACT.semantic_roles[
-                    "category"
-                ],
-                "rich_form": semantic_authoring_module.AUTHORING_CONTRACT.rich["heading_syntax"],
                 "rich_relation_rule": semantic_authoring_module.AUTHORING_CONTRACT.rich[
                     "relation_rule"
                 ],
-                "mutation_rule": semantic_authoring_module.AUTHORING_CONTRACT.routes[
-                    "single_semantic_unit"
-                ],
-                "drift_guards": (
-                    "update/remove require the current parent content hash and unit fingerprint"
+                **(
+                    {
+                        "category_rule": semantic_authoring_module.AUTHORING_CONTRACT.semantic_roles[
+                            "category"
+                        ],
+                        "rich_form": semantic_authoring_module.AUTHORING_CONTRACT.rich[
+                            "heading_syntax"
+                        ],
+                        "mutation_rule": semantic_authoring_module.AUTHORING_CONTRACT.routes[
+                            "single_semantic_unit"
+                        ],
+                        "drift_guards": (
+                            "update/remove require the current parent content hash and unit fingerprint"
+                        ),
+                    }
+                    if profile != "compact"
+                    else {}
                 ),
             },
             "reviewed_creation": {
@@ -1060,42 +1107,54 @@ def op_bootstrap(
                     "it, then call remember() so normal semantic precommit still applies"
                 ),
             },
-            "reviewed_existing_edit": {
-                "validate_call": {
-                    "tool": "edit_memory",
-                    "arguments": {
-                        "path": "Knowledge Base/Notes/Research/example.md",
-                        "why": "refresh relation review",
-                        "operation": {
-                            "kind": "replace_string",
-                            "old_string": "before",
-                            "new_string": "after",
-                            "validate_only": True,
+            "reviewed_existing_edit": (
+                {
+                    "rule": (
+                        "validate the exact edit; retain transition_token and "
+                        "relation_review_hash; commit that edit unchanged with an explicit "
+                        "reviewed_none reason only when no truthful relation applies"
+                    )
+                }
+                if profile == "compact"
+                else {
+                    "validate_call": {
+                        "tool": "edit_memory",
+                        "arguments": {
+                            "path": "Knowledge Base/Notes/Research/example.md",
+                            "why": "refresh relation review",
+                            "operation": {
+                                "kind": "replace_string",
+                                "old_string": "before",
+                                "new_string": "after",
+                                "validate_only": True,
+                            },
                         },
                     },
-                },
-                "commit_call": {
-                    "tool": "edit_memory",
-                    "arguments": {
-                        "path": "Knowledge Base/Notes/Research/example.md",
-                        "why": "refresh relation review",
-                        "operation": {
-                            "kind": "replace_string",
-                            "old_string": "before",
-                            "new_string": "after",
-                            "transition_token": "<returned transition_token>",
-                            "relation_disposition": "reviewed_none",
-                            "relation_review_hash": "<returned relation_review_hash>",
-                            "relation_review_reason": ("No honest typed relation applies."),
+                    "commit_call": {
+                        "tool": "edit_memory",
+                        "arguments": {
+                            "path": "Knowledge Base/Notes/Research/example.md",
+                            "why": "refresh relation review",
+                            "operation": {
+                                "kind": "replace_string",
+                                "old_string": "before",
+                                "new_string": "after",
+                                "transition_token": "<returned transition_token>",
+                                "relation_disposition": "reviewed_none",
+                                "relation_review_hash": "<returned relation_review_hash>",
+                                "relation_review_reason": (
+                                    "No honest typed relation applies."
+                                ),
+                            },
                         },
                     },
-                },
-                "rule": (
-                    "retain semantic.transition_token and "
-                    "semantic.relation_review_hash from validation; commit the "
-                    "identical proposed edit with a bounded reason"
-                ),
-            },
+                    "rule": (
+                        "retain semantic.transition_token and "
+                        "semantic.relation_review_hash from validation; commit the "
+                        "identical proposed edit with a bounded reason"
+                    ),
+                }
+            ),
         },
         "tool_defaults": {
             "normal_lookup": {
@@ -1211,7 +1270,6 @@ def op_bootstrap(
         ),
         "common_tools": [
             "adopt_vault",
-            "browse_memory",
             "ask_memory",
             "read_memory",
             "remember",
@@ -1219,9 +1277,6 @@ def op_bootstrap(
             "observe_memory",
             "replace_memory",
             "connect_memory",
-            "preserve_artifacts",
-            "transfer_artifact",
-            "read_media",
         ],
     }
 
@@ -1330,6 +1385,7 @@ def _require_supported_projected_find_request(
     prefer_compiled: bool,
     prefer_active: bool,
     prefer_used: bool,
+    widen_outside_kb: bool,
     pack: bool,
     graph_enrich: bool,
     include_timings: bool,
@@ -1365,6 +1421,7 @@ def _require_supported_projected_find_request(
         or not prefer_compiled
         or not prefer_active
         or prefer_used
+        or widen_outside_kb
         or pack
         or graph_enrich
         or explain
@@ -1402,6 +1459,7 @@ def op_find(
     prefer_compiled: bool = True,
     prefer_active: bool = True,
     prefer_used: bool = False,
+    widen_outside_kb: bool = False,
     pack: bool = False,
     graph_enrich: bool = False,
     detail: str = "full",
@@ -1452,21 +1510,16 @@ def op_find(
         continuation: Opaque governed-projection continuation returned by a prior page.
             It is bound to the same principal, authorization session, purpose, request,
             and retained projected snapshot. Omit for the first page.
-        scope: "kb" (default) searches Knowledge Base/ first and
-            AUTO-WIDENS to the whole vault when the KB doesn't fill
-            `limit` — so content in sibling folders (Tracking/,
-            Reference/, Finance/, ... and curated, read-only trees kept
-            outside Knowledge Base/) is never silently invisible. Widened
-            hits carry `outside_kb: true`. "vault" always walks the
-            whole vault. "kb-only" is the strict opt-out: KB only,
-            never widens. Outside-KB recall is BM25/keyword (the
-            vector sidecar is KB-scoped), with a relaxed gate so terse
-            files (e.g. a numbers-heavy tracker) surface on a partial
-            token match. `_Schema/`, `_trash/`, `_attachments/`, and
+        scope: "kb" (default) searches Knowledge Base/ only. "vault"
+            searches the whole vault, including sibling folders
+            (Tracking/, Reference/, Finance/, ... and curated,
+            read-only trees kept outside Knowledge Base/). "kb-only" is
+            the strict form of "kb": it can never widen even on
+            request. `_Schema/`, `_trash/`, `_attachments/`, and
             `.obsidian/` are excluded under every scope. NOTE: an
             empty result means "not found in what I searched," NOT
-            "doesn't exist" — say so, and try "vault" before
-            concluding absence.
+            "doesn't exist" — say so, and try `widen_outside_kb` or
+            "vault" before concluding absence.
         mode: Ranker. "hybrid" (default) fuses BM25 + local vector
             embeddings via reciprocal rank fusion — best recall on
             natural-language queries. "keyword" preserves the original
@@ -1519,6 +1572,17 @@ def op_find(
             no separate feedback call exists or is needed. Use for "what
             have I been working with lately" recall; leave off for
             neutral knowledge lookup.
+        widen_outside_kb: When true (OFF by default), scope="kb" also
+            RESERVES up to `limit - 1` slots for pages outside
+            Knowledge Base/, so content in sibling folders is not
+            silently invisible; reserved hits carry `outside_kb: true`.
+            Out-of-KB recall is BM25/keyword (the vector sidecar is
+            KB-scoped) over the maintained catalogue, with a relaxed
+            gate so terse files (e.g. a numbers-heavy tracker) surface
+            on a partial token match. Ignored for "vault" (already
+            searching everything) and "kb-only" (the strict opt-out).
+            Off, scope="kb" costs nothing for callers who never read
+            the reserve.
         pack: When true (off by default), ALSO assemble a reasoning-ready
             context pack from the top hits and change the return to
             {"hits": [...], "pack": {...}} (with pack off, the return is the
@@ -1633,6 +1697,7 @@ def op_find(
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
             prefer_used=prefer_used,
+            widen_outside_kb=widen_outside_kb,
             pack=pack,
             graph_enrich=graph_enrich,
             include_timings=include_timings,
@@ -1767,6 +1832,7 @@ def op_find(
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
             prefer_used=prefer_used,
+            widen_outside_kb=widen_outside_kb,
             timings=timings,
             degraded_out=degraded,
             failed_out=failed,
@@ -1826,7 +1892,15 @@ def op_find(
         )
         if projection_runtime is None:
             ref_index = memory_refs_module.ReferenceIndex(vault_root)
-            refs = ref_index.refs_for_paths([str(hit.get("path") or "") for hit in hit_dicts])
+            # The recall serializer is the one caller the no-walk contract
+            # governs: a cold sidecar here declines with the retryable warming
+            # outcome and one background rebuild instead of scanning the corpus
+            # on the request. Every other `refs_for_paths` caller keeps the
+            # inline build (see `ReferenceIndex.refs_for_paths`).
+            with memory_refs_module.recall_serializer():
+                refs = ref_index.refs_for_paths(
+                    [str(hit.get("path") or "") for hit in hit_dicts]
+                )
             for hit in hit_dicts:
                 ref = refs.get(str(hit.get("path") or ""))
                 if ref:
@@ -2172,10 +2246,16 @@ def op_fetch(
 
 
 def _timing_log_summary(timings_dict: dict | None) -> dict | None:
-    """Query-log-safe slice of a timings envelope: totals + per-stage ms only
-    (never content; stage entries drop skip/error detail to stay compact)."""
+    """Query-log-safe slice of a timings envelope: totals, per-stage ms and
+    per-stage source only (never content; stage entries drop skip/error detail
+    to stay compact)."""
     if timings_dict is None:
         return None
+    timed_stages = {
+        name: entry
+        for name, entry in timings_dict.get("stages", {}).items()
+        if isinstance(entry, dict) and "ms" in entry
+    }
     return {
         "total_ms": timings_dict.get("total_ms"),
         # Carried deliberately. This projection is closed, so a field it does
@@ -2184,10 +2264,18 @@ def _timing_log_summary(timings_dict: dict | None) -> dict | None:
         # which is the thing #283 spent a month unable to see.
         "unattributed_ms": timings_dict.get("unattributed_ms"),
         "cache_hit": bool(timings_dict.get("cache", {}).get("hit")),
-        "stage_ms": {
-            name: entry["ms"]
-            for name, entry in timings_dict.get("stages", {}).items()
-            if isinstance(entry, dict) and "ms" in entry
+        "stage_ms": {name: entry["ms"] for name, entry in timed_stages.items()},
+        # Same closure argument, one level up: a corpus walk that reappears is
+        # a stage that stops saying `index` and starts saying `computed`, and
+        # across many requests the query log is the only place that is visible
+        # without re-running a benchmark. Drawn from the same filtered set as
+        # `stage_ms`, so the log cannot report a stage's time without also
+        # reporting where it came from, and closed to the known vocabulary so
+        # only those four tokens can ever reach the durable record.
+        "stage_source": {
+            name: entry["source"]
+            for name, entry in timed_stages.items()
+            if entry.get("source") in find_types.STAGE_SOURCES
         },
     }
 
@@ -4671,6 +4759,7 @@ def op_ask_memory(
     prefer_compiled: bool = True,
     prefer_active: bool = True,
     prefer_used: bool = False,
+    widen_outside_kb: bool = False,
     graph_enrich: bool = False,
     include_timings: bool = False,
     explain: bool = False,
@@ -4721,6 +4810,11 @@ def op_ask_memory(
         prefer_compiled: Prefer compiled notes over raw sources by default.
         prefer_active: Prefer active conclusions over superseded ones.
         prefer_used: Apply usage boost when explicitly requested.
+        widen_outside_kb: With scope="kb", also reserve up to limit-1 slots for
+            curated vault pages OUTSIDE the knowledge base. Off by default:
+            scope="kb" means the knowledge base and nothing else. Turn it on
+            when a terse out-of-KB file (a tracker, a handbook) is what you are
+            looking for, or use scope="vault" to search everything equally.
         graph_enrich: With deep mode, include typed graph neighborhood data.
         include_timings: Include retrieval timings for diagnostics.
         explain: Add bounded retrieval-plan and per-hit ranking evidence.
@@ -4758,6 +4852,7 @@ def op_ask_memory(
         prefer_compiled=prefer_compiled,
         prefer_active=prefer_active,
         prefer_used=prefer_used,
+        widen_outside_kb=widen_outside_kb,
         pack=deep,
         graph_enrich=graph_enrich,
         detail=detail,
@@ -6323,6 +6418,7 @@ def op_triage_memory(
     until: str | None = None,
     why: str | None = None,
     expected_fingerprint: str | None = None,
+    source_path: _OptionalRelationText = None,
 ) -> dict:
     """Triage one Epistemic Inbox item explicitly.
 
@@ -6349,6 +6445,9 @@ def op_triage_memory(
             decision was made; `quiet` and `off` require one.
         expected_fingerprint: Optional reviewed fingerprint; a mismatch refuses
             the write and asks the caller to refresh.
+        source_path: Source-page hint returned by relation review. Required for
+            newly returned relation items; omitted legacy requests use only the
+            bounded compatibility prefix.
     """
     normalized_action = str(action or "").strip().lower()
     if envelope_module.is_envelope_ref(ref):
@@ -6416,6 +6515,7 @@ def op_triage_memory(
             until=until,
             why=why,
             expected_fingerprint=expected_fingerprint,
+            source_path=source_path,
         )
     normalized = str(action or "").strip().lower()
     try:
@@ -6492,15 +6592,17 @@ def op_triage_memory(
 def op_connect_memory(
     vault_root: Path,
     operation: str = _CONNECT_MEMORY_DEFAULT_OPERATION,
-    path: str | None = None,
-    target: str | None = None,
-    query: str | None = None,
+    path: _OptionalRelationText = None,
+    target: _OptionalRelationText = None,
+    query: _OptionalRelationText = None,
+    requested_relation: _OptionalRelationText = None,
+    continuation: _OptionalRelationText = None,
     unit_ref: str | None = None,
     categories: list[str] | None = None,
     kinds: list[str] | None = None,
     draft_title: str | None = None,
     draft_body: str | None = None,
-    limit: int = 8,
+    limit: _RelationCandidateLimit = 8,
     scope: str = "kb",
     include_model_suggestions: bool = False,
     depth: int = 1,
@@ -6541,16 +6643,22 @@ def op_connect_memory(
 
     Args:
         operation: context, suggest-links, suggest-relations, graph-context,
-            inbound-links, resolve-entity, create-entity, or accept-relation.
-        path: Existing page path for link, graph, or relation context.
-        target: Target path for inbound-links; defaults to path.
-        query: Query seed for graph-context.
+            inbound-links, resolve-relation, resolve-entity, create-entity, or
+            accept-relation.
+        path: Existing page path for link, graph, or relation context; resolve-relation
+            reports it unchanged as optional source context without reading the page.
+        target: Target path for inbound-links; resolve-relation reports it unchanged
+            as optional target context without reading the page.
+        query: Query seed for graph-context or plain-language resolve-relation intent.
+        requested_relation: Optional clean, canonical, or alias label for
+            resolve-relation. At least query or requested_relation is required.
+        continuation: Opaque continuation returned by resolve-relation.
         unit_ref: Exact current semantic-unit seed for graph-context.
         categories: Registry-resolved semantic-unit category allowlist.
         kinds: Governed semantic-unit kind allowlist.
         draft_title: Draft title for suggestion modes.
         draft_body: Draft body for suggestion modes.
-        limit: Candidate cap for suggestion modes.
+        limit: Candidate cap for suggestion and relation-resolution modes.
         scope: Search scope for link suggestions.
         include_model_suggestions: Request optional model-backed relation suggestions.
         depth: Graph traversal depth.
@@ -6589,6 +6697,76 @@ def op_connect_memory(
             eligibility too, so a candidate that stopped being open between
             the queue read and this call also refuses.
     """
+    if operation == "resolve-relation":
+        supplied = locals()
+        unrelated_defaults = {
+            "unit_ref": None,
+            "categories": None,
+            "kinds": None,
+            "draft_title": None,
+            "draft_body": None,
+            "scope": "kb",
+            "include_model_suggestions": False,
+            "depth": 1,
+            "relation_types": None,
+            "node_types": None,
+            "max_nodes": 40,
+            "max_edges": 80,
+            "traversal_profile": None,
+            "max_body_chars": 3000,
+            "entity_type": None,
+            "name": None,
+            "slug": None,
+            "summary": None,
+            "why_in_kb": None,
+            "tags": None,
+            "connections": None,
+            "affiliation": None,
+            "relationship": None,
+            "domain": None,
+            "language": None,
+            "repo": None,
+            "license": None,
+            "used_in": None,
+            "decided": None,
+            "project": None,
+            "decision_status": None,
+            "ref": None,
+            "expected_hash": None,
+            "why": None,
+            "expected_fingerprint": None,
+        }
+        invalid = sorted(
+            name
+            for name, default in unrelated_defaults.items()
+            if supplied[name] != default
+        )
+        if invalid:
+            raise ValueError(
+                "INVALID_RELATION_ARGUMENT: resolve-relation does not accept "
+                + ", ".join(invalid)
+            )
+        relation_vocabulary_module.validate_candidate_limit(limit)
+        _, observation_offset = relation_vocabulary_module.continuation_offsets(
+            continuation
+        )
+        registry = relation_registry_module.load_registry(vault_root)
+        observations = memory_schema_module.indexed_relation_observations(
+            vault_root,
+            limit=limit,
+            offset=observation_offset,
+        )
+        result = relation_vocabulary_module.resolve_relation(
+            registry,
+            query=query,
+            requested_relation=requested_relation,
+            limit=limit,
+            observations=observations if observations is not None else (),
+            continuation=continuation,
+        )
+        result["recurrence_available"] = observations is not None
+        result["context"] = {"path": path, "target": target}
+        return result
     if operation == "accept-relation":
         if not ref:
             raise ValueError("INVALID_MODE: accept-relation requires `ref`")
@@ -6616,6 +6794,7 @@ def op_connect_memory(
             expected_hash=expected_hash,
             why=why,
             expected_fingerprint=expected_fingerprint,
+            source_path=path,
             edit_memory=_accept_relations_edit,
         )
     if path:
@@ -6698,8 +6877,8 @@ def op_connect_memory(
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
-        "suggest-relations, graph-context, inbound-links, resolve-entity, create-entity, or "
-        "accept-relation"
+        "suggest-relations, graph-context, inbound-links, resolve-relation, resolve-entity, "
+        "create-entity, or accept-relation"
     )
 
 
@@ -7101,13 +7280,17 @@ def op_schema_memory(
     project: str | None = None,
     page_type: str | None = None,
     save: bool = False,
-    expected_hash: str | None = None,
+    expected_hash: _OptionalRelationText = None,
     strict: bool = False,
     compare_to: str | None = None,
-    proposal: dict | None = None,
-    why: str | None = None,
+    proposal: _OptionalRelationProposal = None,
+    why: _OptionalRelationText = None,
     include_model_suggestions: bool = False,
     context: _WorkflowContextArgument = None,
+    date_from: _OptionalRelationText = None,
+    date_to: _OptionalRelationText = None,
+    continuation: _OptionalRelationText = None,
+    limit: _RelationCandidateLimit = 20,
 ) -> dict:
     """Infer, validate, diff, or save governed memory schemas and workflow contracts.
 
@@ -7117,7 +7300,9 @@ def op_schema_memory(
     current content hash.
 
     Args:
-        operation: For `workflow-contracts`, exactly one of: inventory (no workflow
+        operation: For `relations`, `propose-relation` returns a reviewed delta
+            without writing and `save-relations` commits that delta with expected_hash
+            and why. For `workflow-contracts`, exactly one of: inventory (no workflow
             fields); inspect (name); validate (exactly one of name or proposal);
             resolve (context plus at most one of name or proposal); preview (proposal,
             optional name); save (proposal and why, optional name plus expected_hash
@@ -7132,16 +7317,21 @@ def op_schema_memory(
         page_type: Optional page-type scope for inference.
         save: Legacy inference flag. Ignored when false for workflow contracts and
             refused when true; workflow writes use operation=`save`.
-        expected_hash: Required for workflow save updates and refresh; rejected by
-            every other workflow operation.
+        expected_hash: Current relation registry hash required by save-relations, or
+            current workflow hash required for workflow save updates and refresh.
         strict: In validate mode, signal a failing CLI/CI outcome on findings.
         compare_to: In diff mode, compare to this saved contract instead of corpus reality.
-        proposal: Required for workflow preview/save; validate and resolve accept it
-            as the exact alternative to `name`.
-        why: Required audit reason for workflow save/refresh and entity-type saves.
+        proposal: Reviewed relation definition for propose-relation, reviewed delta
+            for save-relations, or workflow proposal for workflow modes.
+        why: Required audit reason for relation delta save, workflow save/refresh,
+            and entity-type saves.
         include_model_suggestions: Request response-only optional relation suggestions.
         context: Exact optional workflow resolve mapping. Its only keys are project,
             domain, and activity; omit a key for unknown or set it null for known absent.
+        date_from: Optional inclusive ISO origin-date bound for relation evidence.
+        date_to: Optional inclusive ISO origin-date bound for relation evidence.
+        continuation: Opaque relation candidate continuation.
+        limit: Relation extension and observation candidate budget.
 
     Returns:
         A structured profile/proposal, validation report, contract diff, or workflow result.
@@ -7268,11 +7458,201 @@ def op_schema_memory(
             return result
         raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
     if subject == "relations":
+        if operation == "propose-relation":
+            relation_vocabulary_module.validate_candidate_limit(limit)
+            if proposal is None or not isinstance(proposal, dict):
+                raise ValueError(
+                    "INCOMPLETE_RELATION_PROPOSAL: propose-relation requires a reviewed proposal"
+                )
+            allowed_proposal_fields = {
+                "requested_label",
+                "namespace",
+                "parent",
+                "description",
+                "direction",
+                "aliases",
+                "inverse",
+                "origins",
+                "source_kinds",
+                "target_kinds",
+                "projects",
+                "page_types",
+                "query",
+            }
+            if set(proposal) - allowed_proposal_fields:
+                raise ValueError(
+                    "INVALID_RELATION_ARGUMENT: proposal has unknown fields"
+                )
+            required_semantics = (
+                "requested_label",
+                "parent",
+                "description",
+                "direction",
+            )
+            if any(
+                not isinstance(proposal.get(field_name), str)
+                or not str(proposal[field_name]).strip()
+                for field_name in required_semantics
+            ):
+                raise ValueError(
+                    "INCOMPLETE_RELATION_PROPOSAL: requested_label, parent, description, "
+                    "and direction are required"
+                )
+            for field_name in (
+                "aliases",
+                "origins",
+                "source_kinds",
+                "target_kinds",
+                "projects",
+                "page_types",
+            ):
+                supplied = proposal.get(field_name)
+                if supplied is not None and (
+                    not isinstance(supplied, list)
+                    or not all(isinstance(item, str) for item in supplied)
+                ):
+                    raise ValueError(
+                        f"INVALID_RELATION_ARGUMENT: proposal.{field_name} must be a list of strings"
+                    )
+            if any(
+                value is not None and not isinstance(value, str)
+                for value in (
+                    proposal.get("namespace"),
+                    proposal.get("inverse"),
+                    proposal.get("query"),
+                )
+            ):
+                raise ValueError(
+                    "INVALID_RELATION_ARGUMENT: proposal text fields must be strings"
+                )
+            if (
+                why is not None
+                or save
+                or expected_hash is not None
+                or compare_to is not None
+                or name is not None
+                or project is not None
+                or page_type is not None
+                or strict
+                or include_model_suggestions
+                or context is not None
+            ):
+                raise ValueError(
+                    "INVALID_RELATION_ARGUMENT: propose-relation is read-only"
+                )
+            _, observation_offset = relation_vocabulary_module.continuation_offsets(
+                continuation
+            )
+            observations = memory_schema_module.indexed_relation_observations(
+                vault_root,
+                date_from=date_from,
+                date_to=date_to,
+                limit=limit,
+                offset=observation_offset,
+            )
+            registry = relation_registry_module.load_registry(vault_root)
+            result = relation_vocabulary_module.propose_relation(
+                registry,
+                requested_label=proposal.get("requested_label", ""),
+                parent=proposal.get("parent"),
+                description=proposal.get("description"),
+                direction=proposal.get("direction"),
+                namespace=proposal.get("namespace", "vault"),
+                aliases=proposal.get("aliases") or (),
+                inverse=proposal.get("inverse"),
+                origins=proposal.get("origins"),
+                source_kinds=proposal.get("source_kinds"),
+                target_kinds=proposal.get("target_kinds"),
+                projects=proposal.get("projects"),
+                page_types=proposal.get("page_types"),
+                query=proposal.get("query"),
+                limit=limit,
+                observations=observations if observations is not None else (),
+                continuation=continuation,
+            )
+            return {
+                "subject": "relations",
+                "valid": not result["findings"],
+                "content_hash": result["expected_hash"],
+                "recurrence_available": observations is not None,
+                "date_scope": {"date_from": date_from, "date_to": date_to},
+                **result,
+            }
+        if operation == "save-relations":
+            if proposal is None or not isinstance(proposal, dict):
+                raise ValueError(
+                    "INCOMPLETE_RELATION_PROPOSAL: save-relations requires a reviewed delta"
+                )
+            if not why or not why.strip():
+                raise ValueError("WHY_REQUIRED: save-relations requires why")
+            if not expected_hash:
+                raise ValueError(
+                    "EXPECTED_HASH_REQUIRED: save-relations requires expected_hash"
+                )
+            if (
+                save
+                or project is not None
+                or page_type is not None
+                or date_from is not None
+                or date_to is not None
+                or continuation is not None
+                or include_model_suggestions
+                or compare_to is not None
+                or strict
+                or name is not None
+                or context is not None
+            ):
+                raise ValueError(
+                    "INVALID_RELATION_ARGUMENT: save-relations accepts only delta, hash, and why"
+                )
+            # Pure validation happens before the invocation-specific inner
+            # mutation boundary. The guarded section reloads and repeats the
+            # hash/merge against the bytes it will actually commit.
+            current = relation_registry_module.load_registry(vault_root)
+            relation_registry_module.require_current_hash(
+                current.extension_hash, expected_hash
+            )
+            relation_registry_module.merge_extension_delta(
+                memory_schema_module.relation_registry_proposal(current), proposal
+            )
+            from .writer_lease import active_manager, active_mutation_request_id
+
+            with active_manager().mutation_guard(
+                vault_root,
+                request_id=active_mutation_request_id(),
+                operation="relation_registry_delta_commit",
+                holder_kind="command",
+            ):
+                current = relation_registry_module.load_registry(vault_root)
+                relation_registry_module.require_current_hash(
+                    current.extension_hash, expected_hash
+                )
+                merged = relation_registry_module.merge_extension_delta(
+                    memory_schema_module.relation_registry_proposal(current), proposal
+                )
+                saved = relation_registry_module.save_registry(
+                    vault_root,
+                    merged,
+                    expected_hash=expected_hash,
+                )
+            changed_keys = sorted(
+                set(proposal.get("upsert") or {})
+                | set(proposal.get("deprecate") or {})
+            )
+            return {
+                "subject": "relations",
+                "valid": True,
+                "why": why.strip(),
+                "changed_keys": changed_keys,
+                "saved": saved,
+            }
         if operation == "infer":
             result = memory_schema_module.infer_relation_registry(
                 vault_root,
                 project=project,
                 page_type=page_type,
+                date_from=date_from,
+                date_to=date_to,
                 include_model_suggestions=include_model_suggestions,
             )
             if save:

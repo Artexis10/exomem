@@ -93,12 +93,16 @@ def test_a_stage_that_runs_twice_reports_both_runs() -> None:
 
 
 def test_a_stage_that_runs_once_carries_no_call_count() -> None:
-    """The single-run shape is pinned by exact-dict assertions elsewhere."""
+    """The single-run shape is pinned by exact-dict assertions elsewhere.
+
+    `source` joined `ms` when every stage was made to say where its answer came
+    from; `calls` still appears only when a stage ran more than once.
+    """
     timings = FindTimings()
     with timings.span("keyword"):
         pass
 
-    assert set(timings.as_dict()["stages"]["keyword"]) == {"ms"}
+    assert set(timings.as_dict()["stages"]["keyword"]) == {"ms", "source"}
 
 
 def test_the_query_log_projection_carries_the_unattributed_term() -> None:
@@ -237,7 +241,13 @@ def test_a_stale_remembered_root_refuses_a_page_rather_than_admitting_it(
 
 
 def test_dropping_rebuildable_caches_drops_the_root_memo_too(tmp_path: Path, monkeypatch) -> None:
-    """`unload_ram_caches` means "everything rebuildable" — no quiet exceptions."""
+    """`unload_ram_caches` means "everything rebuildable it was asked for".
+
+    The parsed-page cache is the one documented exception, and it is not quiet:
+    it is spared by default because exact receipt custody already evicts its
+    rows per receipt, and a caller that wants it back says `pages=True`. The
+    root memo has no such custody, so it still goes with every unload.
+    """
     from exomem import find as find_module
 
     monkeypatch.setattr(recall_policy, "_needs_canonical_alias_check", lambda parts: True)

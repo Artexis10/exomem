@@ -352,7 +352,12 @@ class FileWatcher:
     """Watch Knowledge Base/ for `.md` changes and re-embed them, debounced."""
 
     def __init__(self, vault_root: Path, *, debounce_seconds: float | None = None) -> None:
+        from .writer_lease import active_manager
+
         self._vault_root = vault_root
+        # Retain the invoking manager: background threads do not inherit its
+        # ContextVar, and publication must contend with that same writer.
+        self._freshness_manager = active_manager()
         self._kb_root = vault_root / kb_dirname()
         self._debounce_override = debounce_seconds
         self._lock = threading.Lock()
@@ -601,7 +606,18 @@ class FileWatcher:
                 if seed:
                     freshness.seed(self._vault_root, scope, self._walk_entries(scope))
                 else:
-                    delta = freshness.reconcile(self._vault_root, scope, self._walk_entries(scope))
+                    delta = freshness.reconcile(
+                        self._vault_root,
+                        scope,
+                        self._walk_entries(scope),
+                        publication_guard=self._freshness_manager.consistency_guard(
+                            self._vault_root,
+                            operation="watcher_reconcile_freshness",
+                            holder_kind="background",
+                        ),
+                    )
+                    if not delta.published:
+                        baselines_current = False
                     if delta.drifted:
                         drifted = True
                         # vault ⊇ kb, so a KB file lands in both deltas — dedupe

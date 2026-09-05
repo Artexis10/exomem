@@ -4086,10 +4086,17 @@ class LeaseManager:
             and bool(kwargs.get("files"))
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
+        narrow_relation_registry_commit = (
+            command.name == "schema_memory"
+            and kwargs.get("subject", "contract") == "relations"
+            and kwargs.get("operation") == "save-relations"
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+        )
         narrow_boundary = (
             narrow_media_commit
             or narrow_tier2_file_commit
             or narrow_source_artifact_commit
+            or narrow_relation_registry_commit
             or (
                 command.name in _NARROW_BOUNDARY_COMMANDS
                 and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
