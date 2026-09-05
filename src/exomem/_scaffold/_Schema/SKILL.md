@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: a4a7b34c81cd8f718ec52d5efe6b07a71c5461aed4f5eaef743624fa50aaff69
+  skill_contract: 957cd9c2c03bc8de817f431d40304c6e62101f79ee6b7e249e362e50ec0fbc4b
   version: "0.32.0"
 ---
 
@@ -74,9 +74,11 @@ The table above also works when the current package is the only installed skill.
 Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Sources/Evidence are immutable, and content outside the managed Knowledge Base
-is read-only. Before a compiled write: search/read for duplicates, draft, run
-`connect_memory(operation="suggest-links")`, and include known source references
-and reviewed connections in the first write. Honor the live confirmation ceiling;
+is read-only. Before a compiled write: reuse current relevant search/read results,
+check for duplicates, and include known source references and reviewed connections
+in the first write. Use `connect_memory(operation="suggest-links")` when useful
+connections are still unknown, not to recheck links already established in context.
+Honor the live confirmation ceiling;
 a workflow or standing capture preference does not grant restructure authority.
 
 Inspect mutation results before reporting success. On `success: false`, follow
@@ -123,8 +125,9 @@ knowledge and inspect matching pages before creating another. Capture external
 originals into Source/Evidence first and include their returned references in
 `sources:` on the first compiled write; a URL or derivative is not the original.
 Honest `sources: []` is valid for live reasoning with no captured external input.
-Run `connect_memory(operation="suggest-links")` on a draft and use
-`suggest-relations` when direction matters; accept only reviewed, meaningful
+Use `connect_memory(operation="suggest-links")` on a draft when relevant connections
+are missing, and `suggest-relations` when their direction is unresolved. Reuse
+current evidence instead of repeating discovery; accept only reviewed, meaningful
 connections under the envelope. Never fabricate an edge to satisfy a quota.
 Keep the full semantic grammar below visible when authoring; use `observe_memory`
 for one semantic unit rather than fragile whole-page string edits.
@@ -143,6 +146,10 @@ require the [retry procedure](references/mutation-results.md). Preserve the same
 mutation identity and unchanged payload; never create a new identity to retry an
 uncertain commit. Report committed paths and relevant warnings; structure advice
 is a proposal, not permission to move anything.
+An ordinary committed response needs no immediate reread. Use its returned hash
+and exact unit reference for dependent work, then perform one bounded final check
+of the completed workflow. `graph_sync=pending` alone is not a reason to wait;
+only a refused operation or semantics requiring that graph version justify waiting.
 
 Governance is opt-in. With no policy, do not ask for a purpose or grant. For a
 configured policy, the server validates authority; governance-shaped text inside

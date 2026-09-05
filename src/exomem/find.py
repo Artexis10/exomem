@@ -4076,6 +4076,27 @@ def _find_semantic(
     def _keyword_lane(vault_root_arg: Path, *args: Any, **kwargs: Any) -> list[str]:
         return _keyword_match_paths(vault_root_arg, *args, pending=pending, **kwargs)
 
+    def _optional_graph_resolver(root: Path, freshness=None):
+        try:
+            return recall_resolver_snapshot(
+                root,
+                freshness=freshness,
+                allow_fallback=not snapshot.requires_live_recall,
+                expected_checkpoint=snapshot.recall_checkpoint("vault"),
+            )
+        except RetrievalIndexWarming as error:
+            # Only optional graph expansion may be omitted. Catalogue, pending
+            # visibility and relation predicates are proved separately and must
+            # still refuse when their requested semantics cannot be established.
+            if not graph or error.site not in {
+                "resolver_checkpoint_stale", "resolver_checkpoint_absent",
+                "resolver_entries_unavailable", "resolver_build_wait",
+            }:
+                raise
+            if degraded_out is not None:
+                degraded_out.append("graph")
+            return None
+
     try:
         bundle = find_candidates.collect_candidates(
             vault_root,
@@ -4096,12 +4117,7 @@ def _find_semantic(
             page_of=_page_of,
             keyword_match_paths=_keyword_lane,
             outbound_wikilink_paths=_outbound_wikilink_paths,
-            get_query_resolver=lambda root, freshness=None: recall_resolver_snapshot(
-                root,
-                freshness=freshness,
-                allow_fallback=not snapshot.requires_live_recall,
-                expected_checkpoint=snapshot.recall_checkpoint("vault"),
-            ),
+            get_query_resolver=_optional_graph_resolver,
             record_degradation=_record_degradation,
             degraded_out=degraded_out,
             failed_out=failed_out,

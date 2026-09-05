@@ -30,6 +30,21 @@ with the former raw result. Response detail is presentation-only: changing it
 does not change mutation identity, execute the leaf again, or alter a replayed
 terminal.
 
+Committed observation responses retain bounded `before_hash`, `after_hash`,
+`unit_ref` and `removed_unit_ref` when their producer supplies them. Existing-page
+edits retain the exact `after_hash` of their committed bytes. These are mutation
+identities, not a promise that nobody has edited the page since: use the hash as
+the next supported `expected_hash` and honor any stale-write refusal. Portable
+receipt recovery may omit these fields; it never invents a missing identity.
+Do not reread solely to confirm a successful commit. Use one bounded final
+verification of the whole requested outcome, and extra reads only when content,
+warnings or missing concurrency guards actually require them.
+
+`graph_sync=pending` and `derived_sync=pending` describe asynchronous work, not a
+failed canonical write. Continue independent work and ordinary recall; do not
+run maintenance merely to remove the pending label. A graph-dependent query can
+still require current edges and return an explicit freshness refusal.
+
 `MUTATION_WARMING`, `MUTATION_BUSY`, `MUTATION_ACKNOWLEDGEMENT_PENDING`, and
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` remain errors, not successful
 terminals. Preserve the same mutation identity and unchanged payload when
