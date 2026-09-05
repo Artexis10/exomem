@@ -409,3 +409,53 @@ def test_effective_capture_applies_authored_posture_under_the_active_level(
             assert value["proactive_requires"]
         else:
             assert value["proactive_requires"] == []
+
+
+# Base-superset pins. Two regressions in one tranche came from rewriting a
+# carrier's capture text and dropping a sentence nobody's review had a row for:
+# a compact-only override lost the Planning/Records transition rule, and the
+# balanced rewrite lost main's restraint clause. Per-lane reviews and a parity
+# matrix built from the doctrines the tranche ADDED cannot see a doctrine that
+# predated it, so the pins below name the base sentences and the structural
+# property (one capture text per level across every bootstrap projection).
+
+_BASE_CAPTURE_SENTENCES = {
+    "balanced": (
+        "Not mid-thought exploration, tangents, or unresolved questions.",
+        "Route stated intent to Planning and observed outcome to Records.",
+        "Transition only on explicit user intent",
+    ),
+    "maximal": (
+        "When torn between capturing and letting it pass, capture.",
+        "Route stated intent to Planning and observed outcome to Records.",
+        "Transition only on explicit user intent",
+    ),
+}
+
+
+@pytest.mark.parametrize("level", sorted(_BASE_CAPTURE_SENTENCES))
+def test_capture_text_keeps_every_sentence_the_base_carrier_shipped(level: str) -> None:
+    capture = prominence.contract(level).capture
+    missing = [s for s in _BASE_CAPTURE_SENTENCES[level] if s not in capture]
+    assert missing == [], f"{level} capture dropped base doctrine: {missing}"
+
+
+@pytest.mark.parametrize("level", ("off", "light", "balanced", "maximal"))
+def test_every_bootstrap_projection_serves_one_capture_text_per_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, level: str
+) -> None:
+    """A compact-only rewrite of the capture text is how a doctrine went missing
+    from the projection every connector client reads first while full and
+    diagnostics still carried it. The three projections must serve prominence's
+    own text, byte for byte."""
+    from exomem import commands
+
+    monkeypatch.setenv("EXOMEM_PROMINENCE", level)
+    (tmp_path / "Knowledge Base").mkdir()
+    served = {
+        profile: commands.op_bootstrap(tmp_path, profile=profile)["engagement"]["contract"][
+            "capture"
+        ]
+        for profile in ("compact", "full", "diagnostics")
+    }
+    assert set(served.values()) == {prominence.contract(level).capture}, served

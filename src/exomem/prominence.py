@@ -226,7 +226,8 @@ CONTRACTS: dict[str, ProminenceContract] = {
         ),
         capture=(
             "Capture at a stepping stone: a durable conclusion, recurring entity with "
-            "reusable facts, or method that was carried out with a reported result. Capture stable "
+            "reusable facts, or method that was carried out with a reported result. Not "
+            "mid-thought exploration, tangents, or unresolved questions. Capture stable "
             "preferences, recurring routines, historical baselines, or durable affiliations "
             "only when stability or recurrence and reusable comparison, interpretation, or "
             "decision value are clear. Route a uniquely resolved Entity facet or affiliation "
