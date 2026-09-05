@@ -19,6 +19,7 @@ import json
 import math
 import os
 import shutil
+import subprocess
 import sys
 import time
 import uuid
@@ -37,6 +38,90 @@ REQUIRED_PUBLIC_TOOLS = (
 )
 MODEL_FREE_PROFILE = "model-free"
 REAL_EXTRACTION_PROFILE = "real-extraction"
+
+
+def validate_server_root(server_root: Path) -> Path:
+    """Resolve a benchmark target only when it exposes an importable source tree."""
+    target = Path(server_root).resolve()
+    if not (target / "src" / "exomem").is_dir():
+        raise ValueError(f"--server-root must contain src/exomem: {target}")
+    return target
+
+
+def _target_source_environment(server_root: Path) -> dict[str, str]:
+    """Import only the selected source tree; never install benchmark hooks here."""
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("EXOMEM_") and key not in {"PYTHONPATH", "XDG_STATE_HOME"}
+    }
+    environment["PYTHONPATH"] = str(server_root / "src")
+    return environment
+
+
+def _command_output(command: Sequence[str], *, cwd: Path, env: Mapping[str, str] | None = None) -> str | None:
+    try:
+        completed = subprocess.run(
+            list(command), cwd=cwd, env=dict(env) if env is not None else None,
+            check=True, capture_output=True, text=True, timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout.strip() or None
+
+
+def _source_sha256(source_root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted((path for path in source_root.rglob("*") if path.is_file() and "__pycache__" not in path.parts), key=lambda item: item.as_posix()):
+        relative = path.relative_to(source_root).as_posix().encode("utf-8")
+        digest.update(relative + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def runtime_provenance(server_root: Path, python: Path) -> dict[str, Any]:
+    """Record content-free identity for the exact target runtime before timing."""
+    target = validate_server_root(server_root)
+    source_root = target / "src"
+    python_path = Path(python).resolve()
+    environment = _target_source_environment(target)
+    package_origin = _command_output(
+        [str(python_path), "-c", "import exomem, pathlib; print(pathlib.Path(exomem.__file__).resolve())"],
+        cwd=target,
+        env=environment,
+    )
+    expected_package = (source_root / "exomem").resolve()
+    if package_origin is None or not Path(package_origin).is_relative_to(expected_package):
+        raise RuntimeError("selected python did not import exomem from --server-root/src")
+    packages_output = _command_output([str(python_path), "-m", "pip", "list", "--format=json"], cwd=target, env=environment)
+    try:
+        packages = json.loads(packages_output) if packages_output is not None else None
+    except json.JSONDecodeError:
+        packages = None
+    if not isinstance(packages, list):
+        raise RuntimeError("selected python did not provide a package inventory")
+    package_inventory = sorted(
+        [{"name": str(item.get("name") or ""), "version": str(item.get("version") or "")} for item in packages if isinstance(item, Mapping)],
+        key=lambda item: item["name"].lower(),
+    )
+    status = _command_output(["git", "status", "--porcelain"], cwd=target)
+    return {
+        "source": {
+            "root": str(source_root.resolve()),
+            "package_origin": str(Path(package_origin).resolve()),
+            "sha256": _source_sha256(source_root),
+        },
+        "git": {
+            "revision": _command_output(["git", "rev-parse", "HEAD"], cwd=target),
+            "tree": _command_output(["git", "rev-parse", "HEAD^{tree}"], cwd=target),
+            "dirty": None if status is None else bool(status),
+        },
+        "python": {
+            "executable": str(python_path),
+            "version": _command_output([str(python_path), "--version"], cwd=target, env=environment),
+            "packages": package_inventory,
+        },
+    }
 
 
 def load_artifact_manifest(path: Path) -> list[dict[str, str]]:
@@ -428,8 +513,9 @@ def invalid_measurement_report(
     }
 
 
-def benchmark_environment(state: Path, vault: Path) -> dict[str, str]:
+def benchmark_environment(state: Path, vault: Path, *, server_root: Path = ROOT) -> dict[str, str]:
     """Create hermetic process state without disabling watchers or scheduling."""
+    target = validate_server_root(server_root)
     env = {
         key: value
         for key, value in os.environ.items()
@@ -451,7 +537,7 @@ def benchmark_environment(state: Path, vault: Path) -> dict[str, str]:
             # the public workflow clock starts, never as an inline repair.
             "EXOMEM_EAGER_BOOT": "1",
             "XDG_STATE_HOME": str(state / "xdg"),
-            "PYTHONPATH": str(ROOT / "src"),
+            "PYTHONPATH": str(target / "src"),
             "FASTMCP_CHECK_FOR_UPDATES": "off",
             "FASTMCP_SHOW_SERVER_BANNER": "false",
         }
@@ -679,7 +765,7 @@ async def instrumentation_command(state: Path, *, action: str, phase: str, timeo
     raise RuntimeError(f"benchmark instrumentation did not acknowledge {action}:{phase}")
 
 
-def materialize_corpus(vault: Path, *, pages: int) -> dict[str, Any]:
+def materialize_corpus(vault: Path, *, pages: int, server_root: Path = ROOT) -> dict[str, Any]:
     """Build realistic, deterministic Markdown before timing begins.
 
     This fixture producer never creates evidence sidecars or extraction output.
@@ -687,10 +773,11 @@ def materialize_corpus(vault: Path, *, pages: int) -> dict[str, Any]:
     """
     if not 1 <= pages <= 8_000:
         raise ValueError("pages must be between 1 and 8000")
+    target = validate_server_root(server_root)
     kb = vault / "Knowledge Base"
     schema = kb / "_Schema"
     if not schema.exists():
-        shutil.copytree(ROOT / "src" / "exomem" / "_scaffold" / "_Schema", schema)
+        shutil.copytree(target / "src" / "exomem" / "_scaffold" / "_Schema", schema)
     tracker = kb / "Notes" / "Insights" / "active-tracker.md"
     archived = kb / "Notes" / "Insights" / "archived-runbook.md"
     critique = kb / "Notes" / "Insights" / "critique.md"
@@ -1048,6 +1135,7 @@ async def run_public_workflow(
     timeout: float,
     variant: str = "optimized",
     artifacts_manifest: Path | None = None,
+    server_root: Path = ROOT,
 ) -> dict[str, Any]:
     """Run the complete public workflow through one persistent stdio session."""
     from fastmcp import Client
@@ -1055,12 +1143,14 @@ async def run_public_workflow(
 
     if profile not in {MODEL_FREE_PROFILE, REAL_EXTRACTION_PROFILE}:
         raise ValueError(f"unsupported profile: {profile}")
+    target = validate_server_root(server_root)
     workflow_plan(variant)
     state.mkdir(parents=True, exist_ok=True)
     vault.mkdir(parents=True, exist_ok=True)
-    corpus = materialize_corpus(vault, pages=pages)
+    provenance = runtime_provenance(target, python)
+    corpus = materialize_corpus(vault, pages=pages, server_root=target)
     artifacts = load_artifact_manifest(artifacts_manifest) if artifacts_manifest else None
-    env = benchmark_environment(state, vault)
+    env = benchmark_environment(state, vault, server_root=target)
     instrumentation_dir = install_subprocess_instrumentation(state)
     env["DURABLE_CLOSURE_INSTRUMENTATION"] = str(state / "instrumentation.json")
     env["DURABLE_CLOSURE_INSTRUMENTATION_CONTROL"] = str(state / "instrumentation-control.json")
@@ -1071,7 +1161,7 @@ async def run_public_workflow(
         command=str(python),
         args=["-m", "exomem", "--transport", "stdio"],
         env=env,
-        cwd=str(ROOT),
+        cwd=str(target),
         keep_alive=False,
         log_file=state / "stdio.log",
     )
@@ -1380,6 +1470,7 @@ async def run_public_workflow(
     return {
         "variant": variant,
         "profile": profile,
+        "runtime": provenance,
         "status": workflow_status(
             core_passed=closure["passed"],
             media_status=media["status"],
@@ -1506,11 +1597,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--profile", choices=(MODEL_FREE_PROFILE, REAL_EXTRACTION_PROFILE), default=MODEL_FREE_PROFILE)
     parser.add_argument("--variant", choices=("optimized", "stress"), default="optimized")
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
+    parser.add_argument("--server-root", type=Path, default=ROOT, help="target checkout containing src/exomem")
     parser.add_argument("--state", type=Path, required=True, help="empty disposable benchmark state root")
     parser.add_argument("--vault", type=Path, required=True, help="empty disposable benchmark vault")
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--artifacts-manifest", type=Path, default=None)
     args = parser.parse_args(argv)
+    validate_server_root(args.server_root)
     if args.vault.exists() and any(args.vault.iterdir()):
         parser.error("--vault must be empty and disposable")
     if args.state.exists() and any(args.state.iterdir()):
@@ -1527,6 +1620,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout=args.timeout,
             variant=args.variant,
             artifacts_manifest=args.artifacts_manifest,
+            server_root=args.server_root,
         )
     )
     print(json.dumps(report, indent=2, sort_keys=True))

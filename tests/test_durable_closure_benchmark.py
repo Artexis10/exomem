@@ -586,6 +586,40 @@ def test_corpus_provenance_has_varied_content_links_and_byte_digests(tmp_path: P
     assert any("[[Knowledge Base/Notes/Reference/" in (tmp_path / "vault" / entry["path"]).read_text(encoding="utf-8") for entry in inventory)
 
 
+def test_server_root_selects_actual_subprocess_package_and_changes_source_identity(tmp_path: Path) -> None:
+    roots: list[Path] = []
+    for name, marker in (("baseline", "baseline-source"), ("candidate", "candidate-source")):
+        root = tmp_path / name
+        package = root / "src" / "exomem"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text(f"MARKER = {marker!r}\n", encoding="utf-8")
+        roots.append(root)
+
+    baseline = benchmark.runtime_provenance(roots[0], Path(sys.executable))
+    candidate = benchmark.runtime_provenance(roots[1], Path(sys.executable))
+
+    assert baseline["source"]["root"] == str((roots[0] / "src").resolve())
+    assert candidate["source"]["root"] == str((roots[1] / "src").resolve())
+    assert baseline["source"]["package_origin"] == str((roots[0] / "src" / "exomem" / "__init__.py").resolve())
+    assert candidate["source"]["package_origin"] == str((roots[1] / "src" / "exomem" / "__init__.py").resolve())
+    assert baseline["source"]["sha256"] != candidate["source"]["sha256"]
+    assert baseline["python"]["executable"] == str(Path(sys.executable).resolve())
+    assert isinstance(baseline["python"]["packages"], list)
+
+
+def test_server_root_default_remains_current_tree_and_invalid_root_fails(tmp_path: Path) -> None:
+    environment = benchmark.benchmark_environment(tmp_path / "state", tmp_path / "vault")
+
+    assert benchmark.validate_server_root(benchmark.ROOT) == benchmark.ROOT.resolve()
+    assert environment["PYTHONPATH"] == str(benchmark.ROOT / "src")
+    try:
+        benchmark.validate_server_root(tmp_path / "not-a-server")
+    except ValueError as error:
+        assert "src/exomem" in str(error)
+    else:
+        raise AssertionError("a runner root without src/exomem must fail before benchmark setup")
+
+
 def test_small_model_free_smoke_uses_one_registered_stdio_product_session(
     tmp_path: Path,
 ) -> None:
