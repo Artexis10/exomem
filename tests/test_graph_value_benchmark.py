@@ -251,10 +251,37 @@ def test_lifecycle_gate_refuses_whole_helper_literals_with_forged_trace(
 def _set_nested(value: dict, path: tuple[object, ...], replacement: object) -> None:
     current: object = value
     for part in path[:-1]:
-        current = current[part]  # type: ignore[index]
+        if isinstance(current, list) and isinstance(part, str):
+            # Filter rows are identified by path, never by ranking position.
+            matches = [hit for hit in current if hit["path"] == value["paths"][part]]
+            assert len(matches) == 1
+            current = matches[0]
+        else:
+            current = current[part]  # type: ignore[index]
+    assert current[path[-1]] != replacement, path  # type: ignore[index]
     current[path[-1]] = replacement  # type: ignore[index]
 
 
+def _order_lifecycle_filter_target(observation: dict, group: str, position: str) -> None:
+    target = observation["paths"][
+        "predecessor" if group in {"survivor", "deprecated"} else "policy"
+    ]
+    hits = observation["filters"][group]
+    assert len(hits) > 1
+    assert sum(hit["path"] == target for hit in hits) == 1
+    original_facts = bench._lifecycle_hit_facts(hits)
+    calls = [
+        call for call in observation["public_calls"]
+        if call["outcome"].get("hits") == original_facts
+    ]
+    assert len(calls) == 1
+    hits.sort(key=lambda hit: hit["path"] != target, reverse=position == "last")
+    # Reordering legitimate results must preserve their public-call binding.
+    calls[0]["outcome"]["hits"] = bench._lifecycle_hit_facts(hits)
+    assert hits[0 if position == "first" else -1]["path"] == target
+
+
+@pytest.mark.parametrize("target_position", ["first", "last"])
 @pytest.mark.parametrize(
     ("path", "replacement", "case_id", "check_id"),
     [
@@ -271,127 +298,127 @@ def _set_nested(value: dict, path: tuple[object, ...], replacement: object) -> N
             "graph_canonical_relation",
         ),
         (
-            ("filters", "policy_alias", 0, "path"),
+            ("filters", "policy_alias", "policy", "path"),
             "other.md",
             "policy-applicability-extension",
             "alias_path",
         ),
         (
-            ("filters", "policy_alias", 0, "relation_match", "counterpart"),
+            ("filters", "policy_alias", "policy", "relation_match", "counterpart"),
             "other.md",
             "policy-applicability-extension",
             "alias_counterpart",
         ),
         (
-            ("filters", "policy_alias", 0, "relation_match", "direction"),
+            ("filters", "policy_alias", "policy", "relation_match", "direction"),
             "inbound",
             "policy-applicability-extension",
             "alias_direction",
         ),
         (
-            ("filters", "policy_alias", 0, "relation_match", "relation_type"),
+            ("filters", "policy_alias", "policy", "relation_match", "relation_type"),
             "relates_to",
             "policy-applicability-extension",
             "alias_canonical_relation",
         ),
         (
-            ("filters", "policy_alias", 0, "relation_match", "requested_relation"),
+            ("filters", "policy_alias", "policy", "relation_match", "requested_relation"),
             "vault.applies_to",
             "policy-applicability-extension",
             "alias_requested_relation",
         ),
         (
-            ("filters", "policy_alias", 0, "relation_match", "resolved_relation"),
+            ("filters", "policy_alias", "policy", "relation_match", "resolved_relation"),
             "relates_to",
             "policy-applicability-extension",
             "alias_resolved_relation",
         ),
         (
-            ("filters", "policy_alias", 0, "relation_match", "matched_via"),
+            ("filters", "policy_alias", "policy", "relation_match", "matched_via"),
             "parent_relation",
             "policy-applicability-extension",
             "alias_match_mode",
         ),
         (
-            ("filters", "policy_canonical", 0, "path"),
+            ("filters", "policy_canonical", "policy", "path"),
             "other.md",
             "policy-applicability-extension",
             "canonical_path",
         ),
         (
-            ("filters", "policy_canonical", 0, "relation_match", "counterpart"),
+            ("filters", "policy_canonical", "policy", "relation_match", "counterpart"),
             "other.md",
             "policy-applicability-extension",
             "canonical_counterpart",
         ),
         (
-            ("filters", "policy_canonical", 0, "relation_match", "direction"),
+            ("filters", "policy_canonical", "policy", "relation_match", "direction"),
             "inbound",
             "policy-applicability-extension",
             "canonical_direction",
         ),
         (
-            ("filters", "policy_canonical", 0, "relation_match", "relation_type"),
+            ("filters", "policy_canonical", "policy", "relation_match", "relation_type"),
             "relates_to",
             "policy-applicability-extension",
             "canonical_relation",
         ),
         (
-            ("filters", "policy_canonical", 0, "relation_match", "requested_relation"),
+            ("filters", "policy_canonical", "policy", "relation_match", "requested_relation"),
             "applies_to",
             "policy-applicability-extension",
             "canonical_requested_relation",
         ),
         (
-            ("filters", "policy_canonical", 0, "relation_match", "resolved_relation"),
+            ("filters", "policy_canonical", "policy", "relation_match", "resolved_relation"),
             "relates_to",
             "policy-applicability-extension",
             "canonical_resolved_relation",
         ),
         (
-            ("filters", "policy_canonical", 0, "relation_match", "matched_via"),
+            ("filters", "policy_canonical", "policy", "relation_match", "matched_via"),
             "parent_relation",
             "policy-applicability-extension",
             "canonical_match_mode",
         ),
         (
-            ("filters", "policy_parent", 0, "path"),
+            ("filters", "policy_parent", "policy", "path"),
             "other.md",
             "extension-parent-rollup",
             "parent_path",
         ),
         (
-            ("filters", "policy_parent", 0, "relation_match", "counterpart"),
+            ("filters", "policy_parent", "policy", "relation_match", "counterpart"),
             "other.md",
             "extension-parent-rollup",
             "parent_counterpart",
         ),
         (
-            ("filters", "policy_parent", 0, "relation_match", "direction"),
+            ("filters", "policy_parent", "policy", "relation_match", "direction"),
             "inbound",
             "extension-parent-rollup",
             "parent_direction",
         ),
         (
-            ("filters", "policy_parent", 0, "relation_match", "relation_type"),
+            ("filters", "policy_parent", "policy", "relation_match", "relation_type"),
             "relates_to",
             "extension-parent-rollup",
             "parent_child_relation",
         ),
         (
-            ("filters", "policy_parent", 0, "relation_match", "requested_relation"),
+            ("filters", "policy_parent", "policy", "relation_match", "requested_relation"),
             "vault.applies_to",
             "extension-parent-rollup",
             "parent_requested_relation",
         ),
         (
-            ("filters", "policy_parent", 0, "relation_match", "resolved_relation"),
+            ("filters", "policy_parent", "policy", "relation_match", "resolved_relation"),
             "vault.applies_to",
             "extension-parent-rollup",
             "parent_resolved_relation",
         ),
         (
-            ("filters", "policy_parent", 0, "relation_match", "matched_via"),
+            ("filters", "policy_parent", "policy", "relation_match", "matched_via"),
             "relation_type",
             "extension-parent-rollup",
             "parent_match_mode",
@@ -427,85 +454,85 @@ def _set_nested(value: dict, path: tuple[object, ...], replacement: object) -> N
             "graph_terminal_replacement",
         ),
         (
-            ("filters", "survivor", 0, "path"),
+            ("filters", "survivor", "predecessor", "path"),
             "other.md",
             "survivor-directed-replacement",
             "survivor_path",
         ),
         (
-            ("filters", "survivor", 0, "relation_match", "counterpart"),
+            ("filters", "survivor", "predecessor", "relation_match", "counterpart"),
             "other.md",
             "survivor-directed-replacement",
             "survivor_counterpart",
         ),
         (
-            ("filters", "survivor", 0, "relation_match", "direction"),
+            ("filters", "survivor", "predecessor", "relation_match", "direction"),
             "inbound",
             "survivor-directed-replacement",
             "survivor_direction",
         ),
         (
-            ("filters", "survivor", 0, "relation_match", "relation_type"),
+            ("filters", "survivor", "predecessor", "relation_match", "relation_type"),
             "vault.applies_to",
             "survivor-directed-replacement",
             "survivor_raw_relation",
         ),
         (
-            ("filters", "survivor", 0, "relation_match", "requested_relation"),
+            ("filters", "survivor", "predecessor", "relation_match", "requested_relation"),
             "vault.applicable_to",
             "survivor-directed-replacement",
             "survivor_requested_relation",
         ),
         (
-            ("filters", "survivor", 0, "relation_match", "resolved_relation"),
+            ("filters", "survivor", "predecessor", "relation_match", "resolved_relation"),
             "vault.applicable_to",
             "survivor-directed-replacement",
             "survivor_resolved_relation",
         ),
         (
-            ("filters", "survivor", 0, "relation_match", "matched_via"),
+            ("filters", "survivor", "predecessor", "relation_match", "matched_via"),
             "relation_type",
             "survivor-directed-replacement",
             "survivor_match_mode",
         ),
         (
-            ("filters", "deprecated", 0, "path"),
+            ("filters", "deprecated", "predecessor", "path"),
             "other.md",
             "survivor-directed-replacement",
             "predecessor_path",
         ),
         (
-            ("filters", "deprecated", 0, "relation_match", "counterpart"),
+            ("filters", "deprecated", "predecessor", "relation_match", "counterpart"),
             "other.md",
             "survivor-directed-replacement",
             "predecessor_counterpart",
         ),
         (
-            ("filters", "deprecated", 0, "relation_match", "direction"),
+            ("filters", "deprecated", "predecessor", "relation_match", "direction"),
             "inbound",
             "survivor-directed-replacement",
             "predecessor_direction",
         ),
         (
-            ("filters", "deprecated", 0, "relation_match", "relation_type"),
+            ("filters", "deprecated", "predecessor", "relation_match", "relation_type"),
             "vault.applies_to",
             "survivor-directed-replacement",
             "predecessor_raw_relation",
         ),
         (
-            ("filters", "deprecated", 0, "relation_match", "requested_relation"),
+            ("filters", "deprecated", "predecessor", "relation_match", "requested_relation"),
             "vault.applies_to",
             "survivor-directed-replacement",
             "predecessor_requested_relation",
         ),
         (
-            ("filters", "deprecated", 0, "relation_match", "resolved_relation"),
+            ("filters", "deprecated", "predecessor", "relation_match", "resolved_relation"),
             "vault.applies_to",
             "survivor-directed-replacement",
             "predecessor_resolved_relation",
         ),
         (
-            ("filters", "deprecated", 0, "relation_match", "matched_via"),
+            ("filters", "deprecated", "predecessor", "relation_match", "matched_via"),
             "replacement",
             "survivor-directed-replacement",
             "predecessor_match_mode",
@@ -550,12 +577,16 @@ def _set_nested(value: dict, path: tuple[object, ...], replacement: object) -> N
 )
 def test_lifecycle_field_matrix_rejects_one_field_removal_swap_or_corruption(
     lifecycle_observation: dict,
+    target_position: str,
     path: tuple[object, ...],
     replacement: object,
     case_id: str,
     check_id: str,
 ) -> None:
     mutant = copy.deepcopy(lifecycle_observation)
+    if path[0] == "filters":
+        _order_lifecycle_filter_target(mutant, str(path[1]), target_position)
+    assert all(bench.score_relation_lifecycle_observation(mutant)["checks"].values())
     _set_nested(mutant, path, replacement)
 
     result = bench.score_relation_lifecycle_observation(mutant)
