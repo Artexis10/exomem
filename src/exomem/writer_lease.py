@@ -108,6 +108,8 @@ def _profile_admits_request_bound_curation(active_surface: Any, kwargs: Mapping[
         and any(param.name == "curation_action" for param in entry.params)
         for entry in resolved
     )
+
+
 REMOTE_MAINTENANCE_REMEDIATION = (
     "Run `exomem maintain --fix` or `exomem maintain --reconcile` on the host; "
     "for ID backfill, run `exomem maintain_memory --mode backfill-ids "

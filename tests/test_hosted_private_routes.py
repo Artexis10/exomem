@@ -3196,3 +3196,77 @@ def test_the_shared_dispatcher_refuses_v4_curation_and_lets_v5_through(
         else:
             with pytest.raises(_ReachedTheManager):
                 writer_lease.invoke_command(command, tmp_path, **_curation_kwargs())
+
+
+def test_v5_curation_commits_and_replays_under_fast_durable_acknowledgement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Curation crossed with `EXOMEM_FAST_DURABLE_ACK=1`.
+
+    The two features meet without knowing about each other. `fast_ack_session`
+    is built for whatever command is running, so a curation apply under the
+    flag acknowledges through the fast path -- and nothing exercised that
+    combination: the curation suites never reach the LeaseManager at all, and
+    the fast-ack suites never send a curation mode.
+
+    The flag chooses when the caller is told the write is durable, so what has
+    to hold is that "committed" still means the bytes are on disk, that the
+    terminal receipt is still persisted, and that a keyed retry is still
+    answered from it rather than by running the step twice.
+    """
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "lease-state"))
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
+    assert writer_lease.fast_durable_ack_active(), "the flag under test is not in force"
+
+    client, config, _lifecycle, _invoker = _v5_cell(
+        tmp_path,
+        monkeypatch,
+        cell_id="cell-v5-fast-ack",
+        credential="v5-fast-ack-service-credential-0001",
+        production_invoker=True,
+    )
+    proposed = _curation(
+        client, config, "propose", {"plan": _curation_plan(_curation_step("one", "v5-fast-ack"))}
+    ).json()["data"]
+    approval = _approval(proposed)
+    public_key = "curation-fast-ack-public-key"
+
+    applied = _curation(client, config, "apply", approval, idempotency_key=public_key)
+    assert applied.status_code == 200, applied.text
+    committed = applied.json()["data"]
+
+    # The apply answer is the fast path's own terminal envelope, not the
+    # curation projection the unflagged path returns: it carries the committed
+    # path and receipt id directly, and defers the derived work. Asserting that
+    # is what proves the crossing actually happened rather than that the
+    # environment variable was merely set.
+    assert committed["state"] == "committed"
+    assert committed["terminal"] is True
+    assert committed["derived_sync"] == "pending"
+    assert committed["advisory_sync"] == "pending"
+    assert committed["advisory_result_ref"].startswith("exomem://write-advisory-result/")
+
+    # One step, and "committed" means the bytes are there -- an acknowledgement
+    # that outran the step would answer committed with nothing written.
+    assert committed["committed_steps"] == ["one"]
+    assert committed["phase"] == "completed"
+    assert (config.vault_root / committed["path"]).is_file(), (
+        "acknowledged before the step committed"
+    )
+
+    # The terminal receipt is what a keyed retry is answered from, so it has to
+    # survive the fast path rather than being skipped by it.
+    before = _curation(client, config, "status", {"run_id": proposed["run_id"]}).json()["data"]
+    assert before["committed_steps"] == ["one"]
+    assert len(before["receipts"]) == 1
+
+    replay = _curation(client, config, "apply", approval, idempotency_key=public_key)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["data"]["committed_steps"] == committed["committed_steps"]
+    assert replay.json()["data"]["phase"] == committed["phase"]
+
+    after = _curation(client, config, "status", {"run_id": proposed["run_id"]}).json()["data"]
+    assert after["committed_steps"] == ["one"]
+    assert len(after["receipts"]) == 1
+    assert len(list(config.vault_root.rglob("*v5-fast-ack*.md"))) == 1
