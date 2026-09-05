@@ -738,10 +738,24 @@ surface makes the overall run `INVALID`.
 Source
 agreement and result uniqueness SHALL be established before any hit list is
 selected; disagreement or conflicting duplicate canonical results emits no
-selected hits and no source wins. The runner SHALL apply the shared public
-privacy scanner to the serialized public projection before persistence, then
+selected hits and no source wins. Before persistence, the runner SHALL apply
+the shared public privacy scanner to every decoded JSON string, including
+object keys. For the Exomem guest's recognized stringified session capture,
+it SHALL additionally decode the complete embedded message array and scan
+its keys and values plus all surrounding capture text. Invalid or incomplete
+embedded JSON SHALL refuse export. JSON escaping SHALL neither fabricate a
+local-path finding from ordinary message text nor hide an actual private path.
+Opaque runtime identifiers and gold-field checks SHALL remain enforced.
+The runner SHALL then
 re-read the persisted artifact and invoke the full shared artifact validator
 before terminal `VALID`; a model dump or in-memory projection is insufficient.
+
+#### Scenario: Serialized session newlines are not private drive paths
+- **WHEN** a guest message ends a possessive word with a colon and newline,
+  and the capture embeds that message as JSON
+- **THEN** export scans the decoded message and permits the ordinary text
+- **AND** actual private drive, UNC and home paths in capture prefixes,
+  message values or message keys still refuse persistence
 
 The runner SHALL write a started manifest before provider work, export complete
 or partial evidence before cleanup, invoke cleanup from one `finally` path on

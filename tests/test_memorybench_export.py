@@ -1872,6 +1872,52 @@ def test_public_privacy_does_not_misclassify_json_escaped_relative_backslashes(
     )
 
 
+def test_public_privacy_decodes_the_guest_session_json_before_confirming_path_findings(
+    tmp_path: Path,
+) -> None:
+    from memorybench.export import _validate_public_privacy
+
+    # The literal apostrophe makes the trailing s plus JSON-escaped newline
+    # resemble a drive prefix, although the original message contains no path.
+    messages = [{"role": "assistant", "content": "Tell me about your group's:" + "\n\n* Focus"}]
+    capture = "# Session\n\nHere is the session as a stringified JSON:\n" + json.dumps(messages)
+    _validate_public_privacy(
+        json.dumps({"hits": [{"content": capture}]}).encode(),
+        _privacy_plan(tmp_path),
+    )
+
+
+@pytest.mark.parametrize("location", ["prefix", "message", "message-key", "malformed-tail"])
+@pytest.mark.parametrize("path_kind", ["posix", "drive", "unc"])
+def test_public_privacy_keeps_real_paths_blocking_in_guest_session_json(
+    tmp_path: Path, location: str, path_kind: str,
+) -> None:
+    from memorybench.export import _validate_public_privacy
+
+    private_path = {
+        "posix": "/" + "home/private-user/runtime",
+        "drive": "Z:" + "\\private-user\\runtime",
+        "unc": "\\" * 2 + "private-machine\\private-share\\runtime",
+    }[path_kind]
+    message = {"role": "assistant", "content": "ordinary text"}
+    prefix = "# Session\n\n"
+    if location == "prefix":
+        prefix += private_path + "\n"
+    elif location == "message":
+        message["content"] = private_path
+    elif location == "message-key":
+        message[private_path] = "ordinary text"
+    tail = json.dumps([message])
+    if location == "malformed-tail":
+        tail += "\n" + private_path
+    capture = prefix + "Here is the session as a stringified JSON:\n" + tail
+    with pytest.raises(ValueError, match="shared privacy validation"):
+        _validate_public_privacy(
+            json.dumps({"hits": [{"content": capture}]}).encode(),
+            _privacy_plan(tmp_path),
+        )
+
+
 def test_cleanup_retains_checkpoint_target_after_late_private_projection_write_failure(
     tmp_path: Path,
 ) -> None:

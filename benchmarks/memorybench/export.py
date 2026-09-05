@@ -1448,15 +1448,40 @@ def _privacy_forbidden_values(plan: MemoryBenchRunPlan) -> tuple[set[str], set[s
     return opaque, content
 
 
-def _json_string_leaves(value: Any):
+def _json_string_leaves(value: Any, *, include_keys: bool = False):
     if isinstance(value, dict):
-        for child in value.values():
-            yield from _json_string_leaves(child)
+        for key, child in value.items():
+            if include_keys:
+                yield key
+            yield from _json_string_leaves(child, include_keys=include_keys)
     elif isinstance(value, list):
         for child in value:
-            yield from _json_string_leaves(child)
+            yield from _json_string_leaves(child, include_keys=include_keys)
     elif isinstance(value, str):
         yield value
+
+
+def _privacy_scan_strings(value: str, *, provider: str):
+    """Confirm findings against the guest's decoded session, including its keys.
+
+    The guest embeds one JSON message array in its capture body. JSON escaping
+    can make an apostrophe-s followed by a colon and newline look like a drive
+    path. Decode only that complete, recognized payload; malformed tails refuse
+    export, and the surrounding capture text remains in scope.
+    """
+    marker = "Here is the session as a stringified JSON:\n"
+    if provider != "exomem" or marker not in value:
+        yield value
+        return
+    prefix, encoded = value.split(marker, 1)
+    try:
+        messages = _load_json_bytes(encoded.encode("utf-8"), "guest session")
+        if not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages):
+            raise ValueError("guest session must be a message array")
+    except ValueError as exc:
+        raise ValueError("public export failed shared privacy validation: invalid guest session JSON") from exc
+    yield prefix
+    yield from _json_string_leaves(messages, include_keys=True)
 
 
 def _validate_public_privacy(payload: bytes, plan: MemoryBenchRunPlan) -> None:
@@ -1464,14 +1489,14 @@ def _validate_public_privacy(payload: bytes, plan: MemoryBenchRunPlan) -> None:
     from exomem.public_artifact_privacy import _scan_text
 
     decoded = _load_json_bytes(payload, "public export")
-    serialized_findings = _scan_text(text, "memorybench-export.v1.json")
-    if serialized_findings and any(
-        _scan_text(value, "memorybench-export.v1.json")
-        for value in _json_string_leaves(decoded)
+    if any(
+        _scan_text(candidate, "memorybench-export.v1.json")
+        for value in _json_string_leaves(decoded, include_keys=True)
+        for candidate in _privacy_scan_strings(value, provider=plan.provider)
     ):
-        # Scan the serialized bytes first, then confirm against decoded JSON
-        # strings so one literal relative backslash cannot become a fabricated
-        # UNC path merely because JSON escapes it with a second backslash.
+        # Scan semantic strings at both known serialization layers. Requiring a
+        # serialized-text match first also misses real paths after escaped
+        # newlines, whose encoded n incorrectly looks like a word character.
         raise ValueError("public export failed shared privacy validation")
     opaque, content = _privacy_forbidden_values(plan)
     if any(value and value in text for value in opaque):
