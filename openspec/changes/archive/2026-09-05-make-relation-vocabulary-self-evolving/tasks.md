@@ -66,6 +66,12 @@
 
 ## 9. OpenSpec closure and delivery
 
-- [ ] 9.1 Mark tasks complete only from code, test, benchmark, review, and rendered-UI evidence; synchronize this change's delta specs into canonical specs, archive it with the OpenSpec CLI, and verify strict validation before and after archive
+- [x] 9.1 Mark tasks complete only from code, test, benchmark, review, and rendered-UI evidence; synchronize this change's delta specs into canonical specs, archive it with the OpenSpec CLI, and verify strict validation before and after archive
 - [x] 9.2 Inspect contribution, PR-title, CI, release, and privacy rules; commit only intended scope with no private identifiers or AI attribution, integrate current `origin/main` safely in the feature worktree, and verify the completion gates still pass
 - [x] 9.3 Push the feature branch and open a ready-for-review Conventional Commit pull request containing the outcome and verification evidence; keep the worktree alive for review follow-ups and do not merge without explicit authorization
+
+## Delivery evidence
+
+- Implementation and canonical spec synchronization merged in [PR #1074](https://github.com/Artexis10/exomem/pull/1074), commit `49772b51e11dd0e3496b9157a804f43da036de06`.
+- [Full CI](https://github.com/Artexis10/exomem/actions/runs/33938671145) passed 71 jobs. [Final implementation PR CI](https://github.com/Artexis10/exomem/actions/runs/33940814626) passed all required checks after the reviewed fixture corrections. PR #1074 records independent review, rendered Studio acceptance, restart recovery, and calibrated scale/latency evidence.
+- All 24 delta requirements and their scenarios were confirmed present in the eight canonical specs before running `openspec archive make-relation-vocabulary-self-evolving --yes --skip-specs`. Strict validation passed before archive (181 items) and after archive (180 items); no canonical spec was changed by the archive.
