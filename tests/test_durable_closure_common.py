@@ -325,17 +325,29 @@ def test_basic_memory_provenance_requires_the_pinned_wheel_version_and_inventory
     )
 
 
-def test_exomem_provenance_reports_the_runtime_source_identity() -> None:
-    provenance = common.runtime_provenance(
+def test_exomem_provenance_uses_the_explicit_runtime_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    direct = common.runtime_provenance(
         executable=Path(sys.executable),
         wheel=None,
         python=Path(sys.executable),
         package="exomem",
         expected_version=None,
     )
+    provenance = common.runtime_provenance(
+        executable=Path(sys.executable),
+        wheel=None,
+        python=Path(sys.executable),
+        package="exomem",
+        expected_version=None,
+        environment={"PYTHONPATH": str(common.ROOT / "src")},
+    )
 
     identity = provenance["source_identity"]
-    assert identity["runtime_pythonpath_root"]
+    assert direct["source_identity"]["runtime_pythonpath_root"] is None
+    assert identity["runtime_pythonpath_root"] == str(common.ROOT / "src")
     assert identity["revision"]
     assert identity["tree"]
     assert len(identity["source_digest"]) == 64

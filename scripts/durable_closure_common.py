@@ -547,6 +547,7 @@ def runtime_provenance(
     python: Path,
     package: str,
     expected_version: str | None,
+    environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     probe = (
         "import hashlib, importlib.metadata as m, json, os, pathlib, "
@@ -563,7 +564,12 @@ def runtime_provenance(
     try:
         installed = json.loads(
             subprocess.run(
-                [str(python), "-c", probe], check=True, capture_output=True, text=True, timeout=30
+                [str(python), "-c", probe],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=dict(environment) if environment is not None else None,
             ).stdout
         )
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
@@ -995,6 +1001,7 @@ async def run_product(
             python=runtime_python,
             package="basic-memory" if product == "basic_memory" else "exomem",
             expected_version=BASIC_MEMORY_VERSION if product == "basic_memory" else None,
+            environment=env,
         ),
     }
     try:
