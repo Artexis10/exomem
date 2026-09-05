@@ -277,6 +277,136 @@ def _path_projection(result: Any) -> dict[str, Any]:
     return {"paths": []}
 
 
+def _media_result_projection(result: Any) -> dict[str, Any]:
+    """Keep selected-media outcomes bounded without copying leaf diagnostics."""
+    if not isinstance(result, Mapping):
+        return {}
+    operation = result.get("operation")
+    if operation not in {"process", "retry"}:
+        return {}
+
+    def integer(value: Any, *, allow_none: bool = False) -> bool:
+        return (allow_none and value is None) or (
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        )
+
+    def metadata() -> dict[str, Any] | None:
+        if not (
+            integer(result.get("index_refreshed"))
+            and integer(result.get("index_refresh_remaining"))
+        ):
+            return None
+        return {
+            "operation": operation,
+            "index_refreshed": result["index_refreshed"],
+            "index_refresh_remaining": result["index_refresh_remaining"],
+        }
+
+    base = metadata()
+    if base is None:
+        return {}
+    results = result.get("results")
+
+    def path(value: Any) -> bool:
+        return (
+            isinstance(value, str)
+            and 0 < len(value) <= 2048
+            and value.startswith("Knowledge Base/")
+            and "\\" not in value
+            and "\x00" not in value
+        )
+
+    if results is None:
+        if not (
+            path(result.get("path"))
+            and isinstance(result.get("media_type"), str)
+            and 0 < len(result["media_type"]) <= 32
+            and result.get("state")
+            in {"pending", "running", "blocked", "failed", "completed"}
+            and path(result.get("sidecar_path"))
+            and integer(result.get("job_id"), allow_none=True)
+        ):
+            return {}
+        projected = {
+            **base,
+            "media_type": result["media_type"],
+            "media_state": result["state"],
+            "sidecar_path": result["sidecar_path"],
+            "job_id": result["job_id"],
+        }
+        if operation == "retry":
+            if not integer(result.get("requeued")):
+                return {}
+            projected["requeued"] = result["requeued"]
+        return projected
+
+    if not isinstance(results, (list, tuple)) or not 1 <= len(results) <= 32:
+        return {}
+
+    projected: list[dict[str, Any]] = []
+    for item in results:
+        if not isinstance(item, Mapping):
+            return {}
+        outcome = item.get("outcome")
+        state = item.get("state")
+        if outcome == "failed":
+            if not (
+                state == "failed"
+                and path(item.get("path"))
+                and isinstance(item.get("code"), str)
+                and 0 < len(item["code"]) <= 128
+                and isinstance(item.get("remediation"), str)
+                and 0 < len(item["remediation"]) <= 300
+            ):
+                return {}
+            projected.append(
+                {
+                    "path": item["path"],
+                    "outcome": outcome,
+                    "state": state,
+                    "code": item["code"],
+                    "remediation": item["remediation"],
+                }
+            )
+            continue
+        if outcome not in {"processed", "retried"} or state not in {
+            "pending",
+            "running",
+            "blocked",
+            "failed",
+            "completed",
+        }:
+            return {}
+        if not (
+            path(item.get("path"))
+            and isinstance(item.get("media_type"), str)
+            and 0 < len(item["media_type"]) <= 32
+            and path(item.get("sidecar_path"))
+            and integer(item.get("job_id"), allow_none=True)
+            and integer(item.get("requeued"))
+        ):
+            return {}
+        projected.append(
+            {
+                key: item[key]
+                for key in (
+                    "path",
+                    "outcome",
+                    "state",
+                    "media_type",
+                    "sidecar_path",
+                    "job_id",
+                    "requeued",
+                )
+            }
+        )
+    return {
+        **base,
+        "paths": [item["path"] for item in projected],
+        "media_results": projected,
+    }
+
+
 def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
     """Keep the bounded client-artifact outcome visible in compact terminals."""
 
@@ -1085,6 +1215,7 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
     artifact_receipt = _artifact_receipt_projection(leaf)
     compact.update(artifact_receipt)
+    compact.update(_media_result_projection(leaf))
     # `pending` (#576) is the fourth outcome: canonical bytes committed, the
     # registered derived-graph rebuild has not converged yet. It has to survive
     # into `compact` -- the default detail -- or a bounded write would be
