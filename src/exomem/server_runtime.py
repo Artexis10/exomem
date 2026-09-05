@@ -46,6 +46,12 @@ log = logging.getLogger(__name__)
 # background catalogue warm/repair path from starting indefinitely.
 RECALL_SEED_WAIT_SECONDS = 120.0
 
+# An application can be collected after lifespan shutdown while daemon workers
+# still exist. Keep its entered presence context owned by the process, not by
+# that application's object graph (which can be collected on another thread).
+_LOCAL_PROCESS_PRESENCE_LOCK = threading.Lock()
+_LOCAL_PROCESS_PRESENCES: list[AbstractContextManager[None]] = []
+
 
 @dataclass(frozen=True)
 class ServerRuntime:
@@ -131,6 +137,10 @@ class LocalRuntimeActivation:
         self.media_worker: Any | None = None
         self.file_watcher: Any | None = None
         self._runtime_presence = runtime_presence
+        if runtime_presence is not None:
+            with _LOCAL_PROCESS_PRESENCE_LOCK:
+                if not any(held is runtime_presence for held in _LOCAL_PROCESS_PRESENCES):
+                    _LOCAL_PROCESS_PRESENCES.append(runtime_presence)
         self.derived_drain: Any | None = None
 
     def start(self) -> None:

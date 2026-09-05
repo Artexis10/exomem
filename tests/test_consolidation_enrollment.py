@@ -914,3 +914,69 @@ def test_local_server_holds_presence_for_process_after_lifespan_shutdown(
     runtime.local_runtime_presence.__exit__(None, None, None)
     with registry.offline_enrollment(timeout_seconds=0):
         pass
+
+
+@pytest.mark.parametrize("collect_on_worker", [False, True])
+def test_server_presence_survives_application_collection_until_process_exit(
+    tmp_path: Path,
+    _isolated_writer_state: Path,
+    collect_on_worker: bool,
+) -> None:
+    from exomem.governance import consolidation_enrollment
+
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    child_code = """
+import gc
+import sys
+import threading
+import weakref
+from pathlib import Path
+from exomem.governance.consolidation_enrollment import local_runtime_presence
+from exomem.server_runtime import LocalRuntimeActivation
+
+vault = Path(sys.argv[1])
+presence = local_runtime_presence(vault)
+presence.__enter__()
+activation = LocalRuntimeActivation(vault, runtime_presence=presence)
+activation_ref = weakref.ref(activation)
+# Model an app cycle collected after its lifespan has stopped. Its presence
+# must outlive the app because best-effort worker shutdown is not a drain.
+activation._test_cycle = activation
+del activation, presence
+if sys.argv[2] == "worker":
+    collector = threading.Thread(target=gc.collect)
+    collector.start()
+    collector.join()
+else:
+    gc.collect()
+assert activation_ref() is None
+print("collected", flush=True)
+sys.stdin.readline()
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", child_code, str(vault_root),
+         "worker" if collect_on_worker else "owner"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    registry = consolidation_enrollment.LocalRuntimePresenceRegistry(
+        vault_root, state_root=_isolated_writer_state,
+    )
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "collected"
+        with pytest.raises(
+            consolidation_enrollment.ConsolidationEnrollmentUnavailable,
+            match="^CONSOLIDATION_ENROLLMENT_BUSY$",
+        ):
+            with registry.offline_enrollment(timeout_seconds=0):
+                pass
+    finally:
+        _stdout, stderr = process.communicate("exit\n", timeout=15)
+    assert process.returncode == 0, stderr
+    assert "cannot release un-acquired lock" not in stderr
+    with registry.offline_enrollment(timeout_seconds=0):
+        pass
