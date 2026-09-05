@@ -351,9 +351,9 @@ def attach_ledger_measurements(
             row = ledger_rows[row_index]
             if "outcome" not in row or "error_code" not in row:
                 raise ValueError("ledger outcome/error fields are missing")
-            if row.get("outcome") is not None and row.get("outcome") != call.get("outcome"):
+            if row.get("outcome") != call.get("outcome"):
                 raise ValueError("ledger outcome does not match client outcome")
-            if row.get("error_code") is not None and row.get("error_code") != call.get("error_code"):
+            if row.get("error_code") != call.get("error_code"):
                 raise ValueError("ledger error code does not match client outcome")
             result["server_duration_ms"] = float(row["duration_ms"]) if row.get("duration_ms") is not None else None
             result["server_total_ms"] = float(row["total_ms"]) if row.get("total_ms") is not None else None

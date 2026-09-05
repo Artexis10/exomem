@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import sys
 from pathlib import Path
@@ -117,6 +118,18 @@ def test_ledger_refusal_cannot_be_joined_to_an_ok_client_call() -> None:
         raise AssertionError("ledger refusal must invalidate an incompatible client join")
 
 
+def test_null_ledger_outcome_cannot_hide_a_client_refusal() -> None:
+    try:
+        benchmark.attach_ledger_measurements(
+            [{"tool": "ask_memory", "outcome": "refused", "error_code": "RETRIEVAL_INDEX_WARMING", "client_elapsed_ms": 1}],
+            [{"tool": "ask_memory", "outcome": None, "error_code": None, "duration_ms": 1, "total_ms": 1, "ts_utc": "2026-09-05T12:00:01+00:00"}],
+        )
+    except ValueError as error:
+        assert "outcome" in str(error)
+    else:
+        raise AssertionError("null ledger terminal fields must not hide a refusal")
+
+
 def test_missing_ledger_duration_and_outcome_are_not_measured_as_zero_or_ok() -> None:
     try:
         benchmark.summarize_ledger_calls([{"tool": "remember", "total_ms": 2, "started_ms": 0, "ended_ms": 2}])
@@ -156,8 +169,9 @@ def test_utc_ledger_step_invalidates_cross_call_occupancy() -> None:
 
 def test_cumulative_utc_offset_drift_invalidates_cross_call_occupancy() -> None:
     calls = [{"ended_ms": float(index * 1000)} for index in range(20)]
+    base = dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.UTC)
     rows = [
-        {"ts_utc": f"2026-09-05T12:00:{index + 1:02d}.{index * 100:03d}+00:00", "total_ms": 5.0}
+        {"ts_utc": (base + dt.timedelta(milliseconds=index * 1100)).isoformat(), "total_ms": 5.0}
         for index in range(20)
     ]
 
