@@ -9,6 +9,7 @@
 - [ ] 2.1 Add red-first ordinary hybrid recall under resolver lag, strict relation-query and corrupt-pending regressions; implement optional graph degradation and pass affected retrieval suites.
 - [ ] 2.2 Add red-first proof that media process/retry never invoke the deferred drain, plus bounded selected-path batch/partial-failure cases; implement the async terminal and pass media/public-surface suites.
 - [ ] 2.3 Repair diagnosed graph/watcher amplification while retaining unknown-external-edit and lineage fences; demonstrate a burst converges exact current state without per-write full rebuilds in scoped graph/watcher tests.
+- [ ] 2.4 Transfer observed extraction/failure/pending media publications to the service parent through bounded durable results and monotonic claim fencing; prove child handoff stops before later stages, exact parent recovery preserves newer receipt debt, and same-process deferred fanout retains local publication custody.
 
 ## 3. Durable closure benchmark and orchestration
 
