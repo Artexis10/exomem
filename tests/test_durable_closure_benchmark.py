@@ -431,6 +431,52 @@ def test_missing_artifact_manifest_blocks_the_full_workflow() -> None:
     assert benchmark.workflow_status(core_passed=False, media_status="ready") == "fail"
 
 
+def test_failed_dependency_gate_does_not_run_the_dependent_write() -> None:
+    calls = 0
+
+    async def dependent_write() -> None:
+        nonlocal calls
+        calls += 1
+
+    gate = asyncio.run(
+        benchmark.run_after_dependencies(
+            {"real-extraction-proof": False},
+            dependent_write,
+        )
+    )
+
+    assert calls == 0
+    assert gate == {"ready": False, "blocked_dependencies": ["real-extraction-proof"]}
+
+
+def test_unproven_source_closure_is_blocked_only_when_independent_work_and_recalls_hold() -> None:
+    common = {
+        "core_passed": False,
+        "media_status": "blocked",
+        "blocked_dependencies": ["real-extraction-proof"],
+    }
+
+    assert benchmark.workflow_status(
+        **common, independent_work_succeeded=True, ordinary_retrieval_refused=False
+    ) == "blocked"
+    assert benchmark.workflow_status(
+        **common, independent_work_succeeded=False, ordinary_retrieval_refused=False
+    ) == "fail"
+    assert benchmark.workflow_status(
+        **common, independent_work_succeeded=True, ordinary_retrieval_refused=True
+    ) == "fail"
+
+
+def test_blocked_cli_result_is_a_nonzero_incomplete_exit(tmp_path: Path, monkeypatch: object) -> None:
+    def fake_run(coroutine: object) -> dict[str, str]:
+        coroutine.close()  # type: ignore[attr-defined]
+        return {"status": "blocked"}
+
+    monkeypatch.setattr(benchmark.asyncio, "run", fake_run)  # type: ignore[attr-defined]
+
+    assert benchmark.main(["--state", str(tmp_path / "state"), "--vault", str(tmp_path / "vault")]) == 2
+
+
 def test_corpus_provenance_has_varied_content_links_and_byte_digests(tmp_path: Path) -> None:
     corpus = benchmark.materialize_corpus(tmp_path / "vault", pages=7)
 

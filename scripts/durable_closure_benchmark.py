@@ -22,7 +22,7 @@ import shutil
 import sys
 import time
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -65,13 +65,38 @@ def load_artifact_manifest(path: Path) -> list[dict[str, str]]:
     return normalized
 
 
-def workflow_status(*, core_passed: bool, media_status: str) -> str:
+def workflow_status(
+    *,
+    core_passed: bool,
+    media_status: str,
+    blocked_dependencies: Sequence[str] = (),
+    independent_work_succeeded: bool = True,
+    ordinary_retrieval_refused: bool = False,
+) -> str:
     """Do not promote a partial media workflow to an acceptance pass."""
+    if blocked_dependencies:
+        return "blocked" if independent_work_succeeded and not ordinary_retrieval_refused else "fail"
     if not core_passed:
         return "fail"
     if media_status != "ready":
         return "blocked"
     return "pass"
+
+
+def dependency_gate(dependencies: Mapping[str, bool]) -> dict[str, Any]:
+    """Expose unsatisfied DAG prerequisites without running dependent work."""
+    blocked = sorted(name for name, satisfied in dependencies.items() if not satisfied)
+    return {"ready": not blocked, "blocked_dependencies": blocked}
+
+
+async def run_after_dependencies(
+    dependencies: Mapping[str, bool], dependent_operation: Callable[[], Awaitable[Any]]
+) -> dict[str, Any]:
+    """Run a dependent operation exactly once, only after all prerequisites hold."""
+    gate = dependency_gate(dependencies)
+    if gate["ready"]:
+        await dependent_operation()
+    return gate
 
 
 def validated_evidence_paths(
@@ -978,6 +1003,8 @@ async def run_public_workflow(
     extraction_enqueue_started: float | None = None
     extraction_sidecar_paths: list[str] = []
     media_convergence_wall_ms: float | None = None
+    media_enqueue_succeeded: bool | None = None
+    source_gate: dict[str, Any] = {"ready": True, "blocked_dependencies": []}
     useful_closure_finished = workflow_started
     client = Client(transport, timeout=timeout, init_timeout=timeout)
     async with client:
@@ -1038,11 +1065,13 @@ async def run_public_workflow(
                 all(_outcome_ok(payload) for payload in process_payloads)
                 and media_rows_match_request(evidence_paths, media_rows)
             )
+            media_enqueue_succeeded = hashes_match and len(evidence_paths) == 3 and process_ok
             extraction_sidecar_paths = [
                 str(row.get("sidecar_path") or "") for row in media_rows if isinstance(row.get("sidecar_path"), str)
             ]
             media = {
-                "status": "queued" if hashes_match and len(evidence_paths) == 3 and process_ok else "fail",
+                "status": "queued" if media_enqueue_succeeded else "fail",
+                "enqueue_succeeded": media_enqueue_succeeded,
                 "fixture_provenance": [{key: item[key] for key in item} for item in artifacts],
                 "preserved_hashes_match": hashes_match,
                 "evidence_paths": evidence_paths,
@@ -1092,6 +1121,7 @@ async def run_public_workflow(
         # The source note has a causal dependency on media custody/completion.
         # Keep unrelated tracker, critique, archive, and stale-edge work above
         # this boundary so extraction settles while ordinary closure continues.
+        source_dependencies: dict[str, bool] = {}
         if artifacts is not None:
             if profile == REAL_EXTRACTION_PROFILE:
                 proof: dict[str, Any] | None = None
@@ -1123,6 +1153,7 @@ async def run_public_workflow(
                         }
                     )
                     media_convergence_wall_ms = (time.perf_counter() - workflow_started) * 1000.0
+                source_dependencies["real-extraction-proof"] = proof is not None
             else:
                 custody_reads = [
                     await workflow_call("read_memory", {"path": sidecar_path}, phase="media-custody")
@@ -1131,52 +1162,58 @@ async def run_public_workflow(
                 custody_ok = bool(custody_reads) and all(_outcome_ok(read) for read in custody_reads)
                 media.update(
                     {
-                        "status": "blocked" if media.get("status") == "queued" and custody_ok else "fail",
+                        "status": "ready" if media.get("status") == "queued" and custody_ok else "blocked",
                         "reason": "model-free profile records public queued sidecar custody but does not claim extraction completion",
                         "custody_reads": len(custody_reads),
+                        "extraction_completion": "unproven",
                     }
                 )
+                source_dependencies["model-free-sidecar-custody"] = media.get("status") == "ready"
 
-        remember_arguments = {
-            "title": "Durable closure benchmark result",
-            "note_type": "insight",
-            "content": "## Observations\n\n"
-            f"- [finding] {marker} survives the public workflow #benchmark ^durable-closure\n",
-            "response_detail": "full",
-            "sources": evidence_paths,
-        }
-        validation = await workflow_call(
-            "remember",
-            {**remember_arguments, "validate_only": True},
-            phase="source-closure",
-        )
-        remembered = await workflow_call(
-            "remember",
-            {
-                **remember_arguments,
-                "draft_id": validation.get("draft_id"),
-                "draft_hash": validation.get("draft_hash"),
-                "draft_token": validation.get("draft_token"),
-                "relation_disposition": "reviewed_none",
-                "relation_review_hash": validation.get("draft_hash"),
-                "relation_review_reason": "No honest relation exists in the isolated benchmark fixture.",
-            },
-            phase="source-closure",
-        )
-        path = str(remembered.get("path") or "")
-        if path:
-            remembered_observation = await _observe_reviewed(
-                client,
-                calls,
-                path=path,
-                category="evidence",
-                content=f"{marker} observation",
-                anchor="follow-up",
-                call_tool=workflow_call,
+        async def write_evidence_backed_note() -> None:
+            nonlocal path, remembered, remembered_observation
+            remember_arguments = {
+                "title": "Durable closure benchmark result",
+                "note_type": "insight",
+                "content": "## Observations\n\n"
+                f"- [finding] {marker} survives the public workflow #benchmark ^durable-closure\n",
+                "response_detail": "full",
+                "sources": evidence_paths,
+            }
+            validation = await workflow_call(
+                "remember",
+                {**remember_arguments, "validate_only": True},
                 phase="source-closure",
             )
-        else:
-            remembered_observation = {"success": False}
+            remembered = await workflow_call(
+                "remember",
+                {
+                    **remember_arguments,
+                    "draft_id": validation.get("draft_id"),
+                    "draft_hash": validation.get("draft_hash"),
+                    "draft_token": validation.get("draft_token"),
+                    "relation_disposition": "reviewed_none",
+                    "relation_review_hash": validation.get("draft_hash"),
+                    "relation_review_reason": "No honest relation exists in the isolated benchmark fixture.",
+                },
+                phase="source-closure",
+            )
+            path = str(remembered.get("path") or "")
+            if path:
+                remembered_observation = await _observe_reviewed(
+                    client,
+                    calls,
+                    path=path,
+                    category="evidence",
+                    content=f"{marker} observation",
+                    anchor="follow-up",
+                    call_tool=workflow_call,
+                    phase="source-closure",
+                )
+            else:
+                remembered_observation = {"success": False}
+
+        source_gate = await run_after_dependencies(source_dependencies, write_evidence_backed_note)
 
         recall = await workflow_call(
             "ask_memory",
@@ -1201,6 +1238,13 @@ async def run_public_workflow(
     call_records = calls[1:]
     required_payloads = (remembered, remembered_observation, tracker_observation, critique_observation, tracker_correction, archived_read)
     mutation_success = all(_outcome_ok(payload) for payload in required_payloads)
+    independent_work_succeeded = all(
+        _outcome_ok(payload)
+        for payload in (tracker_observation, critique_observation, tracker_correction, archived_read)
+    )
+    ordinary_retrieval_refused = any(
+        call.get("tool") == "ask_memory" and call.get("outcome") != "ok" for call in call_records
+    )
     final_exact = bool(
         path
         and mutation_success
@@ -1242,7 +1286,13 @@ async def run_public_workflow(
     return {
         "variant": variant,
         "profile": profile,
-        "status": workflow_status(core_passed=closure["passed"], media_status=media["status"]),
+        "status": workflow_status(
+            core_passed=closure["passed"],
+            media_status=media["status"],
+            blocked_dependencies=source_gate["blocked_dependencies"],
+            independent_work_succeeded=independent_work_succeeded,
+            ordinary_retrieval_refused=ordinary_retrieval_refused,
+        ),
         "corpus": corpus,
         **lifecycle_timings(
             workflow_started=workflow_started,
@@ -1264,6 +1314,7 @@ async def run_public_workflow(
         "calls": call_records,
         "write_ack": _ack_percentiles(call_records),
         "useful_closure": closure,
+        "blocked_dependencies": source_gate["blocked_dependencies"],
         "verification": {
             "direct_marker": _contains_marker(direct, marker),
             "tracker_marker": _contains_marker(tracker_read, marker),
@@ -1352,7 +1403,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0 if report["status"] in {"pass", "blocked"} else 1
+    return 0 if report["status"] == "pass" else 2 if report["status"] == "blocked" else 1
 
 
 if __name__ == "__main__":
