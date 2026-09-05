@@ -674,7 +674,7 @@ class LiveLifecyclePlane:
         files = await self._cell.read_authorization_session_bundle(owned)
         current = int(self._now())
 
-        async def _mint() -> Any:
+        async def _mint(*, expected_revision: str | None = None) -> Any:
             minted = build_initial_hosted_authorization_bundle(
                 cell_id=owned.subject_id,
                 logical_vault_id=owned.tenant_id,
@@ -691,6 +691,11 @@ class LiveLifecyclePlane:
                 membership_epoch=minted.epoch,
                 membership_digest=minted.membership_digest,
                 revision=minted.revision,
+                # Replacing an existing bundle is a compare-and-swap against the
+                # revision this pass read. Without it, a maintenance transition
+                # committed since that read is clobbered and its epoch silently
+                # reset to genesis.
+                expected_revision=expected_revision,
             )
             return minted
 
@@ -725,11 +730,18 @@ class LiveLifecyclePlane:
                         now=current,
                         _require_fresh=True,
                     )
-                except MetadataConflict:
+                except MetadataConflict as error:
+                    # Prove the refusal really is expiry rather than trusting that
+                    # `_require_fresh` gates nothing else. A future-dated bundle
+                    # also passes the call above and fails this one, and that is
+                    # not elapsed time -- fail closed on anything still in date.
+                    if bundle.expires_at > current:
+                        raise
                     # The bundle is sound and merely expired. A cell that has never
-                    # been admitted or routed has never served a request under it,
-                    # so nothing is depending on the old session and re-minting is
-                    # the same act as minting one for a cell that had none.
+                    # served -- not admitted, not serving, no routes open -- has
+                    # never answered a request under it, so nothing depends on the
+                    # old session and re-minting is the same act as minting one for
+                    # a cell that had none.
                     #
                     # Provisioning a cell is not instantaneous: the bundle is minted
                     # at `install_release`, and any pause before initialize -- a
@@ -738,12 +750,16 @@ class LiveLifecyclePlane:
                     # elapsed time indistinguishable from a forged attestation, and
                     # leaves a cell that can never finish provisioning.
                     snapshot = self._snapshot(metadata)
-                    if snapshot.runtime_admitted or snapshot.routes != (False, False):
+                    if (
+                        snapshot.runtime_admitted
+                        or snapshot.serving
+                        or snapshot.routes != (False, False)
+                    ):
                         raise MetadataConflict(
                             "authorization session expired on a serving cell",
                             reason=(ConflictReason.AUTHORIZATION_SESSION_EXPIRED_ON_SERVING_CELL),
-                        ) from None
-                    bundle = await _mint()
+                        ) from error
+                    bundle = await _mint(expected_revision=bundle.revision)
         return bundle.revision
 
     async def _authorization_helm_values(

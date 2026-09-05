@@ -31,6 +31,7 @@ from exomem_provisioner.lifecycle import (
 )
 from exomem_provisioner.live import (
     KubernetesProviderRegistry,
+    KubernetesProviderSnapshot,
     LiveLifecyclePlane,
 )
 from exomem_provisioner.models import CapacityReservationClass, ResourceKind
@@ -2162,13 +2163,16 @@ def _expiring_bundle_plane(
     *,
     minted_at: int,
     now: int,
-    runtime_admitted: bool,
-    routes: tuple[bool, bool],
+    serving: bool = False,
+    runtime_admitted: bool = False,
+    routes: tuple[bool, bool] = (False, False),
 ):
     """A live plane whose cell already holds a bundle minted at `minted_at`.
 
-    The bundle is produced by the production builder rather than hand-written,
-    so it is exactly the shape `install_release` leaves behind.
+    The bundle comes from the production builder and the snapshot is a real
+    `KubernetesProviderSnapshot`, so neither can agree with the code under test
+    by construction. `init_complete` is False so `initialize` takes the branch
+    that reads the bundle back -- the branch the incident actually hit.
     """
 
     config = SimpleNamespace(
@@ -2207,7 +2211,17 @@ def _expiring_bundle_plane(
         recovery_envelope=envelopes["authorizationSessionSecret"],
         now=minted_at,
     )
-    written: list[dict[str, bytes]] = []
+    snapshot = KubernetesProviderSnapshot(
+        namespace=True,
+        release=True,
+        init_job_present=False,
+        init_complete=False,
+        init_failed=False,
+        serving=serving,
+        runtime_admitted=runtime_admitted,
+        routes=routes,
+    )
+    written: list[dict[str, object]] = []
     applied: list[dict[str, object]] = []
 
     class Cell:
@@ -2216,21 +2230,17 @@ def _expiring_bundle_plane(
         async def read_authorization_session_bundle(self, _owner):
             return self.files
 
-        async def write_authorization_session_bundle(self, _owner, files, **_kwargs):
+        async def write_authorization_session_bundle(self, _owner, files, **kwargs):
             self.files = files
-            written.append(files)
+            written.append({"files": files, **kwargs})
 
     class Helm:
         async def ensure_release(self, _owner, values):
             applied.append(values)
 
-    class Routes:
-        async def enable(self, _owner):  # pragma: no cover - Helm carries identity
-            raise AssertionError("direct route writes lose provider recovery identity")
-
     class Registry:
         async def inspect(self, _current, _owner):
-            return SimpleNamespace(runtime_admitted=runtime_admitted, routes=routes)
+            return snapshot
 
     plane = LiveLifecyclePlane(
         repository=SimpleNamespace(),  # type: ignore[arg-type]
@@ -2238,7 +2248,7 @@ def _expiring_bundle_plane(
         cell=Cell(),  # type: ignore[arg-type]
         helm=Helm(),  # type: ignore[arg-type]
         runtime=SimpleNamespace(),  # type: ignore[arg-type]
-        routes=Routes(),  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
         maintenance=SimpleNamespace(),  # type: ignore[arg-type]
         capacity=SimpleNamespace(),  # type: ignore[arg-type]
         identity_verifier=IDENTITY_CODEC.verifier(),
@@ -2248,51 +2258,46 @@ def _expiring_bundle_plane(
     key = plane._key(metadata)
     plane._owned[key] = metadata
     plane._helm_requests[key] = request
-    plane._snapshots[key] = SimpleNamespace(runtime_admitted=runtime_admitted, routes=routes)
-    return plane, request, original, written, applied
+    plane._snapshots[key] = snapshot
+    return plane, request, config, original, written, applied
 
 
 @pytest.mark.asyncio
 async def test_expired_authorization_bundle_is_reminted_before_the_cell_serves() -> None:
     """Elapsed time must not strand a cell that has never served a request.
 
-    The bundle is minted at `install_release` and carries a one-hour attestation
-    TTL. Any pause before the cell is routed -- a retry, an operator recovery, a
-    slow CSI attach -- can outlast it. Treating that as a terminal conflict makes
-    elapsed time indistinguishable from a forged attestation and leaves a cell
-    that can never finish provisioning, which is what happened on
-    exomem-alpha-01: minted 10:55:16Z, expired 11:55:16Z, retried 11:58Z.
+    The bundle is minted at `install_release` with a one-hour attestation TTL.
+    Any pause before initialize -- a retry, an operator recovery, a slow CSI
+    attach -- can outlast it. Treating that as terminal makes elapsed time
+    indistinguishable from a forged attestation and leaves a cell that can
+    never finish provisioning, which is what happened on exomem-alpha-01:
+    minted 10:55:16Z, expired 11:55:16Z, retried 11:58Z.
     """
 
     metadata = _metadata()
     minted_at = 1_900_000_000
-    plane, request, original, written, applied = _expiring_bundle_plane(
+    plane, request, config, original, written, applied = _expiring_bundle_plane(
         metadata,
         minted_at=minted_at,
         now=minted_at + 3_700,  # past the 3600s attestation TTL
-        runtime_admitted=False,
-        routes=(False, False),
     )
 
-    await plane.enable_routes(metadata, request)
+    await plane.initialize(metadata, request, config)  # type: ignore[arg-type]
 
-    assert written, "an expired bundle on an unrouted cell must be re-minted"
-    assert written[-1] != original.files
-    assert applied and applied[-1]["authorizationSessionRevision"] != original.revision
+    assert written, "an expired bundle on a cell that never served must be re-minted"
+    assert written[-1]["files"] != original.files
+    # Replacing an existing bundle must be a compare-and-swap on what we read.
+    assert written[-1]["expected_revision"] == original.revision
+    assert applied and applied[0]["authorizationSessionRevision"] != original.revision
 
 
 @pytest.mark.asyncio
-async def test_expired_authorization_bundle_still_refuses_on_a_serving_cell() -> None:
-    """Re-minting must not silently rotate the session of a live cell.
-
-    A cell that is admitted or routed has served under this keyring, so the
-    fix above must not reach it: that would be a session rotation disguised as
-    a provisioning step.
-    """
+async def test_expired_authorization_bundle_still_refuses_on_an_admitted_cell() -> None:
+    """Re-minting must never silently rotate the session of a live cell."""
 
     metadata = _metadata()
     minted_at = 1_900_000_000
-    plane, request, _original, written, _applied = _expiring_bundle_plane(
+    plane, request, config, _original, written, _applied = _expiring_bundle_plane(
         metadata,
         minted_at=minted_at,
         now=minted_at + 3_700,
@@ -2301,9 +2306,63 @@ async def test_expired_authorization_bundle_still_refuses_on_a_serving_cell() ->
     )
 
     with pytest.raises(MetadataConflict) as raised:
-        await plane.enable_routes(metadata, request)
+        await plane.initialize(metadata, request, config)  # type: ignore[arg-type]
     assert raised.value.reason is ConflictReason.AUTHORIZATION_SESSION_EXPIRED_ON_SERVING_CELL
-    assert not written, "a serving cell's session must never be re-minted"
+    assert not written, "an admitted cell's session must never be re-minted"
+
+
+@pytest.mark.asyncio
+async def test_expired_authorization_bundle_still_refuses_on_a_serving_pod() -> None:
+    """`serving` alone must block the rotation, without admission or routes.
+
+    Admission and routes are downstream of a running pod, so a guard that reads
+    only those two would rotate the keyring under a cell that is already
+    answering requests. Nothing in this file asserts that ordering, so the
+    guard must not depend on it.
+    """
+
+    metadata = _metadata()
+    minted_at = 1_900_000_000
+    plane, request, config, _original, written, _applied = _expiring_bundle_plane(
+        metadata,
+        minted_at=minted_at,
+        now=minted_at + 3_700,
+        serving=True,
+        runtime_admitted=False,
+        routes=(False, False),
+    )
+
+    with pytest.raises(MetadataConflict) as raised:
+        await plane.initialize(metadata, request, config)  # type: ignore[arg-type]
+    assert raised.value.reason is ConflictReason.AUTHORIZATION_SESSION_EXPIRED_ON_SERVING_CELL
+    assert not written, "a serving pod's session must never be re-minted"
+
+
+@pytest.mark.asyncio
+async def test_a_future_dated_authorization_bundle_still_fails_closed() -> None:
+    """Only elapsed time may be forgiven, not any other freshness anomaly.
+
+    A future-dated bundle never reaches the re-mint branch: the keyring's own
+    validity window is checked unconditionally, so it is refused by the first
+    call rather than by the freshness re-check. That is the stronger guarantee,
+    and this pins it -- if the keyring window ever became conditional on
+    `_require_fresh`, a not-yet-valid bundle would start looking like an
+    expired one, and the `expires_at` assertion in the re-mint branch is what
+    would then have to catch it.
+    """
+
+    metadata = _metadata()
+    minted_at = 1_900_000_000
+    plane, request, config, _original, written, _applied = _expiring_bundle_plane(
+        metadata,
+        minted_at=minted_at,
+        now=minted_at - 600,  # the bundle is not valid yet
+    )
+
+    with pytest.raises(MetadataConflict) as raised:
+        await plane.initialize(metadata, request, config)  # type: ignore[arg-type]
+    assert raised.value.reason is ConflictReason.AUTHORIZATION_KEYRING_IS_INVALID
+    assert not written, "a future-dated bundle must fail closed, not be re-minted"
 
 
 @pytest.mark.asyncio
@@ -2312,15 +2371,13 @@ async def test_a_fresh_authorization_bundle_is_reused_rather_than_reminted() -> 
 
     metadata = _metadata()
     minted_at = 1_900_000_000
-    plane, request, original, written, applied = _expiring_bundle_plane(
+    plane, request, config, original, written, applied = _expiring_bundle_plane(
         metadata,
         minted_at=minted_at,
         now=minted_at + 60,  # well inside the TTL
-        runtime_admitted=False,
-        routes=(False, False),
     )
 
-    await plane.enable_routes(metadata, request)
+    await plane.initialize(metadata, request, config)  # type: ignore[arg-type]
 
     assert not written, "a fresh bundle must be reused, not re-minted"
-    assert applied and applied[-1]["authorizationSessionRevision"] == original.revision
+    assert applied and applied[0]["authorizationSessionRevision"] == original.revision
