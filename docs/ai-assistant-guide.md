@@ -79,6 +79,22 @@ metadata, graph sidecars, or schema terms unless the distinction changes the
 outcome. With the user, say "ask", "remember", "capture", "review", "connect",
 "adopt", or "maintain"; use canonical leaf names only when debugging internals.
 
+## Typed relation loop
+
+For a request to connect two memories, first call
+`connect_memory(operation="resolve-relation")`. Reuse a specific truthful
+registered relation when one fits. `relates_to` and no edge remain valid outcomes;
+candidate ordering is not a semantic decision. When a reviewed distinction is
+missing, call `schema_memory(subject="relations", operation="propose-relation")`.
+Only a separate `save-relations` call with `expected_hash` and `why` changes the
+registry; never treat a proposal, recurrence count, or queue item as approval.
+
+`schema_memory(subject="relations", operation="infer")` is read-only. Its
+aggregate `census` is privacy-safe evidence: `relation_counts`, `page_counts`,
+and `denominators` contain counts only. Optional `project`, `page_type`,
+`date_from`, and `date_to` scope it. Origin dates use `created`, then `captured`;
+undated pages remain explicit and `updated` is not used as a cohort date.
+
 For CLI use, these actions are also available as friendly aliases:
 
 ```bash

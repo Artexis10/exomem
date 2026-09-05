@@ -201,3 +201,21 @@ Default initialization, scanning, reading, registry upgrades, and index
 rebuilds do not fabricate observations, categories, relations, page IDs, or
 review decisions. Existing pages are activation-snapshotted by stable ID or
 portable path/hash fallback without rewriting their Markdown.
+
+## Relation vocabulary workflow
+
+Before authoring a typed relation, use
+`connect_memory(operation="resolve-relation")` to inspect registered meanings.
+Choose the most specific registered relation that is truthful. `relates_to` is
+an honest generic connection; no edge is the right result when there is no
+durable relationship. Resolution is evidence for the caller, never automatic
+semantic selection or edge authoring.
+
+For a durable missing distinction, use
+`schema_memory(subject="relations", operation="propose-relation")`, review its
+delta and `content_hash`, then submit the reviewed delta through
+`schema_memory(subject="relations", operation="save-relations")` with
+`expected_hash` and `why`. Save is hash-guarded; proposal and resolve are
+read-only. For example, a reviewed synthetic `applies_to` relation can remain a
+proposal until its explicit guarded save. Registry reuse, generic fallback, and
+abstention do not require a registry change.

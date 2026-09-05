@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import corpus_aware, find, server
+from exomem import corpus_aware, epistemic_graph, find, freshness, semantic_contract, server
 
 
 def _client(vault: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
@@ -193,12 +193,20 @@ def _seed_relation_queue(vault: Path) -> str:
         "---\ntype: insight\nstatus: active\n---\n# Studio queue birch\n\nA fact.\n",
     )
     find.clear_cache()
+    semantic_contract.reset_corpus_context_cache()
+    freshness.clear()
+    freshness.rebaseline(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     return acorn_rel
 
 
 def _acorn_item(client: TestClient, acorn_rel: str) -> tuple[dict, str]:
     queue = _post(client, "review_memory", {"mode": "relation-queue"})
     group = next(g for g in queue["groups"] if g["path"] == acorn_rel)
+    assert group["source_path"] == acorn_rel
+    assert group["source_content_hash"] == group["content_hash"]
+    assert group["items"][0]["source_path"] == acorn_rel
+    assert group["items"][0]["source_content_hash"] == group["content_hash"]
     return group["items"][0], group["content_hash"]
 
 
@@ -223,7 +231,7 @@ def test_relation_queue_accept_round_trip_writes_canonical_bullet(
 ) -> None:
     acorn_rel = _seed_relation_queue(vault)
     client = _client(vault, monkeypatch)
-    item, content_hash = _acorn_item(client, acorn_rel)
+    item, _content_hash = _acorn_item(client, acorn_rel)
 
     accepted = _post(
         client,
@@ -231,7 +239,8 @@ def test_relation_queue_accept_round_trip_writes_canonical_bullet(
         {
             "operation": "accept-relation",
             "ref": item["ref"],
-            "expected_hash": content_hash,
+            "path": item["source_path"],
+            "expected_hash": item["source_content_hash"],
             "why": "Accepted reviewed relation from the Studio queue",
             "expected_fingerprint": item["fingerprint"],
         },
@@ -263,6 +272,7 @@ def test_relation_queue_accept_refuses_on_target_drift(
         json={
             "operation": "accept-relation",
             "ref": item["ref"],
+            "path": item["source_path"],
             "expected_hash": "0" * 64,
             "why": "Accepted reviewed relation from the Studio queue",
             "expected_fingerprint": item["fingerprint"],
@@ -285,7 +295,13 @@ def test_relation_queue_triage_round_trip_dismisses_candidate(
     dismissed = _post(
         client,
         "triage_memory",
-        {"ref": item["ref"], "action": "dismiss", "expected_fingerprint": item["fingerprint"]},
+        {
+            "ref": item["ref"],
+            "source_path": item["source_path"],
+            "action": "dismiss",
+            "why": "Dismissed reviewed relation from the Studio queue",
+            "expected_fingerprint": item["fingerprint"],
+        },
     )
 
     assert dismissed["state"] == "dismissed"

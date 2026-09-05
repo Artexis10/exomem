@@ -983,7 +983,7 @@ def _drain_graph_work(
     `epoch_admits_incremental_repair`, which re-reads under the canonical
     boundary rather than condemning a lineage on one sample taken mid-batch.
     """
-    from . import epistemic_graph, graph_sync
+    from . import epistemic_graph
 
     pending_generation = deferred_index.graph_full_rebuild_pending(vault_root)
     receipts = deferred_index.snapshot_graph(
@@ -993,25 +993,23 @@ def _drain_graph_work(
         return 0
 
     index = epistemic_graph.EpistemicGraphIndex(vault_root)
+    if pending_generation is not None:
+        result = epistemic_graph.converge_full_graph_marker(vault_root)
+        if result.outcome != "completed":
+            log.info(
+                "deferred full graph convergence retained marker outcome=%s code=%s",
+                result.outcome,
+                result.code,
+            )
+            return 0
+        # Whole-vault convergence covers every receipt in this exact snapshot;
+        # compare-and-swap receipt clearing preserves anything newer.
+        return 1 + deferred_index.clear_graph_receipts(vault_root, receipts)
     if not index.epoch_admits_incremental_repair():
         # Not a warning: under a live writer the ordinary cause is a batch
         # mid-flight, which the next tick clears. The work stays queued.
         log.info("deferred graph drain skipped; graph epoch is not settled")
         return 0
-    if pending_generation is not None:
-        try:
-            index.rebuild_all()
-        except graph_sync.GraphRebuildInProgress:
-            log.info("deferred graph rebuild joined an active external owner")
-            return 0
-        except Exception:  # noqa: BLE001 - durable work must survive a failed rebuild
-            log.warning("deferred graph rebuild failed; marker remains", exc_info=True)
-            return 0
-        deferred_index.clear_graph_full_rebuild(vault_root, generation=pending_generation)
-        # A whole-vault rebuild covers every path queued at snapshot time; a
-        # path enqueued after it started carries a newer revision and survives.
-        return 1 + deferred_index.clear_graph_receipts(vault_root, receipts)
-
     processed = 0
     batch = [vault_root / receipt.rel_path for receipt in receipts]
     try:
@@ -1473,11 +1471,18 @@ def upsert_after_write(
     requested_report, requested_truncated = _bounded_paths(requested_rels)
     eligible_report, eligible_truncated = _bounded_paths(eligible_rels)
     if not eligible and not watcher_mode:
+        from . import epistemic_graph
+
+        graph_component = (
+            _graph_component(lambda: epistemic_graph.converge_full_graph_marker(vault_root))
+            if deferred_index.graph_full_rebuild_pending(vault_root) is not None
+            else None
+        )
         return IndexSyncReport(
             "upsert",
             requested_report,
             eligible_report,
-            (),
+            () if graph_component is None else (graph_component,),
             requested_truncated or eligible_truncated,
         )
     from . import recall_policy

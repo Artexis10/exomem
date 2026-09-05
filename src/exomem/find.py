@@ -3021,13 +3021,18 @@ def _relation_match_dict(match: Any, *, matched: str = "self") -> dict[str, Any]
     unit qualified through its parent page. `matched_via` (from the edge) is
     "relation_type" or "parent_relation" (extension roll-up).
     """
-    return {
+    result = {
         "relation_type": match.relation_type,
         "direction": match.direction,
         "counterpart": match.counterpart,
         "matched_via": match.matched_via,
         "matched": matched,
     }
+    if match.requested_relation is not None:
+        result["requested_relation"] = match.requested_relation
+    if match.resolved_relation is not None:
+        result["resolved_relation"] = match.resolved_relation
+    return result
 
 
 def _nearest_relation_keys(registry: object, raw: str, *, limit: int = 3) -> list[str]:
@@ -3065,11 +3070,9 @@ def _resolve_relation_filter(
             f"relation_direction must be one of {list(_RELATION_DIRECTIONS)}, "
             f"got {relation_direction!r}",
         )
-    from . import epistemic_graph, relation_registry
+    from . import epistemic_graph, relation_registry, traversal_profiles
 
     registry = relation_registry.load_registry(vault_root)
-    canonical: list[str] = []
-    findings: list[dict[str, str]] = []
     for raw in relations or ():
         resolution = registry.resolve(raw)
         if resolution.canonical is None or resolution.status == "unregistered":
@@ -3081,18 +3084,10 @@ def _resolve_relation_filter(
                     "suggestions": _nearest_relation_keys(registry, raw),
                 },
             )
-        canonical.append(resolution.canonical)
-        if resolution.status == "deprecated" and resolution.replacement:
-            findings.append(
-                {
-                    "code": "relation_deprecated",
-                    "relation": resolution.canonical,
-                    "replaced_by": resolution.replacement,
-                }
-            )
+    plan = traversal_profiles.relation_query_plan(registry, relations or [])
     graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
     result = graph_index.relation_participants(
-        canonical, anchor=relation_of, direction=relation_direction
+        relations or (), anchor=relation_of, direction=relation_direction
     )
     if result.status == "temporarily_unavailable":
         raise RetrievalIndexWarming(
@@ -3104,7 +3099,7 @@ def _resolve_relation_filter(
             vault_root, mutation_coordinator=graph_index._canonical_mutation_coordinator()
         )
         raise RetrievalIndexWarming(site="relation_graph_rebuilding", status="warming")
-    return result.paths, dict(result.provenance), tuple(findings)
+    return result.paths, dict(result.provenance), plan.findings
 
 
 def _resolve_eligible_filter_paths(
