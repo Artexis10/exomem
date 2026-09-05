@@ -5070,6 +5070,7 @@ def _batch_atomic_write_locked(
     except Exception as commit_error:
         rollback_errors: list[BaseException] = []
         implicated_workspaces: list[_BatchWorkspace] = []
+        restored_paths: set[Path] = set()
         replaced_indexes = range(len(replaced) - 1, -1, -1)
         for replaced_index in replaced_indexes:
             final, workspace, _artifact = staged[replaced_index]
@@ -5112,6 +5113,7 @@ def _batch_atomic_write_locked(
                     _reset_restored_timestamps(final, restored_identity, snapshot)
                     workspace.recheck()
                 final_guards.pop(final, None)
+                restored_paths.add(final)
             except Exception as rollback_error:  # noqa: BLE001 - report every restore failure
                 rollback_errors.append(rollback_error)
                 if all(workspace is not item for item in implicated_workspaces):
@@ -5124,7 +5126,8 @@ def _batch_atomic_write_locked(
                 from . import file_watcher
 
                 file_watcher.abort_publication_intents(
-                    publication_intents, force_paths=final_guards
+                    publication_intents,
+                    force_paths=(path for path in replaced if path not in restored_paths),
                 )
             _remove_empty_created_dirs(created_dirs)
             raise BatchWriteError(
@@ -5155,7 +5158,7 @@ def _batch_atomic_write_locked(
             from . import file_watcher
 
             file_watcher.abort_publication_intents(
-                publication_intents, force_paths=final_guards
+                publication_intents, force_paths=replaced
             )
         _cleanup_batch_workspaces(workspace_by_parent.values())
         _remove_empty_created_dirs(created_dirs)

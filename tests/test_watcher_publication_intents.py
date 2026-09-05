@@ -211,6 +211,31 @@ def test_clean_rollback_without_watcher_does_not_fence_unchanged_vault(
     assert freshness.external_pending(vault) is False
 
 
+def test_unbound_published_remnant_is_fenced_without_watcher(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "unbound-remnant.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("old", encoding="utf-8")
+    real_capture = vault_module._BatchArtifactGuard.capture
+    new_hash = hashlib.sha256(b"new").hexdigest()
+
+    def fail_capture(path: Path, **kwargs):
+        if path == target and kwargs.get("expected_content_hash") == new_hash:
+            raise OSError("guard capture failed after publication")
+        return real_capture(path, **kwargs)
+
+    monkeypatch.setattr(vault_module._BatchArtifactGuard, "capture", fail_capture)
+
+    with pytest.raises(vault_module.BatchWriteError, match="BATCH_ROLLBACK_INCOMPLETE"):
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(target, "new")], vault_root=vault
+        )
+
+    assert target.read_text(encoding="utf-8") == "new"
+    assert freshness.external_pending(vault) is True
+
+
 def test_expired_held_intent_replays_without_another_event(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
