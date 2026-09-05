@@ -370,6 +370,18 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 - [ ] 4.6c-Lifecycle Use owned local-CLI reconciliation before guest eviction;
       verify the actual two-case staged pipeline, including cross-case
       retirement, export, projection and comparison, before the full cohort.
+- [ ] 4.6c-InputParity Resolve the measured direct/guest normalization,
+      ingestion-payload, namespace and readiness differences before releasing
+      the full gate. The two-case real-data canary produced VALID artifacts on
+      both paths but eight BLOCKING differences; artifact validity alone does
+      not establish equivalence. Preserve the failing comparison and justify
+      any expiring exception from evidence rather than expected behavior.
+- [ ] 4.6c-ProbeParity Keep diagnostic presence-canary material out of the
+      scored retrieval corpus and reader context while retaining the positive,
+      cross-case and never-ingested isolation checks. The direct canary reached
+      reader context in both reduced-session cases; the guest corpus contained
+      only dataset sessions. Verify this boundary through both real runners
+      before treating their output as a quality comparison.
 - [ ] 4.7 Ratify and implement the native Supermemory vendor-hit projection
       (distinct from 4.5's flat guest-hit wire), then run the Supermemory
       direct-SDK vs MemoryBench-provider spot-check (mode=report)
