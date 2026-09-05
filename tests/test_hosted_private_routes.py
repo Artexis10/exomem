@@ -3262,6 +3262,7 @@ def test_v5_curation_commits_and_replays_under_fast_durable_acknowledgement(
     assert committed["state"] == "committed"
     assert committed["terminal"] is True
     assert committed["derived_sync"] == "pending"
+    assert "derived_sync_components" in committed
     assert committed["advisory_sync"] == "pending"
     assert committed["advisory_result_ref"].startswith("exomem://write-advisory-result/")
 
