@@ -101,6 +101,25 @@ rollback can leave proposed bytes behind, so failed or expired intents must
 fence and replay their observed paths. Foreign edits retain the external-change
 path. Fast-receipt behavior remains separately protected.
 
+The combined real-extraction probe exposed two earlier producer gaps that the
+post-replacement test did not exercise. Snapshotting an existing destination
+reads its bytes and restores timestamps with `os.utime` before the original
+intent-registration point. Watchdog reports that metadata operation while the
+old bytes remain visible. An after-image-only token cannot prove this event,
+even when the subsequent canonical replacement succeeds. A deterministic probe
+delivering the event at the timestamp-restore seam still marked external pending
+on the first integrated repair.
+
+Media extraction also publishes from a disposable child process. Its deferred
+sidecar write does not register a publication intent, and its eventual
+process-local self-write registration cannot update the service watcher's
+registry. A second interpreter reproduced the mismatch even when both processes
+read the identical final SHA-256. Suppressing that event alone would be unsafe:
+the parent's freshness, inbound and resolver state must also adopt the exact
+publication. These findings require transaction-wide before/after proof and a
+publication boundary visible to the parent; they are not evidence that the
+historical external-pending latch returned.
+
 ### Optional graph expansion vetoes useful direct recall
 
 Managed ordinary retrieval already has maintained catalogue admission and an
@@ -112,6 +131,13 @@ The regression exercises all four resolver-warming sites in both branches:
 unavailable graph fallback and available graph with unindexed legacy seeds.
 The repair omits unproven graph contributions and discloses graph warming. It
 does not relax catalogue, policy, pending-visibility or relation-predicate proof.
+
+The integrated real-extraction probe also produced `catalog_proof_incomplete`
+after repeated lexical source-moved publication aborts and nested-lock deferred
+upserts. This refusal is upstream mandatory catalogue admission, not optional
+graph expansion. There was no proven coherent catalogue checkpoint to serve;
+the repair must remove producer churn or establish an exact usable snapshot,
+not broaden the resolver exception handler to swallow this failure.
 
 ### Media enqueue pays a multi-consumer convergence bill
 
