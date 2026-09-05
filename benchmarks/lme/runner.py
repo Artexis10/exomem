@@ -401,6 +401,7 @@ def _equivalence_case(
     *, question, case_ids: list[str], namespace_pattern: str, payload_shas: list[str],
     readiness: list, retrieved_ids: list[str], retrieved_text: list[str], top_k: int,
     dataset_identity: DatasetIdentity, reader_name: str, reader_model: str,
+    session_normalization: str = "lme.normalize.render_neutral_session/v1",
 ) -> dict[str, object]:
     from .reader import CONTEXT_SEPARATOR
 
@@ -408,7 +409,7 @@ def _equivalence_case(
         "case_id": question.question_id,
         "dataset_identity": dataset_identity.model_dump(),
         "case_set": sorted(case_ids),
-        "session_normalization": "lme.normalize.render_neutral_session/v1",
+        "session_normalization": session_normalization,
         "namespace": namespace_pattern,
         "ingestion_payloads": payload_shas,
         "readiness": [
@@ -568,6 +569,19 @@ def _readiness_with_probe_evidence(
         else lane
         for lane in readiness
     ]
+
+
+def _trace_doctor_readiness(trace, provider, lanes) -> None:
+    report = getattr(provider, "last_doctor_report", None)
+    if not isinstance(report, dict):
+        return
+    # Doctor's free-form messages include private absolute runtime paths.
+    # Retain the actual check outcomes in the existing typed trace inventory.
+    trace.append({
+        "record": "readiness", "profile": report["profile"], "success": report["success"],
+        "checks": [{"id": check["id"], "status": check["status"]} for check in report["checks"]],
+        "lanes": [lane.model_dump() for lane in lanes],
+    })
 
 
 def _pilot_evidence(
@@ -749,13 +763,18 @@ def execute_run(
         "canonical_selection": config.canonical_selection,
         "selection_mode": "canonical" if config.canonical_selection else ("generic-pilot" if len(dataset.questions) == 25 else None),
         "selection": selection_pins or None,
-        "retrieval_clock": "question_date",
+        "retrieval_clock": "product-wall-clock",
         "dataset_warnings": {
             question.question_id: list(question.validation_warnings)
             for question in dataset.questions
             if question.validation_warnings
         },
     }
+    if config.provider in (None, "exomem-source-only"):
+        profile = lme_profile()
+        environment["lme"]["requested_profile"] = {
+            "name": profile.name, "settings": profile.settings,
+        }
     _write_json(run_dir / "environment.json", environment)
 
     failures: list[dict[str, object]] = []
@@ -901,6 +920,7 @@ def execute_run(
                 check_variant=lambda: bind_observed_variant(diagnostic_context, candidate),
             )
             probes, diagnostic_readiness = diagnostic_result
+            _trace_doctor_readiness(get_diagnostic_trace(), candidate, diagnostic_readiness)
             probe_results.extend(probes)
             readiness_list.extend(diagnostic_readiness)
             with (run_dir / "probes.jsonl").open("a", encoding="utf-8") as probe_file:
@@ -1020,8 +1040,8 @@ def execute_run(
                         question_date=question.question_date_text,
                     )
                     canary_event = _harness_canary(events, handle, token)
-                    events = [*events, canary_event]
-                    content_fields, authored_literals, harness_fields = ingest_field_groups(events, handle)
+                    exomem_capture = config.provider == "exomem-source-only"
+                    content_fields, authored_literals, harness_fields = ingest_field_groups([*events, canary_event], handle, exomem_capture=exomem_capture)
                     authored_literals = {**authored_literals, "harness_canary": canary_event.content}
                     findings = scan_ingest(
                         content_fields,
@@ -1048,43 +1068,62 @@ def execute_run(
                     inserted = candidate.ingest_case(events, handle)
                     bind_observed_variant(context, candidate)
                     payload_shas: list[str] = []
-                    canary_ordinals = {event.session_ordinal for event in events if event.provenance.converter == "harness-canary"}
                     for session_ordinal in sorted({event.session_ordinal for event in events}):
-                        payload = render_neutral_session([event for event in events if event.session_ordinal == session_ordinal])
-                        payload_sha = hashlib.sha256(payload.encode()).hexdigest()
-                        if session_ordinal not in canary_ordinals:
-                            payload_shas.append(payload_sha)
+                        session_events = [event for event in events if event.session_ordinal == session_ordinal]
+                        if exomem_capture:
+                            from .exomem_capture import capture_payload, payload_digest
+                            payload_sha = payload_digest(capture_payload(session_events))
+                        else:
+                            payload_sha = hashlib.sha256(render_neutral_session(session_events).encode()).hexdigest()
+                        payload_shas.append(payload_sha)
                         get_case_trace().append({"record": "ingest", "session_ordinal": session_ordinal, "payload_sha256": payload_sha, "provider_ids": list(inserted or [])})
                     per_case_readiness = _readiness_with_probe_evidence(
                         candidate.readiness(), probe_results
                     )
+                    _trace_doctor_readiness(get_case_trace(), candidate, per_case_readiness)
                     bind_observed_variant(context, candidate)
+                    search_started_at = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
                     hits = candidate.retrieve(question.question, config.top_k, RetrievalPurpose.SCORED_RETRIEVAL)
                     bind_observed_variant(context, candidate)
                     retrieved = [hit.text for hit in hits]
-                    get_case_trace().append({"record": "search", "query": question.question, "raw_response_ref": "inline:provider-hit-list", "normalized_hit_ids": [hit.hit_id for hit in hits], "normalized_hit_shas": [hashlib.sha256(hit.text.encode()).hexdigest() for hit in hits], "top_k": config.top_k})
-                    presence_hits = candidate.retrieve(token, 1, RetrievalPurpose.POSITIVE_PROBE)
-                    bind_observed_variant(context, candidate)
-                    presence = _hit_contains(presence_hits, token)
-                    if prior_presence_token is None:
-                        isolation_rows.append({"case_ordinal": case_ordinal, "prior_case": "not-applicable-no-prior-case"})
-                        prior_hit = False
-                    else:
-                        prior_hits = candidate.retrieve(prior_presence_token, 1, RetrievalPurpose.ABSENCE_PROBE_EXPECTED_EMPTY)
-                        bind_observed_variant(context, candidate)
-                        prior_hit = _hit_contains(prior_hits, prior_presence_token)
-                        isolation_rows.append({"case_ordinal": case_ordinal, "prior_case_token": prior_presence_token, "hit": prior_hit})
-                    never_token = canary_for(run_id, question.question_id, "never_ingested")
-                    never_hits = candidate.retrieve(never_token, 1, RetrievalPurpose.ABSENCE_PROBE_EXPECTED_EMPTY)
-                    bind_observed_variant(context, candidate)
-                    never_hit = _hit_contains(never_hits, never_token)
-                    contamination_by_case[question.question_id] = _canary_verdict({"presence": presence, "cross_case": prior_hit, "never_ingested": never_hit}, retains_nothing=bool(getattr(candidate, "retains_nothing", False)))
+                    get_case_trace().append({"record": "search", "query": question.question, "raw_response_ref": "inline:provider-hit-list", "normalized_hit_ids": [hit.hit_id for hit in hits], "normalized_hit_shas": [hashlib.sha256(hit.text.encode()).hexdigest() for hit in hits], "top_k": config.top_k, "clock": "product-wall-clock", "started_at_utc": search_started_at})
                     reader_attempted = True
                     reader_started = time.perf_counter()
                     hypothesis = active_reader.answer(question, retrieved)
                     reader_wall_time = time.perf_counter() - reader_started
                     get_case_trace().append({"record": "timing", "phase": "retrieve-and-read", "ms": (time.perf_counter() - question_started) * 1000.0})
                     get_case_trace().append({"record": "answer", "prompt_sha256": hashlib.sha256(question.question.encode()).hexdigest(), "model_id": _reader_model(active_reader, config), "response_ref": "inline:stub-response" if isinstance(active_reader, StubReader) else "reader-artifact", "input_tokens": int(getattr(getattr(active_reader, "last_call_metrics", None), "input_tokens", 0) or 0), "output_tokens": int(getattr(getattr(active_reader, "last_call_metrics", None), "output_tokens", 0) or 0)})
+
+                    # Keep the scored corpus unchanged. Filtering a canary out
+                    # of top-k afterwards would still let it displace a hit.
+                    canary_ids = candidate.ingest_case([canary_event], handle)
+                    bind_observed_variant(context, candidate)
+                    canary_sha = payload_digest(capture_payload([canary_event])) if exomem_capture else hashlib.sha256(render_neutral_session([canary_event]).encode()).hexdigest()
+                    get_case_trace().append({"record": "ingest", "session_ordinal": canary_event.session_ordinal, "payload_sha256": canary_sha, "provider_ids": list(canary_ids or [])})
+
+                    def isolation_probe(kind, query, purpose):
+                        probe_hits = candidate.retrieve(query, 1, purpose) if query is not None else []
+                        bind_observed_variant(context, candidate)
+                        matched = [hit.hit_id for hit in probe_hits if query in hit.text]
+                        get_case_trace().append({
+                            "record": "isolation-probe", "kind": kind,
+                            "query": query, "top_k": 1,
+                            "normalized_hit_ids": [hit.hit_id for hit in probe_hits],
+                            "normalized_hit_shas": [hashlib.sha256(hit.text.encode()).hexdigest() for hit in probe_hits],
+                            "matched_hit_ids": matched,
+                            "skipped": "no-prior-case" if query is None else None,
+                        })
+                        return bool(matched)
+
+                    presence = isolation_probe("presence", token, RetrievalPurpose.POSITIVE_PROBE)
+                    prior_hit = isolation_probe("cross_case", prior_presence_token, RetrievalPurpose.ABSENCE_PROBE_EXPECTED_EMPTY)
+                    if prior_presence_token is None:
+                        isolation_rows.append({"case_ordinal": case_ordinal, "prior_case": "not-applicable-no-prior-case"})
+                    else:
+                        isolation_rows.append({"case_ordinal": case_ordinal, "prior_case_token": prior_presence_token, "hit": prior_hit})
+                    never_token = canary_for(run_id, question.question_id, "never_ingested")
+                    never_hit = isolation_probe("never_ingested", never_token, RetrievalPurpose.ABSENCE_PROBE_EXPECTED_EMPTY)
+                    contamination_by_case[question.question_id] = _canary_verdict({"presence": presence, "cross_case": prior_hit, "never_ingested": never_hit}, retains_nothing=bool(getattr(candidate, "retains_nothing", False)))
                     prior_presence_token = token
                     return payload_shas, per_case_readiness, hits, retrieved, hypothesis
 
@@ -1127,6 +1166,7 @@ def execute_run(
                     retrieved_ids=[hit.hit_id for hit in hits], retrieved_text=retrieved, top_k=config.top_k,
                     dataset_identity=dataset_identity, reader_name=config.reader_name,
                     reader_model=_reader_model(active_reader, config),
+                    session_normalization="exomem.lme.capture/v2" if config.provider == "exomem-source-only" else "lme.normalize.render_neutral_session/v1",
                 ))
                 status = "ok"
                 provider_answered = True
@@ -1298,6 +1338,8 @@ def execute_run(
         )
         if len(dataset.questions) < 2 and contamination == "isolated":
             contamination = "unverifiable"
+            if invalid_reason is None:
+                invalid_reason = "cross-case isolation unverified: at least two cases are required"
         # This path plants and probes canaries, so a probe that could not
         # confirm isolation is a measured fault, not a missing measurement.
         contamination_invalid = contamination in {"contaminated", "unverifiable"}
@@ -1365,7 +1407,7 @@ def execute_run(
         "canonical_selection": config.canonical_selection,
         "selection": selection_pins or None,
         "judge_model": "gpt-4o",
-        "retrieval_clock": "question_date",
+        "retrieval_clock": "product-wall-clock",
         "dataset_warnings": environment["lme"]["dataset_warnings"],
         "wall_time_seconds": round(time.perf_counter() - started, 6),
     }

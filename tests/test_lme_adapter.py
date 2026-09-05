@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -45,7 +46,34 @@ def test_adapter_subclasses_product_core_and_keeps_default_capabilities_on() -> 
     assert "EXOMEM_DISABLE_MEDIA_EXTRACTION" not in settings
 
 
-def test_each_question_uses_an_isolated_vault_and_captures_session_time(
+def test_lme_profile_selects_cpu_without_probing_ambient_accelerators(monkeypatch) -> None:
+    from exomem import accel, mode
+
+    ambient = {
+        "EXOMEM_MODE": "performance", "EXOMEM_DEVICE": "cuda",
+        "EXOMEM_EMBED_DEVICE": "cuda:1", "EXOMEM_CLIP_DEVICE": "mps",
+        "CUDA_VISIBLE_DEVICES": "0",
+    }
+    for key, value in ambient.items():
+        monkeypatch.setenv(key, value)
+
+    def unexpected_probe(**kwargs):
+        pytest.fail("the CPU benchmark profile probed an accelerator")
+
+    monkeypatch.setattr(accel, "_auto_device", unexpected_probe)
+    adapter = LmeExomemAdapter()
+    adapter._set_env(lme_profile().settings)
+    try:
+        for override in (None, "EXOMEM_EMBED_DEVICE", "EXOMEM_CLIP_DEVICE"):
+            assert accel.select_device(override_env=override) == "cpu"
+        assert mode.resolve_mode() == "normal"
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
+    finally:
+        adapter._restore_env()
+    assert {key: os.environ[key] for key in ambient} == ambient
+
+
+def test_each_question_uses_an_isolated_vault_and_preserves_session_time_in_content(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     questions = load_dataset(FIXTURE).questions[:2]
@@ -62,13 +90,13 @@ def test_each_question_uses_an_isolated_vault_and_captures_session_time(
     first_text = "\n".join(page.text for page in first.export_state().pages)
     second_text = "\n".join(page.text for page in second.export_state().pages)
     timestamp = questions[0].sessions[0].timestamp_text
-    assert f"captured: {timestamp}" in first_text
+    assert f"captured: {timestamp}" not in first_text
     assert f"Session timestamp: {timestamp}" in first_text
     assert "Vorstead" in first_text
     assert "Vorstead" not in second_text
 
 
-def test_retrieval_clock_reaches_the_actual_read_side_date_seams(
+def test_retrieval_uses_the_same_public_wall_clock_as_the_guest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from exomem import find as find_module
@@ -97,7 +125,23 @@ def test_retrieval_clock_reaches_the_actual_read_side_date_seams(
 
     monkeypatch.setattr(adapter, "search", fake_search)
     assert adapter.retrieve_question(question) == []
-    assert set(observed.values()) == {question.question_date.date()}
+    assert set(observed.values()) == {dt.date.today()}
+
+
+def test_retrieval_reads_selected_bodies_through_the_public_product_command(monkeypatch):
+    from exomem import commands
+    from membench.adapters.base import Hit
+
+    adapter = LmeExomemAdapter()
+    adapter._vault = Path("owned-fixture-vault")
+    monkeypatch.setattr(adapter, "search", lambda query, limit: [Hit(1, "Sources/a.md", "a", "excerpt", (), {}, "---\nprivate_generated_frontmatter\n---\nbody")])
+    seen = []
+    def read(vault, path):
+        seen.append((vault, path))
+        return {"body": "public reader body"}
+    monkeypatch.setattr(commands, "op_read_memory", read)
+    assert adapter.retrieve_text("query", dt.datetime(2020, 1, 1), limit=10) == ["public reader body"]
+    assert seen == [(adapter._vault, "Sources/a.md")]
 
 
 @pytest.mark.parametrize("value", [
@@ -142,3 +186,18 @@ def test_run_question_uses_the_real_product_lifecycle(tmp_path: Path) -> None:
         # precondition failure, never a product defect — skip, don't fail.
         pytest.skip(f"semantic prerequisites unavailable (cold model cache): {exc}")
     assert isinstance(retrieved, list)
+
+
+def test_public_source_body_provenance_matches_real_capture_and_read(tmp_path, monkeypatch):
+    from exomem import commands
+    from lme.exomem_capture import capture_payload, capture_read_body
+    from lme.normalize import neutralize
+
+    monkeypatch.setenv('EXOMEM_DISABLE_EMBEDDINGS', '1')
+    vault = tmp_path / 'source-body'
+    init_vault(vault)
+    question = load_dataset(FIXTURE).questions[0]
+    events = [event for event in neutralize(question, _identity()) if event.session_ordinal == 1]
+    result = commands.op_capture_source(vault, load_source_schema(vault), **capture_payload(events))
+    actual = commands.op_read_memory(vault, path=result['source']['path'])
+    assert actual['body'] == capture_read_body(events)

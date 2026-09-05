@@ -123,6 +123,43 @@ def test_ingest_payload_digests_follow_transmission_order(tmp_path: Path) -> Non
     assert INGEST_LABELS <= observed.resolved_labels()
 
 
+def test_v2_evidence_keeps_wire_hash_and_compares_the_complete_product_payload(tmp_path):
+    from lme.exomem_capture import CAPTURE_CONTRACT, NAMESPACE_PATTERN, payload_digest
+
+    root = tmp_path / ("a" * 24)
+    root.mkdir()
+    body = {"content": "Session timestamp: 2025-01-01T00:00:00Z\nSession ordinal: 1\n\nuser: hello", "title": "neutral", "slug": "neutral", "source_type": "session", "tags": ["longmemeval"], "compile_guidance": False}
+    manifest = {"session_normalization": CAPTURE_CONTRACT, "product_input_contract": CAPTURE_CONTRACT, "namespace_pattern": NAMESPACE_PATTERN, "namespace": root.name}
+    _write(root, 1, "provider-manifest", manifest)
+    wire = {**body, "request_id": "fresh-a", "idempotency_key": "fresh-a"}
+    _write(root, 2, "request", {"path": "/api/capture_source", "body": wire})
+    observed = _project(root)
+    assert not observed.problems
+    assert observed.ingest["transmitted_payload_sha256"] == [payload_digest(wire)]
+    assert observed.ingest["product_payload_sha256"] == [payload_digest(body)]
+    assert observed.namespace_pattern == NAMESPACE_PATTERN
+    assert observed.session_normalization == CAPTURE_CONTRACT
+
+
+@pytest.mark.parametrize("damage", ["namespace", "extra-field", "contract"])
+def test_v2_capture_evidence_refuses_contract_or_namespace_drift(tmp_path, damage):
+    from lme.exomem_capture import CAPTURE_CONTRACT, NAMESPACE_PATTERN
+
+    tmp_path = tmp_path / ("a" * 24)
+    tmp_path.mkdir()
+    manifest = {"session_normalization": CAPTURE_CONTRACT, "product_input_contract": CAPTURE_CONTRACT, "namespace_pattern": NAMESPACE_PATTERN, "namespace": tmp_path.name}
+    body = {"content": "content", "title": "neutral", "slug": "neutral", "source_type": "session", "tags": ["longmemeval"], "compile_guidance": False}
+    if damage == "namespace":
+        manifest["namespace"] = "wrong-namespace"
+    elif damage == "contract":
+        manifest["product_input_contract"] = "unknown/v3"
+    else:
+        body["projects"] = ["undeclared"]
+    _write(tmp_path, 1, "provider-manifest", manifest)
+    _write(tmp_path, 2, "request", {"path": "/api/capture_source", "body": body})
+    assert "guest_evidence_invalid" in _project(tmp_path).problems
+
+
 def test_doctor_evidence_becomes_verified_semantic_readiness(tmp_path: Path) -> None:
     _write(tmp_path, 1, "doctor-request", {"profile": "hybrid"})
     _write(tmp_path, 2, "doctor-response", {
@@ -218,3 +255,33 @@ def test_a_search_body_that_does_not_prove_query_and_limit_publishes_nothing(
 
     assert observed.search is None
     assert not (SEARCH_LABELS & observed.resolved_labels())
+
+
+def test_actual_guest_manifest_survives_evidence_writer_and_python_projection(tmp_path):
+    import subprocess
+    from benchmark_capabilities import require_pinned_bun
+    from lme.exomem_capture import CAPTURE_CONTRACT, NAMESPACE_PATTERN
+
+    require_pinned_bun()
+    tag = 'fixture-case-run'
+    root = tmp_path / hashlib.sha256(tag.encode()).hexdigest()[:24]
+    module = Path('benchmarks/memorybench/providers/exomem/index.ts').resolve()
+    script = f'''
+import {{ ExomemProvider }} from {json.dumps(str(module))};
+const input = JSON.parse(await Bun.stdin.text());
+const provider = new ExomemProvider({{
+  ensureService: async () => ({{protocol_version: 1, provider: "exomem", base_url: "http://127.0.0.1:1", bearer_token: "fixture-service-secret", pid: 1, process_start_identity: "fixture", checkout_pin: "fixture", work_root: input.root, evidence_root: input.root}}),
+  post: async () => ({{source: {{path: "source.md"}}}}),
+  clearAllServices: async () => {{}},
+}});
+// Substitute service/model I/O, while exercising the real provider-authored
+// manifest and production evidence writer (normally disabled by injected I/O).
+provider.evidenceEnabled = true;
+await provider.ingest([{{sessionId: "fixture-session-0", metadata: {{date: "2025-01-01"}}, messages: [{{role: "user", content: "public text"}}]}}], {{containerTag: input.tag}});
+'''
+    subprocess.run(['bun', '--eval', script], input=json.dumps({'root': str(root), 'tag': tag}), text=True, capture_output=True, check=True)
+    observed = _project(root)
+    assert not observed.problems
+    assert observed.session_normalization == CAPTURE_CONTRACT
+    assert observed.namespace_pattern == NAMESPACE_PATTERN
+    assert len(observed.ingest['product_payload_sha256']) == 1

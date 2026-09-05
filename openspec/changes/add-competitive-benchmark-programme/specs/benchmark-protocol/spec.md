@@ -1,5 +1,29 @@
 ## ADDED Requirements
 
+### Requirement: LME CPU Profile Is Enforced Across Both Execution Paths
+
+The Exomem LongMemEval direct adapter and MemoryBench guest SHALL enforce the
+same canonical CPU profile before model initialization and doctor execution.
+The profile SHALL override ambient performance mode, global and text/CLIP
+device overrides, and CUDA visibility without changing the operator's config.
+Embeddings and CLIP SHALL remain enabled. The export stage SHALL carry the
+canonical profile through its controlled child environment. Direct run evidence
+and guest provider evidence SHALL record the requested profile explicitly;
+declared settings SHALL NOT be presented as observed model-device measurements.
+A changed profile requires fresh direct and guest runs at the new provider pin.
+
+#### Scenario: Ambient GPU settings cannot change the benchmark device
+- **GIVEN** an operator selects performance mode and CUDA or MPS model overrides
+- **WHEN** either Exomem benchmark path initializes its models
+- **THEN** text and CLIP select CPU without accelerator probing
+- **AND** the child environment hides CUDA devices, including during doctor
+- **AND** the operator's persistent configuration remains unchanged
+
+#### Scenario: Export and transport retain the same declared CPU policy
+- **WHEN** the export creates its controlled environment and the guest launches
+- **THEN** both apply the canonical direct profile, including empty-valued pins
+- **AND** evidence identifies these values as requested configuration
+
 ### Requirement: Canonical Events Quarantine Gold
 Provider adapters SHALL receive dataset content only as canonical protocol
 events carrying neutralized public identity (ordinal session identity, a
@@ -44,6 +68,17 @@ recorded and blocks cross-provider tables.
 - **WHEN** a canary planted for one case is retrieved inside another case's
   namespace
 - **THEN** the affected case is INVALID and the run records contamination
+
+#### Scenario: Isolation diagnostics cannot alter scored retrieval
+- **WHEN** the runner probes a scored case's namespace
+- **THEN** it first retrieves and reads the unchanged dataset corpus, then
+  ingests the separately scanned presence canary into that same namespace
+- **AND** no diagnostic document can displace a dataset hit or enter reader
+  context, including when the corpus contains fewer documents than top-k
+- **AND** the trace records each presence, foreign-case and never-ingested
+  probe's query, limit, returned hit identities and content digests, and which
+  returned hits contain the exact token; absence of a prior case is explicit
+- **AND** failed presence remains unverifiable, never an inferred pass
 
 ### Requirement: Readiness Fails Closed With Positive Verification
 A run SHALL verify every requested retrieval lane (lexical, semantic,
@@ -181,15 +216,27 @@ defaulting to one.  Admission SHALL be serialized across stage processes.  When
 a new container would exceed the cap, the least-recently-used live service
 SHALL first reconcile its derived state and require `graph_status` to be
 `current|refreshed`, then retire it and prove its owned process group and secure
-descriptor absent before a replacement is spawned.  Only
+descriptor absent before a replacement is spawned.
 `GRAPH_SYNC_STABILIZATION_EXHAUSTED` with `graph_status: unavailable` MAY retry
-the reconcile, with fresh request/idempotency identities and at most three
-total attempts; every other non-current response and exhaustion of that bound
+the reconcile, with fresh attempt identities and at most three stabilization
+failures. Exact `graph_status: unavailable`, `graph_sync: pending`,
+`GRAPH_SYNC_REBUILD_IN_PROGRESS` and a valid checkpoint digest MAY wait five
+seconds before another reconciliation. The entire barrier SHALL have a
+120-second budget, cap each subprocess at the lesser of its 70-second deadline
+and remaining budget, and never launch a live out-of-process index drain.
+Every other non-current response and exhaustion of either bound
 SHALL fail admission and clear all live services.  Residency retirement MAY
 preserve the owned vault and work root needed by a later stage; terminal
 container cleanup SHALL additionally prove owned guest-process and work-root
 absence.  A completed indexing step SHALL retire its now-idle service, and a
 search attempt SHALL clear its finished container on both success and failure.
+
+The retirement reconcile SHALL invoke the pinned checkout's local
+`exomem maintain --reconcile --json` command, with the owned vault and machine
+state bound through the child environment and the canonical CPU profile.
+It SHALL NOT request write-mode maintenance through REST. Each attempt SHALL
+record its identity, local-CLI transport, process exit and parsed response;
+a nonzero process exit or unsuccessful envelope SHALL fail admission.
 
 Ingest, indexing, and search exceptions SHALL clear every live service owned by
 that stage instance before the exception escapes.  SIGINT, SIGTERM, uncaught
@@ -209,8 +256,15 @@ absent
 #### Scenario: Transient graph stabilization exhaustion is bounded
 - **WHEN** residency reconciliation returns exact
   `GRAPH_SYNC_STABILIZATION_EXHAUSTED` before a later attempt proves current
-- **THEN** the provider retries with fresh mutation identities up to three total
-  attempts, retires only after proof, and fails closed if the bound is exhausted
+- **THEN** the provider retries with fresh attempt identities up to three total
+  stabilization failures, retires only after proof, and fails closed if the bound is exhausted
+
+#### Scenario: A registered graph rebuild is pending at retirement
+- **WHEN** reconciliation reports the exact registered-rebuild pending state
+  with a valid checkpoint digest
+- **THEN** the provider waits and rechecks within the shared 120-second budget
+- **AND** only an observed current or refreshed graph permits retirement;
+  queued repair, malformed state and deadline exhaustion refuse admission
 
 #### Scenario: Indexing and search retire as they go
 - **WHEN** indexing completes for a container or search returns or throws
@@ -274,6 +328,13 @@ both zero live owned processes and an unbound listener. Raw process IDs, ports,
 and bearer tokens SHALL NOT be serialized into cleanup evidence. The quarantine
 caveat above is scoped to the in-process model and SHALL NOT be read as
 extending to this one.
+
+The guest transport SHALL inspect every decoded response before retry,
+response evidence or provider return. The actual service bearer token and its
+UTF-8 base64, base64url and hexadecimal encodings SHALL refuse in keys, values
+or bounded nested JSON with a constant diagnostic and normal failure cleanup.
+This check SHALL run while the transport owns the credential; export SHALL NOT
+depend on descriptors that normal retirement has already deleted.
 
 #### Scenario: Sidecar row proves process absence
 - **WHEN** a provider declaring owned-subprocess-terminated-at-cleanup returns
@@ -707,10 +768,38 @@ surface makes the overall run `INVALID`.
 Source
 agreement and result uniqueness SHALL be established before any hit list is
 selected; disagreement or conflicting duplicate canonical results emits no
-selected hits and no source wins. The runner SHALL apply the shared public
-privacy scanner to the serialized public projection before persistence, then
+selected hits and no source wins. Before persistence, the runner SHALL apply
+the shared public privacy scanner to every decoded JSON string, including
+object keys. For the Exomem guest's recognized stringified session capture,
+it SHALL additionally decode the complete embedded message array and scan
+its keys and values plus all surrounding capture text. Invalid or incomplete
+embedded JSON SHALL refuse export. JSON escaping SHALL neither fabricate a
+local-path finding from ordinary message text nor hide an actual private path.
+Opaque runtime identifiers and gold-field checks SHALL remain enforced.
+Exact question text and complete capture/v2 source bodies MAY retain public
+filesystem examples only when case-local provenance matches the repository's
+canonical source identity, actual dataset bytes and exact frozen 25-case
+selection. A caller-declared digest alone SHALL NOT authorize an exception.
+The exception SHALL apply only to the exact question or hit-content field;
+changed, truncated, concatenated or cross-case bodies SHALL remain scanned.
+Private runtime identifiers, the HMAC key and all plan runtime roots SHALL
+always refuse export, including when JSON escaped or present in public source.
+The runner SHALL then
 re-read the persisted artifact and invoke the full shared artifact validator
 before terminal `VALID`; a model dump or in-memory projection is insufficient.
+
+#### Scenario: Serialized session newlines are not private drive paths
+- **WHEN** a guest message ends a possessive word with a colon and newline,
+  and the capture embeds that message as JSON
+- **THEN** export scans the decoded message and permits the ordinary text
+- **AND** actual private drive, UNC and home paths in capture prefixes,
+  message values or message keys still refuse persistence
+
+#### Scenario: Public source examples do not authorize runtime leakage
+- **WHEN** an exact canonical case source body contains a public path example
+- **THEN** export preserves the body after verifying its frozen source provenance
+- **AND** the same body in another case or field, altered content, and private
+  runtime values anywhere still refuse export
 
 The runner SHALL write a started manifest before provider work, export complete
 or partial evidence before cleanup, invoke cleanup from one `finally` path on

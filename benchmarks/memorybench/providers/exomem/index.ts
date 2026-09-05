@@ -8,6 +8,7 @@ import type {
 } from "../../types/provider"
 import type { UnifiedSession } from "../../types/unified"
 import {
+  EXOMEM_LME_ENV,
   appendGuestEvidence,
   clearAllExomemServices,
   clearExomemService,
@@ -17,6 +18,7 @@ import {
   postExomem,
   retireExomemService,
   runExomemDoctor,
+  prepareExomemRetirement,
   sha256Hex,
   type ServiceDescriptor,
 } from "../_guest_transport"
@@ -35,11 +37,6 @@ type PrepareRetirement = (service: ServiceDescriptor) => Promise<void>
 type ClearService = (containerTag: string) => Promise<void>
 type RetireService = (service: ServiceDescriptor) => Promise<void>
 type ClearAllServices = () => Promise<void>
-type RetirementRequest = (
-  service: ServiceDescriptor,
-  path: string,
-  body: Record<string, unknown>
-) => Promise<unknown>
 
 interface DoctorResult {
   success?: unknown
@@ -56,32 +53,37 @@ interface ReadResponse {
   body?: unknown
 }
 
-const EXOMEM_RETIREMENT_RECONCILE_ATTEMPTS = 3
+export const CAPTURE_CONTRACT = "exomem.lme.capture/v2"
+export const NAMESPACE_PATTERN = "exomem-container-tag-sha256-24hex"
 
-export async function prepareExomemRetirement(
-  service: ServiceDescriptor,
-  request: RetirementRequest
-): Promise<void> {
-  for (let attempt = 0; attempt < EXOMEM_RETIREMENT_RECONCILE_ATTEMPTS; attempt += 1) {
-    const requestId = crypto.randomUUID()
-    const raw = await request(service, "/api/maintain_memory", {
-      mode: "reconcile",
-      dry_run: false,
-      rebuild_graph: false,
-      request_id: requestId,
-      idempotency_key: requestId,
-    })
-    if (!raw || typeof raw !== "object") {
-      throw new Error("Exomem retirement barrier response is invalid")
-    }
-    const response = raw as { graph_status?: unknown; graph_sync_code?: unknown }
-    if (response.graph_status === "current" || response.graph_status === "refreshed") return
-    const retryable = response.graph_status === "unavailable" &&
-      response.graph_sync_code === "GRAPH_SYNC_STABILIZATION_EXHAUSTED"
-    if (!retryable) break
+// Python authority: benchmarks/lme/exomem_capture.py. A cross-language test
+// compares the actual product payload, including metadata and Unicode bytes.
+export async function capturePayload(session: UnifiedSession, position: number): Promise<Record<string, unknown>> {
+  if (!Number.isSafeInteger(position) || position < 0 || !session.messages.length) {
+    throw new Error("capture requires a nonempty session and neutral ordinal")
   }
-  throw new Error("Exomem retirement barrier did not prove graph-current state")
+  const date = session.metadata?.date
+  if (typeof date !== "string" || !date) throw new Error("capture requires session date")
+  const parsed = new Date(date)
+  if (!Number.isFinite(parsed.getTime())) throw new Error("capture session date is invalid")
+  const stamp = parsed.toISOString().replace(/\.\d{3}Z$/, "Z")
+  const ordinal = position + 1
+  const lines = [`Session timestamp: ${stamp}`, `Session ordinal: ${ordinal}`, ""]
+  for (const message of session.messages) {
+    if (!["user", "assistant", "system"].includes(message.role) || typeof message.content !== "string") {
+      throw new Error("unsupported session message")
+    }
+    lines.push(`${message.role}: ${message.content.normalize("NFC")}`)
+  }
+  const content = lines.join("\n")
+  const digest = (await sha256Hex(content)).slice(0, 12)
+  return {
+    content, title: `LongMemEval session ${ordinal} ${digest}`,
+    slug: `lme-session-${String(ordinal).padStart(4, "0")}-${digest}`,
+    source_type: "session", tags: ["longmemeval"], compile_guidance: false,
+  }
 }
+
 
 export class ExomemProvider implements Provider {
   name = "exomem"
@@ -119,10 +121,7 @@ export class ExomemProvider implements Provider {
     this.doctor = dependencies.doctor ?? runExomemDoctor
     this.prepareRetirement = dependencies.prepareRetirement ??
       (this.defaultTransport
-        ? async (service) => prepareExomemRetirement(
-            service,
-            (bound, path, body) => this.request(bound, path, body)
-          )
+        ? prepareExomemRetirement
         : async () => {})
     this.clearService = dependencies.clearService ?? clearExomemService
     this.retireService = dependencies.retireService ??
@@ -173,6 +172,10 @@ export class ExomemProvider implements Provider {
       await appendGuestEvidence(service, "provider-manifest", {
         provider: this.name,
         protocol_version: 1,
+        session_normalization: CAPTURE_CONTRACT,
+        product_input_contract: CAPTURE_CONTRACT,
+        namespace_pattern: NAMESPACE_PATTERN,
+        namespace: (await sha256Hex(containerTag)).slice(0, 24),
         concurrency: this.concurrency,
         exomem_authored_transport: true,
         latency_publishable: false,
@@ -180,6 +183,7 @@ export class ExomemProvider implements Provider {
         checkout_root: service.checkout_root,
         deterministic_profile: {
           provenance: "benchmarks/lme/adapter.py::lme_profile",
+          requested_settings: EXOMEM_LME_ENV,
           embeddings_requested: true,
           warmup: "disabled",
           file_watcher: "disabled",
@@ -226,21 +230,19 @@ export class ExomemProvider implements Provider {
     try {
       const service = await this.getService(options.containerTag)
       const documentIds: string[] = []
-      for (const [position, session] of sessions.entries()) {
-        const sessionString = JSON.stringify(session.messages).replace(/</g, "&lt;").replace(/>/g, "&gt;")
-        const formattedDate = session.metadata?.formattedDate
-        const content = typeof formattedDate === "string" && formattedDate.length > 0
-          ? `Here is the date the following session took place: ${formattedDate}\n\nHere is the session as a stringified JSON:\n${sessionString}`
-          : `Here is the session as a stringified JSON:\n${sessionString}`
-        const digest = await sha256Hex(JSON.stringify({ container: options.containerTag, position, content }))
-        const neutral = `mb-session-${digest.slice(0, 24)}`
+      for (const session of sessions) {
+        // The pinned LongMemEval converter generates `<question>-session-N`.
+        // MemoryBench calls ingest([session]) and may resume in a fresh process,
+        // so neither batch position nor a mutable counter is the ordinal.
+        const ordinal = /-session-(0|[1-9][0-9]*)$/.exec(session.sessionId)
+        if (!ordinal || !Number.isSafeInteger(Number(ordinal[1])) || Number(ordinal[1]) >= Number.MAX_SAFE_INTEGER) {
+          throw new Error("capture requires the upstream-generated session ordinal")
+        }
+        const position = Number(ordinal[1])
+        const payload = await capturePayload(session, position)
         const requestId = crypto.randomUUID()
         const response = await this.request(service, "/api/capture_source", {
-          content,
-          title: neutral,
-          slug: neutral,
-          source_type: "session",
-          compile_guidance: false,
+          ...payload,
           request_id: requestId,
           idempotency_key: requestId,
         })
@@ -289,10 +291,11 @@ export class ExomemProvider implements Provider {
       ]) {
         if (checks.get(check) !== "pass") throw new Error(`Exomem doctor semantic check missing or failed: ${check}`)
       }
-      onProgress?.({ completedIds: [...result.documentIds], failedIds: [], total: result.documentIds.length })
+      await this.prepareRetirement(service)
       await this.retireService(service)
       this.services.delete(containerTag)
       this.manifestsWritten.delete(containerTag)
+      onProgress?.({ completedIds: [...result.documentIds], failedIds: [], total: result.documentIds.length })
     } catch (error) {
       await this.failAfterCleanup(error)
     }
@@ -346,5 +349,7 @@ export class ExomemProvider implements Provider {
     this.manifestsWritten.delete(containerTag)
   }
 }
+
+export { prepareExomemRetirement } from "../_guest_transport"
 
 export default ExomemProvider

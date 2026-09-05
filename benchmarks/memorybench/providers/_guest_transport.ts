@@ -38,6 +38,11 @@ export const EXOMEM_LME_ENV = {
   EXOMEM_DISABLE_CORPUS_CACHE: "1",
   EXOMEM_VEC_BACKEND: "numpy",
   EXOMEM_LEXICAL_BACKEND: "python",
+  EXOMEM_MODE: "normal",
+  EXOMEM_DEVICE: "cpu",
+  EXOMEM_EMBED_DEVICE: "cpu",
+  EXOMEM_CLIP_DEVICE: "cpu",
+  CUDA_VISIBLE_DEVICES: "",
   EXOMEM_ALLOW_CPU_TORCH: "1",
   HF_HUB_OFFLINE: "1",
   TRANSFORMERS_OFFLINE: "1",
@@ -104,6 +109,7 @@ export interface ExomemResidencyOperations {
   containerTag: string
   maxLiveServices: number
   discover: () => Promise<ExomemResidencyRecord[]>
+  prepareRetirement: (service: ServiceDescriptor) => Promise<void>
   retire: (service: ServiceDescriptor) => Promise<void>
   launch: () => Promise<ServiceDescriptor>
   touch: (service: ServiceDescriptor) => Promise<void>
@@ -113,6 +119,7 @@ export async function enforceExomemResidency({
   containerTag,
   maxLiveServices,
   discover,
+  prepareRetirement,
   retire,
   launch,
   touch,
@@ -135,6 +142,7 @@ export async function enforceExomemResidency({
   )
   while (leastRecentlyUsed.length >= maxLiveServices) {
     const candidate = leastRecentlyUsed.shift()!
+    await prepareRetirement(candidate.service)
     await retire(candidate.service)
   }
   const service = await launch()
@@ -213,6 +221,7 @@ function requireAbsoluteRoot(name: string, value: string | undefined): string {
 export function exomemOwnedStateEnvironment(workRoot: string): Record<string, string> {
   const ownedRoot = requireAbsoluteRoot("Exomem work root", workRoot)
   return {
+    EXOMEM_STATE_ROOT: join(ownedRoot, "state"),
     EXOMEM_WRITER_LEASE_STATE_DIR: join(ownedRoot, "writer-lease-state"),
   }
 }
@@ -508,6 +517,7 @@ export async function postJsonWithRetry<T>({
       } catch {
         throw new Error("guest response is invalid JSON")
       }
+      refuseGuestSecrets(parsed, token)
       const responseEnvelope = validateGuestResponseEnvelope(parsed, requestId)
       if (!responseEnvelope.ok && response.status >= 500 && responseEnvelope.retryable && attempt === 0) {
         await sleep(responseEnvelope.retryAfterMs ?? 250)
@@ -596,6 +606,7 @@ export async function postExomem<T>(
       }
       let envelope: unknown
       try { envelope = await response.json() } catch { throw new Error("Exomem response is invalid JSON") }
+      refuseGuestSecrets(envelope, service.bearer_token)
       if (!envelope || typeof envelope !== "object") throw new Error("Exomem response envelope is invalid")
       const result = envelope as {
         success?: unknown
@@ -624,6 +635,39 @@ export async function postExomem<T>(
     }
   }
   throw new Error("Exomem request retry budget exhausted")
+}
+
+function refuseGuestSecrets(value: unknown, secret: string): void {
+  const bytes = Buffer.from(secret, "utf8")
+  const variants = [secret, bytes.toString("base64"), bytes.toString("base64url"), bytes.toString("hex")].filter(Boolean)
+  const visit = (item: unknown, depth: number): void => {
+    if (depth > 32) throw new Error("guest response nesting exceeds privacy inspection limit")
+    if (Array.isArray(item)) {
+      for (const child of item) visit(child, depth + 1)
+    } else if (item && typeof item === "object") {
+      for (const [key, child] of Object.entries(item)) {
+        visit(key, depth + 1)
+        visit(child, depth + 1)
+      }
+    } else if (typeof item === "string") {
+      let decoded = item
+      for (let layer = 0; layer <= 32; layer++) {
+        if (variants.some(variant => decoded.includes(variant)) || (secret && decoded.toLowerCase().includes(bytes.toString("hex")))) {
+          throw new Error("guest response contains private runtime material")
+        }
+        const next = decoded.replace(/\\+u([0-9a-f]{4})/gi, (_match, code) => String.fromCharCode(parseInt(code, 16)))
+        if (next === decoded) break
+        if (layer === 32) throw new Error("guest response nesting exceeds privacy inspection limit")
+        decoded = next
+      }
+      // A provider can embed another JSON object or string in a text field.
+      // Parse only complete valid JSON; ordinary prose is unchanged.
+      let nested: unknown
+      try { nested = JSON.parse(item) } catch { return }
+      if (typeof nested === "string" || (nested && typeof nested === "object")) visit(nested, depth + 1)
+    }
+  }
+  visit(value, 0)
 }
 
 function canonicalValue(value: unknown): unknown {
@@ -1171,6 +1215,7 @@ export async function ensureExomemService(containerTag: string): Promise<Service
       containerTag,
       maxLiveServices: configuredExomemMaxLiveServices(),
       discover: discoverExomemServices,
+      prepareRetirement: prepareExomemRetirement,
       retire: retireExomemService,
       touch: touchExomemService,
       launch: async () => {
@@ -1310,6 +1355,87 @@ export async function runExomemDoctor(service: ServiceDescriptor): Promise<unkno
     }
   )
   return parseExomemDoctorProcessResult({ status: result.status, stdout: result.stdout })
+}
+
+type RetirementReconcile = (
+  service: ServiceDescriptor,
+  attemptId: string,
+  timeoutMs?: number
+) => Promise<unknown>
+
+const EXOMEM_RETIREMENT_RECONCILE_ATTEMPTS = 3
+
+export async function prepareExomemRetirement(
+  service: ServiceDescriptor,
+  reconcile: RetirementReconcile = runExomemReconcile,
+  timing = {
+    now: () => performance.now(),
+    sleep: (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)),
+  }
+): Promise<void> {
+  const deadline = timing.now() + GUEST_TIMEOUTS_MS.cleanup
+  let stabilizationFailures = 0
+  while (timing.now() < deadline) {
+    const remaining = Math.max(1, Math.floor(deadline - timing.now()))
+    const raw = await reconcile(service, crypto.randomUUID(), Math.min(GUEST_TIMEOUTS_MS.search, remaining))
+    if (!raw || typeof raw !== "object") {
+      throw new Error("Exomem retirement barrier response is invalid")
+    }
+    const response = raw as { graph_status?: unknown; graph_sync?: unknown; graph_sync_code?: unknown; graph_sync_checkpoint?: unknown }
+    if (timing.now() >= deadline) break
+    if (response.graph_status === "current" || response.graph_status === "refreshed") return
+    if (response.graph_status === "unavailable" && response.graph_sync === "pending" &&
+        response.graph_sync_code === "GRAPH_SYNC_REBUILD_IN_PROGRESS" &&
+        typeof response.graph_sync_checkpoint === "string" && /^[0-9a-f]{64}$/.test(response.graph_sync_checkpoint)) {
+      // The service still owns a registered rebuild. Let it publish; never
+      // launch an out-of-process index drain against the live service.
+      await timing.sleep(Math.min(5_000, Math.max(0, deadline - timing.now())))
+      continue
+    }
+    const retryable = response.graph_status === "unavailable" &&
+      response.graph_sync_code === "GRAPH_SYNC_STABILIZATION_EXHAUSTED"
+    if (!retryable || ++stabilizationFailures >= EXOMEM_RETIREMENT_RECONCILE_ATTEMPTS) break
+  }
+  throw new Error("Exomem retirement barrier did not prove graph-current state")
+}
+
+export async function runExomemReconcile(service: ServiceDescriptor, attemptId: string, timeoutMs: number = GUEST_TIMEOUTS_MS.search): Promise<unknown> {
+  if (!service.vault_root) throw new Error("Exomem vault binding missing")
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > GUEST_TIMEOUTS_MS.search) {
+    throw new Error("Exomem reconcile deadline is invalid")
+  }
+  const exomemHome = requireAbsoluteRoot("EXOMEM_HOME", process.env.EXOMEM_HOME)
+  await appendGuestEvidence(service, "reconcile-request", {
+    attempt_id: attemptId, transport: "owned-local-cli", mode: "reconcile", timeout_ms: timeoutMs,
+  })
+  // Write-mode maintenance is operator-only. The maintain CLI selects its
+  // vault through the environment; its --vault flag belongs to state migration.
+  const result = spawnSync(
+    "uv",
+    ["run", "--project", exomemHome, "--no-sync", "exomem", "maintain", "--reconcile", "--json"],
+    {
+      cwd: service.work_root,
+      env: buildExomemChildEnvironment(process.env, {
+        ...exomemOwnedStateEnvironment(service.work_root),
+        EXOMEM_VAULT_PATH: service.vault_root,
+        MEMORYBENCH_GUEST_WORK_ROOT: service.work_root,
+        MEMORYBENCH_GUEST_PROVIDER: "exomem",
+        MEMORYBENCH_GUEST_INSTANCE_ID: service.instance_id ?? "invalid-missing-instance",
+      }),
+      encoding: "utf8",
+      timeout: timeoutMs,
+    }
+  )
+  let envelope: unknown = null
+  try { envelope = JSON.parse(result.stdout) } catch { /* Refused below. */ }
+  await appendGuestEvidence(service, "reconcile-response", {
+    attempt_id: attemptId, exit_code: result.status, response: envelope,
+  })
+  if (result.status !== 0 || !envelope || typeof envelope !== "object" ||
+      (envelope as { success?: unknown }).success !== true || !("data" in envelope)) {
+    throw new Error("Exomem reconcile failed")
+  }
+  return (envelope as { data: unknown }).data
 }
 
 async function processIsLive(pid: number): Promise<boolean> {
