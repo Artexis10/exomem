@@ -365,9 +365,7 @@ class KubernetesProviderRegistry:
         )
         if stateful_set is not None:
             self._require_not_terminating(stateful_set)
-        desired_replicas = int(
-            getattr(getattr(stateful_set, "spec", None), "replicas", 0) or 0
-        )
+        desired_replicas = int(getattr(getattr(stateful_set, "spec", None), "replicas", 0) or 0)
         runtime_pod_list = await asyncio.to_thread(
             self._core.list_namespaced_pod,
             current.resource_name,
@@ -459,9 +457,7 @@ class KubernetesProviderRegistry:
                 "exomem.io/resource-name": metadata.resource_name,
                 "exomem.io/pvc-name": metadata.resource_name + "-data",
                 "exomem.io/credentials-secret-name": "exomem-cell-credentials",
-                "exomem.io/authorization-session-secret-name": (
-                    "exomem-authorization-session"
-                ),
+                "exomem.io/authorization-session-secret-name": ("exomem-authorization-session"),
                 "exomem.io/init-request-configmap-name": metadata.resource_name + "-init-request",
                 "exomem.io/provision-mode": provision_mode,
             }
@@ -782,15 +778,13 @@ class LiveLifecyclePlane:
                     "runtime attestation authority is unavailable",
                     reason=ConflictReason.RUNTIME_ATTESTATION_AUTHORITY_UNAVAILABLE,
                 )
-            runtime_attestation = (
-                await self._runtime.attest_authorization_session_membership(
-                    owned,
-                    credential=runtime_credential,
-                    protocol_version=runtime_protocol_version,
-                    target_epoch=source.epoch + 1,
-                    previous_epoch_digest=source.membership_digest,
-                    ttl_seconds=DEFAULT_ATTESTATION_TTL_SECONDS,
-                )
+            runtime_attestation = await self._runtime.attest_authorization_session_membership(
+                owned,
+                credential=runtime_credential,
+                protocol_version=runtime_protocol_version,
+                target_epoch=source.epoch + 1,
+                previous_epoch_digest=source.membership_digest,
+                ttl_seconds=DEFAULT_ATTESTATION_TTL_SECONDS,
             )
         successor = transition_hosted_authorization_bundle(
             files,
@@ -971,6 +965,40 @@ class LiveLifecyclePlane:
     ) -> bool:
         if request.get("provisionMode") != "serve":
             return False
+        desired = _fixed_helm_values(self._owner(metadata), request, config)
+        current = await self._helm.current_release_values(self._owner(metadata))
+        for key in ("image", "expectedRelease", "expectedProtocol"):
+            if not isinstance(current.get(key), str):
+                raise MetadataConflict(
+                    "current Helm runtime selection is invalid",
+                    reason=ConflictReason.CURRENT_HELM_RUNTIME_SELECTION_INVALID,
+                )
+        changed = any(
+            current[key] != desired[key] for key in ("image", "expectedRelease", "expectedProtocol")
+        )
+        operation_digest = hashlib.sha256(metadata.operation_id.encode("utf-8")).hexdigest()
+        upgrade = current.get("runtimeUpgrade")
+        transition_owned = (
+            isinstance(upgrade, dict)
+            and upgrade.get("schemaVersion") == 1
+            and upgrade.get("operationDigest") == operation_digest
+            and isinstance(upgrade.get("priorRevision"), int)
+            and not isinstance(upgrade.get("priorRevision"), bool)
+            and upgrade["priorRevision"] >= 1
+        )
+        if not changed and not transition_owned:
+            return False
+
+        # A retarget is genuinely indicated, so an operator must have committed
+        # one. The recovery receipt is written by exactly one caller -- the
+        # operator-driven retarget recovery command in `operation_recovery` --
+        # so requiring it here is what proves this move was authorised.
+        #
+        # It is deliberately checked AFTER the question above is answered. A
+        # cell being provisioned for the first time has never been retargeted
+        # and so can never hold a receipt; demanding one before asking whether
+        # a retarget is needed made "no" unreachable and killed every first
+        # provision at `volume-owned`.
         internal_operation_id = self._operation_ids.get(self._key(metadata))
         if internal_operation_id is None:
             raise MetadataConflict(
@@ -978,8 +1006,8 @@ class LiveLifecyclePlane:
                 reason=ConflictReason.RETARGET_OPERATION_UNAVAILABLE,
             )
         operation = await self._repository.get_by_id(internal_operation_id)
-        marker = operation.progress.get("_runtime_retarget_recovery_v1") if operation else None
-        marker_keys = {
+        receipt = operation.progress.get("_runtime_retarget_recovery_v1") if operation else None
+        receipt_keys = {
             "schema",
             "preflight_sha256",
             "source_request_sha256",
@@ -1006,18 +1034,18 @@ class LiveLifecyclePlane:
             or operation.tenant_id != metadata.tenant_id
             or operation.cell_id != metadata.subject_id
             or operation.fence_generation != metadata.fence_generation
-            or not isinstance(marker, dict)
-            or set(marker) != marker_keys
-            or marker.get("schema") != 1
-            or marker.get("target_request_sha256") != operation.canonical_request_sha256
-            or marker.get("target_runtime_sha256") != target_runtime_sha256
-            or marker.get("source_request_sha256") == marker.get("target_request_sha256")
-            or not isinstance(marker.get("claim_generation"), int)
-            or marker["claim_generation"] < 0
-            or not isinstance(marker.get("committed_at"), str)
+            or not isinstance(receipt, dict)
+            or set(receipt) != receipt_keys
+            or receipt.get("schema") != 1
+            or receipt.get("target_request_sha256") != operation.canonical_request_sha256
+            or receipt.get("target_runtime_sha256") != target_runtime_sha256
+            or receipt.get("source_request_sha256") == receipt.get("target_request_sha256")
+            or not isinstance(receipt.get("claim_generation"), int)
+            or receipt["claim_generation"] < 0
+            or not isinstance(receipt.get("committed_at"), str)
             or any(
-                not isinstance(marker.get(key), str) or len(marker[key]) != 64
-                for key in marker_keys
+                not isinstance(receipt.get(key), str) or len(receipt[key]) != 64
+                for key in receipt_keys
                 if key.endswith("sha256")
             )
         ):
@@ -1025,29 +1053,6 @@ class LiveLifecyclePlane:
                 "retargeted provision recovery receipt is invalid",
                 reason=ConflictReason.RETARGET_RECOVERY_RECEIPT_INVALID,
             )
-        desired = _fixed_helm_values(self._owner(metadata), request, config)
-        current = await self._helm.current_release_values(self._owner(metadata))
-        for key in ("image", "expectedRelease", "expectedProtocol"):
-            if not isinstance(current.get(key), str):
-                raise MetadataConflict(
-                    "current Helm runtime selection is invalid",
-                    reason=ConflictReason.CURRENT_HELM_RUNTIME_SELECTION_INVALID,
-                )
-        changed = any(
-            current[key] != desired[key] for key in ("image", "expectedRelease", "expectedProtocol")
-        )
-        operation_digest = hashlib.sha256(metadata.operation_id.encode("utf-8")).hexdigest()
-        marker = current.get("runtimeUpgrade")
-        transition_owned = (
-            isinstance(marker, dict)
-            and marker.get("schemaVersion") == 1
-            and marker.get("operationDigest") == operation_digest
-            and isinstance(marker.get("priorRevision"), int)
-            and not isinstance(marker.get("priorRevision"), bool)
-            and marker["priorRevision"] >= 1
-        )
-        if not changed and not transition_owned:
-            return False
         snapshot = self._snapshot(metadata)
         if snapshot.runtime_admitted or snapshot.routes != (False, False):
             raise MetadataConflict(

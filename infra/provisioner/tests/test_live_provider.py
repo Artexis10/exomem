@@ -20,6 +20,7 @@ from exomem_provisioner.config import (
     load_deployment_lock,
     load_hosted_release_manifest,
 )
+from exomem_provisioner.conflict_reason import ConflictReason
 from exomem_provisioner.driver import DriverPending, EffectContext
 from exomem_provisioner.lifecycle import (
     CellLifecycleDriver,
@@ -2007,3 +2008,149 @@ async def test_live_plane_publishes_authorization_custody_before_helm_and_reuses
         "helm",
     ]
     assert len(set(helm.revisions)) == 1
+
+
+def _retarget_config(target: dict[str, object], **overrides: object) -> LifecycleConfig:
+    values: dict[str, object] = {
+        "image": "ghcr.io/artexis10/exomem@sha256:" + "d" * 64,
+        "chart_path": "chart",
+        "chart_version": "0.1.0",
+        "helm_version": "3.19.4",
+        "control_hostname": "control.example.invalid",
+        "transfer_hostname": "transfer.example.invalid",
+        "browser_origin": "https://substratesystems.io",
+        "release_version": "0.68.3",
+        "protocol_version": "1",
+        "contract_digest": "a" * 64,
+        "location": "fsn1",
+        "runtime_target": target,
+        "compatibility_digest": "e" * 64,
+        "migration_mode": "state-root-v1",
+    }
+    values.update(overrides)
+    return LifecycleConfig(**values)  # type: ignore[arg-type]
+
+
+def _retarget_plane(
+    metadata: OpaqueProviderMetadata,
+    request: dict[str, object],
+    config: LifecycleConfig,
+    current_values: dict[str, object],
+    *,
+    progress: dict[str, object],
+) -> LiveLifecyclePlane:
+    """A live plane whose cell already carries `current_values` in Helm.
+
+    The operation row is the one the reconciler is actually working: same
+    action, external id, tenant, cell and fence, and a canonical request digest
+    computed the way the repository computes it -- so the only thing under test
+    is the retarget decision itself.
+    """
+
+    class Helm:
+        async def current_release_values(self, owner: OpaqueProviderMetadata) -> dict[str, object]:
+            return dict(current_values)
+
+    class Repository:
+        async def get_by_id(self, operation_id: str) -> object:
+            assert operation_id == "internal-operation-alpha"
+            return SimpleNamespace(
+                action=SimpleNamespace(value="provision"),
+                external_operation_id=metadata.operation_id,
+                tenant_id=metadata.tenant_id,
+                cell_id=metadata.subject_id,
+                fence_generation=metadata.fence_generation,
+                canonical_request_sha256=canonical_request_sha256(request),
+                progress=dict(progress),
+            )
+
+    plane = LiveLifecyclePlane(
+        repository=Repository(),  # type: ignore[arg-type]
+        registry=SimpleNamespace(),  # type: ignore[arg-type]
+        cell=SimpleNamespace(),  # type: ignore[arg-type]
+        helm=Helm(),  # type: ignore[arg-type]
+        runtime=SimpleNamespace(),  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=SimpleNamespace(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=config,
+        now=lambda: 1_900_000_030,
+    )
+    plane._operation_ids[plane._key(metadata)] = "internal-operation-alpha"
+    return plane
+
+
+@pytest.mark.asyncio
+async def test_first_provision_answers_no_retarget_without_a_recovery_receipt() -> None:
+    """A cell provisioned for the first time has never been retargeted.
+
+    `_provision` installs the release with `_fixed_helm_values` and only then
+    reaches `volume-owned`, where it asks whether a retarget is required. The
+    honest answer is "no". Demanding a `_runtime_retarget_recovery_v1` receipt
+    to reach that answer makes it unreachable, because the only writer of that
+    marker is the operator-driven retarget recovery command: a cell that has
+    never been retargeted cannot have one, so every first provision dies.
+    """
+
+    from exomem_provisioner.lifecycle import _fixed_helm_values
+
+    metadata = OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "operation-alpha", 7)
+    target = {
+        "releaseVersion": "0.68.3",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v4",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+        "compatibilityDigest": "e" * 64,
+    }
+    config = _retarget_config(target)
+    request = {
+        "provisionMode": "serve",
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+        "runtimeTarget": target,
+    }
+    # Exactly what `_provision` applied at `release-applied`, so the cell is
+    # already running the runtime this request asks for.
+    installed = _fixed_helm_values(metadata, request, config)
+    plane = _retarget_plane(metadata, request, config, installed, progress={})
+
+    assert await plane.provision_retarget_required(metadata, request, config) is False
+
+
+@pytest.mark.asyncio
+async def test_genuine_retarget_still_requires_the_operator_recovery_receipt() -> None:
+    """The guard must survive the fix that lets a first provision through.
+
+    When the cell is running a different image from the one the request now
+    asks for, a retarget really is required -- and that is exactly when an
+    operator-committed recovery receipt must be present. Absent one, this must
+    still refuse, or the reordering has deleted the guard rather than moved it.
+    """
+
+    from exomem_provisioner.lifecycle import _fixed_helm_values
+
+    metadata = OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "operation-alpha", 7)
+    target = {
+        "releaseVersion": "0.68.3",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v4",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+        "compatibilityDigest": "e" * 64,
+    }
+    config = _retarget_config(target)
+    request = {
+        "provisionMode": "serve",
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+        "runtimeTarget": target,
+    }
+    stale = _fixed_helm_values(metadata, request, config)
+    stale["image"] = "ghcr.io/artexis10/exomem@sha256:" + "9" * 64
+    plane = _retarget_plane(metadata, request, config, stale, progress={})
+
+    with pytest.raises(MetadataConflict) as raised:
+        await plane.provision_retarget_required(metadata, request, config)
+    assert raised.value.reason is ConflictReason.RETARGET_RECOVERY_RECEIPT_INVALID
