@@ -519,3 +519,71 @@ describe("Exomem guest provider", () => {
     expect(h.cleared).toEqual(["container-a"])
   })
 })
+
+test("retirement waits for the measured pending rebuild and proves current before returning", async () => {
+  const h = harness()
+  let now = 0
+  const attempts: Array<{ id: string; timeout: number | undefined }> = []
+  await prepareExomemRetirement(h.service, async (_service, id, timeout) => {
+    attempts.push({ id, timeout })
+    return attempts.length === 1 ? { graph_status: "unavailable", graph_sync: "pending", graph_sync_code: "GRAPH_SYNC_REBUILD_IN_PROGRESS", graph_sync_checkpoint: "a".repeat(64) } : { graph_status: "current", graph_sync: "completed" }
+  }, { now: () => now, sleep: async ms => { now += ms } })
+  expect(attempts).toHaveLength(2)
+  expect(new Set(attempts.map(x => x.id)).size).toBe(2)
+  expect(now).toBe(5000)
+  expect(attempts.every(x => x.timeout! > 0 && x.timeout! <= 70000)).toBe(true)
+})
+
+test("retirement bounds an endless pending rebuild and refuses unowned queued repairs", async () => {
+  const h = harness()
+  let now = 0
+  let attempts = 0
+  await expect(prepareExomemRetirement(h.service, async () => {
+    attempts++
+    return { graph_status: "unavailable", graph_sync: "pending", graph_sync_code: "GRAPH_SYNC_REBUILD_IN_PROGRESS", graph_sync_checkpoint: "a".repeat(64) }
+  }, { now: () => now, sleep: async ms => { now += ms } })).rejects.toThrow("graph-current")
+  expect(now).toBe(120000)
+  expect(attempts).toBe(24)
+  for (const response of [
+    { graph_status: "unavailable", graph_sync: "pending", graph_sync_code: "GRAPH_SYNC_REPAIR_QUEUED", graph_sync_checkpoint: "a".repeat(64) },
+    { graph_status: "unavailable", graph_sync: "pending", graph_sync_code: "GRAPH_SYNC_REBUILD_IN_PROGRESS" },
+  ]) {
+    let calls = 0
+    await expect(prepareExomemRetirement(h.service, async () => { calls++; return response }, { now: () => 0, sleep: async () => { throw new Error("unexpected wait") } })).rejects.toThrow("graph-current")
+    expect(calls).toBe(1)
+  }
+})
+
+test("retirement gives the next subprocess only the remaining budget", async () => {
+  let now = 0
+  const deadlines: Array<number | undefined> = []
+  await prepareExomemRetirement(harness().service, async (_service, _id, timeout) => {
+    deadlines.push(timeout)
+    if (deadlines.length === 1) {
+      now += 69000
+      return { graph_status: "unavailable", graph_sync: "pending", graph_sync_code: "GRAPH_SYNC_REBUILD_IN_PROGRESS", graph_sync_checkpoint: "a".repeat(64) }
+    }
+    return { graph_status: "current" }
+  }, { now: () => now, sleep: async ms => { now += ms } })
+  expect(deadlines).toEqual([70000, 46000])
+})
+
+test.each([false, true])("indexing proves the graph before retirement or completed progress (failure=%s)", async fail => {
+  const h = harness()
+  const events: string[] = []
+  const provider = new ExomemProvider({
+    ensureService: async () => h.service,
+    doctor: async () => { events.push("doctor"); return actualDoctorReport() },
+    prepareRetirement: async () => { events.push("prepare"); if (fail) throw new Error("graph-current unproved") },
+    retireService: async () => { events.push("retire") },
+    clearAllServices: async () => { events.push("cleanup") },
+  })
+  const result = provider.awaitIndexing({ documentIds: ["document"] }, "container", () => events.push("completed"))
+  if (fail) {
+    await expect(result).rejects.toThrow("graph-current")
+    expect(events).toEqual(["doctor", "prepare", "cleanup"])
+  } else {
+    await result
+    expect(events).toEqual(["doctor", "prepare", "retire", "completed"])
+  }
+})

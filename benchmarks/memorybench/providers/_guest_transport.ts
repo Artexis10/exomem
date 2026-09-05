@@ -109,6 +109,7 @@ export interface ExomemResidencyOperations {
   containerTag: string
   maxLiveServices: number
   discover: () => Promise<ExomemResidencyRecord[]>
+  prepareRetirement: (service: ServiceDescriptor) => Promise<void>
   retire: (service: ServiceDescriptor) => Promise<void>
   launch: () => Promise<ServiceDescriptor>
   touch: (service: ServiceDescriptor) => Promise<void>
@@ -118,6 +119,7 @@ export async function enforceExomemResidency({
   containerTag,
   maxLiveServices,
   discover,
+  prepareRetirement,
   retire,
   launch,
   touch,
@@ -140,6 +142,7 @@ export async function enforceExomemResidency({
   )
   while (leastRecentlyUsed.length >= maxLiveServices) {
     const candidate = leastRecentlyUsed.shift()!
+    await prepareRetirement(candidate.service)
     await retire(candidate.service)
   }
   const service = await launch()
@@ -1212,6 +1215,7 @@ export async function ensureExomemService(containerTag: string): Promise<Service
       containerTag,
       maxLiveServices: configuredExomemMaxLiveServices(),
       discover: discoverExomemServices,
+      prepareRetirement: prepareExomemRetirement,
       retire: retireExomemService,
       touch: touchExomemService,
       launch: async () => {
@@ -1353,11 +1357,56 @@ export async function runExomemDoctor(service: ServiceDescriptor): Promise<unkno
   return parseExomemDoctorProcessResult({ status: result.status, stdout: result.stdout })
 }
 
-export async function runExomemReconcile(service: ServiceDescriptor, attemptId: string): Promise<unknown> {
+type RetirementReconcile = (
+  service: ServiceDescriptor,
+  attemptId: string,
+  timeoutMs?: number
+) => Promise<unknown>
+
+const EXOMEM_RETIREMENT_RECONCILE_ATTEMPTS = 3
+
+export async function prepareExomemRetirement(
+  service: ServiceDescriptor,
+  reconcile: RetirementReconcile = runExomemReconcile,
+  timing = {
+    now: () => performance.now(),
+    sleep: (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)),
+  }
+): Promise<void> {
+  const deadline = timing.now() + GUEST_TIMEOUTS_MS.cleanup
+  let stabilizationFailures = 0
+  while (timing.now() < deadline) {
+    const remaining = Math.max(1, Math.floor(deadline - timing.now()))
+    const raw = await reconcile(service, crypto.randomUUID(), Math.min(GUEST_TIMEOUTS_MS.search, remaining))
+    if (!raw || typeof raw !== "object") {
+      throw new Error("Exomem retirement barrier response is invalid")
+    }
+    const response = raw as { graph_status?: unknown; graph_sync?: unknown; graph_sync_code?: unknown; graph_sync_checkpoint?: unknown }
+    if (timing.now() >= deadline) break
+    if (response.graph_status === "current" || response.graph_status === "refreshed") return
+    if (response.graph_status === "unavailable" && response.graph_sync === "pending" &&
+        response.graph_sync_code === "GRAPH_SYNC_REBUILD_IN_PROGRESS" &&
+        typeof response.graph_sync_checkpoint === "string" && /^[0-9a-f]{64}$/.test(response.graph_sync_checkpoint)) {
+      // The service still owns a registered rebuild. Let it publish; never
+      // launch an out-of-process index drain against the live service.
+      await timing.sleep(Math.min(5_000, Math.max(0, deadline - timing.now())))
+      continue
+    }
+    const retryable = response.graph_status === "unavailable" &&
+      response.graph_sync_code === "GRAPH_SYNC_STABILIZATION_EXHAUSTED"
+    if (!retryable || ++stabilizationFailures >= EXOMEM_RETIREMENT_RECONCILE_ATTEMPTS) break
+  }
+  throw new Error("Exomem retirement barrier did not prove graph-current state")
+}
+
+export async function runExomemReconcile(service: ServiceDescriptor, attemptId: string, timeoutMs: number = GUEST_TIMEOUTS_MS.search): Promise<unknown> {
   if (!service.vault_root) throw new Error("Exomem vault binding missing")
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > GUEST_TIMEOUTS_MS.search) {
+    throw new Error("Exomem reconcile deadline is invalid")
+  }
   const exomemHome = requireAbsoluteRoot("EXOMEM_HOME", process.env.EXOMEM_HOME)
   await appendGuestEvidence(service, "reconcile-request", {
-    attempt_id: attemptId, transport: "owned-local-cli", mode: "reconcile",
+    attempt_id: attemptId, transport: "owned-local-cli", mode: "reconcile", timeout_ms: timeoutMs,
   })
   // Write-mode maintenance is operator-only. The maintain CLI selects its
   // vault through the environment; its --vault flag belongs to state migration.
@@ -1374,7 +1423,7 @@ export async function runExomemReconcile(service: ServiceDescriptor, attemptId: 
         MEMORYBENCH_GUEST_INSTANCE_ID: service.instance_id ?? "invalid-missing-instance",
       }),
       encoding: "utf8",
-      timeout: GUEST_TIMEOUTS_MS.search,
+      timeout: timeoutMs,
     }
   )
   let envelope: unknown = null

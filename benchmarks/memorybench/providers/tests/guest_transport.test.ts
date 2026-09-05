@@ -55,6 +55,7 @@ describe("guest transport", () => {
       containerTag: string
       maxLiveServices: number
       discover: () => Promise<ResidencyRecord[]>
+      prepareRetirement: (service: Record<string, unknown>) => Promise<void>
       retire: (service: Record<string, unknown>) => Promise<void>
       launch: () => Promise<Record<string, unknown>>
       touch: (service: Record<string, unknown>) => Promise<void>
@@ -70,6 +71,7 @@ describe("guest transport", () => {
       containerTag,
       maxLiveServices: 1,
       discover: async () => [...live.values()],
+      prepareRetirement: async (service) => { events.push(`ready:${service.container_tag}`) },
       retire: async (service) => {
         const tag = String(service.container_tag)
         events.push(`retire:${tag}`)
@@ -98,6 +100,9 @@ describe("guest transport", () => {
     expect(live.size).toBe(1)
     expect(live.has("container-1")).toBe(true)
     expect(events.indexOf("retire:container-1")).toBeLessThan(events.indexOf("launch:container-2"))
+    for (const [index, event] of events.entries()) {
+      if (event.startsWith("retire:")) expect(events[index - 1]).toBe(event.replace("retire:", "ready:"))
+    }
   })
 
   test("residency admission evicts the least-recently-used service at a configured cap", async () => {
@@ -113,6 +118,7 @@ describe("guest transport", () => {
       containerTag: "new",
       maxLiveServices: 2,
       discover: async () => records,
+      prepareRetirement: async () => {},
       retire: async (service: { container_tag: string }) => { retired.push(service.container_tag) },
       launch: async () => ({ container_tag: "new" }),
       touch: async () => {},
@@ -1116,4 +1122,21 @@ test("successful guest responses refuse the actual service secret before checkpo
     server.close()
     await once(server, "close")
   }
+})
+
+test("cross-stage admission cannot retire or replace a service whose graph is unproved", async () => {
+  const transport = await import("../_guest_transport")
+  const provider = await import("../exomem")
+  expect(provider.prepareExomemRetirement).toBe(transport.prepareExomemRetirement)
+  const events: string[] = []
+  const service = { protocol_version: 1 as const, provider: "exomem" as const, base_url: "http://127.0.0.1:1", bearer_token: "fixture", pid: 1, process_start_identity: "fixture", checkout_pin: "fixture", work_root: "fixture", evidence_root: "fixture" }
+  await expect(transport.enforceExomemResidency({
+    containerTag: "next", maxLiveServices: 1,
+    discover: async () => [{ containerTag: "previous", lastUsed: 1, service }],
+    prepareRetirement: async () => { events.push("prepare"); throw new Error("graph-current unproved") },
+    retire: async () => { events.push("retire") },
+    launch: async () => { events.push("launch"); return service },
+    touch: async () => { events.push("touch") },
+  })).rejects.toThrow("graph-current")
+  expect(events).toEqual(["prepare"])
 })

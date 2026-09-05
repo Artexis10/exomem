@@ -529,8 +529,17 @@ artifacts at the repaired provider pin; old evidence is retained unchanged.
     its derived graph current with a reconcile barrier, then proves its owned
     process group and secure descriptor absent before spawning.  The exact
     transient `GRAPH_SYNC_STABILIZATION_EXHAUSTED` result may be retried with
-    fresh attempt identities, bounded to three total attempts; every other
-    non-current result fails closed without retirement.
+    fresh attempt identities, bounded to three stabilization failures. Exact
+    pending registered-rebuild state with a valid checkpoint digest waits five
+    seconds before rechecking. All attempts share a 120-second budget; each
+    subprocess receives at most 70 seconds and the remaining allowance.
+    Queued repair, malformed state, other non-current outcomes and deadline
+    exhaustion fail closed without retirement. No live CLI index drain is used.
+    The transport owns this single barrier implementation; provider-map
+    eviction, descriptor-based cross-stage admission and indexing completion
+    call it before retirement. Completed indexing progress is emitted only
+    after that proof and retirement. Terminal or failure cleanup still
+    terminates services directly.
     Reconcile uses the pinned checkout's local CLI with the owned vault/state
     environment and canonical CPU profile. Remote write-mode maintenance is
     operator-only and refuses REST; the CLI selects the vault through

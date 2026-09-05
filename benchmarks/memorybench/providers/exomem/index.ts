@@ -18,7 +18,7 @@ import {
   postExomem,
   retireExomemService,
   runExomemDoctor,
-  runExomemReconcile,
+  prepareExomemRetirement,
   sha256Hex,
   type ServiceDescriptor,
 } from "../_guest_transport"
@@ -37,10 +37,6 @@ type PrepareRetirement = (service: ServiceDescriptor) => Promise<void>
 type ClearService = (containerTag: string) => Promise<void>
 type RetireService = (service: ServiceDescriptor) => Promise<void>
 type ClearAllServices = () => Promise<void>
-type RetirementReconcile = (
-  service: ServiceDescriptor,
-  attemptId: string
-) => Promise<unknown>
 
 interface DoctorResult {
   success?: unknown
@@ -57,7 +53,6 @@ interface ReadResponse {
   body?: unknown
 }
 
-const EXOMEM_RETIREMENT_RECONCILE_ATTEMPTS = 3
 export const CAPTURE_CONTRACT = "exomem.lme.capture/v2"
 export const NAMESPACE_PATTERN = "exomem-container-tag-sha256-24hex"
 
@@ -89,23 +84,6 @@ export async function capturePayload(session: UnifiedSession, position: number):
   }
 }
 
-export async function prepareExomemRetirement(
-  service: ServiceDescriptor,
-  reconcile: RetirementReconcile = runExomemReconcile
-): Promise<void> {
-  for (let attempt = 0; attempt < EXOMEM_RETIREMENT_RECONCILE_ATTEMPTS; attempt += 1) {
-    const raw = await reconcile(service, crypto.randomUUID())
-    if (!raw || typeof raw !== "object") {
-      throw new Error("Exomem retirement barrier response is invalid")
-    }
-    const response = raw as { graph_status?: unknown; graph_sync_code?: unknown }
-    if (response.graph_status === "current" || response.graph_status === "refreshed") return
-    const retryable = response.graph_status === "unavailable" &&
-      response.graph_sync_code === "GRAPH_SYNC_STABILIZATION_EXHAUSTED"
-    if (!retryable) break
-  }
-  throw new Error("Exomem retirement barrier did not prove graph-current state")
-}
 
 export class ExomemProvider implements Provider {
   name = "exomem"
@@ -313,10 +291,11 @@ export class ExomemProvider implements Provider {
       ]) {
         if (checks.get(check) !== "pass") throw new Error(`Exomem doctor semantic check missing or failed: ${check}`)
       }
-      onProgress?.({ completedIds: [...result.documentIds], failedIds: [], total: result.documentIds.length })
+      await this.prepareRetirement(service)
       await this.retireService(service)
       this.services.delete(containerTag)
       this.manifestsWritten.delete(containerTag)
+      onProgress?.({ completedIds: [...result.documentIds], failedIds: [], total: result.documentIds.length })
     } catch (error) {
       await this.failAfterCleanup(error)
     }
@@ -370,5 +349,7 @@ export class ExomemProvider implements Provider {
     this.manifestsWritten.delete(containerTag)
   }
 }
+
+export { prepareExomemRetirement } from "../_guest_transport"
 
 export default ExomemProvider

@@ -216,10 +216,15 @@ defaulting to one.  Admission SHALL be serialized across stage processes.  When
 a new container would exceed the cap, the least-recently-used live service
 SHALL first reconcile its derived state and require `graph_status` to be
 `current|refreshed`, then retire it and prove its owned process group and secure
-descriptor absent before a replacement is spawned.  Only
+descriptor absent before a replacement is spawned.
 `GRAPH_SYNC_STABILIZATION_EXHAUSTED` with `graph_status: unavailable` MAY retry
-the reconcile, with fresh attempt identities and at most three
-total attempts; every other non-current response and exhaustion of that bound
+the reconcile, with fresh attempt identities and at most three stabilization
+failures. Exact `graph_status: unavailable`, `graph_sync: pending`,
+`GRAPH_SYNC_REBUILD_IN_PROGRESS` and a valid checkpoint digest MAY wait five
+seconds before another reconciliation. The entire barrier SHALL have a
+120-second budget, cap each subprocess at the lesser of its 70-second deadline
+and remaining budget, and never launch a live out-of-process index drain.
+Every other non-current response and exhaustion of either bound
 SHALL fail admission and clear all live services.  Residency retirement MAY
 preserve the owned vault and work root needed by a later stage; terminal
 container cleanup SHALL additionally prove owned guest-process and work-root
@@ -252,7 +257,14 @@ absent
 - **WHEN** residency reconciliation returns exact
   `GRAPH_SYNC_STABILIZATION_EXHAUSTED` before a later attempt proves current
 - **THEN** the provider retries with fresh attempt identities up to three total
-  attempts, retires only after proof, and fails closed if the bound is exhausted
+  stabilization failures, retires only after proof, and fails closed if the bound is exhausted
+
+#### Scenario: A registered graph rebuild is pending at retirement
+- **WHEN** reconciliation reports the exact registered-rebuild pending state
+  with a valid checkpoint digest
+- **THEN** the provider waits and rechecks within the shared 120-second budget
+- **AND** only an observed current or refreshed graph permits retirement;
+  queued repair, malformed state and deadline exhaustion refuse admission
 
 #### Scenario: Indexing and search retire as they go
 - **WHEN** indexing completes for a container or search returns or throws
