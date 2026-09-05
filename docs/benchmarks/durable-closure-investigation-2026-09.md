@@ -41,6 +41,9 @@ observation span, but the ledger alone does not measure when the user began or
 finished. The 270.211 seconds outside server calls cannot be assigned to model
 planning, connector transit, user pauses or verification decisions without the
 client trace. These fields remain null in the reconstruction.
+Interval reconstruction also assumes a continuous UTC clock. The historical
+ledger has no paired client monotonic trace to verify that assumption; summed
+server durations do not depend on UTC continuity.
 
 Four warming refusals form two sampled refusal-to-next-success spans of 88.893
 and 12.486 seconds. They do not prove continuous outages over those intervals.
@@ -128,6 +131,32 @@ while a competing writer was refused. This is a separate amplifier from watcher
 echoes. Production lacked substage timing to assign a percentage of its long
 holds to discovery versus reindexing. Workflow instrumentation must retain scan
 counts and distinguish this remaining cost from false whole-vault recovery.
+
+## Write-burst and orchestration audit
+
+The current system already has path-level coalescing; the missing property is
+that every producer reliably reaches that incremental route.
+
+| Surface | Current mechanism and limit |
+| --- | --- |
+| Graph/full/semantic queues | One row per relative path with a revision; a completed old snapshot cannot clear a newer enqueue. Graph full-rebuild debt uses an advancing generation marker. |
+| Graph dispatch | Exact checkpoint paths and created paths can enter the incremental queue. An unreadable predecessor is tested first and can redirect known writes into full recovery. |
+| Fast-ACK component receipts | One successful fan-out is memoized across components of one batch. The memo key includes batch identity and canonical generation; this is not cross-batch coalescing. Failed fan-outs are retried. |
+| Resolver, lexical, references, embeddings | The existing fan-out owns these projections together. Embedding jobs have a durable path queue, but deferring them does not by itself avoid graph work in the same fan-out. |
+| Watcher | Events coalesce by path after admission. The publication race can nevertheless create an external epoch before that queue helps; exact publication intents address this producer-side amplification. |
+
+Thus N receipts do not necessarily imply N full scans, but N distinct successful
+receipt fan-outs remain possible. These repairs do not claim cross-batch receipt
+coalescing. Appeared-target discovery and generation-lineage recovery must remain
+visible in the workflow measurements rather than being hidden by fast ACKs.
+
+The public surface already supports multiple preservation handles, edits combined
+within one page, and observations/relations authored in an initial note. Selected
+media paths close one remaining batch gap. Independent reads can share an agent
+tool round; conflicting canonical edits still require ordering and hash guards.
+The generic dependency structure is preservation → media enqueue and note work →
+bounded final verification, with extraction convergence measured separately. No
+application-specific command or second multi-page transaction engine is added.
 
 ## Rerunning the ledger decomposition
 

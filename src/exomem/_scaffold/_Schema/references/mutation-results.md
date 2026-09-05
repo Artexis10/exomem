@@ -30,6 +30,14 @@ with the former raw result. Response detail is presentation-only: changing it
 does not change mutation identity, execute the leaf again, or alter a replayed
 terminal.
 
+A selected media process/retry request can finish without changing canonical
+bytes: it returns `state: settled`, `status: settled`, `terminal: true`, and
+`mutated: false`, with request identity and bounded `media_results`. This means
+the request has completed, not that a new content commit or extraction has
+completed. Inspect each item's state and error/remediation, and use the same
+identity for exact replay. A failed-subset retry is a new request containing
+only those failed paths.
+
 Committed observation responses retain bounded `before_hash`, `after_hash`,
 `unit_ref` and `removed_unit_ref` when their producer supplies them. Existing-page
 edits retain the exact `after_hash` of their committed bytes. These are mutation

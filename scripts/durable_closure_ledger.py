@@ -31,6 +31,8 @@ def summarize_rows(rows: list[dict]) -> dict:
     for index, row in enumerate(rows, 1):
         try:
             end = _timestamp(row["ts_utc"])
+            if type(row.get("sequence")) is not int or row["sequence"] < 1:
+                raise ValueError("invalid ledger sequence")
             total = row["total_ms"]
             if isinstance(total, bool) or not isinstance(total, (int, float)):
                 raise ValueError("invalid duration")
@@ -88,7 +90,9 @@ def summarize_rows(rows: list[dict]) -> dict:
         if row.get("error_code"):
             codes[row["error_code"]] += 1
     # Observations follow completion order, independently of overlap accounting.
-    for _start, end, _total, row in sorted(calls, key=lambda item: item[1]):
+    for _start, end, _total, row in sorted(
+        calls, key=lambda item: (item[1], item[3]["sequence"])
+    ):
         if row.get("error_code") == "RETRIEVAL_INDEX_WARMING":
             if open_span is None:
                 open_span = {"first_refusal_ms": end, "refusals": 0}
@@ -114,6 +118,8 @@ def summarize_rows(rows: list[dict]) -> dict:
         "schema_version": 1,
         "complete": not invalid,
         "public_tool_calls": len(calls),
+        "clock_basis": "UTC completion timestamps plus monotonic server durations",
+        "clock_continuity_verified": False,
         "ledger_observation_span_ms": round(wall, 3) if wall is not None else None,
         "workflow_wall_ms": None,
         "server_execution_sum_ms": round(sum(item[2] for item in calls), 3),
@@ -131,7 +137,9 @@ def summarize_rows(rows: list[dict]) -> dict:
             "The ledger measures server wrapper time. Recorded spans can nest and "
             "aggregate multiple invocations; do not add them or infer invocation percentiles. "
             "Client traces are needed for transport, model planning, pauses and "
-            "verification intent. Refusal spans are sampled observations."
+            "verification intent. Refusal spans are sampled observations. "
+            "UTC interval reconstruction assumes no wall-clock adjustment; "
+            "the ledger alone cannot verify that assumption."
         ),
         "warming_refusals": codes["RETRIEVAL_INDEX_WARMING"],
         "observed_refusal_spans": warming,

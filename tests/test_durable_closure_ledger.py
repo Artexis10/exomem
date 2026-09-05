@@ -43,6 +43,8 @@ def test_overlapping_calls_separate_summed_work_from_occupancy():
     assert report["client_gap_ms"] is None
     assert report["connector_overhead_ms"] is None
     assert report["model_planning_ms"] is None
+    assert report["clock_basis"] == "UTC completion timestamps plus monotonic server durations"
+    assert report["clock_continuity_verified"] is False
     assert "PRIVATE-PATH" not in json.dumps(report)
 
 
@@ -64,6 +66,23 @@ def test_malformed_rows_are_named_and_do_not_silently_abort_audit():
     report = module.summarize_rows([_row(1, 1, 100), {"sequence": 2}, _row(3, 3, 100)])
     assert report["public_tool_calls"] == 2
     assert report["invalid_rows"] == [{"row": 2, "reason": "invalid_call_timing"}]
+    assert report["complete"] is False
+
+
+def test_same_millisecond_completions_follow_ledger_sequence():
+    report = _module().summarize_rows([
+        _row(1, 1, 10, outcome="refused", code="RETRIEVAL_INDEX_WARMING"),
+        _row(2, 1, 100),
+    ])
+    assert report["observed_refusal_spans"] == [{
+        "elapsed_ms": 0, "refusals": 1, "closed_by_success": True,
+        "continuous_outage_proven": False,
+    }]
+
+
+def test_invalid_sequence_cannot_prove_refusal_order():
+    row = _row("bad", 1, 100)
+    report = _module().summarize_rows([row])
     assert report["complete"] is False
 
 
