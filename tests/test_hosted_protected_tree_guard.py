@@ -51,26 +51,6 @@ PRINCIPAL = (
 )
 
 
-class _ProfileConfig(HostedCellConfig):
-    """A cell whose operator has selected the epistemic profile.
-
-    Only the profile *selection* input is stubbed. Everything downstream --
-    routing, auth, coercion, admission, the command leaf -- is the real thing.
-    """
-
-    @property
-    def active_agent_profile(self) -> str:
-        return V3_PROFILE
-
-
-class _ParityProfileConfig(HostedCellConfig):
-    """The same stub for the parity profile, which alone exposes some guards."""
-
-    @property
-    def active_agent_profile(self) -> str:
-        return V4_PROFILE
-
-
 def _profile_exposing(command: str) -> str:
     """The narrowest test profile that actually routes `command`.
 
@@ -104,11 +84,7 @@ def _cell(tmp_path: Path, *, profile: str = V3_PROFILE) -> tuple[Any, HostedCell
     vault_root = tmp_path / "vault"
     init_vault(vault_root)
     _seed_user_schema_documents(vault_root)
-    factory = {
-        V3_PROFILE: _ProfileConfig,
-        V4_PROFILE: _ParityProfileConfig,
-    }.get(profile, HostedCellConfig)
-    config = factory(
+    config = HostedCellConfig(
         cell_id="cell-protected-tree",
         vault_root=vault_root,
         state_root=tmp_path / "state",
@@ -117,6 +93,7 @@ def _cell(tmp_path: Path, *, profile: str = V3_PROFILE) -> tuple[Any, HostedCell
         enforce_transfer_v1_compatibility=False,
         records_reader_version=2,
         lifecycle_actions_enabled=(profile == commands_module.HOSTED_ALPHA_AGENT_V2_PROFILE),
+        agent_profile=profile,
         resource_limits=HostedResourceLimits(
             storage_bytes=4 * 1024 * 1024, upload_bytes=4096, worker_count=0
         ),
