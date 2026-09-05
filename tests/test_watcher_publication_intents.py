@@ -176,6 +176,41 @@ def test_rollback_incomplete_replays_published_remnant_immediately(
     assert target in watcher._drain()[1]
 
 
+def test_clean_rollback_without_watcher_does_not_fence_unchanged_vault(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = vault / "Knowledge Base" / "Notes" / "clean-rollback-first.md"
+    second = vault / "Knowledge Base" / "Notes" / "clean-rollback-second.md"
+    first.parent.mkdir(parents=True, exist_ok=True)
+    first.write_text("first-old", encoding="utf-8")
+    second.write_text("second-old", encoding="utf-8")
+    real_replace = vault_module._BatchWorkspace.replace_artifact
+    publications = 0
+
+    def fail_second_publication(self, artifact, final, **kwargs):  # noqa: ANN001
+        nonlocal publications
+        if artifact.name.startswith("stage-"):
+            publications += 1
+            if publications == 3:
+                raise OSError("second publication failed")
+        return real_replace(self, artifact, final, **kwargs)
+
+    monkeypatch.setattr(vault_module._BatchWorkspace, "replace_artifact", fail_second_publication)
+
+    with pytest.raises(OSError, match="second publication failed"):
+        vault_module.batch_atomic_write(
+            [
+                vault_module.PlannedWrite(first, "first-new"),
+                vault_module.PlannedWrite(second, "second-new"),
+            ],
+            vault_root=vault,
+        )
+
+    assert first.read_text(encoding="utf-8") == "first-old"
+    assert second.read_text(encoding="utf-8") == "second-old"
+    assert freshness.external_pending(vault) is False
+
+
 def test_expired_held_intent_replays_without_another_event(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
