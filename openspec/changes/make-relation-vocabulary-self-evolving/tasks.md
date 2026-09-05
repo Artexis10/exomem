@@ -67,5 +67,5 @@
 ## 9. OpenSpec closure and delivery
 
 - [ ] 9.1 Mark tasks complete only from code, test, benchmark, review, and rendered-UI evidence; synchronize this change's delta specs into canonical specs, archive it with the OpenSpec CLI, and verify strict validation before and after archive
-- [ ] 9.2 Inspect contribution, PR-title, CI, release, and privacy rules; commit only intended scope with no private identifiers or AI attribution, integrate current `origin/main` safely in the feature worktree, and verify the completion gates still pass
+- [x] 9.2 Inspect contribution, PR-title, CI, release, and privacy rules; commit only intended scope with no private identifiers or AI attribution, integrate current `origin/main` safely in the feature worktree, and verify the completion gates still pass
 - [x] 9.3 Push the feature branch and open a ready-for-review Conventional Commit pull request containing the outcome and verification evidence; keep the worktree alive for review follow-ups and do not merge without explicit authorization
