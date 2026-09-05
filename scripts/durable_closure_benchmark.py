@@ -56,6 +56,7 @@ def _target_source_environment(server_root: Path) -> dict[str, str]:
         if not key.startswith("EXOMEM_") and key not in {"PYTHONPATH", "XDG_STATE_HOME"}
     }
     environment["PYTHONPATH"] = str(server_root / "src")
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return environment
 
 
@@ -67,7 +68,7 @@ def _command_output(command: Sequence[str], *, cwd: Path, env: Mapping[str, str]
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    return completed.stdout.strip() or None
+    return completed.stdout.strip()
 
 
 def _source_sha256(source_root: Path) -> str:
@@ -83,7 +84,7 @@ def runtime_provenance(server_root: Path, python: Path) -> dict[str, Any]:
     """Record content-free identity for the exact target runtime before timing."""
     target = validate_server_root(server_root)
     source_root = target / "src"
-    python_path = Path(python).resolve()
+    python_path = Path(python).absolute()
     environment = _target_source_environment(target)
     package_origin = _command_output(
         [str(python_path), "-c", "import exomem, pathlib; print(pathlib.Path(exomem.__file__).resolve())"],
@@ -93,15 +94,23 @@ def runtime_provenance(server_root: Path, python: Path) -> dict[str, Any]:
     expected_package = (source_root / "exomem").resolve()
     if package_origin is None or not Path(package_origin).is_relative_to(expected_package):
         raise RuntimeError("selected python did not import exomem from --server-root/src")
-    packages_output = _command_output([str(python_path), "-m", "pip", "list", "--format=json"], cwd=target, env=environment)
+    runtime_output = _command_output(
+        [
+            str(python_path),
+            "-c",
+            "import importlib.metadata as metadata, json, sys; print(json.dumps({'executable': sys.executable, 'prefix': sys.prefix, 'version': sys.version, 'packages': [{'name': dist.metadata.get('Name', ''), 'version': dist.version} for dist in metadata.distributions()]}))",
+        ],
+        cwd=target,
+        env=environment,
+    )
     try:
-        packages = json.loads(packages_output) if packages_output is not None else None
+        runtime = json.loads(runtime_output) if runtime_output is not None else None
     except json.JSONDecodeError:
-        packages = None
-    if not isinstance(packages, list):
+        runtime = None
+    if not isinstance(runtime, Mapping) or not isinstance(runtime.get("packages"), list):
         raise RuntimeError("selected python did not provide a package inventory")
     package_inventory = sorted(
-        [{"name": str(item.get("name") or ""), "version": str(item.get("version") or "")} for item in packages if isinstance(item, Mapping)],
+        [{"name": str(item.get("name") or ""), "version": str(item.get("version") or "")} for item in runtime["packages"] if isinstance(item, Mapping)],
         key=lambda item: item["name"].lower(),
     )
     status = _command_output(["git", "status", "--porcelain"], cwd=target)
@@ -118,7 +127,10 @@ def runtime_provenance(server_root: Path, python: Path) -> dict[str, Any]:
         },
         "python": {
             "executable": str(python_path),
-            "version": _command_output([str(python_path), "--version"], cwd=target, env=environment),
+            "invocation": str(python_path),
+            "runtime_executable": str(runtime.get("executable") or ""),
+            "prefix": str(runtime.get("prefix") or ""),
+            "version": str(runtime.get("version") or ""),
             "packages": package_inventory,
         },
     }

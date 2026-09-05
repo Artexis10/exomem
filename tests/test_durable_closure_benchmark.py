@@ -603,7 +603,7 @@ def test_server_root_selects_actual_subprocess_package_and_changes_source_identi
     assert baseline["source"]["package_origin"] == str((roots[0] / "src" / "exomem" / "__init__.py").resolve())
     assert candidate["source"]["package_origin"] == str((roots[1] / "src" / "exomem" / "__init__.py").resolve())
     assert baseline["source"]["sha256"] != candidate["source"]["sha256"]
-    assert baseline["python"]["executable"] == str(Path(sys.executable).resolve())
+    assert baseline["python"]["executable"] == str(Path(sys.executable).absolute())
     assert isinstance(baseline["python"]["packages"], list)
 
 
@@ -618,6 +618,44 @@ def test_server_root_default_remains_current_tree_and_invalid_root_fails(tmp_pat
         assert "src/exomem" in str(error)
     else:
         raise AssertionError("a runner root without src/exomem must fail before benchmark setup")
+
+
+def test_runtime_provenance_keeps_the_supplied_venv_launcher_and_its_runtime_identity(tmp_path: Path) -> None:
+    venv = tmp_path / "runner-venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
+    runner = venv / "bin" / "python"
+    direct = subprocess.run(
+        [str(runner), "-c", "import json, sys; print(json.dumps({'executable': sys.executable, 'prefix': sys.prefix}))"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    runtime = json.loads(direct.stdout)
+
+    provenance = benchmark.runtime_provenance(benchmark.ROOT, runner)
+
+    assert provenance["python"]["invocation"] == str(runner)
+    assert provenance["python"]["runtime_executable"] == runtime["executable"]
+    assert provenance["python"]["prefix"] == runtime["prefix"] == str(venv)
+    assert isinstance(provenance["python"]["packages"], list)
+
+
+def test_runtime_provenance_distinguishes_clean_git_from_unavailable_git(tmp_path: Path) -> None:
+    clean_root = tmp_path / "clean"
+    (clean_root / "src" / "exomem").mkdir(parents=True)
+    (clean_root / "src" / "exomem" / "__init__.py").write_text("", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(clean_root)], check=True)
+    subprocess.run(["git", "-C", str(clean_root), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(clean_root), "-c", "user.name=benchmark", "-c", "user.email=benchmark@example.test", "commit", "-qm", "fixture"],
+        check=True,
+    )
+
+    assert benchmark.runtime_provenance(clean_root, Path(sys.executable))["git"]["dirty"] is False
+    non_git_root = tmp_path / "non-git"
+    (non_git_root / "src" / "exomem").mkdir(parents=True)
+    (non_git_root / "src" / "exomem" / "__init__.py").write_text("", encoding="utf-8")
+    assert benchmark.runtime_provenance(non_git_root, Path(sys.executable))["git"]["dirty"] is None
 
 
 def test_small_model_free_smoke_uses_one_registered_stdio_product_session(
