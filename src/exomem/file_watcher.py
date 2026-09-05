@@ -31,11 +31,15 @@ registry is opportunistic: a missed registration merely costs the old harmless e
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
+import stat
 import threading
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import freshness, index_sync, media_processing, mode, semantic_writes
@@ -145,6 +149,26 @@ _SUPPRESS_LOCK = threading.Lock()
 _SELF_UPSERTS: dict[tuple[str, str], tuple[int, int, float]] = {}
 # (root, rel) -> monotonic deadline
 _SELF_DELETES: dict[tuple[str, str], float] = {}
+PUBLICATION_INTENT_TTL_SECONDS = UPSERT_SUPPRESS_TTL_SECONDS
+PUBLICATION_INTENT_MAX_BYTES = 4 * 1024 * 1024
+
+
+@dataclass(slots=True, eq=False)
+class _PublicationIntent:
+    key: tuple[str, str]
+    content_hash: str
+    size: int
+    deadline: float
+    disposition: str = "active"
+    inflight: int = 0
+    observers: list[Callable[[_PublicationIntent, str], None]] = field(
+        default_factory=list
+    )
+
+
+# Kept through the normal suppression window after finalization so a hash that
+# started before commit completion still resolves against the same token.
+_PUBLICATION_INTENTS: dict[tuple[str, str], _PublicationIntent] = {}
 
 
 def _canon_root(vault_root: Path) -> str:
@@ -165,11 +189,217 @@ def _rel_posix(vault_root: Path, path: Path) -> str | None:
             return None
 
 
+def _publication_key(vault_root: Path, path: Path) -> tuple[str, str] | None:
+    rel = _rel_posix(vault_root, path)
+    if rel is None:
+        return None
+    return _canon_root(vault_root), rel
+
+
+def _notify_publication_observers(
+    observers: Iterable[Callable[[_PublicationIntent, str], None]],
+    intent: _PublicationIntent,
+    disposition: str,
+) -> None:
+    for observer in observers:
+        try:
+            observer(intent, disposition)
+        except Exception:  # noqa: BLE001 - watcher custody must not block writers
+            log.debug("publication intent observer failed", exc_info=True)
+
+
+def _expire_publication_intent_locked(
+    intent: _PublicationIntent, now: float
+) -> list[Callable[[_PublicationIntent, str], None]]:
+    if intent.disposition == "active" and intent.deadline <= now:
+        intent.disposition = "expired"
+        return list(intent.observers)
+    return []
+
+
+def _bounded_descriptor_digest(path: Path, expected_size: int) -> tuple[str, int, int] | None:
+    """Read one stable, bounded regular-file descriptor without registry locks."""
+    if expected_size < 0 or expected_size > PUBLICATION_INTENT_MAX_BYTES:
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size != expected_size:
+            return None
+        digest = hashlib.sha256()
+        remaining = expected_size
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                return None
+            digest.update(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        try:
+            current = os.stat(path, follow_symlinks=False)
+        except OSError:
+            return None
+        if (
+            after.st_size != expected_size
+            or before.st_dev != after.st_dev
+            or before.st_ino != after.st_ino
+            or before.st_dev != current.st_dev
+            or before.st_ino != current.st_ino
+            or after.st_mtime_ns != current.st_mtime_ns
+        ):
+            return None
+        return digest.hexdigest(), after.st_mtime_ns, after.st_size
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def register_publication_intents(
+    vault_root: Path, artifacts: Iterable[tuple[Path, int, str]]
+) -> tuple[_PublicationIntent, ...]:
+    """Reserve bounded raw-byte proof tokens before canonical replacement."""
+    candidates: list[tuple[tuple[str, str], str, int]] = []
+    for path, descriptor, digest in artifacts:
+        path = Path(path)
+        if path.suffix.lower() != ".md" or len(digest) != 64:
+            continue
+        key = _publication_key(vault_root, path)
+        if key is None:
+            continue
+        try:
+            info = os.fstat(descriptor)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_size > PUBLICATION_INTENT_MAX_BYTES:
+            continue
+        candidates.append((key, digest, info.st_size))
+    now = time.monotonic()
+    notifications: list[tuple[_PublicationIntent, list[Callable[[_PublicationIntent, str], None]]]] = []
+    registered: list[_PublicationIntent] = []
+    with _SUPPRESS_LOCK:
+        _prune_locked(now)
+        for key, digest, size in candidates:
+            existing = _PUBLICATION_INTENTS.get(key)
+            if existing is not None:
+                expired = _expire_publication_intent_locked(existing, now)
+                if expired:
+                    notifications.append((existing, expired))
+            if (
+                existing is not None and existing.disposition == "active"
+            ) or len(_PUBLICATION_INTENTS) >= _SUPPRESS_MAX_ENTRIES:
+                continue
+            intent = _PublicationIntent(
+                key=key,
+                content_hash=digest,
+                size=size,
+                deadline=now + PUBLICATION_INTENT_TTL_SECONDS,
+            )
+            _PUBLICATION_INTENTS[key] = intent
+            registered.append(intent)
+    for intent, observers in notifications:
+        _notify_publication_observers(observers, intent, intent.disposition)
+    return tuple(registered)
+
+
+def _observe_publication_intent(
+    vault_root: Path,
+    path: Path,
+    *,
+    observer: Callable[[_PublicationIntent, str], None] | None = None,
+) -> tuple[str, _PublicationIntent | None]:
+    """Classify one event without holding the registry lock across file I/O."""
+    key = _publication_key(vault_root, path)
+    if key is None:
+        return "external", None
+    now = time.monotonic()
+    notifications: list[Callable[[_PublicationIntent, str], None]] = []
+    with _SUPPRESS_LOCK:
+        intent = _PUBLICATION_INTENTS.get(key)
+        if intent is None:
+            return "external", None
+        notifications = _expire_publication_intent_locked(intent, now)
+        intent.inflight += 1
+        if observer is not None:
+            intent.observers.append(observer)
+    if notifications:
+        _notify_publication_observers(notifications, intent, intent.disposition)
+    proof = _bounded_descriptor_digest(path, intent.size)
+    notifications = []
+    with _SUPPRESS_LOCK:
+        intent.inflight -= 1
+        notifications = _expire_publication_intent_locked(intent, time.monotonic())
+        disposition = intent.disposition
+    if notifications:
+        _notify_publication_observers(notifications, intent, disposition)
+    if proof is None or proof[0] != intent.content_hash:
+        return "external", intent
+    if disposition == "active":
+        return "held", intent
+    if disposition == "succeeded":
+        return "suppressed", intent
+    return "external", intent
+
+
+def _publication_intent_disposition(intent: _PublicationIntent) -> str:
+    notifications: list[Callable[[_PublicationIntent, str], None]] = []
+    with _SUPPRESS_LOCK:
+        notifications = _expire_publication_intent_locked(intent, time.monotonic())
+        disposition = intent.disposition
+    if notifications:
+        _notify_publication_observers(notifications, intent, disposition)
+    return disposition
+
+
+def publication_intent_deadline(intent: _PublicationIntent) -> float | None:
+    with _SUPPRESS_LOCK:
+        if intent.disposition != "active":
+            return None
+        return intent.deadline
+
+
+def finalize_publication_intents(
+    intents: Iterable[_PublicationIntent],
+    *,
+    succeeded: Iterable[_PublicationIntent] | None = (),
+) -> None:
+    """Set terminal token disposition and immediately replay held failures."""
+    succeeded_set = set(succeeded or ())
+    notifications: list[tuple[_PublicationIntent, list[Callable[[_PublicationIntent, str], None]]]] = []
+    with _SUPPRESS_LOCK:
+        for intent in intents:
+            if _PUBLICATION_INTENTS.get(intent.key) is not intent:
+                continue
+            if intent.disposition != "active":
+                continue
+            intent.disposition = "succeeded" if intent in succeeded_set else "aborted"
+            if intent.disposition != "succeeded":
+                _SELF_UPSERTS.pop(intent.key, None)
+            notifications.append((intent, list(intent.observers)))
+    for intent, observers in notifications:
+        _notify_publication_observers(observers, intent, intent.disposition)
+
+
+def abort_publication_intents(intents: Iterable[_PublicationIntent]) -> None:
+    finalize_publication_intents(intents)
+
+
 def _prune_locked(now: float) -> None:
     for k in [k for k, v in _SELF_UPSERTS.items() if v[2] <= now]:
         _SELF_UPSERTS.pop(k, None)
     for k in [k for k, v in _SELF_DELETES.items() if v <= now]:
         _SELF_DELETES.pop(k, None)
+    for key, intent in list(_PUBLICATION_INTENTS.items()):
+        if (
+            intent.disposition != "active"
+            and intent.inflight == 0
+            and intent.deadline <= now
+        ):
+            _PUBLICATION_INTENTS.pop(key, None)
     if len(_SELF_UPSERTS) > _SUPPRESS_MAX_ENTRIES:
         for k in sorted(_SELF_UPSERTS, key=lambda k: _SELF_UPSERTS[k][2])[
             : len(_SELF_UPSERTS) - _SUPPRESS_MAX_ENTRIES
@@ -216,33 +446,62 @@ def _publish_registry_change(
         log.debug("self-write resolver publish failed", exc_info=True)
 
 
-def register_self_write(vault_root: Path, paths: Iterable[Path]) -> None:
+def register_self_write(vault_root: Path, paths: Iterable[Path]) -> set[_PublicationIntent]:
     """Record server-authored markdown replacements so their watcher echo is
     dropped. Best-effort: unreadable/gone files are skipped (they simply won't
     be suppressed). Also publishes the change to the freshness/inbound
     registries, since the suppressed watcher echo won't."""
     paths = list(paths)
-    root = _canon_root(vault_root)
     now = time.monotonic()
-    with _SUPPRESS_LOCK:
-        for p in paths:
-            p = Path(p)
-            if p.suffix.lower() != ".md":
+    signatures: list[tuple[tuple[str, str], int, int, _PublicationIntent | None]] = []
+    notifications: list[tuple[_PublicationIntent, list[Callable[[_PublicationIntent, str], None]]]] = []
+    for p in paths:
+        p = Path(p)
+        if p.suffix.lower() != ".md":
+            continue
+        key = _publication_key(vault_root, p)
+        if key is None:
+            continue
+        with _SUPPRESS_LOCK:
+            intent = _PUBLICATION_INTENTS.get(key)
+            if intent is not None:
+                expired = _expire_publication_intent_locked(intent, now)
+                if expired:
+                    notifications.append((intent, expired))
+        if intent is not None:
+            proof = _bounded_descriptor_digest(p, intent.size)
+            if proof is None or proof[0] != intent.content_hash:
+                # A foreign replacement after the final writer guard is never
+                # admitted by a same-size/stat suppression signature.
                 continue
-            rel = _rel_posix(vault_root, p)
-            if rel is None:
-                continue
+            _digest, mtime_ns, size = proof
+        else:
             try:
-                st = p.stat()
+                info = p.stat()
             except OSError:
                 continue
-            _SELF_UPSERTS[(root, rel)] = (
-                st.st_mtime_ns,
-                st.st_size,
+            mtime_ns, size = info.st_mtime_ns, info.st_size
+        signatures.append((key, mtime_ns, size, intent))
+    for intent, observers in notifications:
+        _notify_publication_observers(observers, intent, intent.disposition)
+    registered: set[_PublicationIntent] = set()
+    with _SUPPRESS_LOCK:
+        for key, mtime_ns, size, intent in signatures:
+            if intent is not None and (
+                _PUBLICATION_INTENTS.get(key) is not intent
+                or intent.disposition != "active"
+            ):
+                continue
+            _SELF_UPSERTS[key] = (
+                mtime_ns,
+                size,
                 now + UPSERT_SUPPRESS_TTL_SECONDS,
             )
+            if intent is not None:
+                registered.add(intent)
         _prune_locked(now)
     _publish_registry_change(vault_root, changed=paths, deleted_rels=[])
+    return registered
 
 
 def register_self_delete(vault_root: Path, rel_paths: Iterable[str]) -> None:
@@ -297,6 +556,7 @@ def clear_self_write_registry() -> None:
     with _SUPPRESS_LOCK:
         _SELF_UPSERTS.clear()
         _SELF_DELETES.clear()
+        _PUBLICATION_INTENTS.clear()
 
 
 def _import_watchdog():
@@ -364,6 +624,7 @@ class FileWatcher:
         self._pending_upsert: set[Path] = set()
         self._pending_delete: set[Path] = set()
         self._pending_media: set[Path] = set()
+        self._pending_publication_intents: dict[Path, _PublicationIntent] = {}
         self._pending_external_epoch = 0
         self._pending_access_policy = False
         self._last_change = 0.0
@@ -405,6 +666,71 @@ class FileWatcher:
 
     # ---- change recording (called by the watchdog handler AND by tests) ----
 
+    def _record_external_locked(self, path: Path, *, deleted: bool) -> None:
+        if deleted:
+            self._pending_upsert.discard(path)
+            self._pending_delete.add(path)
+        else:
+            self._pending_delete.discard(path)
+            self._pending_upsert.add(path)
+        self._pending_external_epoch = max(
+            self._pending_external_epoch,
+            freshness.mark_external_pending(self._vault_root),
+        )
+        self._last_change = time.monotonic()
+
+    def _publication_intent_finalized(
+        self, path: Path, intent: _PublicationIntent, disposition: str
+    ) -> None:
+        """Resolve a held observation as soon as its transaction closes."""
+        with self._lock:
+            if self._pending_publication_intents.get(path) is not intent:
+                return
+            self._pending_publication_intents.pop(path, None)
+            if disposition != "succeeded":
+                self._record_external_locked(path, deleted=False)
+        self._wake.set()
+
+    def _hold_publication_intent(self, path: Path, intent: _PublicationIntent) -> None:
+        with self._lock:
+            self._pending_publication_intents[path] = intent
+            self._last_change = time.monotonic()
+        # The transaction can close between token observation and watcher
+        # custody. Rechecking its retained disposition closes that tiny race.
+        disposition = _publication_intent_disposition(intent)
+        if disposition != "active":
+            self._publication_intent_finalized(path, intent, disposition)
+        else:
+            self._wake.set()
+
+    def _resolve_held_publication_intents(self) -> None:
+        with self._lock:
+            held = list(self._pending_publication_intents.items())
+        for path, intent in held:
+            disposition, observed = _observe_publication_intent(
+                self._vault_root, path
+            )
+            if observed is not intent:
+                disposition = "external"
+            if disposition != "held":
+                self._publication_intent_finalized(
+                    path,
+                    intent,
+                    "succeeded" if disposition == "suppressed" else "aborted",
+                )
+
+    def _held_publication_intent_timeout(self) -> float | None:
+        with self._lock:
+            intents = tuple(self._pending_publication_intents.values())
+        deadlines = [
+            deadline
+            for intent in intents
+            if (deadline := publication_intent_deadline(intent)) is not None
+        ]
+        if not deadlines:
+            return None
+        return max(0.0, min(deadlines) - time.monotonic())
+
     def _record(self, path: Path, *, deleted: bool) -> None:
         """Record a Markdown or supported-media change, coalesced by path."""
         from .vault import in_excluded_scan_dir
@@ -436,22 +762,25 @@ class FileWatcher:
                 self._last_change = time.monotonic()
             self._wake.set()
             return
+        if not deleted:
+            disposition, intent = _observe_publication_intent(
+                self._vault_root,
+                path,
+                observer=lambda token, state: self._publication_intent_finalized(
+                    path, token, state
+                ),
+            )
+            if disposition == "suppressed":
+                log.debug("file watcher: suppressed completed publication intent for %s", path)
+                return
+            if disposition == "held" and intent is not None:
+                self._hold_publication_intent(path, intent)
+                return
         if _is_self_write_event(self._vault_root, path, deleted=deleted):
             log.debug("file watcher: suppressed self-write echo for %s", path)
             return
         with self._lock:
-            if deleted:
-                self._pending_upsert.discard(path)
-                self._pending_delete.add(path)
-            else:
-                # A re-create after a delete in the same window is a modify.
-                self._pending_delete.discard(path)
-                self._pending_upsert.add(path)
-            self._pending_external_epoch = max(
-                self._pending_external_epoch,
-                freshness.mark_external_pending(self._vault_root),
-            )
-            self._last_change = time.monotonic()
+            self._record_external_locked(path, deleted=deleted)
         self._wake.set()
 
     def _rel(self, path: Path) -> str | None:
@@ -482,6 +811,7 @@ class FileWatcher:
     def _flush(self) -> None:
         """Dispatch the coalesced batch: publish freshness/inbound for every
         changed path (vault-wide), and re-embed only the Knowledge Base subset."""
+        self._resolve_held_publication_intents()
         media, ups, del_rels, pending_epoch, access_policy = self._drain()
         if access_policy:
             self._reconcile_access_policy(pending_epoch)
@@ -545,7 +875,7 @@ class FileWatcher:
                 finally:
                     self._seed_complete.set()
         while not self._stop.is_set():
-            self._wake.wait()
+            self._wake.wait(timeout=self._held_publication_intent_timeout())
             if self._stop.is_set():
                 break
             # Wait for a quiet window so a burst of saves (or a git pull) coalesces
