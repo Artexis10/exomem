@@ -1,7 +1,8 @@
 ---
 name: exomem-reflect
 description: Distill a session or project episode into decisions, failures, patterns, open questions, and next actions.
-version: 0.1.0
+metadata:
+  version: "0.1.0"
 ---
 
 # exomem-reflect
@@ -12,12 +13,32 @@ Convert experience into reusable memory.
 ## When to use
 Use when the user asks what was learned, asks to reflect, closes a project episode, or wants patterns extracted from a session.
 
+## Portable operating rules
+
+Before the first operation, obtain `bootstrap(profile="compact")` if current
+policy or capabilities are missing; honor `engagement.envelope` and
+`available_product_tools`. Use the harness's supported discovery mechanism and
+load only the tools needed now. If neither the applicable local procedure nor
+the portable operating contract is available, do not improvise a write.
+
+Sources/Evidence are immutable, and content outside the managed Knowledge Base
+is read-only. Before a compiled write: search/read for duplicates, draft, run
+`connect_memory(operation="suggest-links")`, and include known source references
+and reviewed connections in the first write. Honor the live confirmation ceiling;
+a workflow or standing capture preference does not grant restructure authority.
+
+Inspect mutation results before reporting success. On `success: false`, follow
+the structured error. For warming, busy, pending, or
+`MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, preserve the same mutation identity
+and unchanged payload; wait/reconcile/retry only as instructed, never with a new
+identity after an uncertain commit.
+
 ## Workflow
 1. Search Exomem with `ask_memory` for the project/topic so reflection builds on existing memory.
 2. Extract durable decisions, solved problems, diagnosed failures, reusable patterns, open questions, and next actions.
-3. Save each durable conclusion with `remember` at the right type: `insight`, `failure`, `pattern`, or `research-note`. Cite the session capture or prior notes it draws on in `sources:`.
+3. Draft each durable conclusion at the right type: `insight`, `failure`, `pattern`, or `research-note`. Cite the session capture or prior notes it draws on in `sources:`.
 4. Prefer one strong note over many weak notes unless the conclusions are genuinely different.
-5. Link the pages you already read in step 1 inline, using `connect_memory(operation="suggest-links")` to catch the ones you missed; write the edges that carry direction under `## Relations`.
+5. Link the pages you already read in step 1 inline, using `connect_memory(operation="suggest-links")` to catch the ones you missed; draft the edges that carry direction under `## Relations`. Then save with `remember`, carrying the sources and accepted links in the first write.
 
 ## Output contract
 Return what was saved, what was intentionally not saved, and remaining open questions.

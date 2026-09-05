@@ -1,7 +1,8 @@
 ---
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
-version: 0.1.0
+metadata:
+  version: "0.1.0"
 ---
 
 # exomem-capture
@@ -12,6 +13,26 @@ Save durable conclusions and recurring entities at the right epistemic layer.
 ## When to use
 Use when the user asks to save or the session lands on durable reusable knowledge, including stable context about a recurring entity.
 
+## Portable operating rules
+
+Before the first operation, obtain `bootstrap(profile="compact")` if current
+policy or capabilities are missing; honor `engagement.envelope` and
+`available_product_tools`. Use the harness's supported discovery mechanism and
+load only the tools needed now. If neither the applicable local procedure nor
+the portable operating contract is available, do not improvise a write.
+
+Sources/Evidence are immutable, and content outside the managed Knowledge Base
+is read-only. Before a compiled write: search/read for duplicates, draft, run
+`connect_memory(operation="suggest-links")`, and include known source references
+and reviewed connections in the first write. Honor the live confirmation ceiling;
+a workflow or standing capture preference does not grant restructure authority.
+
+Inspect mutation results before reporting success. On `success: false`, follow
+the structured error. For warming, busy, pending, or
+`MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, preserve the same mutation identity
+and unchanged payload; wait/reconcile/retry only as instructed, never with a new
+identity after an uncertain commit.
+
 ## Workflow
 1. Decide whether the material is raw evidence or a compiled conclusion.
 2. Use `capture_source` for raw captured text or source material. Classify it on
@@ -19,9 +40,10 @@ Use when the user asks to save or the session lands on durable reusable knowledg
    is about), plus `projects` for the work it serves. Use `other` only when the
    kind genuinely cannot be determined, never because no familiar label matches.
 3. Pick the lane before the transport. Raw material stays with `capture_source`, which takes `files` for attachments as well as `content` for text. Proof-bearing material takes `preserve_evidence` for factual text, `preserve_artifacts` when file handles are available, and `transfer_artifact` only as the binary-upload fallback.
-4. Use `remember` for distilled conclusions: `research-note`, `insight`, `failure`, or `pattern`. Pass any path captured in steps 2-3 as `sources:` so the conclusion links to its provenance and the source leaves the unprocessed queue.
-5. Run `connect_memory(operation="suggest-links")` before writing compiled notes;
-   prefer `edit_memory` or `replace_memory` for near-duplicates.
+4. Draft distilled conclusions as: `research-note`, `insight`, `failure`, or `pattern`. Pass any path captured in steps 2-3 as `sources:` so the conclusion links to its provenance and the source leaves the unprocessed queue.
+5. Run `connect_memory(operation="suggest-links")` on the draft. Then write with
+   `remember`, carrying the sources and accepted links in the first write; prefer
+   `edit_memory` or `replace_memory` for near-duplicates.
 6. For an entity, consult the active entity registry and selected knowledge packs,
    then call `connect_memory(operation="resolve-entity", name=...)` before writing.
 7. When one active entity matches, use `edit_memory` for a small stable-fact

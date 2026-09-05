@@ -1,7 +1,8 @@
 ---
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
-version: 0.1.0
+metadata:
+  version: "0.1.0"
 ---
 
 # exomem-ingest
@@ -12,6 +13,26 @@ Turn external artifacts into preserved evidence plus useful compiled memory.
 ## When to use
 Use when the user asks to ingest, add, import, process, or preserve an external source or artifact.
 
+## Portable operating rules
+
+Before the first operation, obtain `bootstrap(profile="compact")` if current
+policy or capabilities are missing; honor `engagement.envelope` and
+`available_product_tools`. Use the harness's supported discovery mechanism and
+load only the tools needed now. If neither the applicable local procedure nor
+the portable operating contract is available, do not improvise a write.
+
+Sources/Evidence are immutable, and content outside the managed Knowledge Base
+is read-only. Before a compiled write: search/read for duplicates, draft, run
+`connect_memory(operation="suggest-links")`, and include known source references
+and reviewed connections in the first write. Honor the live confirmation ceiling;
+a workflow or standing capture preference does not grant restructure authority.
+
+Inspect mutation results before reporting success. On `success: false`, follow
+the structured error. For warming, busy, pending, or
+`MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, preserve the same mutation identity
+and unchanged payload; wait/reconcile/retry only as instructed, never with a new
+identity after an uncertain commit.
+
 ## Workflow
 1. Identify the artifact type: text, article, PDF, dataset, image, audio, video, or mixed media.
 2. Preserve the raw source first with `capture_source` — `content` for text, `files` for an attached transcript, article, or screenshot. Reach for `preserve_evidence`, `preserve_artifacts`, or the `transfer_artifact` fallback only when the artifact is proof-bearing rather than raw material.
@@ -19,8 +40,8 @@ Use when the user asks to ingest, add, import, process, or preserve an external 
    vocabularies, so name the label that fits even if it is unfamiliar, and keep
    `other` for material you genuinely cannot classify.
 3. Media processing is automatic; use `process_media` for immediate reconciliation, actionable status, or retry, then inspect via `read_media`, extracted text/OCR/transcripts, or media-aware `ask_memory`.
-4. If the source is worth distilling, use `compile_source` for planning and `remember` for the compiled note — passing the path preserved in step 2 as `sources:`. That is what links the note back to the raw artifact and marks the source processed; omit it and the source stays in the unprocessed backlog forever.
-5. Link related prior notes with `connect_memory(operation="suggest-links")`.
+4. If the source is worth distilling, use `compile_source` to plan and draft the compiled note — including the path preserved in step 2 as `sources:`. That is what links the note back to the raw artifact and marks the source processed; omit it and the source stays in the unprocessed backlog forever.
+5. Run `connect_memory(operation="suggest-links")` on the draft and review the connections. Then write with `remember`, carrying the sources and accepted links in this first write.
 
 ## Output contract
 Report the stored source/evidence path, any compiled note path, and what remains unprocessed.
