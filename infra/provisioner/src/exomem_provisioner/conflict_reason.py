@@ -129,6 +129,7 @@ class ConflictReason(StrEnum):
     )
     AUTHORIZATION_BUNDLE_DOCUMENT_INVALID = "authorization-bundle-document-invalid"
     AUTHORIZATION_CONTROL_IS_INVALID = "authorization-control-is-invalid"
+    AUTHORIZATION_SESSION_EXPIRED_ON_SERVING_CELL = "authorization-session-expired-on-serving-cell"
     AUTHORIZATION_DRAIN_ACKNOWLEDGEMENT_IS_INCOMPLETE = (
         "authorization-drain-acknowledgement-is-incomplete"
     )
