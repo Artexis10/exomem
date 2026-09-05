@@ -2,6 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
+  skill_contract: a4a7b34c81cd8f718ec52d5efe6b07a71c5461aed4f5eaef743624fa50aaff69
   version: "0.32.0"
 ---
 
@@ -28,12 +29,16 @@ Claude Code can use `ToolSearch("select:ask_memory")` for a lookup, then discove
 or directly call already exposed tools; `select:` is not a portable requirement.
 Do not preload the mutation/media catalogue for recall.
 
-Use `bootstrap(profile="compact")` once when this session lacks the current
-`engagement` (including `envelope`) or active capability information. Reuse it
-until policy, connection, or adapter changes. The static skill cannot tell you a
-user's current overrides. Generic MCP clients without this skill obtain their
-portable operating contract from bootstrap. Use `profile="diagnostics"` only
-when investigating compute, timing, reranking, or retrieval configuration.
+Use `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` once
+when this session lacks the current `engagement` (including `envelope`) or active
+capability information. Reuse it until policy, connection, adapter, or returned
+vault configuration/registry state changes. Inspect the exposed bootstrap schema: if it lacks
+`skill_contract`, request `bootstrap(profile="compact")` directly. Otherwise request session;
+if the server rejects the session profile or argument, request compact once. The static skill
+cannot tell you a user's current overrides. Generic MCP clients without this skill
+obtain their portable operating contract from compact bootstrap. Use
+`profile="diagnostics"` only when investigating compute, timing, reranking, or
+retrieval configuration.
 Never recommend an unavailable command: `available_product_tools` belongs to the
 active adapter, identified by `active_capabilities.active_capability_sha256`;
 the canonical MCP discovery fingerprint describes a different, full surface.
@@ -66,11 +71,7 @@ The table above also works when the current package is the only installed skill.
 
 ## Portable operating rules
 
-Before the first operation, obtain `bootstrap(profile="compact")` if current
-policy or capabilities are missing; honor `engagement.envelope` and
-`available_product_tools`. Use the harness's supported discovery mechanism and
-load only the tools needed now. If neither the applicable local procedure nor
-the portable operating contract is available, do not improvise a write.
+Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Sources/Evidence are immutable, and content outside the managed Knowledge Base
 is read-only. Before a compiled write: search/read for duplicates, draft, run

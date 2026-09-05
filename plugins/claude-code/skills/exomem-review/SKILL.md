@@ -2,6 +2,7 @@
 name: exomem-review
 description: Use Exomem's Epistemic Inbox and audit queues to surface stale conclusions, contradictions, relation debt, and unprocessed sources safely.
 metadata:
+  skill_contract: a4a7b34c81cd8f718ec52d5efe6b07a71c5461aed4f5eaef743624fa50aaff69
   version: "0.2.0"
 ---
 
@@ -16,11 +17,7 @@ or inspect stale, contradictory, disconnected, or unprocessed material.
 
 ## Portable operating rules
 
-Before the first operation, obtain `bootstrap(profile="compact")` if current
-policy or capabilities are missing; honor `engagement.envelope` and
-`available_product_tools`. Use the harness's supported discovery mechanism and
-load only the tools needed now. If neither the applicable local procedure nor
-the portable operating contract is available, do not improvise a write.
+Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Sources/Evidence are immutable, and content outside the managed Knowledge Base
 is read-only. Before a compiled write: search/read for duplicates, draft, run

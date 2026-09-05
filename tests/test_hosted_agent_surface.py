@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import command_surface, commands
+from exomem import command_surface, commands, workflow_skills
 from exomem import hosted_gateway as gateway
 from exomem.capabilities import active_surface
 
@@ -302,7 +302,7 @@ def test_agent_contract_rejects_unknown_profile_with_stable_error() -> None:
     assert error.value.code == "HOSTED_SURFACE_PROFILE_UNSUPPORTED"
 
 
-@pytest.mark.parametrize("bootstrap_profile", ["compact", "full", "diagnostics"])
+@pytest.mark.parametrize("bootstrap_profile", ["compact", "full", "diagnostics", "session"])
 def test_agent_bootstrap_advertises_only_the_active_profile(
     tmp_path: Path,
     bootstrap_profile: str,
@@ -310,14 +310,25 @@ def test_agent_bootstrap_advertises_only_the_active_profile(
     descriptor = gateway.hosted_agent_surface_descriptor(ALPHA_PROFILE)
 
     with active_surface(descriptor):
-        payload = commands.op_bootstrap(tmp_path, profile=bootstrap_profile)
+        payload = commands.op_bootstrap(
+            tmp_path,
+            profile=bootstrap_profile,
+            **(
+                {"skill_contract": workflow_skills.skill_contract()}
+                if bootstrap_profile == "session"
+                else {}
+            ),
+        )
 
     assert payload["active_capabilities"] == descriptor.as_metadata()
     serialized = json.dumps(payload, ensure_ascii=False)
     assert all(name not in serialized for name in FORBIDDEN_COMMANDS)
-    for action in ("ask", "remember", "capture", "review", "connect"):
-        route = payload["simple_actions"][action]["route"]
-        assert route["tool"] in descriptor.callable_commands
-    for action in ("adopt", "maintain"):
-        assert payload["simple_actions"][action]["available"] is False
-        assert "route" not in payload["simple_actions"][action]
+    if bootstrap_profile == "session":
+        assert "simple_actions" not in payload
+    else:
+        for action in ("ask", "remember", "capture", "review", "connect"):
+            route = payload["simple_actions"][action]["route"]
+            assert route["tool"] in descriptor.callable_commands
+        for action in ("adopt", "maintain"):
+            assert payload["simple_actions"][action]["available"] is False
+            assert "route" not in payload["simple_actions"][action]
