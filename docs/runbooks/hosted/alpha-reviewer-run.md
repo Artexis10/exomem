@@ -122,8 +122,14 @@ tool discovery and authorization too. A refusal leaves reads working.
 
 ## Cost of a failed attempt
 
-`reset` reclaims the tenant. The invite, the alias, the staged release and an
-operator OAuth client slot are spent per attempt and never returned; client
-slots are bounded at 96. Nothing in this runbook is irreversible — the
-irreversible step was `run` — so a bad step inside the cell costs nothing.
-Stop and diagnose rather than re-running the bootstrap.
+Run `reset` against the failed attempt's `--state-dir`. It reclaims the tenant,
+revokes the internal canary credential and fails the leftover staged release.
+The canary is the one that matters most: it carries a 24-hour life and blocks
+every retry until it is revoked or expires, so skipping `reset` costs a day
+rather than a slot.
+
+The invite, the email alias and an operator OAuth client slot are spent per
+attempt and never returned; client slots are bounded at 96. Nothing in this
+runbook is irreversible — the irreversible step was `run` — so a bad step
+inside the cell costs nothing. Stop and diagnose rather than re-running the
+bootstrap.
