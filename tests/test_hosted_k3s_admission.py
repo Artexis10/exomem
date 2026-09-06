@@ -1402,6 +1402,58 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     ] == ["authorization-session-custody"]
     assert _server_dry_run(k3s, serving_pod).returncode == 0
 
+    # A selected agent profile is a platform decision: the chart writes it to the
+    # namespace annotation and the pod may only echo that exact value. The policy
+    # pins an exact env count, so it has to admit both arities -- 28 without a
+    # selection, 29 with one -- and every disagreement between the two halves has
+    # to be refused. Adding the variable to the chart without this cost a real
+    # provision on 2026-09-06: the cell reached a completed init job and a bound
+    # volume, then its serving pod was denied.
+    def _with_profile(value: str, name: str) -> dict[str, Any]:
+        selected = copy.deepcopy(serving_pod)
+        selected["metadata"]["name"] = name
+        selected["spec"]["containers"][0]["env"].append(
+            {"name": "EXOMEM_HOSTED_AGENT_PROFILE", "value": value}
+        )
+        return selected
+
+    # Before the namespace announces a profile, carrying one is refused.
+    _assert_denied(
+        k3s,
+        _with_profile("hosted-alpha-agent-v4", "cell-alpha-serve-profile-unannounced"),
+        message="approved serving command and environment",
+    )
+
+    _kubectl(
+        k3s,
+        [
+            "annotate",
+            "namespace",
+            namespace,
+            "exomem.io/agent-profile=hosted-alpha-agent-v4",
+            "--overwrite",
+        ],
+    )
+
+    selected_profile = _with_profile("hosted-alpha-agent-v4", "cell-alpha-serve-profile")
+    assert len(selected_profile["spec"]["containers"][0]["env"]) == 29
+    assert _server_dry_run(k3s, selected_profile).returncode == 0
+
+    # The pod cannot echo a profile other than the announced one.
+    _assert_denied(
+        k3s,
+        _with_profile("hosted-alpha-agent-v1", "cell-alpha-serve-profile-mismatch"),
+        message="approved serving command and environment",
+    )
+
+    # An announcing namespace refuses a pod that omits the variable, so the
+    # selection cannot be silently dropped on the way to the runtime.
+    omitted = copy.deepcopy(serving_pod)
+    omitted["metadata"]["name"] = "cell-alpha-serve-profile-omitted"
+    _assert_denied(k3s, omitted, message="approved serving command and environment")
+
+    _kubectl(k3s, ["annotate", "namespace", namespace, "exomem.io/agent-profile-"])
+
     serving_group_rewrite = copy.deepcopy(serving_pod)
     serving_group_rewrite["metadata"]["name"] = "cell-alpha-serve-fsgroup"
     serving_group_rewrite["spec"]["securityContext"].update(
