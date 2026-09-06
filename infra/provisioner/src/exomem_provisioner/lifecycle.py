@@ -1968,6 +1968,18 @@ class CellLifecycleDriver:
                     _metadata_from_context(context), context.provider_operation_id
                 )
                 return DriverFinal({})
+            if action == "renew-authorization":
+                # Deliberately not routed through `_lifecycle`: renewal touches
+                # neither routes nor the maintenance drain. It advances the
+                # membership on a cell that is still in date and healthy, so the
+                # attestation window moves forward before it can lapse. A cell
+                # whose window does lapse cannot recover -- minting is fenced off
+                # once it has served, and the drain that would renew it needs an
+                # attestation the expired cell can no longer sign.
+                await self._plane.renew_authorization_session(
+                    _metadata_from_context(context), request
+                )
+                return DriverFinal({})
             if action in {"quiesce", "stop", "resume", "seal"}:
                 return await self._lifecycle(action, request, context)
             if action == "rotate-credential":

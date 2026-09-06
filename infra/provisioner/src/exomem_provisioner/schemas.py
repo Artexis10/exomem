@@ -218,6 +218,10 @@ class V2ResumeRequest(V2TargetRequest):
     pass
 
 
+class V2RenewAuthorizationRequest(V2TargetRequest):
+    pass
+
+
 class V2StopRequest(V2TargetRequest):
     pass
 
@@ -411,6 +415,7 @@ V2_REQUEST_MODELS: dict[str, type[StrictSchema]] = {
     "rollback-rollforward": V2RollbackRollforwardRequest,
     "rotate-credential": V2RotateCredentialRequest,
     "quiesce": V2QuiesceRequest,
+    "renew-authorization": V2RenewAuthorizationRequest,
     "resume": V2ResumeRequest,
     "stop": V2StopRequest,
     "export": V2ExportRequest,
@@ -451,6 +456,10 @@ V2_FINAL_MODELS: dict[str, type[StrictSchema] | None] = {
     "health": V2HealthResponse,
     "rollforward": None,
     "rollback-rollforward": None,
+    # v2-only. `provisioner-wire-v1.json` is the frozen rollback corpus and its
+    # digest is a lock anchor (`rollback.v1CorpusSha256`), so a new action must
+    # never widen v1.
+    "renew-authorization": None,
 }
 
 

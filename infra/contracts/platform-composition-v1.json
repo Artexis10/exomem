@@ -55,6 +55,7 @@
       "health": {"method": "POST", "path": "/cells/health"},
       "rotate-credential": {"method": "POST", "path": "/cells/rotate-credential"},
       "quiesce": {"method": "POST", "path": "/cells/quiesce"},
+      "renew-authorization": {"method": "POST", "path": "/cells/renew-authorization"},
       "resume": {"method": "POST", "path": "/cells/resume"},
       "stop": {"method": "POST", "path": "/cells/stop"},
       "export": {"method": "POST", "path": "/cells/export"},
