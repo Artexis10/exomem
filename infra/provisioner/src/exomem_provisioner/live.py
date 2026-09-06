@@ -792,6 +792,7 @@ class LiveLifecyclePlane:
         require_runtime_attestation: bool = False,
         runtime_credential: str | None = None,
         runtime_protocol_version: str | None = None,
+        renew: bool = False,
     ) -> str:
         """Commit one authenticated successor under the lifecycle maintenance lease."""
 
@@ -861,6 +862,7 @@ class LiveLifecyclePlane:
             target_no_in_flight=target_no_in_flight,
             target_software_version=target_software_version,
             now=current,
+            renew=renew,
             runtime_attestation=runtime_attestation,
         )
         if successor.revision != source.revision:
@@ -874,6 +876,40 @@ class LiveLifecyclePlane:
                 expected_revision=source.revision,
             )
         return successor.revision
+
+    async def renew_authorization_session(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+    ) -> str:
+        """Mint a fresh attestation window on a healthy cell, invisibly.
+
+        The bundle carries a one-hour TTL and nothing renewed it, so a cell
+        stopped admitting mutations an hour after it was provisioned while
+        continuing to serve reads normally -- and once expired it could not
+        recover, because minting is fenced off for a cell that has served and
+        the drain that would renew it needs an attestation the cell can no
+        longer sign. Renewing while still in date avoids all of that: the
+        membership simply advances and the window moves forward.
+
+        Deliberately not routed through `_authorization_helm_values`. The
+        rendered revision is a pod-template annotation, so putting a renewal
+        through Helm would roll the StatefulSet every hour. The new bundle
+        reaches the running pod through the projected Secret instead, which its
+        refresh sidecar republishes and the runtime re-reads on the next
+        admission check.
+        """
+
+        target = runtime_identity(request)
+        return await self._transition_authorization_session_membership(
+            metadata,
+            target_state="SERVING",
+            target_no_in_flight=False,
+            require_runtime_attestation=True,
+            runtime_credential=str(request["serviceCredential"]),
+            runtime_protocol_version=str(target["protocolVersion"]),
+            renew=True,
+        )
 
     async def observed_fence(self, tenant_id: str) -> int:
         return await self._registry.observed_fence(tenant_id)
