@@ -109,7 +109,7 @@ spec:
         (
         (variables.lifecycleJob
           ? (!has(object.spec.initContainers) || size(object.spec.initContainers) == 0)
-          : (size(object.spec.initContainers) == 1 &&
+          : (size(object.spec.initContainers) == 2 &&
             object.spec.initContainers[0].name == 'authorization-session-custody' &&
             object.spec.initContainers[0].image in {{ $runtimeImages | toJson }} &&
             object.spec.initContainers[0].imagePullPolicy == 'IfNotPresent' &&
@@ -135,7 +135,6 @@ spec:
               size(object.spec.initContainers[0].env) == 0) &&
             (!has(object.spec.initContainers[0].ports) ||
               size(object.spec.initContainers[0].ports) == 0) &&
-            size(object.spec.initContainers) == 2 &&
             object.spec.initContainers[1].name == 'authorization-session-refresh' &&
             object.spec.initContainers[1].restartPolicy == 'Always' &&
             object.spec.initContainers[1].image == object.spec.initContainers[0].image &&

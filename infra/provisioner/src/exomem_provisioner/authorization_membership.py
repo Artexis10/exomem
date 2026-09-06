@@ -730,8 +730,25 @@ def transition_hosted_authorization_bundle(
         and not renew
     ):
         return source
+    # A renewal moves the window and nothing else. Letting it name a target state
+    # would make it an unaudited state transition wearing a renewal's name: with
+    # `target_state="SERVING"` against a drained cell it takes the resume branch
+    # below AND rides the expiry exemption beside it, so a background sweep could
+    # silently un-quiesce a cell and resurrect one expired by any amount.
+    if renew and source.replica_state != target_state:
+        raise MetadataConflict(
+            "renewal cannot change the membership state",
+            reason=ConflictReason.AUTHORIZATION_RENEWAL_CANNOT_CHANGE_STATE,
+        )
+    # The exemption exists so a fully drained cell can still be resumed after its
+    # window lapsed. It is the one path that may act on a stale bundle, so it is
+    # explicitly closed to renewal -- the guard above already makes the two
+    # mutually exclusive, and saying so here keeps the property locally checkable.
     if source.expires_at <= current and not (
-        source.replica_state == "DRAINING" and source.no_in_flight and target_state == "SERVING"
+        not renew
+        and source.replica_state == "DRAINING"
+        and source.no_in_flight
+        and target_state == "SERVING"
     ):
         raise MetadataConflict(
             "stale authorization membership cannot be renewed",

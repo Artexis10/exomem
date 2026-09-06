@@ -898,6 +898,13 @@ class LiveLifecyclePlane:
         reaches the running pod through the projected Secret instead, which its
         refresh sidecar republishes and the runtime re-reads on the next
         admission check.
+
+        Names SERVING because that is the only state renewal ever acts on. A cell
+        that is draining, or already drained, is refused rather than resumed:
+        `transition_hosted_authorization_bundle` rejects a renewal whose target
+        differs from the source state. Without that a renewal would take the
+        resume branch and ride the expiry exemption beside it, silently
+        un-quiescing a deliberately drained cell.
         """
 
         target = runtime_identity(request)
