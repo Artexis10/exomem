@@ -1489,7 +1489,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     _assert_denied(
         k3s,
         serving_init_escape,
-        message="exact authorization-custody init container",
+        message="exact authorization-custody init and refresh containers",
     )
 
     serving_command_escape = copy.deepcopy(serving_pod)
@@ -1826,7 +1826,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     for field in ("ports", "env", "startupProbe", "livenessProbe", "readinessProbe"):
         helper.pop(field, None)
     side_init["spec"]["initContainers"] = [helper]
-    _assert_denied(k3s, side_init, message="exact authorization-custody init container")
+    _assert_denied(k3s, side_init, message="exact authorization-custody init and refresh containers")
 
 
 def test_exact_k3s_scopes_privileged_volume_and_deletion_mutations(k3s: str) -> None:
