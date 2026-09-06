@@ -421,15 +421,26 @@ def test_watch_leaves_a_current_destination_untouched(tmp_path: Path) -> None:
     _projected_secret(source)
     wrapper.mkdir(mode=0o700)
     authorization_hosted_mount.copy_projected_custody(source, destination)
-    before = {
-        name: (destination / name).stat().st_ino for name in _FILES
-    }
 
-    authorization_hosted_mount.watch_projected_custody(
-        source, destination, sleeper=lambda _seconds: None, ticks=4
-    )
+    # Counted, not inferred from inode identity: a filesystem is free to reuse
+    # an inode number immediately after an unlink, so that comparison passes
+    # against an implementation that rewrites the files on every tick.
+    republishes = {"count": 0}
+    real = authorization_hosted_mount.republish_projected_custody
 
-    assert {name: (destination / name).stat().st_ino for name in _FILES} == before
+    def counting(*args, **kwargs):
+        republishes["count"] += 1
+        return real(*args, **kwargs)
+
+    authorization_hosted_mount.republish_projected_custody = counting
+    try:
+        authorization_hosted_mount.watch_projected_custody(
+            source, destination, sleeper=lambda _seconds: None, ticks=4
+        )
+    finally:
+        authorization_hosted_mount.republish_projected_custody = real
+
+    assert republishes["count"] == 0
 
 
 def test_republish_sweeps_staging_files_a_crashed_attempt_left_behind(
