@@ -831,8 +831,30 @@ def load_authorization_custody(
     *,
     now: int,
 ) -> AuthorizationCustody:
-    """Load and authenticate the complete external session-custody bundle."""
+    """Load and authenticate the complete external session-custody bundle.
 
+    Retried once, because the three custody files are read separately and are
+    replaced one after another when a renewed authorization bundle is published
+    into a running cell. A read landing inside that burst sees a mixed
+    generation and fails cross-validation, which would refuse an occasional
+    mutation for no reason a caller could act on.
+
+    Retrying a fail-closed read cannot turn a real failure into a pass: the
+    second attempt re-reads and re-authenticates every file under the same
+    rules, so an expired, forged or genuinely absent bundle refuses twice.
+    """
+
+    try:
+        return _load_authorization_custody_once(Path(vault_root), now=now)
+    except AuthorizationCustodyUnavailable:
+        return _load_authorization_custody_once(Path(vault_root), now=now)
+
+
+def _load_authorization_custody_once(
+    vault_root: Path,
+    *,
+    now: int,
+) -> AuthorizationCustody:
     external = load_external_custody(Path(vault_root))
     keyring = parse_keyring(external.keyring)
     control = parse_control_record(external.control, keyring=keyring, now=now)

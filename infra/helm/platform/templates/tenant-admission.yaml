@@ -134,9 +134,36 @@ spec:
             (!has(object.spec.initContainers[0].env) ||
               size(object.spec.initContainers[0].env) == 0) &&
             (!has(object.spec.initContainers[0].ports) ||
-              size(object.spec.initContainers[0].ports) == 0))) &&
+              size(object.spec.initContainers[0].ports) == 0) &&
+            size(object.spec.initContainers) == 2 &&
+            object.spec.initContainers[1].name == 'authorization-session-refresh' &&
+            object.spec.initContainers[1].restartPolicy == 'Always' &&
+            object.spec.initContainers[1].image == object.spec.initContainers[0].image &&
+            object.spec.initContainers[1].imagePullPolicy == 'IfNotPresent' &&
+            object.spec.initContainers[1].command == ['python'] &&
+            object.spec.initContainers[1].args ==
+              ['-m', 'exomem.governance.authorization_hosted_mount', '--watch'] &&
+            object.spec.initContainers[1].securityContext.runAsNonRoot == true &&
+            object.spec.initContainers[1].securityContext.runAsUser == 10001 &&
+            object.spec.initContainers[1].securityContext.runAsGroup == 10001 &&
+            object.spec.initContainers[1].securityContext.allowPrivilegeEscalation == false &&
+            object.spec.initContainers[1].securityContext.readOnlyRootFilesystem == true &&
+            size(object.spec.initContainers[1].securityContext.capabilities.drop) == 1 &&
+            object.spec.initContainers[1].securityContext.capabilities.drop[0] == 'ALL' &&
+            string(dyn(object.spec.initContainers[1].resources).requests['cpu']) == '10m' &&
+            string(dyn(object.spec.initContainers[1].resources).requests['memory']) == '16Mi' &&
+            string(dyn(object.spec.initContainers[1].resources).requests['ephemeral-storage']) == '16Mi' &&
+            string(dyn(object.spec.initContainers[1].resources).limits['cpu']) == '100m' &&
+            string(dyn(object.spec.initContainers[1].resources).limits['memory']) == '64Mi' &&
+            string(dyn(object.spec.initContainers[1].resources).limits['ephemeral-storage']) == '16Mi' &&
+            size(dyn(object.spec.initContainers[1].resources).requests) == 3 &&
+            size(dyn(object.spec.initContainers[1].resources).limits) == 3 &&
+            (!has(object.spec.initContainers[1].env) ||
+              size(object.spec.initContainers[1].env) == 0) &&
+            (!has(object.spec.initContainers[1].ports) ||
+              size(object.spec.initContainers[1].ports) == 0))) &&
         size(object.spec.containers) == 1)
-      message: Tenant pods may use only the exact authorization-custody init container.
+      message: Tenant pods may use only the exact authorization-custody init and refresh containers.
     - expression: >-
         !variables.inScope ||
         (

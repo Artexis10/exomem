@@ -879,3 +879,52 @@ def test_fifo_custody_file_refuses_without_blocking(
 
     with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
         authorization_custody.load_external_custody(tmp_path / "vault")
+
+
+def test_custody_load_retries_once_through_a_republished_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A renewal republishes three files in turn; a read inside that burst must not refuse.
+
+    The custody files are read separately and replaced one after another, so a
+    read landing mid-burst sees a mixed generation and fails cross-validation.
+    That would refuse an occasional mutation for no reason a caller could act on.
+    """
+
+    attempts = {"n": 0}
+    marker = object()
+
+    def torn_then_whole(vault_root, *, now):  # type: ignore[no-untyped-def]
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise authorization_custody.AuthorizationCustodyUnavailable
+        return marker
+
+    monkeypatch.setattr(
+        authorization_custody, "_load_authorization_custody_once", torn_then_whole
+    )
+    assert authorization_custody.load_authorization_custody(tmp_path, now=1) is marker
+    assert attempts["n"] == 2
+
+
+def test_custody_load_still_refuses_a_bundle_that_fails_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry re-authenticates under the same rules, so it masks nothing.
+
+    An expired, forged or absent bundle refuses on both attempts. Pinning the
+    count is what stops the retry becoming an unbounded one.
+    """
+
+    attempts = {"n": 0}
+
+    def always_bad(vault_root, *, now):  # type: ignore[no-untyped-def]
+        attempts["n"] += 1
+        raise authorization_custody.AuthorizationCustodyUnavailable
+
+    monkeypatch.setattr(
+        authorization_custody, "_load_authorization_custody_once", always_bad
+    )
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.load_authorization_custody(tmp_path, now=1)
+    assert attempts["n"] == 2

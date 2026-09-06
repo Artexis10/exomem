@@ -6,7 +6,9 @@ import os
 import re
 import stat
 import sys
+import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from .authorization_custody import HOSTED_CUSTODY_ROOT, MAX_CUSTODY_FILE_BYTES
@@ -14,6 +16,10 @@ from .authorization_custody import HOSTED_CUSTODY_ROOT, MAX_CUSTODY_FILE_BYTES
 SOURCE_ROOT = Path("/run/exomem/authorization-session-source")
 _FILENAMES = ("control.json", "keyring.json", "serving-membership.json")
 _GENERATION = re.compile(r"\.\.[A-Za-z0-9_.-]{1,255}\Z")
+#: Kubelet refreshes a Secret volume about once a minute, so a shorter poll
+#: only costs syscalls. The renewal budget that matters is the attestation
+#: window, not this interval.
+WATCH_INTERVAL_SECONDS = 15.0
 
 
 class HostedCustodyMountUnavailable(RuntimeError):
@@ -279,7 +285,65 @@ def republish_projected_custody(source: Path, destination: Path) -> None:
         raise HostedCustodyMountUnavailable from None
 
 
-def main() -> int:
+def projected_generation(source: Path) -> str:
+    """Name the generation `..data` currently points at, or "" when unreadable."""
+
+    try:
+        link = os.readlink(Path(source) / "..data")
+    except OSError:
+        return ""
+    return link if _GENERATION.match(link) else ""
+
+
+def watch_projected_custody(
+    source: Path,
+    destination: Path,
+    *,
+    interval_seconds: float = WATCH_INTERVAL_SECONDS,
+    sleeper: Callable[[float], None] = time.sleep,
+    ticks: int | None = None,
+) -> int:
+    """Republish each time kubelet swaps the projected generation.
+
+    The runtime re-reads custody on every admission check, so keeping the
+    published generation current is the whole of seamless renewal: a renewed
+    bundle reaches the Secret volume while the pod runs, and the pod picks it up
+    without restarting.
+
+    A republish that fails is retried on the next tick rather than ending the
+    watch. The previous generation stays whole and serving, so the cost of
+    waiting is bounded by the attestation window, while exiting would strand the
+    pod on a generation nothing will ever refresh.
+    """
+
+    published = projected_generation(source)
+    remaining = ticks
+    while remaining is None or remaining > 0:
+        sleeper(interval_seconds)
+        if remaining is not None:
+            remaining -= 1
+        current = projected_generation(source)
+        if not current or current == published:
+            continue
+        try:
+            republish_projected_custody(source, destination)
+        except HostedCustodyMountUnavailable:
+            continue
+        published = current
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    watch = "--watch" in arguments
+    if watch:
+        arguments.remove("--watch")
+    if arguments:
+        return 2
+    if watch:
+        # The init container has already published the first generation; a
+        # second copy would refuse against its own non-empty destination.
+        return watch_projected_custody(SOURCE_ROOT, HOSTED_CUSTODY_ROOT)
     try:
         copy_projected_custody(SOURCE_ROOT, HOSTED_CUSTODY_ROOT)
     except HostedCustodyMountUnavailable:

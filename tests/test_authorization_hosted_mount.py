@@ -263,3 +263,82 @@ def test_republish_projected_custody_survives_a_write_failure_midway(
     assert {path.name for path in destination.iterdir()} == set(_FILES)
     for name, payload in _FILES.items():
         assert (destination / name).read_bytes() == payload
+
+
+def test_watch_republishes_only_when_the_generation_changes(tmp_path: Path) -> None:
+    """Seamless renewal is the watch keeping the published generation current."""
+
+    source = tmp_path / "source"
+    wrapper = tmp_path / "destination"
+    destination = wrapper / "private"
+    _projected_secret(source)
+    wrapper.mkdir(mode=0o700)
+    authorization_hosted_mount.copy_projected_custody(source, destination)
+
+    renewed = {name: payload.replace(b"sentinel", b"renewed") for name, payload in _FILES.items()}
+    swapped = {"done": False}
+
+    def sleeper(_seconds: float) -> None:
+        if not swapped["done"]:
+            _republished_secret(source, renewed)
+            swapped["done"] = True
+
+    authorization_hosted_mount.watch_projected_custody(
+        source, destination, sleeper=sleeper, ticks=3
+    )
+
+    for name, payload in renewed.items():
+        assert (destination / name).read_bytes() == payload
+
+
+def test_watch_survives_a_failed_republish_and_retries(tmp_path: Path) -> None:
+    """A transient failure must not end the watch and strand the pod.
+
+    Exiting would leave the runtime on a generation nothing will refresh, which
+    is exactly the stranding this whole path exists to prevent. Waiting costs at
+    most the remainder of the attestation window.
+    """
+
+    source = tmp_path / "source"
+    wrapper = tmp_path / "destination"
+    destination = wrapper / "private"
+    _projected_secret(source)
+    wrapper.mkdir(mode=0o700)
+    authorization_hosted_mount.copy_projected_custody(source, destination)
+
+    renewed = {name: payload.replace(b"sentinel", b"renewed") for name, payload in _FILES.items()}
+    steps = {"n": 0}
+
+    def sleeper(_seconds: float) -> None:
+        steps["n"] += 1
+        if steps["n"] == 1:
+            # A torn generation: ..data points at a directory that is not there.
+            broken = source / "..data.tmp"
+            broken.symlink_to("..2026_09_06_00_00_00.999999999", target_is_directory=True)
+            os.replace(broken, source / "..data")
+        elif steps["n"] == 2:
+            for stale in source.iterdir():
+                if stale.name.startswith("..2026") and stale.is_dir():
+                    for child in stale.iterdir():
+                        child.unlink()
+                    stale.rmdir()
+            _republished_secret_without_previous(source, renewed)
+
+    authorization_hosted_mount.watch_projected_custody(
+        source, destination, sleeper=sleeper, ticks=4
+    )
+
+    for name, payload in renewed.items():
+        assert (destination / name).read_bytes() == payload
+
+
+def _republished_secret_without_previous(root: Path, payloads: dict[str, bytes]) -> None:
+    generation = root / "..2026_09_06_00_00_00.000000003"
+    generation.mkdir(mode=0o700)
+    for name, payload in payloads.items():
+        target = generation / name
+        target.write_bytes(payload)
+        target.chmod(0o440)
+    replacement = root / "..data.tmp"
+    replacement.symlink_to(generation.name, target_is_directory=True)
+    os.replace(replacement, root / "..data")

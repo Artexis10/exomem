@@ -2521,15 +2521,35 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert "runtimeClassName" not in pod
         assert "fsGroup" not in pod["securityContext"]
         assert "fsGroupChangePolicy" not in pod["securityContext"]
-        assert len(pod.get("initContainers", [])) == 1
+        assert len(pod.get("initContainers", [])) == 2
         custody_init = pod["initContainers"][0]
         assert custody_init["name"] == "authorization-session-custody"
         assert custody_init["args"] == [
             "-m",
             "exomem.governance.authorization_hosted_mount",
         ]
+        assert "restartPolicy" not in custody_init
         assert custody_init["securityContext"]["runAsUser"] == 10001
         assert custody_init["resources"]["requests"]["ephemeral-storage"] == "16Mi"
+        # A native sidecar, not an ordinary container: the tenant boundary policy
+        # pins `size(object.spec.containers) == 1` and indexes containers[0]
+        # throughout, so the refresher has to live in initContainers to leave all
+        # of that untouched. It republishes each generation kubelet projects, so
+        # a renewed authorization bundle reaches the pod without a restart.
+        refresh = pod["initContainers"][1]
+        assert refresh["name"] == "authorization-session-refresh"
+        assert refresh["restartPolicy"] == "Always"
+        assert refresh["image"] == custody_init["image"]
+        assert refresh["args"] == [
+            "-m",
+            "exomem.governance.authorization_hosted_mount",
+            "--watch",
+        ]
+        assert refresh["securityContext"] == custody_init["securityContext"]
+        assert refresh["resources"] == custody_init["resources"]
+        assert refresh["volumeMounts"] == custody_init["volumeMounts"]
+        assert "env" not in refresh and "ports" not in refresh
+        assert len(pod["containers"]) == 1
         container = pod["containers"][0]
         security = container["securityContext"]
         assert "seccompProfile" not in security
