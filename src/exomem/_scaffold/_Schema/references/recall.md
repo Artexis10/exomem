@@ -19,6 +19,23 @@ Modes:
 
 Empty queries degrade to filtered-most-recent regardless of mode.
 
+### What actually answers a search
+
+Vector and BM25 are the **primary** lanes: together they produce the result set,
+and semantic similarity is what reaches pages that share no literal term with the
+query. Prefer `hybrid` and write queries as questions, not keyword soup — the
+vector lane is the reason a vague recollection finds the right page.
+
+The typed graph is an **additive** lane layered on top. It expands neighbours of
+strong matches and reorders; it never decides whether a page can be found. When
+the graph sidecar is unavailable or rebuilding, that lane falls back to plain
+wikilink expansion and recall keeps working — results may be ordered slightly
+differently, nothing disappears. A page written moments ago, with no edges built
+yet, is returned normally by the primary lanes.
+
+So: a graph rebuild is not a recall outage, and never a reason to stop searching
+or to report absence.
+
 **Scope — the vault is bigger than the KB:**
 - `scope="kb"` (default) searches `Knowledge Base/` first and **auto-widens to
   the whole vault** when the KB doesn't fill `limit`. Content in sibling folders
@@ -28,6 +45,29 @@ Empty queries degrade to filtered-most-recent regardless of mode.
 - **Never report a search-miss as absence.** An empty result means *"not found in
   what I searched,"* not *"it doesn't exist."* If you're sure something exists,
   try `scope="vault"`, vary the query terms, or `read_memory` a path you suspect.
+
+### Two cases where a retry, not a conclusion, is the right move
+
+Recall answers from what is indexed, and in two bounded situations it says so
+rather than pretending. Both are explicit in the response — you never have to
+inspect index internals to notice them.
+
+- **`warming` names `embeddings`.** Right after a process start the embedding
+  model may still be loading, and semantic upserts for very recent writes queue
+  until it is up. Keyword and BM25 still answer, so a write is findable
+  immediately by its literal terms — but a *semantic* query may under-return for
+  that window. Retry once `warming` stops appearing (usually well under a
+  minute) before concluding anything is missing.
+- **`RETRIEVAL_INDEX_WARMING` on a relation-filtered recall.** `relations=` and
+  `relation_of=` are answered only from the typed graph sidecar, so they are the
+  one read that refuses rather than degrades while that sidecar rebuilds. The
+  error carries a retry hint. Retry it, or drop the relation filter and search
+  normally — do not read the refusal as "no such relation."
+
+Everything else degrades quietly and correctly. If a plain recall returns
+results, trust them; if it returns none and nothing is warming, the honest
+reading is that nothing matched the query you asked — so vary the query before
+you doubt the vault.
 
 ### Referents
 
