@@ -202,6 +202,83 @@ def copy_projected_custody(source: Path, destination: Path) -> None:
         raise HostedCustodyMountUnavailable from None
 
 
+def republish_projected_custody(source: Path, destination: Path) -> None:
+    """Replace a live custody generation with the current projected one.
+
+    `copy_projected_custody` creates its destination and refuses a non-empty
+    one, so it can only initialise. A renewed authorization bundle reaches the
+    projected Secret while the pod runs, and the runtime re-reads custody on
+    every admission check, so publishing the new generation in place is what
+    makes renewal invisible instead of requiring the pod to restart.
+
+    Every replacement file is written and fsynced before any of them is moved
+    into place. A source that turns out to be torn or ambiguous therefore leaves
+    the previous generation whole, rather than stranding the runtime on a
+    directory holding one renewed file beside two stale ones -- which would fail
+    cross-validation and refuse writes until something republished it correctly.
+    """
+
+    source = Path(source)
+    destination = Path(destination)
+    staged: list[Path] = []
+    try:
+        payloads = _projected_payloads(source)
+        info = os.lstat(destination)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o700
+            or info.st_uid != os.geteuid()
+            or info.st_gid != os.getegid()
+        ):
+            raise HostedCustodyMountUnavailable
+        replacements: list[tuple[Path, Path]] = []
+        for name in _FILENAMES:
+            temporary = destination / f".{name}.{uuid.uuid4().hex}.tmp"
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+            staged.append(temporary)
+            try:
+                view = memoryview(payloads[name])
+                while view:
+                    written = os.write(descriptor, view)
+                    if written < 1:
+                        raise HostedCustodyMountUnavailable
+                    view = view[written:]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            replacements.append((temporary, destination / name))
+        for temporary, published in replacements:
+            os.replace(temporary, published)
+            staged.remove(temporary)
+        directory_fd = os.open(
+            destination,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except HostedCustodyMountUnavailable:
+        for path in staged:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise
+    except (OSError, TypeError, ValueError):
+        for path in staged:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise HostedCustodyMountUnavailable from None
+
+
 def main() -> int:
     try:
         copy_projected_custody(SOURCE_ROOT, HOSTED_CUSTODY_ROOT)

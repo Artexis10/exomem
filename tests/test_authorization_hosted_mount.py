@@ -130,3 +130,136 @@ def test_copy_projected_hosted_custody_cleans_a_partial_publication(
         authorization_hosted_mount.copy_projected_custody(source, destination)
 
     assert not destination.exists()
+
+
+def _republished_secret(root: Path, payloads: dict[str, bytes]) -> None:
+    """Replace the projected generation the way kubelet refreshes a Secret."""
+    generation = root / "..2026_09_06_00_00_00.000000002"
+    generation.mkdir(mode=0o700)
+    for name, payload in payloads.items():
+        target = generation / name
+        target.write_bytes(payload)
+        target.chmod(0o440)
+    replacement = root / "..data.tmp"
+    replacement.symlink_to(generation.name, target_is_directory=True)
+    previous = (root / "..data").resolve()
+    os.replace(replacement, root / "..data")
+    # kubelet removes the superseded generation once ..data points past it.
+    for stale in previous.iterdir():
+        stale.unlink()
+    previous.rmdir()
+
+
+def test_republish_projected_custody_replaces_a_live_generation(
+    tmp_path: Path,
+) -> None:
+    """Renewal must reach a pod that is already reading the custody directory.
+
+    `copy_projected_custody` mkdirs its destination and refuses a non-empty one,
+    so it can only initialise. Without a republish path the runtime holds the
+    generation its init container copied for the pod's whole life, which is why
+    a renewed authorization bundle could only be delivered by restarting the pod.
+    """
+
+    source = tmp_path / "source"
+    wrapper = tmp_path / "destination"
+    destination = wrapper / "private"
+    _projected_secret(source)
+    wrapper.mkdir(mode=0o700)
+    authorization_hosted_mount.copy_projected_custody(source, destination)
+
+    renewed = {name: payload.replace(b"sentinel", b"renewed") for name, payload in _FILES.items()}
+    _republished_secret(source, renewed)
+
+    authorization_hosted_mount.republish_projected_custody(source, destination)
+
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o700
+    assert {path.name for path in destination.iterdir()} == set(_FILES)
+    for name, payload in renewed.items():
+        published = destination / name
+        assert published.read_bytes() == payload
+        assert stat.S_IMODE(published.stat().st_mode) == 0o600
+        assert published.stat().st_uid == os.geteuid()
+        # The reader refuses a file with more than one link, so a republish must
+        # produce a fresh inode rather than hard-linking the projected source.
+        assert published.stat().st_nlink == 1
+
+
+def test_republish_projected_custody_requires_an_existing_generation(
+    tmp_path: Path,
+) -> None:
+    """Republishing is not a second way to initialise custody."""
+
+    source = tmp_path / "source"
+    wrapper = tmp_path / "destination"
+    _projected_secret(source)
+    wrapper.mkdir(mode=0o700)
+
+    with pytest.raises(authorization_hosted_mount.HostedCustodyMountUnavailable):
+        authorization_hosted_mount.republish_projected_custody(source, wrapper / "private")
+
+
+def test_republish_projected_custody_keeps_the_previous_generation_on_a_bad_source(
+    tmp_path: Path,
+) -> None:
+    """A torn or ambiguous source is rejected before anything is written."""
+
+    source = tmp_path / "source"
+    wrapper = tmp_path / "destination"
+    destination = wrapper / "private"
+    _projected_secret(source)
+    wrapper.mkdir(mode=0o700)
+    authorization_hosted_mount.copy_projected_custody(source, destination)
+
+    (source / "unexpected.json").symlink_to("..data/keyring.json")
+
+    with pytest.raises(authorization_hosted_mount.HostedCustodyMountUnavailable):
+        authorization_hosted_mount.republish_projected_custody(source, destination)
+
+    assert {path.name for path in destination.iterdir()} == set(_FILES)
+    for name, payload in _FILES.items():
+        assert (destination / name).read_bytes() == payload
+
+
+def test_republish_projected_custody_survives_a_write_failure_midway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure partway through must leave the live generation whole.
+
+    Every replacement is written and fsynced before any is moved into place, so
+    a write that fails on the second file strands nothing. Replacing each file
+    as it is written would leave the runtime on a directory holding one renewed
+    file beside two stale ones, which fails cross-validation and refuses writes
+    until something republished it correctly.
+    """
+
+    source = tmp_path / "source"
+    wrapper = tmp_path / "destination"
+    destination = wrapper / "private"
+    _projected_secret(source)
+    wrapper.mkdir(mode=0o700)
+    authorization_hosted_mount.copy_projected_custody(source, destination)
+
+    renewed = {name: payload.replace(b"sentinel", b"renewed") for name, payload in _FILES.items()}
+    _republished_secret(source, renewed)
+
+    real_write = os.write
+    writes = {"count": 0}
+
+    def failing_write(fd: int, data) -> int:  # type: ignore[no-untyped-def]
+        writes["count"] += 1
+        if writes["count"] == 2:
+            raise OSError(28, "No space left on device")
+        return real_write(fd, data)
+
+    monkeypatch.setattr(authorization_hosted_mount.os, "write", failing_write)
+
+    with pytest.raises(authorization_hosted_mount.HostedCustodyMountUnavailable):
+        authorization_hosted_mount.republish_projected_custody(source, destination)
+
+    monkeypatch.undo()
+    # Every file is still the previous generation, and no temp file was left.
+    assert {path.name for path in destination.iterdir()} == set(_FILES)
+    for name, payload in _FILES.items():
+        assert (destination / name).read_bytes() == payload
