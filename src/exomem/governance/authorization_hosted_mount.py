@@ -293,16 +293,6 @@ def republish_projected_custody(source: Path, destination: Path) -> None:
         raise HostedCustodyMountUnavailable from None
 
 
-def projected_generation(source: Path) -> str:
-    """Name the generation `..data` currently points at, or "" when unreadable."""
-
-    try:
-        link = os.readlink(Path(source) / "..data")
-    except OSError:
-        return ""
-    return link if _GENERATION.match(link) else ""
-
-
 def _published_custody_is_current(source: Path, destination: Path) -> bool:
     """Answer whether every published file already matches the projected one.
 

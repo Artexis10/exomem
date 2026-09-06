@@ -735,7 +735,14 @@ def transition_hosted_authorization_bundle(
     # `target_state="SERVING"` against a drained cell it takes the resume branch
     # below AND rides the expiry exemption beside it, so a background sweep could
     # silently un-quiesce a cell and resurrect one expired by any amount.
-    if renew and source.replica_state != target_state:
+    #
+    # Both halves of the membership are pinned, not just the replica state. The
+    # drain flag alone is unreachable today because no caller varies it without
+    # varying the state, but a guard that is total needs no such argument to hold
+    # it up.
+    if renew and (
+        source.replica_state != target_state or source.no_in_flight is not target_no_in_flight
+    ):
         raise MetadataConflict(
             "renewal cannot change the membership state",
             reason=ConflictReason.AUTHORIZATION_RENEWAL_CANNOT_CHANGE_STATE,
