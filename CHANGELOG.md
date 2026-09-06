@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.73.1](https://github.com/Artexis10/exomem/compare/v0.73.0...v0.73.1) (2026-09-06)
+
+
+### Bug Fixes
+
+* **hosted:** admit the serving pod that carries a selected agent profile ([#1087](https://github.com/Artexis10/exomem/issues/1087)) ([56ed902](https://github.com/Artexis10/exomem/commit/56ed902b2878fe5b9323d665f2ffc42b005da7f2))
+* **hosted:** let reset reclaim the canary and the stage it already could ([#1091](https://github.com/Artexis10/exomem/issues/1091)) ([48c348b](https://github.com/Artexis10/exomem/commit/48c348b7574e810c9b0384fcb9bc1ad09cbec7db))
+* **hosted:** renew a cell's authorization before its window lapses ([#1090](https://github.com/Artexis10/exomem/issues/1090)) ([89abe36](https://github.com/Artexis10/exomem/commit/89abe3652bd07c14f5455b6eab57fbf53771477d))
+* **schema:** document the relation disposition a compiled write requires ([#1089](https://github.com/Artexis10/exomem/issues/1089)) ([b736df9](https://github.com/Artexis10/exomem/commit/b736df9d128548395e29c371a5c02d031fdf91d5))
+
 ## [0.73.0](https://github.com/Artexis10/exomem/compare/v0.72.1...v0.73.0) (2026-09-06)
 
 
