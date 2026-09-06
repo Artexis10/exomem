@@ -65,9 +65,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -151,15 +153,63 @@ def canonical(value: object) -> str:
     raise TypeError(f"cannot canonicalise {type(value)!r}")
 
 
+#: Matches any connection URI so it can be stripped from output. psql echoes the
+#: whole DSN -- password included -- in connection errors such as `invalid
+#: connection option`, and that output used to be raised verbatim.
+_DSN_RE = re.compile(r"postgres(?:ql)?(?:\+\w+)?://\S*")
+
+
+def redact_dsn(text: str) -> str:
+    """Strip any connection URI from text bound for a log, error or transcript."""
+    return _DSN_RE.sub("postgresql://<redacted>", text)
+
+
+def libpq_url(url: str) -> str:
+    """Normalise an application DSN to something libpq accepts.
+
+    The provisioner stores its DSN for SQLAlchemy, so it arrives as
+    `postgresql+asyncpg://...?ssl=require`. libpq understands neither the
+    dialect suffix nor asyncpg's `ssl` parameter, and psql rejects the whole
+    string with an error that quotes it back in full.
+    """
+    url = re.sub(r"^postgres(ql)?\+\w+://", "postgresql://", url)
+    return re.sub(r"([?&])ssl=", r"\1sslmode=", url)
+
+
+def libpq_environment(url: str) -> dict[str, str]:
+    """Split a DSN into libpq's own variables.
+
+    The password never becomes a command-line argument: argv is world-readable
+    through `ps` for the life of the call, whereas another user's environment is
+    not. Unrecognised query parameters are carried through unchanged rather than
+    dropped, so a DSN that needs `channel_binding` or `options` still works.
+    """
+    parts = urllib.parse.urlsplit(libpq_url(url))
+    environment = {**os.environ}
+    for name, value in (
+        ("PGHOST", parts.hostname),
+        ("PGPORT", str(parts.port) if parts.port else None),
+        ("PGUSER", urllib.parse.unquote(parts.username) if parts.username else None),
+        ("PGPASSWORD", urllib.parse.unquote(parts.password) if parts.password else None),
+        ("PGDATABASE", parts.path.lstrip("/") or None),
+    ):
+        if value:
+            environment[name] = value
+    for key, value in urllib.parse.parse_qsl(parts.query):
+        environment[f"PG{key.upper()}"] = value
+    return environment
+
+
 def query(url: str, sql: str) -> list[str]:
     result = subprocess.run(
-        ["psql", url, "-X", "-A", "-t", "-F", "\x1f", "-c", sql],
+        ["psql", "-X", "-A", "-t", "-F", "\x1f", "-c", sql],
         capture_output=True,
         text=True,
         timeout=90,
+        env=libpq_environment(url),
     )
     if result.returncode != 0:
-        raise SystemExit(f"query failed: {result.stderr.strip()[:400]}")
+        raise SystemExit(f"query failed: {redact_dsn(result.stderr.strip())[:400]}")
     return [line for line in result.stdout.strip().split("\n") if line]
 
 
