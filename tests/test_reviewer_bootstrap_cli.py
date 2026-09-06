@@ -380,9 +380,7 @@ def test_load_locks_reads_the_candidates_profile_not_the_generated_root(
 
     def _write(root: pathlib.Path, declared: str, artifact: str) -> None:
         package = {**OPENAI_PACKAGE_LOCK, "profile": declared, "artifact_sha256": artifact}
-        (root / "claude.lock.json").write_text(
-            json.dumps({**package, "platform": "claude"})
-        )
+        (root / "claude.lock.json").write_text(json.dumps({**package, "platform": "claude"}))
         (root / "claude.zip.lock.json").write_text(
             json.dumps({"platform": "claude", "archive_sha256": "0d" * 32})
         )
@@ -574,9 +572,7 @@ def test_prepare_sizes_the_staged_release_from_stage_minutes(monkeypatch, tmp_pa
     cp = _prepare_cp(tmp_path)
 
     before = module.utc_now()
-    context = module.prepare(
-        cp, "cand-1", "reviewer@example.invalid", _locks(), None, 150
-    )
+    context = module.prepare(cp, "cand-1", "reviewer@example.invalid", _locks(), None, 150)
     after = module.utc_now()
 
     stage_call = next(call for call in cp.calls if call["label"] == "prepare-stage")
@@ -861,9 +857,7 @@ def _run_responses(*, owner_status: tuple[int, dict] | None = None):
     }
 
 
-def test_run_readiness_failure_makes_zero_reviewer_credential_calls(
-    monkeypatch, tmp_path
-) -> None:
+def test_run_readiness_failure_makes_zero_reviewer_credential_calls(monkeypatch, tmp_path) -> None:
     module = _load_module()
     monkeypatch.setattr(
         module, "chatgpt_cimd_identity", lambda *_: ("https://c/x.json", ["https://c/cb"])
@@ -1428,7 +1422,9 @@ def test_reset_fails_the_leftover_stages_at_their_recorded_version(tmp_path) -> 
     exact `expectedVersion`, which only the create response carries.
     """
     module = _load_module()
-    _record(tmp_path, "prepare-stage.response", {"status": 200, "stage": {"id": "s1", "version": 3}})
+    _record(
+        tmp_path, "prepare-stage.response", {"status": 200, "stage": {"id": "s1", "version": 3}}
+    )
     _record(
         tmp_path,
         "run-sibling-stage-claude.response",
@@ -1452,7 +1448,9 @@ def test_reset_reclaims_and_returns_when_no_tenant_was_ever_created(tmp_path, ca
     `reset` in exactly the case where the stage most needs clearing.
     """
     module = _load_module()
-    _record(tmp_path, "prepare-stage.response", {"status": 200, "stage": {"id": "s1", "version": 1}})
+    _record(
+        tmp_path, "prepare-stage.response", {"status": 200, "stage": {"id": "s1", "version": 1}}
+    )
     cp = _StateDirControlPlane(tmp_path, _reset_responses())
 
     module.reset(cp, expected_fence=1)

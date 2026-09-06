@@ -1166,9 +1166,7 @@ def reset(
     authority rather than from an argument is what makes that structural: there
     is no way to point this at something that is not a reviewer bootstrap.
     """
-    status, clients = cp.call(
-        "GET", "/api/exomem/admin/oauth-clients", label="reset-authorities"
-    )
+    status, clients = cp.call("GET", "/api/exomem/admin/oauth-clients", label="reset-authorities")
     if status != 200:
         raise SystemExit(f"could not read bootstrap authorities: {status} {clients}")
     authorities = clients.get("bootstrapAuthorities", [])
