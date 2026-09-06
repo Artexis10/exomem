@@ -305,7 +305,18 @@ spec:
         (
         !has(object.spec.containers[0].command) &&
         object.spec.containers[0].args == ['--transport', 'http', '--port', '8765'] &&
-        size(object.spec.containers[0].env) == 28 &&
+        (
+        (size(object.spec.containers[0].env) == 28 &&
+        !object.spec.containers[0].env.exists(env, env.name == 'EXOMEM_HOSTED_AGENT_PROFILE') &&
+        !('exomem.io/agent-profile' in namespaceObject.metadata.annotations)) ||
+        (size(object.spec.containers[0].env) == 29 &&
+        'exomem.io/agent-profile' in namespaceObject.metadata.annotations &&
+        namespaceObject.metadata.annotations['exomem.io/agent-profile'] != '' &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_AGENT_PROFILE' && has(env.value) &&
+          env.value == namespaceObject.metadata.annotations['exomem.io/agent-profile'] &&
+          !has(env.valueFrom)))
+        ) &&
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_HOSTED_CELL' && has(env.value) && env.value == '1' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
