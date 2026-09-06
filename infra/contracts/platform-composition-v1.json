@@ -24,7 +24,13 @@
       "commandRegistry"
     ],
     "command_registry_length": 21,
-    "command_exact_fields": ["name", "readOnly", "mode", "tier", "capability"],
+    "command_exact_fields": [
+      "name",
+      "readOnly",
+      "mode",
+      "tier",
+      "capability"
+    ],
     "command_types": {
       "name": "snake_case string",
       "readOnly": "boolean",
@@ -51,33 +57,88 @@
       "X-Exomem-Provisioner-Protocol"
     ],
     "actions": {
-      "provision": {"method": "POST", "path": "/cells/provision"},
-      "health": {"method": "POST", "path": "/cells/health"},
-      "rotate-credential": {"method": "POST", "path": "/cells/rotate-credential"},
-      "quiesce": {"method": "POST", "path": "/cells/quiesce"},
-      "resume": {"method": "POST", "path": "/cells/resume"},
-      "stop": {"method": "POST", "path": "/cells/stop"},
-      "export": {"method": "POST", "path": "/cells/export"},
-      "export-release": {"method": "POST", "path": "/cells/export-release"},
-      "export-delete": {"method": "POST", "path": "/cells/export-delete"},
-      "restore": {"method": "POST", "path": "/cells/restore"},
-      "export-download": {"method": "POST", "path": "/cells/export-download"},
-      "seal": {"method": "POST", "path": "/cells/seal"},
-      "discard": {"method": "POST", "path": "/cells/discard"},
-      "destroy": {"method": "POST", "path": "/cells/destroy"}
+      "provision": {
+        "method": "POST",
+        "path": "/cells/provision"
+      },
+      "health": {
+        "method": "POST",
+        "path": "/cells/health"
+      },
+      "rotate-credential": {
+        "method": "POST",
+        "path": "/cells/rotate-credential"
+      },
+      "quiesce": {
+        "method": "POST",
+        "path": "/cells/quiesce"
+      },
+      "renew-authorization": {
+        "method": "POST",
+        "path": "/cells/renew-authorization"
+      },
+      "resume": {
+        "method": "POST",
+        "path": "/cells/resume"
+      },
+      "stop": {
+        "method": "POST",
+        "path": "/cells/stop"
+      },
+      "export": {
+        "method": "POST",
+        "path": "/cells/export"
+      },
+      "export-release": {
+        "method": "POST",
+        "path": "/cells/export-release"
+      },
+      "export-delete": {
+        "method": "POST",
+        "path": "/cells/export-delete"
+      },
+      "restore": {
+        "method": "POST",
+        "path": "/cells/restore"
+      },
+      "export-download": {
+        "method": "POST",
+        "path": "/cells/export-download"
+      },
+      "seal": {
+        "method": "POST",
+        "path": "/cells/seal"
+      },
+      "discard": {
+        "method": "POST",
+        "path": "/cells/discard"
+      },
+      "destroy": {
+        "method": "POST",
+        "path": "/cells/destroy"
+      }
     }
   },
   "capacity_gate": {
     "implementation": "SignedLiveReceiptPostgreSQLCapacityAuthority",
-    "invoked_before": ["routine-provider-effect", "volume-registration-provider-effect"],
-    "provider_defense_checks": ["namespace-create", "helm-install"],
+    "invoked_before": [
+      "routine-provider-effect",
+      "volume-registration-provider-effect"
+    ],
+    "provider_defense_checks": [
+      "namespace-create",
+      "helm-install"
+    ],
     "pending_retry_seconds": 300,
     "sources": [
       "signed-kubernetes-hcloud-receipt",
       "fresh-kubernetes-observation",
       "postgresql-capacity-reservations"
     ],
-    "public_material_consumers": ["exomem-provisioner-worker", "exomem-volume-worker"],
+    "public_material_consumers": [
+      "exomem-provisioner-worker",
+      "exomem-volume-worker"
+    ],
     "limits": {
       "active_user_cells": 4,
       "active_recovery_cells": 2,
@@ -88,7 +149,10 @@
   },
   "volume_rebind": {
     "public_endpoint": null,
-    "invoked_by": ["restore", "node-recovery"],
+    "invoked_by": [
+      "restore",
+      "node-recovery"
+    ],
     "worker_primitive": "VolumeLifecycleWorker.rebind_static"
   },
   "provider_recovery_identity": {
@@ -118,7 +182,9 @@
       "deletion_job_template": "exomem-deletion-job-template",
       "volume_lifecycle": "exomem-volume-worker"
     },
-    "private_signers": ["exomem-provider-recovery-signer/private-key"],
+    "private_signers": [
+      "exomem-provider-recovery-signer/private-key"
+    ],
     "public_verifier": "exomem-provider-recovery-verifier/public-key"
   }
 }

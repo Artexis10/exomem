@@ -81,8 +81,8 @@ def test_v2_cell_requests_require_only_a_strict_seven_field_runtime_target() -> 
 def test_v2_has_one_closed_model_per_action_and_explicit_target_free_actions() -> None:
     request_models = REQUEST_MODELS_BY_PROTOCOL[WIRE_PROTOCOL_V2]
 
-    assert len(request_models) == 16
-    assert len(set(request_models.values())) == 16
+    assert len(request_models) == 17
+    assert len(set(request_models.values())) == 17
     assert set(request_models["rollforward"].model_fields) == {
         "operationId",
         "checkpoint",
