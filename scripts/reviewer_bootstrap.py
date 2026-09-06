@@ -463,6 +463,120 @@ class ControlPlane:
         return status, parsed
 
 
+def _recorded(cp: ControlPlane, label: str) -> dict | None:
+    """Read back an exchange this state dir already recorded, if it is there."""
+    path = cp.state_dir / f"{label}.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def reclaim_internal_canaries(cp: ControlPlane) -> int:
+    """Revoke every internal canary this attempt issued.
+
+    A live internal canary blocks the *next* bootstrap outright: the authority
+    insert carries `NOT EXISTS (... credential_kind = 'internal_canary' AND
+    revoked_at IS NULL AND expires_at > now())`. The script issues them with a
+    24-hour expiry, so an attempt that got as far as the canary and then failed
+    locks the operator out until tomorrow -- which is what turns "try again" into
+    "try again after the weekend".
+
+    Nothing reclaimed them, though `DELETE /admin/reviewer-access` has always
+    existed. It cannot be called blind: both GET and DELETE demand the full seven
+    field selector, and no route answers "is any canary live?". The selector is
+    recoverable from exactly one place, which is the request this attempt already
+    wrote to its own state dir.
+    """
+    revoked = 0
+    for request_path in sorted(cp.state_dir.glob("run-canary-*.request.json")):
+        label = request_path.name[: -len(".request.json")]
+        try:
+            issued = json.loads(request_path.read_text())
+        except json.JSONDecodeError:
+            print(f"  WARN  {request_path.name} is not readable JSON; skipping")
+            continue
+        selector = {
+            key: issued.get(key)
+            for key in (
+                "platform",
+                "tenantId",
+                "candidateId",
+                "assignmentId",
+                "assignmentGeneration",
+                "stagedClientReleaseId",
+                "oauthClientId",
+            )
+        }
+        if any(value is None for value in selector.values()):
+            print(f"  WARN  {request_path.name} names no complete canary selector; skipping")
+            continue
+        status, result = cp.call(
+            "DELETE",
+            "/api/exomem/admin/reviewer-access",
+            label=f"reset-revoke-{label}",
+            body={"credentialKind": "internal_canary", **selector},
+        )
+        if status != 200:
+            print(f"  WARN  canary revoke refused for {selector['platform']}: {status} {result}")
+            continue
+        # `revoked: false` means it was already gone -- expired, or revoked by an
+        # earlier reset. That is the desired end state either way.
+        revoked += 1 if result.get("revoked") else 0
+        print(
+            f"  canary {selector['platform']}: "
+            f"{'revoked' if result.get('revoked') else 'already clear'}"
+        )
+    return revoked
+
+
+def reclaim_staged_releases(cp: ControlPlane) -> int:
+    """Fail every staged client release this attempt created.
+
+    A leftover `staged` release collides with the next attempt's `create-stage`
+    on a unique index and answers a bare 500, inside the window. `fail-stage`
+    has always existed; the script only ever printed a hint telling the operator
+    to run it by hand, which is a step nobody performs while reading a stack
+    trace. The `expectedVersion` it needs is in the create response this state
+    dir already holds.
+    """
+    failed = 0
+    labels = ["prepare-stage"] + sorted(
+        path.name[: -len(".response.json")]
+        for path in cp.state_dir.glob("run-sibling-stage-*.response.json")
+    )
+    for label in labels:
+        recorded = _recorded(cp, f"{label}.response")
+        stage = (recorded or {}).get("stage")
+        if not isinstance(stage, dict):
+            continue
+        stage_id, version = stage.get("id"), stage.get("version")
+        if not isinstance(stage_id, str) or not isinstance(version, int):
+            print(f"  WARN  {label} recorded no stage id and version; skipping")
+            continue
+        status, result = cp.call(
+            "POST",
+            "/api/exomem/admin/contracts",
+            label=f"reset-fail-{label}",
+            body={
+                "action": "fail-stage",
+                "stagedClientReleaseId": stage_id,
+                "expectedVersion": version,
+            },
+        )
+        if status != 200:
+            print(f"  WARN  fail-stage refused for {label}: {status} {result}")
+            continue
+        # It matches only a `staged` row at that exact version. A stage already
+        # evidenced, failed, or version-advanced answers false, and none of those
+        # blocks the next attempt.
+        failed += 1 if result.get("failed") else 0
+        print(f"  stage {label}: {'failed' if result.get('failed') else 'already clear'}")
+    return failed
+
+
 def reusable_client_record(cp: ControlPlane, client_id: str) -> str:
     if not client_id.startswith("exomem-reviewer-bootstrap-") or len(client_id) > 256:
         raise SystemExit("--existing-client-id is not a reviewer bootstrap client ID")
@@ -604,14 +718,25 @@ def preflight(
     )
     ok &= good
 
+    # Three preconditions of `create_reviewer_bootstrap` are invisible from here.
+    # Two are not reported by any admin route at all; the third has a route that
+    # demands the full seven-field selector of the credential being asked about,
+    # so there is no way to ask "is any canary live?" without already knowing the
+    # answer. Naming them is the most this can honestly do -- and `reset` now
+    # clears the two it can reach, so the usual fix is to run it.
     print(
-        "\n  NOTE  A reviewer-purpose tenant with a bound or CELL_READY cell also blocks\n"
-        "        the bootstrap, and is not visible through any admin endpoint. If the\n"
-        "        authority call returns 400 with everything above green, that is almost\n"
-        "        certainly the cause. `reset` releases it with this same admin token;\n"
-        "        it needs the tenant's fence generation, which no admin route reports.\n"
-        "        Note a failed attempt still costs the invite, the alias, the stage and\n"
-        "        the client -- reset reclaims the tenant, not those."
+        "\n  NOTE  Three blockers are invisible to this preflight:\n"
+        "          - a reviewer-purpose tenant with a bound or CELL_READY cell\n"
+        "          - an active reviewer-purpose rollout assignment\n"
+        "          - an unrevoked internal canary credential, which the last attempt\n"
+        "            issued with a 24-hour life and which locks out every retry until\n"
+        "            it expires\n"
+        "        If the authority call returns 400 with everything above green, it is\n"
+        "        one of those. `reset` on the previous attempt's --state-dir clears\n"
+        "        the canary and the leftover stage, and releases the tenant; the\n"
+        "        tenant needs its fence generation, which no admin route reports.\n"
+        "        Still permanently spent per attempt: the invite, the email alias\n"
+        "        and the operator client slot. Nothing reclaims those."
     )
     return bool(ok)
 
@@ -1058,6 +1183,14 @@ def reset(
             "(`revoke_reviewer_bootstrap`) before resetting."
         )
 
+    # Reclaim what this attempt spent that substrate can actually take back, before
+    # deciding whether there is a tenant to release. These two are independent of
+    # the tenant and of each other: an attempt that died before redeem still leaves
+    # a stage, and one that died after the canary leaves a 24-hour lockout. Both
+    # ran only by hand until now, which is to say never.
+    reclaimed_canaries = reclaim_internal_canaries(cp)
+    reclaimed_stages = reclaim_staged_releases(cp)
+
     candidates = [
         a
         for a in authorities
@@ -1066,11 +1199,19 @@ def reset(
         and (authority_id is None or a.get("id") == authority_id)
     ]
     if not candidates:
-        raise SystemExit(
-            "no consumed reviewer-bootstrap authority with a recorded outcome operation; "
-            "there is nothing this can release. An attempt that failed at or before "
-            "redeem never created a tenant."
+        # Not a failure. An attempt that died before redeem never created a tenant,
+        # and the canary and stage reclaim above is the whole of what it left behind.
+        print(
+            "\n  No consumed authority with a recorded outcome operation, so no tenant "
+            "to release.\n  An attempt that failed at or before redeem never created "
+            "one."
         )
+        print(
+            f"  Reclaimed: {reclaimed_canaries} canary credential(s), "
+            f"{reclaimed_stages} staged release(s)."
+        )
+        print("  Re-run `preflight` before preparing again.")
+        return
     if len(candidates) > 1:
         raise SystemExit(
             f"{len(candidates)} consumed authorities are present; name one with "
