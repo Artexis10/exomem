@@ -270,6 +270,296 @@ def test_the_real_vault_projector_blocks_quiet_assertions_rather_than_passing_th
 
 
 # --------------------------------------------------------------------------
+# f21 on the runtime that exists, not on a snapshot of it.
+# `complete-recurring-entity-lifecycle`, tasks 6.1 and 6.2.
+# --------------------------------------------------------------------------
+
+
+def _f21_runtime_snapshot(vault: Path):
+    """Project one real synthetic f21 vault through the real product surfaces."""
+
+    from epistemic.projectors.exomem_vault import VaultProjector
+
+    return VaultProjector(vault, runtime_surfaces=True).project(
+        phase="p1-recurrence", taken_at="2026-08-16T00:00:00Z"
+    )
+
+
+def _f21_signals(snapshot, subject: str) -> dict[str, str]:
+    """``surface -> signal id`` for every entity-candidate signal naming ``subject``."""
+
+    from epistemic import assertions as assertions_module
+
+    return {
+        assertions_module._signal_surface(item) or "unnamed": item.id
+        for item, _token in assertions_module._signals_targeting(
+            snapshot, subject, assertions_module.ENTITY_SIGNAL_CLASSES
+        )
+    }
+
+
+@pytest.fixture
+def f21_vault(tmp_path: Path) -> Path:
+    """The f21 corpus, seeded through the product's own capture and note leaves.
+
+    Not written as markdown bytes: a hand-written page is not the state the
+    product produces, and the audit says so out loud (`frontmatter_compliance`
+    on every page, `unprocessed_source` on every Source). The scenario's
+    `ingest_source` op means the capture leaf, and its `maintenance_pass` op
+    means the maintenance leaf; both run here before anything is projected.
+    """
+
+    from epistemic.journeys import f21_runtime
+
+    return f21_runtime.seed_runtime_vault(tmp_path / "vault")
+
+
+def test_the_real_runtime_projects_every_f21_absence_surface(f21_vault: Path) -> None:
+    """(a) All four declared surfaces are real projections, not stubs.
+
+    Until they are, every quiet assertion over a real vault is *blocked* rather
+    than passing, which is the anti-vacuity meta-predicate doing its job (see
+    ``test_the_real_vault_projector_blocks_quiet_assertions_rather_than_passing_them``).
+    A projection that reports ``complete`` here is claiming the surface was
+    actually enumerated, so each one is read from the product's own documented
+    read path.
+    """
+
+    from epistemic import assertions as assertions_module
+
+    snapshot = _f21_runtime_snapshot(f21_vault)
+
+    projected = {
+        surface: assertions_module._surface_projection(snapshot, surface)
+        for surface in corpus.ABSENCE_SURFACES
+    }
+    assert projected == dict.fromkeys(corpus.ABSENCE_SURFACES, "complete"), projected
+
+
+def test_both_f21_positives_surface_from_the_real_runtime(f21_vault: Path) -> None:
+    """(b) 6.2's positive half, measured on this tree.
+
+    Both positives carry structurally different reusable facets — a typed-copula
+    witness with a work relation, and a typed-label witness with an attendance
+    relation — across three independent origins, and both must reach the audit,
+    the explicit review read and the proposal/work-item projection. The count is
+    asserted too: exactly two candidates, so a projection that surfaced the twin
+    as well would fail here rather than only in the twin's own test.
+    """
+
+    snapshot = _f21_runtime_snapshot(f21_vault)
+
+    for label in ("f21-subject-lower", "f21-subject-cyrillic"):
+        identity = corpus.F21_RUNTIME_REFERENTS[label]
+        result = resolve("entity_candidate_surfaced_from_recurrence")(
+            AssertionContext(snapshot=snapshot, subject=identity)
+        )
+        assert result.outcome == "pass", f"{label}: {result.evidence}"
+        assert set(_f21_signals(snapshot, identity)) == {
+            "audit_findings",
+            "review_queue",
+            "proposal_queue",
+        }, label
+        review_rows = [
+            item
+            for item in snapshot.items
+            if item.raw.get("surface") == "review_queue"
+            and item.raw.get("identity") == identity
+        ]
+        assert len(review_rows) == 1, f"{label}: {[row.id for row in review_rows]}"
+        assert review_rows[0].raw["delivery"] == "explicit_only", (
+            f"{label}: {review_rows[0].raw}"
+        )
+
+    surfaced = {
+        item.raw["identity"]
+        for item in snapshot.items
+        if item.raw.get("signal_class") == "entity_candidate"
+    }
+    assert surfaced == {
+        corpus.F21_RUNTIME_REFERENTS["f21-subject-lower"],
+        corpus.F21_RUNTIME_REFERENTS["f21-subject-cyrillic"],
+    }, surfaced
+
+
+def test_the_f21_twin_is_absent_on_every_real_f21_surface(f21_vault: Path) -> None:
+    """(c) 6.2's quiet half, as a real pass rather than a block.
+
+    The twin rides the same three notes and the same three origins as both
+    positives; only its reusable facets are missing. Its silence must therefore
+    be established on all four surfaces — including due-state, which
+    ``entity_recurrence`` deliberately never enters — and it must be a *pass*,
+    which the meta-predicate only grants once every surface projected
+    completely.
+    """
+
+    snapshot = _f21_runtime_snapshot(f21_vault)
+    twin = corpus.F21_RUNTIME_REFERENTS["f21-twin-incidental"]
+
+    result = resolve("signal_absence_checked_across_all_surfaces")(
+        AssertionContext(snapshot=snapshot, subject=twin)
+    )
+
+    assert result.outcome == "pass", result.evidence
+    for surface in corpus.ABSENCE_SURFACES:
+        assert surface in result.evidence, result.evidence
+    assert _f21_signals(snapshot, twin) == {}
+
+
+def test_the_f21_corpus_is_seeded_through_the_product_write_path(f21_vault: Path) -> None:
+    """The corpus must reach the audit in the state the product writes, not ours.
+
+    Hand-written markdown carries neither the fields the writer stamps nor the
+    `ingested_into:` edge the note leaf appends to a Source it consumed, so the
+    sweep reports `frontmatter_compliance` on every page and `unprocessed_source`
+    on every Source. Projecting that measures the fixture's spelling rather than
+    the runtime, which is the one thing this family cannot afford.
+    """
+
+    snapshot = _f21_runtime_snapshot(f21_vault)
+
+    categories = {
+        item.raw["category"]
+        for item in snapshot.items
+        if item.raw.get("surface") == "audit_findings" and "category" in item.raw
+    }
+    assert "frontmatter_compliance" not in categories, sorted(categories)
+    assert "unprocessed_source" not in categories, sorted(categories)
+
+
+def test_a_refused_curation_read_blocks_the_quiet_assertion_rather_than_silencing_it(
+    f21_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable proposal queue is an error, never the silence it looks like.
+
+    This is the anti-vacuity rule pointed at the projector itself. If a refused
+    `work_item` were swallowed, the surface would still report `complete` while
+    carrying no candidate, and every quiet assertion over that snapshot would
+    pass on silence the product never demonstrated.
+    """
+
+    from exomem import curation as curation_module
+
+    def refuse(*_args: object, **_kwargs: object) -> object:
+        raise curation_module.CurationError(
+            "CURATION_ENTITY_CANDIDATE_STALE", "the candidate changed under the read"
+        )
+
+    monkeypatch.setattr(curation_module, "work_item", refuse)
+    snapshot = _f21_runtime_snapshot(f21_vault)
+
+    from epistemic import assertions as assertions_module
+
+    assert assertions_module._surface_projection(snapshot, "proposal_queue") != "complete"
+    for surface in ("audit_findings", "review_queue", "due_state_counters"):
+        assert assertions_module._surface_projection(snapshot, surface) == "complete", surface
+
+    result = resolve("signal_absence_checked_across_all_surfaces")(
+        AssertionContext(
+            snapshot=snapshot,
+            subject=corpus.F21_RUNTIME_REFERENTS["f21-twin-incidental"],
+        )
+    )
+    assert result.outcome == "blocked", result.evidence
+    assert "never silence" in result.evidence
+
+
+def test_a_signal_bearing_finding_without_its_subject_is_refused() -> None:
+    """A candidate the runtime raised may not project as an ordinary page defect.
+
+    The signal class is attached from the finding's category and the subject
+    from its own identity. If a future `entity_recurrence` finding ever arrived
+    without one, keeping the row and dropping the class would demote a real
+    candidate into page hygiene — invisible to `_signals_targeting`, so every
+    quiet assertion over that snapshot would pass while the runtime was in fact
+    nagging about the subject. Refusing is the only answer that is not silence.
+    """
+
+    from types import SimpleNamespace
+
+    from epistemic.projectors.exomem_vault import _audit_finding_items
+
+    report = SimpleNamespace(
+        summary={"entity_recurrence": 1},
+        findings=[
+            SimpleNamespace(
+                category="entity_recurrence",
+                path="Knowledge Base/Notes/Insights/anything.md",
+                detail="a candidate with no identity",
+                meta={"candidate_state": "promotion"},
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="carries no identity"):
+        _audit_finding_items(report)
+
+
+def test_the_f21_runtime_twin_is_frequency_matched_to_both_positives(
+    f21_vault: Path,
+) -> None:
+    """The twin's silence is about reusable facts, never about rarity.
+
+    Measured from the corpus rather than asserted in prose, exactly as
+    ``test_f20_twins_are_frequency_and_length_matched`` does: equal mentioning
+    pages, equal independent origins and equal mention counts leave the frame
+    structure as the only discriminator.
+    """
+
+    report = corpus.f21_runtime_matching_report()
+
+    assert len(report) == len(corpus.F21_RUNTIME_REFERENTS)
+    assert len(set(report.values())) == 1, report
+    assert report[corpus.F21_RUNTIME_REFERENTS["f21-twin-incidental"]][1] == 3, report
+
+
+def test_the_real_runtime_f21_positives_go_red_when_the_ordinary_text_lane_is_disabled(
+    f21_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(d) The two-sided proof this falsification target needs.
+
+    f21 is a pre-registered falsification target, and a family that only ever
+    goes green proves as little as one that only ever goes red. Disabling the
+    recurrence substrate's ordinary-text lane at its own seam — no source edit,
+    no corpus edit — must take both positives out of the real projection, while
+    the synthetic ``surfaced=True`` snapshot, which models a runtime rather than
+    running one, is untouched.
+    """
+
+    from exomem import entity_recurrence
+
+    monkeypatch.setattr(
+        entity_recurrence, "extract_identity_frames", lambda *a, **k: ()
+    )
+    snapshot = _f21_runtime_snapshot(f21_vault)
+
+    # `unsupported`, pinned exactly, and the pin is a declaration rather than a
+    # preference. The runtime names an identity only once the audit has raised a
+    # finding for it, so a positive that stops surfacing loses its snapshot item
+    # and the predicate reports "not present" rather than "no signal". Scoring
+    # treats `unsupported` as neutral, not as a miss, so this projection cannot
+    # yet produce the `fail` that PREREGISTRATION.md §4 means when it says an
+    # identity recurring across the frozen number of distinct sources must
+    # surface. Closing that gap needs the pre-gate page/origin counts projected
+    # for every declared subject; it is named as follow-up evidence on 6.5 and
+    # is deliberately not implemented here.
+    for label in ("f21-subject-lower", "f21-subject-cyrillic"):
+        identity = corpus.F21_RUNTIME_REFERENTS[label]
+        result = resolve("entity_candidate_surfaced_from_recurrence")(
+            AssertionContext(snapshot=snapshot, subject=identity)
+        )
+        assert result.outcome == "unsupported", f"{label}: {result.evidence}"
+        assert _f21_signals(snapshot, identity) == {}, label
+
+    synthetic = resolve("entity_candidate_surfaced_from_recurrence")(
+        AssertionContext(
+            snapshot=corpus.f21_corpus(surfaced=True), subject="f21-subject-lower"
+        )
+    )
+    assert synthetic.outcome == "pass", synthetic.evidence
+
+
+# --------------------------------------------------------------------------
 # The families execute end to end.
 # --------------------------------------------------------------------------
 

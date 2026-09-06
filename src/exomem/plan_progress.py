@@ -405,14 +405,20 @@ def _planning_manifests(
             return [], 1
         return [manifest], 0
     try:
-        discovered = collections.discover_collections(
+        discovered, unreadable = collections.discover_collections_with_errors(
             root, authorize_path=record_governance.full_release_filter(root)
         )
     except CollectionError:
         return [], 0
+    # An unreadable manifest has no legible profile, so it cannot be ruled OUT
+    # of this scan -- it may be exactly the Planning collection the caller asked
+    # about. Counting it unavailable is the honest answer; not counting it would
+    # report a complete scan of a tree this pass could not fully read. A count
+    # discloses nothing, which is why the review surface carries the number and
+    # never the path.
     return [
         manifest for manifest in discovered if manifest.semantic_profile == "planning"
-    ], 0
+    ], len(unreadable)
 
 
 def _planning_page(

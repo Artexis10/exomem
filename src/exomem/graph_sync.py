@@ -239,8 +239,10 @@ def _is_receipt_terminal_projection(value: object) -> bool:
             return False
         if key == "status" and item not in _RECEIPT_TERMINAL_STATUSES:
             return False
-        if key in {"request_id", "operation_id"} and (
-            not isinstance(item, str) or _UUID.fullmatch(item) is None
+        if key == "request_id" and (not isinstance(item, str) or _UUID.fullmatch(item) is None):
+            return False
+        if key == "operation_id" and (
+            not isinstance(item, str) or (_UUID.fullmatch(item) is None and not _is_digest(item))
         ):
             return False
         if key == "receipt_id" and item is not None and (

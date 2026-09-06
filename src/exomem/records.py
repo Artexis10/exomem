@@ -14,7 +14,9 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NotRequired
+
+from typing_extensions import TypedDict
 
 from . import record_formats, record_governance, vault, writer_lease
 from . import structured_collections as collections
@@ -39,6 +41,24 @@ _LIFECYCLE_RECEIPT_VERSION = 2
 _LIFECYCLE_REQUEST_DOMAIN = b"exomem-record-lifecycle-request:v2\0"
 _LIFECYCLE_GAP_DOMAIN = b"exomem-record-gap:v2\0"
 _LIFECYCLE_CHECKPOINT_DOMAIN = b"exomem-record-checkpoint:v2\0"
+
+
+class ArtifactDeliveryProof(TypedDict):
+    algorithm: str
+    digest: str
+    reference: str
+
+
+class ArtifactDelivery(TypedDict):
+    """Caller-authored field mapping for receipt-gated delivery validation."""
+
+    evidence_page: str
+    link_field: str
+    reported_remote_ref: str
+    reported_remote_field: str
+    verified_remote_field: str
+    platform_reference_field: NotRequired[str]
+    platform_proof: NotRequired[ArtifactDeliveryProof]
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +173,7 @@ def append_record(
     expected_container_hash: str | None = None,
     why: str,
     body: str = "",
+    delivery: ArtifactDelivery | None = None,
     validate_snapshot: Callable[
         [collections.CollectionManifest, record_formats.AdapterSnapshot, str, Mapping[str, Any]],
         None,
@@ -213,6 +234,11 @@ def append_record(
                 {"item_keys": twins},
             )
         payload_hash = _payload_hash(manifest, key, values, body)
+        delivery_guard = (
+            _validate_artifact_delivery(root, manifest, values, delivery)
+            if delivery is not None
+            else None
+        )
         if validate_snapshot is not None:
             validate_snapshot(manifest, snapshot, key, values)
         if existing:
@@ -232,6 +258,8 @@ def append_record(
                     snapshot,
                     planned_paths=(existing[0].source.path,),
                 )
+                if delivery_guard is not None:
+                    delivery_guard.recheck(root)
                 return _result(
                     operation="append",
                     manifest=manifest,
@@ -336,6 +364,7 @@ def append_record(
                 required_guards=(
                     *directory_guards,
                     *snapshot.path_guards,
+                    *((delivery_guard,) if delivery_guard is not None else ()),
                 ),
             )
         except vault.BatchWriteError:
@@ -359,6 +388,211 @@ def append_record(
     # Outside the guard on purpose -- see `_due_state_carrier`.
     advisory = _due_state_carrier(root, manifest, path=committed_path, key=key, values=values)
     return {"due_state": advisory, **committed} if advisory else committed
+
+
+def _delivery_refusal(
+    code: str,
+    reason: str,
+    **details: Any,
+) -> collections.CollectionError:
+    return collections.CollectionError(code, reason, details)
+
+
+def _validate_artifact_delivery(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    item: Mapping[str, Any],
+    delivery: object,
+) -> vault.PathGuard:
+    """Validate caller-authored delivery fields against one Evidence receipt.
+
+    This adapter sets no item value and creates no collection. It only proves
+    that the values the caller supplied already describe a receipt-backed local
+    Evidence artifact and an honest reported/verified remote identity state.
+    """
+    required = {
+        "evidence_page",
+        "link_field",
+        "reported_remote_ref",
+        "reported_remote_field",
+        "verified_remote_field",
+    }
+    optional = {"platform_reference_field", "platform_proof"}
+    if not isinstance(delivery, Mapping) or set(delivery) - required - optional:
+        raise _delivery_refusal(
+            "INVALID_DELIVERY",
+            "delivery must use only the declared receipt-validation fields",
+            allowed_fields=sorted(required | optional),
+        )
+    missing = sorted(required - set(delivery))
+    if missing:
+        raise _delivery_refusal(
+            "INVALID_DELIVERY",
+            f"delivery field is required: {missing[0]}",
+            field=missing[0],
+        )
+    field_limits = {
+        "evidence_page": 2048,
+        "link_field": 128,
+        "reported_remote_ref": 2048,
+        "reported_remote_field": 128,
+        "verified_remote_field": 128,
+    }
+    for name, limit in field_limits.items():
+        value = delivery.get(name)
+        if (
+            type(value) is not str
+            or not value.strip()
+            or value != value.strip()
+            or len(value.encode("utf-8")) > limit
+        ):
+            raise _delivery_refusal(
+                "INVALID_DELIVERY", f"delivery field must be bounded non-empty text: {name}", field=name
+            )
+
+    mapped_names = [
+        str(delivery["link_field"]),
+        str(delivery["reported_remote_field"]),
+        str(delivery["verified_remote_field"]),
+    ]
+    platform_field = delivery.get("platform_reference_field")
+    proof = delivery.get("platform_proof")
+    if (platform_field is None) != (proof is None):
+        raise _delivery_refusal(
+            "INVALID_DELIVERY",
+            "platform_reference_field and platform_proof must be supplied together",
+        )
+    if platform_field is not None:
+        if (
+            type(platform_field) is not str
+            or not platform_field.strip()
+            or platform_field != platform_field.strip()
+            or len(platform_field.encode("utf-8")) > 128
+        ):
+            raise _delivery_refusal(
+                "INVALID_DELIVERY",
+                "platform_reference_field must be a bounded field name",
+                field="platform_reference_field",
+            )
+        mapped_names.append(platform_field)
+    if len(set(mapped_names)) != len(mapped_names):
+        raise _delivery_refusal(
+            "INVALID_DELIVERY", "delivery field mappings must name distinct schema fields"
+        )
+
+    expected_types = {
+        str(delivery["link_field"]): "link",
+        str(delivery["reported_remote_field"]): "string",
+        str(delivery["verified_remote_field"]): "boolean",
+        **({str(platform_field): "string"} if platform_field is not None else {}),
+    }
+    for field, expected_type in expected_types.items():
+        spec = manifest.schema.fields.get(field)
+        if spec is None or spec.type != expected_type:
+            raise _delivery_refusal(
+                "DELIVERY_SCHEMA_INCOMPATIBLE",
+                f"delivery field is missing or has an incompatible type: {field}",
+                field=field,
+                expected_type=expected_type,
+                actual_type=None if spec is None else spec.type,
+            )
+
+    evidence_page = str(delivery["evidence_page"])
+    try:
+        page_path, page_rel = vault.resolve_under_vault(
+            root, evidence_page, must_exist=True, must_be_file=True
+        )
+    except vault.VaultPathError as error:
+        raise _delivery_refusal(
+            "DELIVERY_RECEIPT_REQUIRED",
+            "delivery requires an existing canonical Evidence companion receipt",
+            evidence_page=evidence_page,
+        ) from error
+    if page_rel != evidence_page:
+        raise _delivery_refusal(
+            "INVALID_DELIVERY", "evidence_page must be the canonical vault-relative path"
+        )
+    try:
+        source, page_guard = vault.read_guarded_text(root, page_path)
+        frontmatter, _body, marker = vault.parse_frontmatter(source, strict=True)
+    except (OSError, UnicodeDecodeError, vault.FrontmatterError, vault.PathGuardError) as error:
+        raise _delivery_refusal(
+            "DELIVERY_RECEIPT_REQUIRED",
+            "delivery requires a readable canonical Evidence companion receipt",
+            evidence_page=evidence_page,
+        ) from error
+    adoption = frontmatter.get("artifact_adoption") if marker is not None else None
+    if not isinstance(adoption, Mapping):
+        raise _delivery_refusal(
+            "DELIVERY_RECEIPT_REQUIRED",
+            "delivery requires a committed artifact-adoption receipt",
+            evidence_page=evidence_page,
+        )
+    from . import client_artifacts
+
+    try:
+        receipt = client_artifacts._validate_receipt(
+            adoption, page_path=page_path, vault_root=root
+        )
+        client_artifacts._verify_canonical_artifact(root, receipt)
+    except client_artifacts.SafeFetchError as error:
+        raise _delivery_refusal(
+            "DELIVERY_RECEIPT_REQUIRED",
+            "delivery requires a valid committed Evidence adoption receipt",
+            evidence_page=evidence_page,
+            receipt_error=error.code,
+        ) from error
+    if receipt["lane"] != "evidence":
+        raise _delivery_refusal(
+            "DELIVERY_EVIDENCE_REQUIRED",
+            "Source adoption cannot authorize an Evidence delivery record",
+            evidence_page=evidence_page,
+        )
+
+    expected_values: dict[str, Any] = {
+        str(delivery["link_field"]): evidence_page,
+        str(delivery["reported_remote_field"]): delivery["reported_remote_ref"],
+        str(delivery["verified_remote_field"]): False,
+    }
+    if proof is not None:
+        if not isinstance(proof, Mapping) or set(proof) != {"algorithm", "digest", "reference"}:
+            raise _delivery_refusal(
+                "INVALID_DELIVERY_PROOF",
+                "platform_proof must contain exactly algorithm, digest, and reference",
+            )
+        algorithm = proof.get("algorithm")
+        digest = proof.get("digest")
+        reference = proof.get("reference")
+        if (
+            algorithm != "sha256"
+            or type(digest) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or type(reference) is not str
+            or not reference.strip()
+            or reference != reference.strip()
+            or len(reference.encode("utf-8")) > 2048
+        ):
+            raise _delivery_refusal(
+                "INVALID_DELIVERY_PROOF", "platform_proof has an invalid identity shape"
+            )
+        if digest != receipt["hash"]:
+            raise _delivery_refusal(
+                "DELIVERY_PROOF_MISMATCH",
+                "platform proof digest does not match the local adoption receipt",
+            )
+        expected_values[str(delivery["verified_remote_field"])] = True
+        assert platform_field is not None
+        expected_values[str(platform_field)] = reference
+
+    for field, expected in expected_values.items():
+        if field not in item or type(item[field]) is not type(expected) or item[field] != expected:
+            raise _delivery_refusal(
+                "DELIVERY_ITEM_MISMATCH",
+                f"submitted item does not exactly match delivery evidence: {field}",
+                field=field,
+                expected=expected,
+            )
+    return page_guard
 
 
 def update_record(

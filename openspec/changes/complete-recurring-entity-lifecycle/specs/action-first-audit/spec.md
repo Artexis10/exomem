@@ -5,11 +5,11 @@ The audit SHALL provide an `entity_recurrence` category that deterministically c
 
 The unresolved-wikilink lane SHALL retain its three-distinct-page spread rule and its compatibility reason `unresolved_identity_recurs`. `identity-frames-v1` SHALL accept only `typed-copula`, `typed-label`, `subject-relation`, `identity-relation`, and `body-field` frames using the frozen core-v1 predicate table, active registry `cue_nouns`, and exact title/alias Entity index. Every frame SHALL carry a non-null predicate ID from that table: the four `copula.*` IDs, two `label.*` delimiter IDs, exact form-specific relation IDs, or exact normalized `field.*` label IDs. It SHALL NOT accept a plugin-added frame, arbitrary field name, null or inferred predicate ID, capitalization cue, model, embedding, or statistical NER result.
 
-An ordinary-text identity SHALL qualify only when it occurs on at least three eligible pages across at least three independent origins, carries at least two distinct material facet atoms from at least two origins, and carries a stable cue admitted by that grammar. A candidate span SHALL be the adjacent 1–8-token, 2–128-byte Unicode span bounded by the frame cue and a clause boundary; pronoun-only, all-numeric, stopword-only, URL, email, path, date/time, code, Markdown-link-target, and cue-only spans SHALL be rejected. Repeated mention-only text, repeated copies of one facet atom, and frequency-matched incidental mentions MUST NOT qualify.
+An ordinary-text identity SHALL meet the recurrence/facet gate only when it occurs on at least three eligible pages across at least three independent origins and carries at least two distinct material facet atoms from at least two origins. `typed-copula`, `typed-label`, and `body-field` SHALL be identity-witness frames. `subject-relation` and `identity-relation` SHALL be facet-only frames. Promotion of an unresolved identity SHALL additionally require at least one identity-witness row; facet-only rows may enrich that witnessed identity but MUST NOT seed promotion by themselves. One or more active exact/alias Entity matches SHALL instead provide the identity warrant for hydration or ambiguity, so an exactly resolved existing Entity with qualifying relation-only facets can surface while the same no-match corpus remains quiet. A candidate span SHALL be the adjacent 1–8-token, 2–128-byte Unicode span bounded by the frame cue and a clause boundary; pronoun-only, all-numeric, stopword-only, URL, email, path, code, Markdown-link-target, and exact cue-only spans SHALL be rejected. The only additional date/time exclusions SHALL be the exact NFKC-case-folded whole-span regular expressions `\d{4}-\d{1,2}-\d{1,2}`, `\d{1,2}:\d{2}(?::\d{2})?`, `(?:[01]?\d|2[0-3])h[0-5]\d`, and `\d{1,2}(?:(?: |:)\d{2})? ?(?:am|pm)`. The sensor SHALL NOT claim to semantically distinguish an arbitrary otherwise-valid natural-language phrase from an identically authored name, and SHALL NOT grow a phrase blacklist to simulate that decision. Repeated mention-only text, unresolved relation-only text, repeated copies of one facet atom, and frequency-matched incidental mentions MUST NOT qualify.
 
 A facet atom SHALL bind grammar version, frame type, predicate ID, normalized cue or exact resolved-Entity counterpart, and the clause skeleton with the candidate replaced by `<identity>`. The evidence and signal fingerprints SHALL bind the grammar version, predicate-table digest, registry fingerprint, material facet hashes, and all disconnected qualifying-context hashes. Same-label contexts SHALL form incompatible clusters only when at least two deterministic compatibility-graph components independently meet the full gate and have mutually ancestor-incompatible explicit family cues or disjoint non-empty resolved-Entity anchor sets.
 
-The category SHALL emit at most one finding per identity, carrying bounded deterministic provenance and samples, full recurrence and truncation counts, material facets, role or membership language, co-occurring resolved entities, type cues, resolution evidence, grammar identity, and registry identity. It SHALL add no write-time work, embedding, model call, confidence float, or page mutation.
+The category SHALL emit at most one finding per identity, carrying bounded deterministic provenance and samples, full recurrence and truncation counts, material facets, role or membership language, co-occurring resolved entities, type cues, resolution evidence, grammar identity, and registry identity. Top-level and nested-context `type_cues`, `active_type_cues`, and `entity_families` SHALL each be deterministically capped and SHALL each expose full, returned, and omitted counts; compatibility and fingerprints SHALL continue to bind the complete pre-projection sets. It SHALL add no write-time work, embedding, model call, confidence float, or page mutation.
 
 #### Scenario: A recurring unresolved identity becomes a candidate
 - **GIVEN** three distinct eligible pages whose bodies link an identity that exists neither as a page nor as an active Entity title or alias
@@ -22,7 +22,7 @@ The category SHALL emit at most one finding per identity, carrying bounded deter
 - **THEN** zero findings are produced for that identity
 
 #### Scenario: Plain-text mentions are out of scope for this stream
-- **GIVEN** an identity is mentioned in many page bodies but no occurrence matches `identity-frames-v1` with the required stable cue and material facets
+- **GIVEN** an identity is mentioned in many page bodies but no occurrence matches `identity-frames-v1` with the required identity warrant and material facets
 - **WHEN** the audit sweeps `entity_recurrence`
 - **THEN** zero findings are produced for it
 
@@ -50,9 +50,26 @@ The category SHALL emit at most one finding per identity, carrying bounded deter
 - **THEN** it is a fingerprint-bound, identity-partitioned review item honouring family dispositions, dismissal suppression, and material-change reopen
 
 #### Scenario: Ordinary recurring identity with reusable facets surfaces
-- **GIVEN** an unlinked identity occurs across three independent eligible origins through supported v1 frames with at least two distinct material facets and a stable cue
+- **GIVEN** an unlinked identity occurs across three independent eligible origins through supported v1 frames with at least two distinct material facets and at least one typed-copula, typed-label, or body-field identity witness
 - **WHEN** the audit sweeps `entity_recurrence`
 - **THEN** one finding is produced without requiring a wikilink, capitalization, Latin script, or a registered leaf kind for the candidate
+
+#### Scenario: Relation-only recurrence cannot seed an identity
+- **GIVEN** the same otherwise-valid span occurs across enough independent origins and relation facets but only through `subject-relation` or `identity-relation`
+- **WHEN** the audit sweeps `entity_recurrence`
+- **THEN** zero findings are produced for that unresolved span regardless of whether it resembles a proper name, a temporal phrase, a quantity plus type cue, or another natural-language phrase
+- **AND** adding one qualifying identity-witness row permits the complete evidence set to be evaluated without a phrase-specific exception
+
+#### Scenario: Existing Entity resolution warrants relation-only hydration
+- **GIVEN** the same qualifying relation-only corpus resolves to exactly one active Entity while its contexts remain disconnected
+- **WHEN** the audit sweeps `entity_recurrence`
+- **THEN** one hydration finding is produced for that Entity without requiring a new direct witness
+- **AND** removing the Entity makes the unchanged relation-only corpus quiet rather than producing promotion pressure
+
+#### Scenario: One witness composes with relation facets across origins
+- **GIVEN** one identity-witness row occurs in origin A and distinct supported relation facets for the same identity occur in origins B and C
+- **WHEN** the complete three-origin evidence set meets the recurrence/facet gate
+- **THEN** the relation rows remain material evidence and one promotion finding is produced
 
 #### Scenario: Frequency-matched incidental mentions stay quiet
 - **GIVEN** an identity occurs in the same number of pages and origins as a qualifying identity but carries only mention-only or duplicate context and no reusable facet evidence
@@ -60,7 +77,7 @@ The category SHALL emit at most one finding per identity, carrying bounded deter
 - **THEN** zero findings are produced for the incidental identity
 
 #### Scenario: Lowercase and non-Latin identities use the same contract
-- **GIVEN** lowercase and non-Latin identities each satisfy the same v1 frame, origin, facet, span, and stable-cue gates
+- **GIVEN** lowercase and non-Latin identities each satisfy the same v1 frame, origin, facet, span, and identity-witness gates
 - **WHEN** the audit sweeps `entity_recurrence`
 - **THEN** each is collected by the same detector and evidence schema
 
@@ -92,3 +109,9 @@ The category SHALL emit at most one finding per identity, carrying bounded deter
 - **THEN** it reuses the audit's parsed-page walk and one registry snapshot
 - **AND** performs no model, embedding, background, or write operation
 - **AND** every candidate sample is bounded while full counts remain reported
+
+#### Scenario: Open taxonomy cue projection remains bounded
+- **GIVEN** a vault registry has more active matching leaf kinds or families than one response may return
+- **WHEN** a qualifying candidate and its contexts are projected
+- **THEN** top-level and nested cue/family arrays return the deterministic bounded prefix with full, returned, and omitted counts
+- **AND** changing an omitted registry member still changes the registry-bound signal

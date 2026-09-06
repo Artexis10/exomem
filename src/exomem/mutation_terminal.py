@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
+from . import curation as curation_module
 from . import relation_registry
 
 log = logging.getLogger(__name__)
@@ -143,6 +144,11 @@ def _operation_id(result: Any) -> str | None:
             nested_id = nested.get("draft_id")
             if isinstance(nested_id, str) and nested_id:
                 return nested_id
+    step = result.get("step")
+    if isinstance(step, Mapping):
+        operation_id = step.get("operation_id")
+        if isinstance(operation_id, str) and operation_id:
+            return operation_id
     return None
 
 
@@ -231,6 +237,9 @@ def _path_projection(result: Any) -> dict[str, Any]:
     path = result.get("path")
     if isinstance(path, str):
         return {"path": path}
+    step = result.get("step")
+    if isinstance(step, Mapping) and isinstance(step.get("path"), str):
+        return {"path": step["path"]}
     affected_paths = result.get("affected_paths")
     if (
         valid_collection_receipt(result)
@@ -317,13 +326,57 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             "reason": "artifact result was invalid",
         }
 
+    def adoption_receipt(value: Any, item: Mapping[str, Any]) -> dict[str, Any] | None:
+        fields = (
+            "version",
+            "committed",
+            "key_digest",
+            "trigger",
+            "selected_file_id",
+            "lane",
+            "destination",
+            "stored_path",
+            "page_path",
+            "hash_algorithm",
+            "hash",
+            "size",
+            "content_type",
+            "media_id",
+        )
+        if not isinstance(value, Mapping) or set(value) != set(fields):
+            return None
+        if not (
+            value.get("version") == 1
+            and value.get("committed") is True
+            and sha256(value.get("key_digest"))
+            and string(value.get("trigger"), limit=64)
+            and string(value.get("selected_file_id"), limit=256)
+            and value.get("lane") in {"source", "evidence"}
+            and string(value.get("destination"), limit=2048)
+            and string(value.get("stored_path"), limit=2048)
+            and string(value.get("page_path"), limit=2048)
+            and value.get("hash_algorithm") == "sha256"
+            and sha256(value.get("hash"))
+            and nonnegative_int(value.get("size"))
+            and string(value.get("content_type"), limit=255, allow_none=True)
+            and value.get("media_id") == f"sha256:{value.get('hash')}"
+            and value.get("selected_file_id") == item.get("file_id")
+            and value.get("stored_path") == item.get("stored_path")
+            and value.get("hash") == item.get("hash")
+            and value.get("size") == item.get("size")
+            and value.get("content_type") == item.get("content_type")
+            and value.get("media_id") == item.get("media_id")
+        ):
+            return None
+        return {field: value[field] for field in fields}
+
     projected: list[dict[str, Any]] = []
     for index, item in enumerate(files):
         if not isinstance(item, Mapping) or not string(item.get("file_id"), limit=256):
             projected.append(invalid_row(item, index))
             continue
         outcome = item.get("outcome")
-        if outcome == "stored":
+        if outcome in {"stored", "replayed"}:
             if not (
                 string(item.get("stored_path"), limit=2048)
                 and nonnegative_int(item.get("size"))
@@ -352,6 +405,20 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                 )
                 if key in item
             }
+            for key in ("path", "page", "ref"):
+                if key in item and string(item[key], limit=2048):
+                    row[key] = item[key]
+            if "adoption" in item:
+                receipt = adoption_receipt(item["adoption"], item)
+                if receipt is None:
+                    projected.append(invalid_row(item, index))
+                    continue
+                row["adoption"] = receipt
+            elif outcome == "replayed":
+                projected.append(invalid_row(item, index))
+                continue
+        elif outcome == "unselected":
+            row = {"file_id": item["file_id"], "outcome": "unselected"}
         elif (
             outcome == "failed"
             and string(item.get("code"), limit=64)
@@ -362,9 +429,48 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             projected.append(invalid_row(item, index))
             continue
         projected.append(row)
-    stored = sum(item["outcome"] == "stored" for item in projected)
-    failed = len(projected) - stored
-    return {"files": projected, "summary": {"stored": stored, "failed": failed}}
+    counts = {
+        outcome: sum(item["outcome"] == outcome for item in projected)
+        for outcome in ("stored", "replayed", "failed", "unselected")
+    }
+    adoption_result = any(
+        isinstance(item, Mapping)
+        and (item.get("outcome") in {"replayed", "unselected"} or "adoption" in item)
+        for item in files
+    ) or any(key in summary for key in ("replayed", "unselected"))
+    if not adoption_result:
+        raw_stored = summary.get("stored")
+        raw_failed = summary.get("failed")
+        raw_omitted = summary.get("omitted")
+        if (
+            nonnegative_int(raw_stored)
+            and raw_stored >= counts["stored"]
+            and nonnegative_int(raw_failed)
+            and raw_failed >= counts["failed"]
+            and (raw_omitted is None or nonnegative_int(raw_omitted))
+        ):
+            projected_summary = {"stored": raw_stored, "failed": raw_failed}
+            if raw_omitted is not None:
+                projected_summary["omitted"] = raw_omitted
+            return {"files": projected, "summary": projected_summary}
+        return {
+            "files": projected,
+            "summary": {"stored": counts["stored"], "failed": counts["failed"]},
+        }
+    projected_summary: dict[str, int] = {}
+    for outcome in ("stored", "replayed", "failed", "unselected"):
+        value = summary.get(outcome)
+        if value is None and outcome not in {"stored", "failed"}:
+            continue
+        if not nonnegative_int(value) or value < counts[outcome]:
+            return {}
+        projected_summary[outcome] = value
+    omitted = summary.get("omitted")
+    if omitted is not None:
+        if not nonnegative_int(omitted):
+            return {}
+        projected_summary["omitted"] = omitted
+    return {"files": projected, "summary": projected_summary}
 
 
 #: Bounds on the advisory structural suggestion compact may carry. Same posture as
@@ -923,7 +1029,9 @@ def replayed_terminal(
         and leaf_result.get("outcome") == "committed"
     )
     if not (
-        valid_collection_receipt(leaf_result) or valid_structured_files_receipt(leaf_result)
+        valid_collection_receipt(leaf_result)
+        or valid_structured_files_receipt(leaf_result)
+        or curation_module.valid_replay_result(leaf_result)
     ) or (leaf_result.get("outcome") != "replayed" and not lifecycle_replay):
         raise ValueError("replayed terminal requires a valid governed mutation receipt")
 
@@ -1083,6 +1191,32 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
     elif valid_planning_receipt(leaf):
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
+    elif (
+        isinstance(leaf, Mapping)
+        and isinstance(leaf.get("run_id"), str)
+        and str(leaf["run_id"]).startswith("cur-")
+        and isinstance(leaf.get("plan_id"), str)
+    ):
+        compact.update(
+            {
+                key: leaf[key]
+                for key in (
+                    "action",
+                    "run_id",
+                    "plan_id",
+                    "plan_fingerprint",
+                    "phase",
+                    "active_step",
+                    "committed_steps",
+                    "failed_step",
+                    "retryable",
+                    "next_action",
+                    "outcome",
+                    "recovery",
+                )
+                if key in leaf
+            }
+        )
     artifact_receipt = _artifact_receipt_projection(leaf)
     compact.update(artifact_receipt)
     # `pending` (#576) is the fourth outcome: canonical bytes committed, the

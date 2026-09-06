@@ -25,6 +25,19 @@ Do not ask users to choose internal folders, graph sidecars, or page types unles
 the distinction changes the write. Translate back to simple language when
 reporting results.
 
+## Durable personal baseline routing
+
+A stable preference, recurring routine, historical baseline, or durable affiliation
+is eligible only when both stability or recurrence and reusable comparison,
+interpretation, or decision value are clear. Attach a facet or affiliation to a
+uniquely resolved Entity; otherwise preserve one concise compiled observation. Use
+Records only for an observed measurement accepted by a compatible existing
+collection. Fleeting preferences, one-off activity, incidental associations, trivial
+metrics, and tentative claims stay quiet. Do not create an Entity, collection, or
+schema from eligibility alone: concise observations and narrow additive facts obey
+`proactive_capture`, affiliation relations require `link_acceptance`, and Entity
+creation or substantial curation requires confirmed `restructure_execution`.
+
 ## Planning
 
 `plan_memory` is the one public command for human-owned intended future state.
@@ -44,6 +57,29 @@ filename. Existing UUID-named collections move only through
 `maintain_memory(mode="structured-files", collection=...)`: inspect the
 read-only preview, resolve every collision or immutable/withheld inbound-link
 blocker, then apply the exact `plan_id` and `source_snapshot` with a reason.
+
+## Governed curation
+
+Use `maintain_memory(mode="curation")` when one reviewed structural improvement
+spans multiple compiled notes or combines typed creation, relation acceptance,
+edit, supersession, move, delete, or recovery. The active agent remains the
+semantic author: `curation_action="work-item"` assembles only explicit refs and
+paths, and `curation_action="propose"` validates the agent-authored typed plan.
+
+Call `curation_action="preview"` once for the immutable plan and show its exact
+actions, blockers, fingerprint, and compensation classes. That review is
+advisory. Execution is confirm-required: obtain one explicit confirmation bound
+to the returned plan id and fingerprint, then call `curation_action="apply"`.
+Each apply or `curation_action="resume"` request executes at most one content
+step. Continue resume automatically only while the durable phase is executing;
+stop and report `partial` or `blocked` truth.
+
+Compensation is a separate history-preserving plan. Derive it with
+`curation_action="propose-compensation"`, preview it, and obtain a fresh exact
+confirmation before `curation_action="apply-compensation"`. Never treat
+compensation as rollback, reuse a forward approval, grant standing approval, or
+route Planning, Records, Sources, Evidence, workflow contracts, schema/admin
+paths, or trash internals through curation.
 
 ## Records
 
@@ -402,6 +438,37 @@ an explicit reviewed operation because paths are graph addresses.
 
 ---
 
+## recurring entity lifecycle
+
+At balanced or maximal prominence, spend one ordinary recurrence read once per session,
+on the first turn after bootstrap, after primary work and before the final response:
+`review_memory(mode="attention", categories=["entity_recurrence"], limit=3)`.
+Do not repeat it on later ordinary prompts. The response is deterministic
+evidence for the active agent, not an Entity decision. It returns at most three
+candidates and eight contexts each; absence from default attention or due-state
+does not mean the explicit category is clean.
+
+For a candidate, resolve exact and alias matches, stop on ambiguity, hydrate a
+single match before considering a duplicate, and promote only a stable reusable
+no-match. Open the exact review ref with
+`maintain_memory(mode="curation", curation_action="work-item",
+review_ref=...)`; the returned signal, context batch, target, grammar, and
+registry bindings must round-trip unchanged into the agent-authored plan.
+Register an unknown durable kind separately through guarded
+`schema_memory(operation="save-entity-types")`, then refresh; curation never
+edits `_Schema`.
+
+After one separately confirmed hydration batch reaches a terminal receipt, one
+same-identity curation `work-item` with that `review_ref` and the next
+`hydration_recheck` ordinal may expose the next batch, which needs a fresh plan
+and confirmation. Cap one session at eight hydration mutations and eight rechecks;
+the eighth recheck is closure-only and any ninth batch waits for the next
+session. One unrelated Entity, accepted-relation, or registry mutation permits
+one general recheck. Stop on refusal, ambiguity, target/registry change,
+non-terminal outcome, closure, or user exit. Off/light are explicit-only. If the
+explicit category route is unavailable, skip it—never substitute a local scan,
+model, embedding, or due-state claim.
+
 ## create entity
 
 **Goal:** Create a registered typed entity without duplicating an existing identity.
@@ -502,6 +569,58 @@ cannot be undone.
   straight into `Evidence/<scope>/<category>/`, or drop it via file sync (e.g. Obsidian Sync).
 - **`preserve`** is text-only; binaries always go via the channels above. Every
   write tool rejects inline byte blobs outright (`BINARY_BLOB_REJECTED`).
+
+### Generated artifact adoption
+
+A generated draft is not durable merely because it exists. Keep drafts,
+rejected variants, and revised-away siblings ephemeral. Once the user selects,
+approves, sends, or publishes one offered output, the exact selected handle is
+eligible for preservation under the existing `proactive_capture` authority; an
+explicit request to save is a requested action. Selection is adoption evidence,
+not write confirmation.
+
+Choose the lane by role before transport. Material retained for later reasoning
+is a Source; an approved deliverable or proof-bearing output is Evidence. MIME
+never chooses. With a direct handle, pass the closed envelope on the normal
+command:
+
+```text
+capture_source(..., files=[...],
+  adoption={"key": "...", "trigger": "selected", "selected_file_id": "..."})
+preserve_artifacts(..., files=[...],
+  adoption={"key": "...", "trigger": "approved", "selected_file_id": "..."})
+```
+
+Only `selected_file_id` may become canonical; unselected siblings must report
+`unselected` and create no artifact. Without a usable direct handle, use the
+ordinary upload handoff and report `handoff_required` or `handoff_prepared` as
+non-committing. A token, description, or reconstructed text is not a saved
+artifact.
+
+Delivery is ordered after local Evidence adoption. If one existing compatible
+Records collection has a declared link field, append the caller-authored item
+with the optional validation envelope:
+
+```text
+record_memory(action="append", collection="...", item={...}, why="...",
+  delivery={
+    "evidence_page": "Knowledge Base/Evidence/.../<artifact>.md",
+    "link_field": "<declared-link-field>",
+    "reported_remote_ref": "<reported-platform-reference>",
+    "reported_remote_field": "<declared-string-field>",
+    "verified_remote_field": "<declared-boolean-field>"
+  })
+```
+
+The envelope validates those mapped item values; it does not set them or create
+schema. A verified remote identity additionally requires
+`platform_reference_field` plus a closed `platform_proof` containing
+`algorithm: "sha256"`, the matching local receipt `digest`, and the platform
+`reference`. Without proof, the mapped verified field must be `false`; never
+infer remote byte equality. A Source receipt cannot authorize delivery. Missing
+collection or fields permits only `structural_suggestions`; collection changes
+need confirmed `restructure_execution`. A separately accepted relation remains
+`link_acceptance`.
 
 ### Procedure
 1. Determine scope and category folder. Create the folder if it doesn't exist yet. Confirm a new scope/category first — don't silently invent.

@@ -41,6 +41,18 @@ accumulates reusable facts, history, or relations, **a method was actually
 carried out and the user reports how it went**, **a stated intent or commitment
 is made**, or **an observed outcome or event is reported** — capture it:
 
+- A **durable personal baseline** is also a stepping-stone: a stable preference,
+  recurring routine, historical baseline, or durable affiliation. Capture it only
+  when both stability or recurrence and reusable comparison, interpretation, or
+  decision value are clear. Attach a facet or affiliation to a uniquely resolved
+  Entity; otherwise save one concise compiled observation. Use Records only for an
+  observed measurement accepted by a compatible existing collection. Fleeting
+  preferences, one-off activity, incidental associations, trivial metrics, and
+  tentative claims stay quiet. Eligibility never creates an Entity, collection, or
+  schema: an affiliation relation uses `link_acceptance`; entity creation or substantial curation
+  uses confirmed `restructure_execution`; concise observations and narrow additive
+  facts follow `proactive_capture` and its active disposition.
+
 - Capture whether or not the KB already holds the topic. A durable conclusion on
   brand-new ground is first-class: it becomes the first page on that topic, which
   is how the corpus grows.
@@ -61,6 +73,25 @@ is made**, or **an observed outcome or event is reported** — capture it:
   editing frontmatter around the registry rule.
   A single incidental mention, unresolved identity, or transient participant
   stays in source/note context.
+- **Recurring-identity maintenance boundary (balanced/maximal only).** On the
+  first user turn after bootstrap, after primary work and before the final
+  response, call `review_memory(mode="attention",
+  categories=["entity_recurrence"], limit=3)` once per session. Later ordinary
+  prompts do not rescan. It returns at most three candidates, each carrying at most eight contexts. Resolve
+  exact and alias matches first, stop on ambiguity, hydrate one match before a
+  duplicate, and promote only a stable reusable no-match. Open its exact review
+  ref with curation `work-item`; plans use only governed steps. An unknown kind
+  goes through `schema_memory(operation="save-entity-types")`, then refreshes
+  the candidate; never edit the registry through curation.
+  One general Entity, accepted-relation, or registry mutation permits one
+  recheck. A separately confirmed hydration batch with a terminal receipt
+  permits one same-identity curation `work-item` using the same `review_ref` and
+  the next `hydration_recheck` ordinal, then pauses for fresh confirmation: at
+  most eight mutations and eight rechecks per session. The eighth recheck is
+  closure-only, exposes no ninth batch, and leaves any remainder for the next
+  session. Off/light are explicit-only. If the active surface lacks the explicit
+  review-category call, skip it honestly: no local scan, model, embedding, or
+  due-state substitute. The active agent remains the sole semantic decider.
 - The guardrails that remain are the ones that matter: dedupe (prefer
   **edit_memory**/**replace_memory** over a parallel page; surface a near-duplicate warning when
   it fires) and clean links.
@@ -95,3 +126,29 @@ landing, not during the flight.
 
 Do not wait to be asked. "Did you save that?" arriving after a result already
 landed is the failure, not the prompt.
+
+## Generated artifact adoption
+
+Generated drafts stay ephemeral. Generation, preview, filename, MIME type,
+apparent quality, and abandoned or revised-away variants do not make durable
+work. When the user selects, approves, sends, or publishes one offered output,
+that exact offered artifact becomes adoption-eligible; the event is evidence of
+adoption, not write consent. Agent-initiated adoption therefore follows
+`proactive_capture`, while an explicit request to save is an ordinary requested
+action. Preserve only the selected handle's exact bytes and write no siblings.
+
+Choose the semantic lane before transport: reasoning material is a Source;
+an approved deliverable or proof-bearing output is Evidence. MIME never chooses.
+Use `capture_source(..., adoption={key, trigger, selected_file_id})` or
+`preserve_artifacts(..., adoption={...})` when a direct handle exists. With no handle,
+report a non-committing `handoff_required` or
+`handoff_prepared`; a token or description is not a saved artifact.
+
+Delivery is a later fact. Record it only after a committed local Evidence
+receipt, through `record_memory(action="append", delivery={...})` and one
+compatible existing Records collection whose declared link field names the
+Evidence companion. Keep reported remote identity separate and set verified
+identity only from matching platform proof; never infer remote byte equality.
+A missing collection is `structural_suggestions`; creating or changing it is
+confirmed `restructure_execution`. A separately accepted relation remains
+`link_acceptance`. Adoption success never waits on any of those later changes.

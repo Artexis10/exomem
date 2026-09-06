@@ -1344,9 +1344,12 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
         def authorize(path: str) -> bool:
             return _authorize(root, path, receipt=True)
 
+        discovered, unreadable = collections.discover_collections_with_errors(
+            root, authorize_path=authorize
+        )
         manifests = [
             manifest
-            for manifest in collections.discover_collections(root, authorize_path=authorize)
+            for manifest in discovered
             if manifest.semantic_profile == semantic_profile and authorize(manifest.storage.source)
         ]
         legacy: tuple[collections.LegacyCollection, ...] = ()
@@ -1370,6 +1373,15 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
                 }
                 for manifest in manifests
             ],
+            # Both profiles, always. A manifest this sweep could not read has no
+            # legible profile, so it cannot be filed under one -- and whichever
+            # inventory was asked for, this file is a hole in the answer. An
+            # empty list here is the honest "swept, everything read"; omitting
+            # the key would make an unread file indistinguishable from no file.
+            "unreadable_manifests": [
+                {"path": row.path, "error_code": row.code, "message": row.message}
+                for row in unreadable
+            ],
             # Records-layer only. Planning has no legacy trackers to sweep, and an
             # empty list there reads as "swept, found none" -- a claim about a
             # sweep that never ran. Absent is the honest shape.
@@ -1384,7 +1396,11 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
                 else {}
             ),
             "truncated": {
+                # Both are False on the same basis: discovery raises
+                # COLLECTION_DISCOVERY_LIMIT rather than dropping a candidate,
+                # so a returned sweep is a complete one.
                 "collections": False,
+                "unreadable_manifests": False,
                 **({"legacy_trackers": legacy_truncated} if semantic_profile == "records" else {}),
             },
             "contract_route": {

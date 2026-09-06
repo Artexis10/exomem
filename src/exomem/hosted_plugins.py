@@ -30,6 +30,11 @@ EPISTEMIC_CANDIDATE = "hosted-alpha-agent-v3"
 #: The first candidate whose membership is derived from the product surface
 #: rather than hand-listed. See `commands.HOSTED_SURFACE_EXCLUSIONS`.
 PARITY_CANDIDATE = "hosted-alpha-agent-v4"
+#: The one candidate carrying the durable-baseline, generated-artifact
+#: adoption, recurring-entity lifecycle and governed-curation doctrine. It owns
+#: every skill it ships, including the core skill, and one canonicalised
+#: snapshot of the four generic contribution inputs.
+BASELINE_CANDIDATE = "hosted-alpha-agent-v5"
 #: Every distributable candidate and the surface profile it pins. A third
 #: candidate is what retired the old pairwise `== LIFECYCLE_CANDIDATE`
 #: branching: membership questions now ask the registry, not a constant.
@@ -39,14 +44,42 @@ CANDIDATE_PROFILES: Mapping[str, str] = MappingProxyType(
         LIFECYCLE_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V2_PROFILE,
         EPISTEMIC_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V3_PROFILE,
         PARITY_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V4_PROFILE,
+        BASELINE_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V5_PROFILE,
     }
 )
 #: Candidates whose profile exposes `record_memory`. These pin the Records
 #: reader floor, bind their own selection cases, and must clear live Records
 #: acceptance for their own profile identifier before promotion.
 RECORDS_CANDIDATES: frozenset[str] = frozenset(
-    {LIFECYCLE_CANDIDATE, EPISTEMIC_CANDIDATE, PARITY_CANDIDATE}
+    {LIFECYCLE_CANDIDATE, EPISTEMIC_CANDIDATE, PARITY_CANDIDATE, BASELINE_CANDIDATE}
 )
+#: Candidates that own every skill they ship rather than resolving the shared
+#: `plugins/hosted/skills` tree. v1-v4 resolve the shared copies, so editing a
+#: shared skill would move their `skills_sha256` -- which is precisely why the
+#: doctrine v5 carries could not be written into those shared files.
+SELF_CONTAINED_CANDIDATES: frozenset[str] = frozenset({BASELINE_CANDIDATE})
+#: Candidates that bind one combined candidate-scoped behavior fixture digest
+#: through compatibility, package, lock, archive and promotion evidence.
+FIXTURE_BOUND_CANDIDATES: frozenset[str] = frozenset({BASELINE_CANDIDATE})
+#: The candidate-owned frozen snapshot of the generic contribution inputs.
+COMBINED_FIXTURE_NAME = "behavior-fixture.json"
+#: The top-level lists in a contribution input that hold behavior cases. It is
+#: an allowlist rather than a discovery rule so that a sibling lane inventing a
+#: fourth list is a loud refusal rather than silent under-coverage.
+CONTRIBUTION_CASE_KEYS: tuple[str, ...] = ("cases", "traces", "separate_executed_method_cases")
+#: Generic synthetic inputs, one per implementing change, that sibling lanes
+#: own and this module only ever reads. Keyed by the `family` each file
+#: declares for itself, so a renamed family fails rather than silently
+#: reshaping the combined fixture.
+CONTRIBUTION_INPUTS: Mapping[str, str] = MappingProxyType(
+    {
+        "durable-personal-baselines": "personal_baselines.json",
+        "generated-artifact-adoption": "artifact_adoption.json",
+        "recurring-entity-lifecycle": "recurring_entity_lifecycle.json",
+        "governed-curation": "governed_curation.json",
+    }
+)
+CONTRIBUTION_ROOT = Path("tests/fixtures/hosted_v5_contributions")
 #: Candidate-scoped skills, rendered on top of the shared `SKILL_NAMES`. Each
 #: candidate carries its own copies: a candidate package is immutable once its
 #: lock pins `skills_sha256`, so sharing a file across candidates would let one
@@ -57,6 +90,16 @@ CANDIDATE_SKILL_NAMES: Mapping[str, tuple[str, ...]] = MappingProxyType(
         LIFECYCLE_CANDIDATE: ("exomem-records",),
         EPISTEMIC_CANDIDATE: ("exomem-records", "exomem-supersede"),
         PARITY_CANDIDATE: ("exomem-records", "exomem-supersede"),
+        BASELINE_CANDIDATE: (
+            "exomem",
+            "exomem-capture",
+            "exomem-continue",
+            "exomem-reflect",
+            "exomem-research",
+            "exomem-review",
+            "exomem-records",
+            "exomem-supersede",
+        ),
     }
 )
 PLATFORMS = ("claude", "openai")
@@ -70,6 +113,16 @@ DIRECTORY_REVIEWER_EVIDENCE_MAX_AGE = timedelta(hours=1)
 DEMOTION_REASONS = frozenset(
     {"artifact-withdrawn", "client-regression", "contract-drift", "operator-withdrawal"}
 )
+#: Stable refusal for a candidate name whose published identity would move.
+#:
+#: A promoted release is an identity, not a directory. `demote` exists so
+#: selection can move away from a candidate, and `promote` accepts a demoted
+#: record as a starting state so the same release can be rolled forward again --
+#: which together made demote the correction path the contract forbids: demote,
+#: edit the candidate, render, promote, and a different release ships under the
+#: promoted name. The first live identity is therefore sticky per candidate
+#: name, for every candidate, and a correction has to arrive as a new one.
+PROMOTED_IDENTITY_IMMUTABLE = "HOSTED_PROMOTED_IDENTITY_IMMUTABLE"
 SKILL_NAMES = (
     "exomem",
     "exomem-capture",
@@ -319,14 +372,16 @@ def load_definition(
 
 
 def _skill_paths(root: Path, candidate: str = DEFAULT_CANDIDATE) -> tuple[Path, ...]:
-    base = root / PLUGIN_ROOT / "skills"
-    paths = tuple(base / name / "SKILL.md" for name in SKILL_NAMES)
     _candidate_profile(candidate)
     candidate_root = _candidate_root(root, candidate)
-    return paths + tuple(
+    owned = tuple(
         candidate_root / "skills" / name / "SKILL.md"
         for name in CANDIDATE_SKILL_NAMES.get(candidate, ())
     )
+    if candidate in SELF_CONTAINED_CANDIDATES:
+        return owned
+    base = root / PLUGIN_ROOT / "skills"
+    return tuple(base / name / "SKILL.md" for name in SKILL_NAMES) + owned
 
 
 def _frontmatter(text: str, skill: Path) -> dict[str, Any]:
@@ -386,6 +441,152 @@ def skill_dependencies(
         text = skill.read_text(encoding="utf-8")
         result[skill.parent.name] = validate_skill_text(text, skill, profile=definition.profile)
     return result
+
+
+def _canonicalise_contribution(value: Any) -> Any:
+    """Normalise whitespace and key order without reordering any case.
+
+    Key order is the serializer's job (`_canonical_json` sorts), so this only
+    has to make the *values* deterministic: line endings collapse to `\\n` and
+    surrounding whitespace goes. Lists are rebuilt in place -- a fixture's case
+    order is part of what it asserts, and sorting it would quietly rewrite the
+    contribution rather than freeze it.
+    """
+    if isinstance(value, str):
+        return value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if isinstance(value, dict):
+        return {str(key): _canonicalise_contribution(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_canonicalise_contribution(item) for item in value]
+    return value
+
+
+def _contribution_case_ids(contribution: dict[str, Any]) -> tuple[str, ...]:
+    """Every case identifier a contribution declares, in its own order.
+
+    The four inputs do not share a shape -- one calls them `traces`, two call
+    them `cases`, one carries a second `separate_executed_method_cases` list --
+    and none of them marks polarity. So this collects identifiers and nothing
+    else: the positive and the paired negative are both just cases the promotion
+    evidence has to cover, which is what stops a run reporting only its wins.
+    """
+    known = CONTRIBUTION_CASE_KEYS
+    unmapped = sorted(
+        key
+        for key, value in contribution.items()
+        if key not in known
+        and isinstance(value, list)
+        and any(isinstance(entry, dict) and "id" in entry for entry in value)
+    )
+    if unmapped:
+        # Fail closed. A sibling lane adding `negative_cases` alongside `cases`
+        # would otherwise be silently dropped from the coverage set, and the
+        # promotion gate that requires a trace per declared case would go on
+        # passing while covering less than the contribution declares.
+        raise ValueError(
+            "Hosted contribution declares case list(s) the combined fixture does not map: "
+            + ", ".join(unmapped)
+            + "; the v5 owner must map them in CONTRIBUTION_CASE_KEYS before they can ship"
+        )
+    identifiers: list[str] = []
+    for key in known:
+        entries = contribution.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+                raise ValueError("Hosted contribution case must carry a string id")
+            identifiers.append(entry["id"])
+    if not identifiers or len(set(identifiers)) != len(identifiers):
+        raise ValueError("Hosted contribution must declare unique case identifiers")
+    return tuple(identifiers)
+
+
+def combined_behavior_fixture(repo_root: Path | None = None) -> dict[str, Any]:
+    """Canonicalise the four generic contribution inputs into one payload.
+
+    The inputs live outside the candidate tree and belong to the four
+    implementing lanes; this reads them, checks each declares the family it was
+    filed under, and freezes a canonical snapshot. Nothing here edits them.
+    """
+    root = _repo_root(repo_root)
+    contributions: dict[str, Any] = {}
+    families: dict[str, Any] = {}
+    for family, filename in CONTRIBUTION_INPUTS.items():
+        path = root / CONTRIBUTION_ROOT / filename
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Hosted contribution input must be valid JSON: {path}") from exc
+        if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+            raise ValueError(f"Hosted contribution input has an unsupported schema: {path}")
+        if raw.get("family") != family:
+            raise ValueError(f"Hosted contribution input declares a different family: {path}")
+        contribution = _canonicalise_contribution(raw)
+        contributions[family] = contribution
+        families[family] = {
+            "source": (CONTRIBUTION_ROOT / filename).as_posix(),
+            "case_ids": list(_contribution_case_ids(contribution)),
+        }
+    return {
+        "schema_version": 1,
+        "profile": CANDIDATE_PROFILES[BASELINE_CANDIDATE],
+        "families": families,
+        "contributions": contributions,
+    }
+
+
+def behavior_fixture_path(repo_root: Path | None = None, *, candidate: str) -> Path:
+    if candidate not in FIXTURE_BOUND_CANDIDATES:
+        raise ValueError("candidate does not carry a combined behavior fixture")
+    return _candidate_root(_repo_root(repo_root), candidate) / COMBINED_FIXTURE_NAME
+
+
+def behavior_fixture_sha256(repo_root: Path | None = None, *, candidate: str) -> str:
+    """Digest the frozen bytes, not a re-serialisation of their meaning.
+
+    Hashing the parsed payload would let a whitespace-only edit to a committed
+    release file pass verification, and the file is the artifact.
+    """
+    path = behavior_fixture_path(repo_root, candidate=candidate)
+    try:
+        return _sha256(path.read_bytes())
+    except OSError as exc:
+        raise ValueError(f"Hosted combined behavior fixture is missing: {path}") from exc
+
+
+def check_behavior_fixture(repo_root: Path | None = None, *, candidate: str) -> dict[str, Any]:
+    """Refuse a frozen fixture that no longer matches its contribution inputs."""
+    root = _repo_root(repo_root)
+    path = behavior_fixture_path(root, candidate=candidate)
+    try:
+        frozen = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Hosted combined behavior fixture must be valid JSON: {path}") from exc
+    expected = combined_behavior_fixture(root)
+    if frozen != expected:
+        paths = ", ".join(_json_difference_paths(frozen, expected))
+        raise ValueError(
+            f"Hosted combined behavior fixture is stale: {paths}; run "
+            f"`scripts/hosted-plugin.py freeze-fixture --candidate {candidate}` to re-freeze "
+            "the contribution inputs, then render again"
+        )
+    return frozen
+
+
+def freeze_behavior_fixture(repo_root: Path | None = None, *, candidate: str) -> Path:
+    """Write the candidate-owned snapshot of the four contribution inputs.
+
+    Freezing is a deliberate act by the candidate's owner, which is why it is
+    its own subcommand rather than something `render` does on the way past: a
+    render that silently re-froze would turn a sibling lane's edit to its own
+    input into a new release identity without anyone deciding to cut one.
+    """
+    root = _repo_root(repo_root)
+    path = behavior_fixture_path(root, candidate=candidate)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_bytes_atomic(path, _canonical_json(combined_behavior_fixture(root)) + b"\n")
+    return path
 
 
 def validate_behavior_observation(scenario: dict[str, Any], observation: dict[str, Any]) -> None:
@@ -1724,6 +1925,8 @@ def compatibility_manifest(
     }
     if candidate in RECORDS_CANDIDATES:
         base["minimum_records_reader_version"] = 2
+    if candidate in FIXTURE_BOUND_CANDIDATES:
+        base["behavior_fixture_sha256"] = behavior_fixture_sha256(root, candidate=candidate)
     return {**base, "compatibility_sha256": _sha256(_canonical_json(base))}
 
 
@@ -1856,6 +2059,8 @@ def _package_lock(
         if registered_app_id is None:
             raise ValueError("OpenAI package lock requires a registered app identity")
         lock["registered_app_id_sha256"] = _registered_app_id_sha256(registered_app_id)
+    if candidate in FIXTURE_BOUND_CANDIDATES:
+        lock["behavior_fixture_sha256"] = compatibility["behavior_fixture_sha256"]
     if candidate in RECORDS_CANDIDATES:
         lock["minimum_records_reader_version"] = 2
         selection_path = _candidate_root(root, candidate) / "selection-cases.json"
@@ -2135,6 +2340,11 @@ def candidate_files(
     definition = load_definition(root, candidate=candidate)
     skill_dependencies(root, candidate=candidate)
     validate_hosted_public_inputs(root, include_generated=False)
+    if candidate in FIXTURE_BOUND_CANDIDATES:
+        # Before the first render or lock, and on every verification after:
+        # a candidate whose frozen fixture has drifted from the contribution
+        # inputs is not the candidate its evidence describes.
+        check_behavior_fixture(root, candidate=candidate)
     if platform not in (*PLATFORMS, "all"):
         raise ValueError("unsupported platform")
     selected = PLATFORMS if platform == "all" else (platform,)
@@ -2239,6 +2449,11 @@ def candidate_files(
                 {
                     "platform": item,
                     "archive_sha256": _sha256(archive_bytes),
+                    **(
+                        {"behavior_fixture_sha256": lock["behavior_fixture_sha256"]}
+                        if candidate in FIXTURE_BOUND_CANDIDATES
+                        else {}
+                    ),
                     **(
                         {"registered_app_id_sha256": _registered_app_id_sha256(cast(str, app_id))}
                         if item == "openai"
@@ -2430,6 +2645,10 @@ def archive(
                 "platform": selected_platform,
                 "archive_sha256": _sha256(archive_bytes),
             }
+            if candidate in FIXTURE_BOUND_CANDIDATES:
+                lock["behavior_fixture_sha256"] = behavior_fixture_sha256(
+                    root, candidate=candidate
+                )
             if selected_platform == "openai":
                 lock["registered_app_id_sha256"] = _registered_app_id_sha256(
                     _generated_openai_app_id(generated)
@@ -2439,6 +2658,54 @@ def archive(
                 lock,
             )
     return output_root
+
+
+def _record_live_identity(record: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The release identity a live promotion record binds, if it binds one."""
+    lock = record.get("package_lock")
+    compatibility_sha256 = record.get("compatibility_sha256")
+    if isinstance(lock, dict) and isinstance(compatibility_sha256, str):
+        return {"compatibility_sha256": compatibility_sha256, "package_lock": dict(lock)}
+    return None
+
+
+def _prior_live_identities(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Every identity this candidate name has been promoted with, so far.
+
+    The record's own current identity is folded in rather than trusted to be
+    listed, so a live record written before this field existed still pins what
+    it published.
+    """
+    identities = [
+        dict(entry)
+        for entry in (record.get("prior_live_identities") or [])
+        if isinstance(entry, dict)
+    ]
+    live = _record_live_identity(record)
+    if live is not None and live not in identities:
+        identities.append(live)
+    return identities
+
+
+def _refuse_moved_release_identity(
+    prior: Mapping[str, Any],
+    identity: Mapping[str, Any],
+    *,
+    candidate: str,
+) -> list[dict[str, Any]]:
+    """Refuse a promotion that would move a candidate name's published identity."""
+    recorded = _prior_live_identities(prior)
+    if recorded and dict(identity) not in recorded:
+        raise ValueError(
+            f"{PROMOTED_IDENTITY_IMMUTABLE}: {candidate} has already been promoted with a "
+            "different identity; a promoted candidate's source, fixture, package, lock, "
+            "archive and promotion identity are immutable, so ship the correction as a "
+            "new candidate rather than re-promoting this one"
+        )
+    merged = list(recorded)
+    if dict(identity) not in merged:
+        merged.append(dict(identity))
+    return merged
 
 
 def promotion_record(
@@ -2642,6 +2909,38 @@ def _validate_records_acceptance(
         raise ValueError(f"Records lifecycle evidence is invalid: {exc}") from exc
 
 
+def _validate_behavior_traces(
+    root: Path,
+    evidence: dict[str, Any],
+    *,
+    compatibility: dict[str, Any],
+    lock: dict[str, Any],
+    candidate: str,
+) -> None:
+    """Refuse promotion without a clean-client result for every declared case.
+
+    Coverage is the whole point. Each contribution pairs a positive with its
+    twin -- a fleeting preference beside a stable one, an unselected draft
+    beside the adopted artifact, an ambiguous identity beside a resolved one --
+    so evidence that reports a subset is evidence that a run could have
+    reported only its wins. Every declared identifier, no extras, all true.
+    """
+    if lock.get("behavior_fixture_sha256") != compatibility.get("behavior_fixture_sha256"):
+        raise ValueError("promotion candidate does not bind the combined behavior fixture")
+    fixture = check_behavior_fixture(root, candidate=candidate)
+    families = fixture["families"]
+    traces = evidence.get("behavior_traces")
+    if not isinstance(traces, dict) or set(traces) != set(families):
+        raise ValueError("promotion requires clean-client traces from every behavior family")
+    for family, declared in sorted(families.items()):
+        observed = traces[family]
+        expected_cases = set(declared["case_ids"])
+        if not isinstance(observed, dict) or set(observed) != expected_cases:
+            raise ValueError(f"promotion traces do not cover every {family} case")
+        if not all(observed[case] is True for case in sorted(expected_cases)):
+            raise ValueError(f"promotion traces report an unmet {family} case")
+
+
 def _validate_promotion_evidence(
     root: Path,
     platform: str,
@@ -2705,6 +3004,10 @@ def _validate_promotion_evidence(
     }
     if candidate in RECORDS_CANDIDATES:
         required.add("records_acceptance")
+    if candidate in FIXTURE_BOUND_CANDIDATES:
+        required_strings.add("behavior_fixture_sha256")
+        required.add("behavior_fixture_sha256")
+        required.add("behavior_traces")
     if evidence.get("mocked") or set(evidence) != required:
         raise ValueError("live promotion requires exact real content-bearing client evidence")
     if evidence["schema_version"] != 1 or evidence["platform"] != platform:
@@ -2754,6 +3057,8 @@ def _validate_promotion_evidence(
         "package_artifact_sha256": lock["artifact_sha256"],
         "archive_sha256": archive_lock["archive_sha256"],
     }
+    if candidate in FIXTURE_BOUND_CANDIDATES:
+        expected_identity["behavior_fixture_sha256"] = compatibility["behavior_fixture_sha256"]
     if platform == "openai":
         registered_app_id_sha256 = lock.get("registered_app_id_sha256")
         if (
@@ -2784,6 +3089,8 @@ def _validate_promotion_evidence(
     )
     if platform == "openai":
         digest_keys += ("registered_app_id_sha256",)
+    if candidate in FIXTURE_BOUND_CANDIDATES:
+        digest_keys += ("behavior_fixture_sha256",)
     if not all(re.fullmatch(r"[0-9a-f]{64}", evidence[key]) for key in digest_keys):
         raise ValueError("promotion evidence digests must be SHA-256 values")
     if not trusted_key_id or not trusted_secret or evidence["operator_key_id"] != trusted_key_id:
@@ -2803,6 +3110,10 @@ def _validate_promotion_evidence(
             expectation=records_expectation,
             require_fresh=require_fresh,
             candidate=candidate,
+        )
+    if candidate in FIXTURE_BOUND_CANDIDATES:
+        _validate_behavior_traces(
+            root, evidence, compatibility=compatibility, lock=lock, candidate=candidate
         )
     return compatibility, lock, archive_lock
 
@@ -2857,6 +3168,14 @@ def promote(
                 candidate=candidate,
                 records_expectation=records_expectation,
             )
+            _refuse_moved_release_identity(
+                prior,
+                {
+                    "compatibility_sha256": compatibility["compatibility_sha256"],
+                    "package_lock": lock,
+                },
+                candidate=candidate,
+            )
             if (
                 prior.get("package_lock") != lock
                 or prior.get("compatibility_sha256") != compatibility["compatibility_sha256"]
@@ -2872,6 +3191,14 @@ def promote(
             candidate=candidate,
             records_expectation=records_expectation,
         )
+        live_identities = _refuse_moved_release_identity(
+            prior,
+            {
+                "compatibility_sha256": compatibility["compatibility_sha256"],
+                "package_lock": lock,
+            },
+            candidate=candidate,
+        )
         promoted = {
             "schema_version": 1,
             "platform": platform,
@@ -2883,6 +3210,7 @@ def promote(
             "state": "live",
             "package_lock": lock,
             "compatibility_sha256": compatibility["compatibility_sha256"],
+            "prior_live_identities": live_identities,
             "evidence": evidence,
         }
         if expected_state == "live":
@@ -2919,6 +3247,9 @@ def demote(
             or _sha256(_canonical_json(prior)) != expected_record_sha256
         ):
             raise ValueError("promotion record changed; refresh before retrying")
+        # Demotion drops the package lock and the compatibility digest, which is
+        # what let the candidate come back as something else. Keep them.
+        retained = _prior_live_identities(prior)
         _write_json_atomic(
             record_path,
             {
@@ -2927,6 +3258,7 @@ def demote(
                 **({"candidate": candidate, "minimum_records_reader_version": 2} if candidate in RECORDS_CANDIDATES else {}),
                 "state": "failed",
                 "reason": reason,
+                **({"prior_live_identities": retained} if retained else {}),
             },
         )
 
