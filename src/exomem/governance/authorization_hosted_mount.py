@@ -238,6 +238,14 @@ def republish_projected_custody(source: Path, destination: Path) -> None:
             or info.st_gid != os.getegid()
         ):
             raise HostedCustodyMountUnavailable
+        # The sidecar is the only writer and never republishes concurrently with
+        # itself, so any staging file already present is an orphan from a crashed
+        # attempt. Left alone they accumulate without bound in a 256 KiB tmpfs.
+        for orphan in destination.glob(".*.tmp"):
+            try:
+                orphan.unlink()
+            except OSError:
+                pass
         replacements: list[tuple[Path, Path]] = []
         for name in _FILENAMES:
             temporary = destination / f".{name}.{uuid.uuid4().hex}.tmp"
@@ -295,6 +303,29 @@ def projected_generation(source: Path) -> str:
     return link if _GENERATION.match(link) else ""
 
 
+def _published_custody_is_current(source: Path, destination: Path) -> bool:
+    """Answer whether every published file already matches the projected one.
+
+    An unreadable source is treated as current: there is nothing to publish, and
+    republishing from a torn projection would be worse than waiting. An
+    unreadable or differing destination file is not current, which is what makes
+    a crash-interrupted publish and a restarted sidecar both self-healing.
+    """
+
+    try:
+        payloads = _projected_payloads(Path(source))
+    except HostedCustodyMountUnavailable:
+        return True
+    for name in _FILENAMES:
+        try:
+            with open(Path(destination) / name, "rb") as handle:
+                if handle.read(MAX_CUSTODY_FILE_BYTES + 1) != payloads[name]:
+                    return False
+        except OSError:
+            return False
+    return True
+
+
 def watch_projected_custody(
     source: Path,
     destination: Path,
@@ -314,22 +345,27 @@ def watch_projected_custody(
     watch. The previous generation stays whole and serving, so the cost of
     waiting is bounded by the attestation window, while exiting would strand the
     pod on a generation nothing will ever refresh.
+
+    The tick compares what is *published* against what is *projected*, rather
+    than remembering which source generation was last seen. Remembering is
+    edge-triggered and wrong twice over: a sidecar restart re-seeds the memory
+    from the current source and never notices that the destination is stale, and
+    a republish interrupted between file replacements leaves a mixed generation
+    that no later tick would ever revisit. Comparing content is level-triggered,
+    so both repair themselves within one interval.
     """
 
-    published = projected_generation(source)
     remaining = ticks
     while remaining is None or remaining > 0:
         sleeper(interval_seconds)
         if remaining is not None:
             remaining -= 1
-        current = projected_generation(source)
-        if not current or current == published:
+        if _published_custody_is_current(source, destination):
             continue
         try:
             republish_projected_custody(source, destination)
         except HostedCustodyMountUnavailable:
             continue
-        published = current
     return 0
 
 

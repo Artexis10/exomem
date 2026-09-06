@@ -740,15 +740,14 @@ def transition_hosted_authorization_bundle(
             "renewal cannot change the membership state",
             reason=ConflictReason.AUTHORIZATION_RENEWAL_CANNOT_CHANGE_STATE,
         )
-    # The exemption exists so a fully drained cell can still be resumed after its
-    # window lapsed. It is the one path that may act on a stale bundle, so it is
-    # explicitly closed to renewal -- the guard above already makes the two
-    # mutually exclusive, and saying so here keeps the property locally checkable.
+    # The exemption below exists so a fully drained cell can still be resumed
+    # after its window lapsed. It is the one path allowed to act on a stale
+    # bundle, and renewal cannot reach it: the exemption needs DRAINING -> SERVING
+    # and the guard above refuses any renewal whose target differs from its
+    # source. An explicit `not renew` here would be unreachable, so it is not
+    # written -- an untestable guard reads as protection and provides none.
     if source.expires_at <= current and not (
-        not renew
-        and source.replica_state == "DRAINING"
-        and source.no_in_flight
-        and target_state == "SERVING"
+        source.replica_state == "DRAINING" and source.no_in_flight and target_state == "SERVING"
     ):
         raise MetadataConflict(
             "stale authorization membership cannot be renewed",
