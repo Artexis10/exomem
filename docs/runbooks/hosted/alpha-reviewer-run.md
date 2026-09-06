@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Hosted alpha — the reviewer client run
 
 The manual half of a hosted promotion. A bootstrap `run` has produced a live
