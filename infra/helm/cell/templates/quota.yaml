@@ -12,14 +12,21 @@ spec:
   # init container's 1 CPU / 1Gi. The previous 2Gi ceiling exactly equalled the
   # pre-embedding pair, so raising the cell's limit without raising this would
   # have made the init job unschedulable on quota rather than on capacity.
+  #
+  # The authorization-session-refresh sidecar adds its own 10m/16Mi requests and
+  # 100m/64Mi limits on top, permanently. A native sidecar is not an ordinary
+  # init container: its resources are not merely max'd against the other init
+  # containers, they count toward the pod for its whole life. Leaving this at
+  # 3 CPU put the serving pod at 2100m and left 900m for an init job that asks
+  # for 1000m, so the job was refused on quota and the release rolled back.
   hard:
     persistentvolumeclaims: "1"
     requests.storage: 10Gi
     pods: "2"
-    requests.cpu: "1500m"
-    requests.memory: 1536Mi
-    limits.cpu: "3"
-    limits.memory: 3Gi
+    requests.cpu: "1510m"
+    requests.memory: 1552Mi
+    limits.cpu: "3100m"
+    limits.memory: 3136Mi
 ---
 apiVersion: v1
 kind: LimitRange

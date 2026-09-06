@@ -2954,11 +2954,25 @@ def test_cell_quota_holds_the_serving_pod_and_its_init_job_together() -> None:
     job's. Raising the runtime limit without raising this would have made the
     init job fail admission on quota rather than on real capacity — and it would
     have failed during provisioning, not during a test.
+
+    Native sidecars count too, and this test did not know that. An init
+    container with `restartPolicy: Always` is not merely max'd against the other
+    init containers: its resources are charged to the pod for its whole life.
+    Summing only `containers[0]` left the model 100m short of what the cluster
+    actually charges, so the quota looked sufficient here while k3s refused the
+    init job with `exceeded quota: cell-alpha-quota`.
     """
     documents = _render(CELL, CELL / "values.validation.yaml", namespace="cell-alpha-test")
     quota = _find(documents, "ResourceQuota", "cell-alpha-quota")["spec"]["hard"]
     statefulset = _find(documents, "StatefulSet", "cell-alpha")
-    runtime = statefulset["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"]
+    pod = statefulset["spec"]["template"]["spec"]
+    runtime = pod["containers"][0]["resources"]["limits"]
+    sidecars = [
+        container["resources"]["limits"]
+        for container in pod.get("initContainers", [])
+        if container.get("restartPolicy") == "Always"
+    ]
+    assert sidecars, "the refresh sidecar must be charged to the pod, not max'd away"
 
     def mebibytes(value: str) -> int:
         if value.endswith("Gi"):
@@ -2967,10 +2981,17 @@ def test_cell_quota_holds_the_serving_pod_and_its_init_job_together() -> None:
             return int(value.removesuffix("Mi"))
         raise AssertionError(f"unhandled memory unit: {value}")
 
+    def millicores(value: str) -> int:
+        if value.endswith("m"):
+            return int(value.removesuffix("m"))
+        return int(value) * 1000
+
     init_job_memory = mebibytes("1Gi")  # init-job.yaml, limits.memory
-    init_job_cpu = 1  # init-job.yaml, limits.cpu
-    assert mebibytes(quota["limits.memory"]) >= mebibytes(runtime["memory"]) + init_job_memory
-    assert int(quota["limits.cpu"]) >= int(runtime["cpu"]) + init_job_cpu
+    init_job_cpu = 1000  # init-job.yaml, limits.cpu
+    pod_memory = mebibytes(runtime["memory"]) + sum(mebibytes(s["memory"]) for s in sidecars)
+    pod_cpu = millicores(runtime["cpu"]) + sum(millicores(s["cpu"]) for s in sidecars)
+    assert mebibytes(quota["limits.memory"]) >= pod_memory + init_job_memory
+    assert millicores(quota["limits.cpu"]) >= pod_cpu + init_job_cpu
 
 
 def test_cell_routes_expose_only_exact_control_and_transfer_paths() -> None:
