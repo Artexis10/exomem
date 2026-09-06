@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.73.0](https://github.com/Artexis10/exomem/compare/v0.72.1...v0.73.0) (2026-09-06)
+
+
+### Features
+
+* consolidate the dogfood lifecycle doctrines, mint Hosted v5, and repair collection inventory ([#1085](https://github.com/Artexis10/exomem/issues/1085)) ([f3f235b](https://github.com/Artexis10/exomem/commit/f3f235b87ca650421e1d406595e917513e3f435b))
+
 ## [0.72.1](https://github.com/Artexis10/exomem/compare/v0.72.0...v0.72.1) (2026-09-05)
 
 
