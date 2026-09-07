@@ -19,10 +19,10 @@
     }
   },
   "expectedTuple": {
-    "surfaceProfile": "hosted-alpha-agent-v1",
+    "surfaceProfile": "hosted-alpha-agent-v4",
     "release": "0.73.1",
-    "commandFingerprint": "eddd997c22885ca913aa57dea2e6a2afaa7cb5f0dd52d87b564c1c3d7bbadc7f",
-    "contractDigest": "4e8136f6db262d98eb89dd495728385a9b6cd48f06263ba858a74d7015315907"
+    "commandFingerprint": "4b4b71280fec7915042483207b1ab0e15e916148ac1b88ef965e03671de80968",
+    "contractDigest": "60b5aec6f872874234a214e778e26ce57fa5805af8ce744bdd68efe8ca0fcb26"
   },
   "contractDigest": {
     "algorithm": "sha256",

@@ -44,6 +44,14 @@ RELEASE_OWNED_PREFIXES = (
     "plugins/hosted/generated/",
     "plugins/hosted/directory/generated/",
 )
+HISTORICAL_CANDIDATES = frozenset(
+    {
+        "hosted-alpha-agent-v1",
+        "hosted-alpha-agent-v2",
+        "hosted-alpha-agent-v3",
+        "hosted-alpha-agent-v4",
+    }
+)
 
 
 def _manifest() -> dict:
@@ -113,7 +121,10 @@ def _covered(relative: str) -> bool:
     manifest = _manifest()
     if relative.startswith(tuple(manifest["excluded_prefixes"])):
         return False
-    return str(manifest["excluded_candidate"]) not in relative.split("/")
+    components = relative.split("/")
+    if components[:3] == ["plugins", "hosted", "candidates"]:
+        return len(components) > 3 and components[3] in HISTORICAL_CANDIDATES
+    return str(manifest["excluded_candidate"]) not in components
 
 
 def test_v1_v4_release_surface_is_byte_identical_to_the_pinned_manifest() -> None:
@@ -136,6 +147,15 @@ def test_the_manifest_still_enumerates_every_v1_v4_file() -> None:
     manifest = _manifest()
     tracked = {relative for relative in _tracked_hosted_files() if _covered(relative)}
     assert tracked == set(manifest["files"])
+
+
+def test_v4_command_binding_candidate_is_not_a_historical_v4_component() -> None:
+    assert _covered(
+        "plugins/hosted/candidates/hosted-alpha-agent-v4/definition.json"
+    )
+    assert not _covered(
+        "plugins/hosted/candidates/hosted-alpha-agent-v4-command-binding-v1/definition.json"
+    )
 
 
 def test_a_changed_v1_v4_source_byte_still_trips_the_manifest(tmp_path: Path) -> None:

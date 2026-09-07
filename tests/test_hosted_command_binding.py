@@ -13,10 +13,10 @@ COMMAND_BINDING_CANDIDATE = "hosted-alpha-agent-v4-command-binding-v1"
 
 def test_command_binding_fixture_uses_the_published_agent_contract_digest() -> None:
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    contract = gateway.build_agent_gateway_contract(profile=commands.HOSTED_ALPHA_AGENT_PROFILE)
+    contract = gateway.build_agent_gateway_contract(profile=commands.HOSTED_ALPHA_AGENT_V4_PROFILE)
 
     assert fixture["expectedTuple"] == {
-        "surfaceProfile": commands.HOSTED_ALPHA_AGENT_PROFILE,
+        "surfaceProfile": commands.HOSTED_ALPHA_AGENT_V4_PROFILE,
         "release": contract["exomem_release"],
         "commandFingerprint": contract["agent_profile"]["active_capability_sha256"],
         "contractDigest": gateway.published_agent_contract_digest(contract),
