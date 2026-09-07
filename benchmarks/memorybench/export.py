@@ -13,6 +13,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1670,23 +1671,30 @@ def run_export(
     signal_installer: Callable[[Callable[[int, object | None], None]], Callable[[], None]] = _install_signals,
     utc_now: Callable[[], datetime] = _current_utc,
 ) -> ExportResult:
+    validation_stage = "run-plan"
     try:
         run_plan_bytes = _secure_read(run_plan_path, private=True)
         plan = MemoryBenchRunPlan.model_validate(_load_json_bytes(run_plan_bytes, "run plan"))
     except Exception:
+        print(f"memorybench-export: BLOCKED during {validation_stage} validation", file=sys.stderr)
         return ExportResult("BLOCKED", 2)
     try:
+        validation_stage = "preregistration"
         preregistration_identity = derive_preregistration_identity(
             Path(__file__).resolve().parents[2],
             contract_revision=plan.contract_revision,
         )
         if plan.preregistration_sha256 != preregistration_identity.original.sha256:
             raise ValueError("pre-registration digest assertion differs from derived original")
+        validation_stage = "provider-variant"
         _validate_registered_variant(plan)
+        validation_stage = "output-root"
         output_root = Path(plan.output_root)
         if output_root.exists():
             raise ValueError("output root already exists")
+        validation_stage = "toolchain"
         bun_executable, controlled_path = _resolve_toolchain()
+        validation_stage = "harness-checkout"
         state = checkout_verifier(
             memorybench_home=Path(plan.memorybench_home),
             expected_commit=plan.harness.commit,
@@ -1695,12 +1703,20 @@ def run_export(
         )
         if state != "materialized":
             raise ValueError("MemoryBench checkout is not materialized")
+        validation_stage = "provider-checkout"
         provider_checkout_verifier(plan.provider_checkout.model_dump(mode="json"))
+        validation_stage = "dataset"
         dataset_verifier(Path(plan.dataset_path), plan.dataset.model_dump(mode="json"))
+        validation_stage = "native-dataset"
         _, rows = _native_dataset(plan)
+        validation_stage = "selection"
         selection_pins = _canonical_selection_pins(plan, rows)
+        validation_stage = "runtime-freshness"
         _verify_fresh_runtime(plan)
     except Exception:
+        # Exception text can contain private plan fields or runtime paths.
+        # Emit only the code-owned stage, including when validation itself fails.
+        print(f"memorybench-export: BLOCKED during {validation_stage} validation", file=sys.stderr)
         return ExportResult("BLOCKED", 2)
 
     output_root.mkdir(mode=0o700, parents=True)
