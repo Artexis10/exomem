@@ -1,5 +1,7 @@
 # Optional code navigation with Graft
 
+<!-- authority:non-specification -->
+
 Graft provides a local structural map for unfamiliar cross-file questions. Use
 it when a caller graph or file API would narrow the next source read. Exact
 text searches and small, familiar edits usually need only `rg` or `ast-grep`.
