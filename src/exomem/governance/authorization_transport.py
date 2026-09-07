@@ -485,7 +485,7 @@ async def sanitized_stdio_server(
 
     if stdin is None:
         stdin = anyio.wrap_file(
-            TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
+            TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="surrogateescape")
         )
     if stdout is None:
         stdout = anyio.wrap_file(TextIOWrapper(sys.stdout.buffer, encoding="utf-8"))

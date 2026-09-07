@@ -766,3 +766,32 @@ def test_mcp_raw_decoder_refuses_non_utf8_json():
     raw = '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"consolidate_memory","arguments":{}}}'
     with pytest.raises(authorization_transport.AuthorizationEnvelopeUnavailable):
         authorization_transport.sanitize_mcp_http_body(raw.encode("utf-16"))
+
+
+def test_stdio_decoder_refuses_invalid_utf8_without_normalizing_it(monkeypatch):
+    import asyncio
+    import io
+    from types import SimpleNamespace
+
+    import anyio
+    from mcp.shared.message import SessionMessage
+
+    from exomem.governance import authorization_transport
+
+    invalid = (b'{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+               b'"params":{"name":"consolidate_memory","arguments":{"cursor":"\xff"}}}\n')
+    valid = b'{"jsonrpc":"2.0","id":2,"method":"ping"}\n'
+    monkeypatch.setattr(authorization_transport.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(invalid + valid)))
+
+    async def receive():
+        output = anyio.wrap_file(io.StringIO())
+        async with authorization_transport.sanitized_stdio_server(stdout=output) as (reader, writer):
+            first = await reader.receive()
+            second = await reader.receive()
+            await writer.aclose()
+        return first, second
+
+    first, second = asyncio.run(receive())
+    assert isinstance(first, authorization_transport.AuthorizationEnvelopeUnavailable)
+    assert isinstance(second, SessionMessage)
+    assert second.message.root.id == 2
