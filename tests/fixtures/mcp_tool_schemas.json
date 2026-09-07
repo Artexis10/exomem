@@ -1134,7 +1134,7 @@
             }
           ],
           "default": null,
-          "description": "Optional clean, canonical, or alias label for\nresolve-relation. At least query or requested_relation is required."
+          "description": "Optional clean, canonical, or alias label for\nresolve-relation. On accept-relation, explicitly selects one active\nregistered relation for the reviewed endpoints and requires its exact\nvocabulary binding. At least query or requested_relation is required\nfor resolve-relation."
         },
         "continuation": {
           "anyOf": [
@@ -1553,6 +1553,30 @@
           ],
           "default": null,
           "description": "Reviewed candidate fingerprint for accept-relation. Required for accept-relation (not optional — a mismatch, or an omitted value, refuses the write); accept re-validates live eligibility too, so a candidate that stopped being open between the queue read and this call also refuses."
+        },
+        "vocabulary_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional vocabulary decision correlated with this typed application."
+        },
+        "vocabulary_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact reviewed vocabulary fingerprint; grants no write permission."
         },
         "response_detail": {
           "default": "compact",
@@ -2278,6 +2302,8 @@
         "operation": {
           "description": "Governance lifecycle operation: list, explain, simulate, propose, commit, grant, revoke, suspend, resume, undo, declare, or backfill_companion. Use session with session_action for the authorization-session lifecycle.",
           "enum": [
+            "vocabulary-request",
+            "vocabulary-status",
             "list",
             "explain",
             "simulate",
@@ -2584,6 +2610,18 @@
           "default": null,
           "description": "Exact version-1 artifact, companion, semantics, and binding input."
         },
+        "vocabulary_request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Server-issued pending additive request identifier. Use vocabulary-request to inspect its status after a refused write, or vocabulary-status to inspect activation. Approval belongs to the separate authenticated user control surface."
+        },
         "response_detail": {
           "default": "full",
           "description": "Successful committed mutation detail: full (default), compact acknowledgement (opt-in), or legacy raw leaf result.",
@@ -2856,6 +2894,30 @@
           ],
           "default": null,
           "description": "Exact reviewed plan fingerprint for approval."
+        },
+        "vocabulary_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional vocabulary decision correlated with curation apply or resume."
+        },
+        "vocabulary_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact reviewed vocabulary fingerprint; grants no write permission."
         },
         "response_detail": {
           "default": "compact",
@@ -5755,6 +5817,18 @@
           "description": "Maximum recorded supersession versions.",
           "type": "integer"
         },
+        "continuation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque vocabulary evidence continuation; unsupported for other review families."
+        },
         "authorization_session_credential": {
           "anyOf": [
             {
@@ -5781,7 +5855,7 @@
       "properties": {
         "mode": {
           "default": "attention",
-          "description": "attention, activation, item, audit, dispositions, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, plan-progress, or write-advisory-result. `write-advisory-result` resolves exactly one opaque `exomem://write-advisory-result/<id>` reference returned by a committed write and reports only that job's current `pending`, `ready`, `failed`, or `superseded` state; it requires `ref`, has no list, browse, search, rank, count, continuation, or implicit-current form, and a malformed, unknown, unauthorized, or expired reference returns the shared not-found outcome. `plan-progress` reports, for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; it is derived and read-only, and it scores nothing. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
+          "description": "attention, activation, item, audit, dispositions, vocabulary, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, plan-progress, or write-advisory-result. `write-advisory-result` resolves exactly one opaque `exomem://write-advisory-result/<id>` reference returned by a committed write and reports only that job's current `pending`, `ready`, `failed`, or `superseded` state; it requires `ref`, has no list, browse, search, rank, count, continuation, or implicit-current form, and a malformed, unknown, unauthorized, or expired reference returns the shared not-found outcome. `plan-progress` reports, for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; it is derived and read-only, and it scores nothing. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
           "type": "string"
         },
         "categories": {
@@ -5800,9 +5874,28 @@
           "description": "Optional category filter for attention/activation/audit."
         },
         "limit": {
-          "default": 25,
-          "description": "Attention/activation result cap. On the topic evolution route, caps returned timelines; the path route returns one selected chain and does not use `limit`.",
-          "type": "integer"
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Attention/activation result cap. Vocabulary review defaults to four items; every other mode defaults to 25. On the topic evolution route, caps returned timelines; the path route returns one selected chain and does not use `limit`."
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque continuation for ordinary vocabulary review pagination."
         },
         "query": {
           "default": "",
@@ -5886,7 +5979,7 @@
         },
         "state": {
           "default": "open",
-          "description": "For attention/activation, open (default), all, snoozed, or dismissed.",
+          "description": "For attention/activation, open (default), all, snoozed, or dismissed. Vocabulary review uses open for actionable work or all for decision history; each response is a non-exhaustive bounded pass.",
           "type": "string"
         },
         "ref": {
@@ -5917,6 +6010,18 @@
           "minimum": 0,
           "type": "integer"
         },
+        "family": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Supported vocabulary family for an explicit meaning question. With `mode=\"vocabulary\"`, it requires `path` and `query` and creates only a review consideration; it grants no mutation authority."
+        },
         "authorization_session_credential": {
           "anyOf": [
             {
@@ -5939,7 +6044,7 @@
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "For `relations`, `propose-relation` returns a reviewed delta without writing and `save-relations` commits that delta with expected_hash and why. For `workflow-contracts`, exactly one of: inventory (no workflow fields); inspect (name); validate (exactly one of name or proposal); resolve (context plus at most one of name or proposal); preview (proposal, optional name); save (proposal and why, optional name plus expected_hash for updates); or refresh (name, expected_hash, and why). Other subjects retain their existing operations.",
+          "description": "For `relations`, `propose-relation` returns a reviewed delta without writing and `save-relations` commits that delta with expected_hash and why. For `entity-types`, `resolve-entity-type` reads matching definitions using query and optional requested_type; `save-entity-types` saves a reviewed proposal with why and expected_hash when updating. The current entity registry is included in bootstrap. For `workflow-contracts`, exactly one of: inventory (no workflow fields); inspect (name); validate (exactly one of name or proposal); resolve (context plus at most one of name or proposal); preview (proposal, optional name); save (proposal and why, optional name plus expected_hash for updates); or refresh (name, expected_hash, and why). Other subjects retain their existing operations.",
           "type": "string"
         },
         "name": {
@@ -5956,7 +6061,7 @@
         },
         "subject": {
           "default": "contract",
-          "description": "`contract`, `categories`, `relations`, `traversal-profiles`, or `workflow-contracts`. Workflow contracts support inventory, inspect, validate, resolve, preview, save, and refresh with their exact argument matrix.",
+          "description": "`contract`, `categories`, `entity-types`, `relations`, `traversal-profiles`, or `workflow-contracts`. Workflow contracts support inventory, inspect, validate, resolve, preview, save, and refresh with their exact argument matrix.",
           "type": "string"
         },
         "project": {
@@ -6134,6 +6239,54 @@
           "type": "integer",
           "description": "Relation extension and observation candidate budget."
         },
+        "query": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Entity-type evidence query for resolve-entity-type."
+        },
+        "requested_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Entity-type label to resolve for resolve-entity-type."
+        },
+        "vocabulary_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional vocabulary decision correlated with a registry save."
+        },
+        "vocabulary_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact reviewed vocabulary fingerprint; grants no write permission."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
@@ -6264,6 +6417,164 @@
           ],
           "default": null,
           "description": "Source-page hint returned by relation review. Required for\nnewly returned relation items; omitted legacy requests use only the\nbounded compatibility prefix."
+        },
+        "decision": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "family": {
+                        "const": "entity-instance/v1"
+                      },
+                      "outcome": {
+                        "const": "propose-new"
+                      }
+                    },
+                    "required": [
+                      "family",
+                      "outcome"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "choice": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "canonical": {
+                            "description": "Must equal definition.name.",
+                            "type": "string"
+                          },
+                          "definition": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "entity_type": {
+                                "pattern": "[a-z][a-z0-9-]*",
+                                "type": "string"
+                              },
+                              "name": {
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "summary": {
+                                "minLength": 1,
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "entity_type",
+                              "name",
+                              "summary"
+                            ],
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "canonical",
+                          "definition"
+                        ],
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              ],
+              "properties": {
+                "item_ref": {
+                  "type": "string"
+                },
+                "fingerprint": {
+                  "type": "string"
+                },
+                "family": {
+                  "enum": [
+                    "entity-instance/v1",
+                    "entity-type/v1",
+                    "relation-type/v1"
+                  ]
+                },
+                "registry_hashes": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "target_versions": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "outcome": {
+                  "enum": [
+                    "reuse",
+                    "enrich",
+                    "propose-new",
+                    "generic",
+                    "no-edge",
+                    "defer"
+                  ]
+                },
+                "rationale": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "choice": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "canonical": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "canonical"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "canonical": {
+                          "type": "string"
+                        },
+                        "definition": {
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "canonical",
+                        "definition"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "item_ref",
+                "fingerprint",
+                "family",
+                "registry_hashes",
+                "target_versions",
+                "outcome",
+                "rationale",
+                "choice"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Closed vocabulary decision payload. Required only for\naction=`decide-vocabulary` on an `exomem://review/vocabulary/` ref."
         },
         "response_detail": {
           "default": "compact",

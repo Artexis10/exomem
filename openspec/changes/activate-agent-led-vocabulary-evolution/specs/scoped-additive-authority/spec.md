@@ -117,3 +117,18 @@ The activation record SHALL bind a minimum authority-contract reader/writer vers
 
 - **WHEN** deployment targets a runtime unable to enforce the vault's activated v2 contract
 - **THEN** admission refuses write service for that vault until a compatible runtime or explicitly reviewed migration is used
+
+#### Scenario: Lost authority artifacts cannot restore v1
+
+- **WHEN** a vault's authenticated external control record requires vocabulary authority v2 and its local vocabulary database or activation marker is missing, corrupt or mismatched
+- **THEN** content mutations refuse; absence of those artifacts cannot restore v1, and permitted reads and trusted activation recovery remain available
+
+#### Scenario: Existing session custody does not imply vocabulary activation
+
+- **WHEN** valid version-1 authorization custody has no vocabulary authority artifacts
+- **THEN** ordinary v1 behavior and session issuance remain available without interpreting general governance enrollment as vocabulary-v2 activation
+
+#### Scenario: Custody renewal preserves the authority floor
+
+- **WHEN** an external custody bundle is renewed or republished for a vault requiring vocabulary authority v2
+- **THEN** the authenticated floor cannot decrease and an identity substitution cannot erase the activated contract; a floor change requires matching current serving-membership evidence

@@ -48,6 +48,14 @@ class ReferenceError(Exception):
 
 
 def new_id() -> str:
+    # Activated exact-approval retries need the same staged bytes.  The gate
+    # only supplies this deterministic value inside one canonical writer
+    # operation; ordinary and v1 callers retain UUID4 identities.
+    from . import vocabulary_gate
+
+    generated = vocabulary_gate.deterministic_memory_id()
+    if generated is not None:
+        return generated
     return str(uuid.uuid4())
 
 

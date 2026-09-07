@@ -108,6 +108,8 @@ from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import structured_files as structured_files_module
 from . import traversal_profiles as traversal_profiles_module
+from . import vocabulary_evidence as vocabulary_evidence_module
+from . import vocabulary_workflow as vocabulary_workflow_module
 from . import workflow_contracts as workflow_contracts_module
 from . import workflow_skills as workflow_skills_module
 from .command_surface import (
@@ -190,6 +192,119 @@ _OptionalRelationText = Annotated[
 _OptionalRelationProposal = Annotated[
     dict | None,
     WithJsonSchema({"anyOf": [{"type": "object"}, {"type": "null"}]}),
+]
+_VocabularyDecisionArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "item_ref",
+                        "fingerprint",
+                        "family",
+                        "registry_hashes",
+                        "target_versions",
+                        "outcome",
+                        "rationale",
+                        "choice",
+                    ],
+                    "properties": {
+                        "item_ref": {"type": "string"},
+                        "fingerprint": {"type": "string"},
+                        "family": {
+                            "enum": [
+                                "entity-instance/v1",
+                                "entity-type/v1",
+                                "relation-type/v1",
+                            ]
+                        },
+                        "registry_hashes": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string"},
+                        },
+                        "target_versions": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string"},
+                        },
+                        "outcome": {
+                            "enum": [
+                                "reuse",
+                                "enrich",
+                                "propose-new",
+                                "generic",
+                                "no-edge",
+                                "defer",
+                            ]
+                        },
+                        "rationale": {"type": "string", "minLength": 1},
+                        "choice": {
+                            "anyOf": [
+                                {"type": "null"},
+                                {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["canonical"],
+                                    "properties": {"canonical": {"type": "string"}},
+                                },
+                                {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["canonical", "definition"],
+                                    "properties": {
+                                        "canonical": {"type": "string"},
+                                        "definition": {"type": "object"},
+                                    },
+                                },
+                            ]
+                        },
+                    },
+                    "allOf": [
+                        {
+                            "if": {
+                                "properties": {
+                                    "family": {"const": "entity-instance/v1"},
+                                    "outcome": {"const": "propose-new"},
+                                },
+                                "required": ["family", "outcome"],
+                            },
+                            "then": {
+                                "properties": {
+                                    "choice": {
+                                        "type": "object",
+                                        "additionalProperties": False,
+                                        "required": ["canonical", "definition"],
+                                        "properties": {
+                                            "canonical": {
+                                                "type": "string",
+                                                "description": "Must equal definition.name.",
+                                            },
+                                            "definition": {
+                                                "type": "object",
+                                                "additionalProperties": False,
+                                                "required": ["entity_type", "name", "summary"],
+                                                "properties": {
+                                                    "entity_type": {
+                                                        "type": "string",
+                                                        "pattern": "[a-z][a-z0-9-]*",
+                                                    },
+                                                    "name": {"type": "string", "minLength": 1},
+                                                    "summary": {"type": "string", "minLength": 1},
+                                                },
+                                            },
+                                        },
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
 ]
 _RelationCandidateLimit = Annotated[
     int,
@@ -733,24 +848,157 @@ def op_bootstrap(
             ],
         }
     relation_registry = relation_registry_module.load_registry(vault_root)
+    legacy_commands = None
+    if active_descriptor.profile in hosted_legacy_schemas_module.LEGACY_PROFILE_CONTRACTS:
+        legacy_commands = {
+            command.name: command
+            for command in product_commands_for_profile(active_descriptor.profile, "rest")
+        }
+
+    def vocabulary_operation(
+        tool: str, args: dict[str, str], *, required: tuple[str, ...] = ()
+    ) -> dict:
+        if tool not in active_descriptor.callable_commands:
+            return {
+                "available": False,
+                "unavailable_reason": "This operation is not exported by the active surface.",
+            }
+        if legacy_commands is not None:
+            command = legacy_commands.get(tool)
+            if command is None:
+                return {
+                    "available": False,
+                    "unavailable_reason": "This operation is not admitted by the active surface.",
+                }
+            params = {param.name: param for param in command.params}
+            if any(name not in params for name in (*args, *required)) or any(
+                params[name].choices and value not in params[name].choices
+                for name, value in args.items()
+            ):
+                return {
+                    "available": False,
+                    "unavailable_reason": "This operation is not admitted by the active surface.",
+                }
+        return {"available": True, "route": {"tool": tool, "args": args}}
+
     relation_vocabulary_projection = {
         "contract_version": "2026-09-01.1",
         "core_version": relation_registry.core_version,
-        "core_vocabulary": sorted(relation_registry.core),
+        **({"core_vocabulary": sorted(relation_registry.core)} if profile != "compact" else {}),
         "extension_hash": relation_registry.extension_hash,
         "extension_count": len(relation_registry.extensions),
-        "inventory_route": {
-            "tool": "connect_memory",
-            "args": {"operation": "resolve-relation"},
-        },
+        "inventory_route": vocabulary_operation("connect_memory", {"operation": "resolve-relation"}),
         "workflow": (
-            "Choose a specific truthful registered relation: resolve-relation and reuse it. "
-            "Otherwise use relates_to for a real generic connection, or no edge. Use "
-            "propose-relation only for durable recurring meaning; save-relations is "
-            "proposal-first and hash guarded. Corrections create a new canonical key and "
-            "deprecate the old key."
+            "resolve: specific truthful, relates_to generic/no edge. "
+            "propose-relation only for durable recurring meaning; explicit question is "
+            "consideration, never automatic type. Hash guard save-relations; new canonical "
+            "key deprecates old"
         ),
     }
+    vocabulary_workflow_projection = {
+        "version": "v1",
+        "families": [
+            "entity-instance/v1",
+            "entity-type/v1",
+            "relation-type/v1",
+        ],
+        "consideration": (
+            "Actively choose reuse/enrich/propose-new from ordinary source evidence; "
+            "generic/no-edge/defer when appropriate. No quota. Resolvers leave the "
+            "choice and any new definition to the active agent."
+        ),
+        "cadence": (
+            "At a durable capture boundary, use the available review route and inspect "
+            "relevant items with context. If a useful identity or meaning question is "
+            "missing, use the question route with a source-page anchor. Record its "
+            "typed decision before the corresponding structural write."
+        ),
+        "review_route": {"default_limit": 4, **vocabulary_operation("review_memory", {"mode": "vocabulary"})},
+        "context": vocabulary_operation(
+            "review_item_context", {"ref": "exomem://review/vocabulary/<item>"}
+        ),
+        "question": vocabulary_operation(
+            "review_memory",
+            {
+                "mode": "vocabulary", "path": "<canonical-page-path>",
+                "query": "<meaning-question>", "family": "<supported-family>",
+            },
+        ),
+        "decision": {
+            **vocabulary_operation(
+                "triage_memory",
+                {"action": "decide-vocabulary", "ref": "exomem://review/vocabulary/<item>"},
+                required=("decision",),
+            ),
+            "fields": [
+                "item_ref",
+                "fingerprint",
+                "family",
+                "registry_hashes",
+                "target_versions",
+                "outcome",
+                "rationale",
+                "choice",
+            ],
+            "choice_contracts": {
+                family: vocabulary_workflow_module.choice_contract(family)
+                for family in (
+                    "entity-instance/v1",
+                    "entity-type/v1",
+                    "relation-type/v1",
+                )
+            },
+        },
+        "application": {
+            "correlation_fields": ["vocabulary_ref", "vocabulary_fingerprint"],
+            "rule": (
+                "On a supported canonical writer, pass the reviewed ref and fingerprint "
+                "to bind the result to its decision. Use one stable transport idempotency "
+                "identity for the operation (REST: Idempotency-Key header), retain it on "
+                "retry, and inspect the canonical receipt. A saved type alone does not "
+                "complete a separately proposed entity or edge."
+            ),
+        },
+        "entity_instance": {
+            "resolve": vocabulary_operation("connect_memory", {"operation": "resolve-entity"}),
+            "apply": vocabulary_operation("connect_memory", {"operation": "create-entity"}),
+        },
+        "entity_type": {
+            "resolve": vocabulary_operation(
+                "schema_memory", {"operation": "resolve-entity-type", "subject": "entity-types"}
+            ),
+            "apply": vocabulary_operation("schema_memory", {"operation": "save-entity-types"}),
+        },
+        "relation_type": {
+            "resolve": vocabulary_operation("connect_memory", {"operation": "resolve-relation"}),
+            "propose": vocabulary_operation(
+                "schema_memory", {"operation": "propose-relation", "subject": "relations"}
+            ),
+            "apply": vocabulary_operation(
+                "schema_memory", {"operation": "save-relations", "subject": "relations"}
+            ),
+        },
+        "authority": {
+            "contract_version": "v1",
+            "scoped_delegation": False,
+            "rule": "Decision not permission; v1 writers retain confirmation.",
+        },
+    }
+    from .vocabulary_authority import VocabularyAuthority
+
+    authority_mode = VocabularyAuthority(vault_root).runtime_status().mode
+    if authority_mode != "v1":
+        vocabulary_workflow_projection["authority"] = {
+            "contract_version": authority_mode,
+            "scoped_delegation": authority_mode == "v2",
+            "rule": (
+                "Decision not permission; structural additions require an exact approval "
+                "or a current grant covering every effect. Other writes retain confirmation."
+                if authority_mode == "v2"
+                else "Authority state unavailable; structural writes refuse until custody is repaired."
+            ),
+            "status": vocabulary_operation("govern_memory", {"operation": "vocabulary-status"}),
+        }
     source_taxonomy_projection = _source_taxonomy_projection(vault_root, profile=profile)
     simple_actions = simple_action_catalog(selected_packs, available_tools=active_product_names)
     front_door_actions = product_front_door_catalog(
@@ -1068,6 +1316,7 @@ def op_bootstrap(
         "planning": planning_contract,
         "workflow_contracts": workflow_contract_projection,
         "relation_vocabulary": relation_vocabulary_projection,
+        "vocabulary_workflow": vocabulary_workflow_projection,
         "epistemic_contract": epistemic_contract,
         "memory_model": {
             "built_in_ai_memory": (
@@ -1100,26 +1349,30 @@ def op_bootstrap(
         "source_taxonomy": source_taxonomy_projection,
         "entity_registry": {
             "types": [
-                {
+                ({"id": definition.id} if profile == "compact" else {
                     "id": definition.id,
-                    "label": definition.label,
                     "folder": definition.folder,
                     "family": (
                         entity_type_registry.family_of(definition.id) or definition.id
                     ),
                     "aliases": list(definition.aliases),
+                    "label": definition.label,
                     "capture_guidance": definition.capture_guidance,
-                }
+                })
                 for definition in entity_type_registry.active_definitions
             ],
             "capture_rule": (
-                "After durable work, run one bounded exact-match-first entity pass. "
+                "After durable work: bounded pass. Enrich existing for new durable "
+                "facts or relations; skip incidental. Registration requires why; never invent "
+                "folder/frontmatter type."
+                if profile == "compact"
+                else "After durable work, run one bounded exact-match-first entity pass. "
                 "Create only stable, recurring identities; update an existing entity only "
                 "with new durable facts or relations; skip incidental mentions. Unknown "
                 "types are registered through schema_memory(operation='save-entity-types') "
                 "with a why, never by editing frontmatter around the registry rule."
             ),
-            "candidate_route": "connect_memory(operation='resolve-entity')",
+            "candidate_route": vocabulary_operation("connect_memory", {"operation": "resolve-entity"}),
             "lifecycle": entity_lifecycle,
         },
         "workflow": {
@@ -1142,10 +1395,26 @@ def op_bootstrap(
                 ),
                 "reason in the agent",
                 (
+                    "before saving, use vocabulary_workflow to resolve recurring identities "
+                    "and useful relationship meanings; enrich existing entities, and define "
+                    "a missing type when existing types would distort the evidence. Keep "
+                    "incidental names unpromoted; generic/no-edge/defer remain valid."
+                ),
+                (
+                    "follow vocabulary_workflow.cadence: review relevant pending work, "
+                    "anchor a missing meaning question, record the typed decision, then "
+                    "bind its supported canonical write through vocabulary_workflow.application"
+                ),
+                (
                     "after a write, read the returned warnings and follow up on "
                     "unresolved links or duplicate warnings; write_feedback needs "
                     "response_detail='full', and suggestions additionally need "
                     "remember(suggestions=true)"
+                ),
+                (
+                    "also inspect vocabulary_sync: if guidance is warming or unavailable, "
+                    "follow its recovery route for one bounded review pass. Preserve the "
+                    "committed write and its retry identity; recovery does not repeat it."
                 ),
             ],
             "save_rule": (
@@ -1565,6 +1834,16 @@ def op_bootstrap(
     except Exception:  # noqa: BLE001 — a due-state count never breaks a bootstrap
         log.debug("due-state projection unavailable for bootstrap", exc_info=True)
     compact_payload = _filter_bootstrap_payload(payload, active_descriptor)
+    # Behavioral instructions must survive ordinary head/tail tool-output
+    # truncation. Catalogs remain available, after the operating contract.
+    first = (
+        "contract_version", "profile", "engagement", "governance", "workflow",
+        "vocabulary_workflow", "epistemic_contract",
+    )
+    compact_payload = {
+        **{key: compact_payload[key] for key in first if key in compact_payload},
+        **compact_payload,
+    }
     if session_unavailable is not None:
         return compact_payload | {"session_profile_unavailable": session_unavailable}
     if session_requested:
@@ -1594,6 +1873,7 @@ def _session_bootstrap_projection(compact: dict) -> dict:
             "governance",
             "workflow_contracts",
             "relation_vocabulary",
+            "vocabulary_workflow",
             "entity_registry",
             "source_taxonomy",
         )
@@ -2966,7 +3246,9 @@ def op_attention(
         limit=limit,
         state=state,
     )
-    return report.as_dict()
+    from . import vocabulary_entities
+
+    return vocabulary_entities.annotate_report(vault_root, report.as_dict())
 
 
 def op_evolution(
@@ -3172,6 +3454,17 @@ def op_reconcile(vault_root: Path, dry_run: bool = False, rebuild_graph: bool = 
             result["review_state_compaction"] = {"error": code}
             log.warning("review-state compaction failed during reconcile: %s", code)
             log.debug("could not compact the review state", exc_info=True)
+        try:
+            from .vocabulary_state import VocabularyState
+
+            result["vocabulary_review_projection"] = VocabularyState(
+                vault_root
+            ).rebuild_review_projection()
+        except Exception:  # noqa: BLE001 — optional projection repair is reported
+            result["vocabulary_review_projection"] = {
+                "state": "unavailable", "error": "VOCABULARY_PROJECTION_UNAVAILABLE"
+            }
+            log.warning("vocabulary review projection could not be rebuilt", exc_info=True)
     if active_mutation_request_id() is None:
         return reconcile_module.finalize_graph_rebuild_handoff(vault_root, result)
     return result
@@ -6192,7 +6485,8 @@ def op_review_memory(
     vault_root: Path,
     mode: str = "attention",
     categories: list[str] | None = None,
-    limit: int = 25,
+    limit: int | None = None,
+    continuation: _OptionalRelationText = None,
     query: str = "",
     sources: list[str] | None = None,
     suggested_title: str | None = None,
@@ -6204,6 +6498,7 @@ def op_review_memory(
     ref: str | None = None,
     detail: Literal["actionable", "full"] = "actionable",
     legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
+    family: str | None = None,
 ) -> dict:
     """Review memory health, provenance, drift, or source backlog.
 
@@ -6216,7 +6511,7 @@ def op_review_memory(
     missing original from a derivative.
 
     Args:
-        mode: attention, activation, item, audit, dispositions, provenance,
+        mode: attention, activation, item, audit, dispositions, vocabulary, provenance,
             evolution, compilation, stale, contradiction, unprocessed-sources,
             relation-debt, relation-queue, adoption, plan-progress, or
             write-advisory-result. `write-advisory-result` resolves exactly one
@@ -6243,9 +6538,11 @@ def op_review_memory(
             `adoption_studio(action="apply-proposal")` or dismiss via
             `triage_memory`.
         categories: Optional category filter for attention/activation/audit.
-        limit: Attention/activation result cap. On the topic evolution route, caps
+        limit: Attention/activation result cap. Vocabulary review defaults to four
+            items; every other mode defaults to 25. On the topic evolution route, caps
             returned timelines; the path route returns one selected chain and does
             not use `limit`.
+        continuation: Opaque continuation for ordinary vocabulary review pagination.
         query: Topic for evolution review when `path` is absent. On the topic route,
             `topic_anchor` is the retrieval hit that surfaced the chain; `chain_id`
             is always the active head.
@@ -6259,9 +6556,14 @@ def op_review_memory(
             `chain_id` is always the active head. An unresolvable path raises an
             explicit error.
         state: For attention/activation, open (default), all, snoozed, or dismissed.
+            Vocabulary review uses open for actionable work or all for decision history;
+            each response is a non-exhaustive bounded pass.
         ref: Stable `exomem://review/<id>` reference for item mode, or the
             opaque `exomem://write-advisory-result/<id>` reference for
             write-advisory-result mode. Required by both.
+        family: Supported vocabulary family for an explicit meaning question. With
+            `mode="vocabulary"`, it requires `path` and `query` and creates only a
+            review consideration; it grants no mutation authority.
         detail: Audit output detail: actionable (default) or full.
         legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
 
@@ -6272,6 +6574,61 @@ def op_review_memory(
         active head, while `topic_anchor` is respectively the retrieval hit or the
         requested page.
     """
+    if mode == "vocabulary":
+        question_submission = path is not None or bool(query) or family is not None
+        unrelated = any(
+            item is not None
+            for item in (categories, sources, suggested_title, tag, key, value, ref)
+        ) or state not in {"open", "all"} or detail != "actionable"
+        if question_submission:
+            if (
+                not isinstance(path, str)
+                or not path.strip()
+                or not isinstance(query, str)
+                or not query.strip()
+                or not isinstance(family, str)
+                or continuation is not None
+                or limit is not None
+                or unrelated
+                or state != "open"
+            ):
+                raise ValueError(
+                    "INVALID_VOCABULARY_REVIEW_ARGUMENTS: a meaning question requires "
+                    "only path, query, and family"
+                )
+            from . import vocabulary_questions as vocabulary_questions_module
+
+            return vocabulary_questions_module.submit(
+                vault_root,
+                path=path,
+                query=query,
+                family=family,
+            )
+        if limit is None:
+            limit = 4
+        if (
+            unrelated or path is not None or query or family is not None
+        ):
+            raise ValueError(
+                "INVALID_VOCABULARY_REVIEW_ARGUMENTS: vocabulary review accepts limit, "
+                "continuation, and state=open or all"
+            )
+        from . import vocabulary_review as vocabulary_review_module
+
+        return vocabulary_review_module.review(
+            vault_root,
+            limit=limit,
+            continuation=continuation,
+            **({"state": state} if state != "open" else {}),
+        )
+    if family is not None:
+        raise ValueError("INVALID_REVIEW_ARGUMENTS: family is only supported by vocabulary review")
+    if limit is None:
+        limit = 25
+    if continuation is not None:
+        raise ValueError(
+            "INVALID_REVIEW_ARGUMENTS: continuation is only supported by vocabulary review"
+        )
     if mode == "plan-progress":
         # `path` is a collection selector here, not a memory identifier, so it
         # is passed through before the page-oriented resolution below.
@@ -6343,7 +6700,7 @@ def op_review_memory(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "dispositions, provenance, evolution, compilation, stale, contradiction, "
         "unprocessed-sources, relation-debt, relation-queue, adoption, plan-progress, "
-        "or write-advisory-result"
+        "vocabulary, or write-advisory-result"
     )
 
 
@@ -6357,6 +6714,7 @@ def op_review_item_context(
     max_graph_edges: int = 60,
     max_history: int = 10,
     max_evolution_versions: int = 10,
+    continuation: str | None = None,
 ) -> dict:
     """Inspect one stable review item with bounded recorded context.
 
@@ -6378,7 +6736,31 @@ def op_review_item_context(
         max_graph_edges: Maximum graph edges.
         max_history: Maximum recorded history entries.
         max_evolution_versions: Maximum recorded supersession versions.
+        continuation: Opaque vocabulary evidence continuation; unsupported for other review families.
     """
+    if ref.startswith("exomem://review/vocabulary/"):
+        if (
+            max_graph_nodes != 30
+            or max_graph_edges != 60
+            or max_history != 10
+            or max_evolution_versions != 10
+        ):
+            raise ValueError(
+                "INVALID_VOCABULARY_CONTEXT_ARGUMENTS: vocabulary context accepts only "
+                "expected_fingerprint, max_body_chars, max_related_pages, and continuation"
+            )
+        from . import vocabulary_review as vocabulary_review_module
+
+        return vocabulary_review_module.context(
+            vault_root,
+            ref=ref,
+            expected_fingerprint=expected_fingerprint,
+            max_body_chars=max_body_chars,
+            max_related_pages=max_related_pages,
+            continuation=continuation,
+        )
+    if continuation is not None:
+        raise ValueError("INVALID_REVIEW_CONTEXT_ARGUMENTS: continuation requires a vocabulary ref")
     if adoption_proposals_module.is_adoption_ref(ref):
         return adoption_proposals_module.assemble_context(
             vault_root,
@@ -6693,6 +7075,7 @@ def op_triage_memory(
     why: str | None = None,
     expected_fingerprint: str | None = None,
     source_path: _OptionalRelationText = None,
+    decision: _VocabularyDecisionArgument = None,
 ) -> dict:
     """Triage one Epistemic Inbox item explicitly.
 
@@ -6722,8 +7105,33 @@ def op_triage_memory(
         source_path: Source-page hint returned by relation review. Required for
             newly returned relation items; omitted legacy requests use only the
             bounded compatibility prefix.
+        decision: Closed vocabulary decision payload. Required only for
+            action=`decide-vocabulary` on an `exomem://review/vocabulary/` ref.
     """
     normalized_action = str(action or "").strip().lower()
+    vocabulary_ref = ref.startswith("exomem://review/vocabulary/")
+    if normalized_action == "decide-vocabulary":
+        if not vocabulary_ref:
+            raise ValueError(
+                "INVALID_VOCABULARY_DECISION: decide-vocabulary requires a vocabulary review ref"
+            )
+        if decision is None or any(
+            item is not None for item in (until, why, expected_fingerprint, source_path)
+        ):
+            raise ValueError(
+                "INVALID_VOCABULARY_DECISION: decide-vocabulary accepts only ref and decision"
+            )
+        from . import vocabulary_review as vocabulary_review_module
+
+        return vocabulary_review_module.decide(vault_root, ref=ref, decision=decision)
+    if decision is not None:
+        raise ValueError(
+            "INVALID_VOCABULARY_DECISION: decision is only supported by decide-vocabulary"
+        )
+    if vocabulary_ref:
+        raise ValueError(
+            "INVALID_VOCABULARY_DECISION: vocabulary review refs require decide-vocabulary"
+        )
     if envelope_module.is_envelope_ref(ref):
         if until is not None:
             raise ValueError("INVALID_REVIEW_ACTION: envelope triage does not accept `until`")
@@ -6863,6 +7271,25 @@ def op_triage_memory(
     return result
 
 
+def _validate_vocabulary_binding(
+    reference: str | None, fingerprint: str | None, *, supported: bool
+) -> None:
+    if reference is None and fingerprint is None:
+        return
+    if (
+        not supported
+        or not isinstance(reference, str)
+        or not reference.startswith("exomem://review/vocabulary/")
+        or len(reference) > 256
+        or not isinstance(fingerprint, str)
+        or len(fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in fingerprint)
+    ):
+        raise ValueError(
+            "VOCABULARY_APPLICATION_INVALID: this application requires its exact review binding"
+        )
+
+
 def op_connect_memory(
     vault_root: Path,
     operation: str = _CONNECT_MEMORY_DEFAULT_OPERATION,
@@ -6907,6 +7334,8 @@ def op_connect_memory(
     expected_hash: str | None = None,
     why: str | None = None,
     expected_fingerprint: str | None = None,
+    vocabulary_ref: str | None = None,
+    vocabulary_fingerprint: str | None = None,
 ) -> dict | list[dict]:
     """Connect memory through links, typed graph context, or entities.
 
@@ -6925,7 +7354,10 @@ def op_connect_memory(
             as optional target context without reading the page.
         query: Query seed for graph-context or plain-language resolve-relation intent.
         requested_relation: Optional clean, canonical, or alias label for
-            resolve-relation. At least query or requested_relation is required.
+            resolve-relation. On accept-relation, explicitly selects one active
+            registered relation for the reviewed endpoints and requires its exact
+            vocabulary binding. At least query or requested_relation is required
+            for resolve-relation.
         continuation: Opaque continuation returned by resolve-relation.
         unit_ref: Exact current semantic-unit seed for graph-context.
         categories: Registry-resolved semantic-unit category allowlist.
@@ -6970,7 +7402,13 @@ def op_connect_memory(
             omitted value, refuses the write); accept re-validates live
             eligibility too, so a candidate that stopped being open between
             the queue read and this call also refuses.
+        vocabulary_ref: Optional vocabulary decision correlated with this typed application.
+        vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
     """
+    _validate_vocabulary_binding(
+        vocabulary_ref, vocabulary_fingerprint,
+        supported=operation in {"create-entity", "accept-relation"},
+    )
     if operation == "resolve-relation":
         supplied = locals()
         unrelated_defaults = {
@@ -7044,6 +7482,12 @@ def op_connect_memory(
     if operation == "accept-relation":
         if not ref:
             raise ValueError("INVALID_MODE: accept-relation requires `ref`")
+        if requested_relation is not None and (
+            vocabulary_ref is None or vocabulary_fingerprint is None
+        ):
+            raise ValueError(
+                "VOCABULARY_APPLICATION_INVALID: selected relation requires its exact review binding"
+            )
 
         def _accept_relations_edit(vault_root: Path, **kw: Any) -> dict:
             """`edit_memory` for the relation queue: identical to op_edit_memory,
@@ -7069,6 +7513,7 @@ def op_connect_memory(
             why=why,
             expected_fingerprint=expected_fingerprint,
             source_path=path,
+            requested_relation=requested_relation,
             edit_memory=_accept_relations_edit,
         )
     if path:
@@ -7432,6 +7877,8 @@ def op_maintain_memory(
     review_ref: str | None = None,
     hydration_recheck: int | None = None,
     expected_plan_fingerprint: str | None = None,
+    vocabulary_ref: str | None = None,
+    vocabulary_fingerprint: str | None = None,
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
 
@@ -7495,7 +7942,13 @@ def op_maintain_memory(
         hydration_recheck: Same-identity continuation ordinal, 1 through 8; the
             eighth is closure-only and cannot bind another plan.
         expected_plan_fingerprint: Exact reviewed plan fingerprint for approval.
+        vocabulary_ref: Optional vocabulary decision correlated with curation apply or resume.
+        vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
     """
+    _validate_vocabulary_binding(
+        vocabulary_ref, vocabulary_fingerprint,
+        supported=mode == "curation" and curation_action in {"apply", "resume"},
+    )
     if rebuild_graph and mode != "reconcile":
         raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
     if mode == "curation":
@@ -7802,6 +8255,10 @@ def op_schema_memory(
     date_to: _OptionalRelationText = None,
     continuation: _OptionalRelationText = None,
     limit: _RelationCandidateLimit = 20,
+    query: _OptionalRelationText = None,
+    requested_type: _OptionalRelationText = None,
+    vocabulary_ref: str | None = None,
+    vocabulary_fingerprint: str | None = None,
 ) -> dict:
     """Infer, validate, diff, or save governed memory schemas and workflow contracts.
 
@@ -7813,7 +8270,11 @@ def op_schema_memory(
     Args:
         operation: For `relations`, `propose-relation` returns a reviewed delta
             without writing and `save-relations` commits that delta with expected_hash
-            and why. For `workflow-contracts`, exactly one of: inventory (no workflow
+            and why. For `entity-types`, `resolve-entity-type` reads matching
+            definitions using query and optional requested_type; `save-entity-types`
+            saves a reviewed proposal with why and expected_hash when updating.
+            The current entity registry is included in bootstrap.
+            For `workflow-contracts`, exactly one of: inventory (no workflow
             fields); inspect (name); validate (exactly one of name or proposal);
             resolve (context plus at most one of name or proposal); preview (proposal,
             optional name); save (proposal and why, optional name plus expected_hash
@@ -7821,7 +8282,7 @@ def op_schema_memory(
             retain their existing operations.
         name: A saved workflow key for inspect/refresh, validate as an alternative to
             proposal, resolve (or `@standalone`), and optional preview/save update.
-        subject: `contract`, `categories`, `relations`, `traversal-profiles`, or
+        subject: `contract`, `categories`, `entity-types`, `relations`, `traversal-profiles`, or
             `workflow-contracts`. Workflow contracts support inventory, inspect,
             validate, resolve, preview, save, and refresh with their exact argument matrix.
         project: Optional project scope for inference.
@@ -7843,12 +8304,58 @@ def op_schema_memory(
         date_to: Optional inclusive ISO origin-date bound for relation evidence.
         continuation: Opaque relation candidate continuation.
         limit: Relation extension and observation candidate budget.
+        query: Entity-type evidence query for resolve-entity-type.
+        requested_type: Entity-type label to resolve for resolve-entity-type.
+        vocabulary_ref: Optional vocabulary decision correlated with a registry save.
+        vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
 
     Returns:
         A structured profile/proposal, validation report, contract diff, or workflow result.
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
+    _validate_vocabulary_binding(
+        vocabulary_ref, vocabulary_fingerprint,
+        supported=operation == "save-entity-types"
+        or (subject == "relations" and operation == "save-relations"),
+    )
+    if subject == "entity-types" and operation == "resolve-entity-type":
+        if (
+            any(
+                item is not None
+                for item in (
+                    name,
+                    project,
+                    page_type,
+                    expected_hash,
+                    compare_to,
+                    proposal,
+                    why,
+                    context,
+                    date_from,
+                    date_to,
+                )
+            )
+            or save
+            or strict
+            or include_model_suggestions
+        ):
+            raise ValueError(
+                "INVALID_ENTITY_TYPE_ARGUMENTS: resolve-entity-type accepts query, "
+                "requested_type, limit, and continuation only"
+            )
+        return vocabulary_evidence_module.resolve_entity_type(
+            entity_types_module.load_entity_types(vault_root),
+            query=query,
+            requested_type=requested_type,
+            limit=limit,
+            continuation=continuation,
+        )
+    if query is not None or requested_type is not None:
+        raise ValueError(
+            "INVALID_ENTITY_TYPE_ARGUMENTS: query and requested_type are only supported by "
+            "entity-types resolve-entity-type"
+        )
     if subject == "workflow-contracts":
         return _workflow_contract_schema_operation(
             vault_root,
@@ -8956,6 +9463,8 @@ def op_coordination_status(vault_root: Path) -> dict:
 
 
 _GovernanceOperation = Literal[
+    "vocabulary-request",
+    "vocabulary-status",
     "list",
     "explain",
     "simulate",
@@ -9002,6 +9511,7 @@ def op_govern_memory(
     paths: list[str] | None = None,
     backfill_action: Literal["preview", "commit"] | None = None,
     companion_input: dict[str, object] | None = None,
+    vocabulary_request_id: str | None = None,
 ) -> dict:
     """Inspect or author opt-in confidential governance policy.
 
@@ -9039,6 +9549,10 @@ def op_govern_memory(
         paths: Item paths for simulate.
         backfill_action: Preview or commit an owner-reviewed companion backfill.
         companion_input: Exact version-1 artifact, companion, semantics, and binding input.
+        vocabulary_request_id: Server-issued pending additive request identifier.
+            Use vocabulary-request to inspect its status after a refused write,
+            or vocabulary-status to inspect activation. Approval belongs to the
+            separate authenticated user control surface.
     """
     values = {
         "session_action": session_action,
@@ -9063,6 +9577,7 @@ def op_govern_memory(
         "paths": paths,
         "backfill_action": backfill_action,
         "companion_input": companion_input,
+        "vocabulary_request_id": vocabulary_request_id,
     }
     return governance_tool_module.op_govern_memory(
         vault_root,
@@ -10170,7 +10685,46 @@ PRODUCT_SURFACE_PROFILES = MappingProxyType(
 )
 
 
-def _pinned_legacy_leaf(command: Command, keep: frozenset[str]) -> Any:
+def _legacy_enum(schema: Mapping[str, Any]) -> tuple[str, ...]:
+    """Read a directly-declared historic string enum for CLI metadata."""
+    values = schema.get("enum")
+    if isinstance(values, (list, tuple)) and all(isinstance(value, str) for value in values):
+        return tuple(values)
+    return ()
+
+
+def _legacy_mode_choices(description: str) -> tuple[str, ...]:
+    """Read the historical mode vocabulary from its published first sentence."""
+    first_sentence = description.partition(".")[0]
+    return tuple(re.findall(r"[a-z][a-z0-9-]*", first_sentence))
+
+
+def _legacy_param(
+    published: Mapping[str, object], schema: Mapping[str, Any]
+) -> Param:
+    """Project the descriptor's parameter metadata onto the current command."""
+    default = schema.get("default", inspect.Parameter.empty)
+    name = str(published["name"])
+    choices = _legacy_enum(schema)
+    if name == "mode" and not choices:
+        choices = _legacy_mode_choices(str(published["description"]))
+    return Param(
+        name=name,
+        type=str(published["type"]),
+        required=bool(published["required"]),
+        help=str(published["description"]),
+        choices=choices,
+        schema=hosted_legacy_schemas_module.json_value(schema),
+        schema_description=str(schema.get("description", "")),
+        schema_default=hosted_legacy_schemas_module.json_value(default),
+    )
+
+
+def _pinned_legacy_leaf(
+    command: Command,
+    keep: frozenset[str],
+    contract: hosted_legacy_schemas_module.LegacyCommandContract | None = None,
+) -> Any:
     """Return `command`'s leaf with only the pinned parameters visible.
 
     Trimming `Command.params` alone pins the REST wire, because `cli_ops.coerce`
@@ -10182,11 +10736,62 @@ def _pinned_legacy_leaf(command: Command, keep: frozenset[str]) -> Any:
     injected = 2 if command.needs_schema else 1
     signature = inspect.signature(leaf)
     parameters = list(signature.parameters.values())
-    retained = [
-        parameter
-        for index, parameter in enumerate(parameters)
-        if index < injected or parameter.name in keep
-    ]
+    properties: Mapping[str, Any] = {}
+    required: frozenset[str] = frozenset()
+    if contract is not None:
+        raw_properties = contract.input_schema.get("properties")
+        raw_required = contract.input_schema.get("required", ())
+        if not isinstance(raw_properties, Mapping) or not isinstance(raw_required, tuple):
+            raise RuntimeError(f"{command.name}: pinned input schema is invalid")
+        properties = raw_properties
+        required = frozenset(str(name) for name in raw_required)
+
+    leaf_parameter_names = {parameter.name for parameter in parameters[injected:]}
+    legacy_defaults = {
+        name: hosted_legacy_schemas_module.json_value(schema["default"])
+        for name, schema in properties.items()
+        if (
+            name in leaf_parameter_names
+            and name not in required
+            and isinstance(schema, Mapping)
+            and "default" in schema
+        )
+    }
+    legacy_selectors = {
+        name: _legacy_enum(schema)
+        for name, schema in properties.items()
+        if name in leaf_parameter_names and isinstance(schema, Mapping) and _legacy_enum(schema)
+    }
+    for param in contract.params if contract is not None else ():
+        name = str(param["name"])
+        if name == "mode" and name not in legacy_selectors:
+            legacy_selectors[name] = _legacy_mode_choices(str(param["description"]))
+
+    retained = []
+    for index, parameter in enumerate(parameters):
+        if index < injected:
+            retained.append(parameter)
+            continue
+        if parameter.name not in keep:
+            continue
+        if contract is None:
+            retained.append(parameter)
+            continue
+        schema = properties.get(parameter.name)
+        if not isinstance(schema, Mapping):
+            raise RuntimeError(f"{command.name}: pinned parameter schema is missing for {parameter.name}")
+        default = inspect.Parameter.empty if parameter.name in required else schema.get(
+            "default", inspect.Parameter.empty
+        )
+        retained.append(
+            parameter.replace(
+                default=hosted_legacy_schemas_module.json_value(default),
+                annotation=Annotated[
+                    Any,
+                    WithJsonSchema(hosted_legacy_schemas_module.json_value(schema)),
+                ],
+            )
+        )
 
     def pinned(*args: Any, **kwargs: Any) -> Any:
         unexpected = sorted(set(kwargs) - keep)
@@ -10195,7 +10800,13 @@ def _pinned_legacy_leaf(command: Command, keep: frozenset[str]) -> Any:
                 f"{command.name}() got unexpected keyword argument(s) "
                 f"{', '.join(unexpected)} for a pinned Hosted profile"
             )
-        return leaf(*args, **kwargs)
+        historical = {**legacy_defaults, **kwargs}
+        for name, choices in legacy_selectors.items():
+            if choices and historical.get(name) not in choices:
+                raise ValueError(
+                    f"INVALID_MODE: {command.name} {name} must be one of {', '.join(choices)}"
+                )
+        return leaf(*args, **historical)
 
     pinned.__name__ = getattr(leaf, "__name__", command.name)
     pinned.__qualname__ = getattr(leaf, "__qualname__", command.name)
@@ -10213,33 +10824,70 @@ def _pinned_legacy_leaf(command: Command, keep: frozenset[str]) -> Any:
     except Exception:  # noqa: BLE001 - fall back to the raw annotations
         resolved = dict(getattr(leaf, "__annotations__", {}))
     pinned.__annotations__ = {
-        name: annotation for name, annotation in resolved.items() if name in retained_names
+        name: (
+            next(parameter.annotation for parameter in retained if parameter.name == name)
+            if contract is not None and any(parameter.name == name for parameter in retained)
+            else annotation
+        )
+        for name, annotation in resolved.items()
+        if name in retained_names
     }
     return pinned
 
 
-def apply_legacy_profile_pin(command: Command, pinned: tuple[str, ...]) -> Command:
+def apply_legacy_profile_pin(
+    command: Command,
+    pinned: tuple[str, ...] | hosted_legacy_schemas_module.LegacyCommandContract,
+) -> Command:
     """Narrow one command to the parameter names a released profile published.
 
     A pinned name that no longer exists, or one that moved, is raised rather
     than tolerated: both are breaking changes to a published descriptor, and a
     pin that absorbed them would bless the very drift it exists to catch.
     """
+    contract = pinned if isinstance(pinned, hosted_legacy_schemas_module.LegacyCommandContract) else None
+    names = (
+        tuple(param["name"] for param in contract.params)
+        if contract is not None
+        else pinned
+    )
     current = tuple(param.name for param in command.params)
-    if current == pinned:
-        return command
-    missing = [name for name in pinned if name not in current]
+    missing = [name for name in names if name not in current]
     if missing:
         raise RuntimeError(
             f"{command.name}: pinned parameter(s) no longer exist: {', '.join(missing)}"
         )
-    keep = frozenset(pinned)
-    if tuple(name for name in current if name in keep) != pinned:
+    keep = frozenset(names)
+    if tuple(name for name in current if name in keep) != names:
         raise RuntimeError(f"{command.name}: pinned parameter order changed")
+    if contract is None and current == names:
+        return command
+    if contract is not None:
+        expected_annotations = {
+            "title": command.name.replace("_", " ").title(),
+            "readOnlyHint": command.read_only,
+            "destructiveHint": False if command.read_only else command.name in DESTRUCTIVE_OPS,
+            "idempotentHint": command.read_only,
+            "openWorldHint": True,
+        }
+        if dict(contract.annotations) != expected_annotations:
+            raise RuntimeError(f"{command.name}: pinned MCP annotations changed")
+        published = {str(param["name"]): param for param in contract.params}
+        properties = contract.input_schema.get("properties")
+        if not isinstance(properties, Mapping):
+            raise RuntimeError(f"{command.name}: pinned input schema has no properties")
+        params = tuple(
+            _legacy_param(published[param.name], properties[param.name])
+            for param in command.params
+            if param.name in keep
+        )
+    else:
+        params = tuple(param for param in command.params if param.name in keep)
     return dataclass_replace(
         command,
-        leaf=_pinned_legacy_leaf(command, keep),
-        params=tuple(param for param in command.params if param.name in keep),
+        leaf=_pinned_legacy_leaf(command, keep, contract),
+        params=params,
+        description=contract.description if contract is not None else command.description,
     )
 
 
@@ -10266,7 +10914,7 @@ def product_commands_for_profile(
         raise ValueError(f"unsupported product surface profile: {profile!r}")
 
     canonical = {command.name: command for command in PRODUCT_COMMANDS}
-    pinned_schema = hosted_legacy_schemas_module.LEGACY_PROFILE_PARAMS.get(profile)
+    pinned_schema = hosted_legacy_schemas_module.LEGACY_PROFILE_CONTRACTS.get(profile)
     selected: list[Command] = []
     for name in definition.command_names:
         command = canonical.get(name)

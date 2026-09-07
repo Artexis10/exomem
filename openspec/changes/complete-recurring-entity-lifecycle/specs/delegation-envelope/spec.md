@@ -3,6 +3,8 @@
 ### Requirement: Entity lifecycle actions retain existing authority classes
 Agent-initiated entity-candidate surfacing and curation-plan proposals SHALL be `structural_suggestions` and SHALL only surface when that class disposition permits. An unknown-kind entity-type registry save, Entity creation, and curation apply, resume, or compensation SHALL be `restructure_execution` and SHALL remain exactly confirm-required. Acceptance of a graph relation SHALL be `link_acceptance` and SHALL remain confirm-required; when relation acceptance is a step inside curation apply, the stricter enclosing `restructure_execution` confirmation SHALL govern the whole apply. Candidate detection and work-item reads grant no write authority and this change SHALL add no standing-delegation cell.
 
+These authority classes and confirmation scenarios define the unchanged v1 mode. `activate-agent-led-vocabulary-evolution` SHALL be the sole v2 authority dependency. Only its explicit activation, supported canonical effects, fresh authority checks, and receipt binding may authorize additive steps; lifecycle detection, stored proposals, prominence, and prior confirmations SHALL NOT grant that authority. Non-additive steps retain their existing confirmation requirements.
+
 #### Scenario: Candidate surfacing is advisory only
 - **WHEN** a recurring identity qualifies without an explicit user request
 - **THEN** the active agent may surface it only under the `structural_suggestions` disposition

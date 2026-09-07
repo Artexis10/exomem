@@ -1997,6 +1997,22 @@ class IdempotencyStore:
             if item.exists() and stat.S_IMODE(item.stat().st_mode) & 0o077:
                 raise RuntimeError("idempotency runtime database is not owner-only")
 
+    def completed_terminal(self, key: str | None, digest: str) -> Mapping[str, Any] | None:
+        """Return an exact trusted replay terminal without taking an execution claim."""
+        if not key:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT state, result FROM mutations WHERE key = ? AND digest = ?", (key, digest)
+            ).fetchone()
+        if row is None or row[0] != "completed" or not isinstance(row[1], bytes):
+            return None
+        try:
+            terminal = pickle.loads(row[1])  # noqa: S301 - private idempotency cache
+        except (AttributeError, EOFError, ImportError, IndexError, pickle.UnpicklingError, TypeError):
+            return None
+        return terminal if isinstance(terminal, Mapping) else None
+
     def _validate_existing_runtime_paths(self) -> None:
         """Reject attacker-controlled SQLite/pickle paths before opening them."""
         if os.name == "nt":
@@ -3300,6 +3316,8 @@ class LeaseManager:
         holder_kind: str = "command",
         attachment_control: bool = False,
         attachment_now: int | None = None,
+        session_open_admission: bool = False,
+        activation_admission: bool = False,
     ) -> Iterator[VaultMutationCoordinator]:
         """Hold the shared vault mutation boundary and revalidate writer authority."""
         direct_boundary: tuple[str, Path] | None = None
@@ -3328,6 +3346,8 @@ class LeaseManager:
                         vault_root=vault_root,
                         attachment_control=attachment_control,
                         attachment_now=attachment_now,
+                        session_open_admission=session_open_admission,
+                        activation_admission=activation_admission,
                     ):
                         yield mutation
                 finally:
@@ -3380,6 +3400,8 @@ class LeaseManager:
         vault_root: os.PathLike[str] | str | None = None,
         attachment_control: bool = False,
         attachment_now: int | None = None,
+        session_open_admission: bool = False,
+        activation_admission: bool = False,
     ) -> Iterator[None]:
         """Revalidate writer authority without holding the vault mutation lock.
 
@@ -3390,17 +3412,33 @@ class LeaseManager:
         """
         fence_context: Token[tuple[Any, int] | None] | None = None
         counted = False
+        admission_now = int(time.time()) if attachment_now is None else attachment_now
+        if session_open_admission and activation_admission:
+            raise ValueError("writer admission must name one restricted transition")
+        if vault_root is not None and not attachment_control:
+            from .vocabulary_admission import (
+                VocabularyAdmissionError,
+                require_activation_admission,
+                require_mutation_admission,
+                require_session_open_admission,
+            )
+
+            try:
+                if session_open_admission:
+                    require_session_open_admission(Path(vault_root), now=admission_now)
+                elif activation_admission:
+                    require_activation_admission(Path(vault_root), now=admission_now)
+                else:
+                    require_mutation_admission(Path(vault_root), now=admission_now)
+            except VocabularyAdmissionError as exc:
+                raise OpError(exc.code, "activated vocabulary authority is unavailable") from None
         if vault_root is not None and not attachment_control:
             from .governance import authorization_custody
 
             try:
                 authorization_custody.require_standalone_mutation_admission(
                     Path(vault_root),
-                    now=(
-                        int(time.time())
-                        if attachment_now is None
-                        else attachment_now
-                    ),
+                    now=admission_now,
                 )
             except authorization_custody.AuthorizationCustodyUnavailable:
                 raise OpError(
@@ -3457,6 +3495,11 @@ class LeaseManager:
             and kwargs.get("operation") == "session"
             and kwargs.get("session_action") in {"open", "rotate"}
         )
+        session_open_admission = (
+            command.name == "govern_memory"
+            and kwargs.get("operation") == "session"
+            and kwargs.get("session_action") == "open"
+        )
         if authorization_issuance:
             # The generic mutation store pickles its terminal for replay. An
             # authorization-session issuance terminal contains the one raw
@@ -3500,6 +3543,38 @@ class LeaseManager:
             receipt_key_digest = None
         request_id = mutation_request_id or str(uuid.uuid4())
         receipt = _receipt_tag(key) if key else None
+        vocabulary_binding = None
+        vocabulary_replay_terminal = self.idempotency.completed_terminal(key, digest)
+        if "vocabulary_ref" in kwargs or "vocabulary_fingerprint" in kwargs:
+            # These fields only correlate an explicit canonical writer call
+            # with an already reviewed choice.  They never carry a receipt,
+            # resulting version, or permission supplied by the caller.
+            if receipt_vault_root is None or key is None:
+                raise OpError(
+                    "VOCABULARY_APPLICATION_INVALID",
+                    "a vocabulary application requires a canonical idempotency identity",
+                    "Retry the same reviewed canonical write with an idempotency key.",
+                )
+            from . import vocabulary_application
+            from .governance.principal import effective_principal
+
+            principal = effective_principal()
+            if not principal.resolved:
+                raise OpError(
+                    "VOCABULARY_APPLICATION_INVALID",
+                    "a vocabulary application requires a resolved principal",
+                    "Retry through an authenticated or local-owner writer surface.",
+                )
+            vocabulary_binding = vocabulary_application.bind(
+                receipt_vault_root,
+                command=command.name,
+                kwargs=kwargs,
+                idempotency_key=key,
+                command_digest=digest,
+                principal=principal.audience_id,
+                request_id=request_id,
+                canonical_terminal=vocabulary_replay_terminal,
+            )
         commit_state = {"observed": False}
         fast_ack_session = (
             _FastAcknowledgementSession(
@@ -3553,41 +3628,58 @@ class LeaseManager:
             trace_token = _ACTIVE_MUTATION_TRACE.set((request_id, command.name, receipt or "none"))
             commit_token = _ACTIVE_MUTATION_COMMITTED.set(False)
             manager_token = _ACTIVE_LEASE_MANAGER.set(self)
+            from .governance.principal import effective_principal
+            from .vocabulary_gate import attach_evidence, operation_context
+
+            gate_context = None
             fast_ack_token = (
                 _ACTIVE_FAST_ACK_SESSION.set(fast_ack_session)
                 if fast_ack_session is not None
                 else None
             )
             try:
-                leaf_result = command.leaf(*injected, **kwargs)
-                if _ACTIVE_MUTATION_COMMITTED.get():
-                    return committed_terminal(
-                        leaf_result,
-                        request_id=request_id,
-                        receipt_id=receipt,
-                        idempotency_key=effective_public_idempotency_key,
-                    )
-                if (
-                    command.name in {"record_memory", "plan_memory"}
-                    and valid_collection_receipt(leaf_result)
-                    or command.name == "maintain_memory"
-                    and kwargs.get("mode") == "structured-files"
-                    and valid_structured_files_receipt(leaf_result)
-                    or command.name == "maintain_memory"
-                    and kwargs.get("mode") == "curation"
-                    and curation_module.valid_replay_result(leaf_result)
-                ) and leaf_result.get("outcome") == "replayed":
-                    return replayed_terminal(
-                        leaf_result,
-                        request_id=request_id,
-                        receipt_id=receipt,
-                        idempotency_key=effective_public_idempotency_key,
-                    )
-                # A guarded write that validated but did not commit is mid-flight, not
-                # failed. Give it the same envelope shape as its eventual success so a
-                # client can correlate the pair on `operation_id` and see `terminal`
-                # is false, instead of reading the first response as the outcome.
-                return needs_review_terminal(leaf_result)
+                with operation_context(
+                    receipt_vault_root,
+                    idempotency_key=key,
+                    command_digest=digest,
+                    receipt_id=receipt,
+                    principal=effective_principal(),
+                ) as gate_context:
+                    leaf_result = command.leaf(*injected, **kwargs)
+                    if _ACTIVE_MUTATION_COMMITTED.get():
+                        return attach_evidence(
+                            committed_terminal(
+                                leaf_result,
+                                request_id=request_id,
+                                receipt_id=receipt,
+                                idempotency_key=effective_public_idempotency_key,
+                            ),
+                            gate_context,
+                        )
+                    if (
+                        command.name in {"record_memory", "plan_memory"}
+                        and valid_collection_receipt(leaf_result)
+                        or command.name == "maintain_memory"
+                        and kwargs.get("mode") == "structured-files"
+                        and valid_structured_files_receipt(leaf_result)
+                        or command.name == "maintain_memory"
+                        and kwargs.get("mode") == "curation"
+                        and curation_module.valid_replay_result(leaf_result)
+                    ) and leaf_result.get("outcome") == "replayed":
+                        return attach_evidence(
+                            replayed_terminal(
+                                leaf_result,
+                                request_id=request_id,
+                                receipt_id=receipt,
+                                idempotency_key=effective_public_idempotency_key,
+                            ),
+                            gate_context,
+                        )
+                    # A guarded write that validated but did not commit is mid-flight, not
+                    # failed. Give it the same envelope shape as its eventual success so a
+                    # client can correlate the pair on `operation_id` and see `terminal`
+                    # is false, instead of reading the first response as the outcome.
+                    return attach_evidence(needs_review_terminal(leaf_result), gate_context)
             except Exception as error:
                 if (
                     _ACTIVE_MUTATION_COMMITTED.get()
@@ -3782,7 +3874,39 @@ class LeaseManager:
                 if fast_ack_session is not None
                 else result
             )
-            return wait_for_graph_sync(acknowledged)
+            terminal = wait_for_graph_sync(acknowledged)
+            if receipt_vault_root is not None:
+                from .vocabulary_delivery import after_commit
+
+                terminal = after_commit(receipt_vault_root, terminal)
+            if vocabulary_binding is not None and isinstance(terminal, Mapping):
+                # This hook is reached only after IdempotencyStore persisted
+                # the canonical mutation. A correlation write must never turn
+                # that committed result into an error or a fabricated applied
+                # state when its own durable record cannot be refreshed.
+                try:
+                    if terminal.get("state") == "committed":
+                        from . import vocabulary_application
+
+                        vocabulary_application.commit(
+                            receipt_vault_root,
+                            vocabulary_binding,
+                            vocabulary_application._writer_terminal(terminal),
+                        )
+                except Exception:  # noqa: BLE001 - canonical replay must remain successful
+                    try:
+                        from .vocabulary_state import VocabularyState
+
+                        VocabularyState(receipt_vault_root).record_application_uncertain(
+                            vocabulary_binding.item,
+                            operation_id=vocabulary_binding.operation_id,
+                        )
+                    except Exception:  # noqa: BLE001 - correlation recovery is advisory
+                        # The canonical terminal is already durable. A second
+                        # local state failure stays recoverable rather than
+                        # changing that completed mutation into a failure.
+                        pass
+            return terminal
 
         def persist_graph_sync_progress(
             result: Any, attempt: _ExecutionAttempt, canonical_disposition: str = "success"
@@ -3815,6 +3939,7 @@ class LeaseManager:
                         "receipt_id",
                         "operation_id",
                         "warnings_count",
+                        "additive_authority",
                     )
                     if isinstance(result, Mapping) and name in result
                 }
@@ -4151,13 +4276,19 @@ class LeaseManager:
                 expires_after=expires_after,
                 on_replay=on_replay,
                 operation_guard=(
-                    self.writer_authority_guard
+                    (
+                        lambda: self.writer_authority_guard(
+                            vault_root=mutation_subject,
+                            session_open_admission=session_open_admission,
+                        )
+                    )
                     if narrow_boundary
                     else lambda: self.mutation_guard(
                         mutation_subject,
                         request_id=request_id,
                         operation=command.name,
                         holder_kind="command",
+                        session_open_admission=session_open_admission,
                     )
                 ),
                 commit_observed=lambda: commit_state["observed"],
@@ -4167,6 +4298,29 @@ class LeaseManager:
                 commit_evidence=exact_commit_evidence,
                 legacy_graph_pending_proof=legacy_graph_pending_proof,
             )
+            if (
+                vocabulary_replay_terminal is not None
+                and vocabulary_binding is not None
+                and isinstance(result, Mapping)
+                and result.get("state") == "committed"
+            ):
+                try:
+                    from . import vocabulary_application
+
+                    vocabulary_application.commit(
+                        receipt_vault_root,
+                        vocabulary_binding,
+                        vocabulary_application._writer_terminal(result),
+                    )
+                except Exception:  # noqa: BLE001 - canonical replay must remain successful
+                    try:
+                        from .vocabulary_state import VocabularyState
+
+                        VocabularyState(receipt_vault_root).record_application_uncertain(
+                            vocabulary_binding.item, operation_id=vocabulary_binding.operation_id
+                        )
+                    except Exception:  # noqa: BLE001 - correlation recovery is advisory
+                        pass
         except BaseException as error:
             if isinstance(error, OpError):
                 if error.code == "MUTATION_BUSY":

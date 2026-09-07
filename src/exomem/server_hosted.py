@@ -36,6 +36,8 @@ from . import (
     hosted_runtime_temp,
     hosted_transfer,
     hosted_transfer_routes,
+    vocabulary_authority,
+    vocabulary_control,
 )
 from . import commands as commands_module
 from . import hosted_gateway as gateway
@@ -846,6 +848,10 @@ def _default_mutation_guard(vault_root: Path) -> AbstractContextManager[None]:
     return hosted_runtime.hosted_mutation_guard(vault_root)
 
 
+def _default_vocabulary_activation_guard(vault_root: Path) -> AbstractContextManager[None]:
+    return hosted_runtime.hosted_vocabulary_activation_guard(vault_root)
+
+
 def _default_preserve_stream(*args: Any, **kwargs: Any) -> Any:
     from . import preserve
 
@@ -867,10 +873,14 @@ def register_hosted_routes(
     # passed here has to run `governance.egress.postfilter` itself.
     invoke_command_func: Callable[..., Any] | None = None,
     mutation_guard_factory: Callable[[Path], AbstractContextManager[None]] | None = None,
+    vocabulary_activation_guard_factory: Callable[[Path], AbstractContextManager[None]] | None = None,
     preserve_stream_func: Callable[..., Any] | None = None,
     private_authenticator: Any | None = None,
     transfer_security_authority: hosted_transfer.TransferSecurityAuthority | None = None,
     runtime_temp_authority: hosted_runtime_temp.HostedRuntimeTempAuthority | None = None,
+    vocabulary_owner_decision_callback: Callable[[vocabulary_control.OwnerControlIntent], object] | None = None,
+    vocabulary_deployment_floor_callback: Callable[[vocabulary_control.OwnerControlIntent], object] | None = None,
+    vocabulary_authority_factory: Callable[[Path], vocabulary_authority.VocabularyAuthority] | None = None,
 ) -> None:
     """Register private v1 plus the two exact public transfer-v2 capabilities."""
 
@@ -914,6 +924,10 @@ def register_hosted_routes(
 
         invoke = invoke_command
     guard_factory = mutation_guard_factory or _default_mutation_guard
+    activation_guard_factory = (
+        vocabulary_activation_guard_factory or _default_vocabulary_activation_guard
+    )
+    authority_factory = vocabulary_authority_factory or vocabulary_authority.VocabularyAuthority
     preserve_stream = preserve_stream_func or _default_preserve_stream
     upload_idempotency = IdempotencyStore(config.state_root / "idempotency-hosted.sqlite")
     private_v1_upload_slot = threading.Lock()
@@ -1051,6 +1065,150 @@ def register_hosted_routes(
             operation="live",
             request_id=context.request_id,
             started=started,
+        )
+
+    async def _vocabulary_control_principal(
+        request: Request,
+    ) -> tuple[gateway.TrustedGatewayContext, Any]:
+        """Authenticate the hosted service first, then require its existing session context."""
+
+        context = _trusted_context(request, config, private_authenticator)
+        if "authorization_session_credential" in request.query_params:
+            raise authorization_request.AuthorizationContextUnavailable
+        carrier = authorization_transport.current_request_authorization_carrier()
+        if carrier is None:
+            _headers, carrier = authorization_transport.strip_sensitive_authorization_header(
+                list(request.scope.get("headers") or [])
+            )
+        if carrier.is_invalid:
+            raise authorization_request.AuthorizationContextUnavailable
+        from .governance import principal as principal_module
+
+        admission = await run_in_threadpool(
+            authorization_request.verify_authorization_context,
+            config.vault_root,
+            principal=principal_module.resolve_hosted_principal(context.principal_scope),
+            credential=carrier.consume(),
+            now=int(time.time()),
+        )
+        return context, authorization_request.enforce_credential_rule(
+            admission,
+            authorization_request.CredentialRule.REQUIRED,
+        )
+
+    def _vocabulary_control() -> vocabulary_control.VocabularyControl:
+        return vocabulary_control.VocabularyControl(
+            authority_factory(config.vault_root),
+            owner_decision_callback=vocabulary_owner_decision_callback,
+            deployment_floor_callback=vocabulary_deployment_floor_callback,
+            activation_guard_factory=activation_guard_factory,
+        )
+
+    def _vocabulary_status_data(status: vocabulary_authority.AuthorityStatus) -> dict[str, object]:
+        return {
+            "mode": status.mode,
+            "generation": status.generation,
+            "active_grants": status.active_grants,
+        }
+
+    async def _vocabulary_control_route(
+        request: Request,
+        *,
+        operation: str,
+        action: Callable[[vocabulary_control.VocabularyControl, Any, Mapping[str, Any]], Any],
+        body_required: bool,
+    ) -> HostedJSONResponse:
+        started = time.perf_counter()
+        context: gateway.TrustedGatewayContext | None = None
+        try:
+            context, principal = await _vocabulary_control_principal(request)
+            body = await _json_body(request) if body_required else {}
+            result = await run_in_threadpool(action, _vocabulary_control(), principal, body)
+            if isinstance(result, vocabulary_authority.AuthorityStatus):
+                result = _vocabulary_status_data(result)
+            elif result is None:
+                result = {"status": "ok"}
+            elif isinstance(result, str):
+                result = {"authority_id": result}
+            return _success_response(
+                result,
+                config=config,
+                operation=operation,
+                request_id=context.request_id,
+                started=started,
+            )
+        except gateway.HostedGatewayError as exc:
+            code = exc.code
+        except authorization_request.AuthorizationContextUnavailable:
+            code = "AUTHORIZATION_SESSION_UNAVAILABLE"
+        except vocabulary_authority.VocabularyAuthorityUnavailable:
+            code = "VOCABULARY_AUTHORITY_UNAVAILABLE"
+        except vocabulary_authority.VocabularyAuthorityDenied:
+            code = "VOCABULARY_AUTHORITY_DENIED"
+        except vocabulary_authority.VocabularyAuthorityConflict:
+            code = "VOCABULARY_AUTHORITY_CONFLICT"
+        except ValueError:
+            code = "VOCABULARY_CONTROL_INVALID"
+        return _error_response(
+            code,
+            config=config,
+            operation=operation,
+            request_id=context.request_id if context else None,
+            started=started,
+        )
+
+    @mcp_app.custom_route("/private/exomem/v1/vocabulary/control/status", methods=["GET"])
+    async def _vocabulary_control_status(request: Request) -> HostedJSONResponse:
+        return await _vocabulary_control_route(
+            request,
+            operation="vocabulary-control-status",
+            action=lambda control, principal, _body: control.status(principal=principal),
+            body_required=False,
+        )
+
+    @mcp_app.custom_route("/private/exomem/v1/vocabulary/control/activate", methods=["POST"])
+    async def _vocabulary_control_activate(request: Request) -> HostedJSONResponse:
+        return await _vocabulary_control_route(
+            request,
+            operation="vocabulary-control-activate",
+            action=lambda control, principal, body: control.activate(principal=principal, body=body),
+            body_required=True,
+        )
+
+    @mcp_app.custom_route("/private/exomem/v1/vocabulary/control/approve", methods=["POST"])
+    async def _vocabulary_control_approve(request: Request) -> HostedJSONResponse:
+        return await _vocabulary_control_route(
+            request,
+            operation="vocabulary-control-approve",
+            action=lambda control, principal, body: control.approve_request(principal=principal, body=body),
+            body_required=True,
+        )
+
+    @mcp_app.custom_route("/private/exomem/v1/vocabulary/control/deny", methods=["POST"])
+    async def _vocabulary_control_deny(request: Request) -> HostedJSONResponse:
+        return await _vocabulary_control_route(
+            request,
+            operation="vocabulary-control-deny",
+            action=lambda control, principal, body: control.deny_request(principal=principal, body=body),
+            body_required=True,
+        )
+
+    @mcp_app.custom_route("/private/exomem/v1/vocabulary/control/grant", methods=["POST"])
+    async def _vocabulary_control_grant(request: Request) -> HostedJSONResponse:
+        return await _vocabulary_control_route(
+            request,
+            operation="vocabulary-control-grant",
+            action=lambda control, principal, body: control.grant(principal=principal, body=body),
+            body_required=True,
+        )
+
+    @mcp_app.custom_route("/private/exomem/v1/vocabulary/control/revoke", methods=["POST"])
+    async def _vocabulary_control_revoke(request: Request) -> HostedJSONResponse:
+        return await _vocabulary_control_route(
+            request,
+            operation="vocabulary-control-revoke",
+            action=lambda control, principal, body: control.revoke(principal=principal, body=body),
+            body_required=True,
         )
 
     @mcp_app.custom_route("/private/exomem/v1/ready", methods=["GET"])

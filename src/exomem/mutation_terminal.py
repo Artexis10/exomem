@@ -1275,6 +1275,15 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact["due_state"] = due_state
     if relation_advisory is not None:
         compact["relation_advisory"] = relation_advisory
+    if "vocabulary_sync" in result or "vocabulary_advisory" in result:
+        from .vocabulary_delivery import public_projection
+
+        compact.update(public_projection(result))
+    if "additive_authority" in result:
+        from .vocabulary_receipts import valid_projection
+
+        if valid_projection(result["additive_authority"]):
+            compact["additive_authority"] = result["additive_authority"]
     compact["warnings_count"] = result["warnings_count"]
     # Projected from the leaf, never from the receipt. Receipt recovery replaces
     # `leaf_result` with `{}` on purpose (the portable receipt must not retain

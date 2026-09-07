@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .. import find_corpus, reserved_paths, state_migration, writer_lease
 from ..kbdir import kb_dirname
+from ..vocabulary_admission import VocabularyAdmissionError
 from . import (
     authorization_custody,
     legacy_v3_placement,
@@ -2072,6 +2073,9 @@ def restore_forward_migration_backup(
 
     root = Path(vault_root)
     try:
+        from ..vocabulary_admission import require_restore_admission
+
+        require_restore_admission(root)
         moment = _bounded_integer(now, minimum=1)
         expected_plan = _require_digest(expected_plan_digest)
         expected_reference = _require_backup_reference(expected_backup_reference)
@@ -2326,7 +2330,7 @@ def restore_forward_migration_backup(
                 _forward_migration_barrier("after_restore_schema_fence")
                 session.seal_complete_metadata_only()
                 _forward_migration_barrier("after_restore_complete_marker")
-    except (_ForwardMigrationCrash, ForwardMigrationRestoreUnavailable):
+    except (_ForwardMigrationCrash, ForwardMigrationRestoreUnavailable, VocabularyAdmissionError):
         raise
     except (
         ForwardMigrationUnavailable,

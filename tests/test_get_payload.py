@@ -84,6 +84,11 @@ def registry_proven_never_enrolled(
         str(external / "authorization-serving-membership.json"),
     )
     monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "standalone")
+    monkeypatch.setattr(
+        authorization_custody,
+        "_standalone_host_control_root",
+        lambda: tmp_path / "host-control",
+    )
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(lease_state))
     writer_lease.reset_managers_for_tests()
     authorization_custody.provision_standalone_custody(vault, now=int(time.time()))

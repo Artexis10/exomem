@@ -105,6 +105,7 @@ _RECEIPT_TERMINAL_FIELDS = frozenset(
         "receipt_id",
         "operation_id",
         "result_sha256",
+        "additive_authority",
     }
 )
 _RECEIPT_TERMINAL_STATES = frozenset({"committed", "rejected"})
@@ -223,12 +224,17 @@ def _is_digest(value: object) -> bool:
 
 
 def _is_receipt_terminal_projection(value: object) -> bool:
-    """Validate the closed, scalar receipt projection before HMAC verification."""
+    """Validate the closed, content-free receipt projection before HMAC verification."""
     if not isinstance(value, dict) or not value:
         return False
     for key, item in value.items():
         if key not in _RECEIPT_TERMINAL_FIELDS:
             return False
+        if key == "additive_authority":
+            from .vocabulary_receipts import valid_projection
+
+            if not valid_projection(item):
+                return False
         if key == "_terminal" and item != "exomem.mutation-terminal":
             return False
         if key == "version" and (type(item) is not int or item != 1):

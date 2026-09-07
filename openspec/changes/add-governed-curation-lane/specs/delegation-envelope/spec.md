@@ -11,6 +11,13 @@ The served bootstrap and curation workflow contract SHALL teach this split and
 require explicit in-conversation user confirmation before the first apply of
 each immutable forward or compensation plan.
 
+These requirements and confirmation scenarios define the unchanged v1 mode.
+`activate-agent-led-vocabulary-evolution` SHALL be the sole dependency that may
+authorize supported additive steps in an explicitly activated v2 vault. A plan,
+candidate, disposition, or prior confirmation SHALL NOT activate that mode or
+replace its exact effect, current authority, and receipt checks. Compensation
+and other non-additive steps retain their existing confirmation boundary.
+
 #### Scenario: Structural suggestions are off
 
 - **WHEN** `structural_suggestions` is off and the user has not explicitly

@@ -770,6 +770,7 @@ def link(
         + list(why_warnings)
     )
     auxiliary: list[PlannedWrite] = list(key_plan.writes)
+    derived_auxiliaries: list[tuple[str, PlannedWrite]] = []
     kb = kb_root(vault_root)
     activity = _activity_summary(
         rel_entity_no_ext=rel_entity_no_ext,
@@ -790,10 +791,9 @@ def link(
             pending_paths=[rel_entity_no_ext],
             include_unchanged=True,
         )
-        auxiliary.append(
-            PlannedWrite(top_index, counted_top or new_top, guard=top_guard)
-        )
-        auxiliary.extend(sub_writes)
+        index_writes = [PlannedWrite(top_index, counted_top or new_top, guard=top_guard), *sub_writes]
+        auxiliary.extend(index_writes)
+        derived_auxiliaries.extend(("index", write) for write in index_writes)
     else:
         warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
     try:
@@ -817,6 +817,7 @@ def link(
             "LOG_PLAN_CONFLICT", [], "entity log update could not be planned safely"
         ) from error
     auxiliary.extend(log_plan.writes)
+    derived_auxiliaries.extend(("operation-log", write) for write in log_plan.writes)
     if log_plan.warning is not None:
         warnings.append(log_plan.warning)
     if log_plan.rotation_note is not None:
@@ -833,6 +834,7 @@ def link(
         vault_root,
         preflight=preflight,
         auxiliary_writes=tuple(auxiliary),
+        derived_auxiliary_writes=tuple(derived_auxiliaries),
         operation="create",
     )
     return LinkResult(

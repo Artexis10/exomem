@@ -1136,6 +1136,7 @@ def build_page_state(
     relation_registry: relation_registry.RelationRegistry | None = None,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     review_fingerprint: str | None | object = _REVIEW_FINGERPRINT_UNSET,
+    complete_authored_effects: bool = False,
 ) -> SemanticPageState:
     """Build detached semantic state from one already-read Markdown string."""
     root = Path(vault_root)
@@ -1176,7 +1177,7 @@ def build_page_state(
     body_links: list[tuple[str, int]] = []
     seen_link_targets: set[str] = set()
     for match in vault.find_body_wikilinks(body):
-        if len(body_links) >= _MAX_WIKILINK_FACTS_PER_PAGE:
+        if not complete_authored_effects and len(body_links) >= _MAX_WIKILINK_FACTS_PER_PAGE:
             break
         target = match.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
         if not target:
@@ -3226,6 +3227,7 @@ def _derive_relation_facts(
     registry: relation_registry.RelationRegistry,
     *,
     target_states: Mapping[str, SemanticPageState] | None = None,
+    complete_authored_effects: bool = False,
 ) -> tuple[RelationFact, ...]:
     resolved_states = target_states if target_states is not None else states
     raw_facts: list[dict[str, Any]] = []
@@ -3281,6 +3283,21 @@ def _derive_relation_facts(
                         "source_kind": "file",
                         "origin": "frontmatter",
                         "reverse": reverse,
+                    }
+                )
+        if complete_authored_effects:
+            for raw_target, line in state.body_wikilinks:
+                raw_facts.append(
+                    {
+                        "authored": state,
+                        "raw_relation": "links_to",
+                        "raw_target": raw_target,
+                        "line": line,
+                        "anchor": None,
+                        "element_identity": None,
+                        "source_kind": "file",
+                        "origin": "wikilink",
+                        "reverse": False,
                     }
                 )
     occurrences: Counter[tuple[str, str, str, str, str, str]] = Counter()

@@ -31,6 +31,27 @@ Each item SHALL carry a stable reference, family, target identities, evidence re
 - **WHEN** a consideration has more evidence than the response budget or its projection is warming
 - **THEN** the response exposes continuation or typed unavailability and does not claim that no other candidates exist
 
+#### Scenario: Review history does not crowd out actionable work
+
+- **WHEN** retained resolved or deferred decisions outnumber pending considerations
+- **THEN** ordinary vocabulary review selects pending, proposed, awaiting-approval, and applying work
+- **AND** explicit `state="all"` preserves access to deferred and completed history without deleting decisions
+
+#### Scenario: Hidden work cannot make a bounded pass unbounded
+
+- **WHEN** a review queue contains many items withheld from the current principal
+- **THEN** one request evaluates only a fixed private candidate window from a current derived projection
+- **AND** successive requests advance private scan progress without exposing hidden counts, offsets, or queue exhaustion
+- **AND** a public continuation refers only to already-disclosed visible work and is bound to the principal and current decision snapshot
+- **AND** empty and all-hidden passes both report non-exhaustive coverage
+
+#### Scenario: Missing review projection has an explicit repair route
+
+- **WHEN** the canonical review ledger and derived queue publication fence disagree
+- **THEN** review reports warming or unavailable and names explicit reconciliation
+- **AND** it does not scan the full ledger or silently treat a partial projection as complete
+- **AND** reconciliation rebuilds from canonical decisions without granting mutation authority or discarding history
+
 ### Requirement: Meaning is decided by the active agent
 
 The workflow SHALL present existing definitions, aliases, direction, applicable parent families and available overlap evidence before a new type is committed. The active agent SHALL choose reuse, enrich, propose-new, generic, no-edge or defer with a concise rationale appropriate to the family. New meanings SHALL require a definition, justification and the family's existing registry validation. Exact identity or alias collisions SHALL be rejected; semantic proximity alone SHALL NOT veto a distinct meaning or select an equivalent meaning automatically.
@@ -58,6 +79,8 @@ No server-side reasoning model, numeric semantic-authority score, minimum edge c
 Decision writes SHALL bind to the item fingerprint, reviewed registry hashes and relevant target versions. Stale decisions SHALL refuse without altering content or disposition. Recorded states SHALL distinguish pending consideration, deferred, resolved without mutation, proposed, awaiting approval, applying and applied. A proposal or approval SHALL NOT count as applied; applied SHALL reference successful canonical mutation receipts and the resulting state. A stale or failed application SHALL remain recoverable rather than silently resolved.
 
 Unchanged items already considered SHALL NOT repeatedly interrupt the same conversation. A durable defer or family quiet SHALL suppress unsolicited repetition while preserving explicit review access. New evidence that changes the fingerprint SHALL permit reconsideration; a registry timestamp change alone SHALL NOT create an endless stream of equivalent advice. An ignored item SHALL remain pending without increasing authority.
+
+Transient conversation notices SHALL use indexed exact lookup and bounded cleanup rather than scanning all retained session notices. Their retention horizon SHALL follow the existing surfaced-ledger horizon; expiry SHALL NOT delete a durable decision or impose a limit on sessions, types, entities, or retained knowledge. Legacy notification migration SHALL be explicit and SHALL avoid repeating unexpired notices.
 
 Workflow notification and semantic consideration SHALL be distinct from canonical integrity findings. A defer, generic/no-edge outcome or family quiet SHALL NOT dismiss, hide or resolve a finding whose owning contract requires state repair, including `entity_type_unregistered`. Linked audit findings SHALL retain their original visibility and state-based resolution rules even when a workflow notification is suppressed. Claiming a consideration resolved SHALL NOT claim its linked integrity defect repaired.
 
@@ -110,6 +133,13 @@ Type registration SHALL persist through its existing canonical registry writer b
 - **WHEN** a permitted type save commits but graph publication is pending
 - **THEN** the response distinguishes registered from graph-current and gives the normal recovery/read route
 - **AND** it does not repeat the registration under a new mutation identity
+
+#### Scenario: A reviewed pair completes a newly registered relation
+
+- **WHEN** a relation-type proposal is registered for two exact reviewed endpoints
+- **THEN** its registry receipt remains ordered and durable while the pair application is pending
+- **AND** `connect_memory(operation="accept-relation")` may author the decision's active canonical relation for the same live reviewed candidate only when its exact vocabulary binding, source hash and queue fingerprint are supplied
+- **AND** the resulting canonical edge is discoverable by its exact relation and parent family before the consideration becomes applied
 
 ### Requirement: Adoption is verified through unprompted domain tasks
 

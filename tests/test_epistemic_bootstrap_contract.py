@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, hosted_gateway, semantic_blocks, semantic_units
+from exomem import commands, hosted_gateway, semantic_blocks, semantic_units, workflow_skills
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
 #: Every commitment the portable contract has to carry, keyed by payload key.
@@ -87,6 +87,158 @@ def test_commitments_name_no_tool(vault: Path) -> None:
 
     for tool in commands.PRODUCT_PUBLIC_NAMES:
         assert tool not in serialized, tool
+
+
+# ------------------------------------------------------------ vocabulary loop
+
+
+def test_compact_bootstrap_teaches_the_v1_vocabulary_consideration_loop(vault: Path) -> None:
+    """A hookless client needs routes, abstention, and the v1 authority limit."""
+    workflow = commands.op_bootstrap(vault, profile="compact")["vocabulary_workflow"]
+
+    assert workflow["version"] == "v1"
+    assert workflow["families"] == [
+        "entity-instance/v1",
+        "entity-type/v1",
+        "relation-type/v1",
+    ]
+    assert workflow["review_route"]["default_limit"] == 4
+    assert workflow["review_route"]["route"] == {
+        "tool": "review_memory",
+        "args": {"mode": "vocabulary"},
+    }
+    assert workflow["context"]["route"] == {
+        "tool": "review_item_context",
+        "args": {"ref": "exomem://review/vocabulary/<item>"},
+    }
+    assert workflow["decision"]["route"] == {
+        "tool": "triage_memory",
+        "args": {"action": "decide-vocabulary", "ref": "exomem://review/vocabulary/<item>"},
+    }
+    assert workflow["decision"]["fields"] == [
+        "item_ref",
+        "fingerprint",
+        "family",
+        "registry_hashes",
+        "target_versions",
+        "outcome",
+        "rationale",
+        "choice",
+    ]
+    assert workflow["entity_instance"]["resolve"]["route"] == {
+        "tool": "connect_memory",
+        "args": {"operation": "resolve-entity"},
+    }
+    assert workflow["entity_instance"]["apply"]["route"] == {
+        "tool": "connect_memory",
+        "args": {"operation": "create-entity"},
+    }
+    assert workflow["entity_type"]["resolve"]["route"] == {
+        "tool": "schema_memory",
+        "args": {"operation": "resolve-entity-type", "subject": "entity-types"},
+    }
+    assert workflow["entity_type"]["apply"]["route"] == {
+        "tool": "schema_memory",
+        "args": {"operation": "save-entity-types"},
+    }
+    assert workflow["relation_type"]["resolve"]["route"] == {
+        "tool": "connect_memory",
+        "args": {"operation": "resolve-relation"},
+    }
+    assert workflow["relation_type"]["propose"]["route"] == {
+        "tool": "schema_memory",
+        "args": {"operation": "propose-relation", "subject": "relations"},
+    }
+    assert workflow["relation_type"]["apply"]["route"] == {
+        "tool": "schema_memory",
+        "args": {"operation": "save-relations", "subject": "relations"},
+    }
+    assert "reuse" in workflow["consideration"]
+    assert all(outcome in workflow["consideration"] for outcome in ("generic", "no-edge", "defer"))
+    assert all(step in workflow["cadence"] for step in ("review", "context", "question", "decision"))
+    assert workflow["application"]["correlation_fields"] == [
+        "vocabulary_ref", "vocabulary_fingerprint"
+    ]
+    assert "Idempotency-Key" in workflow["application"]["rule"]
+    assert workflow["authority"] == {
+        "contract_version": "v1",
+        "scoped_delegation": False,
+        "rule": "Decision not permission; v1 writers retain confirmation.",
+    }
+
+
+def test_reduced_bootstrap_reports_missing_vocabulary_routes(vault: Path) -> None:
+    descriptor = ActiveSurfaceDescriptor(
+        surface="test", profile="reduced", tier2_enabled=False, product_commands=("bootstrap",)
+    )
+
+    with active_surface(descriptor):
+        workflow = commands.op_bootstrap(vault, profile="compact")["vocabulary_workflow"]
+
+    for operation in (
+        "review_route",
+        "context",
+        "decision",
+    ):
+        assert workflow[operation]["available"] is False
+        assert workflow[operation]["unavailable_reason"]
+        assert "route" not in workflow[operation]
+    assert workflow["entity_type"]["resolve"]["available"] is False
+
+
+def test_compact_operating_instructions_precede_large_catalogs(vault: Path) -> None:
+    payload = commands.op_bootstrap(vault, profile="compact")
+    keys = list(payload)
+    for doctrine in ("workflow", "vocabulary_workflow", "epistemic_contract"):
+        for catalog in ("simple_actions", "front_door_actions", "product_commands"):
+            assert keys.index(doctrine) < keys.index(catalog)
+    assert any("vocabulary_sync" in step and "recovery" in step for step in payload["workflow"]["loop"])
+
+
+@pytest.mark.parametrize(
+    ("product_commands", "expected"),
+    (
+        (("bootstrap",), {"common": False, "connect": False, "schema": False}),
+        (
+            ("bootstrap", "review_memory", "review_item_context", "triage_memory"),
+            {"common": True, "connect": False, "schema": False},
+        ),
+        (
+            ("bootstrap", "review_memory", "review_item_context", "triage_memory", "connect_memory"),
+            {"common": True, "connect": True, "schema": False},
+        ),
+        (
+            ("bootstrap", "review_memory", "review_item_context", "triage_memory", "schema_memory"),
+            {"common": True, "connect": False, "schema": True},
+        ),
+    ),
+)
+@pytest.mark.parametrize("profile", ("compact", "full", "session"))
+def test_vocabulary_bootstrap_marks_each_operation_available_or_limited(
+    vault: Path, product_commands: tuple[str, ...], expected: dict[str, bool], profile: str
+) -> None:
+    descriptor = ActiveSurfaceDescriptor(
+        surface="test", profile="partial", tier2_enabled=True, product_commands=product_commands
+    )
+    arguments = {"profile": profile}
+    if profile == "session":
+        arguments["skill_contract"] = workflow_skills.skill_contract()
+
+    with active_surface(descriptor):
+        payload = commands.op_bootstrap(vault, **arguments)
+
+    workflow = payload["vocabulary_workflow"]
+    for operation in ("review_route", "context", "decision"):
+        assert workflow[operation]["available"] is expected["common"]
+    assert workflow["entity_instance"]["resolve"]["available"] is expected["connect"]
+    assert workflow["entity_instance"]["apply"]["available"] is expected["connect"]
+    assert workflow["entity_type"]["resolve"]["available"] is expected["schema"]
+    assert workflow["entity_type"]["apply"]["available"] is expected["schema"]
+    assert workflow["relation_type"]["resolve"]["available"] is expected["connect"]
+    assert workflow["relation_type"]["propose"]["available"] is expected["schema"]
+    assert workflow["relation_type"]["apply"]["available"] is expected["schema"]
+    assert payload["entity_registry"]["candidate_route"]["available"] is expected["connect"]
+    assert payload["relation_vocabulary"]["inventory_route"]["available"] is expected["connect"]
 
 
 # -------------------------------------------------------------------- vocabulary

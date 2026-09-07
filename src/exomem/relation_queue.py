@@ -89,6 +89,46 @@ def _bullet(candidate: dict[str, Any]) -> str:
     return f"- {relation} [[{destination}]]"
 
 
+def selected_relation(
+    vault_root: Path,
+    candidate: dict[str, Any],
+    requested_relation: str | None,
+    *,
+    source_page: Any | None = None,
+) -> dict[str, Any]:
+    """Return the registered relation explicitly selected for reviewed endpoints."""
+    if requested_relation is None:
+        return dict(candidate)
+    if not isinstance(requested_relation, str) or not requested_relation.strip():
+        raise ValueError("INVALID_SELECTED_RELATION: a registered relation label is required")
+    page = source_page or _page_for(vault_root, str(candidate.get("from") or ""))
+    target = _page_for(vault_root, str(candidate.get("to") or ""))
+    if page is None or target is None:
+        raise ValueError("REVIEW_ITEM_CHANGED: refresh the relation candidate")
+    source_project = page.frontmatter.get("project")
+    target_project = target.frontmatter.get("project")
+    if not isinstance(source_project, str):
+        source_project = None
+    if not isinstance(target_project, str):
+        target_project = None
+    resolved = relation_registry.load_registry(vault_root).resolve(
+        requested_relation,
+        project=source_project,
+        page_type=page.page_type,
+        source_kind=page.page_type,
+        target_kind=target.page_type,
+        origin="markdown_relation",
+    )
+    definition = resolved.definition
+    if (
+        definition is None
+        or resolved.status not in {"core", "extension", "alias"}
+        or (definition.projects and target_project not in definition.projects)
+    ):
+        raise ValueError("INVALID_SELECTED_RELATION: relation is not active for reviewed endpoints")
+    return {**candidate, "relation_type": resolved.canonical}
+
+
 def _evidence_signal_version(page: Any, candidate: dict[str, Any]) -> str:
     """A version string that changes whenever the candidate's evidence does.
 
@@ -779,6 +819,7 @@ def accept(
     why: str | None,
     expected_fingerprint: str | None = None,
     source_path: str | None = None,
+    requested_relation: str | None = None,
     edit_memory: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
     """Governed server-side accept: validate signal + hash, then author the bullet.
@@ -848,7 +889,13 @@ def accept(
             "REVIEW_ITEM_CHANGED: the relation candidate is no longer eligible "
             f"({reason}); refresh the queue and inspect {ref} again"
         )
-    bullet = _bullet(candidate)
+    selected = selected_relation(
+        vault_root,
+        candidate,
+        requested_relation,
+        source_page=page,
+    )
+    bullet = _bullet(selected)
     edit_result = edit_memory(
         vault_root,
         path=str(candidate.get("from") or ""),
@@ -862,9 +909,9 @@ def accept(
         "accepted": True,
         "ref": ref,
         "path": candidate.get("from"),
-        "from": candidate.get("from"),
-        "to": candidate.get("to"),
-        "relation_type": candidate.get("relation_type"),
+        "from": selected.get("from"),
+        "to": selected.get("to"),
+        "relation_type": selected.get("relation_type"),
         "method": candidate.get("method"),
         "fingerprint": resolved.fingerprint,
         "bullet": bullet,

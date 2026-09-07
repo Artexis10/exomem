@@ -153,6 +153,23 @@ def test_the_pin_is_derived_from_the_committed_descriptor_not_from_memory(
     assert pinned == published
 
 
+@pytest.mark.parametrize("candidate", HISTORICAL_CANDIDATES)
+def test_the_pin_retains_the_full_published_command_contract(candidate: str) -> None:
+    """Names alone cannot preserve defaults, schemas, or published guidance."""
+    committed = _committed_compatibility(candidate)
+    profile = hosted_plugins.CANDIDATE_PROFILES[candidate]
+    pinned = hosted_legacy_schemas.LEGACY_PROFILE_CONTRACTS[profile]
+
+    for entry in committed["agent_contract"]["commands"]:
+        contract = pinned[entry["name"]]
+        assert contract.params == tuple(entry["params"])
+        assert contract.description == entry["mcp_tool"]["description"]
+        assert contract.annotations == entry["mcp_tool"]["annotations"]
+        assert hosted_legacy_schemas.json_value(contract.input_schema) == entry["mcp_tool"][
+            "inputSchema"
+        ]
+
+
 def test_the_pin_refuses_a_command_whose_pinned_parameter_disappeared() -> None:
     """Dropping a pinned parameter is a breaking change, not a silent narrowing.
 
@@ -233,6 +250,126 @@ def test_v5_admits_the_same_body_over_the_real_route(
     assert "UNKNOWN_PARAM" not in response.text, response.text
     assert "COMMAND_NOT_FOUND" not in response.text, response.text
     assert argument in _published_schema(profile, command_name)["properties"]
+
+
+@pytest.mark.parametrize("candidate", HISTORICAL_CANDIDATES)
+def test_historical_profiles_refuse_the_new_vocabulary_review_mode(
+    tmp_path: Path, candidate: str
+) -> None:
+    profile = hosted_plugins.CANDIDATE_PROFILES[candidate]
+    app, config = guard._cell(tmp_path, profile=profile)
+
+    response = guard._call(app, config, "review_memory", {"mode": "vocabulary"})
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "INVALID_MODE", response.text
+    mode = next(param for param in _resolved(profile)["review_memory"].params if param.name == "mode")
+    assert "vocabulary" not in mode.help
+    assert "vocabulary" not in mode.choices
+
+
+def test_v5_admits_the_new_vocabulary_review_mode_over_the_real_route(tmp_path: Path) -> None:
+    profile = commands.HOSTED_ALPHA_AGENT_V5_PROFILE
+    app, config = guard._cell(tmp_path, profile=profile)
+
+    response = guard._call(app, config, "review_memory", {"mode": "vocabulary"})
+
+    assert "UNKNOWN_PARAM" not in response.text, response.text
+    assert "INVALID_MODE" not in response.text, response.text
+    mode = next(param for param in _resolved(profile)["review_memory"].params if param.name == "mode")
+    assert "vocabulary" in mode.help
+
+
+@pytest.mark.parametrize("candidate", HISTORICAL_CANDIDATES)
+def test_historical_bootstrap_only_advertises_vocabulary_routes_the_pin_admits(
+    tmp_path: Path, candidate: str
+) -> None:
+    """A command name alone does not make a newer selector callable."""
+    from exomem import capabilities, hosted_gateway
+    from exomem.init import init_vault
+
+    profile = hosted_plugins.CANDIDATE_PROFILES[candidate]
+    init_vault(tmp_path)
+    with capabilities.active_surface(hosted_gateway.hosted_agent_surface_descriptor(profile)):
+        workflow = commands.op_bootstrap(tmp_path)["vocabulary_workflow"]
+    resolved = _resolved(profile)
+
+    def admitted(tool: str, args: dict[str, str], *, required: tuple[str, ...] = ()) -> bool:
+        command = resolved.get(tool)
+        if command is None:
+            return False
+        params = {param.name: param for param in command.params}
+        return all(
+            name in params and (not params[name].choices or value in params[name].choices)
+            for name, value in args.items()
+        ) and all(name in params for name in required)
+
+    routes = (
+        (workflow["review_route"], "review_memory", {"mode": "vocabulary"}, ()),
+        (
+            workflow["question"],
+            "review_memory",
+            {"mode": "vocabulary", "path": "page", "query": "meaning", "family": "relation-type/v1"},
+            (),
+        ),
+        (
+            workflow["decision"],
+            "triage_memory",
+            {"action": "decide-vocabulary", "ref": "exomem://review/vocabulary/item"},
+            ("decision",),
+        ),
+        (workflow["entity_instance"]["resolve"], "connect_memory", {"operation": "resolve-entity"}, ()),
+        (workflow["entity_instance"]["apply"], "connect_memory", {"operation": "create-entity"}, ()),
+        (
+            workflow["entity_type"]["resolve"],
+            "schema_memory",
+            {"operation": "resolve-entity-type", "subject": "entity-types"},
+            (),
+        ),
+        (workflow["entity_type"]["apply"], "schema_memory", {"operation": "save-entity-types"}, ()),
+    )
+    for advertised, tool, args, required in routes:
+        assert advertised["available"] is admitted(tool, args, required=required)
+        if advertised["available"]:
+            assert advertised["route"] == {"tool": tool, "args": args}
+        else:
+            assert "route" not in advertised
+
+
+@pytest.mark.parametrize(
+    "profile",
+    (
+        *(hosted_plugins.CANDIDATE_PROFILES[candidate] for candidate in HISTORICAL_CANDIDATES),
+        commands.HOSTED_ALPHA_AGENT_V5_PROFILE,
+    ),
+)
+def test_bootstrap_only_advertises_vocabulary_authority_status_on_the_current_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str
+) -> None:
+    """A historical govern_memory enum must not imply a newer operation exists."""
+    from types import SimpleNamespace
+
+    from exomem import capabilities, hosted_gateway, vocabulary_authority
+    from exomem.init import init_vault
+
+    init_vault(tmp_path)
+    monkeypatch.setattr(
+        vocabulary_authority.VocabularyAuthority,
+        "runtime_status",
+        lambda _self: SimpleNamespace(mode="v2"),
+    )
+    with capabilities.active_surface(hosted_gateway.hosted_agent_surface_descriptor(profile)):
+        authority = commands.op_bootstrap(tmp_path)["vocabulary_workflow"]["authority"]
+
+    status = authority["status"]
+    assert status["available"] is (profile == commands.HOSTED_ALPHA_AGENT_V5_PROFILE)
+    if status["available"]:
+        assert status["route"] == {
+            "tool": "govern_memory",
+            "args": {"operation": "vocabulary-status"},
+        }
+    else:
+        assert "route" not in status
 
 
 class _ForeignProbe:

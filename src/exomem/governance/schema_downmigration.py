@@ -1606,6 +1606,9 @@ def downmigrate_enrolled_v4_store(
     """Run rollback under the state marker then one reentrant receipt sequence."""
     root = Path(vault_root)
     try:
+        from ..vocabulary_admission import require_restore_admission
+
+        require_restore_admission(root)
         with state_migration.governance_rollback_session(root) as marker_session:
             with receipts.exclusive_sequence(root):
                 return _downmigrate_enrolled_v4_store_locked(

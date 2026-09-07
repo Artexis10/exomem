@@ -241,6 +241,7 @@ def append_to_file(
                 vault_root,
                 preflight=preflight,
                 auxiliary_writes=log_plan.writes,
+                derived_auxiliary_writes=tuple(("operation-log", write) for write in log_plan.writes),
             )
         except semantic_writes.SemanticWriteError as error:
             raise AppendError(error.code, error.reason) from error

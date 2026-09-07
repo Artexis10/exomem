@@ -4514,6 +4514,7 @@ def batch_atomic_write(
     post_commit_fanout: bool = True,
     commit_point: bool = True,
     defer_graph_completion: bool = False,
+    _vocabulary_auxiliaries: Any | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -4547,6 +4548,7 @@ def batch_atomic_write(
             post_commit_fanout=post_commit_fanout,
             commit_point=commit_point,
             defer_graph_completion=defer_graph_completion,
+            _vocabulary_auxiliaries=_vocabulary_auxiliaries,
         )
         curation_witness.mark_consumed(curation_witness_state)
         return result
@@ -4563,6 +4565,7 @@ def _batch_atomic_write_locked(
     post_commit_fanout: bool = True,
     commit_point: bool = True,
     defer_graph_completion: bool = False,
+    _vocabulary_auxiliaries: Any | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -4953,13 +4956,18 @@ def _batch_atomic_write_locked(
     # measurement that matters is how long the caller holds authority, and a
     # diff about whitespace hides that.
     canonical_started_monotonic = _fast_ack_monotonic()
+    additive_guard = None
     try:
+        from . import vocabulary_gate
         from .writer_lease import (
             log_active_mutation_phase,
             mark_active_mutation_committed,
             validate_active_write_fence,
         )
 
+        additive_guard = vocabulary_gate.begin_batch(
+            vault_root, staged, snapshots, auxiliary_manifest=_vocabulary_auxiliaries
+        )
         validate_active_write_fence()
         log_active_mutation_phase("canonical_commit_started", affected_count=len(staged))
         for index, (final, workspace, artifact) in enumerate(staged):
@@ -5046,6 +5054,8 @@ def _batch_atomic_write_locked(
                 guard.recheck(root, allowed_changes=allowed_census_changes)
         for guard in final_guards.values():
             guard.recheck()
+        if additive_guard is not None:
+            additive_guard.commit()
         log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))
         call_spans.record_span(
             "derived.canonical_commit",
@@ -5056,6 +5066,12 @@ def _batch_atomic_write_locked(
         if replaced and commit_point:
             mark_active_mutation_committed()
     except Exception as commit_error:
+        if additive_guard is not None and additive_guard.committed:
+            # Authority and canonical bytes are already committed together.
+            # A later diagnostic failure must recover that outcome, never
+            # roll the bytes back while leaving an exact approval spent.
+            mark_active_mutation_committed()
+            raise
         rollback_errors: list[BaseException] = []
         implicated_workspaces: list[_BatchWorkspace] = []
         replaced_indexes = range(len(replaced) - 1, -1, -1)
@@ -5130,6 +5146,9 @@ def _batch_atomic_write_locked(
         raise
     else:
         cleanup_retained = _cleanup_batch_workspaces(workspace_by_parent.values())
+    finally:
+        if additive_guard is not None:
+            additive_guard.abort()
 
     if fast_receipt is not None:
         if canonical_commit_monotonic is None:  # pragma: no cover - receipt implies a batch

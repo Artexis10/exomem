@@ -2019,6 +2019,7 @@ def _commit_existing_locked(
     *,
     preflight: ExistingPreflight,
     auxiliaries: tuple[vault.PlannedWrite, ...],
+    derived_auxiliaries: tuple[tuple[str, vault.PlannedWrite], ...],
     result: semantic_contract.SemanticContractResult,
 ) -> ExistingCommit:
     """Plan lifecycle state and commit while the semantic namespace is held."""
@@ -2141,13 +2142,12 @@ def _commit_existing_locked(
         required_guards = lifecycle.required_guards
 
     writes = [*lifecycle_writes, *auxiliaries]
-    writes.append(
-        vault.PlannedWrite(
+    primary_write = vault.PlannedWrite(
             root / preflight.path,
             preflight.after_source,
             guard=preflight.primary_guard,
         )
-    )
+    writes.append(primary_write)
     from .governance import catalog_publication, graph_producer
 
     planned_writes = tuple(writes)
@@ -2172,12 +2172,20 @@ def _commit_existing_locked(
             str(error),
         ) from error
     reports: list[Any] = []
+    from . import vocabulary_auxiliaries
+
+    manifest = vocabulary_auxiliaries.seal(
+        root,
+        primary=primary_write,
+        derived=(*derived_auxiliaries, *(("lifecycle-review", item) for item in lifecycle_writes)),
+    )
     written = vault.batch_atomic_write(
         writes,
         vault_root=root,
         required_guards=required_guards,
         index_reports=reports,
         semantic_states={preflight.path: semantic_index.from_semantic_page_state(preflight.after)},
+        _vocabulary_auxiliaries=manifest,
     )
     try:
         catalog_publication.publish_markdown_batch(catalog_target)
@@ -2320,6 +2328,7 @@ def commit_existing(
     *,
     preflight: ExistingPreflight,
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...] = (),
     timings: MutationTimings | None = None,
 ) -> ExistingCommit:
     """Commit one preflighted existing-page transition, primary Markdown last.
@@ -2333,6 +2342,7 @@ def commit_existing(
             vault_root,
             preflight=preflight,
             auxiliary_writes=auxiliary_writes,
+            derived_auxiliary_writes=derived_auxiliary_writes,
             timings=timings,
         )
     suggestion = _structure_suggestion(preflight.after, preflight.after_corpus)
@@ -2354,6 +2364,7 @@ def _commit_existing(
     *,
     preflight: ExistingPreflight,
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...] = (),
     timings: MutationTimings | None = None,
 ) -> ExistingCommit:
     root = Path(vault_root)
@@ -2379,6 +2390,11 @@ def _commit_existing(
         auxiliaries = source_closure.merge_backref_writes(
             auxiliary_writes,
             closure_plan.backref_writes,
+        )
+        _validate_derived_auxiliaries(auxiliary_writes, derived_auxiliary_writes)
+        derived_auxiliaries = (
+            *derived_auxiliary_writes,
+            *(("source-backref", item) for item in closure_plan.backref_writes),
         )
     except source_closure.SourceClosureViolation as error:
         raise SemanticWriteError(
@@ -2486,6 +2502,7 @@ def _commit_existing(
                         root,
                         preflight=preflight,
                         auxiliaries=auxiliaries,
+                        derived_auxiliaries=derived_auxiliaries,
                         result=result,
                     )
         except vault.PathGuardError as error:
@@ -3796,6 +3813,7 @@ def commit_creation(
     *,
     preflight: CreationPreflight,
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...] = (),
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
@@ -3808,6 +3826,7 @@ def commit_creation(
         vault_root,
         preflight=preflight,
         auxiliary_writes=auxiliary_writes,
+        derived_auxiliary_writes=derived_auxiliary_writes,
         relation_disposition=relation_disposition,
         relation_review_hash=relation_review_hash,
         relation_review_reason=relation_review_reason,
@@ -3862,11 +3881,26 @@ def _prepare_creation_catalog_publication(
     )
 
 
+def _validate_derived_auxiliaries(
+    auxiliaries: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite],
+    derived: tuple[tuple[str, vault.PlannedWrite], ...],
+) -> None:
+    """Require every declared derived output to be an exact planned auxiliary."""
+    available = {
+        (Path(write.path).absolute(), write.content)
+        for write in auxiliaries
+        if isinstance(write.content, str)
+    }
+    if any((Path(write.path).absolute(), write.content) not in available for _role, write in derived):
+        raise SemanticWriteError("INVALID_AUXILIARY_WRITE", "derived auxiliary is not a planned writer output")
+
+
 def _commit_creation(
     vault_root: Path,
     *,
     preflight: CreationPreflight,
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...] = (),
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
@@ -3898,6 +3932,11 @@ def _commit_creation(
             auxiliary_writes,
             closure_plan.backref_writes,
         )
+        _validate_derived_auxiliaries(auxiliary_writes, derived_auxiliary_writes)
+        derived_auxiliaries = (
+            *derived_auxiliary_writes,
+            *(("source-backref", write) for write in closure_plan.backref_writes),
+        )
     except source_closure.SourceClosureViolation as error:
         raise SemanticWriteError(
             error.code,
@@ -3919,7 +3958,8 @@ def _commit_creation(
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
-            auxiliary_writes=auxiliaries,
+                auxiliary_writes=auxiliaries,
+                derived_auxiliary_writes=derived_auxiliaries,
             draft_token=preflight.draft_token,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
@@ -4025,8 +4065,7 @@ def _commit_creation(
         from .governance import catalog_publication
 
         writes = [*auxiliaries]
-        writes.append(
-            vault.PlannedWrite(
+        primary_write = vault.PlannedWrite(
                 root / preflight.destination,
                 preflight.source,
                 create_only=True,
@@ -4036,7 +4075,7 @@ def _commit_creation(
                     leaf_policy="absent",
                 ),
             )
-        )
+        writes.append(primary_write)
         try:
             catalog_target = _prepare_creation_catalog_publication(
                 root,
@@ -4054,7 +4093,14 @@ def _commit_creation(
             {preflight.destination: semantic_index.from_semantic_page_state(catalog_state)}
         )
         try:
-            written = vault.batch_atomic_write(writes, vault_root=root)
+            from . import vocabulary_auxiliaries
+
+            manifest = vocabulary_auxiliaries.seal(
+                root, primary=primary_write, derived=derived_auxiliaries
+            )
+            written = vault.batch_atomic_write(
+                writes, vault_root=root, _vocabulary_auxiliaries=manifest
+            )
         except vault.PathGuardError as error:
             raise SemanticWriteError(
                 "STALE_SEMANTIC_WRITE",
