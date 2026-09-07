@@ -67,6 +67,14 @@ _MAX_UPLOAD_FIELDS = 8
 _MAX_UPLOAD_METADATA_BYTES = 32 * 1024
 _MAX_UPLOAD_SHORT_FIELD_BYTES = 512
 _DOWNLOAD_CHUNK_BYTES = 64 * 1024
+_MAX_EXPECTED_RELEASE_BYTES = 128
+_EXPECTED_RELEASE = re.compile(r"^[0-9][0-9A-Za-z.+-]{0,127}$")
+_EXPECTED_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_EXPECTED_CONTRACT_HEADERS = (
+    "x-exomem-expected-release",
+    "x-exomem-expected-command-fingerprint",
+    "x-exomem-expected-contract-digest",
+)
 _HOSTED_MUTATION_DETAIL_FIELDS = (
     "status",
     "committed",
@@ -274,6 +282,10 @@ def _status_for(code: str) -> int:
     if code in {"HOSTED_CELL_CONTEXT_MISMATCH", "HOSTED_PROTECTED_TREE_MUTATION"}:
         return 403
     if code == "HOSTED_PROTOCOL_MISMATCH":
+        return 409
+    if code == "HOSTED_EXPECTED_CONTRACT_INVALID":
+        return 400
+    if code == "HOSTED_EXPECTED_CONTRACT_MISMATCH":
         return 409
     if code == "HOSTED_TRANSFER_INTERCEPT_REQUIRED":
         return 409
@@ -535,6 +547,46 @@ def _has_duplicate_sensitive_headers(request: Request) -> bool:
             if counts[name] > 1:
                 return True
     return False
+
+
+def _expected_contract_headers(
+    request: Request, agent_contract: Mapping[str, Any]
+) -> None:
+    """Require the v2 command binding before the command body is read."""
+
+    values: dict[str, str] = {}
+    for header in _EXPECTED_CONTRACT_HEADERS:
+        matches = [
+            raw_value
+            for raw_name, raw_value in request.scope.get("headers", ())
+            if raw_name.decode("latin-1").lower() == header
+        ]
+        if len(matches) != 1:
+            raise gateway.HostedGatewayError(
+                "HOSTED_EXPECTED_CONTRACT_INVALID", "expected contract headers are invalid"
+            )
+        value = matches[0].decode("latin-1")
+        max_bytes = _MAX_EXPECTED_RELEASE_BYTES if header.endswith("release") else 64
+        pattern = _EXPECTED_RELEASE if header.endswith("release") else _EXPECTED_SHA256
+        if len(matches[0]) > max_bytes or not pattern.fullmatch(value):
+            raise gateway.HostedGatewayError(
+                "HOSTED_EXPECTED_CONTRACT_INVALID", "expected contract headers are invalid"
+            )
+        values[header] = value
+
+    expected = {
+        "x-exomem-expected-release": agent_contract["exomem_release"],
+        "x-exomem-expected-command-fingerprint": agent_contract["agent_profile"][
+            "active_capability_sha256"
+        ],
+        "x-exomem-expected-contract-digest": gateway.published_agent_contract_digest(
+            agent_contract
+        ),
+    }
+    if not all(hmac.compare_digest(values[header], expected[header]) for header in values):
+        raise gateway.HostedGatewayError(
+            "HOSTED_EXPECTED_CONTRACT_MISMATCH", "expected contract does not match"
+        )
 
 
 def _bearer_credential(request: Request) -> str | None:
@@ -1255,12 +1307,13 @@ def register_hosted_routes(
         *,
         command_map: Mapping[str, commands_module.Command],
         descriptor: capabilities.ActiveSurfaceDescriptor,
+        context: gateway.TrustedGatewayContext | None = None,
     ) -> HostedJSONResponse:
         started = time.perf_counter()
         operation = "command"
-        context: gateway.TrustedGatewayContext | None = None
         try:
-            context = _trusted_context(request, config, private_authenticator)
+            if context is None:
+                context = _trusted_context(request, config, private_authenticator)
             if "authorization_session_credential" in request.query_params:
                 raise authorization_request.AuthorizationContextUnavailable
             request_carrier = authorization_transport.current_request_authorization_carrier()
@@ -1495,6 +1548,41 @@ def register_hosted_routes(
             request,
             command_map=command_map,
             descriptor=descriptor,
+        )
+
+    @mcp_app.custom_route(
+        "/private/exomem/v2/agent/{surface_profile}/command/{command_name}",
+        methods=["POST"],
+    )
+    async def _agent_command_v2(request: Request) -> HostedJSONResponse:
+        started = time.perf_counter()
+        context: gateway.TrustedGatewayContext | None = None
+        try:
+            context = _trusted_context(request, config, private_authenticator)
+            surface_profile = str(request.path_params.get("surface_profile", ""))
+            command_map = agent_commands_by_profile.get(surface_profile)
+            descriptor = agent_surface_descriptors.get(surface_profile)
+            agent_contract = agent_contracts.get(surface_profile)
+            if command_map is None or descriptor is None or agent_contract is None:
+                raise gateway.HostedGatewayError(
+                    "HOSTED_SURFACE_PROFILE_UNSUPPORTED",
+                    "hosted agent surface profile is not supported",
+                )
+            _expected_contract_headers(request, agent_contract)
+        except gateway.HostedGatewayError as exc:
+            return _error_response(
+                exc.code,
+                config=config,
+                operation="agent-command",
+                request_id=context.request_id if context else None,
+                started=started,
+            )
+        assert context is not None
+        return await _execute_command(
+            request,
+            command_map=command_map,
+            descriptor=descriptor,
+            context=context,
         )
 
     async def lifecycle_context(

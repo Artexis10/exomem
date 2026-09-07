@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import importlib.util
-from contextlib import ExitStack
 from collections.abc import Sequence
 from pathlib import Path
-from unittest import mock
 
 from membench.adapters.base import AdapterEnvironmentError, OpResult, Profile
 from membench.adapters.exomem_local import ExomemLocalAdapter
@@ -18,7 +15,8 @@ from protocol.leakage import scan_ingest
 from protocol.models import CaseGold, CaseHandle, DatasetIdentity, ProtocolEvent
 
 from .dataset import LmeQuestion
-from .normalize import ingest_field_groups, neutral_tags, neutral_title, neutralize, render_neutral_session
+from .normalize import ingest_field_groups, neutralize
+from .exomem_capture import capture_payload
 
 
 def lme_profile() -> Profile:
@@ -36,8 +34,14 @@ def lme_profile() -> Profile:
             "EXOMEM_DISABLE_CORPUS_CACHE": "1",
             "EXOMEM_VEC_BACKEND": "numpy",
             "EXOMEM_LEXICAL_BACKEND": "python",
+            "EXOMEM_MODE": "normal",
+            "EXOMEM_DEVICE": "cpu",
+            "EXOMEM_EMBED_DEVICE": "cpu",
+            "EXOMEM_CLIP_DEVICE": "cpu",
+            "CUDA_VISIBLE_DEVICES": "",
             # The canonical lane is CPU/numpy even on hosts that expose an
-            # unusable NVIDIA driver (for example GPU-blocked sandboxes).
+            # unusable NVIDIA driver. Device pins above select CPU; this
+            # separate doctor allowance alone does not select a device.
             "EXOMEM_ALLOW_CPU_TORCH": "1",
             # Model weights must already exist in the local cache. A cache
             # miss is the semantic environment fault above, never a network
@@ -90,11 +94,6 @@ class LmeExomemAdapter(ExomemLocalAdapter):
                 "direct provider setup failed"
             )
 
-    @staticmethod
-    def _slug(handle: CaseHandle, session_ordinal: int) -> str:
-        digest = hashlib.sha256(f"{handle.case_id}:{session_ordinal}".encode("utf-8")).hexdigest()[:10]
-        return f"lme-session-{digest}"
-
     def ingest_case(self, events: Sequence[ProtocolEvent], handle: CaseHandle) -> tuple[OpResult, ...]:
         """Capture neutral events; gold-bearing dataset records cannot cross this boundary."""
 
@@ -106,7 +105,7 @@ class LmeExomemAdapter(ExomemLocalAdapter):
             raise TypeError("ingest_case events must be non-empty and match the neutral case handle")
         if self._vault is None or self._schema is None:
             raise AdapterEnvironmentError("adapter not set up")
-        from exomem import commands, find as find_module, temporal
+        from exomem import commands, find as find_module
 
         results: list[OpResult] = []
         grouped: dict[int, list[ProtocolEvent]] = {}
@@ -119,20 +118,9 @@ class LmeExomemAdapter(ExomemLocalAdapter):
             source_id = f"session-{session_ordinal}"
             session_events = grouped[session_ordinal]
             try:
-                # The product writer owns frontmatter. Clocking that public
-                # write is how the session timestamp lands in `captured:`
-                # without post-editing an append-only governed Source.
-                timestamp = dt.datetime.fromisoformat(session_events[0].original_timestamp.replace("Z", "+00:00"))
-                with mock.patch.object(temporal, "now", return_value=timestamp):
-                    captured = commands.op_capture_source(
-                        self._vault,
-                        self._schema,
-                        content=render_neutral_session(session_events),
-                        title=neutral_title(handle.case_ordinal, session_ordinal),
-                        slug=self._slug(handle, session_ordinal),
-                        source_type="session",
-                        tags=neutral_tags(),
-                    )
+                captured = commands.op_capture_source(
+                    self._vault, self._schema, **capture_payload(session_events),
+                )
                 source = captured.get("source") if isinstance(captured, dict) else None
                 path = source.get("path") if isinstance(source, dict) else None
                 if not isinstance(path, str):
@@ -157,35 +145,24 @@ class LmeExomemAdapter(ExomemLocalAdapter):
         return tuple(results)
 
     def retrieve_question(self, question: LmeQuestion, *, limit: int = 10) -> list[str]:
-        """Retrieve at ``question_date`` using hybrid product defaults."""
+        """Retrieve using the same public clock and command as the guest."""
 
         return self.retrieve_text(question.question, question.question_date, limit=limit)
 
     def retrieve_text(self, question_text: str, question_date: dt.datetime, *, limit: int = 10) -> list[str]:
-        """Retrieve neutral query text at an explicitly supplied case clock."""
+        """Hydrate selected hits through read_memory, exactly as the guest does."""
+        from exomem import commands
 
-        from exomem import find as find_module
-        from exomem import find_policy, structured_filters, temporal
-
-        pinned_day = question_date.date()
-
-        class RetrievalDate(dt.date):
-            @classmethod
-            def today(cls) -> dt.date:
-                return cls(pinned_day.year, pinned_day.month, pinned_day.day)
-
-        # The read path imports ``date`` into three modules, so patch each
-        # consumer for exactly one search call. ``temporal.now`` remains pinned
-        # for read-side helpers that use the product clock abstraction.
-        with ExitStack() as stack:
-            stack.enter_context(mock.patch.object(find_policy, "date", RetrievalDate))
-            stack.enter_context(mock.patch.object(find_module, "date", RetrievalDate))
-            stack.enter_context(mock.patch.object(structured_filters, "date", RetrievalDate))
-            stack.enter_context(
-                mock.patch.object(temporal, "now", return_value=question_date)
-            )
-            hits = self.search(question_text, limit)
-        return [hit.text or hit.excerpt or "" for hit in hits if hit.text or hit.excerpt]
+        del question_date  # Session time belongs in evidence, not a private clock patch.
+        hits = self.search(question_text, limit)
+        texts: list[str] = []
+        for hit in hits:
+            response = commands.op_read_memory(self._vault, path=hit.provider_path)
+            body = response.get("body") if isinstance(response, dict) else None
+            if not isinstance(body, str):
+                raise AdapterEnvironmentError("read_memory returned no selected body")
+            texts.append(body)
+        return texts
 
     def run_question(
         self, question: LmeQuestion, workdir: Path, *, dataset_identity: DatasetIdentity,
@@ -205,7 +182,7 @@ class LmeExomemAdapter(ExomemLocalAdapter):
                 answer_session_ids=list(question.answer_session_ids), question_type=question.question_type,
                 question=question.question,
             )
-            content_fields, authored_literals, harness_fields = ingest_field_groups(events, handle)
+            content_fields, authored_literals, harness_fields = ingest_field_groups(events, handle, exomem_capture=True)
             findings = scan_ingest(
                 content_fields, authored_literals, harness_fields, gold,
                 raw_upstream_session_ids=[session.session_id for session in question.sessions],

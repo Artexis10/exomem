@@ -23,14 +23,18 @@ JUDGE = {
 
 
 def _export(**overrides):
+    from test_protocol_schema_conformance import _memorybench_payloads
+
+    base = _memorybench_payloads()["MemoryBenchExport"]
+    references = base["cases"][0]
     case = {
         "case_ordinal": 1,
         "case_id_hmac_sha256": "d" * 64,
         "question": {"text": "which lantern?", "type": "knowledge-update", "date": None},
         "container_tag_hmac_sha256": "e" * 64,
-        "checkpoint": None,
-        "canonical_result": None,
-        "private_gold": None,
+        "checkpoint": references["checkpoint"],
+        "canonical_result": references["canonical_result"],
+        "private_gold": references["private_gold"],
         "phases": {
             name: {"status": "completed", "failure_code": None}
             for name in ("ingest", "indexing", "search")
@@ -46,6 +50,7 @@ def _export(**overrides):
         "ingest": {"transmitted_payload_sha256": [_SHA]},
     }
     export = {
+        **base,
         "run_id": "mb-20260815T000000Z",
         "provider_variant": "exomem-source-only",
         "dataset": {
@@ -62,6 +67,29 @@ def _export(**overrides):
     }
     export.update(overrides)
     return export
+
+
+@pytest.mark.parametrize("field,value", [
+    ("protocol_version", "9.9.9"), ("schema_version", 999),
+    ("artifact_type", "memorybench-export.v99"), ("status", "partial"),
+])
+def test_projection_refuses_unrecognized_versions_and_partial_exports(field, value):
+    with pytest.raises(ValueError):
+        _project(_export(**{field: value}))
+
+
+def test_v2_projection_uses_product_hashes_and_current_case_evidence():
+    from lme.exomem_capture import CAPTURE_CONTRACT, NAMESPACE_PATTERN
+
+    export = _export(session_normalization=CAPTURE_CONTRACT)
+    case = export["cases"][0]
+    case["ingest"]["product_payload_sha256"] = ["a" * 64]
+    case["namespace_pattern"] = NAMESPACE_PATTERN
+    case["readiness"] = export["readiness"]
+    projected = _project(export)["cases"][0]
+    assert projected["ingestion_payloads"] == ["a" * 64]
+    assert projected["namespace"] == NAMESPACE_PATTERN
+    assert projected["readiness"][0]["method"] == "doctor-check"
 
 
 def _golds():

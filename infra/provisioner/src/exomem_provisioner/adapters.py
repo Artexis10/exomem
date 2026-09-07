@@ -2651,6 +2651,10 @@ class TraefikRoutingAdapter:
         }
         service = [{"name": metadata.resource_name, "port": 8765}]
         control_prefix = f"/cells/{metadata.subject_id}/private/exomem/v1"
+        command_pattern = (
+            f"^/cells/{metadata.subject_id}/private/exomem/v2/agent/"
+            "[a-z][a-z0-9-]{0,63}/command/[a-z][a-z0-9_]{0,63}$"
+        )
         transfer_prefix = f"/cells/{metadata.subject_id}/public/exomem/v2/transfers"
         middleware_name = metadata.resource_name + "-strip-cell"
         middleware = {
@@ -2681,7 +2685,8 @@ class TraefikRoutingAdapter:
                                 "kind": "Rule",
                                 "match": (
                                     f"Host(`{self._control_hostname}`) && "
-                                    f"PathPrefix(`{control_prefix}`)"
+                                    f"(Path(`{control_prefix}`) || PathPrefix(`{control_prefix}/`) || "
+                                    f"(Method(`POST`) && PathRegexp(`{command_pattern}`)))"
                                 ),
                                 "middlewares": [{"name": middleware_name}],
                                 "services": service,

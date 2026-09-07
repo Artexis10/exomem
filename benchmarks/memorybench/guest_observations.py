@@ -19,18 +19,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from lme.exomem_capture import CAPTURE_CONTRACT, NAMESPACE_PATTERN, payload_digest, product_payload
+from protocol.readiness import SEMANTIC_DOCTOR_CHECKS, semantic_doctor_readiness
+
 SEARCH_PATH = "/api/ask_memory"
 INGEST_PATH = "/api/capture_source"
 READ_PATH = "/api/read_memory"
 DOCTOR_RESPONSE = "doctor-response"
-SEMANTIC_DOCTOR_CHECKS = frozenset({
-    "embeddings.enabled",
-    "dep.sentence-transformers",
-    "dep.torch",
-    "dep.pillow",
-    "models.cache",
-    "embeddings.sidecar",
-})
 
 SEARCH_LABELS = frozenset({
     "search.transmitted_query",
@@ -58,6 +53,7 @@ class GuestObservations:
     ingest: dict[str, Any] | None = None
     readiness: list[dict[str, Any]] | None = None
     session_normalization: str | None = None
+    namespace_pattern: str | None = None
     problems: frozenset[str] = frozenset()
 
     def resolved_labels(self) -> frozenset[str]:
@@ -193,8 +189,9 @@ def _project_search(entries: Sequence[dict[str, Any]], problems: set[str]) -> di
     }
 
 
-def _project_ingest(entries: Sequence[dict[str, Any]], problems: set[str]) -> dict[str, Any] | None:
+def _project_ingest(entries: Sequence[dict[str, Any]], problems: set[str], *, canonical: bool = False) -> dict[str, Any] | None:
     digests: list[str] = []
+    product_digests: list[str] = []
     for entry in entries:
         if entry["event"] != "request" or _call_path(entry) != INGEST_PATH:
             continue
@@ -203,9 +200,18 @@ def _project_ingest(entries: Sequence[dict[str, Any]], problems: set[str]) -> di
             problems.add(_EVIDENCE_INVALID)
             return None
         digests.append(_canonical_digest(body))
+        if canonical:
+            try:
+                product_digests.append(payload_digest(product_payload(body)))
+            except ValueError:
+                problems.add(_EVIDENCE_INVALID)
+                return None
     if not digests:
         return None
-    return {"transmitted_payload_sha256": digests}
+    return {
+        "transmitted_payload_sha256": digests,
+        **({"product_payload_sha256": product_digests} if canonical else {}),
+    }
 
 
 def _project_readiness(
@@ -265,13 +271,37 @@ def project_guest_evidence(evidence_dir: Path) -> GuestObservations:
     """Read one guest evidence directory and publish only what it proves."""
 
     entries, problems = read_guest_evidence(Path(evidence_dir))
+    manifests = [entry["data"] for entry in entries if entry["event"] == "provider-manifest"]
+    contract_fields = {"session_normalization", "product_input_contract", "namespace_pattern", "namespace"}
+    canonical = any(contract_fields & set(manifest) for manifest in manifests)
+    if canonical:
+        expected = {
+            "session_normalization": CAPTURE_CONTRACT,
+            "product_input_contract": CAPTURE_CONTRACT,
+            "namespace_pattern": NAMESPACE_PATTERN,
+            "namespace": evidence_dir.name,
+        }
+        if not re.fullmatch(r"[0-9a-f]{24}", evidence_dir.name) or any(
+            any(manifest.get(key) != value for key, value in expected.items())
+            for manifest in manifests
+        ):
+            problems.add(_EVIDENCE_INVALID)
+            return GuestObservations(problems=frozenset(problems))
     search = _project_search(entries, problems)
-    ingest = _project_ingest(entries, problems)
+    ingest = _project_ingest(entries, problems, canonical=canonical)
     readiness = _project_readiness(entries, problems)
+    if canonical:
+        reports = [entry["data"].get("response") for entry in entries if entry["event"] == DOCTOR_RESPONSE]
+        if reports:
+            lanes = [semantic_doctor_readiness(report) for report in reports]
+            if any(not lane.verified for lane in lanes):
+                problems.add(_EVIDENCE_INVALID)
+            readiness = [lanes[-1].model_dump()]
     return GuestObservations(
         search=search,
         ingest=ingest,
         readiness=readiness,
-        session_normalization=SESSION_NORMALIZATION if entries else None,
+        session_normalization=(CAPTURE_CONTRACT if canonical else SESSION_NORMALIZATION) if entries else None,
+        namespace_pattern=NAMESPACE_PATTERN if canonical else None,
         problems=frozenset(problems),
     )

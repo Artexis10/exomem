@@ -779,6 +779,17 @@ def build_agent_gateway_contract(
     }
 
 
+def published_agent_contract_digest(contract: Mapping[str, Any]) -> str:
+    """Return the release-independent digest published in compatibility artifacts."""
+
+    base = {
+        key: value
+        for key, value in contract.items()
+        if key not in {"exomem_release", "digest"}
+    }
+    return hashlib.sha256(canonical_json(base)).hexdigest()
+
+
 def validate_opaque_scope(value: str, *, field: str) -> str:
     clean = str(value or "").strip()
     if not _OPAQUE_SCOPE.fullmatch(clean):
@@ -1109,6 +1120,7 @@ __all__ = [
     "implicit_retry_scope",
     "hosted_agent_surface_descriptor",
     "mint_transfer_grant",
+    "published_agent_contract_digest",
     "scoped_idempotency_key",
     "validate_opaque_scope",
     "validate_principal_scope",

@@ -43,6 +43,21 @@ variable "transfer_hostname" {
   }
 }
 
+variable "gateway_hostname" {
+  description = "Optional canonical MCP gateway origin on the existing tunnel; empty disables its DNS and route."
+  type        = string
+  default     = ""
+
+  validation {
+    condition = var.gateway_hostname == "" || (
+      can(regex("^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$", var.gateway_hostname)) &&
+      var.gateway_hostname != var.control_hostname &&
+      var.gateway_hostname != var.transfer_hostname
+    )
+    error_message = "gateway_hostname must be empty or a distinct lowercase ASCII DNS name."
+  }
+}
+
 variable "admin_ssh_cidrs" {
   description = "Explicit operator IPv4/IPv6 CIDRs allowed to reach SSH."
   type        = set(string)

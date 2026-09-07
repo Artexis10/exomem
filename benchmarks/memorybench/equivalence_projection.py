@@ -41,11 +41,15 @@ def _project_case(
     judge_config: dict[str, Any],
 ) -> dict[str, Any]:
     from lme.reader import CONTEXT_SEPARATOR
+    from lme.exomem_capture import CAPTURE_CONTRACT
 
     search = case.get("search")
     ingest = case.get("ingest")
     retrieved_text = [hit["content"] for hit in case.get("hits") or []]
     question_text = (case.get("question") or {}).get("text") or ""
+    canonical = session_normalization == CAPTURE_CONTRACT
+    if canonical:
+        readiness = case.get("readiness")
 
     return {
         "case_id": question_id,
@@ -54,8 +58,8 @@ def _project_case(
         "session_normalization": session_normalization,
         # The guest derives its namespace from the container tag, so the
         # pattern is what can be compared across runs, not the literal.
-        "namespace": f"memorybench.container-tag/{container_tag}" if container_tag else None,
-        "ingestion_payloads": (ingest or {}).get("transmitted_payload_sha256"),
+        "namespace": case.get("namespace_pattern") if canonical else (f"memorybench.container-tag/{container_tag}" if container_tag else None),
+        "ingestion_payloads": (ingest or {}).get("product_payload_sha256" if canonical else "transmitted_payload_sha256"),
         "readiness": (
             [{field: lane[field] for field in _READINESS_FIELDS} for lane in readiness]
             if readiness is not None
@@ -85,7 +89,14 @@ def project_export(
     carries only pseudonyms, and the comparison needs the real question ids.
     """
 
-    cases = export.get("cases") or []
+    from protocol.models import MemoryBenchExport
+
+    if not isinstance(export, dict) or not {"protocol_version", "schema_version", "artifact_type", "status"} <= set(export):
+        raise ValueError("projection requires an explicitly versioned MemoryBench export")
+    export = MemoryBenchExport.model_validate(export).model_dump(mode="json")
+    if export["status"] != "complete":
+        raise ValueError("equivalence projection requires a complete MemoryBench export")
+    cases = export["cases"]
     resolved: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for case in cases:
         digest = case.get("case_id_hmac_sha256")
@@ -144,7 +155,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--judge-model", default="gpt-4o")
     args = parser.parse_args(argv)
 
-    export = json.loads(args.export.read_text(encoding="utf-8"))
+    from .export import _load_json_bytes
+
+    export = _load_json_bytes(args.export.read_bytes(), "MemoryBench export")
     gold_dir = args.private_gold or (args.export.parent / "private-gold")
     payload = project_export(
         export,

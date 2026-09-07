@@ -1,0 +1,205 @@
+{{- if .Values.gateway.enabled }}
+{{- $lock := include "exomem.hostedDeploymentLockJson" . | mustFromJson }}
+{{- $runtimeTarget := $lock.runtimeTarget }}
+{{- if eq (include "exomem.hostedRuntimeSelection" .) "rollback" }}
+{{- $runtimeTarget = $lock.recordsCompatibility.rollbackRuntime.runtimeTarget }}
+{{- end }}
+{{- if or (eq .Values.gateway.originHostname .Values.provisioner.controlHostname) (eq .Values.gateway.originHostname .Values.provisioner.transferHostname) }}
+{{- fail "gateway.originHostname must differ from control and transfer hostnames" }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exomem-gateway
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exomem-gateway
+  labels:
+    app.kubernetes.io/name: exomem-gateway
+    app.kubernetes.io/part-of: exomem-hosted
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: exomem-gateway
+        app.kubernetes.io/part-of: exomem-hosted
+    spec:
+      serviceAccountName: exomem-gateway
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: {{ .Values.gateway.image | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: EXOMEM_GATEWAY_PORT
+              value: "8080"
+            - name: EXOMEM_GATEWAY_MAX_INFLIGHT
+              value: {{ .Values.gateway.maxInflight | quote }}
+            - name: EXOMEM_PUBLIC_BASE_URL
+              value: https://substratesystems.io
+            - name: EXOMEM_CELL_PROTOCOL_VERSION
+              value: {{ $runtimeTarget.protocolVersion | quote }}
+            - name: EXOMEM_GATEWAY_CONTROL_HOSTNAME
+              value: {{ .Values.provisioner.controlHostname | quote }}
+            - name: EXOMEM_GATEWAY_INTERNAL_ORIGIN
+              value: http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80
+            - name: EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_HEADER
+              value: x-exomem-gateway-ingress
+            - name: EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_VALUE
+              value: shared-edge
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.databaseSecretName }}
+                  key: {{ .Values.gateway.databaseSecretKey }}
+            - name: EXOMEM_CONTROL_PLANE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.controlPlaneKeySecretName }}
+                  key: {{ .Values.gateway.controlPlaneKeySecretKey }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 3
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: exomem-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: exomem-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: exomem-gateway-boundary
+spec:
+  headers:
+    customRequestHeaders:
+      X-Exomem-Gateway-Ingress: shared-edge
+      X-Forwarded-For: ""
+      X-Real-Ip: ""
+    customResponseHeaders:
+      Cache-Control: private, no-store
+      X-Vercel-Enable-Rewrite-Caching: "0"
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: exomem-gateway
+spec:
+  entryPoints: [web]
+  routes:
+    - kind: Rule
+      match: Host(`{{ .Values.gateway.originHostname }}`) && Path(`/api/exomem/mcp/v1`)
+      middlewares:
+        - name: exomem-gateway-boundary
+      services:
+        - name: exomem-gateway
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: exomem-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-gateway
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              exomem.io/ingress: traefik
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              exomem.io/ingress: traefik
+      ports:
+        # Service port 80 resolves to Traefik's destination pod port 8000.
+        - port: 8000
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        {{- range .Values.gateway.databaseEgressCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 5432
+          protocol: TCP
+{{- end }}
