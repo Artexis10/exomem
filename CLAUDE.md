@@ -1,5 +1,9 @@
 # exomem — instructions for Claude
 
+For unfamiliar cross-file code paths, optional Graft CLI queries can provide a
+small starting map. Read `docs/code-navigation.md` when using it; verify its
+results in source and use normal search when it misses.
+
 ## Concurrent sessions share ONE checkout — isolate new work in a worktree
 
 This repo is often worked on by more than one Claude Code session at once, all
