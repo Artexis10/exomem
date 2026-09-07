@@ -23,4 +23,6 @@
 - [x] 4.1 Obtain author-independent diff review and rerun important reproductions in isolated state; resolve blocking findings to APPROVE.
 - [x] 4.2 Run the full test corpus once at the completion boundary, public-artifact privacy validation and `openspec validate --all --strict`; fix attributable failures and record actual outputs.
 - [x] 4.3 Integrate current remote main safely, commit intended changes, push and open a ready pull request with measured results and validation evidence.
-- [ ] 4.4 After separately authorized merge and shipping evidence, synchronize the delta specs and archive through OpenSpec, validating strictly before and after; do not claim rollout completion before this evidence exists.
+- [x] 4.4 After separately authorized merge and shipping evidence, synchronize the delta specs and archive through OpenSpec, validating strictly before and after; do not claim rollout completion before this evidence exists.
+
+Delivery evidence: implementation merged in [PR #1101](https://github.com/Artexis10/exomem/pull/1101) at `0aa3b7e5`, after [CI on the reviewed head](https://github.com/Artexis10/exomem/actions/runs/34121289480) passed. OpenSpec synchronized nine added requirements and archived this change through the pinned CLI. Source delivery is complete; production deployment remains separate.
