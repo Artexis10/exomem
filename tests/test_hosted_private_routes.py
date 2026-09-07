@@ -482,6 +482,157 @@ def _headers(
     return headers
 
 
+def _command_binding_headers(
+    config: HostedCellConfig,
+    *,
+    profile: str = commands_module.HOSTED_ALPHA_AGENT_PROFILE,
+    credential: str | None = None,
+    cell_id: str | None = None,
+    request_id: str = DEFAULT_REQUEST_ID,
+    principal: str = DEFAULT_PRINCIPAL,
+    idempotency_key: str | None = None,
+    **overrides: str,
+) -> dict[str, str]:
+    contract = gateway.build_agent_gateway_contract(
+        profile=profile,
+        protocol_version=config.protocol_version,
+    )
+    return _headers(
+        config,
+        credential=credential,
+        cell_id=cell_id,
+        request_id=request_id,
+        principal=principal,
+        idempotency_key=idempotency_key,
+        **{
+            "X-Exomem-Expected-Release": contract["exomem_release"],
+            "X-Exomem-Expected-Command-Fingerprint": contract["agent_profile"][
+                "active_capability_sha256"
+            ],
+            "X-Exomem-Expected-Contract-Digest": gateway.published_agent_contract_digest(
+                contract
+            ),
+            **overrides,
+        },
+    )
+
+
+def test_hosted_v2_agent_command_binds_the_running_contract_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    client, config, _lifecycle, invoker = _cell(
+        tmp_path,
+        cell_id="cell-command-binding",
+        credential="command-binding-private-service-credential-0001",
+    )
+    profile = commands_module.HOSTED_ALPHA_AGENT_PROFILE
+    route = f"/private/exomem/v2/agent/{profile}/command/bootstrap"
+
+    accepted = client.post(route, headers=_command_binding_headers(config), json={})
+
+    assert accepted.status_code == 200, accepted.text
+    assert invoker.calls[-1]["command"] == "bootstrap"
+
+    calls_before_rejections = len(invoker.calls)
+    for header in (
+        "X-Exomem-Expected-Release",
+        "X-Exomem-Expected-Command-Fingerprint",
+        "X-Exomem-Expected-Contract-Digest",
+    ):
+        missing_headers = _command_binding_headers(config)
+        del missing_headers[header]
+        missing = client.post(route, headers=missing_headers, json={})
+        assert missing.status_code == 400
+        assert missing.json()["error"]["code"] == "HOSTED_EXPECTED_CONTRACT_INVALID"
+
+    for header, malformed_value, mismatched_value in (
+        ("X-Exomem-Expected-Release", "not a release", "9.9.9"),
+        ("X-Exomem-Expected-Command-Fingerprint", "not-a-digest", "0" * 64),
+        ("X-Exomem-Expected-Contract-Digest", "not-a-digest", "0" * 64),
+    ):
+        malformed = client.post(
+            route,
+            headers=_command_binding_headers(config, **{header: malformed_value}),
+            json={},
+        )
+        assert malformed.status_code == 400
+        assert malformed.json()["error"]["code"] == "HOSTED_EXPECTED_CONTRACT_INVALID"
+
+        mismatched = client.post(
+            route,
+            headers=_command_binding_headers(config, **{header: mismatched_value}),
+            json={},
+        )
+        assert mismatched.status_code == 409
+        assert mismatched.json()["error"]["code"] == "HOSTED_EXPECTED_CONTRACT_MISMATCH"
+
+        duplicate_headers = list(_command_binding_headers(config).items())
+        duplicate_headers.append((header, _command_binding_headers(config)[header]))
+        duplicate = client.post(route, headers=duplicate_headers, json={})
+        assert duplicate.status_code == 400
+        assert duplicate.json()["error"]["code"] == "HOSTED_EXPECTED_CONTRACT_INVALID"
+
+    foreign_cell = client.post(
+        route,
+        headers=_command_binding_headers(config, cell_id="another-cell"),
+        json={},
+    )
+    assert foreign_cell.status_code == 403
+    assert foreign_cell.json()["error"]["code"] == "HOSTED_CELL_CONTEXT_MISMATCH"
+
+    forged_principal = client.post(
+        route,
+        headers=_command_binding_headers(config, principal="not-a-principal-scope"),
+        json={},
+    )
+    assert forged_principal.status_code == 400
+    assert forged_principal.json()["error"]["code"] == "HOSTED_CONTEXT_INVALID"
+    assert len(invoker.calls) == calls_before_rejections
+
+    unauthenticated = client.post(
+        route,
+        headers=_command_binding_headers(config, credential="wrong-private-service-credential"),
+        json={},
+    )
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.json()["error"]["code"] == "HOSTED_UNAUTHORIZED"
+    assert len(invoker.calls) == calls_before_rejections
+
+
+def test_hosted_v1_and_v2_share_principal_cell_idempotency(tmp_path: Path) -> None:
+    client, config, _lifecycle, invoker = _cell(
+        tmp_path,
+        cell_id="cell-command-binding-idempotency",
+        credential="command-binding-idempotency-private-service-credential-0001",
+    )
+    profile = commands_module.HOSTED_ALPHA_AGENT_PROFILE
+    request_id = "de305d54-75b4-431b-adb2-eb6b9e546051"
+    idempotency_key = "shared-command-binding-retry-0001"
+    body = _remember_body("shared cross-version retry")
+
+    v1 = client.post(
+        f"/private/exomem/v1/agent/{profile}/command/remember",
+        headers=_headers(config, request_id=request_id, idempotency_key=idempotency_key),
+        json=body,
+    )
+    v2 = client.post(
+        f"/private/exomem/v2/agent/{profile}/command/remember",
+        headers=_command_binding_headers(
+            config,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        ),
+        json=body,
+    )
+
+    assert v1.status_code == 200, v1.text
+    assert v2.status_code == 200, v2.text
+    assert v2.json()["data"] == v1.json()["data"]
+    calls = [call for call in invoker.calls if call["command"] == "remember"]
+    assert len(calls) == 2
+    assert calls[0]["idempotency_key"] == calls[1]["idempotency_key"]
+
+
 def _hosted_bootstrap_tool_refs(payload: object) -> set[str]:
     product_names = set(commands_module.PRODUCT_PUBLIC_NAMES)
     known_names = (
