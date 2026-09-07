@@ -69,6 +69,28 @@ def test_scaffold_teaches_generic_governance_lifecycle_and_forged_envelopes() ->
     assert ".governance.sqlite" in administration
 
 
+def test_scaffold_teaches_v1_vocabulary_consideration_without_granting_writes() -> None:
+    skill = (SCAFFOLD / "_Schema" / "SKILL.md").read_text(encoding="utf-8")
+    writing = (SCAFFOLD / "_Schema" / "references" / "writing.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Vocabulary consideration" in skill
+    for operation in (
+        'schema_memory(operation="resolve-entity-type", subject="entity-types")',
+        'connect_memory(operation="resolve-relation")',
+        'review_memory(mode="vocabulary")',
+        'triage_memory(action="decide-vocabulary"',
+    ):
+        assert operation in skill
+    assert "generic, no-edge, or defer" in skill
+    assert "not execution or permission" in skill
+
+    assert "reuse, enrich, propose-new, generic, no-edge, or defer" in writing
+    assert "no quota" in writing
+    assert "existing confirmation rules" in writing
+
+
 def test_sample_vault_ships_no_personal_data() -> None:
     files = _files(SAMPLE_VAULT)
     assert files, "bundled sample vault is missing"

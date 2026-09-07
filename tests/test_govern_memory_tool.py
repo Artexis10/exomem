@@ -121,6 +121,8 @@ def test_operation_registry_drives_read_write_and_receipt_mapping() -> None:
         "list",
         "explain",
         "simulate",
+        "vocabulary-request",
+        "vocabulary-status",
     }
     assert {
         name for name, spec in OPERATION_SPECS.items() if spec.authorization_affecting

@@ -1141,3 +1141,37 @@ def test_excluded_frontmatter_fields_are_refused(vault: Path) -> None:
             today=TODAY,
         )
     assert ce.value.code == "EXCLUDED_FIELD"
+
+
+def test_semantic_create_marks_generated_index_and_log_as_derived_auxiliaries(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import semantic_writes
+
+    path = "Knowledge Base/Notes/Insights/derived-auxiliaries.md"
+    content = "# Derived auxiliaries\n\n## Observations\n\n- [constraint] Keep generated output sealed.\n"
+    frontmatter = {"type": "insight", "title": "Derived auxiliaries", "status": "active"}
+    validation = create_file_module.create_file(
+        vault, path=path, content=content, frontmatter=frontmatter,
+        today=TODAY, validate_only=True,
+    )
+    captured: dict[str, object] = {}
+
+    class _Committed:
+        def as_dict(self):
+            return {}
+
+    def commit(root, **kwargs):
+        captured.update(kwargs)
+        return _Committed()
+
+    monkeypatch.setattr(semantic_writes, "commit_creation", commit)
+    create_file_module.create_file(
+        vault, path=path, content=content, frontmatter=frontmatter,
+        today=TODAY, draft_id=validation.draft_id, draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+    )
+
+    derived = captured["derived_auxiliary_writes"]
+    assert {role for role, _write in derived} == {"index", "operation-log"}
+    assert {(write.path.name) for _role, write in derived} >= {"index.md", "log.md"}

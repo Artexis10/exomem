@@ -386,6 +386,9 @@ def observe_memory(
                 vault_root,
                 preflight=preflight,
                 auxiliary_writes=log_plan.writes,
+                derived_auxiliary_writes=tuple(
+                    ("operation-log", write) for write in log_plan.writes
+                ),
                 timings=timings,
             )
     except semantic_writes.SemanticWriteError as error:

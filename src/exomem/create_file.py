@@ -338,6 +338,7 @@ def create_file(
         if validate_only:
             return preflight
         auxiliary: list[PlannedWrite] = []
+        derived_auxiliaries: list[tuple[str, PlannedWrite]] = []
         top_index = kb_root(vault_root) / "index.md"
         if top_index.is_file() and preflight.applicability in {"full", "structural"}:
             top_text, top_guard = read_guarded_text(vault_root, top_index)
@@ -352,16 +353,20 @@ def create_file(
                 pending_paths=[rel_no_ext],
                 include_unchanged=True,
             )
-            auxiliary.append(
-                PlannedWrite(top_index, counted_top or new_top, guard=top_guard)
-            )
-            auxiliary.extend(sub_writes)
+            index_writes = [
+                PlannedWrite(top_index, counted_top or new_top, guard=top_guard),
+                *sub_writes,
+            ]
+            auxiliary.extend(index_writes)
+            derived_auxiliaries.extend(("index", write) for write in index_writes)
         auxiliary.extend(log_plan.writes)
+        derived_auxiliaries.extend(("operation-log", write) for write in log_plan.writes)
         try:
             committed = semantic_writes.commit_creation(
                 vault_root,
                 preflight=preflight,
                 auxiliary_writes=tuple(auxiliary),
+                derived_auxiliary_writes=tuple(derived_auxiliaries),
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
                 relation_review_reason=relation_review_reason,
@@ -401,6 +406,7 @@ def create_file(
                 vault_root,
                 preflight=preflight,
                 auxiliary_writes=log_plan.writes,
+                derived_auxiliary_writes=tuple(("operation-log", write) for write in log_plan.writes),
             )
         except semantic_writes.SemanticWriteError as error:
             raise CreateFileError(error.code, error.reason) from error

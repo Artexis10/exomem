@@ -48,6 +48,7 @@ INVALID_CREDENTIAL: Final = object()
 
 _SELF_INSPECTION_OPERATIONS = frozenset({"list", "explain", "simulate"})
 _OWNER_OPERATIONS = frozenset({"propose", "commit", "suspend", "resume", "undo"})
+_VOCABULARY_OPERATIONS = frozenset({"vocabulary-request", "vocabulary-status"})
 _SESSION_ACTION_RULES: Mapping[str, CredentialRule] = {
     "open": CredentialRule.FORBIDDEN,
     "status": CredentialRule.REQUIRED,
@@ -121,6 +122,7 @@ _OPTIONAL_COMMANDS = frozenset(
 _GOVERNANCE_OPERATIONS = frozenset(
     _SELF_INSPECTION_OPERATIONS
     | _OWNER_OPERATIONS
+    | _VOCABULARY_OPERATIONS
     | {"grant", "revoke", "declare", "backfill_companion", "session"}
 )
 
@@ -162,7 +164,7 @@ def credential_rule(
         if scope == "standing":
             return CredentialRule.NON_AUTHORIZING
         raise AuthorizationRouteUnclassified
-    if operation == "declare":
+    if operation == "declare" or operation in _VOCABULARY_OPERATIONS:
         return CredentialRule.REQUIRED
     if operation in _SELF_INSPECTION_OPERATIONS:
         return CredentialRule.OPTIONAL

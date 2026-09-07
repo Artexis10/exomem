@@ -6542,11 +6542,34 @@ def _not_implemented(_vault_root: Path, operation: str, **_kwargs: Any) -> dict[
     raise GovernanceError("GOVERNANCE_OPERATION_UNAVAILABLE", f"{operation} is not implemented")
 
 
+def _vocabulary_status(vault_root: Path, operation: str, **kwargs: Any) -> dict[str, Any]:
+    from dataclasses import asdict
+    from .. import vocabulary_authority
+    from .principal import effective_principal
+
+    values = {key: value for key, value in kwargs.items() if key != "_selection"}
+    allowed = {"vocabulary_request_id"} if operation == "vocabulary-request" else set()
+    if set(values) - allowed:
+        raise GovernanceError("VOCABULARY_AUTHORITY_INVALID", "unexpected authority status arguments")
+    authority = vocabulary_authority.VocabularyAuthority(vault_root)
+    principal = effective_principal()
+    if operation == "vocabulary-status":
+        return asdict(authority.status(principal))
+    request_id = values.get("vocabulary_request_id")
+    if not isinstance(request_id, str) or not request_id or len(request_id) > 256:
+        raise GovernanceError("VOCABULARY_AUTHORITY_INVALID", "a server request identifier is required")
+    status = authority.request_status(request_id, principal=principal)
+    # Agent inspection is content-free. The separately authenticated owner
+    # ceremony displays the complete stored operation, never supplied text.
+    return {"request_id": status.request_id, "state": status.state, "expires_at": status.expires_at}
+
+
 _HANDLER_STRATEGIES: Mapping[str, Any] = MappingProxyType(
     {
         "backfill_companion_commit": _backfill_commit,
         "backfill_companion_preview": _backfill_preview,
         "inspect": _inspect,
+        "vocabulary_status": _vocabulary_status,
         "proposal": _proposal,
         "commit": _commit,
         "grant_session": _grant,

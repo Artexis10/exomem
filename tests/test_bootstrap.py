@@ -56,7 +56,9 @@ def test_entity_capture_types_include_vault_defined_types(tmp_path: Path) -> Non
         *entity_types.ENTITY_TYPE_IDS,
         "place",
     ]
-    assert "save-entity-types" in result["entity_registry"]["capture_rule"]
+    assert result["vocabulary_workflow"]["entity_type"]["apply"]["route"]["args"] == {
+        "operation": "save-entity-types"
+    }
 
 
 def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
@@ -106,15 +108,18 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert [item["id"] for item in out["entity_registry"]["types"]] == list(
         entity_types.ENTITY_TYPE_IDS
     )
-    assert out["entity_registry"]["types"][0]["aliases"] == list(
+    assert set(out["entity_registry"]["types"][0]) == {"id", "folder", "family"}
+    full = commands.op_bootstrap(vault, profile="full")
+    assert full["entity_registry"]["types"][0]["aliases"] == list(
         entity_types.ENTITY_TYPE_REGISTRY[0].aliases
     )
-    assert out["entity_registry"]["candidate_route"] == (
-        "connect_memory(operation='resolve-entity')"
-    )
+    assert out["entity_registry"]["candidate_route"]["route"] == {
+        "tool": "connect_memory",
+        "args": {"operation": "resolve-entity"},
+    }
     organization = next(
         item
-        for item in out["entity_registry"]["types"]
+        for item in full["entity_registry"]["types"]
         if item["id"] == "organization"
     )
     assert "company" in organization["aliases"]
