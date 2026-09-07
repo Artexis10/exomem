@@ -3622,6 +3622,15 @@ class EpistemicGraphIndex:
             )
         if report.pop("_rebuild_after_release", False):
             durable_before_rebuild = bool(report.pop("_durable_before_rebuild", False))
+            if _parent_receipted_graph_handoff_active(
+                self.vault_root, self._mutation_coordinator.state_root
+            ):
+                required = graph_checkpoint or graph_sync.read_checkpoint(self.vault_root)
+                if required is not None and not durable_before_rebuild:
+                    deferred_index.advance_graph_full_rebuild(
+                        self.vault_root, after_generation=required.generation
+                    )
+                return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
             try:
                 return self._rebuild_all_off_boundary(accept_stabilized_build=True)
             except graph_sync.GraphRebuildInProgress:
