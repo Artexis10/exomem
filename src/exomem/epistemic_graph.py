@@ -4538,7 +4538,7 @@ class EpistemicGraphIndex:
                             (source_path, lookup_key, raw_target),
                         ).rowcount
                         changed += removed
-                        if source_path not in invalidated_sources:
+                        if removed and source_path not in invalidated_sources:
                             invalidated_sources.append(source_path)
                     for source_path in invalidated_sources:
                         changed += conn.execute(
