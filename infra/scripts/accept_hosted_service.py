@@ -36,6 +36,16 @@ _TENANT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$")
 _STAGES = ("oauth", "protocol", "continuity", "isolation", "restore", "performance", "claude-host", "openai-host")
 _STATUSES = {"pending", "passed", "failed", "blocked"}
 _MAX_RESPONSE_BYTES = 1_048_576
+_CORPUS_TOPICS = (
+    ("operating profile", "The synthetic operating profile records a routine service condition."),
+    ("incident exercise", "The synthetic incident exercise records a bounded recovery decision."),
+    ("retrieval scenario", "The synthetic retrieval scenario records an expected cited answer."),
+    ("capacity sample", "The synthetic capacity sample records an ordinary resource observation."),
+    ("governance example", "The synthetic governance example records an approved access boundary."),
+    ("continuity probe", "The synthetic continuity probe records a token-rotation outcome."),
+    ("audit fixture", "The synthetic audit fixture records a repeatable validation result."),
+    ("collaboration trace", "The synthetic collaboration trace records a tenant-local handoff."),
+)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -220,38 +230,48 @@ def tenant_recall_query(run_id: str) -> str:
     return f"What tenant-local acceptance marker was recorded for run {run_id}?"
 
 
+def _render_synthetic_corpus_note(ordinal: int, *, notes: int, minimum_bytes: int) -> bytes:
+    per_note = max(512, (minimum_bytes + notes - 1) // notes)
+    seed = hashlib.sha256(f"exomem-hosted-acceptance-v1:{ordinal}".encode()).hexdigest()
+    category, topic = _CORPUS_TOPICS[ordinal % len(_CORPUS_TOPICS)]
+    body = (f"{topic} Synthetic acceptance note {ordinal}. Sentinel {seed}. " * ((per_note // 160) + 2))[:per_note]
+    return (
+        f"# Acceptance corpus {ordinal:04d}\n\n"
+        "## Observations\n\n"
+        f"- [{category}] {body} #hosted #benchmark ^corpus-{ordinal:04d}\n"
+    ).encode()
+
+
+def synthetic_corpus_identity(destination: Path, *, notes: int, minimum_bytes: int) -> dict[str, int | str]:
+    """Recompute the exact deterministic corpus bytes before public capture."""
+    expected_names = {f"note-{ordinal:04d}.md" for ordinal in range(notes)}
+    actual_names = {path.name for path in destination.glob("note-*.md")}
+    if actual_names != expected_names:
+        raise AcceptanceError("corpus fixture files do not match the generated note set")
+    content_bytes = 0
+    digest = hashlib.sha256()
+    for ordinal in range(notes):
+        path = destination / f"note-{ordinal:04d}.md"
+        try:
+            actual = path.read_bytes()
+        except OSError as exc:
+            raise AcceptanceError("corpus fixture is missing a generated note") from exc
+        if actual != _render_synthetic_corpus_note(ordinal, notes=notes, minimum_bytes=minimum_bytes):
+            raise AcceptanceError("corpus fixture does not match the generated deterministic content")
+        digest.update(actual)
+        content_bytes += len(actual)
+    return {"notes": notes, "minimum_bytes": minimum_bytes, "bytes": content_bytes, "digest": digest.hexdigest()}
+
+
 def generate_synthetic_corpus(destination: Path, *, notes: int = 1000, minimum_bytes: int = 10 * 1024 * 1024) -> dict[str, int | str]:
     if notes < 1000 or minimum_bytes < 10 * 1024 * 1024:
         raise AcceptanceError("corpus must contain at least 1,000 notes and 10 MiB")
     destination.mkdir(parents=True, exist_ok=True)
-    content_bytes = 0
-    digest = hashlib.sha256()
-    per_note = max(512, (minimum_bytes + notes - 1) // notes)
-    topics = (
-        ("operating profile", "The synthetic operating profile records a routine service condition."),
-        ("incident exercise", "The synthetic incident exercise records a bounded recovery decision."),
-        ("retrieval scenario", "The synthetic retrieval scenario records an expected cited answer."),
-        ("capacity sample", "The synthetic capacity sample records an ordinary resource observation."),
-        ("governance example", "The synthetic governance example records an approved access boundary."),
-        ("continuity probe", "The synthetic continuity probe records a token-rotation outcome."),
-        ("audit fixture", "The synthetic audit fixture records a repeatable validation result."),
-        ("collaboration trace", "The synthetic collaboration trace records a tenant-local handoff."),
-    )
     for ordinal in range(notes):
-        seed = hashlib.sha256(f"exomem-hosted-acceptance-v1:{ordinal}".encode()).hexdigest()
-        category, topic = topics[ordinal % len(topics)]
-        body = (f"{topic} Synthetic acceptance note {ordinal}. Sentinel {seed}. " * ((per_note // 160) + 2))[:per_note]
-        rendered = (
-            f"# Acceptance corpus {ordinal:04d}\n\n"
-            "## Observations\n\n"
-            f"- [{category}] {body} #hosted #benchmark ^corpus-{ordinal:04d}\n"
+        (destination / f"note-{ordinal:04d}.md").write_bytes(
+            _render_synthetic_corpus_note(ordinal, notes=notes, minimum_bytes=minimum_bytes)
         )
-        encoded = rendered.encode("utf-8")
-        path = destination / f"note-{ordinal:04d}.md"
-        path.write_bytes(encoded)
-        digest.update(encoded)
-        content_bytes += len(encoded)
-    return {"notes": notes, "bytes": content_bytes, "digest": digest.hexdigest()}
+    return synthetic_corpus_identity(destination, notes=notes, minimum_bytes=minimum_bytes)
 
 
 def committed_tool_receipt(result: Mapping[str, Any]) -> bool:
@@ -510,7 +530,11 @@ class AcceptanceRunner:
 
     def fail(self, stage: str, error: Exception) -> None:
         manifest = self._stage(stage)
-        manifest["stages"][stage] = {"status": "failed", "error": str(_redact(str(error), self._secret_values()))}
+        manifest["stages"][stage] = {
+            **manifest["stages"][stage],
+            "status": "failed",
+            "error": str(_redact(str(error), self._secret_values())),
+        }
         self._write_manifest(manifest)
 
     def block(self, stage: str, operator_action: str) -> None:
@@ -595,6 +619,13 @@ class AcceptanceRunner:
         self.pass_stage("protocol", {"initialize": "passed", "tools": list(tools_list), "durable_ack": dict(durable_ack), "recall": _redact(dict(recall), self._secret_values())})
 
     def run_protocol(self) -> None:
+        try:
+            self._run_protocol()
+        except AcceptanceError as exc:
+            self.fail("protocol", exc)
+            raise
+
+    def _run_protocol(self) -> None:
         """Exercise the canonical public tools with independent tenant tokens."""
         proofs: dict[str, dict[str, Any]] = {}
         fresh_clients: dict[str, MCPClient] = {}
@@ -639,13 +670,34 @@ class AcceptanceRunner:
     def _corpus_fixture(self) -> dict[str, Any]:
         stage = self.manifest()["stages"]["performance"]
         fixture = stage.get("fixture") if isinstance(stage, dict) else None
-        if not isinstance(fixture, dict) or not isinstance(fixture.get("notes"), int) or fixture["notes"] < 1000 or not isinstance(fixture.get("bytes"), int) or fixture["bytes"] < 10 * 1024 * 1024:
+        if (
+            not isinstance(fixture, dict)
+            or not isinstance(fixture.get("notes"), int)
+            or fixture["notes"] < 1000
+            or not isinstance(fixture.get("minimum_bytes"), int)
+            or fixture["minimum_bytes"] < 10 * 1024 * 1024
+            or not isinstance(fixture.get("bytes"), int)
+            or fixture["bytes"] < 10 * 1024 * 1024
+            or not isinstance(fixture.get("digest"), str)
+            or not _SHA256.fullmatch(fixture["digest"])
+        ):
             raise AcceptanceError("benchmark requires a generated 1,000-note, 10 MiB corpus fixture")
         return fixture
+
+    def _validate_corpus_fixture(self, fixture: Mapping[str, Any]) -> None:
+        source = self.run_dir / "fixtures" / "corpus"
+        identity = synthetic_corpus_identity(
+            source,
+            notes=fixture["notes"],
+            minimum_bytes=fixture["minimum_bytes"],
+        )
+        if identity != dict(fixture):
+            raise AcceptanceError("corpus fixture identity does not match its recorded evidence")
 
     def seed_corpus(self) -> None:
         """Write the owned corpus through ordinary tenant-bound MCP capture calls."""
         fixture = self._corpus_fixture()
+        self._validate_corpus_fixture(fixture)
         source = self.run_dir / "fixtures" / "corpus"
         notes = sorted(source.glob("note-*.md"))
         if len(notes) != fixture["notes"]:
@@ -679,15 +731,45 @@ class AcceptanceRunner:
             manifest["stages"]["performance"]["cell_corpus"] = seeded
             self._write_manifest(manifest)
 
+    def _begin_benchmark_attempt(self) -> str:
+        manifest = self.manifest()
+        stage = manifest["stages"]["performance"]
+        attempts = stage.setdefault("benchmark_attempts", [])
+        if not isinstance(attempts, list):
+            raise AcceptanceError("benchmark attempt history is invalid")
+        for prior in attempts:
+            if isinstance(prior, dict) and prior.get("status") == "running":
+                prior.update({"status": "interrupted", "outcome": "uncertain", "summary": "a new full benchmark attempt began before this attempt reached a terminal result"})
+        attempt_id = "benchmark-attempt-" + secrets.token_hex(12)
+        attempts.append({"id": attempt_id, "status": "running", "started_at": int(time.time())})
+        stage["status"] = "pending"
+        stage.pop("error", None)
+        self._write_manifest(manifest)
+        return attempt_id
+
+    def _finish_benchmark_attempt(self, attempt_id: str, *, status: str, summary: Mapping[str, Any]) -> None:
+        manifest = self.manifest()
+        stage = manifest["stages"]["performance"]
+        attempts = stage.get("benchmark_attempts")
+        if not isinstance(attempts, list):
+            raise AcceptanceError("benchmark attempt history is invalid")
+        attempt = next((item for item in attempts if isinstance(item, dict) and item.get("id") == attempt_id), None)
+        if attempt is None or attempt.get("status") != "running":
+            raise AcceptanceError("benchmark attempt is not running")
+        attempt.update({"status": status, "summary": _redact(dict(summary), self._secret_values())})
+        self._write_manifest(manifest)
+
     def run_benchmark(self) -> None:
         """Measure the public protocol only after both cells contain the owned corpus."""
         fixture = self._corpus_fixture()
+        self._validate_corpus_fixture(fixture)
         stage = self.manifest()["stages"]["performance"]
         if stage.get("status") == "passed":
             raise AcceptanceError("benchmark is already terminal")
         cell_corpus = stage.get("cell_corpus") if isinstance(stage, dict) else None
         if not isinstance(cell_corpus, dict) or any(cell_corpus.get(tenant, {}).get("status") != "committed" or cell_corpus.get(tenant, {}).get("convergence") != "passed" for tenant in ("synthetic", "isolation")):
             raise AcceptanceError("benchmark requires committed corpus evidence for both reserved cells")
+        attempt_id = self._begin_benchmark_attempt()
         warm: dict[str, list[float]] = {operation: [] for operation in ("initialize", "tools_list", "capture", "recall")}
         errors: dict[str, int] = {operation: 0 for operation in warm}
 
@@ -707,9 +789,9 @@ class AcceptanceRunner:
                     failures["initialize"] += 1
                     continue
                 samples["initialize"].append((time.perf_counter() - started) * 1000)
-                benchmark_fact = f"hosted benchmark sample {self.run_id} {worker_id}-{ordinal}"
-                capture_arguments = {"title": f"Hosted benchmark {self.run_id} {worker_id}-{ordinal}", "content": f"## Observations\n- [benchmark sample] {benchmark_fact} #hosted ^benchmark-{worker_id}-{ordinal}", "note_type": "insight", "sources": []}
-                capture_key = self.mutation_request_id(f"benchmark-{worker_id}-{ordinal}")
+                benchmark_fact = f"hosted benchmark sample {self.run_id} {attempt_id} {worker_id}-{ordinal}"
+                capture_arguments = {"title": f"Hosted benchmark {self.run_id} {attempt_id} {worker_id}-{ordinal}", "content": f"## Observations\n- [benchmark sample] {benchmark_fact} #hosted ^{attempt_id}-{worker_id}-{ordinal}", "note_type": "insight", "sources": []}
+                capture_key = self.mutation_request_id(f"{attempt_id}-{worker_id}-{ordinal}")
                 for operation, action in (("tools_list", client.list_tools), ("capture", lambda client=client, arguments=capture_arguments, key=capture_key: client.capture(arguments, idempotency_key=key))):
                     started = time.perf_counter()
                     try:
@@ -756,15 +838,19 @@ class AcceptanceRunner:
             summaries = {operation: latency_summary(samples, errors=errors[operation], kind="warm") for operation, samples in warm.items()}
             cold_summary = latency_summary(cold, errors=cold_errors, kind="cold")
         except AcceptanceError as exc:
+            self._finish_benchmark_attempt(attempt_id, status="failed", summary={"error": str(exc)})
             self.fail("performance", exc)
             raise
         targets = {"initialize": 500.0, "tools_list": 500.0, "capture": 1000.0, "recall": 1000.0, "cold_client_initialize": 2000.0}
         failed = [operation for operation, target in targets.items() if (cold_summary if operation == "cold_client_initialize" else summaries[operation])["errors"] or (cold_summary if operation == "cold_client_initialize" else summaries[operation])["p95_ms"] > target]
         if failed:
             error = AcceptanceError(f"benchmark errors or p95 target misses: {', '.join(failed)}")
+            self._finish_benchmark_attempt(attempt_id, status="failed", summary={"error": str(error), "warm": summaries, "cold_client_initialize": cold_summary})
             self.fail("performance", error)
             raise error
-        self.pass_stage("performance", {"clients": 5, "tenant_clients": {"synthetic": 3, "isolation": 2}, "warm_samples_per_operation": 100, "cold_client_resets": 20, "cold_reset_semantics": "new MCPClient instance; no service, process, tenant, or storage reset", "warm_recall_semantics": "timed recall of the already-converged run-owned corpus fact; citation readback is verified outside the timed interval", "corpus": {"fixture": fixture, "cell_evidence": cell_corpus}, "runtime": {"configured": self.config["runtime"], "verified": {"status": "pending", "operator_action": "attach signed runtime evidence matching the configured tuple"}}, "warm": summaries, "cold_client_initialize": cold_summary, "targets_ms": targets})
+        self._finish_benchmark_attempt(attempt_id, status="passed", summary={"warm": summaries, "cold_client_initialize": cold_summary})
+        attempts = self.manifest()["stages"]["performance"]["benchmark_attempts"]
+        self.pass_stage("performance", {"attempt_id": attempt_id, "benchmark_attempts": attempts, "clients": 5, "tenant_clients": {"synthetic": 3, "isolation": 2}, "warm_samples_per_operation": 100, "cold_client_resets": 20, "cold_reset_semantics": "new MCPClient instance; no service, process, tenant, or storage reset", "warm_recall_semantics": "timed recall of the already-converged run-owned corpus fact; citation readback is verified outside the timed interval", "corpus": {"fixture": fixture, "cell_evidence": cell_corpus}, "runtime": {"configured": self.config["runtime"], "verified": {"status": "pending", "operator_action": "attach signed runtime evidence matching the configured tuple"}}, "warm": summaries, "cold_client_initialize": cold_summary, "targets_ms": targets})
 
     def evaluate_continuity(self, *, now: float | None = None) -> None:
         """Checkpoint token rotation and the post-renewal cell-backed read without waiting."""

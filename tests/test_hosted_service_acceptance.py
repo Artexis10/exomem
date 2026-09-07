@@ -184,6 +184,48 @@ def test_synthetic_corpus_notes_are_valid_compiled_compact_observations(tmp_path
     assert len(categories) >= 8
 
 
+def test_seed_and_benchmark_refuse_a_tampered_generated_corpus_before_side_effects(tmp_path: Path) -> None:
+    runner = _load()
+    acceptance = runner.AcceptanceRunner.from_config(
+        _write_config(tmp_path), state_dir=tmp_path / "state", run_id="fixture-tamper-001"
+    )
+    acceptance.prepare()
+    corpus = runner.generate_synthetic_corpus(acceptance.run_dir / "fixtures" / "corpus")
+    acceptance.register_fixture(acceptance.run_dir / "fixtures" / "corpus")
+    manifest = acceptance.manifest()
+    manifest["stages"]["performance"] = {"status": "pending", "fixture": corpus}
+    acceptance._write_manifest(manifest)
+    (acceptance.run_dir / "fixtures" / "corpus" / "note-0000.md").write_text("truncated\n", encoding="utf-8")
+
+    with pytest.raises(runner.AcceptanceError, match="corpus fixture"):
+        acceptance.seed_corpus()
+    with pytest.raises(runner.AcceptanceError, match="corpus fixture"):
+        acceptance.run_benchmark()
+
+
+def test_seed_refuses_tampered_fixture_before_resuming_committed_cells(tmp_path: Path) -> None:
+    runner = _load()
+    acceptance = runner.AcceptanceRunner.from_config(
+        _write_config(tmp_path), state_dir=tmp_path / "state", run_id="fixture-resume-001"
+    )
+    acceptance.prepare()
+    corpus = runner.generate_synthetic_corpus(acceptance.run_dir / "fixtures" / "corpus")
+    manifest = acceptance.manifest()
+    manifest["stages"]["performance"] = {
+        "status": "pending",
+        "fixture": corpus,
+        "cell_corpus": {
+            tenant: {"status": "committed", "convergence": "passed"}
+            for tenant in ("synthetic", "isolation")
+        },
+    }
+    acceptance._write_manifest(manifest)
+    (acceptance.run_dir / "fixtures" / "corpus" / "note-0999.md").write_text("truncated\n", encoding="utf-8")
+
+    with pytest.raises(runner.AcceptanceError, match="corpus fixture"):
+        acceptance.seed_corpus()
+
+
 def test_tenant_sentinels_are_stable_distinct_and_non_overlapping() -> None:
     runner = _load()
 
@@ -245,6 +287,35 @@ def test_tool_results_marked_as_errors_are_not_usable_as_recall_evidence() -> No
 
     with pytest.raises(runner.AcceptanceError, match="unsuccessful"):
         runner._tool_result({"isError": True, "structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/sentinel.md", "text": "forged"}]}}})
+
+
+def test_protocol_failure_is_persisted_and_redacted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _load()
+    acceptance = runner.AcceptanceRunner.from_config(
+        _write_config(tmp_path), state_dir=tmp_path / "state", run_id="protocol-failure-001"
+    )
+    acceptance.prepare()
+    acceptance.save_tokens({"access_token": "protocol-secret", "refresh_token": "refresh-secret"}, tenant="synthetic")
+    acceptance.save_tokens({"access_token": "isolation-access", "refresh_token": "isolation-refresh"}, tenant="isolation")
+
+    class Client:
+        def initialize(self) -> dict[str, Any]:
+            return {"protocolVersion": "2025-06-18"}
+
+        def list_tools(self) -> dict[str, Any]:
+            return {"tools": [{"name": "remember"}, {"name": "ask_memory"}, {"name": "read_memory"}]}
+
+        def capture(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+            raise runner.AcceptanceError("receipt failure for protocol-secret")
+
+    monkeypatch.setattr(runner.AcceptanceRunner, "_mcp_client", lambda *_args: Client())
+
+    with pytest.raises(runner.AcceptanceError, match="protocol-secret"):
+        acceptance.run_protocol()
+    protocol = acceptance.manifest()["stages"]["protocol"]
+    assert protocol["status"] == "failed"
+    assert "protocol-secret" not in protocol["error"]
+    assert "[REDACTED]" in protocol["error"]
 
 
 def test_pkce_client_validates_discovery_and_rotating_refresh_replay(tmp_path: Path) -> None:
@@ -704,6 +775,7 @@ def test_benchmark_refuses_failed_capture_and_unresolvable_warm_recall(
         _write_config(tmp_path), state_dir=tmp_path / "state", run_id=f"benchmark-{failure}-001"
     )
     acceptance.prepare()
+    corpus = runner.generate_synthetic_corpus(acceptance.run_dir / "fixtures" / "corpus")
     manifest = acceptance.manifest()
     facts = {
         tenant: runner.tenant_sentinel(acceptance.run_id, tenant) + " corpus"
@@ -711,7 +783,7 @@ def test_benchmark_refuses_failed_capture_and_unresolvable_warm_recall(
     }
     manifest["stages"]["performance"] = {
         "status": "pending",
-        "fixture": {"notes": 1000, "bytes": 10 * 1024 * 1024, "digest": "fixture"},
+        "fixture": corpus,
         "cell_corpus": {
             tenant: {"status": "committed", "convergence": "passed", "fact": fact}
             for tenant, fact in facts.items()
@@ -746,6 +818,81 @@ def test_benchmark_refuses_failed_capture_and_unresolvable_warm_recall(
     with pytest.raises(runner.AcceptanceError, match="warm samples"):
         acceptance.run_benchmark()
     assert acceptance.manifest()["stages"]["performance"]["status"] == "failed"
+
+
+def test_benchmark_rerun_cannot_measure_cached_captures_as_fresh_latency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = _load()
+    acceptance = runner.AcceptanceRunner.from_config(
+        _write_config(tmp_path), state_dir=tmp_path / "state", run_id="benchmark-replay-001"
+    )
+    acceptance.prepare()
+    corpus = runner.generate_synthetic_corpus(acceptance.run_dir / "fixtures" / "corpus")
+    facts = {
+        tenant: runner.tenant_sentinel(acceptance.run_id, tenant) + " corpus"
+        for tenant in ("synthetic", "isolation")
+    }
+
+    def stage() -> dict[str, Any]:
+        return {
+            "status": "pending",
+            "fixture": corpus,
+            "cell_corpus": {
+                tenant: {"status": "committed", "convergence": "passed", "fact": fact}
+                for tenant, fact in facts.items()
+            },
+        }
+
+    manifest = acceptance.manifest()
+    manifest["stages"]["performance"] = stage()
+    acceptance._write_manifest(manifest)
+    seen_keys: set[str] = set()
+    local = threading.local()
+
+    def clock() -> float:
+        if getattr(local, "capture_started", False):
+            local.capture_started = False
+            return 1.1
+        return 0.0
+
+    class Client:
+        def __init__(self, tenant: str) -> None:
+            self.tenant = tenant
+
+        def initialize(self) -> dict[str, Any]:
+            return {"protocolVersion": "2025-06-18"}
+
+        def list_tools(self) -> dict[str, Any]:
+            return {"tools": []}
+
+        def capture(self, _arguments: dict[str, Any], *, idempotency_key: str) -> dict[str, Any]:
+            if idempotency_key not in seen_keys:
+                seen_keys.add(idempotency_key)
+                local.capture_started = True
+            return {"structuredContent": {"ok": True, "state": "committed", "terminal": True, "status": "committed", "mutated": True}}
+
+        def recall(self, _query: str) -> dict[str, Any]:
+            return {"structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/corpus.md", "text": facts[self.tenant]}]}}}
+
+        def call(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+            return {"structuredContent": {"result": {"content": facts[self.tenant]}}}
+
+    monkeypatch.setattr(runner.time, "perf_counter", clock)
+    monkeypatch.setattr(runner.AcceptanceRunner, "_mcp_client", lambda _self, tenant: Client(tenant))
+
+    with pytest.raises(runner.AcceptanceError, match="capture"):
+        acceptance.run_benchmark()
+    manifest = acceptance.manifest()
+    manifest["stages"]["performance"].update(stage())
+    acceptance._write_manifest(manifest)
+    with pytest.raises(runner.AcceptanceError, match="capture"):
+        acceptance.run_benchmark()
+
+    attempts = acceptance.manifest()["stages"]["performance"]["benchmark_attempts"]
+    assert len(attempts) == 2
+    assert attempts[0]["status"] == attempts[1]["status"] == "failed"
+    assert attempts[0]["id"] != attempts[1]["id"]
 
 
 def test_continuity_rotates_persisted_tokens_then_proves_service_use_after_fleet_window(tmp_path: Path) -> None:
