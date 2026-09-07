@@ -898,13 +898,37 @@ class MediaWorker:
             with fanout_scope:
                 if parent_receipted_handoff:
                     registered_checkpoint = graph_sync.read_checkpoint(self._vault_root)
-                completed = post_commit_batch_fanout(
-                    self._vault_root,
-                    list(token.replaced),
-                    index_reports if parent_receipted_handoff else None,
-                    None,
-                    publication_intents=publication_intents,
-                )
+                try:
+                    completed = post_commit_batch_fanout(
+                        self._vault_root,
+                        list(token.replaced),
+                        index_reports if parent_receipted_handoff else None,
+                        None,
+                        publication_intents=publication_intents,
+                    )
+                finally:
+                    if (
+                        parent_receipted_handoff
+                        and registered_checkpoint is not None
+                        and graph_sync.read_checkpoint(self._vault_root)
+                        == registered_checkpoint
+                        and any(
+                            isinstance(report, index_sync.IndexSyncReport)
+                            and any(
+                                component.component == "epistemic_graph"
+                                and component.outcome == "registered"
+                                for component in report.components
+                            )
+                            for report in index_reports
+                        )
+                    ):
+                        graph_sync.start_registered_detached(
+                            self._vault_root,
+                            state_root=get_manager()
+                            ._mutation_coordinator_for(self._vault_root)
+                            .state_root,
+                            expected_checkpoint=registered_checkpoint,
+                        )
             if completed is True:
                 deferred_index.clear_full_receipts(self._vault_root, receipts)
                 completed = True
@@ -912,26 +936,6 @@ class MediaWorker:
         except Exception:  # noqa: BLE001 - canonical media is already committed
             log.exception("media deferred graph completion failed")
         finally:
-            if (
-                parent_receipted_handoff
-                and registered_checkpoint is not None
-                and any(
-                    isinstance(report, index_sync.IndexSyncReport)
-                    and any(
-                        component.component == "epistemic_graph"
-                        and component.outcome == "registered"
-                        for component in report.components
-                    )
-                    for report in index_reports
-                )
-            ):
-                graph_sync.start_registered_detached(
-                    self._vault_root,
-                    state_root=get_manager()
-                    ._mutation_coordinator_for(self._vault_root)
-                    .state_root,
-                    expected_checkpoint=registered_checkpoint,
-                )
             if not completed and publication_intents:
                 from . import file_watcher
 
@@ -1240,6 +1244,8 @@ class MediaWorker:
                 finally:
                     if (
                         registered_checkpoint is not None
+                        and graph_sync.read_checkpoint(self._vault_root)
+                        == registered_checkpoint
                         and any(
                             isinstance(report, index_sync.IndexSyncReport)
                             and any(
