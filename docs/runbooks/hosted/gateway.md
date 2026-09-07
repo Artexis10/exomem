@@ -21,6 +21,11 @@ passed integration acceptance.
   Secret references. The database credential must belong to this gateway's
   required service operations; do not reuse a provider-admin credential or
   copy the complete Vercel environment.
+  This source delivery leaves the gateway disabled and the existing active
+  secret matrix unchanged. Before enablement, register both gateway destinations
+  together with their ciphertexts, active selection, handoff tests and signed
+  registry in one reviewed deployment change. Do not register an active
+  destination without its selected ciphertext.
   Use the existing `secret_handoff.py` workflow: `gateway_database_url` may
   reach only `k3s.gateway.database.active`; the existing `control_plane_key`
   reaches `k3s.gateway.control-plane.active`. Deliver the same wrapping key as
