@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -947,6 +948,122 @@ def test_normalizer_holds_the_line_shape_and_rejects_carriage_returns() -> None:
     ):
         with pytest.raises(module.HandoffError):
             module._normalize_secret(value, shape)
+
+
+@pytest.mark.parametrize("value_shape", ["line", "file"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        b"[SENSITIVE]",
+        b"[Sensitive]\n",
+        b" [sensitive] \r\n",
+        b"<sensitive>",
+        b"[REDACTED]",
+        b"<redacted>",
+        "\u00a0[SENSITIVE]\u00a0".encode(),
+        "\u2009[REDACTED]\u202f".encode(),
+    ],
+)
+def test_normalizer_rejects_whole_value_redaction_markers(value: bytes, value_shape: str) -> None:
+    module = _load_module()
+    with pytest.raises(module.HandoffError, match="redaction placeholder"):
+        module._normalize_secret(value, value_shape)
+
+
+@pytest.mark.parametrize("source_kind", ["stdin", "prompt", "terraform"])
+@pytest.mark.parametrize(
+    ("secret_name", "destination_id"),
+    [
+        ("cloudflare_tunnel_token", "k3s.cloudflared.active"),
+        (
+            "cloudflare_access_client_secret",
+            "vercel.substrate.production.access.active.client-secret",
+        ),
+    ],
+)
+def test_redacted_source_is_rejected_before_any_handoff_side_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_kind: str,
+    secret_name: str,
+    destination_id: str,
+) -> None:
+    module = _load_module()
+    _link_vercel_project(tmp_path)
+    marker = b"[SENSITIVE]"
+    monkeypatch.setattr(module.sys, "stdin", io.TextIOWrapper(io.BytesIO(marker + b"\n")))
+    monkeypatch.setattr(module.getpass, "getpass", lambda _prompt: marker.decode())
+    monkeypatch.setenv("SOPS_AGE_RECIPIENTS", "age1testrecipient")
+    destination_calls: list[list[str]] = []
+
+    def _runner(command, **_kwargs):
+        if command[0] != "terraform":
+            destination_calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout=marker, stderr=b"")
+
+    monkeypatch.setattr(module.subprocess, "run", _runner)
+    with pytest.raises(module.HandoffError, match="redaction placeholder"):
+        module.execute_handoff(
+            matrix_path=MATRIX,
+            repository_root=tmp_path,
+            secret_name=secret_name,
+            version="v1",
+            destination_ids=(destination_id,),
+            source_kind=source_kind,
+            terraform_bin="terraform",
+            sops_bin="sops",
+            vercel_bin="vercel",
+            vercel_project=tmp_path,
+            dry_run=False,
+        )
+    assert destination_calls == []
+    assert not (tmp_path / "infra").exists()
+
+
+@pytest.mark.parametrize("marker", [b"[SENSITIVE]", "\u00a0[SENSITIVE]\u00a0".encode()])
+def test_cli_rejects_redacted_control_plane_key_without_echo_or_receipt(
+    tmp_path: Path, marker: bytes
+) -> None:
+    require_posix_only_stdlib()
+    _link_vercel_project(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--matrix",
+            str(MATRIX),
+            "--repository-root",
+            str(tmp_path),
+            "--secret",
+            "control_plane_key",
+            "--version",
+            "v1",
+            "--destination",
+            "vercel.substrate.production.control-plane.active",
+            "--source",
+            "stdin",
+            "--vercel-project",
+            str(tmp_path),
+            "--vercel-bin",
+            str(tmp_path / "must-not-run-vercel"),
+        ],
+        input=marker + b"\n",
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert result.stdout == b""
+    assert result.stderr == b"handoff rejected: secret source is a redaction placeholder\n"
+    assert not (tmp_path / "infra").exists()
+
+
+def test_placeholder_detection_does_not_rewrite_real_secret_content() -> None:
+    module = _load_module()
+    assert module._normalize_secret(b"  opaque-token  \n") == b"  opaque-token  "
+    assert module._normalize_secret(b"token-[SENSITIVE]-suffix") == b"token-[SENSITIVE]-suffix"
+    assert module._normalize_secret(b"[service]\npassword=opaque\n", "file") == (
+        b"[service]\npassword=opaque"
+    )
 
 
 def test_matrix_never_routes_a_file_shaped_secret_to_vercel(tmp_path: Path) -> None:

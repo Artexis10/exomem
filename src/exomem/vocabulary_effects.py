@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
@@ -70,7 +70,7 @@ class Effect:
     action: str
     path: str
     key: str | None = None
-    details: Mapping[str, str] = MappingProxyType({})
+    details: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.action not in _ALLOWED_ACTIONS:
