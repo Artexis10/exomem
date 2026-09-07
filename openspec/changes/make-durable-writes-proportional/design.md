@@ -196,6 +196,14 @@ bounded startup deadline expires. A timeout yields an incomplete setup with no
 workflow timing, never a pass over a smaller corpus. The normal per-tool timeout
 continues to bound each timed public call.
 
+Bind Exomem's store to the canonical state key derived from the requested vault,
+and keep the configured state directory and selected store inside this run's
+disposable root. Validate each product's supported schema version and actual
+FTS5 virtual-table definition; ordinary tables with matching column names do
+not prove search readiness. Close every observation's read connection. One
+outer asynchronous deadline and a final pre-clock check prevent even a late
+successful readiness response from admitting an expired setup.
+
 The common workload still does not require optional graph convergence; retain
 the separately labelled public-sentinel/current-graph characterization. This
 setup correction does not relax the median parity target or authorize enabling

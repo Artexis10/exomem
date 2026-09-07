@@ -19,7 +19,7 @@
 ## 4. Verify integrated behavior and deliver
 
 - [x] 4.1 Integrate reviewed lane bytes and obtain fresh integration approval with independently rerun writer-to-graph interaction checks (APPROVE on f7a20cef; 53 existing scoped tests plus public lifecycle and interrupted-transaction probes passed).
-- [ ] 4.2a Correct the shared benchmark's incomplete-index readiness defect: retain invalid-for-scale observations, prove exact metadata/text-index fixture membership for both products before timing, and independently review the correction and rejection tests.
+- [x] 4.2a Correct the shared benchmark's incomplete-index readiness defect: retain invalid-for-scale observations, prove exact metadata/text-index fixture membership for both products before timing, and independently review the correction and rejection tests (APPROVE on 6c3b7d9d; 45 tests, wrong-vault/plain-table rejection reproductions, bounded-startup rejection, and real four-page public workflows for both products passed).
 - [ ] 4.2 Run at least three fresh paired public Markdown workflows at each of 3,800 and 8,000 pages against the pinned Basic Memory artifact, alternating product order; retain sanitized individual measurements and meet the median parity target in design.md.
 - [ ] 4.3 Run the existing real-media workflow with isolated state and verify extraction, custody and useful closure remain correct; report optional graph convergence separately.
 - [ ] 4.4 Pass the full lean test corpus, relevant latency gates, lint/type checks, public-artifact privacy validation and pinned strict OpenSpec validation on the final implementation bytes.
