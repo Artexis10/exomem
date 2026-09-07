@@ -86,7 +86,7 @@ import stat
 import sys
 from collections import deque
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -688,7 +688,8 @@ class _SemanticIsolationRow:
     path: str | None
     edge_column: str | None = None
     missing: bool = False
-    dependency_source: str | None = None
+    dependency_source: object | None = None
+    dependency_source_present: bool = False
     dependency_lookup_key: str | None = None
     dependency_raw_target: str | None = None
 
@@ -1215,11 +1216,25 @@ def _graph_dependency_census_signature(vault_root: Path, path: Path) -> str | No
         if main is None:
             return None
         wal = identities.get(path.name + "-wal")
-        durable_wal = wal if wal is not None and len(wal) > 2 and wal[2] else ("empty",)
+        wal_size = _sidecar_signature_size(wal) if wal is not None else 0
+        if wal_size is None:
+            return None
+        durable_wal = wal if wal_size else ("empty",)
         payload = repr((main, durable_wal)).encode("ascii")
         return hashlib.sha256(payload).hexdigest()
     finally:
         binding.close()
+
+
+def _sidecar_signature_size(signature: tuple[int, ...]) -> int | None:
+    """Extract the byte size from the POSIX or retained-Windows signature shape."""
+    if len(signature) == 4:
+        size = signature[2]
+    elif len(signature) == 5:
+        size = signature[3]
+    else:
+        return None
+    return size if isinstance(size, int) and size >= 0 else None
 
 
 def _deferred_sidecar_signature(vault_root: Path, path: Path) -> str | None:
@@ -1379,28 +1394,48 @@ def semantic_recall_isolation_census(
             )
             if row is not None:
                 rows.append(row)
+    dependency_signature = _graph_dependency_census_signature(vault_root, graph_sidecar)
     stored = cursors.get("graph_dependency_coverage", {})
     values, truncated, last, failure = _sidecar_rows(
         vault_root,
         graph_sidecar,
-        "SELECT source_path FROM graph_dependency_coverage "
-        "WHERE source_path > ? ORDER BY source_path",
-        after=stored.get("cursor", "") if stored.get("signature") == signature else "",
+        "SELECT rowid, source_path FROM graph_dependency_coverage "
+        "WHERE rowid > CAST(? AS INTEGER) ORDER BY rowid",
+        after=(
+            stored.get("cursor", "")
+            if dependency_signature is not None
+            and stored.get("signature") == dependency_signature
+            else ""
+        ),
         limit=limit,
     )
     truncation["graph_dependency_coverage"] = truncated
     if failure is not None:
         incomplete["graph_dependency_coverage"] = failure
-    elif truncated and last is not None and signature is not None:
-        continuation["graph_dependency_coverage"] = {"cursor": last, "signature": signature}
-    for (source_path,) in values:
+    elif dependency_signature is None:
+        incomplete["graph_dependency_coverage"] = "sidecar_revision_unavailable"
+    elif truncated and last is not None:
+        after_signature = _graph_dependency_census_signature(vault_root, graph_sidecar)
+        if after_signature == dependency_signature:
+            continuation["graph_dependency_coverage"] = {
+                "cursor": last,
+                "signature": dependency_signature,
+            }
+        else:
+            incomplete["graph_dependency_coverage"] = "sidecar_revision_moved"
+    for _rowid, source_path in values:
         row = _classify_semantic_isolation_row(
             vault_root, "graph_dependency_coverage", source_path
         )
         if row is not None:
-            rows.append(row)
+            rows.append(
+                replace(
+                    row,
+                    dependency_source=source_path,
+                    dependency_source_present=True,
+                )
+            )
 
-    dependency_signature = _graph_dependency_census_signature(vault_root, graph_sidecar)
     stored = cursors.get("graph_dependencies", {})
     values, truncated, last, failure = _sidecar_rows(
         vault_root,
@@ -1409,7 +1444,8 @@ def semantic_recall_isolation_census(
         "WHERE rowid > CAST(? AS INTEGER) ORDER BY rowid",
         after=(
             stored.get("cursor", "")
-            if stored.get("signature") == dependency_signature
+            if dependency_signature is not None
+            and stored.get("signature") == dependency_signature
             else ""
         ),
         limit=limit,
@@ -1417,6 +1453,8 @@ def semantic_recall_isolation_census(
     truncation["graph_dependencies"] = truncated
     if failure is not None:
         incomplete["graph_dependencies"] = failure
+    elif dependency_signature is None:
+        incomplete["graph_dependencies"] = "sidecar_revision_unavailable"
     elif truncated and last is not None:
         after_signature = _graph_dependency_census_signature(vault_root, graph_sidecar)
         if after_signature == dependency_signature:
@@ -1431,7 +1469,13 @@ def semantic_recall_isolation_census(
             vault_root, "graph_dependencies", source_path, edge_column="source_path"
         )
         if source_row is not None:
-            rows.append(source_row)
+            rows.append(
+                replace(
+                    source_row,
+                    dependency_source=source_path,
+                    dependency_source_present=True,
+                )
+            )
             continue
         if (
             not isinstance(lookup_key, str)
@@ -1444,7 +1488,8 @@ def semantic_recall_isolation_census(
                     repr((lookup_key, raw_target)),
                     None,
                     "dependency_record",
-                    dependency_source=str(source_path),
+                    dependency_source=source_path,
+                    dependency_source_present=True,
                     dependency_lookup_key=lookup_key if isinstance(lookup_key, str) else None,
                     dependency_raw_target=raw_target if isinstance(raw_target, str) else None,
                 )
@@ -1457,6 +1502,7 @@ def semantic_recall_isolation_census(
             row.edge_column,
             row.missing,
             row.dependency_source,
+            row.dependency_source_present,
             row.dependency_lookup_key,
             row.dependency_raw_target,
         ): row
@@ -1483,8 +1529,7 @@ def purge_corrupt_semantic_recall_isolation_rows(
 
     grouped: dict[str, set[str]] = {}
     graph_edges: dict[str, set[str]] = {}
-    dependency_rows: set[tuple[str, str, str]] = set()
-    dependency_source_paths: set[str] = set()
+    dependency_source_paths: list[object] = []
     for row in rows:
         if row.path is not None:
             continue
@@ -1492,19 +1537,9 @@ def purge_corrupt_semantic_recall_isolation_rows(
             if row.edge_column in {"source_path", "src_key", "dst_key"}:
                 graph_edges.setdefault(row.edge_column, set()).add(row.raw)
             continue
-        if row.component == "graph_dependencies":
-            if row.edge_column == "source_path":
-                dependency_source_paths.add(row.raw)
-            elif (
-                row.dependency_source is not None
-                and row.dependency_lookup_key is not None
-                and row.dependency_raw_target is not None
-            ):
-                dependency_rows.add(
-                    (row.dependency_source, row.dependency_lookup_key, row.dependency_raw_target)
-                )
-            elif row.dependency_source is not None:
-                dependency_source_paths.add(row.dependency_source)
+        if row.component in {"graph_dependencies", "graph_dependency_coverage"}:
+            if row.dependency_source_present:
+                dependency_source_paths.append(row.dependency_source)
             continue
         grouped.setdefault(row.component, set()).add(row.raw)
 
@@ -1576,8 +1611,7 @@ def purge_corrupt_semantic_recall_isolation_rows(
         ).purge_exact_persisted_rows(
             sorted(grouped.get("graph", set())),
             graph_values,
-            dependency_rows=sorted(dependency_rows),
-            dependency_source_paths=sorted(dependency_source_paths),
+            dependency_source_paths=dependency_source_paths,
             connection_path=connection_path,
         ),
     )
