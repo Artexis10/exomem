@@ -186,11 +186,12 @@ def test_reduced_bootstrap_reports_missing_vocabulary_routes(vault: Path) -> Non
     assert workflow["entity_type"]["resolve"]["available"] is False
 
 
-def test_compact_operating_instructions_precede_large_catalogs(vault: Path) -> None:
+def test_compact_operating_instructions_and_simple_actions_precede_large_catalogs(vault: Path) -> None:
     payload = commands.op_bootstrap(vault, profile="compact")
     keys = list(payload)
-    for doctrine in ("workflow", "vocabulary_workflow", "epistemic_contract"):
-        for catalog in ("simple_actions", "front_door_actions", "product_commands"):
+    assert keys.index("workflow") < keys.index("simple_actions")
+    for doctrine in ("simple_actions", "workflow", "vocabulary_workflow", "epistemic_contract"):
+        for catalog in ("front_door_actions", "product_commands"):
             assert keys.index(doctrine) < keys.index(catalog)
     assert any("vocabulary_sync" in step and "recovery" in step for step in payload["workflow"]["loop"])
 

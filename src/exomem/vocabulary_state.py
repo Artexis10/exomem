@@ -89,11 +89,14 @@ class VocabularyState:
         operation: Callable[[dict[str, Any]], Any],
         *,
         affected_refs: tuple[str, ...] | None = None,
+        validator: Callable[[dict[str, Any]], None] | None = None,
     ) -> Any:
         # Use the owner's existing lock and publication gate; a parallel review
         # disposition must not be overwritten by a vocabulary update.
         with review_state._LOCK:
             payload = self.store.load()
+            if validator is not None:
+                validator(payload)
             section = payload["vocabulary"]
             before = copy.deepcopy(section)
             result = operation(section)
@@ -106,12 +109,17 @@ class VocabularyState:
                 )
             return result
 
-    def observe(self, item: WorkItem) -> dict[str, Any]:
+    def observe(
+        self,
+        item: WorkItem,
+        *,
+        validator: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         def update(section):
             section["items"][item.ref] = item.to_dict()
             return _view(section, item.ref)
 
-        return self._update(update)
+        return self._update(update, validator=validator)
 
     def get(self, ref: str) -> dict[str, Any]:
         return _view(self.store.load()["vocabulary"], ref)

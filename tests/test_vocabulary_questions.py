@@ -11,8 +11,10 @@ from starlette.testclient import TestClient
 from exomem import (
     commands,
     epistemic_graph,
+    mutation_terminal,
     relation_registry,
     semantic_contract,
+    vocabulary_application,
     vocabulary_questions,
     vocabulary_review,
     writer_lease,
@@ -451,6 +453,189 @@ def test_relation_question_refuses_an_endpoint_changed_after_its_decision(
             read_only=False,
         )
     assert "## Relations" not in (tmp_path / source).read_text(encoding="utf-8")
+
+
+def test_relation_question_rechecks_dismissal_while_observing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _anchor(
+        tmp_path,
+        "See [[Knowledge Base/Notes/meaning-target]].",
+        path="Knowledge Base/Notes/meaning-source.md",
+    )
+    target = _anchor(
+        tmp_path,
+        "A distinct target.",
+        path="Knowledge Base/Notes/meaning-target.md",
+        identity="00000000-0000-4000-8000-000000000002",
+    )
+    with library_scope():
+        epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    semantic_contract.build_corpus_context(tmp_path)
+    queue = commands.op_review_memory(tmp_path, mode="relation-queue")
+    candidate = next(
+        entry
+        for group in queue["groups"]
+        for entry in group["items"]
+        if entry["from"] == source and entry["to"] == target
+    )
+    original_observe = vocabulary_questions.VocabularyState.observe
+
+    def dismiss_then_observe(self, item, **kwargs):
+        with library_scope():
+            commands.op_triage_memory(
+                tmp_path,
+                ref=candidate["ref"],
+                action="dismiss",
+                why="handled: the candidate was dismissed before observation.",
+                expected_fingerprint=candidate["fingerprint"],
+                source_path=source,
+            )
+        return original_observe(self, item, **kwargs)
+
+    monkeypatch.setattr(
+        vocabulary_questions.VocabularyState, "observe", dismiss_then_observe
+    )
+    with pytest.raises(ValueError, match="relation candidate is no longer eligible"):
+        commands.op_review_memory(
+            tmp_path,
+            mode="vocabulary",
+            path=source,
+            query="Should this relation remain generic?",
+            family="relation-type/v1",
+            ref=candidate["ref"],
+        )
+    state_path = VocabularyState(tmp_path).store.path
+    assert b"exomem://review/vocabulary/" not in state_path.read_bytes()
+
+
+def test_directed_relation_questions_keep_an_applying_forward_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _anchor(
+        tmp_path,
+        "See [[Knowledge Base/Notes/meaning-target]].",
+        path="Knowledge Base/Notes/meaning-source.md",
+    )
+    target = _anchor(
+        tmp_path,
+        "See [[Knowledge Base/Notes/meaning-source]].",
+        path="Knowledge Base/Notes/meaning-target.md",
+        identity="00000000-0000-4000-8000-000000000002",
+    )
+    extension = {
+        "parent": "relates_to",
+        "description": "A venue hosts a recurring event.",
+        "direction": "directed",
+        "origins": ["markdown_relation", "semantic_relation"],
+    }
+    with library_scope():
+        relation_registry.save_registry(
+            tmp_path,
+            {"schema_version": 1, "extensions": {"venue.hosts": extension}},
+        )
+        epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    semantic_contract.build_corpus_context(tmp_path)
+    queue = commands.op_review_memory(tmp_path, mode="relation-queue")
+    candidates = {
+        (entry["from"], entry["to"]): entry
+        for group in queue["groups"]
+        for entry in group["items"]
+    }
+    forward_candidate = candidates[source, target]
+    reverse_candidate = candidates[target, source]
+    question = "Should this relation remain generic?"
+    forward = commands.op_review_memory(
+        tmp_path,
+        mode="vocabulary",
+        path=source,
+        query=question,
+        family="relation-type/v1",
+        ref=forward_candidate["ref"],
+    )
+    item = forward["item"]
+    with library_scope():
+        vocabulary_review.decide(
+            tmp_path,
+            ref=item["ref"],
+            decision={
+                "item_ref": item["ref"],
+                "fingerprint": item["fingerprint"],
+                "family": item["family"],
+                "registry_hashes": item["registry_hashes"],
+                "target_versions": item["target_versions"],
+                "outcome": "reuse",
+                "choice": {"canonical": "venue.hosts"},
+                "rationale": "The reviewed directed candidate uses this relation.",
+            },
+        )
+    route = forward["application_route"]
+    binding_kwargs = {
+        key: route[key]
+        for key in (
+            "operation",
+            "ref",
+            "path",
+            "expected_fingerprint",
+            "expected_hash",
+            "vocabulary_ref",
+            "vocabulary_fingerprint",
+        )
+    } | {"requested_relation": "venue.hosts", "why": "Apply the reviewed edge."}
+    with library_scope():
+        binding = vocabulary_application.bind(
+            tmp_path,
+            command="connect_memory",
+            kwargs=binding_kwargs,
+            idempotency_key="forward-paired-question",
+            command_digest="a" * 64,
+            principal="owner",
+        )
+    assert VocabularyState(tmp_path).get(item["ref"])["state"] == "applying"
+
+    reverse = commands.op_review_memory(
+        tmp_path,
+        mode="vocabulary",
+        path=target,
+        query=question,
+        family="relation-type/v1",
+        ref=reverse_candidate["ref"],
+    )
+    assert reverse["item"]["ref"] != item["ref"]
+    assert VocabularyState(tmp_path).get(item["ref"])["state"] == "applying"
+
+    source_page = tmp_path / source
+    source_page.write_text(
+        source_page.read_text(encoding="utf-8")
+        + "\n## Relations\n\n- venue.hosts [[Knowledge Base/Notes/meaning-target]]\n",
+        encoding="utf-8",
+    )
+    with library_scope():
+        applied = vocabulary_application.commit(
+            tmp_path,
+            binding,
+            vocabulary_application._writer_terminal(
+                {
+                    "_terminal": mutation_terminal._TERMINAL_MARKER,
+                    "version": mutation_terminal._TERMINAL_VERSION,
+                    "state": "committed",
+                    "ok": True,
+                    "receipt_id": "forward-paired-question-receipt",
+                    "leaf_result": {
+                        "from": source,
+                        "to": target,
+                        "relation_type": "venue.hosts",
+                    },
+                }
+            ),
+        )
+    assert applied["state"] == "applied"
+    assert VocabularyState(tmp_path).get(item["ref"])["receipts"] == [
+        "forward-paired-question-receipt"
+    ]
+
 
 def test_question_submission_refuses_unknown_family_and_unreadable_anchor_without_state_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Agent-led vocabulary verification
 
 This record accompanies `activate-agent-led-vocabulary-evolution`. The source

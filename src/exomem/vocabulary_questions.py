@@ -63,37 +63,41 @@ def submit(
             raise ValueError(
                 "VOCABULARY_EVIDENCE_UNAVAILABLE: refresh the relation candidate"
             )
-        authored = relation_queue._current_candidate_is_authored(
-            vault_root, source_page, candidate
-        )
-        if authored is None:
-            raise relation_queue._refresh_required(relation_ref)
         review_store = relation_queue.review_state_module.ReviewStateStore(vault_root)
-        reason, _ = relation_queue._classify_candidate(
-            vault_root,
-            source_page,
-            candidate,
-            store=review_store,
-            state_payload=review_store.load(),
-            exact_refs=resolved.identity_refs,
-            authored=(
-                {
-                    (
-                        str(candidate.get("relation_type") or ""),
-                        relation_queue.epistemic_graph_module._with_md(
-                            str(candidate.get("to") or "")
-                        ),
-                    )
-                }
-                if authored
-                else set()
-            ),
-        )
-        if reason is not None:
-            raise ValueError(
-                "VOCABULARY_QUESTION_INVALID: relation candidate is no longer eligible; "
-                "refresh the relation queue"
+
+        def require_open(payload) -> None:
+            authored = relation_queue._current_candidate_is_authored(
+                vault_root, source_page, candidate
             )
+            if authored is None:
+                raise relation_queue._refresh_required(relation_ref)
+            reason, _ = relation_queue._classify_candidate(
+                vault_root,
+                source_page,
+                candidate,
+                store=review_store,
+                state_payload=payload,
+                exact_refs=resolved.identity_refs,
+                authored=(
+                    {
+                        (
+                            str(candidate.get("relation_type") or ""),
+                            relation_queue.epistemic_graph_module._with_md(
+                                str(candidate.get("to") or "")
+                            ),
+                        )
+                    }
+                    if authored
+                    else set()
+                ),
+            )
+            if reason is not None:
+                raise ValueError(
+                    "VOCABULARY_QUESTION_INVALID: relation candidate is no longer eligible; "
+                    "refresh the relation queue"
+                )
+
+        require_open(review_store.load())
         target_path = candidate.get("to")
         if not isinstance(target_path, str) or not target_path:
             raise ValueError("VOCABULARY_EVIDENCE_UNAVAILABLE: refresh the relation candidate")
@@ -133,6 +137,7 @@ def submit(
         projection_status="current",
         paths=paths,
         question=query,
+        logical_identity=(f"relation-question:{relation_ref}" if relation_ref is not None else None),
         projection_currency=(
             {
                 "candidate_ref": relation_ref,
@@ -144,7 +149,10 @@ def submit(
             else None
         ),
     )
-    item = VocabularyState(vault_root).observe(current)
+    item = VocabularyState(vault_root).observe(
+        current,
+        validator=require_open if relation_ref is not None else None,
+    )
     result = {
         "item": item,
         "context_route": {"tool": "review_item_context", "ref": current.ref},

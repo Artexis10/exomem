@@ -27,6 +27,7 @@ import os
 import re
 import typing
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
 from importlib.metadata import PackageNotFoundError, version
@@ -143,6 +144,8 @@ from .vault import (
 )
 
 log = logging.getLogger(__name__)
+
+_legacy_selected_relation = ContextVar("legacy_selected_relation", default=False)
 
 _link_summary = link_summary_module.link_summary
 _CONNECT_MEMORY_DEFAULT_OPERATION = "suggest-links"
@@ -1359,7 +1362,11 @@ def op_bootstrap(
         "source_taxonomy": source_taxonomy_projection,
         "entity_registry": {
             "types": [
-                ({"id": definition.id} if profile == "compact" else {
+                ({
+                    "id": definition.id,
+                    "folder": definition.folder,
+                    "family": entity_type_registry.family_of(definition.id) or definition.id,
+                } if profile == "compact" else {
                     "id": definition.id,
                     "folder": definition.folder,
                     "family": (
@@ -1848,7 +1855,7 @@ def op_bootstrap(
     # truncation. Catalogs remain available, after the operating contract.
     first = (
         "contract_version", "profile", "engagement", "governance", "workflow",
-        "vocabulary_workflow", "epistemic_contract",
+        "simple_actions", "vocabulary_workflow", "epistemic_contract",
     )
     compact_payload = {
         **{key: compact_payload[key] for key in first if key in compact_payload},
@@ -7671,7 +7678,7 @@ def op_connect_memory(
     if operation == "accept-relation":
         if not ref:
             raise ValueError("INVALID_MODE: accept-relation requires `ref`")
-        if requested_relation is not None and (
+        if requested_relation is not None and not _legacy_selected_relation.get() and (
             vocabulary_ref is None or vocabulary_fingerprint is None
         ):
             raise ValueError(
@@ -11005,7 +11012,21 @@ def _pinned_legacy_leaf(
                 raise ValueError(
                     f"INVALID_MODE: {command.name} {name} must be one of {', '.join(choices)}"
                 )
-        return leaf(*args, **historical)
+        # Released profiles offered selected relations before vocabulary review
+        # bindings existed. Preserve that contract only inside their pinned leaf;
+        # current callers still have to supply the exact review binding.
+        legacy_selected_relation = (
+            contract is not None
+            and command.name == "connect_memory"
+            and historical.get("operation") == "accept-relation"
+            and "requested_relation" in keep
+            and not {"vocabulary_ref", "vocabulary_fingerprint"} & keep
+        )
+        token = _legacy_selected_relation.set(legacy_selected_relation)
+        try:
+            return leaf(*args, **historical)
+        finally:
+            _legacy_selected_relation.reset(token)
 
     pinned.__name__ = getattr(leaf, "__name__", command.name)
     pinned.__qualname__ = getattr(leaf, "__qualname__", command.name)

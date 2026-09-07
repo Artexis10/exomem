@@ -39,6 +39,75 @@ from exomem import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+
+@pytest.mark.parametrize("profile", [f"hosted-alpha-agent-v{version}" for version in range(1, 5)])
+def test_legacy_selected_relation_commits_without_new_review_parameters(tmp_path, monkeypatch, profile):
+    from exomem import epistemic_graph, relation_registry, semantic_contract, writer_lease
+    from exomem.governance.principal import library_scope
+
+    source = "Knowledge Base/Notes/source.md"
+    target = "Knowledge Base/Notes/target.md"
+    for path, body, identity in (
+        (source, "See [[Knowledge Base/Notes/target]].", "00000000-0000-4000-8000-000000000001"),
+        (target, "A distinct target.", "00000000-0000-4000-8000-000000000002"),
+    ):
+        page = tmp_path / path
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(f"---\ntype: insight\nstatus: active\nexomem_id: {identity}\n---\n{body}\n")
+    with library_scope():
+        relation_registry.save_registry(
+            tmp_path,
+            {
+                "schema_version": 1,
+                "extensions": {
+                    "venue.hosts": {
+                        "parent": "relates_to",
+                        "description": "A venue hosts a recurring event.",
+                        "direction": "directed",
+                        "origins": ["markdown_relation", "semantic_relation"],
+                    }
+                },
+            },
+        )
+        epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    semantic_contract.build_corpus_context(tmp_path)
+    queue = commands.op_review_memory(tmp_path, mode="relation-queue")
+    candidate = next(
+        item for group in queue["groups"] for item in group["items"]
+        if item["from"] == source and item["to"] == target
+    )
+    legacy = next(
+        item for item in commands.product_commands_for_profile(profile, "rest")
+        if item.name == "connect_memory"
+    )
+    names = {parameter.name for parameter in legacy.params}
+    assert "requested_relation" in names
+    assert not {"vocabulary_ref", "vocabulary_fingerprint"} & names
+    arguments = {
+        "operation": "accept-relation",
+        "ref": candidate["ref"],
+        "path": source,
+        "expected_hash": candidate["source_content_hash"],
+        "expected_fingerprint": candidate["fingerprint"],
+        "requested_relation": "venue.hosts",
+        "why": "Apply the selected meaning through the released contract.",
+    }
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    with library_scope():
+        result = manager.invoke(
+            legacy, (tmp_path,), arguments,
+            idempotency_key="legacy-selected-relation", read_only=False,
+        )
+        # The historical invocation cannot change the current contract for
+        # subsequent calls in the same execution context.
+        with pytest.raises(ValueError, match="exact review binding"):
+            commands.op_connect_memory(tmp_path, **arguments)
+    assert result["state"] == "committed"
+    assert result["receipt_id"]
+    assert "- venue.hosts [[Knowledge Base/Notes/target]]" in (tmp_path / source).read_text()
+
+
 HISTORICAL_CANDIDATES = (
     "hosted-alpha-agent-v1",
     "hosted-alpha-agent-v2",

@@ -79,6 +79,14 @@ def test_mutation_admission_passes_the_writer_attachment_time(tmp_path: Path) ->
     assert authority.now == 123
 
 
+def test_restore_admission_uses_the_governed_restore_time(tmp_path: Path) -> None:
+    authority = _TimedAuthority(tmp_path, AuthorityStatus("v1", None, 0))
+
+    require_restore_admission(tmp_path, authority_factory=lambda _root: authority, now=123)
+
+    assert authority.now == 123
+
+
 def test_portability_refuses_before_offline_publication_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -3546,7 +3546,7 @@ class LeaseManager:
         receipt = _receipt_tag(key) if key else None
         vocabulary_binding = None
         vocabulary_replay_terminal = self.idempotency.completed_terminal(key, digest)
-        if "vocabulary_ref" in kwargs or "vocabulary_fingerprint" in kwargs:
+        if kwargs.get("vocabulary_ref") is not None or kwargs.get("vocabulary_fingerprint") is not None:
             # These fields only correlate an explicit canonical writer call
             # with an already reviewed choice.  They never carry a receipt,
             # resulting version, or permission supplied by the caller.

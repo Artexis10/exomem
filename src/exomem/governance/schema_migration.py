@@ -2075,8 +2075,8 @@ def restore_forward_migration_backup(
     try:
         from ..vocabulary_admission import require_restore_admission
 
-        require_restore_admission(root)
         moment = _bounded_integer(now, minimum=1)
+        require_restore_admission(root, now=moment)
         expected_plan = _require_digest(expected_plan_digest)
         expected_reference = _require_backup_reference(expected_backup_reference)
         with state_migration.governance_rollback_session(root) as session:

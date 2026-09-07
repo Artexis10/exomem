@@ -1608,12 +1608,13 @@ def downmigrate_enrolled_v4_store(
     try:
         from ..vocabulary_admission import require_restore_admission
 
-        require_restore_admission(root)
+        moment = _bounded_integer(now, minimum=1)
+        require_restore_admission(root, now=moment)
         with state_migration.governance_rollback_session(root) as marker_session:
             with receipts.exclusive_sequence(root):
                 return _downmigrate_enrolled_v4_store_locked(
                     root,
-                    now=now,
+                    now=moment,
                     marker_session=marker_session,
                 )
     except (

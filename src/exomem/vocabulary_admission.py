@@ -58,13 +58,16 @@ def require_restore_admission(
     vault_root: Path,
     *,
     authority_factory: Callable[[Path], VocabularyAuthority] = VocabularyAuthority,
+    now: int | None = None,
 ) -> RuntimeAdmission:
     """Refuse offline replacement of an activated v2 custody generation.
 
     There is no authority-preserving offline migration in this release.  A
     destination already under activated custody therefore cannot be replaced.
     """
-    admission = runtime_admission(Path(vault_root), authority_factory=authority_factory)
+    admission = runtime_admission(
+        Path(vault_root), authority_factory=authority_factory, now=now
+    )
     if admission.status.mode == "unavailable":
         raise VocabularyAdmissionError("VOCABULARY_AUTHORITY_UNAVAILABLE")
     if admission.status.mode == "v2":
