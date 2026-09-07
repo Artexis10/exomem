@@ -1,15 +1,19 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { EXOMEM_LME_ENV } from "../_guest_transport"
 import type { UnifiedSession } from "../../types/unified"
 import { ExomemProvider, prepareExomemRetirement } from "../exomem"
 
 const sessions: UnifiedSession[] = [
   {
-    sessionId: "answer_session_abs",
+    sessionId: "answer_session_abs-session-0",
     messages: [{ role: "user", content: "Tea < coffee." }],
     metadata: { date: "2025-01-02", formattedDate: "January 2, 2025" },
   },
   {
-    sessionId: "filler_session",
+    sessionId: "answer_session_abs-session-1",
     messages: [{ role: "assistant", content: "Coffee is available." }],
     metadata: { date: "2025-01-03" },
   },
@@ -65,6 +69,44 @@ function harness() {
 }
 
 describe("Exomem guest provider", () => {
+  test("singleton ingest calls and resumed providers preserve the upstream session ordinal", async () => {
+    const h = harness()
+    const create = () => new ExomemProvider({ ensureService: async () => h.service, post: h.post, doctor: h.doctor })
+    const provider = create()
+    await provider.ingest([sessions[0]], { containerTag: "case-run" })
+    await provider.ingest([sessions[1]], { containerTag: "case-run" })
+    await create().ingest([sessions[1]], { containerTag: "case-run" })
+    expect(String(h.posts[0].body.content)).toContain("Session ordinal: 1")
+    expect(String(h.posts[1].body.content)).toContain("Session ordinal: 2")
+    for (const field of ["content", "title", "slug", "tags", "source_type", "compile_guidance"]) {
+      expect(h.posts[2].body[field]).toEqual(h.posts[1].body[field])
+    }
+  })
+
+  test("provider evidence records its requested CPU environment", async () => {
+    const root = await mkdtemp(join(tmpdir(), "exomem-profile-evidence-"))
+    try {
+      const h = harness()
+      const service = { ...h.service, evidence_root: root }
+      const provider = new ExomemProvider({
+        ensureService: async () => service,
+        post: h.post,
+        doctor: h.doctor,
+        clearService: async () => {},
+      })
+      // Exercise real evidence persistence while replacing only service I/O.
+      ;(provider as unknown as { evidenceEnabled: boolean }).evidenceEnabled = true
+      await provider.ingest(sessions.slice(0, 1), { containerTag: "profile-evidence" })
+      const entries = await Promise.all((await readdir(root)).filter((name) => name.endsWith(".json"))
+        .map(async (name) => JSON.parse(await readFile(join(root, name), "utf8"))))
+      const manifest = entries.find((entry) => entry.event === "provider-manifest")
+      expect(manifest.data.deterministic_profile.requested_settings).toEqual(EXOMEM_LME_ENV)
+      expect(manifest.data.deterministic_profile.requested_settings.EXOMEM_DEVICE).toBe("cpu")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   test("declares sequential concurrency and accepts no API key", async () => {
     const h = harness()
     const provider = new ExomemProvider({
@@ -227,22 +269,16 @@ describe("Exomem guest provider", () => {
 
   test("the default retirement barrier performs and verifies a graph-current reconcile", async () => {
     const h = harness()
-    const calls: Array<{ path: string; body: Record<string, unknown> }> = []
+    const calls: Array<{ service: unknown; attemptId: string }> = []
 
-    await prepareExomemRetirement(h.service, async (_service, path, body) => {
-      calls.push({ path, body })
+    await prepareExomemRetirement(h.service, async (service, attemptId) => {
+      calls.push({ service, attemptId })
       return { graph_status: "refreshed" }
     })
 
     expect(calls).toHaveLength(1)
-    expect(calls[0].path).toBe("/api/maintain_memory")
-    expect(calls[0].body).toMatchObject({
-      mode: "reconcile",
-      dry_run: false,
-      rebuild_graph: false,
-    })
-    expect(calls[0].body.request_id).toMatch(/^[0-9a-f-]{36}$/)
-    expect(calls[0].body.idempotency_key).toBe(calls[0].body.request_id)
+    expect(calls[0].service).toBe(h.service)
+    expect(calls[0].attemptId).toMatch(/^[0-9a-f-]{36}$/)
 
     await expect(
       prepareExomemRetirement(h.service, async () => ({ graph_status: "unavailable" }))
@@ -254,9 +290,9 @@ describe("Exomem guest provider", () => {
     const requestIds: string[] = []
     let attempts = 0
 
-    await prepareExomemRetirement(h.service, async (_service, _path, body) => {
+    await prepareExomemRetirement(h.service, async (_service, attemptId) => {
       attempts += 1
-      requestIds.push(body.request_id as string)
+      requestIds.push(attemptId)
       if (attempts === 1) {
         return {
           graph_status: "unavailable",
@@ -302,16 +338,16 @@ describe("Exomem guest provider", () => {
     expect(ensured).toEqual(["container-b"])
   })
 
-  test("capture content matches the pinned MemoryBench vendor session projection", async () => {
+  test("capture content uses canonical neutral sessions without changing dataset text", async () => {
     const h = harness()
     const provider = new ExomemProvider({ ensureService: async () => h.service, post: h.post, doctor: h.doctor })
     await provider.ingest(sessions, { containerTag: "container" })
     const captures = h.posts.filter((call) => call.path === "/api/capture_source")
     expect(captures[0].body.content).toBe(
-      'Here is the date the following session took place: January 2, 2025\n\nHere is the session as a stringified JSON:\n[{"role":"user","content":"Tea &lt; coffee."}]'
+      'Session timestamp: 2025-01-02T00:00:00Z\nSession ordinal: 1\n\nuser: Tea < coffee.'
     )
     expect(captures[1].body.content).toBe(
-      'Here is the session as a stringified JSON:\n[{"role":"assistant","content":"Coffee is available."}]'
+      'Session timestamp: 2025-01-03T00:00:00Z\nSession ordinal: 2\n\nassistant: Coffee is available.'
     )
   })
 
@@ -482,4 +518,72 @@ describe("Exomem guest provider", () => {
     expect(ensureCalls).toBe(0)
     expect(h.cleared).toEqual(["container-a"])
   })
+})
+
+test("retirement waits for the measured pending rebuild and proves current before returning", async () => {
+  const h = harness()
+  let now = 0
+  const attempts: Array<{ id: string; timeout: number | undefined }> = []
+  await prepareExomemRetirement(h.service, async (_service, id, timeout) => {
+    attempts.push({ id, timeout })
+    return attempts.length === 1 ? { graph_status: "unavailable", graph_sync: "pending", graph_sync_code: "GRAPH_SYNC_REBUILD_IN_PROGRESS", graph_sync_checkpoint: "a".repeat(64) } : { graph_status: "current", graph_sync: "completed" }
+  }, { now: () => now, sleep: async ms => { now += ms } })
+  expect(attempts).toHaveLength(2)
+  expect(new Set(attempts.map(x => x.id)).size).toBe(2)
+  expect(now).toBe(5000)
+  expect(attempts.every(x => x.timeout! > 0 && x.timeout! <= 70000)).toBe(true)
+})
+
+test("retirement bounds an endless pending rebuild and refuses unowned queued repairs", async () => {
+  const h = harness()
+  let now = 0
+  let attempts = 0
+  await expect(prepareExomemRetirement(h.service, async () => {
+    attempts++
+    return { graph_status: "unavailable", graph_sync: "pending", graph_sync_code: "GRAPH_SYNC_REBUILD_IN_PROGRESS", graph_sync_checkpoint: "a".repeat(64) }
+  }, { now: () => now, sleep: async ms => { now += ms } })).rejects.toThrow("graph-current")
+  expect(now).toBe(120000)
+  expect(attempts).toBe(24)
+  for (const response of [
+    { graph_status: "unavailable", graph_sync: "pending", graph_sync_code: "GRAPH_SYNC_REPAIR_QUEUED", graph_sync_checkpoint: "a".repeat(64) },
+    { graph_status: "unavailable", graph_sync: "pending", graph_sync_code: "GRAPH_SYNC_REBUILD_IN_PROGRESS" },
+  ]) {
+    let calls = 0
+    await expect(prepareExomemRetirement(h.service, async () => { calls++; return response }, { now: () => 0, sleep: async () => { throw new Error("unexpected wait") } })).rejects.toThrow("graph-current")
+    expect(calls).toBe(1)
+  }
+})
+
+test("retirement gives the next subprocess only the remaining budget", async () => {
+  let now = 0
+  const deadlines: Array<number | undefined> = []
+  await prepareExomemRetirement(harness().service, async (_service, _id, timeout) => {
+    deadlines.push(timeout)
+    if (deadlines.length === 1) {
+      now += 69000
+      return { graph_status: "unavailable", graph_sync: "pending", graph_sync_code: "GRAPH_SYNC_REBUILD_IN_PROGRESS", graph_sync_checkpoint: "a".repeat(64) }
+    }
+    return { graph_status: "current" }
+  }, { now: () => now, sleep: async ms => { now += ms } })
+  expect(deadlines).toEqual([70000, 46000])
+})
+
+test.each([false, true])("indexing proves the graph before retirement or completed progress (failure=%s)", async fail => {
+  const h = harness()
+  const events: string[] = []
+  const provider = new ExomemProvider({
+    ensureService: async () => h.service,
+    doctor: async () => { events.push("doctor"); return actualDoctorReport() },
+    prepareRetirement: async () => { events.push("prepare"); if (fail) throw new Error("graph-current unproved") },
+    retireService: async () => { events.push("retire") },
+    clearAllServices: async () => { events.push("cleanup") },
+  })
+  const result = provider.awaitIndexing({ documentIds: ["document"] }, "container", () => events.push("completed"))
+  if (fail) {
+    await expect(result).rejects.toThrow("graph-current")
+    expect(events).toEqual(["doctor", "prepare", "cleanup"])
+  } else {
+    await result
+    expect(events).toEqual(["doctor", "prepare", "retire", "completed"])
+  }
 })

@@ -121,6 +121,30 @@
       "title": "CleanupRecordV2",
       "type": "object"
     },
+    "DoctorCheckEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "warn",
+            "fail"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ],
+      "title": "DoctorCheckEvidence",
+      "type": "object"
+    },
     "IngestRecordV2": {
       "additionalProperties": false,
       "properties": {
@@ -166,6 +190,99 @@
         "schema_version"
       ],
       "title": "IngestRecordV2",
+      "type": "object"
+    },
+    "IsolationProbeRecordV2": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "presence",
+            "cross_case",
+            "never_ingested"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "matched_hit_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Matched Hit Ids",
+          "type": "array"
+        },
+        "normalized_hit_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Normalized Hit Ids",
+          "type": "array"
+        },
+        "normalized_hit_shas": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Normalized Hit Shas",
+          "type": "array"
+        },
+        "protocol_version": {
+          "const": "1.0.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "query": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Query"
+        },
+        "record": {
+          "const": "isolation-probe",
+          "default": "isolation-probe",
+          "title": "Record",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 2,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "skipped": {
+          "anyOf": [
+            {
+              "const": "no-prior-case",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Skipped"
+        },
+        "top_k": {
+          "minimum": 1,
+          "title": "Top K",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "schema_version",
+        "kind",
+        "query",
+        "top_k",
+        "normalized_hit_ids",
+        "normalized_hit_shas",
+        "matched_hit_ids"
+      ],
+      "title": "IsolationProbeRecordV2",
       "type": "object"
     },
     "JudgeRecordV2": {
@@ -218,9 +335,123 @@
       "title": "JudgeRecordV2",
       "type": "object"
     },
+    "LaneReadiness": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "title": "Evidence",
+          "type": "string"
+        },
+        "fallback_detected": {
+          "default": false,
+          "title": "Fallback Detected",
+          "type": "boolean"
+        },
+        "lane": {
+          "title": "Lane",
+          "type": "string"
+        },
+        "method": {
+          "enum": [
+            "index-count",
+            "config-state",
+            "semantic-probe",
+            "memories-canary",
+            "doctor-check",
+            "readiness-unverifiable"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "requested": {
+          "title": "Requested",
+          "type": "boolean"
+        },
+        "verified": {
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "lane",
+        "requested",
+        "verified",
+        "method",
+        "evidence"
+      ],
+      "title": "LaneReadiness",
+      "type": "object"
+    },
+    "ReadinessRecordV2": {
+      "additionalProperties": false,
+      "properties": {
+        "checks": {
+          "items": {
+            "$ref": "#/$defs/DoctorCheckEvidence"
+          },
+          "title": "Checks",
+          "type": "array"
+        },
+        "lanes": {
+          "items": {
+            "$ref": "#/$defs/LaneReadiness"
+          },
+          "title": "Lanes",
+          "type": "array"
+        },
+        "profile": {
+          "const": "hybrid",
+          "title": "Profile",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": "1.0.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "record": {
+          "const": "readiness",
+          "default": "readiness",
+          "title": "Record",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 2,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "success": {
+          "title": "Success",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "schema_version",
+        "profile",
+        "success",
+        "checks",
+        "lanes"
+      ],
+      "title": "ReadinessRecordV2",
+      "type": "object"
+    },
     "SearchRecordV2": {
       "additionalProperties": false,
       "properties": {
+        "clock": {
+          "anyOf": [
+            {
+              "const": "product-wall-clock",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clock"
+        },
         "normalized_hit_ids": {
           "items": {
             "type": "string"
@@ -258,6 +489,18 @@
           "const": 2,
           "title": "Schema Version",
           "type": "integer"
+        },
+        "started_at_utc": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At Utc"
         },
         "top_k": {
           "minimum": 0,
@@ -329,7 +572,9 @@
             "answer": "#/$defs/AnswerRecordV2",
             "cleanup": "#/$defs/CleanupRecordV2",
             "ingest": "#/$defs/IngestRecordV2",
+            "isolation-probe": "#/$defs/IsolationProbeRecordV2",
             "judge": "#/$defs/JudgeRecordV2",
+            "readiness": "#/$defs/ReadinessRecordV2",
             "search": "#/$defs/SearchRecordV2",
             "timing": "#/$defs/TimingRecordV2"
           },
@@ -341,6 +586,12 @@
           },
           {
             "$ref": "#/$defs/SearchRecordV2"
+          },
+          {
+            "$ref": "#/$defs/IsolationProbeRecordV2"
+          },
+          {
+            "$ref": "#/$defs/ReadinessRecordV2"
           },
           {
             "$ref": "#/$defs/AnswerRecordV2"

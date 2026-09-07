@@ -42,6 +42,7 @@ tests/test_lme_cli_provider_choices.py
 tests/test_lme_dataset.py
 tests/test_lme_direct_lifecycle.py
 tests/test_lme_duplicate_session_ids.py
+tests/test_lme_exomem_capture.py
 tests/test_lme_hybrid_rag.py
 tests/test_lme_normalize.py
 tests/test_lme_providers.py
@@ -92,6 +93,7 @@ tests/test_memorybench_equivalence_projection.py
 tests/test_memorybench_export.py
 tests/test_memorybench_export_observations.py
 tests/test_memorybench_guest_observations.py
+tests/test_memorybench_provider_sources.py
 tests/test_memorybench_recording_proxy.py
 tests/test_memorybench_setup.py
 tests/test_protocol_budget.py

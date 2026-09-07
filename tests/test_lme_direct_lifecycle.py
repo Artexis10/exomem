@@ -2131,6 +2131,103 @@ def _feedback6_custodied_context(tmp_path: Path, label: str):
     return run, custody, context
 
 
+def test_exomem_retired_cases_do_not_reuse_cached_writer_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import doctor, writer_lease
+    from lme.providers.exomem_direct import ExomemDirectProvider
+    from lme.providers.lifecycle import run_provider_lifecycle
+    from lme.providers.registry import provider_spec
+    from membench.adapters.base import Profile
+    from dataclasses import replace
+
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "unrelated"))
+    unrelated = writer_lease.get_manager()
+    profile = Profile(name="runtime-only", settings={
+        "EXOMEM_DISABLE_EMBEDDINGS": "1", "EXOMEM_DISABLE_CLIP": "1",
+        "EXOMEM_DISABLE_WARMUP": "1", "EXOMEM_DISABLE_FILE_WATCHER": "1",
+    })
+    statuses = []
+    managers = []
+    handles = []
+    capabilities = []
+    # Reserve one descriptor throughout the test; never overwrite an unowned
+    # fd. Rebind it to each real held work inode to make OS reuse deterministic.
+    reserved_fd = os.open(os.devnull, os.O_RDONLY)
+    try:
+        for number in range(3):
+            run, custody, context = _feedback6_custodied_context(tmp_path, f"runtime-{number}")
+            os.dup2(custody.work.fd, reserved_fd)
+            os.close(custody.work.fd)
+            custody.work.fd = reserved_fd
+            context = replace(context, work_root=custody.work.capability_path)
+            capabilities.append(context.work_root)
+
+            def observe(_provider):
+                manager = writer_lease.get_manager()
+                managers.append(manager)
+                handles.append(manager.idempotency._owner_lock_handle)
+                statuses.append(doctor._check_idempotency_store().status)
+
+            try:
+                run_provider_lifecycle(
+                    provider=ExomemDirectProvider(), profile=profile, context=context,
+                    binding=provider_spec("exomem-source-only").runtime_binding,
+                    requested_provider="exomem-source-only", operation=observe, custody=custody,
+                )
+            finally:
+                custody.work.fd = os.dup(reserved_fd)
+                custody.close()
+                run.close()
+    finally:
+        os.close(reserved_fd)
+
+    assert len(set(capabilities)) < len(capabilities), "exercise OS directory descriptor reuse"
+    assert statuses == ["pass"] * 3
+    assert len({id(manager) for manager in managers}) == 3
+    assert all(handle.closed for handle in handles)
+    assert all(manager not in writer_lease._MANAGERS.values() for manager in managers)
+    assert writer_lease.get_manager() is unrelated
+    assert not unrelated.idempotency._owner_lock_handle.closed
+
+
+@pytest.mark.parametrize("setup_fails", [False, True])
+def test_exomem_writer_runtime_is_closed_even_after_partial_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, setup_fails: bool,
+) -> None:
+    from exomem import writer_lease
+    from lme.providers.exomem_direct import ExomemDirectProvider
+    from membench.adapters.base import AdapterEnvironmentError
+
+    run, custody, context = _feedback6_custodied_context(tmp_path, "partial-runtime")
+    provider = ExomemDirectProvider()
+    managers = []
+
+    def setup(workdir, _profile):
+        provider._adapter._set_env({"EXOMEM_WRITER_LEASE_STATE_DIR": str(workdir / "leases")})
+        managers.append(writer_lease.get_manager())
+        if setup_fails:
+            provider._adapter._restore_env()
+            raise RuntimeError("partial setup")
+
+    monkeypatch.setattr(provider._adapter, "setup", setup)
+    try:
+        if setup_fails:
+            with pytest.raises(AdapterEnvironmentError):
+                provider.setup(None, context)
+        else:
+            provider.setup(None, context)
+        handle = managers[0].idempotency._owner_lock_handle
+        provider.cleanup()
+        provider.cleanup()
+        assert handle.closed
+        assert managers[0].config not in writer_lease._MANAGERS
+        assert not (context.work_root / "leases").exists()
+    finally:
+        custody.close()
+        run.close()
+
+
 def test_feedback6_cleanup_orders_publish_reobserve_bind_register_then_retire(
     tmp_path: Path,
 ) -> None:

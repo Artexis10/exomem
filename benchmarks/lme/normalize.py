@@ -53,7 +53,7 @@ def neutral_tags() -> list[str]:
 
 
 def ingest_field_groups(
-    events: Iterable[ProtocolEvent], handle: CaseHandle
+    events: Iterable[ProtocolEvent], handle: CaseHandle, *, exomem_capture: bool = False,
 ) -> tuple[list[str], dict[str, object], dict[str, object]]:
     """Partition data content, static template text, and rendered harness fields."""
 
@@ -76,4 +76,15 @@ def ingest_field_groups(
             for ordinal in sorted(grouped)
         ],
     }
+    if exomem_capture:
+        from .exomem_capture import capture_payload
+
+        payloads = [capture_payload(grouped[ordinal]) for ordinal in sorted(grouped)]
+        authored_literals["titles"] = ["LongMemEval session {ordinal} {digest}"]
+        authored_literals["slugs"] = ["lme-session-{ordinal}-{digest}"]
+        authored_literals["capture_metadata"] = {"source_type": "session", "compile_guidance": False}
+        harness = {
+            "metadata": [{key: value for key, value in payload.items() if key != "content"} for payload in payloads],
+            "prefixes": [payload["content"].split("\n\n", 1)[0] for payload in payloads],
+        }
     return content, authored_literals, harness

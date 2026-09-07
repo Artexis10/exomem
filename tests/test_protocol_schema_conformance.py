@@ -282,6 +282,8 @@ def _memorybench_payloads() -> dict[str, dict]:
                 # optional blocks stay null and their labels stay in `missing`.
                 "search": None,
                 "ingest": None,
+                "namespace_pattern": None,
+                "readiness": None,
             }
         ],
         "session_normalization": None,
