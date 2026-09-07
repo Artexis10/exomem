@@ -32,6 +32,8 @@ POLL_INTERVAL_SECONDS = 0.25
 WARM_SENTINEL = "durable-closure-common-warm-sentinel"
 BASIC_MEMORY_VERSION = "0.23.2"
 BASIC_MEMORY_WHEEL_SHA256 = "a1679a16319d8a7fb9c0486033551a47dedc0fbae7f5da81444eb3c4bf0ccecb"
+BASIC_MEMORY_ALEMBIC_VERSION = "7f6a2b8c9d10"
+EXOMEM_LEXICAL_SCHEMA_VERSION = 10
 
 
 class AdapterFault(RuntimeError):
@@ -731,19 +733,18 @@ def _contained_path(root: Path, candidate: Path) -> Path:
     return resolved_candidate
 
 
-def _indexed_store(product: str, state: Path) -> Path | None:
+def _indexed_store(product: str, state: Path, vault: Path) -> Path | None:
     if product == "basic_memory":
         candidate = state / "config" / "memory.db"
         return _contained_path(state, candidate) if candidate.is_file() else None
     root = state / "state"
     if not root.is_dir():
         return None
-    candidates = [
-        _contained_path(root, path) for path in root.glob("*/.lexical.sqlite") if path.is_file()
-    ]
-    if len(candidates) > 1:
-        raise AdapterFault("ambiguous Exomem indexed stores under the disposable state root")
-    return candidates[0] if candidates else None
+    _contained_path(state, root)
+    from exomem.state_paths import vault_state_key
+
+    candidate = root / vault_state_key(vault) / ".lexical.sqlite"
+    return _contained_path(root, candidate) if candidate.is_file() else None
 
 
 def _schema_identity(conn: sqlite3.Connection, tables: Sequence[str]) -> dict[str, Any]:
@@ -766,6 +767,26 @@ def _require_columns(conn: sqlite3.Connection, table: str, required: set[str]) -
         raise AdapterFault(f"incompatible indexed-store schema: {table} missing {missing}")
 
 
+def _require_fts5_virtual_table(conn: sqlite3.Connection, table: str) -> None:
+    row = conn.execute("SELECT type, sql FROM sqlite_master WHERE name = ?", (table,)).fetchone()
+    statement = str(row[1] or "").casefold() if row else ""
+    if (
+        not row
+        or row[0] != "table"
+        or "create virtual table" not in statement
+        or "using fts5" not in statement
+    ):
+        raise AdapterFault(
+            f"incompatible indexed-store schema: {table} is not an FTS5 virtual table"
+        )
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return (
+        conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (table,)).fetchone() is not None
+    )
+
+
 def _fixture_paths(product: str, fixture: Mapping[str, Any]) -> list[str]:
     names = [str(page["path"]) for page in fixture["pages"]]
     if product == "exomem":
@@ -779,7 +800,7 @@ def inspect_indexed_fixture(
     """Read one coherent snapshot of the current disposable derived store."""
     if product not in {"basic_memory", "exomem"}:
         raise ValueError(f"unknown product {product}")
-    store = _indexed_store(product, state)
+    store = _indexed_store(product, state, vault)
     expected_paths = _fixture_paths(product, fixture)
     proof: dict[str, Any] = {
         "ready": False,
@@ -792,93 +813,121 @@ def inspect_indexed_fixture(
     if store is None:
         proof["reason"] = "indexed store is not present"
         return proof
+    conn = sqlite3.connect(f"{store.as_uri()}?mode=ro", uri=True)
     try:
-        with sqlite3.connect(f"{store.as_uri()}?mode=ro", uri=True) as conn:
-            conn.execute("BEGIN")
-            if product == "basic_memory":
-                _require_columns(conn, "project", {"id", "name", "path"})
-                _require_columns(conn, "entity", {"id", "file_path", "project_id"})
-                _require_columns(
-                    conn, "search_index", {"id", "file_path", "project_id", "entity_id", "type"}
-                )
-                proof["schema_identity"] = _schema_identity(
-                    conn, ("project", "entity", "search_index")
-                )
-                project_rows = conn.execute(
-                    "SELECT id, path FROM project WHERE name = 'main'"
-                ).fetchall()
-                expected_root = _contained_path(state, state / "home")
-                if (
-                    len(project_rows) != 1
-                    or _contained_path(state, Path(str(project_rows[0][1]))) != expected_root
+        conn.execute("BEGIN")
+        if product == "basic_memory":
+            if not _table_exists(conn, "alembic_version"):
+                if not any(
+                    _table_exists(conn, table) for table in ("project", "entity", "search_index")
                 ):
-                    proof["reason"] = (
-                        "configured main project does not bind to the disposable fixture root"
-                    )
+                    proof["reason"] = "indexed store is not initialized yet"
                     return proof
-                project_id = project_rows[0][0]
-                entities = [
-                    (int(row[0]), str(row[1]), int(row[2]))
-                    for row in conn.execute(
-                        "SELECT id, file_path, project_id FROM entity WHERE project_id = ?",
-                        (project_id,),
-                    )
-                ]
-                search_rows = [
-                    (int(row[0]), str(row[1]), int(row[2]), int(row[3]))
-                    for row in conn.execute(
-                        "SELECT id, file_path, project_id, entity_id FROM search_index "
-                        "WHERE type = 'entity' AND project_id = ?",
-                        (project_id,),
-                    )
-                ]
-                search = [(row[0], row[1], row[2]) for row in search_rows]
-                observed_paths = [row[1] for row in entities]
-                proof.update(
-                    {
-                        "observed_path_count": len(observed_paths),
-                        "observed_path_digest": _membership_digest(observed_paths),
-                        "proof_method": "entity/search_index identity multiset join",
-                        "identity_join_proof": "entity(id,file_path,project_id) = search_index(id,file_path,project_id); entity_id = id",
-                        "product_binding": {"project": "main", "project_id": project_id},
-                    }
+                raise AdapterFault("incompatible indexed-store schema: missing alembic_version")
+            version_rows = conn.execute("SELECT version_num FROM alembic_version").fetchall()
+            if version_rows != [(BASIC_MEMORY_ALEMBIC_VERSION,)]:
+                raise AdapterFault(
+                    "incompatible indexed-store schema: unsupported Basic Memory version"
                 )
-                proof["ready"] = (
-                    Counter(observed_paths) == Counter(expected_paths)
-                    and Counter(entities) == Counter(search)
-                    and all(row[0] == row[3] for row in search_rows)
+            _require_columns(conn, "project", {"id", "name", "path"})
+            _require_columns(conn, "entity", {"id", "file_path", "project_id"})
+            _require_columns(
+                conn, "search_index", {"id", "file_path", "project_id", "entity_id", "type"}
+            )
+            _require_fts5_virtual_table(conn, "search_index")
+            proof["schema_identity"] = _schema_identity(
+                conn, ("alembic_version", "project", "entity", "search_index")
+            )
+            project_rows = conn.execute(
+                "SELECT id, path FROM project WHERE name = 'main'"
+            ).fetchall()
+            expected_root = _contained_path(state, state / "home")
+            if (
+                len(project_rows) != 1
+                or _contained_path(state, Path(str(project_rows[0][1]))) != expected_root
+            ):
+                proof["reason"] = (
+                    "configured main project does not bind to the disposable fixture root"
                 )
-            else:
-                _require_columns(conn, "pages", {"path", "in_kb", "in_vault"})
-                _require_columns(conn, "fts", {"stemmed"})
-                proof["schema_identity"] = _schema_identity(conn, ("pages", "fts"))
-                prefix = "Knowledge Base/Reference/"
-                rows = conn.execute(
-                    "SELECT pages.rowid, pages.path, pages.in_kb, pages.in_vault, fts.rowid "
-                    "FROM pages LEFT JOIN fts ON fts.rowid = pages.rowid "
-                    "WHERE pages.path LIKE ?",
-                    (prefix + "%",),
-                ).fetchall()
-                observed_paths = [str(row[1]) for row in rows]
-                proof.update(
-                    {
-                        "observed_path_count": len(observed_paths),
-                        "observed_path_digest": _membership_digest(observed_paths),
-                        "proof_method": "pages/fts rowid identity join with recall admission",
-                        "identity_join_proof": "pages.rowid = fts.rowid",
-                        "product_binding": {
-                            "fixture_prefix": prefix,
-                            "vault": str(vault.resolve()),
-                        },
-                    }
+                return proof
+            project_id = project_rows[0][0]
+            entities = [
+                (int(row[0]), str(row[1]), int(row[2]))
+                for row in conn.execute(
+                    "SELECT id, file_path, project_id FROM entity WHERE project_id = ?",
+                    (project_id,),
                 )
-                proof["ready"] = Counter(observed_paths) == Counter(expected_paths) and all(
-                    row[2] == 1 and row[3] == 1 and row[4] is not None for row in rows
+            ]
+            search_rows = [
+                (int(row[0]), str(row[1]), int(row[2]), int(row[3]))
+                for row in conn.execute(
+                    "SELECT id, file_path, project_id, entity_id FROM search_index "
+                    "WHERE type = 'entity' AND project_id = ?",
+                    (project_id,),
                 )
+            ]
+            search = [(row[0], row[1], row[2]) for row in search_rows]
+            observed_paths = [row[1] for row in entities]
+            proof.update(
+                {
+                    "observed_path_count": len(observed_paths),
+                    "observed_path_digest": _membership_digest(observed_paths),
+                    "proof_method": "entity/search_index identity multiset join",
+                    "identity_join_proof": "entity(id,file_path,project_id) = search_index(id,file_path,project_id); entity_id = id",
+                    "product_binding": {"project": "main", "project_id": project_id},
+                }
+            )
+            proof["ready"] = (
+                Counter(observed_paths) == Counter(expected_paths)
+                and Counter(entities) == Counter(search)
+                and all(row[0] == row[3] for row in search_rows)
+            )
+        else:
+            if not _table_exists(conn, "meta"):
+                if not any(_table_exists(conn, table) for table in ("pages", "fts")):
+                    proof["reason"] = "indexed store is not initialized yet"
+                    return proof
+                raise AdapterFault("incompatible indexed-store schema: missing meta")
+            version = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+            if version != (str(EXOMEM_LEXICAL_SCHEMA_VERSION),):
+                raise AdapterFault(
+                    "incompatible indexed-store schema: unsupported Exomem lexical version"
+                )
+            _require_columns(conn, "pages", {"path", "in_kb", "in_vault"})
+            _require_columns(conn, "fts", {"stemmed"})
+            _require_fts5_virtual_table(conn, "fts")
+            proof["schema_identity"] = _schema_identity(conn, ("meta", "pages", "fts"))
+            prefix = "Knowledge Base/Reference/"
+            rows = conn.execute(
+                "SELECT pages.rowid, pages.path, pages.in_kb, pages.in_vault, fts.rowid "
+                "FROM pages LEFT JOIN fts ON fts.rowid = pages.rowid "
+                "WHERE pages.path LIKE ?",
+                (prefix + "%",),
+            ).fetchall()
+            observed_paths = [str(row[1]) for row in rows]
+            proof.update(
+                {
+                    "observed_path_count": len(observed_paths),
+                    "observed_path_digest": _membership_digest(observed_paths),
+                    "proof_method": "pages/fts rowid identity join with recall admission",
+                    "identity_join_proof": "pages.rowid = fts.rowid",
+                    "product_binding": {
+                        "fixture_prefix": prefix,
+                        "vault_state_key": store.parent.name,
+                    },
+                }
+            )
+            proof["ready"] = Counter(observed_paths) == Counter(expected_paths) and all(
+                row[2] == 1 and row[3] == 1 and row[4] is not None for row in rows
+            )
     except sqlite3.Error as error:
         raise AdapterFault(f"incompatible indexed-store schema: {error}") from error
-    proof.setdefault(
-        "reason", "fixture membership, identity join, or recall admission is incomplete"
+    finally:
+        conn.close()
+    proof["reason"] = (
+        None
+        if proof["ready"]
+        else "fixture membership, identity join, or recall admission is incomplete"
     )
     return proof
 
@@ -1270,18 +1319,26 @@ async def run_product(
             if missing:
                 raise AdapterFault(f"registered public MCP tools missing: {missing}")
             startup_deadline = time.perf_counter() + startup_timeout
-            # Discovery/initial indexing are pre-timing setup, never an inline reindex.
-            await _await_initial_index(setup_public, product=product, deadline=startup_deadline)
-            await _await_indexed_fixture(
-                product=product,
-                state=state,
-                vault=vault,
-                fixture=fixture,
-                deadline=startup_deadline,
-                evidence=indexed_corpus,
-            )
-            if product == "exomem":
-                await _await_exomem_mutation(setup_public, deadline=startup_deadline)
+            try:
+                async with asyncio.timeout(max(0.0, startup_deadline - time.perf_counter())):
+                    # Discovery/initial indexing are pre-timing setup, never an inline reindex.
+                    await _await_initial_index(
+                        setup_public, product=product, deadline=startup_deadline
+                    )
+                    await _await_indexed_fixture(
+                        product=product,
+                        state=state,
+                        vault=vault,
+                        fixture=fixture,
+                        deadline=startup_deadline,
+                        evidence=indexed_corpus,
+                    )
+                    if product == "exomem":
+                        await _await_exomem_mutation(setup_public, deadline=startup_deadline)
+            except TimeoutError as error:
+                raise AdapterFault("initial readiness exceeded startup timeout") from error
+            if time.perf_counter() >= startup_deadline:
+                raise AdapterFault("initial readiness exceeded startup timeout")
             clock.start_timing()
             result = await (
                 _run_basic_memory(public, marker, fixture, timeout)
