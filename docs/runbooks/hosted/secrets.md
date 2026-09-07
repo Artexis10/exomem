@@ -495,6 +495,23 @@ infra/scripts/apply_active_sops_secrets.py \
   --verify-only
 ```
 
+## Provisioner database source
+
+The production provisioner database URL has an exact BWS binding named
+`provisioner-database-url` in `infra/contracts/bws-production-v1.json`. Check
+that identity without printing its value:
+
+```bash
+bwsx-secret check --bindings infra/contracts/bws-production-v1.json provisioner-database-url
+```
+
+For subsequent handoffs, use `secret_handoff.py --source bws` with secret
+`provisioner_database_url` and destination `k3s.provisioner.database-url.active`.
+The source binding is custody, not proof that PostgreSQL already accepts the
+stored credential. A replacement is staged before provider cutover. Retain the
+previous ciphertext and signed registry, then follow the complete rotation
+procedure below; never apply this database Secret independently of that sequence.
+
 ## Future provisioner database rotation
 
 This procedure is deliberately future-only. Do not start it until an
