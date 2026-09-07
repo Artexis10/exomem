@@ -88,11 +88,14 @@ def test_checkpoint_yields_only_to_another_thread_for_the_same_vault(
 
     thread = threading.Thread(target=foreground)
     thread.start()
-    assert entered.wait(1)
-    with foreground_activity.background_scope(vault):
-        foreground_activity.checkpoint(vault)
-    release.set()
-    thread.join(1)
+    try:
+        assert entered.wait(5)
+        with foreground_activity.background_scope(vault):
+            foreground_activity.checkpoint(vault)
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
     assert slept and max(slept) <= 0.005
     assert sum(slept) <= 0.050001
 
@@ -105,9 +108,9 @@ def test_foreground_nesting_suppresses_its_background_scope_and_unwinds(tmp_path
     release = threading.Event()
     holder = threading.Thread(target=lambda: _hold_foreground(vault, entered, release))
     holder.start()
-    assert entered.wait(5)
-    monkeypatch.setattr(foreground_activity.time, "sleep", slept.append)
     try:
+        assert entered.wait(5)
+        monkeypatch.setattr(foreground_activity.time, "sleep", slept.append)
         with foreground_activity.background_scope(vault):
             with foreground_activity.foreground_scope(vault):
                 foreground_activity.checkpoint(vault)
@@ -159,8 +162,8 @@ def test_waiter_bypass_is_checked_outside_activity_lock(tmp_path, monkeypatch) -
 
     thread = threading.Thread(target=foreground)
     thread.start()
-    assert entered.wait(1)
     try:
+        assert entered.wait(5)
         with foreground_activity.background_scope(vault, waiter_bypass=bypass):
             foreground_activity.checkpoint(vault)
     finally:
@@ -187,25 +190,27 @@ def test_checkpoint_reuses_the_background_scope_identity(tmp_path, monkeypatch) 
     release = threading.Event()
     thread = threading.Thread(target=lambda: _hold_foreground(vault, entered, release))
     thread.start()
-    assert entered.wait(1)
-    monkeypatch.setattr(foreground_activity.time, "monotonic", lambda: clock[0])
+    try:
+        assert entered.wait(5)
+        monkeypatch.setattr(foreground_activity.time, "monotonic", lambda: clock[0])
 
-    def sleep(requested: float) -> None:
-        slept.append(requested)
-        clock[0] += requested
+        def sleep(requested: float) -> None:
+            slept.append(requested)
+            clock[0] += requested
 
-    monkeypatch.setattr(foreground_activity.time, "sleep", sleep)
+        monkeypatch.setattr(foreground_activity.time, "sleep", sleep)
 
-    with foreground_activity.background_scope(vault):
-        monkeypatch.setattr(
-            foreground_activity,
-            "_canonical",
-            lambda _root: (_ for _ in ()).throw(AssertionError("checkpoint resolved vault")),
-        )
-        foreground_activity.checkpoint(vault)
-
-    release.set()
-    thread.join(1)
+        with foreground_activity.background_scope(vault):
+            monkeypatch.setattr(
+                foreground_activity,
+                "_canonical",
+                lambda _root: (_ for _ in ()).throw(AssertionError("checkpoint resolved vault")),
+            )
+            foreground_activity.checkpoint(vault)
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
     assert slept and max(slept) <= 0.005
     assert sum(slept) <= 0.050001
 
@@ -224,9 +229,9 @@ def test_fork_child_replaces_an_inherited_held_activity_lock(tmp_path) -> None:
 
     holder = threading.Thread(target=hold_lock)
     holder.start()
-    assert acquired.wait(1)
-    child, read_fd = _fork_foreground_state(vault, checkpoint=False)
     try:
+        assert acquired.wait(5)
+        child, read_fd = _fork_foreground_state(vault, checkpoint=False)
         assert _read_forked_foreground_state(child, read_fd) == (False, False)
     finally:
         release.set()
@@ -242,8 +247,8 @@ def test_fork_child_drops_vanished_foreground_holders_and_background_scope(tmp_p
     release = threading.Event()
     holder = threading.Thread(target=lambda: _hold_foreground(vault, entered, release))
     holder.start()
-    assert entered.wait(1)
     try:
+        assert entered.wait(5)
         with foreground_activity.background_scope(vault):
             child, read_fd = _fork_foreground_state(vault, checkpoint=True)
         assert _read_forked_foreground_state(child, read_fd) == (False, False)
@@ -266,18 +271,20 @@ def test_interrupted_foreground_entry_restores_background_scope(tmp_path) -> Non
 
     holder = threading.Thread(target=hold_lock)
     holder.start()
-    assert acquired.wait(5)
-    interrupt = threading.Timer(0.05, lambda: os.kill(os.getpid(), signal.SIGINT))
-    interrupt.start()
+    interrupt: threading.Timer | None = None
     try:
+        assert acquired.wait(5)
+        interrupt = threading.Timer(0.05, lambda: os.kill(os.getpid(), signal.SIGINT))
+        interrupt.start()
         with foreground_activity.background_scope(vault):
             with pytest.raises(KeyboardInterrupt):
                 with foreground_activity.foreground_scope(vault):
                     pytest.fail("interrupted foreground entry reached its body")
             assert foreground_activity.background_active(vault)
     finally:
-        interrupt.cancel()
-        interrupt.join(5)
+        if interrupt is not None:
+            interrupt.cancel()
+            interrupt.join(5)
         release.set()
         holder.join(5)
     assert not holder.is_alive()
@@ -301,11 +308,14 @@ def test_checkpoint_stops_after_one_scheduling_overshoot(tmp_path, monkeypatch) 
         target=lambda: _hold_foreground(vault, entered, release), daemon=True
     )
     thread.start()
-    assert entered.wait(1)
-    with foreground_activity.background_scope(vault):
-        foreground_activity.checkpoint(vault)
-    release.set()
-    thread.join(1)
+    try:
+        assert entered.wait(5)
+        with foreground_activity.background_scope(vault):
+            foreground_activity.checkpoint(vault)
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
     assert sleeps == [0.005]
 
 
@@ -319,11 +329,14 @@ def test_checkpoint_resamples_waiter_after_a_pause(tmp_path, monkeypatch) -> Non
     release = threading.Event()
     thread = threading.Thread(target=lambda: _hold_foreground(vault, entered, release), daemon=True)
     thread.start()
-    assert entered.wait(1)
-    with foreground_activity.background_scope(vault, waiter_bypass=lambda: waiter[0]):
-        foreground_activity.checkpoint(vault)
-    release.set()
-    thread.join(1)
+    try:
+        assert entered.wait(5)
+        with foreground_activity.background_scope(vault, waiter_bypass=lambda: waiter[0]):
+            foreground_activity.checkpoint(vault)
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
     assert sleeps == [0.005]
 
 
