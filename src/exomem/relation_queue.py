@@ -111,9 +111,10 @@ def selected_relation(
         source_project = None
     if not isinstance(target_project, str):
         target_project = None
-    resolved = relation_registry.load_registry(vault_root).resolve(
+    resolved = semantic_contract_module._registry_resolution(
+        relation_registry.load_registry(vault_root),
         requested_relation,
-        project=source_project,
+        projects=(source_project,) if source_project is not None else (),
         page_type=page.page_type,
         source_kind=page.page_type,
         target_kind=target.page_type,

@@ -277,6 +277,101 @@ def test_question_bound_target_change_can_reconcile_after_projection(tmp_path):
     assert completed["decision"]["fingerprint"] == original.fingerprint
 
 
+def test_changed_evidence_preserves_applied_history_until_a_fresh_decision(tmp_path):
+    store, original = applying(tmp_path)
+    store.record_committed_receipt(
+        original,
+        terminal(),
+        resulting_versions={"registry:relations": "r2"},
+        applied_choice=decision(original, "propose-new")["choice"],
+    )
+    changed = item(version="v2", registry="r2")
+
+    historical = store.observe(changed)
+
+    assert historical["state"] == "pending"
+    assert historical["decision_currency"] == "refresh_required"
+    assert historical["decision"]["state"] == "applied"
+    assert historical["receipts"] == ["receipt-1"]
+    assert store.decide(changed, decision(changed, "propose-new"), actor="principal:test")[
+        "state"
+    ] == "proposed"
+
+
+def test_changed_evidence_cannot_overwrite_an_uncertain_application(tmp_path):
+    store = vocabulary_state.VocabularyState(tmp_path)
+    current = item()
+    store.observe(current)
+    store.decide(current, decision(current, "propose-new"), actor="principal:test")
+    store.begin_application(
+        current,
+        request_id="operation-1",
+        operation_id="operation-id",
+        expected_results={"registry:relations": "r2"},
+        choice=decision(current, "propose-new")["choice"],
+    )
+    store.record_application_uncertain(current, operation_id="operation-id")
+    changed = item(version="v2")
+
+    historical = store.observe(changed)
+
+    assert historical["state"] == "applying"
+    assert historical["decision_currency"] == "refresh_required"
+    assert historical["decision"]["application"]["state"] == "uncertain"
+    with pytest.raises(ValueError, match="VOCABULARY_APPLICATION_INVALID"):
+        store.decide(changed, decision(changed, "propose-new"), actor="principal:test")
+
+
+def test_ambiguous_result_currency_remains_historical(tmp_path):
+    def snapshot(version: str):
+        return make_item(
+            family="relation-type/v1",
+            signal="generic-pair",
+            targets={"entity:a": version, "entity:b": "t2"},
+            evidence=[Evidence("source:1", "v1", "origin:1")],
+            registry_hashes={"relations": "r1"},
+            projection_status="current",
+        )
+
+    store = vocabulary_state.VocabularyState(tmp_path)
+    first = snapshot("t1")
+    store.observe(first)
+    store.decide(first, decision(first, "propose-new"), actor="principal:test")
+    store.begin_application(
+        first,
+        request_id="operation-1",
+        expected_results={"entity:a": "t3"},
+        choice=decision(first, "propose-new")["choice"],
+    )
+    store.record_committed_receipt(
+        first,
+        terminal(receipt="receipt-1"),
+        resulting_versions={"entity:a": "t3"},
+        applied_choice=decision(first, "propose-new")["choice"],
+    )
+    second = snapshot("t2")
+    store.observe(second)
+    store.decide(second, decision(second, "propose-new"), actor="principal:test")
+    store.begin_application(
+        second,
+        request_id="operation-2",
+        expected_results={"entity:a": "t3"},
+        choice=decision(second, "propose-new")["choice"],
+    )
+    store.record_committed_receipt(
+        second,
+        terminal(request="operation-2", receipt="receipt-2"),
+        resulting_versions={"entity:a": "t3"},
+        applied_choice=decision(second, "propose-new")["choice"],
+    )
+
+    historical = store.observe(snapshot("t3"))
+
+    assert historical["state"] == "pending"
+    assert historical["decision_currency"] == "refresh_required"
+    assert historical["receipts"] == ["receipt-2"]
+
+
 def test_unrelated_evidence_cannot_be_resolved_by_an_old_application(tmp_path):
     store, original = applying(tmp_path)
     changed = item(version="new-source-content", registry="r2")

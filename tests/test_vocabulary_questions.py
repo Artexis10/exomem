@@ -158,8 +158,15 @@ def test_questions_deduplicate_only_when_anchor_and_question_match(tmp_path: Pat
     assert changed_content["item"]["fingerprint"] != first["item"]["fingerprint"]
 
 
+@pytest.mark.parametrize(
+    "origins",
+    [
+        pytest.param(["markdown_relation", "semantic_relation"], id="both-origins"),
+        pytest.param(["semantic_relation"], id="default-semantic-origin"),
+    ],
+)
 def test_relation_question_binds_the_exact_current_queue_pair(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, origins: list[str]
 ) -> None:
     source = _anchor(
         tmp_path,
@@ -182,7 +189,7 @@ def test_relation_question_binds_the_exact_current_queue_pair(
                         "parent": "relates_to",
                         "description": "A venue hosts a recurring event.",
                         "direction": "directed",
-                        "origins": ["markdown_relation", "semantic_relation"],
+                        "origins": origins,
                     }
                 },
             },
@@ -277,6 +284,17 @@ def test_relation_question_binds_the_exact_current_queue_pair(
     assert "- venue.hosts [[Knowledge Base/Notes/meaning-target]]" in (
         tmp_path / source
     ).read_text(encoding="utf-8")
+    context = commands.op_review_item_context(tmp_path, ref=item["ref"])
+    assert context["item"]["state"] == "applied"
+    assert context["item"]["decision_currency"] == "current"
+    assert context["item"]["receipts"] == [accepted["receipt_id"]]
+    state_path = VocabularyState(tmp_path).store.path
+    before_restart = state_path.read_bytes()
+    restarted_context = commands.op_review_item_context(tmp_path, ref=item["ref"])
+    assert restarted_context["item"]["state"] == "applied"
+    assert restarted_context["item"]["decision_currency"] == "current"
+    assert restarted_context["item"]["receipts"] == [accepted["receipt_id"]]
+    assert state_path.read_bytes() == before_restart
     with library_scope():
         epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
     graph = commands.op_graph_context(tmp_path, path=source, relation_types=["venue.hosts"])

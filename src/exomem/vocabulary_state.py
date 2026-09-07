@@ -15,7 +15,15 @@ from pathlib import Path
 from typing import Any
 
 from . import mutation_terminal, review_state
-from .vocabulary_workflow import WorkItem, _hash, _text, _versions, make_item, validate_decision
+from .vocabulary_workflow import (
+    Evidence,
+    WorkItem,
+    _hash,
+    _text,
+    _versions,
+    make_item,
+    validate_decision,
+)
 
 
 def _key(item: WorkItem) -> str:
@@ -26,11 +34,38 @@ def _currency(item: Mapping[str, Any]) -> dict[str, Any]:
     return {key: item[key] for key in ("fingerprint", "registry_hashes", "target_versions")}
 
 
+def _result_currency(item: WorkItem, versions: Mapping[str, str]) -> dict[str, Any]:
+    """Currency of the reader-derived state after a canonical mutation."""
+    return _currency(
+        make_item(
+            family=item.family,
+            signal=item.signal,
+            targets={ref: versions.get(ref, version) for ref, version in item.target_versions},
+            evidence=[
+                Evidence(entry.ref, versions.get(entry.ref, entry.version), entry.origin)
+                for entry in item.evidence
+            ],
+            registry_hashes={
+                key: versions.get(f"registry:{key}", version)
+                for key, version in item.registry_hashes
+            },
+            projection_status=item.projection_status,
+            continuation=item.continuation,
+            paths=dict(item.paths),
+            question=item.question,
+            logical_identity=item.logical_identity,
+            projection_currency=dict(item.projection_currency),
+        ).to_dict()
+    )
+
+
 def _view(section: dict[str, Any], ref: str) -> dict[str, Any]:
     stored = section["items"].get(ref)
     if not isinstance(stored, dict):
         raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh vocabulary review")
     decision = section["decisions"].get(f"{ref}:{stored['fingerprint']}")
+    exact_match = decision is not None
+    result_match = False
     if decision is None:
         # A canonical target edit changes the signal fingerprint. Retain its
         # bound application only for the exact expected resulting snapshot.
@@ -43,9 +78,27 @@ def _view(section: dict[str, Any], ref: str) -> dict[str, Any]:
         ]
         if len(matches) == 1:
             decision = matches[0]
+            result_match = True
+    if decision is None:
+        historical = [
+            record
+            for record in section["decisions"].values()
+            if record["item_ref"] == ref and record.get("state") in {"applying", "applied"}
+        ]
+        if historical:
+            decision = max(
+                historical,
+                key=lambda record: (
+                    str(record.get("updated_at") or ""),
+                    str(record.get("fingerprint") or ""),
+                ),
+            )
     current = decision is None or _currency(decision) == _currency(stored)
     if decision and decision["state"] == "applied":
-        current = current or decision["application"]["result_currency"] == _currency(stored)
+        current = current or (
+            (exact_match or result_match)
+            and decision["application"]["result_currency"] == _currency(stored)
+        )
     state = decision["state"] if decision else "pending"
     if not current and state not in {"deferred", "applying"}:
         state = "pending"
@@ -152,7 +205,13 @@ class VocabularyState:
 
         def update(section):
             current = _current(section, item)
-            if current["decision"] and current["decision"]["state"] in {"applying", "applied"}:
+            if current["decision"] and (
+                current["decision"]["state"] == "applying"
+                or (
+                    current["decision"]["state"] == "applied"
+                    and current["decision_currency"] == "current"
+                )
+            ):
                 raise ValueError(
                     "VOCABULARY_APPLICATION_INVALID: reconcile the bound application first"
                 )
@@ -198,24 +257,7 @@ class VocabularyState:
             "expected_results": versions,
             "choice_digest": _hash(choice),
             "reviewed_currency": _currency(item.to_dict()),
-            "result_currency": _currency(
-                make_item(
-                    family=item.family,
-                    signal=item.signal,
-                    targets={
-                        ref: versions.get(ref, version) for ref, version in item.target_versions
-                    },
-                    evidence=item.evidence,
-                    registry_hashes={
-                        key: versions.get(f"registry:{key}", version)
-                        for key, version in item.registry_hashes
-                    },
-                    projection_status=item.projection_status,
-                    question=item.question,
-                    logical_identity=item.logical_identity,
-                    projection_currency=dict(item.projection_currency),
-                ).to_dict()
-            ),
+            "result_currency": _result_currency(item, versions),
         }
 
         def update(section):
@@ -380,19 +422,7 @@ class VocabularyState:
                 if not isinstance(operation, dict):
                     raise ValueError("VOCABULARY_APPLICATION_INVALID: application is not bound")
                 operation["expected_results"] = versions
-                operation["result_currency"] = _currency(
-                    make_item(
-                        family=item.family,
-                        signal=item.signal,
-                        targets={ref: versions.get(ref, version) for ref, version in item.target_versions},
-                        evidence=item.evidence,
-                        registry_hashes={key: versions.get(f"registry:{key}", version) for key, version in item.registry_hashes},
-                        projection_status=item.projection_status,
-                        question=item.question,
-                        logical_identity=item.logical_identity,
-                        projection_currency=dict(item.projection_currency),
-                    ).to_dict()
-                )
+                operation["result_currency"] = _result_currency(item, versions)
                 if operation.get("step") == "edge":
                     binding["result_currency"] = operation["result_currency"]
                 return
@@ -403,24 +433,7 @@ class VocabularyState:
             ):
                 raise ValueError("VOCABULARY_APPLICATION_INVALID: application is not bound")
             binding["expected_results"] = versions
-            binding["result_currency"] = _currency(
-                make_item(
-                    family=item.family,
-                    signal=item.signal,
-                    targets={
-                        ref: versions.get(ref, version) for ref, version in item.target_versions
-                    },
-                    evidence=item.evidence,
-                    registry_hashes={
-                        key: versions.get(f"registry:{key}", version)
-                        for key, version in item.registry_hashes
-                    },
-                    projection_status=item.projection_status,
-                    question=item.question,
-                    logical_identity=item.logical_identity,
-                    projection_currency=dict(item.projection_currency),
-                ).to_dict()
-            )
+            binding["result_currency"] = _result_currency(item, versions)
 
         self._update(update, affected_refs=(item.ref,))
 

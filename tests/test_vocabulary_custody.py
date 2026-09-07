@@ -157,7 +157,8 @@ def test_downmigration_refuses_before_rollback_session(
 ) -> None:
     entered = False
 
-    def refuse(_root: Path) -> None:
+    def refuse(_root: Path, *, now: int) -> None:
+        assert now == 1
         raise VocabularyAdmissionError("VOCABULARY_RESTORE_REQUIRES_AUTHORITY")
 
     def rollback(_root: Path):  # noqa: ANN202
@@ -179,7 +180,8 @@ def test_forward_restore_refuses_before_rollback_session(
 ) -> None:
     entered = False
 
-    def refuse(_root: Path) -> None:
+    def refuse(_root: Path, *, now: int) -> None:
+        assert now == 1
         raise VocabularyAdmissionError("VOCABULARY_AUTHORITY_UNAVAILABLE")
 
     def rollback(_root: Path):  # noqa: ANN202

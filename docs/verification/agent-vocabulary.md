@@ -26,7 +26,7 @@ module versions inside a running server. Embeddings were disabled.
 | Confirmation-enabled organization task | Proposed Concept entries, then proposed and saved a Programme type after domain feedback distinguished real activities from abstract concepts; created the school and two programmes, enriched the existing cooperative, and saved a summary note | Assisted custom-type adoption, canonical validation, authored use, reuse, and enrichment succeeded; formal vocabulary review/decision correlation was not used |
 | Explicit compact workflow cadence | Saved a sourced insight; supplier and administrator queries retrieved it | The agent admitted substituting resolver results for the required review/decision cadence and ignoring the returned recovery route; this is an adoption failure, not a successful workflow trial |
 | Profile and navigation task with operating instructions first | Independently proposed Programme and grounded relations, then created the profiles and verified all supplied-goods, administration and narrowly defined hosting traversals after confirmation | The review and relation-decision paths were used; opaque entity-decision validation led to unbound entity creation, so this remains partial workflow acceptance |
-| Public decision-and-application workflow | Independently selected Programme, recorded decisions, registered the type and relations, created the school and programmes, and enriched existing profiles with canonical receipts; edge application exposed a missing paired-question route | Public application recovered from actionable validation feedback; the original edge attempt correctly remained uncommitted pending a decision covering both endpoints |
+| Public decision-and-application workflow | Independently selected Programme, recorded decisions, registered the type and relations, created the school and programmes, and enriched existing profiles; after the recorded contract repairs, committed all three approved directed relationships and retrieved their correct targets | Review, registration, enrichment, paired edge application and typed navigation worked through the public API; intermediate failures and technical restarts remain recorded |
 
 The third trial's Programme definition initially failed an alias collision and
 was corrected before saving. The programme records preserved their distinct
@@ -58,10 +58,41 @@ an alias added by the proposal, and a single-page question that could not bind
 application to a directed pair. The first two were repaired with exact entry
 shapes and bounded field-level feedback. The agent corrected its own definitions
 and anchored enrichment questions to the existing entities. These corrections did
-not relax canonical validation or supply domain choices. The edge gap requires a
-current relation-candidate question that reviews both visible endpoint versions
-and returns the canonical application route. Intermediate refusals and server
-restarts remain part of the trial's evidence.
+not relax canonical validation or supply domain choices. The edge gap was repaired
+with a current relation-candidate question that reviews both visible endpoint
+versions and returns the canonical application route. A further application
+refusal exposed a disagreement between the proposal's default `semantic_relation`
+origin and the selected-edge validator. Selection now uses the same registry
+resolver as canonical authored relations; unrelated-origin and project-scope
+refusals remain covered. Intermediate refusals and server restarts remain part
+of the trial's evidence.
+
+One restart deliberately disabled the file watcher to isolate graph drain.
+Graph synchronization converged, but relation review remained `warming` because
+it also requires a live canonical identity census. Both the current main
+baseline and the earlier pre-change baseline reproduced this behavior. Restarting
+the same cell with the watcher enabled made the queue available without changing
+its content or repairing database rows.
+
+The final continuation committed the supplier-to-school edge and both
+administrator-to-programme edges. The agent found that the school's summary
+mentioned its programme without a wikilink, recorded an enrichment decision,
+validated and applied that link, then reviewed and applied the resulting exact
+pair. Public typed queries returned the school for supplied goods and the
+correct distinct programme for each administrator. The two programme lifecycles,
+the existing cooperative identity and the narrowly worded monitoring-visit fact
+were preserved.
+
+Receipt readback exposed a final bookkeeping mismatch: expected post-write
+currency updated target versions but retained pre-write evidence versions.
+The public lifecycle regression now reads the completed review repeatedly and
+requires its applied state and canonical receipt. Later endpoint changes retain
+the historical decision and receipts with `refresh_required`; they cannot turn
+that history into current authority or overwrite an uncertain application.
+The preserved trial's older serialized list rows were rebuilt through the existing
+projection-maintenance seam. All 47 canonical files and the review ledger were
+unchanged; repeated list and exact-context reads then agreed on the historical
+receipts and explicit refresh requirement.
 
 ## Retrieval limits observed
 
