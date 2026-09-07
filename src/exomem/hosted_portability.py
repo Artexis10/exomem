@@ -1477,6 +1477,12 @@ def _repair_canonical_from_archive(
     authority after the migration journal has advanced.
     """
 
+    from .vocabulary_admission import VocabularyAdmissionError, require_restore_admission
+
+    try:
+        require_restore_admission(live)
+    except VocabularyAdmissionError as exc:
+        _fail(exc.code, "offline repair cannot replace the destination authority custody")
     verified = verify_export_archive(
         prepared.source_archive,
         expected_vault_id=prepared.manifest["vault_id"],
@@ -1578,6 +1584,12 @@ def publish_prepared_restore(
     _validate_context(prepared.context, allowed_states={"restore-staging"})
     staging = prepared.staging_root
     live = Path(live_root).absolute()
+    from .vocabulary_admission import VocabularyAdmissionError, require_restore_admission
+
+    try:
+        require_restore_admission(live)
+    except VocabularyAdmissionError as exc:
+        _fail(exc.code, "offline restore cannot replace the destination authority custody")
     if os.path.lexists(live):
         _fail("LIVE_VAULT_EXISTS", "restore publication never overlays a live vault")
     if not staging.is_dir() or staging.is_symlink():

@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from exomem import epistemic_graph, relation_queue
+from exomem import epistemic_graph, relation_queue, relation_registry
+from exomem.governance.principal import library_scope
 
 
 def _write_page(
@@ -268,6 +269,46 @@ def test_accept_refuses_when_target_deleted_between_read_and_accept(
             edit_memory=_unexpected_edit,
         )
     assert page.read_bytes() == before  # no bullet was appended
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        {"origins": ["wikilink"]},
+        {"origins": ["semantic_relation"], "scope": {"projects": ["other"]}},
+    ],
+    ids=["wikilink-only", "wrong-project"],
+)
+def test_selected_relation_retains_origin_and_project_scope(
+    tmp_path: Path, definition: dict[str, object]
+) -> None:
+    _seed(tmp_path)
+    with library_scope():
+        relation_registry.save_registry(
+            tmp_path,
+            {
+                "schema_version": 1,
+                "extensions": {
+                    "commerce.supplies_goods_to": {
+                        "parent": "relates_to",
+                        "description": "A supplier provides goods to a recipient.",
+                        "direction": "directed",
+                        **definition,
+                    }
+                },
+            },
+        )
+
+    with pytest.raises(ValueError, match="INVALID_SELECTED_RELATION"):
+        relation_queue.selected_relation(
+            tmp_path,
+            {
+                "from": "Knowledge Base/Notes/Insights/alpha.md",
+                "to": "Knowledge Base/Notes/Insights/beta.md",
+                "relation_type": "relates_to",
+            },
+            "commerce.supplies_goods_to",
+        )
 
 
 def test_read_never_writes_to_the_vault(tmp_path: Path) -> None:

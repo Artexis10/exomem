@@ -256,6 +256,116 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _ensure_vocabulary_provenance_schema(conn: sqlite3.Connection) -> None:
+    """Add bounded vocabulary provenance checkpoints to the existing sidecar."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vocabulary_provenance_checkpoints (
+            target_path TEXT PRIMARY KEY,
+            target_hash TEXT NOT NULL CHECK(length(target_hash) = 64),
+            graph_generation TEXT NOT NULL CHECK(length(graph_generation) BETWEEN 1 AND 128),
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            after_path TEXT NOT NULL,
+            complete INTEGER NOT NULL CHECK(complete IN (0, 1)),
+            evidence_digest TEXT CHECK(evidence_digest IS NULL OR length(evidence_digest) = 64),
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vocabulary_provenance_sources (
+            target_path TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            source_ref TEXT NOT NULL,
+            source_hash TEXT NOT NULL CHECK(length(source_hash) = 64),
+            declared INTEGER NOT NULL CHECK(declared IN (0, 1)),
+            component TEXT NOT NULL,
+            PRIMARY KEY(target_path, source_path),
+            FOREIGN KEY(target_path) REFERENCES vocabulary_provenance_checkpoints(target_path)
+                ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vocabulary_provenance_aliases (
+            target_path TEXT NOT NULL,
+            alias TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            PRIMARY KEY(target_path, alias, source_path),
+            FOREIGN KEY(target_path, source_path)
+                REFERENCES vocabulary_provenance_sources(target_path, source_path)
+                ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS vocabulary_provenance_alias_lookup "
+        "ON vocabulary_provenance_aliases(target_path, alias)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS vocabulary_provenance_component_lookup "
+        "ON vocabulary_provenance_sources(target_path, component, source_path)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vocabulary_provenance_components (
+            target_path TEXT NOT NULL,
+            component TEXT NOT NULL,
+            parent TEXT NOT NULL,
+            is_root INTEGER NOT NULL DEFAULT 1 CHECK(is_root IN (0, 1)),
+            rank INTEGER NOT NULL DEFAULT 0,
+            first_path TEXT,
+            first_ref TEXT,
+            first_hash TEXT,
+            declared_path TEXT,
+            declared_ref TEXT,
+            declared_hash TEXT,
+            PRIMARY KEY(target_path, component),
+            FOREIGN KEY(target_path) REFERENCES vocabulary_provenance_checkpoints(target_path)
+                ON DELETE CASCADE
+        )
+        """
+    )
+    component_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(vocabulary_provenance_components)")
+    }
+    if "is_root" not in component_columns:
+        conn.execute(
+            "ALTER TABLE vocabulary_provenance_components "
+            "ADD COLUMN is_root INTEGER NOT NULL DEFAULT 1 CHECK(is_root IN (0, 1))"
+        )
+        conn.execute(
+            "UPDATE vocabulary_provenance_components SET is_root = (parent = component)"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS vocabulary_provenance_roots "
+        "ON vocabulary_provenance_components(target_path, is_root, first_path)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS vocabulary_provenance_retired "
+        "(target_path TEXT PRIMARY KEY, needs_cleanup INTEGER NOT NULL DEFAULT 1 CHECK(needs_cleanup IN (0, 1)))"
+    )
+    retired_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(vocabulary_provenance_retired)")
+    }
+    if "needs_cleanup" not in retired_columns:
+        conn.execute(
+            "ALTER TABLE vocabulary_provenance_retired "
+            "ADD COLUMN needs_cleanup INTEGER NOT NULL DEFAULT 1 CHECK(needs_cleanup IN (0, 1))"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS vocabulary_provenance_retired_pending "
+        "ON vocabulary_provenance_retired(needs_cleanup)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS vocabulary_provenance_active "
+        "(logical_path TEXT PRIMARY KEY, target_path TEXT NOT NULL)"
+    )
+    conn.commit()
+
+
 def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
     with reserved_paths._subsystem_authority_scope("deferred_index"):
         return _sqlite_connect_owned(database, *args, **kwargs)
@@ -434,6 +544,7 @@ def _connect_created_owned(
             "ALTER TABLE full_upserts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
         )
     _ensure_derived_batch_schema(conn)
+    _ensure_vocabulary_provenance_schema(conn)
     if publish:
         try:
             reserved_paths._publish_sqlite_owner_family(

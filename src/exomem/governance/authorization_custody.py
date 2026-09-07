@@ -54,7 +54,7 @@ _KEYRING_FIELDS = frozenset(
     }
 )
 _KEY_FIELDS = frozenset({"key_id", "key", "not_before", "not_after"})
-_CONTROL_FIELDS = frozenset(
+_CONTROL_FIELDS_V1 = frozenset(
     {
         "version",
         "keyring_id",
@@ -74,7 +74,9 @@ _CONTROL_FIELDS = frozenset(
         "mac",
     }
 )
-_CONTROL_MAC_DOMAIN = b"exomem.authorization-session.control/v1"
+_CONTROL_FIELDS_V2 = _CONTROL_FIELDS_V1 | frozenset({"vocabulary_authority_floor"})
+_CONTROL_MAC_DOMAIN_V1 = b"exomem.authorization-session.control/v1"
+_CONTROL_MAC_DOMAIN_V2 = b"exomem.authorization-session.control/v2"
 _ATTACHMENT_DOMAIN = b"exomem.authorization-session.attachment/v1"
 _DETACH_ACK_MAC_DOMAIN = b"exomem.authorization-session.detach-ack/v1"
 _HOST_REGISTRY_MAC_DOMAIN = b"exomem.authorization-session.host-registry/v1"
@@ -189,6 +191,7 @@ class AuthorizationControlRecord:
     issued_at: int
     expires_at: int
     signing_key_id: str
+    vocabulary_authority_floor: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,17 +624,22 @@ def control_attestation_digest(record: AuthorizationControlRecord) -> str:
 
     if not isinstance(record, AuthorizationControlRecord):
         raise AuthorizationCustodyUnavailable
+    fields = (
+        str(record.version).encode("ascii"),
+        record.keyring_id.encode("utf-8"),
+        record.cell_id.encode("utf-8"),
+        record.logical_vault_id.encode("utf-8"),
+        record.registry_attachment_id.encode("utf-8"),
+        str(record.attachment_epoch).encode("ascii"),
+    )
+    if record.version == 2:
+        fields += (str(record.vocabulary_authority_floor).encode("ascii"),)
     return hashlib.sha256(
         _framed(
-            b"exomem.authorization-session.control-attestation-basis/v1",
-            (
-                str(record.version).encode("ascii"),
-                record.keyring_id.encode("utf-8"),
-                record.cell_id.encode("utf-8"),
-                record.logical_vault_id.encode("utf-8"),
-                record.registry_attachment_id.encode("utf-8"),
-                str(record.attachment_epoch).encode("ascii"),
-            ),
+            b"exomem.authorization-session.control-attestation-basis/v2"
+            if record.version == 2
+            else b"exomem.authorization-session.control-attestation-basis/v1",
+            fields,
         )
     ).hexdigest()
 
@@ -640,9 +648,7 @@ def _control_mac_input(value: dict[str, object]) -> bytes:
     activation_store = value["activation_store_id"]
     activation_epoch = value["activation_epoch"]
     activation_digest = value["activation_state_digest"]
-    return _framed(
-        _CONTROL_MAC_DOMAIN,
-        (
+    fields = (
             str(value["version"]).encode("ascii"),
             str(value["keyring_id"]).encode("utf-8"),
             str(value["cell_id"]).encode("utf-8"),
@@ -657,9 +663,11 @@ def _control_mac_input(value: dict[str, object]) -> bytes:
             str(value["serving_membership_digest"]).encode("ascii"),
             str(value["issued_at"]).encode("ascii"),
             str(value["expires_at"]).encode("ascii"),
-            str(value["signing_key_id"]).encode("utf-8"),
-        ),
+        str(value["signing_key_id"]).encode("utf-8"),
     )
+    if value["version"] == 2:
+        fields += (str(value["vocabulary_authority_floor"]).encode("ascii"),)
+    return _framed(_CONTROL_MAC_DOMAIN_V2 if value["version"] == 2 else _CONTROL_MAC_DOMAIN_V1, fields)
 
 
 def _parse_key(value: object) -> AuthorizationVerifierKey:
@@ -741,10 +749,12 @@ def parse_control_record(
         raise
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
         raise AuthorizationCustodyUnavailable from None
-    if not isinstance(value, dict) or set(value) != _CONTROL_FIELDS:
+    if not isinstance(value, dict):
         raise AuthorizationCustodyUnavailable
-    version = value["version"]
-    if isinstance(version, bool) or version != 1:
+    version = value.get("version")
+    if type(version) is not int or version not in {1, 2}:
+        raise AuthorizationCustodyUnavailable
+    if set(value) != (_CONTROL_FIELDS_V2 if version == 2 else _CONTROL_FIELDS_V1):
         raise AuthorizationCustodyUnavailable
 
     keyring_id = _bounded_identifier(value["keyring_id"])
@@ -787,6 +797,12 @@ def parse_control_record(
         activation_epoch = None
         activation_state_digest = None
 
+    floor = 1 if version == 1 else value["vocabulary_authority_floor"]
+    if isinstance(floor, bool) or floor not in {1, 2}:
+        raise AuthorizationCustodyUnavailable
+    if version == 2 and (floor != 2 or not enrolled or activation_epoch is None):
+        raise AuthorizationCustodyUnavailable
+
     signing_key_id = _bounded_identifier(value["signing_key_id"])
     signing_key = next(
         (key for key in keyring.accepted_keys if key.key_id == signing_key_id),
@@ -808,7 +824,7 @@ def parse_control_record(
         raise AuthorizationCustodyUnavailable
 
     return AuthorizationControlRecord(
-        version=1,
+        version=version,
         keyring_id=keyring_id,
         cell_id=cell_id,
         logical_vault_id=logical_vault_id,
@@ -823,6 +839,7 @@ def parse_control_record(
         issued_at=issued_at,
         expires_at=expires_at,
         signing_key_id=signing_key_id,
+        vocabulary_authority_floor=floor,
     )
 
 
@@ -937,7 +954,7 @@ def _load_optional_serving_membership(
 
 
 def _control_value(record: AuthorizationControlRecord) -> dict[str, object]:
-    return {
+    value = {
         "version": record.version,
         "keyring_id": record.keyring_id,
         "cell_id": record.cell_id,
@@ -954,6 +971,9 @@ def _control_value(record: AuthorizationControlRecord) -> dict[str, object]:
         "expires_at": record.expires_at,
         "signing_key_id": record.signing_key_id,
     }
+    if record.version == 2:
+        value["vocabulary_authority_floor"] = record.vocabulary_authority_floor
+    return value
 
 
 def _signed_control_bytes(
@@ -2157,6 +2177,7 @@ def stage_standalone_v3_custody(
                 attachment_id=attachment_id,
                 current_time=current_time,
             )
+            _require_vocabulary_identity_unused(control_path, keyring.logical_vault_id)
             _publish_private_file(keyring_path, _keyring_bytes(keyring))
         else:
             keyring = parse_keyring(loaded.data)
@@ -2255,6 +2276,7 @@ def enroll_standalone_v3_migration(
             raise AuthorizationCustodyUnavailable
 
         if control_loaded is None:
+            _require_vocabulary_identity_unused(control_path, keyring.logical_vault_id)
             provisional_control = AuthorizationControlRecord(
                 version=1,
                 keyring_id=keyring.keyring_id,
@@ -2454,6 +2476,7 @@ def complete_standalone_v4_migration(
         or control.activation_state_digest != target.activation_state_digest
     ):
         raise AuthorizationCustodyUnavailable
+    _require_vocabulary_identity_unused(external.control_path, control.logical_vault_id)
 
     target_control: AuthorizationControlRecord
     if control.serving_membership_epoch == 1:
@@ -2902,6 +2925,7 @@ def begin_standalone_attachment_drain(
         attachment_control=True,
         attachment_now=now,
     ):
+        _require_v1_vocabulary_transition(root, now=now)
         return _transition_standalone_attachment_membership(
             root,
             expected_control=expected_control,
@@ -2931,6 +2955,7 @@ def acknowledge_standalone_attachment_drain(
         attachment_control=True,
         attachment_now=now,
     ):
+        _require_v1_vocabulary_transition(root, now=now)
         return _transition_standalone_attachment_membership(
             root,
             expected_control=expected_control,
@@ -2953,6 +2978,7 @@ def prepare_standalone_attachment_transfer(
 
     source = Path(source_vault_root)
     current_time = _bounded_time(now)
+    _require_v1_vocabulary_transition(source, now=current_time)
     custody = load_authorization_custody(source, now=current_time)
     if custody.control != expected_control or custody.serving_membership is None:
         raise AuthorizationCustodyUnavailable
@@ -3097,6 +3123,7 @@ def _complete_standalone_attachment_transfer(
         or detached.target_registry_attachment_id != target_attachment
     ):
         raise AuthorizationCustodyUnavailable
+    _require_v1_vocabulary_artifacts_absent(external.control_path, control)
     membership_path, membership_raw, replica_id = _standalone_membership_file(
         target,
         external=external,
@@ -3308,6 +3335,38 @@ def complete_standalone_attachment_transfer(
             )
 
 
+def _require_v1_vocabulary_transition(vault_root: Path, *, now: int) -> None:
+    """Reject custody relocation once v2 authority has a durable generation."""
+    from ..vocabulary_authority import transition_status
+
+    if transition_status(Path(vault_root), now=_bounded_time(now)) != "v1":
+        raise AuthorizationCustodyUnavailable
+
+
+def _require_vocabulary_identity_unused(control_path: Path, logical_vault_id: str) -> None:
+    """Do not provision a new custody identity over a retained v2 sidecar."""
+    from ..vocabulary_authority import authority_artifact_paths
+
+    marker, database = authority_artifact_paths(Path(control_path), logical_vault_id)
+    for artifact in (
+        marker,
+        database,
+        *(database.with_name(f"{database.name}{suffix}") for suffix in ("-journal", "-wal", "-shm")),
+    ):
+        if os.path.lexists(artifact):
+            raise AuthorizationCustodyUnavailable
+
+
+def _require_v1_vocabulary_artifacts_absent(
+    control_path: Path, control: AuthorizationControlRecord
+) -> None:
+    """Bind an attachment transition to an artifact-free signed v1 control."""
+
+    if control.version != 1 or control.vocabulary_authority_floor != 1:
+        raise AuthorizationCustodyUnavailable
+    _require_vocabulary_identity_unused(control_path, control.logical_vault_id)
+
+
 def _clone_publication_barrier(point: str) -> None:
     """Crash-injection seam between durable exact-v4 clone effects."""
 
@@ -3403,6 +3462,7 @@ def _clone_standalone_exact_v4_custody(
             attachment_id=attachment_id,
             current_time=current_time,
         )
+        _require_vocabulary_identity_unused(control_path, keyring.logical_vault_id)
         _publish_private_file(keyring_path, _keyring_bytes(keyring))
     else:
         keyring = parse_keyring(keyring_loaded.data)
@@ -3592,6 +3652,7 @@ def provision_standalone_custody(
                 current_time=current_time,
             )
             encoded_keyring = _keyring_bytes(keyring)
+            _require_vocabulary_identity_unused(control_path, keyring.logical_vault_id)
             _publish_private_file(keyring_path, encoded_keyring)
 
         if not keyring.active_key.not_before <= current_time < keyring.active_key.not_after:

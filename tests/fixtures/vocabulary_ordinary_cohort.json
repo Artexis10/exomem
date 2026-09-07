@@ -1,0 +1,56 @@
+{
+  "scenario": "ordinary-report-organization",
+  "sources": [
+    {
+      "slug": "cooperative-report",
+      "url": "https://cooperative.example/reports/2026-08",
+      "title": "Cooperative report",
+      "body": "Cedar Cooperative supplies chilled produce to Brook School under a three-year delivery contract. Deliveries occur twice weekly. Separately, the Tidal Commons watershed restoration programme began in 2024 and is administered by Cedar Cooperative. The programme has its own public reporting cycle and 2027 end date. The report mentions a presenter named Ada once in a closing thank-you; no further identity or role is supplied."
+    },
+    {
+      "slug": "school-procurement",
+      "url": "https://school.example/procurement/annual-review",
+      "title": "School procurement review",
+      "body": "Brook School purchases chilled produce from Cedar Cooperative, which is its contracted produce supplier. This procurement review was written by the school independently of the cooperative's report. It also records that the school's grounds host monitoring visits for the Tidal Commons programme, administered by Cedar Cooperative. A separate River Classroom education programme began in 2025; Brook School administers it and expects annual reporting through 2028."
+    },
+    {
+      "slug": "programme-register",
+      "url": "https://civic.example/programmes/2026",
+      "title": "Civic programme register",
+      "body": "Tidal Commons is an ongoing watershed restoration programme, administered by Cedar Cooperative, with start year 2024 and end year 2027. River Classroom is an ongoing environmental education programme, administered by Brook School, with start year 2025 and end year 2028. Both programmes have stable programme identities and annual reports. They are activities with lifecycles, not legal organizations. The register lists them on the same page; it records no delivery, funding, dependence, or partnership relationship between the two programmes."
+    }
+  ],
+  "existing_entities": [
+    {
+      "title": "Cedar Cooperative",
+      "entity_type": "organization",
+      "aliases": [
+        "Cedar Co-op"
+      ],
+      "body": "A regional food cooperative."
+    }
+  ],
+  "evidence_expectations": {
+    "supplier": "Cedar Cooperative supplies Brook School with chilled produce twice weekly under a three-year contract.",
+    "programme_administrators": {
+      "Tidal Commons": "Cedar Cooperative",
+      "River Classroom": "Brook School"
+    },
+    "programme_lifecycles": {
+      "Tidal Commons": [
+        2024,
+        2027
+      ],
+      "River Classroom": [
+        2025,
+        2028
+      ]
+    },
+    "identity_reuse": "Cedar Co-op and Cedar Cooperative identify the same existing organization.",
+    "incidental_name": "The one mention of Ada supplies no independently useful identity or role.",
+    "unsupported_edge": "Co-listing the two programmes supplies no partnership, dependence, delivery, or funding relationship."
+  },
+  "evaluation_rule": "Judge supported identities, meanings and subsequent retrieval; no required count of new entities, types, or edges.",
+  "ordinary_prompt": "Please organize the information in these reports so we can keep track of the cooperative, the school, and the ongoing programmes over time. Preserve the facts and useful connections, and make it easy to answer who supplies Brook School, who administers each programme, and what we know about Cedar Co-op. You may make appropriate knowledge-base changes.",
+  "profile_prompt": "Build durable profiles of Cedar Cooperative, Brook School, Tidal Commons, and River Classroom from these reports. Keep institutions distinct from the real programmes they run. I need to revisit each independently, see its timeline and responsible organisation, and navigate the supplied-goods and administration relationships. Reuse what already exists and leave unsupported people and connections alone. You may make appropriate knowledge-base changes."
+}

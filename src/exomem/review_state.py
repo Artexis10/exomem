@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 #: Schemas this runtime can READ. An older file is migrated in memory on load
 #: and rewritten at the current version on the next write; anything newer is
 #: refused, which is the correct fail-closed posture for a vault-local file
@@ -29,7 +30,9 @@ SCHEMA_VERSION = 3
 #: offer can be recorded durably; and an adaptation-reset epoch that excludes
 #: pre-reset dismissals from a new offer. A v2 file migrates forward silently;
 #: a v2 RUNTIME refuses a v3 file, which is the point of the bump.
-_READABLE_SCHEMA_VERSIONS = frozenset({1, 2, 3})
+# v4 keeps vocabulary work and decisions separate from integrity dispositions.
+# Old readers refuse it rather than dropping durable consideration state.
+_READABLE_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4})
 STATE_FILENAME = ".review-state.json"
 #: Raised from 4 MiB with the sectioned schema, and MEASURED rather than picked.
 #:
@@ -239,11 +242,13 @@ def registered_families() -> frozenset[str]:
     """
     from . import attention as attention_module
     from . import corpus_aware as corpus_aware_module
+    from .vocabulary_notifications import REVIEW_FAMILIES
 
     return frozenset(
         {
             *attention_module._TRIAGEABLE_CATEGORIES,
             *corpus_aware_module._WRITE_ADVISORY_KINDS,
+            *REVIEW_FAMILIES.values(),
         }
     )
 
@@ -686,7 +691,10 @@ class ReviewStateStore:
                 records[key] = record
                 decision = record
             _compact_if_due(payload, now=moment, path=self.path)
-            self._write(payload)
+            self._write(
+                payload, vocabulary_refs=(), vocabulary_families=(),
+                vocabulary_review_id=review_id,
+            )
         return {
             "item_id": review_id,
             "ref": review_ref(review_id),
@@ -731,6 +739,11 @@ class ReviewStateStore:
         with _LOCK:
             payload = self.load()
             dispositions = payload["dispositions"]
+            from .vocabulary_notifications import PROJECTION_FAMILIES
+
+            vocabulary_families = (
+                (family,) if family in PROJECTION_FAMILIES else ()
+            )
             if disposition == "normal":
                 record = dispositions.pop(family, None)
                 stored: dict[str, Any] = {
@@ -746,7 +759,9 @@ class ReviewStateStore:
                 # without erasing the durable review history.
                 payload["adaptation_resets"][family] = timestamp
                 _compact_if_due(payload, now=moment, path=self.path)
-                self._write(payload)
+                self._write(
+                    payload, vocabulary_refs=(), vocabulary_families=vocabulary_families
+                )
                 return stored
             stored = {
                 "family": family,
@@ -765,7 +780,7 @@ class ReviewStateStore:
                 stored["quiet_offered_at"] = previous["quiet_offered_at"]
             dispositions[family] = stored
             _compact_if_due(payload, now=moment, path=self.path)
-            self._write(payload)
+            self._write(payload, vocabulary_refs=(), vocabulary_families=vocabulary_families)
         return dict(stored)
 
     def arm_quiet_offer(
@@ -814,7 +829,7 @@ class ReviewStateStore:
             row["quiet_offered_at"] = timestamp
             payload["dispositions"][family] = row
             _compact_if_due(payload, now=moment, path=self.path)
-            self._write(payload)
+            self._write(payload, vocabulary_refs=(), vocabulary_families=())
         return {
             "family": family,
             "ref": family_ref(family),
@@ -849,16 +864,31 @@ class ReviewStateStore:
         with _LOCK:
             payload = self.load(read_limit=read_limit)
             report = _compact_payload(payload, now=moment)
-            if force or report["dropped"]["records"] or report["dropped"]["surfaced"]:
-                self._write(payload)
+            if force or any(report["dropped"].values()) or any(report.get("updated", {}).values()):
+                self._write(payload, vocabulary_refs=(), vocabulary_families=())
         return report
 
-    def _write(self, payload: dict[str, Any]) -> None:
-        from . import reserved_paths
+    def _write(
+        self,
+        payload: dict[str, Any],
+        *,
+        vocabulary_refs: Iterable[str] | None = None,
+        vocabulary_families: Iterable[str] | None = None,
+        vocabulary_review_id: str | None = None,
+    ) -> None:
+        """Publish canonical state, then best-effort point-maintain its queue view.
+
+        The projection has no standing authority: an unhinted caller leaves it
+        warming instead of guessing which vocabulary rows changed.
+        """
+        import sqlite3
+
+        from . import reserved_paths, vocabulary_review_index
 
         encoded = (
             json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
         ).encode("utf-8")
+        before_signature = vocabulary_review_index._signature(self.path)
         with reserved_paths._subsystem_authority_scope("review_state"):
             reserved_paths._publish_owner_bytes(
                 self.vault_root,
@@ -866,6 +896,21 @@ class ReviewStateStore:
                 "review-state",
                 encoded,
             )
+        after_signature = vocabulary_review_index._signature(self.path)
+        try:
+            vocabulary_review_index.publish_delta(
+                self.vault_root,
+                payload,
+                before_signature=before_signature,
+                after_signature=after_signature,
+                vocabulary_refs=vocabulary_refs,
+                vocabulary_families=vocabulary_families,
+                vocabulary_review_id=vocabulary_review_id,
+            )
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            # Canonical review state is already durable.  Keeping the old
+            # source fence makes the derived reader report warming on retry.
+            log.debug("vocabulary review projection publication deferred: %s", exc)
 
 
 # --------------------------------------------------------------------------
@@ -874,7 +919,7 @@ class ReviewStateStore:
 
 
 def empty_state() -> dict[str, Any]:
-    """A fresh v3 payload. One definition, because five readers build this."""
+    """A fresh payload. One definition, because five readers build this."""
     return {
         "version": SCHEMA_VERSION,
         "records": {},
@@ -882,6 +927,7 @@ def empty_state() -> dict[str, Any]:
         "adaptation_resets": {},
         "surfaced": {},
         "stats": {},
+        "vocabulary": {"items": {}, "decisions": {}, "notifications": {}},
     }
 
 
@@ -896,6 +942,16 @@ def _migrated(payload: dict[str, Any]) -> dict[str, Any]:
     same way afterwards. Nothing is written here: the rewrite happens on the
     next write, which is the one moment the file is already being replaced.
     """
+    if payload.get("version", 0) < 4:
+        payload.setdefault("vocabulary", {"items": {}, "decisions": {}, "notifications": {}})
+    vocabulary = payload.get("vocabulary")
+    if not isinstance(vocabulary, dict) or any(
+        not isinstance(vocabulary.get(section), dict)
+        for section in ("items", "decisions", "notifications")
+    ):
+        raise ValueError("REVIEW_STATE_INVALID: vocabulary sections must be objects")
+    if "recoveries" in vocabulary and not isinstance(vocabulary["recoveries"], dict):
+        raise ValueError("REVIEW_STATE_INVALID: vocabulary recovery must be an object")
     for section in ("dispositions", "adaptation_resets", "surfaced", "stats"):
         if not isinstance(payload.get(section), dict):
             payload[section] = {}
@@ -1150,7 +1206,7 @@ def record_surfaced(
                 stamps[key] = timestamp
                 added = True
             if added:
-                store._write(payload)
+                store._write(payload, vocabulary_refs=(), vocabulary_families=())
     except (OSError, ValueError) as error:
         log.debug("first-surfaced ledger not recorded: %s", error)
         for review_id, fingerprint in pairs:
@@ -1244,6 +1300,14 @@ def _compact_payload(payload: dict[str, Any], *, now: dt.datetime) -> dict[str, 
     for key in dropped_ledger:
         ledger.pop(key, None)
 
+    recoveries = payload.get("vocabulary", {}).get("recoveries", {})
+    dropped_recoveries = [
+        key for key, row in recoveries.items()
+        if isinstance(row, dict) and row.get("state") == "current"
+    ]
+    for key in dropped_recoveries:
+        del recoveries[key]
+
     report = {
         "at": _stamp(now),
         # Compaction is the runtime deciding, so what it writes says so. The
@@ -1260,7 +1324,9 @@ def _compact_payload(payload: dict[str, Any], *, now: dt.datetime) -> dict[str, 
     # scan, so a store that can never drop anything again — the ordinary end
     # state, since standing decisions are permanent — would rewrite itself for
     # the sake of a timestamp saying nothing happened.
-    if dropped_records or dropped_ledger:
+    if dropped_recoveries:
+        report["dropped"]["vocabulary_recoveries"] = len(dropped_recoveries)
+    if dropped_records or dropped_ledger or dropped_recoveries:
         payload["stats"]["compaction"] = report
     return report
 

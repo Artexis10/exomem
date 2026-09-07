@@ -10,13 +10,29 @@ import pytest
 from fastmcp.exceptions import ToolError
 from starlette.testclient import TestClient
 
-from exomem import commands, hosted_gateway, relation_queue, server, writer_lease
+from exomem import commands, hosted_gateway, hosted_plugins, relation_queue, server, writer_lease
 from exomem.__main__ import main
 from exomem.governance import egress
 
 
 def _product_command(name: str):
     return next(command for command in commands.PRODUCT_COMMANDS if command.name == name)
+
+
+def _committed_hosted_tool(profile: str, name: str) -> dict[str, object]:
+    candidate = next(
+        candidate
+        for candidate, candidate_profile in hosted_plugins.CANDIDATE_PROFILES.items()
+        if candidate_profile == profile
+    )
+    generated = Path(__file__).resolve().parents[1] / "plugins" / "hosted" / "generated"
+    if candidate != hosted_plugins.DEFAULT_CANDIDATE:
+        generated = generated / "candidates" / candidate
+    compatibility = json.loads((generated / "compatibility.json").read_text(encoding="utf-8"))
+    entry = next(
+        entry for entry in compatibility["agent_contract"]["commands"] if entry["name"] == name
+    )
+    return entry["mcp_tool"]
 
 
 def _complete_relation_proposal() -> dict[str, object]:
@@ -444,13 +460,15 @@ def test_mcp_openapi_and_hosted_contracts_share_relation_parameter_schemas(
             "requestBody"
         ]["content"]["application/json"]["schema"]["properties"]
         hosted_properties = hosted[name]["inputSchema"]["properties"]
+        committed_hosted = _committed_hosted_tool(
+            commands.HOSTED_ALPHA_AGENT_V4_PROFILE, name
+        )
+        committed_properties = committed_hosted["inputSchema"]["properties"]
         for parameter_name in parameter_names:
             assert rest_properties[parameter_name] == mcp_properties[parameter_name]
-            assert hosted_properties[parameter_name] == mcp_properties[parameter_name]
+            assert hosted_properties[parameter_name] == committed_properties[parameter_name]
         for annotation in ("readOnlyHint", "destructiveHint", "idempotentHint"):
-            assert hosted[name]["annotations"][annotation] == live_tools[name][
-                "annotations"
-            ][annotation]
+            assert hosted[name]["annotations"][annotation] == committed_hosted["annotations"][annotation]
     for name in ("connect_memory", "schema_memory"):
         relation_limit = live_tools[name]["inputSchema"]["properties"]["limit"]
         assert relation_limit["minimum"] == 1
