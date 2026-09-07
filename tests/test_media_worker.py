@@ -446,8 +446,9 @@ def test_failed_deferred_completion_aborts_held_publication_intent(
     assert target in watcher._drain()[1]
 
 
-def test_parent_deferred_completion_detaches_registered_graph_after_a_failed_fanout(
-    vault, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("fanout_success", [False, True])
+def test_parent_deferred_completion_detaches_registered_graph_before_receipt_finalization(
+    vault, monkeypatch: pytest.MonkeyPatch, fanout_success: bool
 ) -> None:
     target = vault / "Knowledge Base" / "Notes" / "parent-deferred.md"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -478,7 +479,7 @@ def test_parent_deferred_completion_detaches_registered_graph_after_a_failed_fan
         lambda _root, **kwargs: detached.append(kwargs.get("expected_checkpoint")),
     )
 
-    def failed_fanout(
+    def fanout(
         root: Path,
         _paths: list[Path],
         index_reports: list[object],
@@ -500,15 +501,22 @@ def test_parent_deferred_completion_detaches_registered_graph_after_a_failed_fan
                 ),
             )
         )
-        return False
+        return fanout_success
 
-    monkeypatch.setattr(media_worker, "post_commit_batch_fanout", failed_fanout)
+    original_clear = deferred_index.clear_full_receipts
 
-    assert not worker._complete_deferred_graph_completion(
+    def clear_after_detach(root: Path, receipts: list[deferred_index.DeferredReceipt]) -> None:
+        assert detached == [checkpoint]
+        original_clear(root, receipts)
+
+    monkeypatch.setattr(media_worker, "post_commit_batch_fanout", fanout)
+    monkeypatch.setattr(deferred_index, "clear_full_receipts", clear_after_detach)
+
+    assert worker._complete_deferred_graph_completion(
         token, [receipt], recover_on_mismatch=True, parent_receipted_handoff=True
-    )
+    ) is fanout_success
     assert detached == [checkpoint]
-    assert deferred_index.snapshot_full(vault) == [receipt]
+    assert deferred_index.snapshot_full(vault) == ([] if fanout_success else [receipt])
 
 
 @pytest.mark.parametrize("fanout_success", [True, False])
