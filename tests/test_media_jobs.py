@@ -144,6 +144,28 @@ def test_failed_result_prepares_and_finalizes_against_its_terminal_claim(vault: 
     assert current is not None and current.state == media_jobs.FAILED
 
 
+def test_parent_finalization_keeps_ocr_enqueued_after_the_claim(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+    claimed = store.claim_next()
+    assert claimed is not None
+    assert store.record_result(
+        claimed,
+        kind="extraction",
+        sidecar_before_hash="a" * 64,
+        binary_identity={"stat": [1, 2, 3, 4, 5], "sha256": "b" * 64},
+        payload={"text": "current", "engine": "test"},
+    )
+    store.enqueue(_job(vault))
+
+    [result] = store.pending_results()
+    assert store.finalize_result(result, requeue_remaining=True)
+    requeued = store.get(claimed.id)
+    assert requeued is not None and requeued.state == media_jobs.PENDING and requeued.do_ocr
+    fresh = store.claim_next()
+    assert fresh is not None and fresh.claim_revision > claimed.claim_revision
+
+
 def test_result_bearing_failure_cannot_retry_or_finalize_after_claim_aba(vault: Path) -> None:
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(_job(vault))

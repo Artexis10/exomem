@@ -392,6 +392,7 @@ class MediaJob:
     id: int | None = None
     attempts: int = 0
     claim_revision: int = 0
+    ocr_generation: int = 0
     state: str = PENDING
     last_error: str | None = None
 
@@ -400,6 +401,7 @@ class MediaJob:
 class MediaJobResult:
     job_id: int
     claim_revision: int
+    ocr_generation: int
     kind: str
     sidecar_before_hash: str
     binary_identity: dict[str, Any]
@@ -534,6 +536,7 @@ class MediaJobStore:
                         state TEXT NOT NULL DEFAULT 'pending',
                         attempts INTEGER NOT NULL DEFAULT 0,
                         claim_revision INTEGER NOT NULL DEFAULT 0,
+                        ocr_generation INTEGER NOT NULL DEFAULT 0,
                         created_at REAL NOT NULL,
                         updated_at REAL NOT NULL,
                         last_error TEXT
@@ -558,6 +561,7 @@ class MediaJobStore:
                         binary_identity_json TEXT NOT NULL,
                         payload_json TEXT NOT NULL,
                         payload_hash TEXT NOT NULL,
+                        ocr_generation INTEGER NOT NULL DEFAULT 0,
                         target_hash TEXT,
                         target_size INTEGER,
                         receipt_revision INTEGER,
@@ -600,6 +604,10 @@ class MediaJobStore:
             conn.execute(
                 "ALTER TABLE jobs ADD COLUMN claim_revision INTEGER NOT NULL DEFAULT 0"
             )
+        if "ocr_generation" not in columns:
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN ocr_generation INTEGER NOT NULL DEFAULT 0"
+            )
 
     @staticmethod
     def _migrate_result_schema(conn: sqlite3.Connection) -> None:
@@ -611,6 +619,11 @@ class MediaJobStore:
             conn.execute(
                 "ALTER TABLE media_job_results "
                 "ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
+            )
+        if "ocr_generation" not in columns:
+            conn.execute(
+                "ALTER TABLE media_job_results "
+                "ADD COLUMN ocr_generation INTEGER NOT NULL DEFAULT 0"
             )
 
     def _migrate_job_key(self, conn: sqlite3.Connection) -> None:
@@ -708,6 +721,7 @@ class MediaJobStore:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, NULL)
                     ON CONFLICT(job_key) DO UPDATE SET
                         do_ocr = MAX(jobs.do_ocr, excluded.do_ocr),
+                        ocr_generation = jobs.ocr_generation + excluded.do_ocr,
                         do_clip = MAX(jobs.do_clip, excluded.do_clip),
                         do_reembed = MAX(jobs.do_reembed, excluded.do_reembed),
                         updated_at = excluded.updated_at
@@ -939,13 +953,14 @@ class MediaJobStore:
                     """
                     INSERT INTO media_job_results(
                         job_id, schema_version, claim_revision, kind, sidecar_before_hash,
-                        binary_identity_json, payload_json, payload_hash, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        binary_identity_json, payload_json, payload_hash, ocr_generation,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(job_id) DO NOTHING
                     """,
                     (
                         job.id, _RESULT_SCHEMA_VERSION, job.claim_revision, kind, sidecar_before_hash,
-                        identity_json, payload_json, digest, now, now,
+                        identity_json, payload_json, digest, job.ocr_generation, now, now,
                     ),
                 ).rowcount
             else:
@@ -953,13 +968,14 @@ class MediaJobStore:
                     """
                     INSERT INTO media_job_results(
                         job_id, schema_version, claim_revision, kind, sidecar_before_hash,
-                        binary_identity_json, payload_json, payload_hash, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        binary_identity_json, payload_json, payload_hash, ocr_generation,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(job_id) DO NOTHING
                     """,
                     (
                         job.id, _RESULT_SCHEMA_VERSION, job.claim_revision, kind, sidecar_before_hash,
-                        identity_json, payload_json, digest, now, now,
+                        identity_json, payload_json, digest, job.ocr_generation, now, now,
                     ),
                 ).rowcount
                 if changed:
@@ -998,7 +1014,8 @@ class MediaJobStore:
                 SELECT jobs.*, media_job_results.schema_version,
                        media_job_results.claim_revision AS result_claim_revision,
                        kind, sidecar_before_hash, binary_identity_json, payload_json,
-                       payload_hash, target_hash, target_size, receipt_revision
+                       payload_hash, media_job_results.ocr_generation AS result_ocr_generation,
+                       target_hash, target_size, receipt_revision
                 FROM media_job_results JOIN jobs ON jobs.id = media_job_results.job_id
                 ORDER BY media_job_results.updated_at, jobs.id LIMIT ?
                 """,
@@ -1042,10 +1059,19 @@ class MediaJobStore:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            expected_states = (BLOCKED, FAILED) if result.kind == "failure" else (RUNNING,)
+            placeholders = ",".join("?" for _ in expected_states)
             changed = conn.execute(
                 "UPDATE jobs SET state = ?, last_error = ?, updated_at = ? "
-                "WHERE id = ? AND state = 'running' AND claim_revision = ?",
-                (state, error[:1000] or None, time.time(), result.job_id, result.claim_revision),
+                f"WHERE id = ? AND state IN ({placeholders}) AND claim_revision = ?",
+                (
+                    state,
+                    error[:1000] or None,
+                    time.time(),
+                    result.job_id,
+                    *expected_states,
+                    result.claim_revision,
+                ),
             ).rowcount
             if changed != 1:
                 conn.rollback()
@@ -1112,36 +1138,52 @@ class MediaJobStore:
         try:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT do_ocr, do_clip, do_reembed, state, claim_revision FROM jobs WHERE id = ?",
+                "SELECT do_ocr, do_clip, do_reembed, state, claim_revision, ocr_generation "
+                "FROM jobs WHERE id = ?",
                 (result.job_id,),
             ).fetchone()
+            allowed_states = {RUNNING}
+            if requeue_remaining and result.kind == "failure":
+                allowed_states.update({BLOCKED, FAILED})
             if (
                 row is None
                 or int(row["claim_revision"]) != result.claim_revision
-                or row["state"] not in ({RUNNING} if requeue_remaining else {BLOCKED, FAILED})
+                or row["state"] not in (allowed_states if requeue_remaining else {BLOCKED, FAILED})
             ):
                 conn.rollback()
                 return False
             if requeue_remaining:
                 remaining_ocr = (
                     int(row["do_ocr"])
-                    if keep_ocr or result.kind != "extraction"
+                    if keep_ocr
+                    or result.kind != "extraction"
+                    or int(row["ocr_generation"]) > result.ocr_generation
                     else 0
                 )
+                state_placeholders = ",".join("?" for _ in allowed_states)
                 if remaining_ocr or row["do_clip"] or row["do_reembed"]:
                     delete_job = False
                     changed = conn.execute(
                         """
                         UPDATE jobs SET do_ocr = ?, state = 'pending', last_error = NULL,
-                            updated_at = ? WHERE id = ? AND state = 'running' AND claim_revision = ?
+                            updated_at = ? WHERE id = ? AND state IN (""" + state_placeholders + """)
+                            AND claim_revision = ?
                         """,
-                        (remaining_ocr, time.time(), result.job_id, result.claim_revision),
+                        (
+                            remaining_ocr,
+                            time.time(),
+                            result.job_id,
+                            *allowed_states,
+                            result.claim_revision,
+                        ),
                     ).rowcount
                 else:
                     delete_job = True
                     changed = conn.execute(
-                        "DELETE FROM jobs WHERE id = ? AND state = 'running' AND claim_revision = ?",
-                        (result.job_id, result.claim_revision),
+                        "DELETE FROM jobs WHERE id = ? AND state IN ("
+                        + state_placeholders
+                        + ") AND claim_revision = ?",
+                        (result.job_id, *allowed_states, result.claim_revision),
                     ).rowcount
             else:
                 delete_job = False
@@ -1635,6 +1677,7 @@ class MediaJobStore:
             do_reembed=bool(row["do_reembed"]),
             attempts=int(row["attempts"]),
             claim_revision=int(row["claim_revision"]),
+            ocr_generation=int(row["ocr_generation"]),
             state=str(row["state"]),
             last_error=row["last_error"],
         )
@@ -1645,6 +1688,9 @@ class MediaJobStore:
                 return None
             claim_revision = int(row["result_claim_revision"])
             if claim_revision <= 0:
+                return None
+            ocr_generation = int(row["result_ocr_generation"])
+            if ocr_generation < 0:
                 return None
             kind = str(row["kind"])
             sidecar_before_hash = str(row["sidecar_before_hash"])
@@ -1684,6 +1730,7 @@ class MediaJobStore:
         return MediaJobResult(
             job_id=int(row["id"]),
             claim_revision=claim_revision,
+            ocr_generation=ocr_generation,
             kind=kind,
             sidecar_before_hash=sidecar_before_hash,
             binary_identity=identity,

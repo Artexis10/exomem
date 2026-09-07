@@ -10,8 +10,9 @@ from pathlib import Path
 import pytest
 
 from exomem import preserve as preserve_module
+from exomem import file_watcher
 from exomem import vault as vault_module
-from exomem.governance import companions
+from exomem.governance import catalog_publication, companions
 from exomem.vault import PlannedWrite, content_hash
 
 TODAY = dt.date(2026, 5, 25)
@@ -137,6 +138,43 @@ def test_media_sidecar_commit_passes_explicit_publication_intent_collector(
     )
 
     assert captured == ["intent"]
+
+
+def test_media_sidecar_commit_aborts_collected_intents_after_catalog_failure(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = vault / "Knowledge Base" / "Evidence" / "catalog-failure.jpg.md"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text("---\n---\n", encoding="utf-8")
+    captured: list[object] = []
+    aborted: list[object] = []
+
+    def writer(writes, **kwargs):  # noqa: ANN001
+        kwargs["publication_intents_out"].append("intent")
+        return [write.path for write in writes]
+
+    monkeypatch.setattr(
+        catalog_publication,
+        "publish_markdown_batch",
+        lambda _prepared: (_ for _ in ()).throw(catalog_publication.CatalogPublicationError("catalog failed")),
+    )
+    monkeypatch.setattr(
+        file_watcher,
+        "abort_publication_intents",
+        lambda intents, **_kwargs: aborted.extend(intents),
+    )
+
+    with pytest.raises(catalog_publication.CatalogCommitError):
+        preserve_module.commit_media_sidecar_writes(
+            vault,
+            (PlannedWrite(sidecar, "---\n---\nbody\n", expected_hash=content_hash("---\n---\n")),),
+            post_commit_fanout=False,
+            publication_intents_out=captured,
+            batch_writer=writer,
+        )
+
+    assert captured == ["intent"]
+    assert aborted == ["intent"]
 
 
 def test_update_sidecar_extraction_replaces_internal_headings_before_preserved_notes(

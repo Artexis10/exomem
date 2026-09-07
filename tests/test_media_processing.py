@@ -387,6 +387,60 @@ def test_passed_commit_guard_revalidates_planned_binary_before_mutation(
     assert not media_jobs.job_store_path(vault).exists()
 
 
+def test_commit_guard_accepts_completed_sidecar_for_the_same_binary(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "concurrent-completed.m4a")
+    first = media_processing.reconcile_media(vault, binary)
+    sidecar = first.sidecar_path
+    completed = sidecar.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed += "\n## Extracted text\n\n[0:00] A concurrent completed transcript.\n"
+
+    @contextmanager
+    def commit_guard():
+        sidecar.write_text(completed, encoding="utf-8")
+        yield
+
+    reconciled = media_processing.reconcile_media(vault, binary, commit_guard=commit_guard)
+
+    assert reconciled is not None and reconciled.state == "completed" and reconciled.job_id is None
+    assert sidecar.read_text(encoding="utf-8") == completed
+    assert _job_count(vault) == 0
+
+
+def test_commit_guard_keeps_foreign_sidecar_change_fenced(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "concurrent-foreign.m4a")
+    first = media_processing.reconcile_media(vault, binary)
+
+    @contextmanager
+    def commit_guard():
+        first.sidecar_path.write_text("foreign sidecar", encoding="utf-8")
+        yield
+
+    with pytest.raises(media_processing.MediaProcessingError) as raised:
+        media_processing.reconcile_media(vault, binary, commit_guard=commit_guard)
+
+    assert raised.value.code == "MEDIA_CHANGED_DURING_RECONCILIATION"
+
+
+def test_unchanged_pending_reconciliation_does_not_reenqueue_running_ocr(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "unchanged-running.m4a")
+    first = media_processing.reconcile_media(vault, binary)
+    assert first is not None and first.job_id is not None
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None
+
+    reconciled = media_processing.reconcile_media(vault, binary)
+
+    assert reconciled is not None and reconciled.job_id == claimed.id
+    current = store.get(claimed.id)
+    assert current is not None and current.ocr_generation == claimed.ocr_generation
+
+
 def test_passed_commit_guard_revalidates_access_policy_before_mutation(
     vault: Path,
 ) -> None:
@@ -505,6 +559,35 @@ def test_runtime_unavailable_background_commit_fans_out_once_after_guard_release
     assert fanout_depths == [0]
 
 
+def test_guarded_reconciliation_carries_publication_intents_to_fanout(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "guarded-intent.m4a")
+    intent = object()
+    fanned_out: list[object] = []
+
+    @contextmanager
+    def commit_guard():
+        yield
+
+    def commit(_vault, writes, *, publication_intents_out, **_kwargs):  # noqa: ANN001
+        publication_intents_out.append(intent)
+        return [write.path for write in writes]
+
+    monkeypatch.setattr(media_processing._preserve_module(), "commit_media_sidecar_writes", commit)
+    monkeypatch.setattr(
+        media_processing,
+        "post_commit_batch_fanout",
+        lambda *_args, **kwargs: fanned_out.extend(kwargs["publication_intents"]) or True,
+    )
+
+    assert media_processing.reconcile_media(vault, binary, commit_guard=commit_guard) is not None
+    assert fanned_out == [intent]
+
+
 def test_post_write_enqueue_failure_still_fans_out_after_guard_release(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -590,6 +673,41 @@ def test_mark_processing_unavailable_commits_each_sidecar_before_fanout(
     assert "processing_state: blocked" in initial.sidecar_path.read_text(
         encoding="utf-8"
     )
+
+
+def test_guarded_unavailable_presentation_carries_publication_intents_to_fanout(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "guarded-unavailable-intent.m4a")
+    media_processing.reconcile_media(vault, binary)
+    intent = object()
+    fanned_out: list[object] = []
+
+    @contextmanager
+    def commit_guard():
+        yield
+
+    def commit(_vault, writes, *, publication_intents_out, **_kwargs):  # noqa: ANN001
+        publication_intents_out.append(intent)
+        return [write.path for write in writes]
+
+    monkeypatch.setattr(media_processing._preserve_module(), "commit_media_sidecar_writes", commit)
+    monkeypatch.setattr(
+        media_processing,
+        "post_commit_batch_fanout",
+        lambda *_args, **kwargs: fanned_out.extend(kwargs["publication_intents"]) or True,
+    )
+
+    assert media_processing.mark_processing_unavailable(
+        vault,
+        reason="MediaRuntimeUnavailable: startup failed",
+        next_action="fix runtime",
+        commit_guard=commit_guard,
+    ) == 1
+    assert fanned_out == [intent]
 
 
 def test_background_batch_rechecks_access_policy_changed_during_staging(
