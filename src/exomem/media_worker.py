@@ -1415,7 +1415,7 @@ class MediaWorker:
                     if self._store is not None
                     else None
                 )
-                if existing is None:
+                if existing is None or not existing.do_ocr:
                     self.enqueue(binary_path=binary, sidecar_path=sidecar, media_type=media_type)
                     n += 1
                 if _PARENT_MEDIA_MARKER in head:

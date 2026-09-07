@@ -441,6 +441,62 @@ def test_unchanged_pending_reconciliation_does_not_reenqueue_running_ocr(vault: 
     assert current is not None and current.ocr_generation == claimed.ocr_generation
 
 
+def test_unchanged_pending_reconciliation_adds_missing_ocr_stage(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "missing-ocr-stage.m4a")
+    first = media_processing.reconcile_media(vault, binary)
+    assert first is not None
+    store = media_jobs.MediaJobStore(vault)
+    existing = store.get_by_binary(binary)
+    assert existing is not None
+    assert store.discard(existing) == 1
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=first.sidecar_path,
+            media_type="audio",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
+
+    media_processing.reconcile_media(vault, binary)
+
+    current = store.get_by_binary(binary)
+    assert current is not None and current.do_ocr and current.do_clip
+
+
+def test_unchanged_pending_reconciliation_adds_missing_clip_without_new_ocr(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "missing-clip-stage.jpg", data=b"\xff\xd8\xff")
+    first = media_processing.reconcile_media(vault, binary)
+    assert first is not None
+    store = media_jobs.MediaJobStore(vault)
+    existing = store.get_by_binary(binary)
+    assert existing is not None and existing.do_ocr and existing.do_clip
+    assert store.discard(existing) == 1
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=first.sidecar_path,
+            media_type="image",
+            do_ocr=True,
+            do_clip=False,
+        )
+    )
+    before = store.get_by_binary(binary)
+    assert before is not None
+
+    media_processing.reconcile_media(vault, binary)
+
+    current = store.get_by_binary(binary)
+    assert current is not None and current.do_ocr and current.do_clip
+    assert current.ocr_generation == before.ocr_generation
+
+
 def test_passed_commit_guard_revalidates_access_policy_before_mutation(
     vault: Path,
 ) -> None:

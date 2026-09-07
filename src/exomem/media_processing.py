@@ -416,15 +416,19 @@ def reconcile_media(
             _verify_binary_identity(binary, resolved_binary, provenance)
             store = media_jobs.MediaJobStore(vault)
             durable_job = store.get_by_binary(binary)
-            if original != pending or durable_job is None:
+            requested_clip = media_type in {"image", "video"} and not os.environ.get(
+                "EXOMEM_DISABLE_CLIP"
+            )
+            needs_ocr = durable_job is None or not durable_job.do_ocr
+            needs_clip = requested_clip and (durable_job is None or not durable_job.do_clip)
+            if original != pending or needs_ocr or needs_clip:
                 job_id = store.enqueue(
                     media_jobs.MediaJob(
                         binary_path=binary,
                         sidecar_path=sidecar,
                         media_type=media_type,
-                        do_ocr=True,
-                        do_clip=media_type in {"image", "video"}
-                        and not os.environ.get("EXOMEM_DISABLE_CLIP"),
+                        do_ocr=original != pending or needs_ocr,
+                        do_clip=requested_clip if original != pending else needs_clip,
                     )
                 )
                 durable_job = store.get(job_id)
