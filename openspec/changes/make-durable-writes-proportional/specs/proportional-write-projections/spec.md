@@ -107,3 +107,48 @@ to define equivalent behavior across MCP, CLI, and REST.
 #### Scenario: Media work is pending during an ordinary write
 - **WHEN** the shared write path runs while media-derived graph work is pending
 - **THEN** its speedup leaves artifact custody and graph generation fencing intact
+
+### Requirement: Background scans give bounded priority to foreground requests
+
+The existing graph and due-state background workers SHALL yield briefly at
+per-page scan checkpoints while another thread serves a foreground request for
+the same vault. Foreground activity SHALL cover the complete shared dispatcher
+invocation and SHALL unwind on every return or exception. This activity is an
+advisory process-local hint, never an authorization or publication proof.
+Each checkpoint SHALL use a monotonic 50 ms waiting budget, request sleeps of
+at most 5 ms within the remaining budget, and request no further sleep once
+the deadline expires. Operating-system scheduling may overshoot a requested
+sleep. The checkpoint SHALL then resume its existing work unit even during
+continuous foreground traffic. Activity locks SHALL be released before
+sleeping or invoking waiter callbacks.
+Explicit graph waiters SHALL dynamically bypass these pauses. Synchronous
+foreground work, the background thread's own nested invocation, and requests
+for another vault SHALL NOT introduce a pause.
+
+#### Scenario: Foreground request overlaps graph and due-state warming
+- **WHEN** an ordinary request runs while those workers scan the same vault
+- **THEN** their scan checkpoints can yield within the fixed budget throughout the request, including terminal handling and retrieval, while all admission and publication proofs remain required
+
+#### Scenario: Nested request raises or is cancelled
+- **WHEN** a foreground invocation exits through an exception or a nested invocation completes
+- **THEN** its activity counters unwind exactly and no completed invocation leaves a phantom foreground holder
+
+#### Scenario: Other vault or synchronous work runs
+- **WHEN** a foreground request targets another vault, or a scan runs synchronously outside a background scope
+- **THEN** the scan proceeds without cooperative delay and without per-page filesystem or database activity to discover foreground requests
+
+#### Scenario: Background worker invokes a foreground command
+- **WHEN** a background-scoped worker enters a nested foreground invocation while another request is also active
+- **THEN** that nested invocation suppresses its thread's background scope and never pauses as background work, restoring the scope on exit
+
+#### Scenario: Foreground traffic remains continuous
+- **WHEN** another thread continuously serves requests for the same vault
+- **THEN** each background checkpoint requests no further waiting after its fixed deadline and resumes the existing work unit instead of suppressing work indefinitely
+
+#### Scenario: Caller explicitly waits for registered graph work
+- **WHEN** an explicit response waiter joins a registered graph builder, including during an active cooperative pause
+- **THEN** the builder bypasses further waiting within that pause and subsequent checkpoints until its explicit waiters leave, preserving existing join and publication semantics
+
+#### Scenario: Foreground activity ends
+- **WHEN** requests finish after delaying background scans
+- **THEN** the existing workers complete through normal recovery and produce graph and due-state projections equivalent to synchronous construction without dropping queued work or weakening source-version proofs

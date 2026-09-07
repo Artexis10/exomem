@@ -92,6 +92,43 @@ focus. A separate instrumented run placed the remaining edit cost mainly in
 the guarded canonical batch and index fan-out; semantic preflight and mutation
 lock acquisition were small in that observation.
 
-The corrected setup must prove the complete metadata and text-index fixture
-membership for both products before timing. Valid after-change paired
-observations and full convergence evidence are pending.
+The corrected setup now proves complete metadata and text-index fixture
+membership for both products before timing, including the actual vault/project
+binding and supported FTS schema. An independent review reran all 45 focused
+tests, wrong-vault and ordinary-table rejection cases, and real four-page
+public workflows for both products.
+
+## First complete-index pair
+
+Source `c563ec57` includes the reviewed proportional changes and current-main
+vocabulary work. Both products proved exactly 3,800 indexed fixture identities
+before the unchanged public workflow. All body/read/search checks passed.
+
+| Product | Complete startup, outside workflow clock | Verified public workflow |
+|---|---:|---:|
+| Exomem | 62.11 s | 17.41 s |
+| Basic Memory 0.23.2 | 651.05 s | 11.53 s |
+
+[Preliminary pair JSON](proportional-writes-2026-09/preliminary-complete-index-3800.json)
+retains both exact membership proofs, timed calls, correctness checks, runtime
+and host evidence. This is one valid pair, not an accepted comparative median.
+The next Basic Memory setup was interrupted before its full-index gate could
+pass, to investigate the remaining foreground cost before repeating acceptance
+runs. No 8,000-page observation began in this cohort.
+
+## Background contention diagnosis
+
+Stack sampling during Exomem commits found private graph admission scans and
+the initial due-state audit reading the corpus concurrently. Foreground CPU
+time was substantially below elapsed time. A disposable prototype pausing
+those scans for at most 50 ms per checkpoint during canonical commands took
+11.65 s. Covering the complete foreground dispatcher invocation instead took
+8.35 s; both diagnostic workflows passed exact body/read/search checks.
+
+These are instrumented diagnostic observations, not shipping code or accepted
+parity results. The OpenSpec amendment requires explicit scopes, exact-vault
+isolation, bounded background progress, and bypasses for synchronous work and
+explicit graph waiters. Source admission, durable custody and independent
+publication proofs remain unchanged. Repeated uninstrumented comparisons,
+real-media regression, warm-graph characterization and full-suite evidence are
+still required for delivery.
