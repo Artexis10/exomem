@@ -19,6 +19,7 @@ a large page count or do not bother.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import statistics
 import sys
@@ -308,6 +309,9 @@ def run(
         "queue_remaining": len(imports["deferred_index"].list_graph_paths(vault_root)),
         "graph_state": state,
         "drift_findings": len(drift),
+        "drift_details": [
+            {"path": finding.path, "reason": finding.detail} for finding in drift
+        ],
         "errors": errors[:10],
     }
 
@@ -410,6 +414,8 @@ def main(argv: list[str] | None = None) -> int:
             imports["graph_sync"].drain_active_rebuilds()
 
     print(format_report(report), flush=True)
+    if report["drift_details"]:
+        print("graph drift: " + json.dumps(report["drift_details"], sort_keys=True), flush=True)
     failures = verdict(report, max_blocking=args.max_blocking)
     for failure in failures:
         print(f"FAIL: {failure}", flush=True)
