@@ -313,11 +313,11 @@ def test_parent_receipted_handoff_does_not_join_registered_rebuild(
         "_graph_sync_predecessor_state",
         lambda _self, _required: "graph_sync_predecessor_unreadable",
     )
-    started: list[Path] = []
+    detached: list[Path] = []
     monkeypatch.setattr(
         graph_sync,
-        "start_registered",
-        lambda root, **_kwargs: started.append(root),
+        "start_registered_detached",
+        lambda root, **_kwargs: detached.append(root),
     )
     monkeypatch.setattr(
         graph_sync,
@@ -331,8 +331,8 @@ def test_parent_receipted_handoff_does_not_join_registered_rebuild(
         result = epistemic_graph.upsert_after_write(vault, [vault / PAGE_A])
 
     assert result.outcome == "registered"
-    assert started == [vault]
-    assert graph_sync.registered_checkpoint(vault, state_root=state_dir) is None
+    assert detached == []
+    assert graph_sync.registered_checkpoint(vault, state_root=state_dir) == required
 
 
 def test_parent_receipted_handoff_detaches_refresh_fallback_registration(
@@ -382,7 +382,8 @@ def test_parent_receipted_handoff_detaches_refresh_fallback_registration(
         result = epistemic_graph.upsert_after_write(vault, [vault / PAGE_A])
 
     assert result.outcome == "registered"
-    assert detached == [vault]
+    assert detached == []
+    assert graph_sync.registered_checkpoint(vault, state_root=state_dir) == required
 
 
 def test_parent_receipted_handoff_scope_does_not_relax_standalone(
@@ -430,6 +431,44 @@ def test_parent_receipted_handoff_scope_does_not_relax_standalone(
     assert cross_vault.outcome == "completed"
     assert after_scope.outcome == "completed"
     assert observed == [vault, other_vault, vault]
+
+
+def test_detached_registered_start_keeps_an_absent_or_foreign_waiter(
+    vault: Path,
+) -> None:
+    """A parent fanout may release only the exact registration it observed."""
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    state_dir = vault / "detached-identity-state"
+    coordinator = LeaseManager(
+        LeaseConfig(state_dir=state_dir)
+    )._mutation_coordinator_for(vault)
+    expected = _checkpoint(10)
+    foreign = _checkpoint(11)
+
+    assert (
+        graph_sync.start_registered_detached(
+            vault, state_root=coordinator.state_root, expected_checkpoint=expected
+        )
+        is None
+    )
+    graph_sync.register_rebuild(
+        vault,
+        foreign,
+        lambda required: graph_sync.GraphBuildOutcome.covering(required),
+        state_root=coordinator.state_root,
+    )
+
+    assert (
+        graph_sync.start_registered_detached(
+            vault, state_root=coordinator.state_root, expected_checkpoint=expected
+        )
+        is None
+    )
+    assert (
+        graph_sync.registered_checkpoint(vault, state_root=coordinator.state_root)
+        == foreign
+    )
 
 
 # --- 2. The non-waiting return is honest ----------------------------------------

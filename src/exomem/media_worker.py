@@ -819,6 +819,8 @@ class MediaWorker:
     ) -> bool:
         publication_intents = tuple(publication_intents)
         completed = False
+        index_reports: list[object] = []
+        registered_checkpoint: graph_sync.GraphSyncCheckpoint | None = None
         try:
             needs_recovery = False
             with get_manager().mutation_guard(
@@ -894,10 +896,12 @@ class MediaWorker:
                 else contextlib.nullcontext()
             )
             with fanout_scope:
+                if parent_receipted_handoff:
+                    registered_checkpoint = graph_sync.read_checkpoint(self._vault_root)
                 completed = post_commit_batch_fanout(
                     self._vault_root,
                     list(token.replaced),
-                    None,
+                    index_reports if parent_receipted_handoff else None,
                     None,
                     publication_intents=publication_intents,
                 )
@@ -908,6 +912,26 @@ class MediaWorker:
         except Exception:  # noqa: BLE001 - canonical media is already committed
             log.exception("media deferred graph completion failed")
         finally:
+            if (
+                parent_receipted_handoff
+                and registered_checkpoint is not None
+                and any(
+                    isinstance(report, index_sync.IndexSyncReport)
+                    and any(
+                        component.component == "epistemic_graph"
+                        and component.outcome == "registered"
+                        for component in report.components
+                    )
+                    for report in index_reports
+                )
+            ):
+                graph_sync.start_registered_detached(
+                    self._vault_root,
+                    state_root=get_manager()
+                    ._mutation_coordinator_for(self._vault_root)
+                    .state_root,
+                    expected_checkpoint=registered_checkpoint,
+                )
             if not completed and publication_intents:
                 from . import file_watcher
 
@@ -1197,6 +1221,8 @@ class MediaWorker:
                 result.receipt_revision,
             )
             coordinator = get_manager()._mutation_coordinator_for(self._vault_root)
+            index_reports: list[object] = []
+            registered_checkpoint: graph_sync.GraphSyncCheckpoint | None = None
             with epistemic_graph.parent_receipted_graph_handoff(
                 self._vault_root,
                 state_root=coordinator.state_root,
@@ -1206,9 +1232,29 @@ class MediaWorker:
                     self._vault_root, build=False
                 ):
                     return
-                completed = post_commit_batch_fanout(
-                    self._vault_root, [job.sidecar_path], None, None
-                )
+                registered_checkpoint = graph_sync.read_checkpoint(self._vault_root)
+                try:
+                    completed = post_commit_batch_fanout(
+                        self._vault_root, [job.sidecar_path], index_reports, None
+                    )
+                finally:
+                    if (
+                        registered_checkpoint is not None
+                        and any(
+                            isinstance(report, index_sync.IndexSyncReport)
+                            and any(
+                                component.component == "epistemic_graph"
+                                and component.outcome == "registered"
+                                for component in report.components
+                            )
+                            for report in index_reports
+                        )
+                    ):
+                        graph_sync.start_registered_detached(
+                            self._vault_root,
+                            state_root=coordinator.state_root,
+                            expected_checkpoint=registered_checkpoint,
+                        )
             if completed is not True:
                 return
             deferred_index.clear_full_receipts(

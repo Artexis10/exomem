@@ -6733,9 +6733,10 @@ def _join_registered_standalone(
     if _parent_receipted_graph_handoff_active(
         vault_root, mutation_coordinator.state_root
     ):
-        graph_sync.start_registered_detached(
-            vault_root, state_root=mutation_coordinator.state_root
-        )
+        # The parent keeps this exact registration until its fanout observes
+        # it. `full_upsert_succeeded()` acknowledges registered work from the
+        # request-local waiter; releasing it here turns a healthy graph handoff
+        # into GRAPH_SYNC_HANDOFF_MISSING before the parent can finalize.
         return result
     if _caller_can_carry_pending(vault_root, mutation_coordinator):
         return result
