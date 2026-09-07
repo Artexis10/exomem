@@ -1,0 +1,31 @@
+"""Characterize the same public workflow after a public sentinel write and graph convergence."""
+import asyncio, json, pathlib, sys, time
+source=pathlib.Path(__file__).resolve().parent/'source-placeholder'
+# The source checkout is an explicit launch argument; do not infer from an installed package.
+source=pathlib.Path(sys.argv.pop(1)).resolve()
+sys.path.insert(0,str(source/'scripts'))
+import durable_closure_common as m
+original=m._await_exomem_mutation
+async def ready(client,*,timeout=None,deadline=None):
+ deadline=deadline if deadline is not None else time.perf_counter()+(timeout or 0)
+ await original(client,deadline=deadline)
+ title='Disposable graph readiness sentinel'
+ content='## Decision\n\nWait for the disposable graph readiness sentinel to become queryable before starting the measured workflow.\n'
+ preview=await client.call('remember',{'title':title,'note_type':'insight','content':content,'response_detail':'full','validate_only':True})
+ result=await client.call('remember',m._remember_commit_arguments(preview,title=title,content=content),ack=True)
+ if not result.get('path'): raise m.AdapterFault('warm graph sentinel commit missing path')
+ while True:
+  payload=await client.call('connect_memory',{'operation':'graph-context','path':result['path'],'max_nodes':5,'max_edges':5},allow_refusal=True)
+  if payload.get('available') is True:return
+  if time.perf_counter()>=deadline: raise m.AdapterFault('public graph did not become available after sentinel commit')
+  await asyncio.sleep(.5)
+m._await_exomem_mutation=ready
+original_run=m.run_product
+async def run(**kw):
+ row=await original_run(**kw)
+ row['setup_variant']='public-sentinel-write-then-graph-current'
+ row['setup_extra_pages']=1
+ row['setup_note']='Generated common fixture plus one public sentinel note; sentinel commit and graph readiness polling are outside the timed workflow.'
+ return row
+m.run_product=run
+raise SystemExit(m.main())

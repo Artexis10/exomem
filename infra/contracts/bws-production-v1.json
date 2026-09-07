@@ -3,6 +3,13 @@
   "product": "exomem-hosted",
   "environment": "production",
   "bindings": {
+    "provisioner-database-url": {
+      "project_id": "69843186-5161-40a2-951f-b487011122ce",
+      "secret_id": "00943c12-dede-4984-a65a-b4be017b265a",
+      "expected_key": "EXOMEM_HOSTED_PROVISIONER_DATABASE_URL",
+      "env": "EXOMEM_HOSTED_PROVISIONER_DATABASE_URL",
+      "format": "opaque-line"
+    },
     "control-plane-key": {
       "project_id": "69843186-5161-40a2-951f-b487011122ce",
       "secret_id": "1d9caad4-9eba-4c62-90ec-b4a0017805cf",

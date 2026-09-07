@@ -1,0 +1,70 @@
+{
+  "evidence_format": 1,
+  "verdict": "VERIFIED",
+  "scope": "Separate Exomem characterizations and exact compact-evidence retention; no paired parity or full graph-convergence claim.",
+  "measured_source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+  "characterizations_sha256": "1c52cd3e45f005282b270adb7fe69b063d18287ca26d0d838b16673f353af69b",
+  "tracked_copy_identical": true,
+  "sample_count": 3,
+  "compaction": {
+    "all_timed_calls_phases_verification_hosts_retained": true,
+    "all_raw_result_hashes_match": true,
+    "runtime_profiles_content_and_hashes_match": true,
+    "startup_call_grouping_matches": true,
+    "media_corpus_inventory_entries": 8000,
+    "media_corpus_digest_preserved": true,
+    "sanitization_passed": true
+  },
+  "warm": {
+    "raw_result_sha256": "ec6069b9ed38de4c3e044f067b1abec5099094109d2e766e77f3d5cfdcb58c1a",
+    "wrapper_sha256": "e37be3bc22db0fdf71a13006bb325fb58a8e8a8678f43012a3f53f2ddb9cd239",
+    "tracked_wrapper_identical": true,
+    "closure_ms": 11521.626963003655,
+    "pre_timing_ms": 130013.01827399584,
+    "teardown_ms": 2105.0846739963163,
+    "timed_calls": 13,
+    "write_acks": 4,
+    "exact_body_proofs": 4,
+    "successful_marker_searches": 3,
+    "full_initial_indexed_corpus_pages": 8000,
+    "extra_public_sentinel_pages": 1,
+    "limitation": "Single Exomem characterization, not paired acceptance median. Wrapper accepts graph-context available=true after sentinel commit; this can return empty seeds, so neither sentinel graph membership nor global graph convergence is separately established. Readiness raw retains call classification rather than full graph response."
+  },
+  "real_media": {
+    "raw_result_sha256": "d39557b4601fba1e70f581d4b796e5cefe9a629376d503006d19522f62d07bb7",
+    "driver_sha256": "7701f8265bb8ae2f55492e85a0feff19e9db90023e878168e80cc98a149dfef9",
+    "useful_closure_ms": 43577.766638001776,
+    "workflow_ms": 43588.11618700565,
+    "media_convergence_from_workflow_start_ms": 29875.598272003117,
+    "extraction_interval_ms": 10837.323462998029,
+    "public_calls": 29,
+    "write_acks": 7,
+    "ordinary_retrieval_refusals": 0,
+    "verification_all_true": true,
+    "preserved_artifact_hashes_match": true,
+    "completed_extraction_sidecars": 3,
+    "expected_texts_verified": [
+      "Dummy PDF file",
+      "Cautionary Statement",
+      "Introduction to the Tenth Anniversary Edition"
+    ],
+    "engine_labels": [
+      "pymupdf+tesseract",
+      "tesseract"
+    ],
+    "graph_warming": true,
+    "full_convergence_proven": false,
+    "limits": [
+      "Single-product characterization, separate from paired parity acceptance.",
+      "Media startup records keyword recall and mutation admission; no full-corpus metadata/FTS membership proof is emitted by this driver.",
+      "Graph remains warming; full graph/lexical/embedding convergence is explicitly unproven.",
+      "Final persisted instrumentation records 3 rebuild attempts, 0 successful completions and 1 inflight. Its after_shutdown label is not proof the rebuild finished.",
+      "Graph elapsed counters include exited unsuccessful invocations and omit work still active; they are not total convergence time.",
+      "Zero topology paths/bytes applies only to the instrumented _sources_linking_to hook, not all graph work or all filesystem I/O.",
+      "Ledger occupancy/span/idle are invalid due UTC/client clock disagreement; connector overhead remains unmeasured.",
+      "Engine labels are retained; Python package versions are available, but a Tesseract binary version is not recorded.",
+      "Media result job states are enqueue-time snapshots; later public sidecar reads prove completed extraction."
+    ]
+  },
+  "clock_domain": "Client/host duration measurements use time.perf_counter; graph instrumentation uses monotonic; UTC timestamps/ledger are a separate clock. UTC occupancy is invalidated, not adjusted. No cause for clock disagreement inferred."
+}

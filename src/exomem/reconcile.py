@@ -359,7 +359,10 @@ def reconcile(
             )
         )
         expected_components = {
-            "graph" if row.component == "graph_edges" else row.component
+            "graph"
+            if row.component
+            in {"graph_edges", "graph_dependencies", "graph_dependency_coverage"}
+            else row.component
             for row in suppression_census.corrupt_rows
         }
         if not expected_components <= set(report.semantic_suppressed_corrupt_purged):

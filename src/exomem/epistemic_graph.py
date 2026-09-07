@@ -68,7 +68,8 @@ def _sqlite_connect_owned(
 ) -> sqlite3.Connection:
     return sqlite3.connect(database, *args, **kwargs)
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
+_DEPENDENCY_FORMAT = 1
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
 EDGE_INSPECTION_MULTIPLIER = 4
@@ -1403,6 +1404,59 @@ def _source_signature(path: Path, source: str) -> GraphSourceSignature:
     )
 
 
+def _dependency_lookup_keys(raw_target: str) -> set[str]:
+    """Conservative normalized lookup keys for one authored body wikilink."""
+    target = raw_target.strip()
+    if target.startswith("[[") and target.endswith("]]"):
+        target = target[2:-2].strip()
+    target = target.split("|", 1)[0].split("#", 1)[0].strip()
+    target = target.removesuffix(".md").strip().strip("/")
+    if not target:
+        return set()
+    keys = {target.casefold()}
+    if target.startswith(kb_prefix()):
+        keys.add(target.removeprefix(kb_prefix()).casefold())
+    else:
+        keys.add((kb_prefix() + target).casefold())
+    if "/" not in target:
+        keys.add(target.casefold())
+    return keys
+
+
+def _dependency_records(body: str) -> list[tuple[str, str]]:
+    """Deduplicated authored body targets and their conservative lookup keys."""
+    records: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for match in vault_module.find_body_wikilinks(body):
+        raw_target = match.group(0)[2:-2].strip()
+        if not raw_target or raw_target.endswith("/"):
+            continue
+        for lookup_key in sorted(_dependency_lookup_keys(raw_target)):
+            record = (lookup_key, raw_target)
+            if record not in seen:
+                seen.add(record)
+                records.append(record)
+    return records
+
+
+def _dependency_changed_keys(
+    rels: set[str], *resolvers: vault_module.WikilinkResolver
+) -> set[str]:
+    """Every path, stem, KB-relative, and title key a topology change can move."""
+    keys: set[str] = set()
+    for rel in rels:
+        no_ext = rel.removesuffix(".md").strip("/")
+        if not no_ext:
+            continue
+        keys.update(_dependency_lookup_keys(no_ext))
+        keys.add(no_ext.rsplit("/", 1)[-1].casefold())
+        for resolver in resolvers:
+            title = resolver.title_key_for_path(rel)
+            if title:
+                keys.add(title.casefold())
+    return keys
+
+
 def _resolver_topology_fingerprint(
     resolver: vault_module.WikilinkResolver,
 ) -> str:
@@ -1633,6 +1687,18 @@ class EpistemicGraphIndex:
                 key TEXT PRIMARY KEY, value TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS graph_dependency_coverage (
+                source_path TEXT PRIMARY KEY NOT NULL, source_hash TEXT NOT NULL,
+                dependency_format INTEGER NOT NULL, expected_count INTEGER NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS graph_dependencies (
+                source_path TEXT NOT NULL, lookup_key TEXT NOT NULL, raw_target TEXT NOT NULL,
+                PRIMARY KEY(source_path, lookup_key, raw_target)
+            )
+        """)
         conn.execute(
             "INSERT OR IGNORE INTO graph_meta(key, value) VALUES ('instance', ?)",
             (secrets.token_hex(16),),
@@ -1690,6 +1756,10 @@ class EpistemicGraphIndex:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_unregistered "
             "ON graph_edges(registry_status, raw_relation, source_path, source_anchor)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_dependencies_lookup "
+            "ON graph_dependencies(lookup_key, source_path)"
         )
         return conn
 
@@ -2947,6 +3017,8 @@ class EpistemicGraphIndex:
                 conn.execute("DELETE FROM graph_edges")
                 conn.execute("DELETE FROM graph_nodes")
                 conn.execute("DELETE FROM graph_parent_refs")
+                conn.execute("DELETE FROM graph_dependencies")
+                conn.execute("DELETE FROM graph_dependency_coverage")
                 conn.execute("DELETE FROM graph_meta WHERE key = 'schema_version'")
                 conn.execute(
                     "DELETE FROM graph_meta WHERE key = ?",
@@ -3332,11 +3404,32 @@ class EpistemicGraphIndex:
         self,
         resolver: vault_module.WikilinkResolver,
         expected_membership: frozenset[str],
+        *,
+        changed_rels: set[str] | None = None,
     ) -> dict[str, GraphSourceSignature] | None:
         """Bind the resolver's vault-wide paths and titles to current bytes."""
+        changed = changed_rels or set()
         resolver_paths = {rel.removesuffix(".md") for rel in expected_membership}
         if resolver.full_paths != resolver_paths:
             return None
+        indexed_hashes: dict[str, str] | None = None
+        if self.path == sidecar_path(self.vault_root) and self.path.exists():
+            conn: sqlite3.Connection | None = None
+            try:
+                conn = self._connect_existing(readonly=True)
+                indexed_hashes = {
+                    str(path): str(source_hash)
+                    for path, source_hash in conn.execute(
+                        "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file'"
+                    )
+                }
+            except (sqlite3.Error, FileNotFoundError):
+                return None
+            finally:
+                if conn is not None:
+                    conn.close()
+            if (set(indexed_hashes) - changed) != (set(expected_membership) - changed):
+                return None
         versions: dict[str, GraphSourceSignature] = {}
         for rel in sorted(expected_membership):
             path = self.vault_root / rel
@@ -3355,6 +3448,12 @@ class EpistemicGraphIndex:
                 resolved_relative=rel,
             )
             if page is None:
+                return None
+            if (
+                indexed_hashes is not None
+                and rel not in changed
+                and indexed_hashes.get(rel) != source_signature[3]
+            ):
                 return None
             title = page.title.strip().lower() if page.title.strip() else None
             if resolver.title_key_for_path(rel) != title:
@@ -3526,6 +3625,60 @@ class EpistemicGraphIndex:
             }
         return indexed_sources, linked_sources, str(fingerprint_row[0])
 
+    def _dependency_index_complete(self, conn: sqlite3.Connection) -> bool:
+        """Prove in one snapshot that raw dependencies cover every file row."""
+        try:
+            files = {
+                str(path): str(source_hash)
+                for path, source_hash in conn.execute(
+                    "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file'"
+                )
+            }
+            coverage = {
+                str(source_path): (str(source_hash), int(dependency_format), int(expected_count))
+                for source_path, source_hash, dependency_format, expected_count in conn.execute(
+                    "SELECT source_path, source_hash, dependency_format, expected_count "
+                    "FROM graph_dependency_coverage"
+                )
+            }
+            counts = {
+                str(source_path): int(count)
+                for source_path, count in conn.execute(
+                    "SELECT source_path, COUNT(*) FROM graph_dependencies GROUP BY source_path"
+                )
+            }
+        except (sqlite3.Error, TypeError, ValueError):
+            return False
+        if set(files) != set(coverage) or not set(counts) <= set(coverage):
+            return False
+        return all(
+            source_hash == files[source_path]
+            and dependency_format == _DEPENDENCY_FORMAT
+            and expected_count >= 0
+            and expected_count == counts.get(source_path, 0)
+            for source_path, (source_hash, dependency_format, expected_count) in coverage.items()
+        )
+
+    @staticmethod
+    def _dependency_sources_for_keys(
+        conn: sqlite3.Connection, keys: set[str]
+    ) -> set[tuple[str, str]]:
+        if not keys:
+            return set()
+        rows: set[tuple[str, str]] = set()
+        for start in range(0, len(keys), 900):
+            batch = sorted(keys)[start : start + 900]
+            placeholders = ",".join("?" for _ in batch)
+            rows.update(
+                (str(source_path), str(raw_target))
+                for source_path, raw_target in conn.execute(
+                    "SELECT DISTINCT source_path, raw_target FROM graph_dependencies "
+                    f"WHERE lookup_key IN ({placeholders})",
+                    batch,
+                )
+            )
+        return rows
+
     def _resolver_affected_sources(
         self,
         indexed_sources: dict[str, str],
@@ -3535,47 +3688,41 @@ class EpistemicGraphIndex:
         old_resolver: vault_module.WikilinkResolver,
         resolver: vault_module.WikilinkResolver,
     ) -> tuple[set[str], dict[str, GraphSourceSignature]] | None:
-        """Find affected sources and bind every source used by that decision."""
+        """Find topology dependants without rereading every indexed body."""
         indexed_paths = set(indexed_sources)
         if not linked_sources <= indexed_paths:
             return None
         affected = set(linked_sources) - changed_rels
-        scanned_versions: dict[str, GraphSourceSignature] = {}
-        for rel in sorted(indexed_paths - changed_rels):
-            path = self.vault_root / rel
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._connect_existing(readonly=True)
+            conn.execute("BEGIN")
+            if not self._dependency_index_complete(conn):
+                return None
+            raw_dependencies = self._dependency_sources_for_keys(
+                conn, _dependency_changed_keys(changed_rels, old_resolver, resolver)
+            )
+        except sqlite3.Error:
+            return None
+        finally:
+            if conn is not None:
+                conn.rollback()
+                conn.close()
+        for source_path, raw_target in raw_dependencies:
+            if source_path in changed_rels:
+                continue
             try:
-                raw = vault_module.read_bytes_without_pinning(path).decode("utf-8")
-                scanned_versions[rel] = _source_signature(path, raw)
-            except (OSError, UnicodeDecodeError):
+                old_target, old_warning = vault_module.normalize_wikilink(
+                    raw_target, self.vault_root, resolver=old_resolver, strict=False
+                )
+                new_target, new_warning = vault_module.normalize_wikilink(
+                    raw_target, self.vault_root, resolver=resolver, strict=False
+                )
+            except Exception:  # noqa: BLE001 - uncertainty requires full repair
                 return None
-            if scanned_versions[rel][3] != indexed_sources[rel]:
-                # The sidecar row is already stale even if a coarse filesystem
-                # clock leaves its path signature apparently unchanged.
-                return None
-            for match in vault_module.find_body_wikilinks(raw):
-                target = match.group(1).strip()
-                try:
-                    old_target, old_warning = vault_module.normalize_wikilink(
-                        target,
-                        self.vault_root,
-                        resolver=old_resolver,
-                        strict=False,
-                    )
-                    new_target, new_warning = vault_module.normalize_wikilink(
-                        target,
-                        self.vault_root,
-                        resolver=resolver,
-                        strict=False,
-                    )
-                except Exception:  # noqa: BLE001 - uncertainty requires full repair
-                    return None
-                if (old_target, old_warning is None) != (
-                    new_target,
-                    new_warning is None,
-                ):
-                    affected.add(rel)
-                    break
-        return affected, scanned_versions
+            if (old_target, old_warning is None) != (new_target, new_warning is None):
+                affected.add(source_path)
+        return affected, {}
 
     @call_spans.timed("graph.refresh_paths")
     def refresh_paths(
@@ -3889,6 +4036,11 @@ class EpistemicGraphIndex:
             != old_entry
             for rel, old_entry in stored_entries.items()
         )
+        delta_rels = {
+            rel
+            for path in set(delta.changed | delta.deleted)
+            if (rel := _vault_rel(self.vault_root, Path(path))) is not None
+        }
         indexed_sources: dict[str, str] = {}
         linked_sources: set[str] = set()
         resolver_fingerprint: str | None = None
@@ -3941,14 +4093,11 @@ class EpistemicGraphIndex:
         if topology_changed:
             assert old_resolver is not None
             assert resolver_fingerprint is not None
-            delta_rels = {
-                rel
-                for path in delta_paths
-                if (rel := _vault_rel(self.vault_root, Path(path))) is not None
-            }
             expected_membership = self._checkpoint_membership(checkpoint)
             resolver_version_result = (
-                self._resolver_source_versions(resolver, expected_membership)
+                self._resolver_source_versions(
+                    resolver, expected_membership, changed_rels=delta_rels
+                )
                 if expected_membership is not None
                 else None
             )
@@ -4084,48 +4233,38 @@ class EpistemicGraphIndex:
         rels: set[str],
         *,
         resolver: vault_module.WikilinkResolver,
-    ) -> set[str]:
-        """Pages whose own edges change because these pages appeared or vanished.
-
-        A wikilink that does not resolve produces no edge at all -- it is dropped
-        in `_body_wikilink_paths`, not recorded as unresolved. So a page written
-        before its target exists has a missing edge, and nothing about
-        re-indexing the *target* later repairs the *source*. That is the forward
-        reference the full rebuild gets right for free, by re-deriving every page
-        once the corpus is complete, and the one thing a naive per-path drain
-        silently gets wrong.
-
-        The two directions cost very differently, so they are answered
-        differently:
-
-        - A page that *vanished* leaves its inbound edges behind, and those edges
-          name their own source. One indexed query answers it.
-        - A page that *appeared* has no such trace, because the links that should
-          point at it were never written down. Only the bodies know, so this
-          scans them.
-
-        Persisting the unresolved edge instead -- storing the link's target
-        *name* even when no target id exists yet -- would turn this scan into an
-        index lookup. That is a real improvement and a real schema change,
-        including to what a read renders for a target that does not exist, so it
-        is a measured Phase 3 candidate rather than something smuggled in here.
-        The scan only runs when a drain actually changes topology, which
-        ordinary edits do not.
-        """
+    ) -> set[str] | None:
+        """Find topology dependants from complete persisted raw dependencies."""
+        opened_snapshot = not conn.in_transaction
+        if opened_snapshot:
+            conn.execute("BEGIN")
+        if not self._dependency_index_complete(conn):
+            if opened_snapshot:
+                conn.rollback()
+            return None
         appeared: set[str] = set()
         vanished: set[str] = set()
+        old_titles: set[str] = set()
         for rel in rels:
-            indexed = (
-                conn.execute(
-                    "SELECT 1 FROM graph_nodes WHERE path = ? LIMIT 1", (rel,)
-                ).fetchone()
-                is not None
-            )
+            row = conn.execute(
+                "SELECT title FROM graph_nodes WHERE path = ? AND kind = 'file'", (rel,)
+            ).fetchone()
+            indexed = row is not None
+            if row is not None and row[0] is not None and str(row[0]).strip():
+                old_titles.add(str(row[0]).strip().casefold())
             exists = (self.vault_root / rel).exists()
             if exists and not indexed:
                 appeared.add(rel)
             elif indexed and not exists:
                 vanished.add(rel)
+
+            # A changed non-KB target that has no persisted file row cannot
+            # supply its prior title. It may have removed an ambiguity, so the
+            # graph cannot safely claim bounded topology recovery.
+            if not rel.startswith(kb_prefix()) and not indexed:
+                if opened_snapshot:
+                    conn.rollback()
+                return None
 
         affected: set[str] = set()
         for rel in vanished:
@@ -4136,8 +4275,13 @@ class EpistemicGraphIndex:
                     (_file_key(rel),),
                 )
             )
-        if appeared:
-            affected.update(self._sources_linking_to(appeared, resolver=resolver))
+        keys = _dependency_changed_keys(rels, resolver) | old_titles
+        affected.update(
+            source_path
+            for source_path, _raw_target in self._dependency_sources_for_keys(conn, keys)
+        )
+        if opened_snapshot:
+            conn.rollback()
         return affected - rels
 
     def _sources_linking_to(
@@ -4235,6 +4379,8 @@ class EpistemicGraphIndex:
                 )
             finally:
                 probe.close()
+            if affected is None:
+                return {**report, "requires_rebuild": 1}
             batch = sorted({*paths, *(self.vault_root / rel for rel in affected)})
             indexed_versions: dict[str, GraphSourceSignature] = {}
             published = False
@@ -4338,6 +4484,8 @@ class EpistemicGraphIndex:
         node_paths: list[str],
         edge_values: dict[str, list[str]],
         *,
+        dependency_rows: list[tuple[object, object, object]] | None = None,
+        dependency_source_paths: list[object] | None = None,
         connection_path: Path | None = None,
     ) -> int:
         """Purge quarantined sidecar values without normalizing them as paths."""
@@ -4350,7 +4498,9 @@ class EpistemicGraphIndex:
             if column in {"source_path", "src_key", "dst_key"}
         }
         paths = sorted({value for value in node_paths if isinstance(value, str)})
-        if not paths and not values:
+        dependency_records = list(dict.fromkeys(dependency_rows or ()))
+        dependency_sources = list(dict.fromkeys([*paths, *(dependency_source_paths or ())]))
+        if not paths and not values and not dependency_records and not dependency_sources:
             return 0
         with self._mutation_coordinator.hold(
             operation="epistemic_graph_purge_exact_persisted_rows", holder_kind="graph"
@@ -4380,6 +4530,24 @@ class EpistemicGraphIndex:
                                 f"DELETE FROM graph_edges WHERE {column} IN ({placeholders})",
                                 batch,
                             ).rowcount
+                    invalidated_sources = list(dependency_sources)
+                    for source_path, lookup_key, raw_target in dependency_records:
+                        removed = conn.execute(
+                            "DELETE FROM graph_dependencies WHERE source_path IS ? "
+                            "AND lookup_key IS ? AND raw_target IS ?",
+                            (source_path, lookup_key, raw_target),
+                        ).rowcount
+                        changed += removed
+                        if removed and source_path not in invalidated_sources:
+                            invalidated_sources.append(source_path)
+                    for source_path in invalidated_sources:
+                        changed += conn.execute(
+                            "DELETE FROM graph_dependencies WHERE source_path IS ?", (source_path,)
+                        ).rowcount
+                        changed += conn.execute(
+                            "DELETE FROM graph_dependency_coverage WHERE source_path IS ?",
+                            (source_path,),
+                        ).rowcount
                     if changed:
                         _bump_generation(conn)
                 return int(changed)
@@ -4530,6 +4698,7 @@ class EpistemicGraphIndex:
             parent_state=state,
             resolver=resolver,
         )
+        dependencies = _dependency_records(page.body)
         with conn if commit else nullcontext():
             # Direct editors can replace a file while parsing/edge resolution is
             # in flight.  Rebind to the exact source immediately before the
@@ -4549,6 +4718,10 @@ class EpistemicGraphIndex:
             conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel,))
             conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel,))
             conn.execute("DELETE FROM graph_parent_refs WHERE path = ?", (rel,))
+            conn.execute("DELETE FROM graph_dependencies WHERE source_path = ?", (rel,))
+            conn.execute(
+                "DELETE FROM graph_dependency_coverage WHERE source_path = ?", (rel,)
+            )
             conn.execute(
                 "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                 ("core_registry_version", str(self.registry.core_version)),
@@ -4575,6 +4748,18 @@ class EpistemicGraphIndex:
                 )
             for edge in edges:
                 _insert_edge(conn, edge)
+            conn.executemany(
+                "INSERT INTO graph_dependencies("
+                "source_path, lookup_key, raw_target"
+                ") VALUES (?, ?, ?)",
+                [(rel, lookup_key, raw_target) for lookup_key, raw_target in dependencies],
+            )
+            conn.execute(
+                "INSERT INTO graph_dependency_coverage("
+                "source_path, source_hash, dependency_format, expected_count"
+                ") VALUES (?, ?, ?, ?)",
+                (rel, source_signature[3], _DEPENDENCY_FORMAT, len(dependencies)),
+            )
             _bump_generation(conn)
             if indexed_versions is not None:
                 indexed_versions[rel] = current_signature
@@ -4594,6 +4779,10 @@ class EpistemicGraphIndex:
             )
             cur = conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel_path,))
             conn.execute("DELETE FROM graph_parent_refs WHERE path = ?", (rel_path,))
+            conn.execute("DELETE FROM graph_dependencies WHERE source_path = ?", (rel_path,))
+            conn.execute(
+                "DELETE FROM graph_dependency_coverage WHERE source_path = ?", (rel_path,)
+            )
             _bump_generation(conn)
         return cur.rowcount if cur.rowcount is not None else 0
 
@@ -6816,9 +7005,12 @@ def schedule_background_rebuild(
 
     def _run() -> None:
         try:
-            EpistemicGraphIndex(
-                vault_root, mutation_coordinator=mutation_coordinator
-            ).rebuild_all()
+            from .foreground_activity import background_scope
+
+            with background_scope(vault_root):
+                EpistemicGraphIndex(
+                    vault_root, mutation_coordinator=mutation_coordinator
+                ).rebuild_all()
         except graph_sync.GraphRebuildInProgress:
             # Another process owns the kernel-backed rebuild claim.  That is a
             # healthy coalescing state, not a failed publication requiring a

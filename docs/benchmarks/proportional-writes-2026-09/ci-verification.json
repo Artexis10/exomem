@@ -1,0 +1,434 @@
+{
+  "corrected_tests": [
+    {
+      "result": "passed",
+      "seconds": 0.113,
+      "test": "tests.test_epistemic_graph_relation_filter::test_schema_bump_invalidates_cache_token"
+    },
+    {
+      "result": "passed",
+      "seconds": 0.003,
+      "test": "tests.test_semantic_unit_reconcile::test_hierarchy_parser_and_sidecar_versions_are_incremented"
+    },
+    {
+      "result": "passed",
+      "seconds": 0.098,
+      "test": "tests.test_bounded_graph_join::test_a_direct_mutation_guard_also_returns_while_its_rebuild_runs"
+    },
+    {
+      "result": "passed",
+      "seconds": 0.102,
+      "test": "tests.test_bounded_graph_join::test_interactive_write_returns_while_a_registered_rebuild_is_still_running"
+    },
+    {
+      "result": "passed",
+      "seconds": 0.111,
+      "test": "tests.test_epistemic_graph_relation_filter::test_stale_schema_sidecar_is_warming"
+    }
+  ],
+  "current_coverage": {
+    "additional_cases_since_full_run": {
+      "count": 13,
+      "module": "tests/test_hosted_bws_source.py",
+      "reason": "new main commit be382efc included in tested synthetic merge",
+      "removed_identities": 0
+    },
+    "errors": 0,
+    "failed": 0,
+    "individual_test_skips": 311,
+    "junit_shards": {
+      "artifact_head_mismatches": 0,
+      "core": 12,
+      "duplicate_executed_identities": 0,
+      "duplicates": [],
+      "expected": 16,
+      "harness": 4,
+      "missing": [],
+      "observed": 16
+    },
+    "module_skip_identities": 7,
+    "module_skip_records": 84,
+    "partition_contract": {
+      "result": "passed",
+      "scope": "The core and harness tiers plus separately owned tests/test_latency_gate.py exactly partition full lean collection; this PR runs the two tiers. The latency file ran in supplemental full CI."
+    },
+    "passed": 17639,
+    "python": "3.13",
+    "skip_explanation": "7 optional-module collection skips recur across core shards: 84 raw module records become 7 identities, removing 77 duplicate skip records. Individual platform/optional-extra/tool/fixture skips remain skips.",
+    "skipped_deduplicated": 318,
+    "skipped_raw": 395,
+    "tiers": {
+      "core": {
+        "passed": 14933,
+        "skipped": 336
+      },
+      "harness": {
+        "passed": 2706,
+        "skipped": 59
+      }
+    }
+  },
+  "current_gates": {
+    "capabilities": {
+      "job_id": 101881798698,
+      "result": "success",
+      "test_summaries": [],
+      "url": "https://github.com/Artexis10/exomem/actions/runs/34167652315/job/101881798698"
+    },
+    "lint_and_types": {
+      "job_id": 101881798711,
+      "result": "success",
+      "test_summaries": [],
+      "url": "https://github.com/Artexis10/exomem/actions/runs/34167652315/job/101881798711"
+    },
+    "native_windows": {
+      "job_id": 101881798530,
+      "result": "success",
+      "test_summaries": [
+        {
+          "deselected": 0,
+          "passed": 236,
+          "seconds": 105.46,
+          "skipped": 4
+        },
+        {
+          "deselected": 256,
+          "passed": 17,
+          "seconds": 82.1,
+          "skipped": 0
+        }
+      ],
+      "url": "https://github.com/Artexis10/exomem/actions/runs/34167652315/job/101881798530"
+    },
+    "privacy_and_build": {
+      "generated_artifacts": 13,
+      "job_id": 101881798835,
+      "repository_files": 3955,
+      "result": "success",
+      "test_summaries": [
+        {
+          "deselected": 0,
+          "passed": 3,
+          "seconds": 16.12,
+          "skipped": 0
+        }
+      ],
+      "text_payloads": 4067,
+      "url": "https://github.com/Artexis10/exomem/actions/runs/34167652315/job/101881798835"
+    },
+    "product_e2e": {
+      "job_id": 101881798696,
+      "result": "success",
+      "test_summaries": [],
+      "url": "https://github.com/Artexis10/exomem/actions/runs/34167652315/job/101881798696"
+    },
+    "required_ci": {
+      "job_id": 101884146797,
+      "result": "success",
+      "test_summaries": [],
+      "url": "https://github.com/Artexis10/exomem/actions/runs/34167652315/job/101884146797"
+    },
+    "strict_openspec": {
+      "failed": 0,
+      "job_id": 101881798760,
+      "passed": 189,
+      "result": "success",
+      "url": "https://github.com/Artexis10/exomem/actions/runs/34167652315/job/101881798760"
+    },
+    "terminal_ui": {
+      "job_id": 101881798727,
+      "result": "success",
+      "test_summaries": [
+        {
+          "deselected": 0,
+          "passed": 159,
+          "seconds": 78.06,
+          "skipped": 0
+        }
+      ],
+      "url": "https://github.com/Artexis10/exomem/actions/runs/34167652315/job/101881798727"
+    },
+    "wheel_onboarding": {
+      "job_id": 101881798912,
+      "result": "success",
+      "test_summaries": [],
+      "url": "https://github.com/Artexis10/exomem/actions/runs/34167652315/job/101881798912"
+    }
+  },
+  "current_run": {
+    "checkout_sha": "031cc9069910ae53b69c0aa0112505b9d90a2f33",
+    "checkout_tree": "013209b0471403855217c94021081b387d60d85b",
+    "conclusion": "success",
+    "event": "pull_request",
+    "head_sha": "e28506314217e734b1bef187497ef9e9cb7f7a20",
+    "id": 34167652315,
+    "intentional_skipped_jobs": [
+      "docker (lean build + smoke)",
+      "governance projected vector CPU wire (${{ matrix.route }})",
+      "governance projected wire characterization (${{ matrix.route }})",
+      "graph convergence (concurrent writer)",
+      "release evidence",
+      "retrieval latency (2k synthetic vault)",
+      "retrieval quality (golden gate, embeddings)",
+      "semantic write latency (2k and 8k)"
+    ],
+    "jobs": {
+      "skipped": 8,
+      "success": 25
+    },
+    "url": "https://github.com/Artexis10/exomem/actions/runs/34167652315"
+  },
+  "earlier_failed_runs": [
+    {
+      "conclusion": "failure",
+      "diagnosis": "Two tests retained schema literal 9 after the graph schema became 11. Corrected in 061dc6a94e55b622b44be97f675b5267a641c1c2; both runtimes passed those corrections in the next full run.",
+      "failures": [
+        {
+          "actual": "assert 11 == 9",
+          "python": [
+            "3.11",
+            "3.13"
+          ],
+          "test": "tests/test_epistemic_graph_relation_filter.py::test_schema_bump_invalidates_cache_token"
+        },
+        {
+          "actual": "assert 11 == 9",
+          "python": [
+            "3.11",
+            "3.13"
+          ],
+          "test": "tests/test_semantic_unit_reconcile.py::test_hierarchy_parser_and_sidecar_versions_are_incremented"
+        }
+      ],
+      "head_sha": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+      "id": 34155741088,
+      "jobs": {
+        "failure": 3,
+        "success": 68
+      },
+      "url": "https://github.com/Artexis10/exomem/actions/runs/34155741088"
+    },
+    {
+      "conclusion": "failure",
+      "correction_commit": "7c961455b35b08ea64fa2ad503fb1799b78aef70",
+      "diagnosis": "The test assumed thread callback entry before a nonblocking mutation guard returned, and released its worker before asserting publication was pending. Two neighboring tests now wait for eventual entry outside the measured duration, assert nonpublication before release, and join/verify the required checkpoint.",
+      "failure": {
+        "actual": "assert entered.is_set() is True; actual False",
+        "python": "3.13",
+        "test": "tests/test_bounded_graph_join.py::test_a_direct_mutation_guard_also_returns_while_its_rebuild_runs"
+      },
+      "head_sha": "061dc6a94e55b622b44be97f675b5267a641c1c2",
+      "id": 34157824902,
+      "jobs": {
+        "failure": 2,
+        "success": 69
+      },
+      "url": "https://github.com/Artexis10/exomem/actions/runs/34157824902"
+    }
+  ],
+  "focused_module_outcomes": {
+    "tests.test_bounded_graph_join": {
+      "passed": 26
+    },
+    "tests.test_durable_closure_common": {
+      "passed": 45
+    },
+    "tests.test_foreground_activity": {
+      "passed": 11
+    },
+    "tests.test_foreground_scan_priority": {
+      "passed": 7
+    },
+    "tests.test_graph_dependencies": {
+      "passed": 15
+    },
+    "tests.test_proportional_writer_resolver": {
+      "passed": 6
+    }
+  },
+  "pull_request": "https://github.com/Artexis10/exomem/pull/1121",
+  "repository": "Artexis10/exomem",
+  "schema_version": 2,
+  "scope": "Complete Python 3.13 PR core+harness tiers and required PR gates, supplemented by earlier successful Python 3.11 and manual-only gates. No claim that skipped PR jobs executed.",
+  "source_provenance": {
+    "all_changed_paths_since_prior_full": [
+      ".release-please-manifest.json",
+      "CHANGELOG.md",
+      "docs/benchmarks/proportional-writes-2026-09.md",
+      "docs/benchmarks/proportional-writes-2026-09/benchmark-verification.json",
+      "docs/benchmarks/proportional-writes-2026-09/characterizations-verification.json",
+      "docs/benchmarks/proportional-writes-2026-09/characterizations.json",
+      "docs/benchmarks/proportional-writes-2026-09/paired-common.json",
+      "docs/benchmarks/proportional-writes-2026-09/warm-graph-setup.txt",
+      "openspec/changes/activate-agent-led-vocabulary-evolution/tasks.md",
+      "openspec/changes/make-durable-writes-proportional/tasks.md",
+      "pyproject.toml",
+      "server.json",
+      "src/exomem/__init__.py",
+      "tests/test_bounded_graph_join.py",
+      "uv.lock"
+    ],
+    "benchmark_drivers_identical": true,
+    "benchmark_head": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+    "ci_workflows_identical": true,
+    "dependency_changes": "only own package version 0.74.0 to 0.75.0",
+    "local_main_integration": {
+      "commit": "ff1b4271e42a9cae38532e17996fff78424f5c5e",
+      "entire_tree_equals_tested_synthetic_merge": true,
+      "tree_sha": "013209b0471403855217c94021081b387d60d85b"
+    },
+    "prior_full_run_head": "061dc6a94e55b622b44be97f675b5267a641c1c2",
+    "production_equal_except_package_version_literal": true,
+    "synthetic_merge": {
+      "additional_main_commit": "be382efced5dbc7732185f31eb46b2aedad37202",
+      "additional_paths": [
+        "docs/runbooks/hosted/secrets.md",
+        "infra/contracts/bws-production-v1.json",
+        "infra/contracts/secret-destinations-v1.json",
+        "infra/scripts/secret_handoff.py",
+        "openspec/changes/bind-hosted-secret-sources-to-bws/.openspec.yaml",
+        "openspec/changes/bind-hosted-secret-sources-to-bws/design.md",
+        "openspec/changes/bind-hosted-secret-sources-to-bws/proposal.md",
+        "openspec/changes/bind-hosted-secret-sources-to-bws/specs/hosted-secret-custody/spec.md",
+        "openspec/changes/bind-hosted-secret-sources-to-bws/tasks.md",
+        "tests/harness_modules.txt",
+        "tests/test_hosted_bws_source.py"
+      ],
+      "additional_scope": "unrelated hosted BWS handoff source binding, tests, runbook and OpenSpec",
+      "base_sha": "be382efced5dbc7732185f31eb46b2aedad37202",
+      "checkout_confirmed_in_completed_job_logs": true,
+      "checkout_job_count": 24,
+      "sha": "031cc9069910ae53b69c0aa0112505b9d90a2f33",
+      "tree_sha": "013209b0471403855217c94021081b387d60d85b"
+    },
+    "tests_changed_since_benchmark": [
+      "tests/test_bounded_graph_join.py",
+      "tests/test_epistemic_graph_relation_filter.py",
+      "tests/test_semantic_unit_reconcile.py"
+    ],
+    "tests_changed_since_prior_full": [
+      "tests/test_bounded_graph_join.py"
+    ],
+    "verified_pr_head": "e28506314217e734b1bef187497ef9e9cb7f7a20",
+    "version_metadata_paths": [
+      ".release-please-manifest.json",
+      "pyproject.toml",
+      "server.json",
+      "src/exomem/__init__.py",
+      "uv.lock"
+    ]
+  },
+  "supplemental_full_run": {
+    "head_sha": "061dc6a94e55b622b44be97f675b5267a641c1c2",
+    "id": 34157824902,
+    "overall_conclusion": "failure",
+    "python_3_11": {
+      "errors": 0,
+      "failed": 0,
+      "individual_test_skips": 311,
+      "module_skip_identities": 7,
+      "module_skip_records": 84,
+      "passed": 17626,
+      "python": "3.11",
+      "skipped_deduplicated": 318,
+      "skipped_raw": 395,
+      "unique_junit_identities": 17944
+    },
+    "successful_manual_only_gates": {
+      "docker_install_smoke": {
+        "job_id": 101853209844,
+        "result": "success"
+      },
+      "governance_vector_cpu_wire": {
+        "passed": 12,
+        "routes": 12,
+        "tests_per_route": 13
+      },
+      "governance_wire": {
+        "passed": 12,
+        "routes": 12,
+        "tests_per_route": 13
+      },
+      "graph_convergence": {
+        "blocking_writes": 0,
+        "drift": 0,
+        "final_graph_state": "current",
+        "job_id": 101853209345,
+        "pages": 400,
+        "queue_remaining": 0,
+        "result": "success",
+        "seconds": 48.8,
+        "write_max_ms": 1018.4,
+        "write_median_ms": 504.9,
+        "write_p95_ms": 905.4,
+        "writers": 1,
+        "writes": 74
+      },
+      "retrieval_latency": {
+        "job_id": 101853209620,
+        "result": "success",
+        "test_summaries": [
+          {
+            "deselected": 0,
+            "passed": 7,
+            "seconds": 236.33,
+            "skipped": 0
+          }
+        ]
+      },
+      "retrieval_quality": {
+        "job_id": 101853209548,
+        "result": "success",
+        "test_summaries": [
+          {
+            "deselected": 18010,
+            "passed": 7,
+            "seconds": 118.49,
+            "skipped": 1
+          }
+        ]
+      },
+      "semantic_write_latency": {
+        "job_id": 101853209559,
+        "observations": [
+          {
+            "commit_median_ms": 160.9,
+            "commit_p95_ms": 173.3,
+            "pages": 2000,
+            "paired_write_read_p95_ms": 662.8,
+            "post_canonical_max_ms": 91.7,
+            "public_write_median_ms": 195.1,
+            "public_write_p95_ms": 510.7,
+            "samples": 5,
+            "validate_median_ms": 30.7,
+            "validate_p95_ms": 31.5
+          },
+          {
+            "commit_median_ms": 382.7,
+            "commit_p95_ms": 399.9,
+            "pages": 8000,
+            "paired_write_read_p95_ms": 1485.4,
+            "post_canonical_max_ms": 62.5,
+            "public_write_median_ms": 433.9,
+            "public_write_p95_ms": 1100.4,
+            "samples": 5,
+            "validate_median_ms": 201.0,
+            "validate_p95_ms": 217.8
+          }
+        ],
+        "read_after_write_tests": [
+          {
+            "deselected": 0,
+            "passed": 3,
+            "seconds": 1.83,
+            "skipped": 0
+          }
+        ],
+        "result": "success"
+      }
+    },
+    "url": "https://github.com/Artexis10/exomem/actions/runs/34157824902",
+    "why_supplemental": "Successful components retained from earlier full run. Final PR differs by corrected tests, documentation, release-version fields and unrelated hosted main integration; no fresh Python 3.11 run is claimed for that final merged tree."
+  },
+  "verdict": "VERIFIED"
+}

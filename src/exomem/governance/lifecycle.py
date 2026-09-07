@@ -895,6 +895,8 @@ def direct_residue(
             ("SELECT 1 FROM graph_nodes WHERE path = ? LIMIT 1", rels),
             ("SELECT 1 FROM graph_parent_refs WHERE path = ? LIMIT 1", rels),
             ("SELECT 1 FROM graph_edges WHERE source_path = ? LIMIT 1", rels),
+            ("SELECT 1 FROM graph_dependencies WHERE source_path = ? LIMIT 1", rels),
+            ("SELECT 1 FROM graph_dependency_coverage WHERE source_path = ? LIMIT 1", rels),
         ),
     )
     embeddings = _query_path(

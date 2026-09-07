@@ -276,6 +276,11 @@ RUNTIME_ENDPOINTS: tuple[str, ...] = (
     "exomem.due_state.recompute(vault)",
 )
 
+#: Opt-in provenance for the declared-subject pre-gate measurement. It records
+#: a local projection pass over eligible canonical page bodies; it is not a
+#: runtime detector or a claim that any subject has reusable facets.
+DECLARED_ENTITY_SUBJECT_COUNTS_ENDPOINT = "benchmark:declared_entity_subject_counts(vault)"
+
 #: Why the due-state counters surface reports nothing on a vault that has none.
 NO_DUE_STATE_LEDGER = (
     f"{DUE_STATE_FILE} carries no emission ledger; nothing has been counted or emitted"
@@ -500,12 +505,10 @@ def _identity_item(identity: str, finding: Any) -> StateItem:
     occurrence counts", and a corpus that repeats one name on one page is the
     case the whole family exists to keep quiet.
 
-    An identity reaches the snapshot only once the audit has produced a finding
-    for it, because that is the only place the runtime names one. A subject with
-    no finding therefore evaluates `unsupported` rather than `pass` — not a
-    silence anything is credited with, and not the twin's proof either: the
-    twin's silence is established by the absence meta-predicate over four
-    completely projected surfaces, which needs no item at all.
+    Undeclared identities reach the snapshot only after an audit finding.
+    Declared subjects receive independent pre-gate counts, allowing a missing
+    signal to score as a miss. The twin's silence is established separately by
+    the absence meta-predicate over four completely projected surfaces.
     """
 
     meta = finding.meta or {}
@@ -601,20 +604,33 @@ class VaultProjector(Projector):
     #: default-empty, but the output schema moved, and a snapshot's provenance is
     #: only worth anything if the version tracks what the projector can emit.
     #: 0.4.0 adds the opt-in `runtime_surfaces` projection, which emits signal
-    #: and surface items the file-only build cannot produce at all.
-    version = "0.4.0"
+    #: and surface items the file-only build cannot produce at all. 0.5.0 adds
+    #: opt-in declared-subject measurements before those runtime signals gate.
+    version = "0.5.0"
     author = "benchmark-harness"
     endpoints_used = ("filesystem:walk(vault)", "filesystem:read_text(*.md)")
 
-    def __init__(self, vault_root: Path | str, *, runtime_surfaces: bool = False) -> None:
+    def __init__(
+        self,
+        vault_root: Path | str,
+        *,
+        runtime_surfaces: bool = False,
+        declared_entity_subjects: Iterable[str] = (),
+    ) -> None:
         self.vault_root = Path(vault_root)
         #: Read the four absence surfaces through the product's documented read
         #: paths instead of from files. Off by default, and the default is the
         #: fair-comparison build: from files alone three of the four surfaces
         #: cannot be projected at all, so every quiet assertion is blocked.
         self.runtime_surfaces = runtime_surfaces
+        self.declared_entity_subjects = tuple(declared_entity_subjects)
         if runtime_surfaces:
             self.endpoints_used = (*type(self).endpoints_used, *RUNTIME_ENDPOINTS)
+            if self.declared_entity_subjects:
+                self.endpoints_used = (
+                    *self.endpoints_used,
+                    DECLARED_ENTITY_SUBJECT_COUNTS_ENDPOINT,
+                )
 
     # -- reading -----------------------------------------------------------
 
@@ -910,12 +926,92 @@ class VaultProjector(Projector):
             today=today,
             record_surfacing=False,
         )
+        audit_items = _audit_finding_items(audit_report)
+        surfaced_by_id = {item.id: item for item in audit_items}
+        declared_items = tuple(
+            self._merge_declared_entity_item(item, surfaced_by_id.get(item.id))
+            for item in self._declared_entity_items()
+        )
         return (
-            *_audit_finding_items(audit_report),
+            *audit_items,
+            *declared_items,
             *_review_queue_items(review_report),
             *self._project_proposal_queue(review_report),
             *self._project_runtime_due_state(today),
             *self._dismissal_items(self._triage_decisions()[1]),
+        )
+
+    def _declared_entity_items(self) -> tuple[StateItem, ...]:
+        """Measure declared identities before recurrence eligibility gates them."""
+
+        if not self.runtime_surfaces or not self.declared_entity_subjects:
+            return ()
+
+        from exomem import access, entity_recurrence
+        from exomem import audit as audit_module
+        from exomem.vault import kb_root
+
+        subjects: dict[str, str] = {}
+        for subject in self.declared_entity_subjects:
+            identity = entity_recurrence.identity_key(subject)
+            if identity:
+                subjects.setdefault(identity, str(subject).strip())
+
+        eligible: list[tuple[Any, str]] = []
+        entities = entity_recurrence.entities_prefix()
+        # The file-only projector has a different corpus boundary. Use the
+        # runtime's canonical page walk before any recurrence finding gate.
+        for page in audit_module._parse_all(kb_root(self.vault_root), self.vault_root):
+            relative = str(page.rel_path)
+            if relative.startswith(entities) or not entity_recurrence.counts_as_evidence(
+                page, indexable=access.is_indexable(self.vault_root, relative)
+            ):
+                continue
+            eligible.append((page, page.body))
+
+        projected: list[StateItem] = []
+        for identity, subject in sorted(subjects.items()):
+            pattern = re.compile(
+                r"(?<!\w)" + r"\s+".join(re.escape(part) for part in identity.split()) + r"(?!\w)"
+            )
+            matches = tuple(
+                page
+                for page, body in eligible
+                if pattern.search(
+                    entity_recurrence.identity_key(entity_recurrence._markdown_text(body))
+                )
+            )
+            origins = entity_recurrence._origin_refs(matches)
+            projected.append(
+                StateItem(
+                    id=identity,
+                    kind="container",
+                    title=subject,
+                    text="declared entity subject occurrence measurement",
+                    raw={
+                        "page_count": str(len(matches)),
+                        "source_count": str(len(set(origins.values()))),
+                        "projection": "declared_entity_subject_counts",
+                    },
+                )
+            )
+        return tuple(projected)
+
+    @staticmethod
+    def _merge_declared_entity_item(declared: StateItem, surfaced: StateItem | None) -> StateItem:
+        """Keep pre-gate counts while retaining surfaced candidate metadata."""
+
+        if surfaced is None:
+            return declared
+        return surfaced.model_copy(
+            update={
+                "raw": {
+                    **surfaced.raw,
+                    "page_count": declared.raw["page_count"],
+                    "source_count": declared.raw["source_count"],
+                    "projection": declared.raw["projection"],
+                }
+            }
         )
 
     def _project_proposal_queue(self, review_report: Any) -> tuple[StateItem, ...]:

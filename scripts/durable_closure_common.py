@@ -14,10 +14,12 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
 import uuid
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +32,8 @@ POLL_INTERVAL_SECONDS = 0.25
 WARM_SENTINEL = "durable-closure-common-warm-sentinel"
 BASIC_MEMORY_VERSION = "0.23.2"
 BASIC_MEMORY_WHEEL_SHA256 = "a1679a16319d8a7fb9c0486033551a47dedc0fbae7f5da81444eb3c4bf0ccecb"
+BASIC_MEMORY_ALEMBIC_VERSION = "7f6a2b8c9d10"
+EXOMEM_LEXICAL_SCHEMA_VERSION = 10
 
 
 class AdapterFault(RuntimeError):
@@ -713,9 +717,254 @@ def _search_proof(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _await_initial_index(client: PublicClient, *, product: str, timeout: float) -> None:
+def _membership_digest(values: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    for value in sorted(values):
+        digest.update(value.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _contained_path(root: Path, candidate: Path) -> Path:
+    resolved_root = root.resolve()
+    resolved_candidate = candidate.resolve()
+    if not resolved_candidate.is_relative_to(resolved_root):
+        raise AdapterFault("indexed store escaped the disposable state root")
+    return resolved_candidate
+
+
+def _indexed_store(product: str, state: Path, vault: Path) -> Path | None:
+    if product == "basic_memory":
+        candidate = state / "config" / "memory.db"
+        return _contained_path(state, candidate) if candidate.is_file() else None
+    root = state / "state"
+    if not root.is_dir():
+        return None
+    _contained_path(state, root)
+    from exomem.state_paths import vault_state_key
+
+    candidate = root / vault_state_key(vault) / ".lexical.sqlite"
+    return _contained_path(root, candidate) if candidate.is_file() else None
+
+
+def _schema_identity(conn: sqlite3.Connection, tables: Sequence[str]) -> dict[str, Any]:
+    rows = conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'virtual table') "
+        f"AND name IN ({','.join('?' for _ in tables)}) ORDER BY name",
+        tuple(tables),
+    ).fetchall()
+    identity = {str(name): str(sql or "") for name, sql in rows}
+    return {
+        "tables": sorted(identity),
+        "digest": _membership_digest([json.dumps(identity, sort_keys=True)]),
+    }
+
+
+def _require_columns(conn: sqlite3.Connection, table: str, required: set[str]) -> None:
+    columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    missing = sorted(required - columns)
+    if missing:
+        raise AdapterFault(f"incompatible indexed-store schema: {table} missing {missing}")
+
+
+def _require_fts5_virtual_table(conn: sqlite3.Connection, table: str) -> None:
+    row = conn.execute("SELECT type, sql FROM sqlite_master WHERE name = ?", (table,)).fetchone()
+    statement = str(row[1] or "").casefold() if row else ""
+    if (
+        not row
+        or row[0] != "table"
+        or "create virtual table" not in statement
+        or "using fts5" not in statement
+    ):
+        raise AdapterFault(
+            f"incompatible indexed-store schema: {table} is not an FTS5 virtual table"
+        )
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return (
+        conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (table,)).fetchone() is not None
+    )
+
+
+def _fixture_paths(product: str, fixture: Mapping[str, Any]) -> list[str]:
+    names = [str(page["path"]) for page in fixture["pages"]]
+    if product == "exomem":
+        return ["Knowledge Base/Reference/" + name for name in names]
+    return names
+
+
+def inspect_indexed_fixture(
+    *, product: str, state: Path, vault: Path, fixture: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Read one coherent snapshot of the current disposable derived store."""
+    if product not in {"basic_memory", "exomem"}:
+        raise ValueError(f"unknown product {product}")
+    store = _indexed_store(product, state, vault)
+    expected_paths = _fixture_paths(product, fixture)
+    proof: dict[str, Any] = {
+        "ready": False,
+        "expected_path_count": len(expected_paths),
+        "expected_path_digest": _membership_digest(expected_paths),
+        "observed_path_count": 0,
+        "observed_path_digest": _membership_digest([]),
+        "store": str(store) if store else None,
+    }
+    if store is None:
+        proof["reason"] = "indexed store is not present"
+        return proof
+    conn = sqlite3.connect(f"{store.as_uri()}?mode=ro", uri=True)
+    try:
+        conn.execute("BEGIN")
+        if product == "basic_memory":
+            if not _table_exists(conn, "alembic_version"):
+                if not any(
+                    _table_exists(conn, table) for table in ("project", "entity", "search_index")
+                ):
+                    proof["reason"] = "indexed store is not initialized yet"
+                    return proof
+                raise AdapterFault("incompatible indexed-store schema: missing alembic_version")
+            version_rows = conn.execute("SELECT version_num FROM alembic_version").fetchall()
+            if version_rows != [(BASIC_MEMORY_ALEMBIC_VERSION,)]:
+                raise AdapterFault(
+                    "incompatible indexed-store schema: unsupported Basic Memory version"
+                )
+            _require_columns(conn, "project", {"id", "name", "path"})
+            _require_columns(conn, "entity", {"id", "file_path", "project_id"})
+            _require_columns(
+                conn, "search_index", {"id", "file_path", "project_id", "entity_id", "type"}
+            )
+            _require_fts5_virtual_table(conn, "search_index")
+            proof["schema_identity"] = _schema_identity(
+                conn, ("alembic_version", "project", "entity", "search_index")
+            )
+            project_rows = conn.execute(
+                "SELECT id, path FROM project WHERE name = 'main'"
+            ).fetchall()
+            expected_root = _contained_path(state, state / "home")
+            if (
+                len(project_rows) != 1
+                or _contained_path(state, Path(str(project_rows[0][1]))) != expected_root
+            ):
+                proof["reason"] = (
+                    "configured main project does not bind to the disposable fixture root"
+                )
+                return proof
+            project_id = project_rows[0][0]
+            entities = [
+                (int(row[0]), str(row[1]), int(row[2]))
+                for row in conn.execute(
+                    "SELECT id, file_path, project_id FROM entity WHERE project_id = ?",
+                    (project_id,),
+                )
+            ]
+            search_rows = [
+                (int(row[0]), str(row[1]), int(row[2]), int(row[3]))
+                for row in conn.execute(
+                    "SELECT id, file_path, project_id, entity_id FROM search_index "
+                    "WHERE type = 'entity' AND project_id = ?",
+                    (project_id,),
+                )
+            ]
+            search = [(row[0], row[1], row[2]) for row in search_rows]
+            observed_paths = [row[1] for row in entities]
+            proof.update(
+                {
+                    "observed_path_count": len(observed_paths),
+                    "observed_path_digest": _membership_digest(observed_paths),
+                    "proof_method": "entity/search_index identity multiset join",
+                    "identity_join_proof": "entity(id,file_path,project_id) = search_index(id,file_path,project_id); entity_id = id",
+                    "product_binding": {"project": "main", "project_id": project_id},
+                }
+            )
+            proof["ready"] = (
+                Counter(observed_paths) == Counter(expected_paths)
+                and Counter(entities) == Counter(search)
+                and all(row[0] == row[3] for row in search_rows)
+            )
+        else:
+            if not _table_exists(conn, "meta"):
+                if not any(_table_exists(conn, table) for table in ("pages", "fts")):
+                    proof["reason"] = "indexed store is not initialized yet"
+                    return proof
+                raise AdapterFault("incompatible indexed-store schema: missing meta")
+            version = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+            if version != (str(EXOMEM_LEXICAL_SCHEMA_VERSION),):
+                raise AdapterFault(
+                    "incompatible indexed-store schema: unsupported Exomem lexical version"
+                )
+            _require_columns(conn, "pages", {"path", "in_kb", "in_vault"})
+            _require_columns(conn, "fts", {"stemmed"})
+            _require_fts5_virtual_table(conn, "fts")
+            proof["schema_identity"] = _schema_identity(conn, ("meta", "pages", "fts"))
+            prefix = "Knowledge Base/Reference/"
+            rows = conn.execute(
+                "SELECT pages.rowid, pages.path, pages.in_kb, pages.in_vault, fts.rowid "
+                "FROM pages LEFT JOIN fts ON fts.rowid = pages.rowid "
+                "WHERE pages.path LIKE ?",
+                (prefix + "%",),
+            ).fetchall()
+            observed_paths = [str(row[1]) for row in rows]
+            proof.update(
+                {
+                    "observed_path_count": len(observed_paths),
+                    "observed_path_digest": _membership_digest(observed_paths),
+                    "proof_method": "pages/fts rowid identity join with recall admission",
+                    "identity_join_proof": "pages.rowid = fts.rowid",
+                    "product_binding": {
+                        "fixture_prefix": prefix,
+                        "vault_state_key": store.parent.name,
+                    },
+                }
+            )
+            proof["ready"] = Counter(observed_paths) == Counter(expected_paths) and all(
+                row[2] == 1 and row[3] == 1 and row[4] is not None for row in rows
+            )
+    except sqlite3.Error as error:
+        raise AdapterFault(f"incompatible indexed-store schema: {error}") from error
+    finally:
+        conn.close()
+    proof["reason"] = (
+        None
+        if proof["ready"]
+        else "fixture membership, identity join, or recall admission is incomplete"
+    )
+    return proof
+
+
+async def _await_indexed_fixture(
+    *,
+    product: str,
+    state: Path,
+    vault: Path,
+    fixture: Mapping[str, Any],
+    deadline: float,
+    evidence: dict[str, Any],
+) -> None:
+    while True:
+        evidence.clear()
+        evidence.update(
+            inspect_indexed_fixture(product=product, state=state, vault=vault, fixture=fixture)
+        )
+        if evidence["ready"]:
+            return
+        if time.perf_counter() >= deadline:
+            raise AdapterFault(
+                "initial indexed-corpus proof incomplete before startup timeout: "
+                + str(evidence.get("reason", "fixture identity proof did not converge"))
+            )
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
+async def _await_initial_index(
+    client: PublicClient,
+    *,
+    product: str,
+    timeout: float | None = None,
+    deadline: float | None = None,
+) -> None:
     """Wait for the native public retrieval path before starting the workflow clock."""
-    deadline = time.perf_counter() + timeout
+    deadline = deadline if deadline is not None else time.perf_counter() + (timeout or 0)
     proof: dict[str, Any] = {"classification": "unobserved"}
     while True:
         if product == "basic_memory":
@@ -753,23 +1002,35 @@ async def _await_initial_index(client: PublicClient, *, product: str, timeout: f
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
-async def _await_exomem_mutation(client: PublicClient, *, timeout: float) -> None:
+async def _await_exomem_mutation(
+    client: PublicClient, *, timeout: float | None = None, deadline: float | None = None
+) -> None:
     """Keep semantic corpus startup outside the shared warm-workflow clock."""
-    deadline = time.perf_counter() + timeout
+    deadline = deadline if deadline is not None else time.perf_counter() + (timeout or 0)
     while True:
         payload = await client.call(
             "remember",
-            {"title": "Disposable readiness preview", "note_type": "insight",
-             "content": "Public semantic admission is ready for the disposable workflow.",
-             "response_detail": "full", "validate_only": True},
+            {
+                "title": "Disposable readiness preview",
+                "note_type": "insight",
+                "content": "Public semantic admission is ready for the disposable workflow.",
+                "response_detail": "full",
+                "validate_only": True,
+            },
             allow_refusal=True,
         )
-        if result_classification(payload) == "ok" and payload.get("draft_id") and payload.get("draft_hash"):
+        if (
+            result_classification(payload) == "ok"
+            and payload.get("draft_id")
+            and payload.get("draft_hash")
+        ):
             return
         error = payload.get("error")
         code = error.get("code") if isinstance(error, Mapping) else None
         if code != "MUTATION_WARMING" or time.perf_counter() >= deadline:
-            raise AdapterFault(f"initial public mutation admission failed: {code or 'unproved draft'}")
+            raise AdapterFault(
+                f"initial public mutation admission failed: {code or 'unproved draft'}"
+            )
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
@@ -787,6 +1048,7 @@ async def _run_basic_memory(
 ) -> dict[str, Any]:
     markdown = common_markdown_payload(marker)
     source = dict(fixture_pages(int(fixture["page_count"])))
+
     def created_path(payload: Mapping[str, Any]) -> str:
         path = payload.get("file_path")
         if not isinstance(path, str) or not path.strip():
@@ -986,6 +1248,7 @@ async def run_product(
     basic_memory: Path,
     wheel: Path | None,
     marker: str,
+    startup_timeout: float = 1800.0,
 ) -> dict[str, Any]:
     """Run one warm persistent public-MCP row, leaving product outcomes observable."""
     from fastmcp import Client
@@ -1022,6 +1285,7 @@ async def run_product(
     client = Client(transport, timeout=timeout, init_timeout=timeout)
     public = PublicClient(client)
     setup_public = PublicClient(client)
+    indexed_corpus: dict[str, Any] = {"ready": False, "reason": "unobserved"}
     row: dict[str, Any] = {
         "product": product,
         "status": "invalid",
@@ -1054,10 +1318,27 @@ async def run_product(
             missing = sorted(required - tools)
             if missing:
                 raise AdapterFault(f"registered public MCP tools missing: {missing}")
-            # Discovery/initial indexing are pre-timing setup, never an inline reindex.
-            await _await_initial_index(setup_public, product=product, timeout=timeout)
-            if product == "exomem":
-                await _await_exomem_mutation(setup_public, timeout=timeout)
+            startup_deadline = time.perf_counter() + startup_timeout
+            try:
+                async with asyncio.timeout(max(0.0, startup_deadline - time.perf_counter())):
+                    # Discovery/initial indexing are pre-timing setup, never an inline reindex.
+                    await _await_initial_index(
+                        setup_public, product=product, deadline=startup_deadline
+                    )
+                    await _await_indexed_fixture(
+                        product=product,
+                        state=state,
+                        vault=vault,
+                        fixture=fixture,
+                        deadline=startup_deadline,
+                        evidence=indexed_corpus,
+                    )
+                    if product == "exomem":
+                        await _await_exomem_mutation(setup_public, deadline=startup_deadline)
+            except TimeoutError as error:
+                raise AdapterFault("initial readiness exceeded startup timeout") from error
+            if time.perf_counter() >= startup_deadline:
+                raise AdapterFault("initial readiness exceeded startup timeout")
             clock.start_timing()
             result = await (
                 _run_basic_memory(public, marker, fixture, timeout)
@@ -1129,6 +1410,7 @@ async def run_product(
         clock.finish_teardown()
         row.setdefault("public_calls", public.calls)
         row.setdefault("measurements", call_measurements(public.calls))
+        row["initial_indexed_corpus"] = indexed_corpus
         row["pre_timing_public_calls"] = setup_public.calls
         row["phases"] = clock.report()
     return row
@@ -1146,6 +1428,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--pages", type=int, default=8)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument(
+        "--startup-timeout",
+        type=float,
+        default=1800.0,
+        help="bounded initial public and full-index readiness wait in seconds",
+    )
+    parser.add_argument(
         "--python", type=Path, default=Path(sys.executable), help="explicit Exomem interpreter"
     )
     parser.add_argument("--basic-memory-executable", type=Path, required=True)
@@ -1155,6 +1443,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     selected = ("exomem", "basic_memory") if args.product == "both" else (args.product,)
     if args.pages < MIN_PAGES or args.pages > MAX_PAGES:
         parser.error(f"--pages must be between {MIN_PAGES} and {MAX_PAGES}")
+    if args.startup_timeout <= 0:
+        parser.error("--startup-timeout must be positive")
     if (
         args.state.exists()
         and any(args.state.iterdir())
@@ -1177,6 +1467,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     basic_memory=args.basic_memory_executable,
                     wheel=args.basic_memory_wheel,
                     marker=marker,
+                    startup_timeout=args.startup_timeout,
                 )
             )
         )

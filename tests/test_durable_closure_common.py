@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-import importlib.util
 import asyncio
+import importlib.util
 import json
+import sqlite3
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -34,11 +36,14 @@ def test_semantic_setup_retries_only_warming_and_requires_a_reviewed_draft() -> 
     assert all(tool == "remember" and args["validate_only"] for tool, args, _ in calls)
 
 
-@pytest.mark.parametrize("payload", [
-    {"success": False, "error": {"code": "MUTATION_WARMING"}},
-    {"success": False, "error": {"code": "VALIDATION_FAILED"}},
-    {"success": True},
-])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"success": False, "error": {"code": "MUTATION_WARMING"}},
+        {"success": False, "error": {"code": "VALIDATION_FAILED"}},
+        {"success": True},
+    ],
+)
 def test_semantic_setup_rejects_timeout_refusal_and_missing_draft(payload) -> None:
     class Client:
         async def call(self, *args, **kwargs):
@@ -323,6 +328,462 @@ def test_main_shares_an_explicit_marker_between_both_product_rows(
         "exomem",
         "basic_memory",
     ]
+
+
+def _basic_memory_snapshot(
+    state: Path,
+    fixture: dict[str, object],
+    *,
+    entities: list[tuple[int, str, int]] | None = None,
+    search_rows: list[tuple[int, str, int]] | None = None,
+    project_path: Path | None = None,
+    virtual_search: bool = True,
+) -> None:
+    db = state / "config" / "memory.db"
+    db.parent.mkdir(parents=True)
+    expected = [str(page["path"]) for page in fixture["pages"]]  # type: ignore[index]
+    entities = (
+        entities
+        if entities is not None
+        else [(number, path, 1) for number, path in enumerate(expected, start=1)]
+    )
+    search_rows = search_rows if search_rows is not None else list(entities)
+    with sqlite3.connect(db) as conn:
+        search_table = (
+            "CREATE VIRTUAL TABLE search_index USING fts5("
+            "id UNINDEXED, file_path UNINDEXED, type UNINDEXED, project_id UNINDEXED, "
+            "entity_id UNINDEXED);"
+            if virtual_search
+            else "CREATE TABLE search_index(id INTEGER, file_path TEXT, type TEXT, "
+            "project_id INTEGER, entity_id INTEGER);"
+        )
+        conn.executescript(
+            "CREATE TABLE project(id INTEGER, name TEXT, path TEXT);"
+            "CREATE TABLE entity(id INTEGER, file_path TEXT, project_id INTEGER);"
+            "CREATE TABLE alembic_version(version_num TEXT);" + search_table
+        )
+        conn.execute(
+            "INSERT INTO alembic_version VALUES (?)", (common.BASIC_MEMORY_ALEMBIC_VERSION,)
+        )
+        conn.execute(
+            "INSERT INTO project VALUES (1, 'main', ?)",
+            (str(project_path or state / "home"),),
+        )
+        conn.executemany("INSERT INTO entity VALUES (?, ?, ?)", entities)
+        conn.executemany(
+            "INSERT INTO search_index(id, file_path, type, project_id, entity_id) "
+            "VALUES (?, ?, 'entity', ?, ?)",
+            [
+                (entity_id, path, project_id, entity_id)
+                for entity_id, path, project_id in search_rows
+            ],
+        )
+
+
+def _exomem_snapshot(
+    state: Path,
+    vault: Path,
+    fixture: dict[str, object],
+    *,
+    paths: list[str] | None = None,
+    fts_rowids: list[int] | None = None,
+    admitted: bool = True,
+    virtual_fts: bool = True,
+) -> None:
+    from exomem.state_paths import vault_state_key
+
+    db = state / "state" / vault_state_key(vault) / ".lexical.sqlite"
+    db.parent.mkdir(parents=True)
+    expected = [
+        "Knowledge Base/Reference/" + str(page["path"])
+        for page in fixture["pages"]  # type: ignore[index]
+    ]
+    paths = paths if paths is not None else expected
+    fts_rowids = fts_rowids if fts_rowids is not None else list(range(1, len(paths) + 1))
+    with sqlite3.connect(db) as conn:
+        fts_table = (
+            "CREATE VIRTUAL TABLE fts USING fts5(stemmed);"
+            if virtual_fts
+            else "CREATE TABLE fts(stemmed TEXT);"
+        )
+        conn.executescript(
+            "CREATE TABLE pages(path TEXT, in_kb INTEGER, in_vault INTEGER);"
+            "CREATE TABLE meta(key TEXT, value TEXT);" + fts_table
+        )
+        conn.execute(
+            "INSERT INTO meta VALUES ('schema_version', ?)",
+            (str(common.EXOMEM_LEXICAL_SCHEMA_VERSION),),
+        )
+        conn.executemany(
+            "INSERT INTO pages(rowid, path, in_kb, in_vault) VALUES (?, ?, ?, ?)",
+            [
+                (number, path, int(admitted), int(admitted))
+                for number, path in enumerate(paths, start=1)
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO fts(rowid, stemmed) VALUES (?, 'indexed')",
+            [(rowid,) for rowid in fts_rowids],
+        )
+
+
+def test_indexed_fixture_rejects_a_sentinel_sized_basic_memory_snapshot(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    fixture = common.materialize_fixture(state / "home", pages=4)
+    _basic_memory_snapshot(state, fixture, entities=[(1, "background.md", 1)])
+
+    proof = common.inspect_indexed_fixture(
+        product="basic_memory", state=state, vault=tmp_path / "vault", fixture=fixture
+    )
+
+    assert proof["ready"] is False
+    assert proof["observed_path_count"] == 1
+    assert proof["expected_path_count"] == 4
+
+
+def test_indexed_fixture_rejects_equal_counts_with_unexpected_and_duplicate_identities(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    fixture = common.materialize_fixture(state / "home", pages=4)
+    paths = [str(page["path"]) for page in fixture["pages"]]
+    _basic_memory_snapshot(
+        state,
+        fixture,
+        entities=[(1, paths[0], 1), (2, paths[1], 1), (3, paths[2], 1), (4, "unexpected.md", 1)],
+        search_rows=[(1, paths[0], 1), (2, paths[1], 1), (3, paths[2], 1), (3, paths[2], 1)],
+    )
+
+    proof = common.inspect_indexed_fixture(
+        product="basic_memory", state=state, vault=tmp_path / "vault", fixture=fixture
+    )
+
+    assert proof["ready"] is False
+    assert proof["proof_method"] == "entity/search_index identity multiset join"
+
+
+def test_indexed_fixture_requires_search_join_and_exact_basic_memory_project(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    fixture = common.materialize_fixture(state / "home", pages=4)
+    paths = [str(page["path"]) for page in fixture["pages"]]
+    _basic_memory_snapshot(
+        state,
+        fixture,
+        entities=[(number, path, 2) for number, path in enumerate(paths, start=1)],
+        search_rows=[],
+        project_path=state / "other-project",
+    )
+
+    proof = common.inspect_indexed_fixture(
+        product="basic_memory", state=state, vault=tmp_path / "vault", fixture=fixture
+    )
+
+    assert proof["ready"] is False
+    assert "project" in str(proof["reason"])
+
+
+def test_indexed_fixture_accepts_full_current_schema_snapshots_for_both_products(
+    tmp_path: Path,
+) -> None:
+    basic_state = tmp_path / "basic"
+    basic_fixture = common.materialize_fixture(basic_state / "home", pages=4)
+    _basic_memory_snapshot(basic_state, basic_fixture)
+    exomem_state = tmp_path / "exomem"
+    exomem_vault = tmp_path / "vault"
+    exomem_fixture = common.materialize_fixture(
+        exomem_vault / "Knowledge Base" / "Reference", pages=4
+    )
+    _exomem_snapshot(exomem_state, exomem_vault, exomem_fixture)
+
+    basic = common.inspect_indexed_fixture(
+        product="basic_memory", state=basic_state, vault=tmp_path / "unused", fixture=basic_fixture
+    )
+    exomem = common.inspect_indexed_fixture(
+        product="exomem", state=exomem_state, vault=exomem_vault, fixture=exomem_fixture
+    )
+
+    assert basic["ready"] is True
+    assert exomem["ready"] is True
+    assert exomem["identity_join_proof"] == "pages.rowid = fts.rowid"
+
+
+def test_indexed_fixture_rejects_missing_search_and_ineligible_exomem_page(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    vault = tmp_path / "vault"
+    fixture = common.materialize_fixture(vault / "Knowledge Base" / "Reference", pages=4)
+    _exomem_snapshot(state, vault, fixture, fts_rowids=[1, 2, 3], admitted=False)
+
+    proof = common.inspect_indexed_fixture(
+        product="exomem", state=state, vault=vault, fixture=fixture
+    )
+
+    assert proof["ready"] is False
+    assert proof["observed_path_count"] == 4
+
+
+@pytest.mark.parametrize("product", ["basic_memory", "exomem"])
+def test_indexed_fixture_rejects_plain_tables_that_impersonate_search(
+    product: str, tmp_path: Path
+) -> None:
+    state = tmp_path / "state"
+    vault = tmp_path / "vault"
+    if product == "basic_memory":
+        fixture = common.materialize_fixture(state / "home", pages=4)
+        _basic_memory_snapshot(state, fixture, virtual_search=False)
+    else:
+        fixture = common.materialize_fixture(vault / "Knowledge Base" / "Reference", pages=4)
+        _exomem_snapshot(state, vault, fixture, virtual_fts=False)
+
+    with pytest.raises(common.AdapterFault, match="FTS5 virtual table"):
+        common.inspect_indexed_fixture(product=product, state=state, vault=vault, fixture=fixture)
+
+
+def test_indexed_fixture_rejects_an_exomem_store_for_a_different_vault_key(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    vault = tmp_path / "vault"
+    fixture = common.materialize_fixture(vault / "Knowledge Base" / "Reference", pages=4)
+    other_vault = tmp_path / "definitely-not-the-derived-vault-key"
+    _exomem_snapshot(state, other_vault, fixture)
+
+    proof = common.inspect_indexed_fixture(
+        product="exomem", state=state, vault=vault, fixture=fixture
+    )
+
+    assert proof["ready"] is False
+    assert proof["store"] is None
+
+
+def test_indexed_fixture_has_no_incomplete_reason_when_ready(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    fixture = common.materialize_fixture(state / "home", pages=4)
+    _basic_memory_snapshot(state, fixture)
+
+    proof = common.inspect_indexed_fixture(
+        product="basic_memory", state=state, vault=tmp_path / "vault", fixture=fixture
+    )
+
+    assert proof["ready"] is True
+    assert proof["reason"] is None
+
+
+def test_indexed_fixture_observes_one_coherent_snapshot_while_index_mutates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = tmp_path / "state"
+    fixture = common.materialize_fixture(state / "home", pages=4)
+    _basic_memory_snapshot(state, fixture)
+    db = state / "config" / "memory.db"
+    with sqlite3.connect(db) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+
+    original_identity = common._schema_identity
+
+    def mutate_after_snapshot(
+        conn: sqlite3.Connection, tables: tuple[str, ...]
+    ) -> dict[str, object]:
+        identity = original_identity(conn, tables)
+        with sqlite3.connect(db) as writer:
+            writer.execute("DELETE FROM search_index")
+        return identity
+
+    monkeypatch.setattr(common, "_schema_identity", mutate_after_snapshot)
+
+    proof = common.inspect_indexed_fixture(
+        product="basic_memory", state=state, vault=tmp_path / "vault", fixture=fixture
+    )
+
+    assert proof["ready"] is True
+
+
+def test_indexed_fixture_reports_missing_store_and_invalid_schema_separately(
+    tmp_path: Path,
+) -> None:
+    fixture = common.materialize_fixture(tmp_path / "home", pages=4)
+    pending = common.inspect_indexed_fixture(
+        product="basic_memory",
+        state=tmp_path / "missing",
+        vault=tmp_path / "vault",
+        fixture=fixture,
+    )
+    assert pending["ready"] is False
+    assert pending["reason"] == "indexed store is not present"
+
+    state = tmp_path / "invalid"
+    db = state / "config" / "memory.db"
+    db.parent.mkdir(parents=True)
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE alembic_version(version_num TEXT)")
+        conn.execute("INSERT INTO alembic_version VALUES ('unsupported')")
+    with pytest.raises(common.AdapterFault, match="incompatible indexed-store schema"):
+        common.inspect_indexed_fixture(
+            product="basic_memory", state=state, vault=tmp_path / "vault", fixture=fixture
+        )
+
+
+def test_main_passes_startup_timeout_to_each_product(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: list[float] = []
+
+    async def fake_run_product(**kwargs: object) -> dict[str, object]:
+        seen.append(float(kwargs["startup_timeout"]))
+        return {"product": kwargs["product"], "status": "pass"}
+
+    monkeypatch.setattr(common, "run_product", fake_run_product)
+    assert (
+        common.main(
+            [
+                "--product",
+                "both",
+                "--state",
+                str(tmp_path / "state"),
+                "--vault",
+                str(tmp_path / "vault"),
+                "--basic-memory-executable",
+                "/bin/true",
+                "--startup-timeout",
+                "17.5",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert seen == [17.5, 17.5]
+
+
+def test_run_product_does_not_start_timed_work_when_indexed_fixture_times_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class Transport:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class Client:
+        def __init__(self, transport: object, **kwargs: object) -> None:
+            del transport, kwargs
+
+        async def __aenter__(self) -> Client:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        async def list_tools(self) -> list[types.SimpleNamespace]:
+            return [
+                types.SimpleNamespace(name=name)
+                for name in ("remember", "edit_memory", "read_memory", "ask_memory")
+            ]
+
+    fastmcp = types.ModuleType("fastmcp")
+    fastmcp.Client = Client  # type: ignore[attr-defined]
+    client_module = types.ModuleType("fastmcp.client")
+    transports = types.ModuleType("fastmcp.client.transports")
+    transports.StdioTransport = Transport  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "fastmcp", fastmcp)
+    monkeypatch.setitem(sys.modules, "fastmcp.client", client_module)
+    monkeypatch.setitem(sys.modules, "fastmcp.client.transports", transports)
+
+    async def public_ready(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+    async def incomplete(*args: object, **kwargs: object) -> None:
+        evidence = kwargs["evidence"]
+        assert isinstance(evidence, dict)
+        evidence.update({"ready": False, "reason": "fixture remains partial"})
+        raise common.AdapterFault("initial indexed-corpus proof incomplete before startup timeout")
+
+    async def workflow_started(*args: object, **kwargs: object) -> dict[str, object]:
+        raise AssertionError("timed workflow must not start")
+
+    monkeypatch.setattr(common, "_await_initial_index", public_ready)
+    monkeypatch.setattr(common, "_await_indexed_fixture", incomplete)
+    monkeypatch.setattr(common, "_run_exomem", workflow_started)
+
+    row = asyncio.run(
+        common.run_product(
+            product="exomem",
+            state=tmp_path / "state",
+            vault=tmp_path / "vault",
+            pages=4,
+            timeout=1,
+            python=Path(sys.executable),
+            basic_memory=Path("/bin/true"),
+            wheel=None,
+            marker="marker",
+            startup_timeout=1,
+        )
+    )
+
+    assert row["status"] == "invalid"
+    assert row["phases"]["wall_to_verified_closure_ms"] is None
+    assert row["initial_indexed_corpus"]["reason"] == "fixture remains partial"
+
+
+def test_run_product_rejects_late_success_before_starting_timed_work(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class Transport:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class Client:
+        def __init__(self, transport: object, **kwargs: object) -> None:
+            del transport, kwargs
+
+        async def __aenter__(self) -> Client:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        async def list_tools(self) -> list[types.SimpleNamespace]:
+            return [
+                types.SimpleNamespace(name=name)
+                for name in ("remember", "edit_memory", "read_memory", "ask_memory")
+            ]
+
+    fastmcp = types.ModuleType("fastmcp")
+    fastmcp.Client = Client  # type: ignore[attr-defined]
+    client_module = types.ModuleType("fastmcp.client")
+    transports = types.ModuleType("fastmcp.client.transports")
+    transports.StdioTransport = Transport  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "fastmcp", fastmcp)
+    monkeypatch.setitem(sys.modules, "fastmcp.client", client_module)
+    monkeypatch.setitem(sys.modules, "fastmcp.client.transports", transports)
+
+    async def ready(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+    async def workflow_started(*args: object, **kwargs: object) -> dict[str, object]:
+        raise AssertionError("timed workflow must not start after a late readiness result")
+
+    ticks = iter((10.0, 10.0, 16.0))
+    monkeypatch.setattr(common.time, "perf_counter", lambda: next(ticks, 16.0))
+    monkeypatch.setattr(common, "_await_initial_index", ready)
+    monkeypatch.setattr(common, "_await_indexed_fixture", ready)
+    monkeypatch.setattr(common, "_await_exomem_mutation", ready)
+    monkeypatch.setattr(common, "_run_exomem", workflow_started)
+
+    row = asyncio.run(
+        common.run_product(
+            product="exomem",
+            state=tmp_path / "state",
+            vault=tmp_path / "vault",
+            pages=4,
+            timeout=1,
+            python=Path(sys.executable),
+            basic_memory=Path("/bin/true"),
+            wheel=None,
+            marker="marker",
+            startup_timeout=5,
+        )
+    )
+
+    assert row["status"] == "invalid"
+    assert "startup timeout" in str(row["reason"])
+    assert row["phases"]["wall_to_verified_closure_ms"] is None
 
 
 def test_startup_failure_becomes_an_invalid_json_row(

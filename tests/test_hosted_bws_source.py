@@ -23,6 +23,23 @@ def test_production_control_key_declares_a_matching_bws_binding():
     assert binding["env"] == destination.fields["name"]
 
 
+def test_production_provisioner_database_declares_a_matching_bws_binding():
+    module = _load_module()
+    matrix = module.load_matrix(ROOT / "infra/contracts/secret-destinations-v1.json")
+    spec = matrix.secrets["provisioner_database_url"]
+    source = spec.sources[0]
+    assert source.kind == "bws"
+    document = json.loads((ROOT / source.bindings).read_text())
+    binding = document["bindings"][source.binding]
+    assert document["product"] == "exomem-hosted"
+    assert document["environment"] == "production"
+    assert binding["format"] == "opaque-line"
+    assert binding["expected_key"] == binding["env"] == "EXOMEM_HOSTED_PROVISIONER_DATABASE_URL"
+    destination = spec.destinations["k3s.provisioner.database-url.active"]
+    assert destination.fields["kubernetes_secret"] == "exomem-provisioner-database"
+    assert destination.fields["key"] == "url"
+
+
 def source_matrix(tmp_path: Path, **overrides: object) -> Path:
     matrix = _matrix()
     matrix["secrets"]["control_plane_key"]["sources"] = [

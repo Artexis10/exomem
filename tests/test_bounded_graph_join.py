@@ -156,23 +156,28 @@ def test_interactive_write_returns_while_a_registered_rebuild_is_still_running(
         published.set()
         return graph_sync.GraphBuildOutcome.covering(required)
 
+    required = _checkpoint(1)
+    outcome: graph_sync.GraphBuildOutcome | None = None
     started = time.monotonic()
     try:
-        result = _invoke_with_registered_rebuild(vault, build)
+        result = _invoke_with_registered_rebuild(vault, build, checkpoint=required)
         elapsed = time.monotonic() - started
+        assert entered.wait(5), "the registered rebuild must eventually start"
+        assert published.is_set() is False, "the write must not have waited for publication"
+        # A literal, not the bound constant: the point is the *behaviour*, and this
+        # assertion has to be able to fail on a tree where the constant does not
+        # exist yet. 15 s sits well above the bound plus process overhead and well
+        # below the 30 s the builder holds, so neither side is a coin flip.
+        assert elapsed < 15.0, (
+            f"interactive write parked {elapsed:.1f}s on a registered rebuild"
+        )
+        assert result["state"] == "committed"
     finally:
         release.set()
-
-    assert entered.is_set() is True, "the registered rebuild must still be started"
-    assert published.is_set() is False, "the write must not have waited for publication"
-    # A literal, not the bound constant: the point is the *behaviour*, and this
-    # assertion has to be able to fail on a tree where the constant does not
-    # exist yet. 15 s sits well above the bound plus process overhead and well
-    # below the 30 s the builder holds, so neither side is a coin flip.
-    assert elapsed < 15.0, (
-        f"interactive write parked {elapsed:.1f}s on a registered rebuild"
-    )
-    assert result["state"] == "committed"
+        outcome = graph_sync.await_active_rebuild(
+            vault, state_root=vault / "state", timeout=5
+        )
+    assert outcome is not None and outcome.covers(required)
 
 
 def test_a_direct_mutation_guard_also_returns_while_its_rebuild_runs(
@@ -199,6 +204,8 @@ def test_a_direct_mutation_guard_also_returns_while_its_rebuild_runs(
 
     state_dir = vault / "state"
     manager = LeaseManager(LeaseConfig(state_dir=state_dir))
+    required = _checkpoint(1)
+    outcome: graph_sync.GraphBuildOutcome | None = None
     started = time.monotonic()
     try:
         with manager.mutation_guard(vault):
@@ -206,17 +213,18 @@ def test_a_direct_mutation_guard_also_returns_while_its_rebuild_runs(
                 _page("A", "A now claims something else."), encoding="utf-8"
             )
             graph_sync.register_rebuild(
-                vault, _checkpoint(1), build, state_root=state_dir
+                vault, required, build, state_root=state_dir
             )
         elapsed = time.monotonic() - started
+        assert entered.wait(5), "the registered rebuild must eventually start"
+        assert published.is_set() is False, "the guard must not have waited for publication"
+        assert elapsed < 15.0, (
+            f"direct mutation guard parked {elapsed:.1f}s on a registered rebuild"
+        )
     finally:
         release.set()
-
-    assert entered.is_set() is True, "the registered rebuild must still be started"
-    assert published.is_set() is False, "the guard must not have waited for publication"
-    assert elapsed < 15.0, (
-        f"direct mutation guard parked {elapsed:.1f}s on a registered rebuild"
-    )
+        outcome = graph_sync.await_active_rebuild(vault, state_root=state_dir, timeout=5)
+    assert outcome is not None and outcome.covers(required)
 
 
 #: Every `wait_for_registered` caller in `src/exomem/`, and why it is or is not
