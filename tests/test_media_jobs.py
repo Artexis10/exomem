@@ -970,6 +970,9 @@ def test_retry_does_not_requeue_job_claimed_after_candidate_selection(
         def close(self) -> None:
             self._connection.close()
 
+        def rollback(self) -> None:
+            self._connection.rollback()
+
     monkeypatch.setattr(
         store,
         "_connect",
