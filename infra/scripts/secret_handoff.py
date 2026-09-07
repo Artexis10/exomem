@@ -22,6 +22,7 @@ from typing import Any
 _VERSION = re.compile(r"v[1-9][0-9]*\Z")
 _SAFE_NAME = re.compile(r"[a-zA-Z0-9_.-]+\Z")
 _MAX_SECRET_BYTES = 8192
+_REDACTION_PLACEHOLDERS = frozenset({"[sensitive]", "<sensitive>", "[redacted]", "<redacted>"})
 
 
 class HandoffError(RuntimeError):
@@ -316,6 +317,10 @@ def _normalize_secret(value: bytes, value_shape: str = "line") -> bytes:
         raise HandoffError("secret source has an invalid value")
     if value_shape == "file" and b"\r" in value:
         raise HandoffError("secret source has an invalid value")
+    # Provider exports may substitute display text for a write-only value.
+    # Classify the whole value without changing the bytes of a genuine secret.
+    if value.decode("utf-8", errors="replace").strip().casefold() in _REDACTION_PLACEHOLDERS:
+        raise HandoffError("secret source is a redaction placeholder")
     return value
 
 

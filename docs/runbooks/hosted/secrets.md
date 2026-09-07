@@ -7,6 +7,20 @@ a pipe into Vercel and the static K3s Secret set. The command validates the
 versioned destination matrix before reading a value. Values never appear in
 arguments or successful output; provider CLI output is captured and discarded.
 
+Provider exports are not a recovery store. The handoff rejects whole-value
+`[SENSITIVE]`, `<sensitive>`, `[REDACTED]`, and `<redacted>` display markers
+(case-insensitively, allowing surrounding whitespace) before any artifact,
+receipt reservation, or destination call. Real secret content is not trimmed
+or rewritten beyond the existing single trailing-newline handling. This guard
+does not validate an arbitrary token or prove its custody.
+
+Use the authoritative secret-manager value, not an environment-variable listing
+or a write-only provider export. A Vercel delivery receipt proves that a CLI
+write succeeded; it does not prove that a usable source value is recoverable.
+For an existing encryption key, check the consumer's format and authenticated
+decryption of existing ciphertext before accepting recovery. A generated
+replacement is a rotation, not recovery, and must follow the rotation procedure.
+
 ## Preconditions
 
 - Work from a clean infrastructure checkout with `terraform`, `sops`, `age`,
