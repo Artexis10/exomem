@@ -504,6 +504,7 @@ class _PreparedCreationDraft:
     destination: str
     artifact_rel: str
     auxiliaries: tuple[vault.PlannedWrite, ...]
+    derived_auxiliaries: tuple[tuple[str, vault.PlannedWrite], ...]
     auxiliary_digest: str
     requested_review: bool
     reason: str | None
@@ -3638,6 +3639,7 @@ def prepare_commit_creation_draft(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...] = (),
     draft_token: str = "",
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
@@ -3680,6 +3682,9 @@ def prepare_commit_creation_draft(
         auxiliaries = _detach_auxiliaries(
             root, auxiliary_writes, primary=destination, artifact=artifact_rel
         )
+        available = {(item.path, item.content) for item in auxiliaries}
+        if any((item.path, item.content) not in available for _role, item in derived_auxiliary_writes):
+            raise RelationReviewError("INVALID_AUXILIARY_WRITE", "derived auxiliary is not committed")
         review_fields = (
             relation_disposition is not None,
             relation_review_hash is not None,
@@ -3772,6 +3777,7 @@ def prepare_commit_creation_draft(
             destination,
             artifact_rel,
             tuple(auxiliaries),
+            tuple(derived_auxiliary_writes),
             auxiliary_digest,
             requested_review,
             reason,
@@ -3814,6 +3820,7 @@ def commit_prepared_creation_draft(
         destination = prepared.destination
         artifact_rel = prepared.artifact_rel
         auxiliaries = prepared.auxiliaries
+        derived_auxiliaries = prepared.derived_auxiliaries
         auxiliary_digest = prepared.auxiliary_digest
         requested_review = prepared.requested_review
         reason = prepared.reason
@@ -3920,20 +3927,30 @@ def commit_prepared_creation_draft(
                 )
             writes.extend(guarded_auxiliaries)
             primary_guard = vault.PathGuard.capture(root, destination, leaf_policy="absent")
-            writes.append(
-                vault.PlannedWrite(
+            primary_write = vault.PlannedWrite(
                     root / destination,
                     attempt.source,
                     create_only=True,
                     guard=primary_guard,
                 )
-            )
+            writes.append(primary_write)
+            derived_by_path = {(item.path, item.content): role for role, item in derived_auxiliaries}
+            declared = [
+                (derived_by_path[(item.path, item.content)], item)
+                for item in guarded_auxiliaries
+                if (item.path, item.content) in derived_by_path
+            ]
+            if record is not None:
+                declared.append(("relation-review", writes[0]))
+            from . import vocabulary_auxiliaries
+            manifest = vocabulary_auxiliaries.seal(root, primary=primary_write, derived=declared)
             try:
                 if semantic_state is None:
                     written = vault.batch_atomic_write(
                         writes,
                         vault_root=root,
                         required_guards=required_guards,
+                        _vocabulary_auxiliaries=manifest,
                     )
                 else:
                     from . import semantic_index
@@ -3946,6 +3963,7 @@ def commit_prepared_creation_draft(
                             writes,
                             vault_root=root,
                             required_guards=required_guards,
+                            _vocabulary_auxiliaries=manifest,
                         )
                     finally:
                         semantic_index.reset_parent_states(state_token)
@@ -3999,6 +4017,7 @@ def commit_creation_draft(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...] = (),
     draft_token: str = "",
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
@@ -4021,6 +4040,7 @@ def commit_creation_draft(
         relation_review_hash=relation_review_hash,
         relation_review_reason=relation_review_reason,
         auxiliary_writes=auxiliary_writes,
+        derived_auxiliary_writes=derived_auxiliary_writes,
         draft_token=draft_token,
         predecessor_path=predecessor_path,
         predecessor_content_hash=predecessor_content_hash,

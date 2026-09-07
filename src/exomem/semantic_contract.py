@@ -1136,6 +1136,7 @@ def build_page_state(
     relation_registry: relation_registry.RelationRegistry | None = None,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     review_fingerprint: str | None | object = _REVIEW_FINGERPRINT_UNSET,
+    complete_authored_effects: bool = False,
 ) -> SemanticPageState:
     """Build detached semantic state from one already-read Markdown string."""
     root = Path(vault_root)
@@ -1176,7 +1177,7 @@ def build_page_state(
     body_links: list[tuple[str, int]] = []
     seen_link_targets: set[str] = set()
     for match in vault.find_body_wikilinks(body):
-        if len(body_links) >= _MAX_WIKILINK_FACTS_PER_PAGE:
+        if not complete_authored_effects and len(body_links) >= _MAX_WIKILINK_FACTS_PER_PAGE:
             break
         target = match.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
         if not target:
@@ -1427,6 +1428,86 @@ def reference_identity_snapshot_is_current(
                 and entry[1].identity_census._reference_paths is snapshot.reference_paths
                 and entry[1].identity_census._canonical_refs_by_path
                 is snapshot.canonical_refs_by_path
+            )
+
+
+def current_writer_resolver_entries(
+    vault_root: Path,
+    *,
+    freshness_key: tuple[int, int, str] | None = None,
+) -> tuple[tuple[str, str], ...] | None:
+    """Return broad resolver entries from an exactly current resident corpus.
+
+    Writer preparation may borrow this immutable path/title projection only
+    when the event-maintained corpus caption, semantic configuration, and live
+    broad Markdown membership still all identify the same corpus.  This is
+    intentionally read-only: a miss must leave both corpus and resolver caches
+    untouched for the existing disk fallback to handle.
+    """
+    root = Path(vault_root)
+    try:
+        cache_key = _corpus_cache_key(root)
+    except Exception:  # noqa: BLE001 - an unkeyable root has no authority
+        return None
+
+    with _CORPUS_CONTEXT_UPDATE_LOCK:
+        if freshness.external_pending(root) or not freshness.is_live(root, "vault"):
+            return None
+        checkpoint = freshness.consumer_checkpoint(root, "vault")
+        if checkpoint.triple is None or (
+            freshness_key is not None and freshness_key != checkpoint.triple
+        ):
+            return None
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
+            language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
+            if entry is None or caption != checkpoint or language_hash is None:
+                return None
+            census, context = entry
+            entries = context.resolver_entries
+
+    try:
+        configuration = _config_census(root)
+        relation_definitions = relation_registry.load_registry(root)
+        language = semantic_language_registry.load_registry(root)
+        membership = tuple(
+            sorted(path.relative_to(root).as_posix() for path in vault.walk_vault_md(root))
+        )
+    except Exception:  # noqa: BLE001 - an incomplete proof must decline reuse
+        return None
+
+    if (
+        configuration is None
+        or configuration != _stored_config_census(census)
+        or (
+            context.registry.core_version,
+            context.registry.extension_hash,
+        )
+        != (
+            relation_definitions.core_version,
+            relation_definitions.extension_hash,
+        )
+        or language_hash != f"{language.schema_version}:{language.content_hash}"
+        or tuple(path for path, _title in entries) != membership
+        or _config_census(root) != configuration
+    ):
+        return None
+
+    with _CORPUS_CONTEXT_UPDATE_LOCK:
+        if freshness.external_pending(root) or not freshness.is_live(root, "vault"):
+            return None
+        if freshness.consumer_checkpoint(root, "vault") != checkpoint:
+            return None
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            current = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            return (
+                entries
+                if current is not None
+                and current[1] is context
+                and _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key) == checkpoint
+                and _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key) == language_hash
+                else None
             )
 
 
@@ -3226,6 +3307,7 @@ def _derive_relation_facts(
     registry: relation_registry.RelationRegistry,
     *,
     target_states: Mapping[str, SemanticPageState] | None = None,
+    complete_authored_effects: bool = False,
 ) -> tuple[RelationFact, ...]:
     resolved_states = target_states if target_states is not None else states
     raw_facts: list[dict[str, Any]] = []
@@ -3281,6 +3363,21 @@ def _derive_relation_facts(
                         "source_kind": "file",
                         "origin": "frontmatter",
                         "reverse": reverse,
+                    }
+                )
+        if complete_authored_effects:
+            for raw_target, line in state.body_wikilinks:
+                raw_facts.append(
+                    {
+                        "authored": state,
+                        "raw_relation": "links_to",
+                        "raw_target": raw_target,
+                        "line": line,
+                        "anchor": None,
+                        "element_identity": None,
+                        "source_kind": "file",
+                        "origin": "wikilink",
+                        "reverse": False,
                     }
                 )
     occurrences: Counter[tuple[str, str, str, str, str, str]] = Counter()

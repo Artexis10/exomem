@@ -110,6 +110,14 @@ coverage rows. Reopening and full rebuild must not leave ghosts or repeatedly
 recreate invalid structural data. Preserve existing audit continuation and
 incomplete-result behavior for older schemas.
 
+Dependency audit pages advance by a unique persisted row identity, so a page
+boundary cannot skip remaining targets from the same source. Bind continuation
+to the database and nonempty WAL revision before and after reading the page;
+normalize an absent and empty WAL equally and exclude derived SHM churn from
+this revision identity. Retain the existing no-follow sidecar binding. A real
+revision change invalidates continuation rather than captioning old rows with
+a new revision; same-count updates must be detected.
+
 ### Replace dependency discovery without weakening publication proofs
 
 Use the indexed dependency query in both `_topology_affected_sources` and
@@ -155,6 +163,133 @@ The combined patch receives one fresh integration review. Scoped tests run durin
 iterations; one successful full lean corpus plus existing latency/privacy/spec
 gates runs at the delivery boundary. Real media regression checks use the existing
 public benchmark and isolated state, with no live-cell mutation.
+
+### Prove the whole fixture is indexed before comparing corpus-scale writes
+
+The first integrated comparison exposed a setup defect in the existing shared
+driver: its sentinel search can succeed after Basic Memory indexes its first
+100-file batch. Two completed 3,800-file runs each held only 103 entity rows at
+teardown, including the two timed creations. They do not establish performance
+at an indexed corpus size of 3,800. Retain these observations as incomplete-index
+diagnostics and withdraw their use, and the preceding single-pair observations'
+use, as evidence of large-corpus comparative latency.
+
+Keep the generated Markdown and timed public write/edit/read/search workflow
+unchanged. Add an initial completeness gate for BOTH products, outside the
+workflow clock. Observe only the current run's disposable SQLite stores through
+read-only connections and one transaction per observation. Require the exact
+fixture path set in the Markdown metadata table and its text-search projection:
+Basic Memory `entity` plus entity rows in `search_index`, scoped to the configured
+project; Exomem `pages` plus corresponding `fts` rows, with recall eligibility.
+Missing, duplicate, unexpected, unindexed or wrong-project fixture identities
+cannot pass. Merely seeing files on disk, a row count, or one sentinel is not a
+proof. The fixture directory is exclusive to this generated corpus.
+
+The benchmark may inspect these derived stores as pre-timing evidence; it must
+not insert rows, invoke an indexer in the live service, change product defaults,
+or replace any timed public call with an internal API. Keep existing public
+sentinel readiness and Exomem semantic mutation admission as independent gates.
+Record expected and observed membership counts/digests, proof method and schema
+identity, along with full startup duration. An unsupported schema invalidates
+the adapter; a missing or still-incomplete index remains pending until a separate
+bounded startup deadline expires. A timeout yields an incomplete setup with no
+workflow timing, never a pass over a smaller corpus. The normal per-tool timeout
+continues to bound each timed public call.
+
+Bind Exomem's store to the canonical state key derived from the requested vault,
+and keep the configured state directory and selected store inside this run's
+disposable root. Validate each product's supported schema version and actual
+FTS5 virtual-table definition; ordinary tables with matching column names do
+not prove search readiness. Close every observation's read connection. One
+outer asynchronous deadline and a final pre-clock check prevent even a late
+successful readiness response from admitting an expired setup.
+
+The common workload still does not require optional graph convergence; retain
+the separately labelled public-sentinel/current-graph characterization. This
+setup correction does not relax the median parity target or authorize enabling
+the opt-in fast-acknowledgement path only in a benchmark environment.
+
+### Let background corpus scans yield to foreground requests
+
+The corrected first 3,800-page pair proves complete metadata/FTS membership:
+Exomem took 17,411.13 ms and Basic Memory 11,534.53 ms to verified closure.
+These are preliminary individual observations, not the required paired medians.
+Stack sampling during Exomem commits found both private graph construction and
+the initial due-state audit scanning the corpus. Foreground CPU time was much
+lower than elapsed time. A bounded pause only at graph row insertion never
+executed during the measured calls; the competing work was earlier in the scan.
+
+Two disposable prototypes retained every public operation and publication proof.
+Pausing graph admission scans and due-state parsing for at most 50 ms per work
+unit during canonical commands produced an 11,653.39 ms diagnostic workflow.
+Covering the whole public request, including post-commit handling and retrieval,
+produced 8,349.73 ms. These instrumented observations justify the amendment;
+they do not replace uninstrumented acceptance runs. Neither prototype is shipped.
+
+Add a small standard-library-only foreground-activity module. The shared
+`writer_lease.invoke_command` dispatcher registers the injected vault for the
+duration of the complete synchronous invocation, including reads, previews,
+ordinary writes and their terminal handling. Keep its signature, routing,
+authority checks, exceptions and results unchanged. Nested calls are counted
+per thread and vault and unwind in `finally`. Calls without a usable injected
+vault retain their existing behavior. This process-local hint is scheduling
+information only: it never authorizes a read, write, acknowledgement or current
+projection. Do not reuse the lease manager's global active-mutation count.
+
+Bind activity to a canonical vault identity once at scope entry. Background
+workers capture that same identity in an explicit thread-local scan scope;
+ordinary foreground and synchronous maintenance paths have no background scope.
+Entering a foreground invocation temporarily suppresses any background scan
+scope on that thread, restoring it on exit. Thus a worker's nested foreground
+call cannot inherit cooperative delays even while other requests are active.
+Hot per-page checks use the bound identity and a cheap comparison with the
+supplied vault spelling; they must not resolve paths, probe OS locks, inspect
+SQLite, or scan other vaults on every iteration. Scope nesting restores the
+previous value, and completed foreground scopes remove their counters.
+
+Enable the scope only around builders in `GraphRebuildCoordinator._run`, the
+existing `schedule_background_rebuild` worker, and the due-state
+`_schedule_reconcile` worker. Add cooperative checkpoints before graph recall
+candidate admission and due-state page parsing, using the existing
+`recall_policy.is_recall_candidate` and `find_corpus.parse_page` seams. The
+checks are inert outside an explicit background scan. Do not select production
+behavior by thread name, introduce another queue or delay foreground work.
+
+At a checkpoint, another thread's foreground activity for the same vault may
+cause sleeps requested in increments of at most 5 ms against a monotonic
+deadline 50 ms from checkpoint entry. Request no further sleep after that
+deadline; operating-system scheduling can overshoot a requested sleep.
+Release the activity mutex before sleeping or invoking a waiter callback;
+after the callback, resample activity under its mutex before deciding to sleep.
+Test requested sleep budgets and scheduling overshoot with a fake clock and
+sleeper. Resume the
+existing work unit when activity ends or the deadline expires; continuous
+requests cannot suppress that unit indefinitely. The background thread's own
+nested command must not cause it to wait for itself. Activity in another vault
+does not delay it. Do not hold a new filesystem or database lock while waiting.
+
+An explicit graph response waiter changes the priority: the registered graph
+builder must bypass cooperative pauses while its coordinator has a waiter.
+Check this dynamically, including during an ongoing pause, so a maintenance
+request awaiting graph completion cannot slow the work it awaits. Keep existing
+waiter limits, cancellation, single-flight coalescing and retry budgets intact.
+The independently scheduled missing-graph worker still uses its existing
+nonblocking publication path; synchronous rebuilds never acquire this scan scope.
+
+All source admission, independent source-version proofs, generation fencing,
+transaction boundaries, durable queues and recovery custody remain mandatory.
+The cost trade-off is that advisory warming and background graph construction
+may finish later during sustained foreground traffic. They must resume useful
+work at every bounded checkpoint and converge through the existing path once
+foreground activity stops. Test that completion and compare the resulting graph
+and due-state projection with their ordinary synchronous results.
+
+The graph lane owns this amendment's activity helper, dispatcher wrapper,
+background scopes and focused tests, after independent critique. The root owns
+the OpenSpec amendment and measurements. The same author/reviewer correction
+loop applies, followed by renewed integration review. Final full-suite and
+latency verification may run through the repository's existing full CI workflow
+on isolated runners while the local comparison machine remains quiescent.
 
 ## Risks / Trade-offs
 

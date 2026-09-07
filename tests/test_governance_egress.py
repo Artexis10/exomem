@@ -2809,6 +2809,7 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "save": "mutation",
         "refresh": "mutation",
         "save-entity-types": "mutation",
+        "resolve-entity-type": "structure",
         "propose-relation": "structure",
         "save-relations": "mutation",
     }

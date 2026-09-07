@@ -865,6 +865,7 @@ def commit_edit(
     """
     kb = kb_root(vault_root)
     writes: list[PlannedWrite] = []
+    derived_auxiliary_writes: list[tuple[str, PlannedWrite]] = []
     warnings: list[str] = list(extra_warnings or [])
 
     # Opportunistic sub-index refresh — surfacing any drift on every write
@@ -879,7 +880,9 @@ def commit_edit(
             writes.append(
                 PlannedWrite(path=top_index, content=new_top, guard=top_guard)
             )
+            derived_auxiliary_writes.append(("index", writes[-1]))
         writes.extend(sub_writes)
+        derived_auxiliary_writes.extend(("index", write) for write in sub_writes)
 
     rel_no_ext = rel_path.removesuffix(".md")
     recorded = temporal.parse(date_iso)
@@ -911,6 +914,7 @@ def commit_edit(
             "LOG_PLAN_CONFLICT", ["log"], "edit log update could not be planned safely"
         ) from error
     writes.extend(log_plan.writes)
+    derived_auxiliary_writes.extend(("operation-log", write) for write in log_plan.writes)
     if log_plan.warning is not None:
         warnings.append(log_plan.warning)
     if log_plan.rotation_note is not None:
@@ -941,6 +945,7 @@ def commit_edit(
                 vault_root,
                 preflight=preflight,
                 auxiliary_writes=tuple(writes),
+                derived_auxiliary_writes=tuple(derived_auxiliary_writes),
                 timings=timings,
             )
     except semantic_writes.SemanticWriteError as error:

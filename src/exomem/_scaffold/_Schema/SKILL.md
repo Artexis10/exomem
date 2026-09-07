@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 75fb5e1e3fb04874e3ea97610481708ca90661cf63579ea905122c96189f9c12
+  skill_contract: c29752b4969560fe1781f0487c2bb39bdcb300cabc8ff9f145d91da49a7bebe2
   version: "0.32.0"
 ---
 
@@ -131,6 +131,44 @@ current evidence instead of repeating discovery; accept only reviewed, meaningfu
 connections under the envelope. Never fabricate an edge to satisfy a quota.
 Keep the full semantic grammar below visible when authoring; use `observe_memory`
 for one semantic unit rather than fragile whole-page string edits.
+
+### Vocabulary consideration
+
+Before saving durable knowledge, consider whether the material calls for reuse,
+enrichment, a justified new entity or type, an honest generic connection, no
+edge, or deferral. This is a meaning check, not a requirement to invent
+structure or meet a quota. Resolve entity types with
+`schema_memory(operation="resolve-entity-type", subject="entity-types")` and
+relations with `connect_memory(operation="resolve-relation")`; reuse a truthful
+existing canonical identity when it fits.
+
+If a useful distinction is absent from the queue, anchor a meaning question with
+`review_memory(mode="vocabulary", path=..., query=..., family=...)`: use a source
+page for a new identity/type, or the existing entity page for reuse/enrichment.
+For a selected relation candidate, use its source path and add its current `ref`
+with `family="relation-type/v1"`. This reviews both endpoints and returns an
+`application_route` for that directed pair; record the decision before applying it.
+At a durable capture boundary, call `review_memory(mode="vocabulary")` (four
+actionable items by default; `state="all"` includes decision history), inspect a namespaced item with
+`review_item_context(ref="exomem://review/vocabulary/<item>")`, and record the
+reviewed snapshot through
+`triage_memory(action="decide-vocabulary", ref="exomem://review/vocabulary/<item>", decision=...)`.
+Its decision carries the item fingerprint, family, registry hashes, target
+versions, outcome, rationale, and canonical `choice`; it is not execution or permission.
+`generic, no-edge, or defer` are valid truthful outcomes. A proposed
+new identity still uses its family's canonical writer, and all existing
+confirmation rules remain in force: v1 has no scoped delegation or automatic
+vocabulary write.
+
+Bind that supported canonical write with `vocabulary_ref` and
+`vocabulary_fingerprint`, and keep one transport idempotency identity across
+retries (REST uses the `Idempotency-Key` header). Inspect the canonical receipt;
+registration does not itself complete a separately proposed entity or edge.
+Review scans bounded private windows: an empty pass does not prove the queue
+exhausted. A later review advances the pass; an opaque continuation retrieves
+already available visible work. A missing or stale projection names the
+operator-only recovery command, `exomem maintain --reconcile`; remote agents
+report that requirement rather than retrying it through the maintenance tool.
 
 Planning captures intended future state; Records capture observed state/history.
 Resolve workflow posture and the relevant collection before proactive capture;

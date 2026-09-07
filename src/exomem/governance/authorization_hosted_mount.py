@@ -238,6 +238,7 @@ def republish_projected_custody(source: Path, destination: Path) -> None:
             or info.st_gid != os.getegid()
         ):
             raise HostedCustodyMountUnavailable
+        _refuse_authority_identity_change(destination, payloads)
         # The sidecar is the only writer and never republishes concurrently with
         # itself, so any staging file already present is an orphan from a crashed
         # attempt. Left alone they accumulate without bound in a 256 KiB tmpfs.
@@ -291,6 +292,71 @@ def republish_projected_custody(source: Path, destination: Path) -> None:
             except OSError:
                 pass
         raise HostedCustodyMountUnavailable from None
+
+
+def _refuse_authority_identity_change(destination: Path, payloads: dict[str, bytes]) -> None:
+    """Keep an activated private authority generation bound to its identity.
+
+    The projected bundle remains read-only.  We inspect the fixed authority
+    artifact patterns in its immediate control directory before parsing either
+    custody generation; ordinary v1 renewals retain their copy-and-replace
+    path.
+    """
+    try:
+        from ..vocabulary_authority import authority_artifact_paths
+        from . import authorization_custody
+
+        old = {
+            name: (destination / name).read_bytes()
+            for name in ("keyring.json", "control.json")
+        }
+        old_keyring = authorization_custody.parse_keyring(old["keyring.json"])
+        new_keyring = authorization_custody.parse_keyring(payloads["keyring.json"])
+        new_control = authorization_custody.parse_control_record(
+            payloads["control.json"], keyring=new_keyring, now=int(time.time())
+        )
+        try:
+            old_control = authorization_custody.parse_control_record(
+                old["control.json"], keyring=old_keyring, now=int(time.time())
+            )
+        except authorization_custody.AuthorizationCustodyUnavailable:
+            # `control.json` is published before `keyring.json`.  A crash in
+            # that interval is repairable only when the new control is the
+            # exact authenticated projected successor, never merely a record
+            # that happens to verify under the projected keyring.
+            if old["control.json"] != payloads["control.json"]:
+                raise
+            old_control = new_control
+        old_identity = (old_control.cell_id, old_control.logical_vault_id, old_control.keyring_id)
+        new_identity = (new_control.cell_id, new_control.logical_vault_id, new_control.keyring_id)
+        old_artifacts = authority_artifact_paths(
+            destination / "control.json", old_control.logical_vault_id
+        )
+        new_artifacts = authority_artifact_paths(
+            destination / "control.json", new_control.logical_vault_id
+        )
+    except Exception as exc:  # noqa: BLE001 - authority-present identity is authenticated
+        raise HostedCustodyMountUnavailable from exc
+    old_floor = getattr(old_control, "vocabulary_authority_floor", 1)
+    new_floor = getattr(new_control, "vocabulary_authority_floor", 1)
+    if old_floor not in {1, 2} or new_floor not in {1, 2}:
+        raise HostedCustodyMountUnavailable
+    if new_floor < old_floor:
+        raise HostedCustodyMountUnavailable
+    if (old_floor == 2 or new_floor == 2) and old_identity != new_identity:
+        raise HostedCustodyMountUnavailable
+    old_marker, old_database = old_artifacts
+    new_marker, new_database = new_artifacts
+    authority_artifacts = (old_marker, old_database, new_marker, new_database)
+    authority_sidecars = tuple(
+        database.with_name(f"{database.name}{suffix}")
+        for database in (old_database, new_database)
+        for suffix in ("-journal", "-wal", "-shm")
+    )
+    if old_identity != new_identity and any(
+        os.path.lexists(path) for path in (*authority_artifacts, *authority_sidecars)
+    ):
+        raise HostedCustodyMountUnavailable
 
 
 def _published_custody_is_current(source: Path, destination: Path) -> bool:

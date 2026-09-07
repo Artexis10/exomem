@@ -266,6 +266,7 @@ def set_frontmatter_field(
             vault_root,
             preflight=preflight,
             auxiliary_writes=tuple(auxiliaries),
+            derived_auxiliary_writes=tuple(("operation-log", write) for write in log_plan.writes),
         )
     except semantic_writes.SemanticWriteError as error:
         raise SetFrontmatterError(error.code, error.reason) from error

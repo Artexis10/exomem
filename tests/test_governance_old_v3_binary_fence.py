@@ -65,6 +65,11 @@ def _old_python() -> Path:
 def _configure_custody(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     external = tmp_path / "external-custody"
     external.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        authorization_custody,
+        "_standalone_host_control_root",
+        lambda: tmp_path / "host-control",
+    )
     monkeypatch.setenv(
         authorization_custody.KEYRING_FILE_ENV,
         str(external / "authorization-keyring.json"),
@@ -155,8 +160,10 @@ def _v4_vault(
     tmp_path: Path,
     *,
     now: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Path, schema_v4.VerifiedActiveGovernanceState]:
     vault = _v3_vault(tmp_path, now=now)
+    _configure_custody(tmp_path, monkeypatch)
     staged = authorization_custody.stage_standalone_v3_custody(vault, now=now)
     snapshot = policy.observe_authoring_snapshot(vault)
     assert snapshot is not None
@@ -213,12 +220,14 @@ def _backup_restore_vault(
     tmp_path: Path,
     *,
     now: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[
     Path,
     schema_migration.ForwardMigrationPlan,
     schema_migration.ForwardMigrationResult,
 ]:
     vault = _v3_vault(tmp_path, now=now)
+    _configure_custody(tmp_path, monkeypatch)
     plan = schema_migration.prepare_forward_migration(vault, now=now)
     schema_migration.stage_forward_migration(
         vault,
@@ -300,6 +309,7 @@ def _old_environment(
         **os.environ,
         "EXOMEM_VAULT_PATH": str(vault),
         "EXOMEM_WRITER_LEASE_STATE_DIR": str(state),
+        "EXOMEM_STATE_ROOT": str(state),
         "XDG_STATE_HOME": str(state),
         "EXOMEM_DISABLE_EMBEDDINGS": "1",
         "EXOMEM_DISABLE_MEDIA_EXTRACTION": "1",
@@ -307,12 +317,17 @@ def _old_environment(
         "EXOMEM_DISABLE_RANKING": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
+    env.pop("PYTHONPATH", None)
     for name in (
         "EXOMEM_WRITER_LEASE_URL",
         "EXOMEM_WRITER_LEASE_VAULT_ID",
         "EXOMEM_WRITER_LEASE_REPLICA_ID",
         "EXOMEM_WRITER_LEASE_TOKEN",
         "EXOMEM_WRITER_LEASE_PREFERRED",
+        authorization_custody.KEYRING_FILE_ENV,
+        authorization_custody.CONTROL_FILE_ENV,
+        authorization_custody.MEMBERSHIP_FILE_ENV,
+        authorization_custody.REPLICA_ID_ENV,
     ):
         env.pop(name, None)
     if coordinator_url is not None:
@@ -446,13 +461,27 @@ def _schema_fence(coordinator_url: str) -> dict[str, object]:
     return value
 
 
+def test_legacy_v3_fixture_bootstraps_before_external_custody(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _v3_vault(tmp_path, now=1_800_000_000)
+    connection = store.open_connection(vault)
+    try:
+        schema_v4.require_exact_v3_connection(connection)
+    finally:
+        connection.close()
+
+    _configure_custody(tmp_path, monkeypatch)
+    staged = authorization_custody.stage_standalone_v3_custody(vault, now=1_800_000_000)
+    assert staged.logical_vault_id
+
+
 def test_actual_old_v3_binary_is_write_fenced_from_v4_and_reopens_only_after_rollback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     old_python = _old_python()
     now = 1_800_000_000
-    _configure_custody(tmp_path, monkeypatch)
     coordinator_database = tmp_path / "coordinator.sqlite"
     with _lease_server(coordinator_database) as coordinator_url:
         _configure_schema_fence(monkeypatch, coordinator_url)
@@ -465,7 +494,7 @@ def test_actual_old_v3_binary_is_write_fenced_from_v4_and_reopens_only_after_rol
             "schema_version": 3,
             "generation": 1,
         }
-        vault, active = _v4_vault(tmp_path, now=now)
+        vault, active = _v4_vault(tmp_path, now=now, monkeypatch=monkeypatch)
         assert _schema_fence(coordinator_url) == {
             "governance_enrolled": True,
             "schema_version": 4,
@@ -638,7 +667,6 @@ def test_actual_old_v3_binary_writes_receipts_after_production_backup_restore(
 ) -> None:
     old_python = _old_python()
     now = 1_800_000_100
-    _configure_custody(tmp_path, monkeypatch)
     coordinator_database = tmp_path / "backup-restore-coordinator.sqlite"
     with _lease_server(coordinator_database) as coordinator_url:
         _configure_schema_fence(monkeypatch, coordinator_url)
@@ -651,7 +679,9 @@ def test_actual_old_v3_binary_writes_receipts_after_production_backup_restore(
             "schema_version": 3,
             "generation": 1,
         }
-        vault, plan, committed = _backup_restore_vault(tmp_path, now=now)
+        vault, plan, committed = _backup_restore_vault(
+            tmp_path, now=now, monkeypatch=monkeypatch
+        )
         assert _schema_fence(coordinator_url) == {
             "governance_enrolled": True,
             "schema_version": 4,

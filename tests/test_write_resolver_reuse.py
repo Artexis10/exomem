@@ -161,7 +161,7 @@ def test_failed_note_write_purges_pending_resolver_entry(
 ) -> None:
     _warm_resolver(vault)
 
-    def boom(writes, *, vault_root):  # signature-compatible with batch_atomic_write
+    def boom(writes, *, vault_root, **kwargs):
         raise OSError("simulated disk failure")
 
     monkeypatch.setattr(note_module.semantic_writes.vault, "batch_atomic_write", boom)

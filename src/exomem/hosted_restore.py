@@ -751,6 +751,7 @@ def _publish_staging(
     staging: Path,
     manifest: Mapping[str, Any],
 ) -> None:
+    _require_restore_admission(binding.vault_root)
     target = binding.vault_root
     if staging.parent != target.parent:
         raise OperatorFailure("HOSTED_RESTORE_TARGET_CONFLICT")
@@ -777,6 +778,15 @@ def _publish_staging(
     except OSError as exc:
         raise OperatorFailure("HOSTED_RESTORE_TARGET_CONFLICT") from exc
     _verify_published(binding, manifest)
+
+
+def _require_restore_admission(vault_root: Path) -> None:
+    from .vocabulary_admission import VocabularyAdmissionError, require_restore_admission
+
+    try:
+        require_restore_admission(vault_root)
+    except VocabularyAdmissionError as exc:
+        raise OperatorFailure(exc.code) from None
 
 
 def _bootstrap_security(
@@ -915,6 +925,7 @@ def _restore_candidate_bound(
 
     with acquire_hosted_lifetime_lock(binding.state_root, binding=binding):
         _target_preflight(binding)
+        _require_restore_admission(binding.vault_root)
         _ensure_private_directory(binding.state_root, binding)
         _ensure_runtime_root(binding, "state", binding.state_root)
         _event(crash_hook, "state_bound")

@@ -45,6 +45,7 @@ HANDLER_STRATEGY_KEYS = frozenset(
         "grant_session",
         "grant_standing",
         "inspect",
+        "vocabulary_status",
         "proposal",
         "revoke_session",
         "revoke_standing",
@@ -90,6 +91,8 @@ OPERATION_SPECS: Mapping[str, OperationSpec] = MappingProxyType(
         "list": OperationSpec(True, "inspect", handler_key="inspect"),
         "explain": OperationSpec(True, "inspect", handler_key="inspect"),
         "simulate": OperationSpec(True, "inspect", handler_key="inspect"),
+        "vocabulary-request": OperationSpec(True, "inspect", handler_key="vocabulary_status"),
+        "vocabulary-status": OperationSpec(True, "inspect", handler_key="vocabulary_status"),
         "propose": OperationSpec(
             False,
             "owner",

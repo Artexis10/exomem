@@ -5765,6 +5765,7 @@ def writer_resolver_snapshot(
     that already measured direct disk freshness may supply that key to bypass
     potentially stale event-registry state.
     """
+    from . import semantic_contract
     from .vault import WikilinkResolver
 
     root = Path(vault_root)
@@ -5775,6 +5776,12 @@ def writer_resolver_snapshot(
         cached = _RESOLVER_CACHE.get(root)
         if cached and cached[0] == current_freshness:
             return cached[1].fork()
+    entries = semantic_contract.current_writer_resolver_entries(
+        root,
+        freshness_key=current_freshness,
+    )
+    if entries is not None:
+        return WikilinkResolver.from_entries(root, entries)
     return WikilinkResolver(root)
 
 

@@ -1116,6 +1116,26 @@ def hosted_mutation_guard(vault_root: Path) -> AbstractContextManager[None]:
     return guard(vault_root)
 
 
+def hosted_vocabulary_activation_guard(vault_root: Path) -> AbstractContextManager[None]:
+    """Use the canonical hosted mutation boundary for the floor-two activation."""
+
+    from .writer_lease import get_manager
+
+    manager = get_manager()
+    guard = getattr(manager, "mutation_guard", None)
+    if not callable(guard):
+        raise HostedLifecycleError(
+            "HOSTED_MUTATION_AUTHORITY_UNAVAILABLE",
+            "shared vault mutation authority is unavailable",
+        )
+    return guard(
+        vault_root,
+        operation="vocabulary-authority-activation",
+        holder_kind="vocabulary-authority-control",
+        activation_admission=True,
+    )
+
+
 def parse_feature_grants(raw: str | None) -> tuple[str, ...]:
     values = {_normalize_feature(part) for part in str(raw or "").split(",") if part.strip()}
     unknown = values - _KNOWN_FEATURES

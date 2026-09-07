@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
+from test_bootstrap_compact_budget import COMPACT_BYTE_CEILING
 
 from exomem import commands, relation_registry
 
@@ -41,14 +43,20 @@ def test_every_bootstrap_profile_exposes_bounded_relation_currency(tmp_path: Pat
 
         assert relation["contract_version"]
         assert relation["core_version"]
-        assert len(relation["core_vocabulary"]) == 28
+        if profile == "compact":
+            assert "core_vocabulary" not in relation
+        else:
+            assert len(relation["core_vocabulary"]) == 28
         assert relation["extension_count"] == 40
         assert relation["extension_hash"] == relation_registry.load_registry(
             vault
         ).extension_hash
         assert relation["inventory_route"] == {
-            "tool": "connect_memory",
-            "args": {"operation": "resolve-relation"},
+            "available": True,
+            "route": {
+                "tool": "connect_memory",
+                "args": {"operation": "resolve-relation"},
+            },
         }
         assert "extensions" not in relation
 
@@ -72,6 +80,53 @@ def test_compact_bootstrap_teaches_the_complete_truthful_relation_loop(
     ):
         assert token in rendered
 
+    workflow = relation["workflow"].lower()
+    assert "durable recurring meaning" in workflow
+    assert "explicit question" in workflow
+    assert "consideration" in workflow
+    assert "automatic" in workflow and ("not" in workflow or "never" in workflow)
+
+
+def test_compact_entity_guidance_keeps_the_existing_v1_constraints(tmp_path: Path) -> None:
+    rule = commands.op_bootstrap(tmp_path / "vault", profile="compact")["entity_registry"][
+        "capture_rule"
+    ].lower()
+
+    for phrase in (
+        "after durable work",
+        "bounded",
+        "new durable facts or relations",
+        "requires why",
+        "folder",
+        "frontmatter",
+    ):
+        assert phrase in rule
+
+
+@pytest.mark.parametrize(
+    ("route_name", "kwargs", "guard"),
+    [
+        ("propose", {}, "INCOMPLETE_RELATION_PROPOSAL"),
+        (
+            "apply",
+            {"proposal": {"upsert": {}}, "expected_hash": "a" * 64},
+            "WHY_REQUIRED",
+        ),
+    ],
+)
+def test_relation_workflow_routes_reach_relation_schema_guards(
+    tmp_path: Path,
+    route_name: str,
+    kwargs: dict[str, object],
+    guard: str,
+) -> None:
+    route = commands.op_bootstrap(tmp_path / "vault", profile="compact")[
+        "vocabulary_workflow"
+    ]["relation_type"][route_name]["route"]
+
+    with pytest.raises(ValueError, match=guard):
+        commands.op_schema_memory(tmp_path / "vault", **route["args"], **kwargs)
+
 
 def test_compact_bootstrap_does_not_inline_unbounded_extension_definitions(
     tmp_path: Path,
@@ -82,7 +137,7 @@ def test_compact_bootstrap_does_not_inline_unbounded_extension_definitions(
     compact = commands.op_bootstrap(vault, profile="compact")
     encoded = json.dumps(compact, ensure_ascii=False).encode("utf-8")
 
-    assert len(encoded) <= 63_300
+    assert len(encoded) <= COMPACT_BYTE_CEILING
     assert "Synthetic reviewed meaning 199" not in encoded.decode("utf-8")
 
 
