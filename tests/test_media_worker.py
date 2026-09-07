@@ -446,8 +446,74 @@ def test_failed_deferred_completion_aborts_held_publication_intent(
     assert target in watcher._drain()[1]
 
 
-def test_parent_recovers_prepared_target_without_replacing_sidecar(
+def test_parent_deferred_completion_detaches_registered_graph_after_a_failed_fanout(
     vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "parent-deferred.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("canonical", encoding="utf-8")
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1,
+        mutation_id="b" * 24,
+        paths=((target.relative_to(vault).as_posix(), "c" * 64),),
+        created_paths=(),
+    )
+    token = vault_module.DeferredGraphCompletion((target,), checkpoint, None)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    coordinator = media_worker.get_manager()._mutation_coordinator_for(vault)
+    [receipt] = deferred_index.add_full_receipts(
+        vault, [target.relative_to(vault).as_posix()]
+    )
+    monkeypatch.setattr(graph_sync, "floor_path", lambda _vault: vault / "missing-floor")
+    monkeypatch.setattr(
+        media_worker.index_sync,
+        "recover_full_receipt_graph_epoch",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(graph_sync, "read_checkpoint", lambda _vault: checkpoint)
+    detached: list[graph_sync.GraphSyncCheckpoint | None] = []
+    monkeypatch.setattr(
+        graph_sync,
+        "start_registered_detached",
+        lambda _root, **kwargs: detached.append(kwargs.get("expected_checkpoint")),
+    )
+
+    def failed_fanout(
+        root: Path,
+        _paths: list[Path],
+        index_reports: list[object],
+        _states: object,
+        **_kwargs,
+    ) -> bool:
+        assert epistemic_graph._parent_receipted_graph_handoff_active(
+            root, coordinator.state_root
+        )
+        index_reports.append(
+            index_sync.IndexSyncReport(
+                "upsert",
+                (target.relative_to(vault).as_posix(),),
+                (target.relative_to(vault).as_posix(),),
+                (
+                    index_sync.IndexComponentOutcome(
+                        "epistemic_graph", "registered", "graph_rebuild_registered"
+                    ),
+                ),
+            )
+        )
+        return False
+
+    monkeypatch.setattr(media_worker, "post_commit_batch_fanout", failed_fanout)
+
+    assert not worker._complete_deferred_graph_completion(
+        token, [receipt], recover_on_mismatch=True, parent_receipted_handoff=True
+    )
+    assert detached == [checkpoint]
+    assert deferred_index.snapshot_full(vault) == [receipt]
+
+
+@pytest.mark.parametrize("fanout_success", [True, False])
+def test_parent_recovers_prepared_target_without_replacing_sidecar(
+    vault, monkeypatch: pytest.MonkeyPatch, fanout_success: bool
 ) -> None:
     result = _preserve_media_stub(vault, filename="prepared-target.mp3")
     sidecar = vault / result.sidecar_path
@@ -479,23 +545,59 @@ def test_parent_recovers_prepared_target_without_replacing_sidecar(
         target_size=len(target.encode("utf-8")),
         receipt_revision=1,
     )
+    assert deferred_index.add_full_receipts(
+        vault, [sidecar.relative_to(vault).as_posix()]
+    ) == [deferred_index.DeferredReceipt(sidecar.relative_to(vault).as_posix(), 1)]
     sidecar.write_text(target, encoding="utf-8")
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     recovered: list[bool] = []
     fanned_out: list[bool] = []
+    coordinator = media_worker.get_manager()._mutation_coordinator_for(vault)
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1,
+        mutation_id="a" * 24,
+        paths=((sidecar.relative_to(vault).as_posix(), "b" * 64),),
+        created_paths=(),
+    )
+    graph_sync.register_rebuild(
+        vault,
+        checkpoint,
+        lambda required: graph_sync.GraphBuildOutcome.covering(required),
+        state_root=coordinator.state_root,
+    )
     monkeypatch.setattr(
         media_worker.index_sync,
         "recover_full_receipt_graph_epoch",
         lambda *_a, **_k: recovered.append(True) or True,
     )
-    def fanout_under_parent_scope(root: Path, *_args, **_kwargs) -> bool:
-        coordinator = media_worker.get_manager()._mutation_coordinator_for(root)
+    def fanout_under_parent_scope(
+        root: Path, _paths: list[Path], index_reports: list[object], _states: object
+    ) -> bool:
         assert epistemic_graph._parent_receipted_graph_handoff_active(
             root, coordinator.state_root
         )
+        index_reports.append(
+            index_sync.IndexSyncReport(
+                "upsert",
+                (sidecar.relative_to(vault).as_posix(),),
+                (sidecar.relative_to(vault).as_posix(),),
+                (
+                    index_sync.IndexComponentOutcome(
+                        "epistemic_graph", "registered", "graph_rebuild_registered"
+                    ),
+                ),
+            )
+        )
         fanned_out.append(True)
-        return True
+        return fanout_success
 
+    monkeypatch.setattr(graph_sync, "read_checkpoint", lambda _root: checkpoint)
+    detached: list[graph_sync.GraphSyncCheckpoint | None] = []
+    monkeypatch.setattr(
+        graph_sync,
+        "start_registered_detached",
+        lambda _root, **kwargs: detached.append(kwargs.get("expected_checkpoint")),
+    )
     monkeypatch.setattr(media_worker, "post_commit_batch_fanout", fanout_under_parent_scope)
 
     worker._publish_parent_result(store.pending_results()[0])
@@ -503,7 +605,14 @@ def test_parent_recovers_prepared_target_without_replacing_sidecar(
     assert sidecar.read_text(encoding="utf-8") == target
     assert recovered == [True]
     assert fanned_out == [True]
-    assert store.pending_result_count() == 0
+    assert detached == [checkpoint]
+    if fanout_success:
+        assert store.pending_result_count() == 0
+    else:
+        assert store.pending_result_count() == 1
+        assert deferred_index.snapshot_full(vault) == [
+            deferred_index.DeferredReceipt(sidecar.relative_to(vault).as_posix(), 1)
+        ]
 
 
 def test_parent_terminalizes_ambiguous_preserved_notes_handoff(
