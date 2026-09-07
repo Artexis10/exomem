@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
@@ -59,8 +60,8 @@ _PLAN_RECEIPT_FIELDS = (
 #: MUST NOT infer any other. `needs_review` is explicitly NONTERMINAL: it means the
 #: guarded write is mid-flight and the caller should complete the review step, not that
 #: anything failed. Conflating it with failure is the 2026-08-06 misclassification.
-STATES = ("needs_review", "committed", "rejected", "retryable", "indeterminate")
-TERMINAL_STATES = frozenset({"committed", "rejected"})
+STATES = ("needs_review", "committed", "rejected", "retryable", "indeterminate", "settled")
+TERMINAL_STATES = frozenset({"committed", "rejected", "settled"})
 
 #: The closed derived-graph outcome vocabulary a client may branch on. Absent
 #: means no graph work was required; `pending` means the write is durable but
@@ -284,6 +285,172 @@ def _path_projection(result: Any) -> dict[str, Any]:
     if isinstance(restored_path, str):
         return {"path": restored_path}
     return {"paths": []}
+
+
+def _media_result_projection(result: Any) -> dict[str, Any]:
+    """Keep selected-media outcomes bounded without copying leaf diagnostics."""
+    if not isinstance(result, Mapping):
+        return {}
+    operation = result.get("operation")
+    if operation not in {"process", "retry"}:
+        return {}
+
+    def integer(value: Any, *, allow_none: bool = False) -> bool:
+        return (allow_none and value is None) or (
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        )
+
+    def metadata() -> dict[str, Any] | None:
+        if not (
+            integer(result.get("index_refreshed"))
+            and integer(result.get("index_refresh_remaining"))
+        ):
+            return None
+        return {
+            "operation": operation,
+            "index_refreshed": result["index_refreshed"],
+            "index_refresh_remaining": result["index_refresh_remaining"],
+        }
+
+    base = metadata()
+    if base is None:
+        return {}
+    results = result.get("results")
+
+    def path(value: Any) -> bool:
+        return (
+            isinstance(value, str)
+            and 0 < len(value) <= 2048
+            and value.startswith("Knowledge Base/")
+            and "\\" not in value
+            and "\x00" not in value
+        )
+
+    if results is None:
+        if not (
+            path(result.get("path"))
+            and isinstance(result.get("media_type"), str)
+            and 0 < len(result["media_type"]) <= 32
+            and result.get("state")
+            in {"pending", "running", "blocked", "failed", "completed"}
+            and path(result.get("sidecar_path"))
+            and integer(result.get("job_id"), allow_none=True)
+        ):
+            return {}
+        projected = {
+            **base,
+            "media_type": result["media_type"],
+            "media_state": result["state"],
+            "sidecar_path": result["sidecar_path"],
+            "job_id": result["job_id"],
+        }
+        if operation == "retry":
+            if not integer(result.get("requeued")):
+                return {}
+            projected["requeued"] = result["requeued"]
+        return projected
+
+    if not isinstance(results, (list, tuple)) or not 1 <= len(results) <= 32:
+        return {}
+
+    projected: list[dict[str, Any]] = []
+    for item in results:
+        if not isinstance(item, Mapping):
+            return {}
+        outcome = item.get("outcome")
+        state = item.get("state")
+        if outcome == "failed":
+            if not (
+                state in {"blocked", "failed"}
+                and path(item.get("path"))
+                and isinstance(item.get("code"), str)
+                and 0 < len(item["code"]) <= 128
+                and isinstance(item.get("remediation"), str)
+                and 0 < len(item["remediation"]) <= 300
+            ):
+                return {}
+            projected.append(
+                {
+                    "path": item["path"],
+                    "outcome": outcome,
+                    "state": state,
+                    "code": item["code"],
+                    "remediation": item["remediation"],
+                }
+            )
+            continue
+        if outcome not in {"processed", "retried"} or state not in {
+            "pending",
+            "running",
+            "blocked",
+            "failed",
+            "completed",
+        }:
+            return {}
+        if not (
+            path(item.get("path"))
+            and isinstance(item.get("media_type"), str)
+            and 0 < len(item["media_type"]) <= 32
+            and path(item.get("sidecar_path"))
+            and integer(item.get("job_id"), allow_none=True)
+            and integer(item.get("requeued"))
+        ):
+            return {}
+        projected.append(
+            {
+                key: item[key]
+                for key in (
+                    "path",
+                    "outcome",
+                    "state",
+                    "media_type",
+                    "sidecar_path",
+                    "job_id",
+                    "requeued",
+                )
+            }
+        )
+    return {
+        **base,
+        "paths": [item["path"] for item in projected],
+        "media_results": projected,
+    }
+
+
+def settled_media_terminal(
+    leaf_result: Any,
+    *,
+    request_id: str,
+    receipt_id: str | None,
+    idempotency_key: str | None,
+) -> dict[str, Any] | None:
+    """Own a completed queue-only media acknowledgement without claiming a commit.
+
+    Reconciliation can find an already-current sidecar or retry only its
+    machine-local job. Both are complete public requests, but neither crossed
+    the canonical mutation boundary. Keep their bounded media outcome behind
+    the same terminal marker as canonical writes so compact/full presentation
+    and exact idempotency replay cannot fall back to a raw leaf.
+    """
+    if not _media_result_projection(leaf_result):
+        return None
+    terminal: dict[str, Any] = {
+        "_terminal": _TERMINAL_MARKER,
+        "version": _TERMINAL_VERSION,
+        "ok": True,
+        "state": "settled",
+        "status": "settled",
+        "terminal": True,
+        "mutated": False,
+        "request_id": request_id,
+        "receipt_id": receipt_id,
+        "warnings_count": _warning_count(leaf_result),
+        "leaf_result": leaf_result,
+    }
+    terminal.update(_path_projection(leaf_result))
+    if idempotency_key is not None:
+        terminal["idempotency_key"] = idempotency_key
+    return terminal
 
 
 def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
@@ -1219,6 +1386,9 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         )
     artifact_receipt = _artifact_receipt_projection(leaf)
     compact.update(artifact_receipt)
+    if result.get("state") == "committed":
+        compact.update(_commit_metadata_projection(leaf))
+    compact.update(_media_result_projection(leaf))
     # `pending` (#576) is the fourth outcome: canonical bytes committed, the
     # registered derived-graph rebuild has not converged yet. It has to survive
     # into `compact` -- the default detail -- or a bounded write would be
@@ -1304,6 +1474,45 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         else:
             compact["diagnostics"] = leaf
     return compact
+
+
+def _commit_metadata_projection(leaf: Any) -> dict[str, str]:
+    """Preserve exact bounded identities, never page/unit bodies or diagnostics.
+
+    Portable receipt recovery intentionally supplies no leaf; it cannot invent
+    these identities. Semantic hashes are copied only from the same committed
+    primary path, not an auxiliary page or a preflight preview.
+    """
+    if not isinstance(leaf, Mapping) or not isinstance(leaf.get("path"), str):
+        return {}
+    projection = {
+        key: leaf[key] for key in ("before_hash", "after_hash") if _hash(leaf.get(key))
+    }
+    semantic = leaf.get("semantic")
+    if (
+        "after_hash" not in projection
+        and isinstance(semantic, Mapping)
+        and semantic.get("path") == leaf["path"]
+        and semantic.get("mutated") is True
+        and _hash(semantic.get("after_hash"))
+    ):
+        projection["after_hash"] = semantic["after_hash"]
+    for key in ("unit_ref", "removed_unit_ref"):
+        value = leaf.get(key)
+        if not isinstance(value, str) or len(value) > 128:
+            continue
+        parent, separator, fragment = value.partition("#")
+        if (
+            separator
+            and parent.startswith("exomem://memory/")
+            and _normalized_uuid(parent.removeprefix("exomem://memory/"))
+            and (
+                re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?", fragment)
+                or re.fullmatch(r"unit-[0-9a-f]{64}", fragment)
+            )
+        ):
+            projection[key] = value
+    return projection
 
 
 def valid_record_receipt(value: Any) -> bool:

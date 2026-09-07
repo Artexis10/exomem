@@ -44,7 +44,7 @@ from typing import Any
 
 import pytest
 
-from exomem import epistemic_graph, freshness, graph_sync
+from exomem import deferred_index, epistemic_graph, freshness, graph_sync
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.epistemic_graph import EpistemicGraphIndex
@@ -93,6 +93,21 @@ def _checkpoint(generation: int) -> graph_sync.GraphSyncCheckpoint:
         paths=((PAGE_A, "d" * 64),),
         created_paths=(PAGE_A,),
     )
+
+
+@pytest.mark.parametrize(
+    "terminal", [graph_sync.committed_graph_pending, graph_sync.committed_graph_queued]
+)
+def test_pending_graph_guidance_does_not_require_verifying_each_write(terminal: Any) -> None:
+    result = terminal(_checkpoint(1))
+
+    assert result["graph_sync"] == "pending"
+    guidance = result["graph_sync_remediation"]
+    assert "The write is durable" in guidance
+    assert "Continue independent work" in guidance
+    assert "graph-dependent" in guidance
+    assert "re-read shortly" not in guidance
+    assert "maintain_memory" not in guidance
 
 
 def _invoke_with_registered_rebuild(
@@ -276,6 +291,184 @@ def test_the_settled_helper_does_not_launder_a_real_failure_into_pending(
 
     with pytest.raises(graph_sync.GraphRebuildRegistrationError):
         graph_sync.join_registered_if_settled(vault)
+
+
+def test_parent_receipted_handoff_does_not_join_registered_rebuild(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A durable parent result may return pending while its full receipt remains."""
+    from exomem import writer_lease
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    state_dir = vault / "parent-handoff-state"
+    manager = LeaseManager(LeaseConfig(state_dir=state_dir))
+    coordinator = manager._mutation_coordinator_for(vault)
+    required = _checkpoint(7)
+    [receipt] = deferred_index.add_full_receipts(vault, [PAGE_A])
+    monkeypatch.setattr(graph_sync, "read_checkpoint", lambda _vault: required)
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    monkeypatch.setattr(EpistemicGraphIndex, "available", lambda _self: False)
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "_graph_sync_predecessor_state",
+        lambda _self, _required: "graph_sync_predecessor_unreadable",
+    )
+    detached: list[Path] = []
+    monkeypatch.setattr(
+        graph_sync,
+        "start_registered_detached",
+        lambda root, **_kwargs: detached.append(root),
+    )
+    monkeypatch.setattr(
+        graph_sync,
+        "wait_for_registered",
+        lambda *_args, **_kwargs: pytest.fail("parent handoff joined a registered rebuild"),
+    )
+
+    with epistemic_graph.parent_receipted_graph_handoff(
+        vault, state_root=coordinator.state_root, receipts=(receipt,)
+    ):
+        result = epistemic_graph.upsert_after_write(vault, [vault / PAGE_A])
+
+    assert result.outcome == "registered"
+    assert detached == []
+    assert graph_sync.registered_checkpoint(vault, state_root=state_dir) == required
+
+
+def test_parent_receipted_handoff_detaches_refresh_fallback_registration(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The incremental refresh fallback also leaves the parent result pending."""
+    from exomem import writer_lease
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    state_dir = vault / "parent-refresh-fallback-state"
+    manager = LeaseManager(LeaseConfig(state_dir=state_dir))
+    coordinator = manager._mutation_coordinator_for(vault)
+    required = _checkpoint(9)
+    [receipt] = deferred_index.add_full_receipts(vault, [PAGE_A])
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    monkeypatch.setattr(graph_sync, "read_checkpoint", lambda _vault: required)
+    monkeypatch.setattr(EpistemicGraphIndex, "available", lambda _self: False)
+    monkeypatch.setattr(
+        EpistemicGraphIndex, "_graph_sync_predecessor_state", lambda _self, _required: "available"
+    )
+
+    def register_from_refresh(
+        index: EpistemicGraphIndex, _paths: list[Path], **_kwargs: object
+    ) -> dict[str, int]:
+        graph_sync.register_rebuild(
+            vault,
+            required,
+            lambda checkpoint: graph_sync.GraphBuildOutcome.covering(checkpoint),
+            state_root=coordinator.state_root,
+        )
+        return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_refresh_paths_locked", register_from_refresh)
+    detached: list[Path] = []
+    monkeypatch.setattr(
+        graph_sync, "start_registered_detached", lambda root, **_kwargs: detached.append(root)
+    )
+    monkeypatch.setattr(
+        graph_sync,
+        "wait_for_registered",
+        lambda *_args, **_kwargs: pytest.fail("parent refresh fallback joined a registered rebuild"),
+    )
+
+    with epistemic_graph.parent_receipted_graph_handoff(
+        vault, state_root=coordinator.state_root, receipts=(receipt,)
+    ):
+        result = epistemic_graph.upsert_after_write(vault, [vault / PAGE_A])
+
+    assert result.outcome == "registered"
+    assert detached == []
+    assert graph_sync.registered_checkpoint(vault, state_root=state_dir) == required
+
+
+def test_parent_receipted_handoff_scope_does_not_relax_standalone(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The parent exception is exact to its vault and state root."""
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    state_dir = vault / "parent-handoff-state"
+    manager = LeaseManager(LeaseConfig(state_dir=state_dir))
+    coordinator = manager._mutation_coordinator_for(vault)
+    required = _checkpoint(8)
+    observed: list[Path] = []
+    monkeypatch.setattr(graph_sync, "start_registered", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        graph_sync,
+        "wait_for_registered",
+        lambda root, **_kwargs: observed.append(root),
+    )
+    result = epistemic_graph.GraphDispatchResult(
+        "registered", "graph_rebuild_registered", required
+    )
+
+    with epistemic_graph.parent_receipted_graph_handoff(
+        vault,
+        state_root=coordinator.state_root,
+        receipts=(deferred_index.DeferredReceipt(PAGE_A, 1),),
+    ):
+        completed = epistemic_graph._join_registered_standalone(
+            vault, result, coordinator
+        )
+        other = LeaseManager(
+            LeaseConfig(state_dir=vault / "other-parent-handoff-state")
+        )._mutation_coordinator_for(vault)
+        standalone = epistemic_graph._join_registered_standalone(vault, result, other)
+        other_vault = vault.parent / "other-vault"
+        other_vault.mkdir()
+        cross_vault = epistemic_graph._join_registered_standalone(
+            other_vault, result, manager._mutation_coordinator_for(other_vault)
+        )
+    after_scope = epistemic_graph._join_registered_standalone(vault, result, coordinator)
+
+    assert completed.outcome == "registered"
+    assert standalone.outcome == "completed"
+    assert cross_vault.outcome == "completed"
+    assert after_scope.outcome == "completed"
+    assert observed == [vault, other_vault, vault]
+
+
+def test_detached_registered_start_keeps_an_absent_or_foreign_waiter(
+    vault: Path,
+) -> None:
+    """A parent fanout may release only the exact registration it observed."""
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    state_dir = vault / "detached-identity-state"
+    coordinator = LeaseManager(
+        LeaseConfig(state_dir=state_dir)
+    )._mutation_coordinator_for(vault)
+    expected = _checkpoint(10)
+    foreign = _checkpoint(11)
+
+    assert (
+        graph_sync.start_registered_detached(
+            vault, state_root=coordinator.state_root, expected_checkpoint=expected
+        )
+        is None
+    )
+    graph_sync.register_rebuild(
+        vault,
+        foreign,
+        lambda required: graph_sync.GraphBuildOutcome.covering(required),
+        state_root=coordinator.state_root,
+    )
+
+    assert (
+        graph_sync.start_registered_detached(
+            vault, state_root=coordinator.state_root, expected_checkpoint=expected
+        )
+        is None
+    )
+    assert (
+        graph_sync.registered_checkpoint(vault, state_root=coordinator.state_root)
+        == foreign
+    )
 
 
 # --- 2. The non-waiting return is honest ----------------------------------------

@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: c57a5e842d7885f429fa2d7d808560c8d412a7223028c21febb66b722e134b64
+  skill_contract: c29752b4969560fe1781f0487c2bb39bdcb300cabc8ff9f145d91da49a7bebe2
   version: "0.1.0"
 ---
 
@@ -19,9 +19,11 @@ Use when the user asks to save or the session lands on durable reusable knowledg
 Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Sources/Evidence are immutable, and content outside the managed Knowledge Base
-is read-only. Before a compiled write: search/read for duplicates, draft, run
-`connect_memory(operation="suggest-links")`, and include known source references
-and reviewed connections in the first write. Honor the live confirmation ceiling;
+is read-only. Before a compiled write: reuse current relevant search/read results,
+check for duplicates, and include known source references and reviewed connections
+in the first write. Use `connect_memory(operation="suggest-links")` when useful
+connections are still unknown, not to recheck links already established in context.
+Honor the live confirmation ceiling;
 a workflow or standing capture preference does not grant restructure authority.
 
 Inspect mutation results before reporting success. On `success: false`, follow
@@ -50,7 +52,8 @@ substantial curation uses confirmed `restructure_execution`.
    kind genuinely cannot be determined, never because no familiar label matches.
 3. Pick the lane before the transport. Raw material stays with `capture_source`, which takes `files` for attachments as well as `content` for text. Proof-bearing material takes `preserve_evidence` for factual text, `preserve_artifacts` when file handles are available, and `transfer_artifact` only as the binary-upload fallback.
 4. Draft distilled conclusions as: `research-note`, `insight`, `failure`, or `pattern`. Pass any path captured in steps 2-3 as `sources:` so the conclusion links to its provenance and the source leaves the unprocessed queue.
-5. Run `connect_memory(operation="suggest-links")` on the draft. Then write with
+5. Reuse known meaningful connections; use `connect_memory(operation="suggest-links")`
+   when candidates are still missing. Then write with
    `remember`, carrying the sources and accepted links in the first write; prefer
    `edit_memory` or `replace_memory` for near-duplicates.
 6. For an entity, consult the active entity registry and selected knowledge packs,

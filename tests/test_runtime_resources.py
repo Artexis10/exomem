@@ -380,7 +380,12 @@ def test_media_child_defers_model_busy_without_publishing_a_failure(
     monkeypatch.setattr(media_worker.extract, "log_diarization_readiness", lambda _root: None)
 
     assert media_worker.run_child(tmp_path, parent_pid=1, idle_seconds=1) == 75
-    assert events == [("recover", None), ("worker", None), ("defer", 7), ("clear", None)]
+    assert events == [
+        ("recover", None),
+        ("worker", None),
+        ("defer", job),
+        ("clear", None),
+    ]
 
 
 def test_clip_model_busy_propagates_to_the_child_defer_boundary(tmp_path: Path) -> None:

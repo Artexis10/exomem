@@ -4117,6 +4117,21 @@
           "default": null,
           "description": "Optional governed Knowledge Base media path. Omit for bounded all-media work."
         },
+        "paths": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional list of 1-32 unique governed media paths for process or retry."
+        },
         "operation": {
           "default": "process",
           "description": "process, status, or retry.",
@@ -5899,7 +5914,7 @@
         },
         "query": {
           "default": "",
-          "description": "Topic for evolution review when `path` is absent. On the topic route, `topic_anchor` is the retrieval hit that surfaced the chain; `chain_id` is always the active head.",
+          "description": "Topic for evolution review when `path` is absent. On the topic route, `topic_anchor` is the retrieval hit that surfaced the chain; `chain_id` is always the active head. In vocabulary mode, the explicit meaning question to record against the selected page or relation candidate.",
           "type": "string"
         },
         "sources": {
@@ -5975,7 +5990,7 @@
             }
           ],
           "default": null,
-          "description": "Restrict provenance scan to one path. For evolution, selects the path route and `query` is not used: `topic_anchor` is the requested page and `chain_id` is always the active head. An unresolvable path raises an explicit error."
+          "description": "Restrict provenance scan to one path. For evolution, selects the path route and `query` is not used: `topic_anchor` is the requested page and `chain_id` is always the active head. An unresolvable path raises an explicit error. Vocabulary questions use a source page for a new meaning or the existing entity page for reuse/enrichment. A relation candidate question uses the candidate's source_path alongside its ref."
         },
         "state": {
           "default": "open",
@@ -5992,7 +6007,7 @@
             }
           ],
           "default": null,
-          "description": "Stable `exomem://review/<id>` reference for item mode, or the opaque `exomem://write-advisory-result/<id>` reference for write-advisory-result mode. Required by both."
+          "description": "Stable `exomem://review/<id>` reference for item mode, or the opaque `exomem://write-advisory-result/<id>` reference for write-advisory-result mode. Required by both. For a vocabulary relation-type question, optionally provide a current relation-queue candidate ref alongside its source path and your meaning question. This reviews both endpoints and returns the exact application route."
         },
         "detail": {
           "default": "actionable",
@@ -6020,7 +6035,7 @@
             }
           ],
           "default": null,
-          "description": "Supported vocabulary family for an explicit meaning question. With `mode=\"vocabulary\"`, it requires `path` and `query` and creates only a review consideration; it grants no mutation authority."
+          "description": "Supported vocabulary family for an explicit meaning question. With `mode=\"vocabulary\"`, it requires `path` and `query` and creates only a review consideration; it grants no mutation authority. A selected edge requires `relation-type/v1` and the relation-queue candidate `ref` so the decision covers both endpoints. Read its context, record the typed decision, then use the returned application_route with that choice."
         },
         "authorization_session_credential": {
           "anyOf": [

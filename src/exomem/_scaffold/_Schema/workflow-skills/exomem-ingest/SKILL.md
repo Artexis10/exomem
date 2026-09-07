@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: c57a5e842d7885f429fa2d7d808560c8d412a7223028c21febb66b722e134b64
+  skill_contract: c29752b4969560fe1781f0487c2bb39bdcb300cabc8ff9f145d91da49a7bebe2
   version: "0.1.0"
 ---
 
@@ -19,9 +19,11 @@ Use when the user asks to ingest, add, import, process, or preserve an external 
 Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Sources/Evidence are immutable, and content outside the managed Knowledge Base
-is read-only. Before a compiled write: search/read for duplicates, draft, run
-`connect_memory(operation="suggest-links")`, and include known source references
-and reviewed connections in the first write. Honor the live confirmation ceiling;
+is read-only. Before a compiled write: reuse current relevant search/read results,
+check for duplicates, and include known source references and reviewed connections
+in the first write. Use `connect_memory(operation="suggest-links")` when useful
+connections are still unknown, not to recheck links already established in context.
+Honor the live confirmation ceiling;
 a workflow or standing capture preference does not grant restructure authority.
 
 Inspect mutation results before reporting success. On `success: false`, follow
@@ -38,7 +40,7 @@ identity after an uncertain commit.
    `other` for material you genuinely cannot classify.
 3. Media processing is automatic; use `process_media` for immediate reconciliation, actionable status, or retry, then inspect via `read_media`, extracted text/OCR/transcripts, or media-aware `ask_memory`.
 4. If the source is worth distilling, use `compile_source` to plan and draft the compiled note — including the path preserved in step 2 as `sources:`. That is what links the note back to the raw artifact and marks the source processed; omit it and the source stays in the unprocessed backlog forever.
-5. Run `connect_memory(operation="suggest-links")` on the draft and review the connections. Then write with `remember`, carrying the sources and accepted links in this first write.
+5. Reuse known meaningful connections; use `connect_memory(operation="suggest-links")` when candidates are still missing and review them. Then write with `remember`, carrying the sources and accepted links in this first write.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific

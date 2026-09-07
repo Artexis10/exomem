@@ -1043,6 +1043,9 @@ class ExistingCommit:
     # the seam's licence to skip a disclosure decision, and does not get one.
     due_state: dict[str, Any] | None = None
     relation_advisory_context: dict[str, str] | None = None
+    # Exact canonical write bytes, not the normalized semantic source hash.
+    # Absent on legacy/replay results without an exact byte proof.
+    after_hash: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -1063,6 +1066,8 @@ class ExistingCommit:
             value["due_state"] = self.due_state
         if self.relation_advisory_context is not None:
             value["_relation_advisory_context"] = self.relation_advisory_context
+        if self.after_hash is not None:
+            value["after_hash"] = self.after_hash
         return value
 
 
@@ -2205,6 +2210,7 @@ def _commit_existing_locked(
         report,
         lifecycle_state,
         preflight.transition_token,
+        after_hash=vault.content_hash(preflight.after_source),
     )
 
 

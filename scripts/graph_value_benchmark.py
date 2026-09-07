@@ -1952,17 +1952,18 @@ def _lifecycle_propose_and_save(
 def _lifecycle_rebuild(root: Path) -> None:
     from exomem import epistemic_graph, graph_sync
 
-    # A governed registry save may already have registered the one durable
-    # convergence job.  Wait only for that typed in-flight owner, then use the
-    # same public graph projection the benchmark subsequently queries.
-    for attempt in range(10):
-        try:
-            epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
-            return
-        except graph_sync.GraphRebuildInProgress:
-            if attempt == 9:
-                raise
-            time.sleep(0.05)
+    # A governed registry save may already own this rebuild. Fixture setup
+    # needs its published outcome, even when that takes more than 450 ms.
+    # The registered flight's errors and timeout must remain visible.
+    try:
+        epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+    except graph_sync.GraphRebuildInProgress:
+        if graph_sync.await_active_rebuild(root, timeout=30.0) is None:
+            # A different process's claim is not ours to join or report ready.
+            raise
+        # A settled prior flight may coexist with a new external owner. Prove
+        # current publication after joining; a new busy claim still refuses.
+        epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
 
 
 def _graph_relation_types(

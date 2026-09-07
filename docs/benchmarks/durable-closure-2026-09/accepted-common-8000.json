@@ -1,0 +1,2384 @@
+{
+  "driver_sha256": {
+    "docs/benchmarks/durable-closure-public-artifacts.json": "8c7e9741f4a8b4d13bd54105804e9b9ec48bee84ef08fe78d96845eaa16edc5a",
+    "scripts/durable_closure_benchmark.py": "7701f8265bb8ae2f55492e85a0feff19e9db90023e878168e80cc98a149dfef9",
+    "scripts/durable_closure_common.py": "79a8d123de203f880f9be40fa3a2823bff0ea833e1bf32c00c8d43f259f1a8bf"
+  },
+  "evidence_format": 1,
+  "host": {
+    "cpu_count": 16,
+    "driver_git_revision": "938e8751bab359b2c945cbf98e29b8ed7dc19fd1",
+    "driver_sha256": {
+      "docs/benchmarks/durable-closure-public-artifacts.json": "8c7e9741f4a8b4d13bd54105804e9b9ec48bee84ef08fe78d96845eaa16edc5a",
+      "scripts/durable_closure_benchmark.py": "7701f8265bb8ae2f55492e85a0feff19e9db90023e878168e80cc98a149dfef9",
+      "scripts/durable_closure_common.py": "79a8d123de203f880f9be40fa3a2823bff0ea833e1bf32c00c8d43f259f1a8bf"
+    },
+    "ended_utc": "2026-09-07T11:58:47.620207+00:00",
+    "exit_code": 0,
+    "load_average_end": [
+      20.0791015625,
+      20.01318359375,
+      17.80517578125
+    ],
+    "load_average_start": [
+      20.02001953125,
+      19.82275390625,
+      17.16357421875
+    ],
+    "runner_wall_s": 218.75908467400586,
+    "samples_per_product": 1,
+    "started_utc": "2026-09-07T11:55:03.803642+00:00",
+    "task_test_workers_quiescent": true
+  },
+  "label": "accepted-common-8000",
+  "measurement_limits": [
+    "One sample per row; task-worker quiescence is declared separately from external host load.",
+    "A failed workflow is not a completed latency baseline; no speed ratio is asserted.",
+    "Graph timing and invocation wrappers instrument the MCP service owner only, excluding disposable media children.",
+    "Source scans cover only the named wrapped functions, not all filesystem reads.",
+    "Full projection convergence, connector overhead, and model planning remain unmeasured unless explicitly populated."
+  ],
+  "raw_result_sha256": "295a2700ae2d1b4d79369685546765b4188ac895836941933d8b8a2cb878dc41",
+  "result": {
+    "diagnostic": "durable-closure-common-subset",
+    "rows": [
+      {
+        "configuration": {
+          "EXOMEM_CALL_LEDGER_DIR": "<sample-root>/state/exomem/ledger",
+          "EXOMEM_CONFIG_PATH": "<sample-root>/state/exomem/config.json",
+          "EXOMEM_DISABLE_EMBEDDINGS": "1",
+          "EXOMEM_DISABLE_QUERY_LOG": "1",
+          "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
+          "EXOMEM_EAGER_BOOT": "1",
+          "EXOMEM_LOG_DIR": "<sample-root>/state/exomem/logs",
+          "EXOMEM_STATE_ROOT": "<sample-root>/state/exomem/state",
+          "EXOMEM_VAULT_PATH": "<sample-root>/vault/exomem",
+          "EXOMEM_WRITER_LEASE_STATE_DIR": "<sample-root>/state/exomem/leases"
+        },
+        "corpus": {
+          "digest": "acf638d6bbbb3decdd500bfc6516b4e07897bf396d3140a9385f4fcc819ccffb",
+          "generator": "durable-closure-common-markdown-v1",
+          "named_pages": {
+            "background": "background.md",
+            "stale_link": "stale-link.md",
+            "tracker": "active-tracker.md"
+          },
+          "page_count": 8000,
+          "pages_entries": 8000,
+          "pages_omitted_reason": "Generated per-page inventory omitted; page count, named workflow pages, generator identity, and corpus digest retained."
+        },
+        "markers": [
+          "common-subset-656173c995c44915b8ce64fd2481b78d-chapter",
+          "common-subset-656173c995c44915b8ce64fd2481b78d-tracker",
+          "common-subset-656173c995c44915b8ce64fd2481b78d-capture"
+        ],
+        "measurements": {
+          "ack_p50_ms": 2276.2165650055977,
+          "ack_p95_ms": 17240.62700899958,
+          "connector_ms": null,
+          "connector_reason": "not exposed by the public MCP protocol",
+          "public_call_count": 13,
+          "shared_server_ms": null,
+          "shared_server_reason": "not exposed by the public MCP protocol"
+        },
+        "phases": {
+          "pre_timing_ms": 131567.08158100082,
+          "teardown_ms": 2103.996295001707,
+          "wall_to_verified_closure_ms": 54001.98189400544
+        },
+        "plan": [
+          {
+            "operation": "create_completed_chapter",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "edit_tracker",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "correct_stale_link",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "capture_independent_note",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "exact_read_changed_pages",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "search_unique_markers",
+            "surface": "public_mcp"
+          }
+        ],
+        "pre_timing_public_calls": [
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 15.69250000466127,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.668548998888582,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.186912997392938,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.09432900173124,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.049766991869546,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.01711400365457,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 11.435688997153193,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.993417992722243,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.010737994685769,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.839124002610333,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 11.075059010181576,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.483428002567962,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.025779003626667,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.017588003189303,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.752598009072244,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.823629006859846,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 8.836805005557835,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.332638990599662,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.266810000757687,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.302627993747592,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 58.00831801025197,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 69.1964120051125,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 69.29967099858914,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 81.45323599455878,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.55340700002853,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 75.03827700566035,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 82.6434250047896,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 67.6703500066651,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 112.60145300184377,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 115.00442799297161,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 151.54240200354252,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 32.452862011268735,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 126.82542098627891,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 99.93356600170955,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 124.76376400445588,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 19.77458999317605,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 85.0931339955423,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 76.84147599502467,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 88.47363699169364,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 72.94290199934039,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 84.34524999756832,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 85.0027440028498,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 83.99119300884195,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 301.31971900118515,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 56.411660989397205,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.45261698937975,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 42.798932001460344,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.76061100407969,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.55778599448968,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 45.82332499558106,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.54851500224322,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.22660400229506,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.914604004938155,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 47.78641898883507,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.36598999181297,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.504136997507885,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.66351699840743,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.534274010919034,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.43824099609628,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.49879400758073,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 46.08134800218977,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 47.568573005264625,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.661791006452404,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 55.15253600606229,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 45.33044500567485,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 46.89905000850558,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 45.479891006834805,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.79536699829623,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.442234999034554,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 42.73674899013713,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.2903580092825,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.884415999869816,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 56.07180000515655,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.12427200563252,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.10342999978457,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.72258898871951,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 55.192165993503295,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 54.86686300719157,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 33.37593100150116,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 45.15311600698624,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.33482998947147,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.8184789941879,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.342201010440476,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.13163198984694,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 47.23135699168779,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.472795992391184,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 41.88155400333926,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.14876200584695,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 46.29898200801108,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.76947999582626,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.241533008171245,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.89755399583373,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.67436399217695,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 40.332350006792694,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 54.16126799536869,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 42.79816499911249,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.89869099215139,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 54.61700299929362,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.85679099324625,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 46.775622002314776,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 45.483958994736895,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.744266998255625,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 47.934529997291975,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.0534389866516,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 47.60877200169489,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 43.10949599312153,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.04545599897392,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 44.353149001835845,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.93162100133486,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 44.483289995696396,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.9077629938256,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 47.168413002509624,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.327141000539996,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.49385399615858,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.762127001187764,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.43778299295809,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.5290890064789,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.33534999913536,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.348649005172774,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.63257699657697,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.23625700373668,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.74215101194568,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 44.90223100583535,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.36627300817054,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.93815699708648,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.296124998363666,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.2774919946678,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.289380996720865,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.36578598769847,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.04171799030155,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.23883800802287,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.59669500426389,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 44.601140994927846,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 53.8280689943349,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.54548100451939,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.95303800771944,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.011423990828916,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 58.80867800442502,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 55.47195200051647,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.7087970074499,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 53.11986300512217,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 46.59542800800409,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 60.15097501222044,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.98380900057964,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 33.585591008886695,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.36194500664715,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 46.757162999711,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 46.2415819929447,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.906881999457255,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.045053000794724,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.27752598875668,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.05958900821861,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.4696380085079,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.133310992852785,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 55.29058899264783,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 53.099394994205795,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.745645995950326,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.41438600549009,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.80369900679216,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.23186099808663,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.32125699613243,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 47.378766001202166,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.828578001935966,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 47.92854299012106,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 47.85363300470635,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 53.257987994584255,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 53.04032001004089,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 53.98079899896402,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.39448299410287,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 54.53287799900863,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.402200001408346,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 11.26210400252603,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.306847005267628,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.736267995322123,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.747231004643254,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 94.30660400539637,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 145.00523799506482,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 119.79786500160117,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 108.29164698952809,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 120.2693020022707,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 145.47361100267153,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 124.2338519950863,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 146.2862869957462,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 374.58540200896095,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 410.0668030005181,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 302.34273300447967,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 286.5054009889718,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 235.85604000254534,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 319.041490991367,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 306.0211440024432,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 301.0664519970305,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 312.9409729881445,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 306.942044000607,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 309.54986899450887,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 316.724004005664,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 307.35327099682763,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 292.38862299825996,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 294.35126899625175,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 296.16978799458593,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 303.59649599995464,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 297.962507000193,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 309.2132460005814,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 297.6042140071513,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 879.2205709905829,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 203.79352298914455,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 213.8613879942568,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 203.19803700840566,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 193.89005299308337,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 211.564654004178,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 205.6378919951385,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 211.79617699817754,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 214.1553639958147,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 209.95799599040765,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 207.6755599991884,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 210.18603999982588,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 203.09901499422267,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 201.26092500868253,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 211.30177000304684,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 234.30520499823615,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 228.98958600126207,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 210.32727698911913,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 216.2266679952154,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 187.7989000058733,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 199.61939599306788,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 125.37393800448626,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 106.87647300073877,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 26108.04710299999,
+            "tool": "remember"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 24511.41499800724,
+            "tool": "remember"
+          }
+        ],
+        "product": "exomem",
+        "public_calls": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 21002.736747992458,
+            "tool": "remember"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 9991.332835998037,
+            "tool": "remember"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 17240.62700899958,
+            "tool": "edit_memory"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 1545.6762599933427,
+            "tool": "edit_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 374.5340080058668,
+            "tool": "remember"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 2276.2165650055977,
+            "tool": "remember"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 134.90157699561678,
+            "tool": "read_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 48.653637000825256,
+            "tool": "read_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 47.17276099836454,
+            "tool": "read_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 84.72652499040123,
+            "tool": "read_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 501.82074900658336,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 294.59988200687803,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 264.38077799684834,
+            "tool": "ask_memory"
+          }
+        ],
+        "reason": null,
+        "runtime": {
+          "dependency_inventory": {
+            "entries": [
+              "Authlib==1.7.2",
+              "PyJWT==2.12.1",
+              "PyMuPDF==1.27.2.3",
+              "PyYAML==6.0.3",
+              "Pygments==2.20.0",
+              "SecretStorage==3.5.0",
+              "aiofile==3.11.1",
+              "annotated-types==0.7.0",
+              "anyio==4.13.0",
+              "attrs==26.1.0",
+              "beartype==0.22.9",
+              "cachetools==7.1.2",
+              "caio==0.9.25",
+              "certifi==2026.4.22",
+              "cffi==2.0.0",
+              "click==8.4.0",
+              "cryptography==48.0.0",
+              "cyclopts==4.13.0",
+              "dnspython==2.8.0",
+              "docstring_parser==0.18.0",
+              "docutils==0.22.4",
+              "email-validator==2.3.0",
+              "exceptiongroup==1.3.1",
+              "exomem==0.73.1",
+              "fastmcp-slim==3.4.4",
+              "fastmcp==3.4.4",
+              "griffelib==2.0.2",
+              "h11==0.16.0",
+              "httpcore==1.0.9",
+              "httpx-sse==0.4.3",
+              "httpx==0.28.1",
+              "idna==3.15",
+              "jaraco.classes==3.4.0",
+              "jaraco.context==6.1.2",
+              "jaraco.functools==4.5.0",
+              "jeepney==0.9.0",
+              "joserfc==1.6.5",
+              "jsonref==1.1.0",
+              "jsonschema-path==0.4.6",
+              "jsonschema-specifications==2025.9.1",
+              "jsonschema==4.26.0",
+              "keyring==25.7.0",
+              "markdown-it-py==4.2.0",
+              "mcp==1.27.1",
+              "mdurl==0.1.2",
+              "more-itertools==11.0.2",
+              "numpy==2.4.6",
+              "openapi-pydantic==0.5.1",
+              "opentelemetry-api==1.43.0",
+              "packaging==26.2",
+              "pathable==0.5.0",
+              "pillow==12.2.0",
+              "platformdirs==4.9.6",
+              "py-key-value-aio==0.4.4",
+              "pycparser==3.0",
+              "pydantic-settings==2.14.1",
+              "pydantic==2.13.4",
+              "pydantic_core==2.46.4",
+              "pyperclip==1.11.0",
+              "pytesseract==0.3.13",
+              "python-dotenv==1.2.2",
+              "python-multipart==0.0.29",
+              "python-slugify==8.0.4",
+              "rank-bm25==0.2.2",
+              "referencing==0.37.0",
+              "rich-rst==1.3.2",
+              "rich==15.0.0",
+              "rpds-py==0.30.0",
+              "snowballstemmer==3.1.0",
+              "sse-starlette==3.4.4",
+              "starlette==1.3.1",
+              "text-unidecode==1.3",
+              "typing-inspection==0.4.2",
+              "typing_extensions==4.15.0",
+              "uncalled-for==0.3.2",
+              "uvicorn==0.47.0",
+              "watchdog==6.0.0",
+              "watchfiles==1.1.1",
+              "websockets==16.0"
+            ],
+            "status": "ok"
+          },
+          "executable": "<candidate-worktree>/.venv-perf/bin/python",
+          "executable_sha256": "f0b128827bc923c2b0cd365a7c75fe1a5d400fdcf1fdae822e045cc67b25ea79",
+          "installed": {
+            "module_sha256": "f69bdac87e170b47dfcc8ce631efc0045a574eb81fd0f605b990b02692e3398d",
+            "package_root": "<candidate-worktree>/src/exomem",
+            "runtime_pythonpath_root": "<candidate-worktree>/src",
+            "version": "0.73.1"
+          },
+          "installed_version_matches_expected": null,
+          "source_identity": {
+            "dirty": false,
+            "dirty_source_digest": "c31b0df2f64e135321cac38cdc0ac61489c8a281942012e4e25a53804618a03b",
+            "package_root": "<candidate-worktree>/src/exomem",
+            "revision": "938e8751bab359b2c945cbf98e29b8ed7dc19fd1",
+            "runtime_pythonpath_root": "<candidate-worktree>/src",
+            "source_digest": "c31b0df2f64e135321cac38cdc0ac61489c8a281942012e4e25a53804618a03b",
+            "tree": "2ab5b42d82efbfdbcaef304d2af0aacbd026842c"
+          },
+          "wheel": null,
+          "wheel_matches_pinned_digest": null,
+          "wheel_sha256": null
+        },
+        "status": "pass",
+        "verification": {
+          "body_proof": [
+            {
+              "actual_bytes": 124,
+              "actual_sha256": "b2c6485668c4a0baf06ae8106a93482124b1e2a9011f8d329bcd035ee94f9206",
+              "expected_bytes": 124,
+              "expected_sha256": "b2c6485668c4a0baf06ae8106a93482124b1e2a9011f8d329bcd035ee94f9206",
+              "matches": true
+            },
+            {
+              "actual_bytes": 1210,
+              "actual_sha256": "1bc561639284d198e88bb86a611b9412cd4134fd9d0d2b938baafda8cdcba695",
+              "expected_bytes": 1210,
+              "expected_sha256": "1bc561639284d198e88bb86a611b9412cd4134fd9d0d2b938baafda8cdcba695",
+              "matches": true
+            },
+            {
+              "actual_bytes": 3175,
+              "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+              "expected_bytes": 3175,
+              "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+              "matches": true
+            },
+            {
+              "actual_bytes": 107,
+              "actual_sha256": "c04faacf794e50f21472b751a06a67f5c3bfd2c8f32d2878b8c6f38385c9fbc8",
+              "expected_bytes": 107,
+              "expected_sha256": "c04faacf794e50f21472b751a06a67f5c3bfd2c8f32d2878b8c6f38385c9fbc8",
+              "matches": true
+            }
+          ],
+          "exact_read_your_write": true,
+          "expected_bodies_match": true,
+          "search_converged": true,
+          "searches": [
+            {
+              "convergence_ms": 501.83766199916136,
+              "final_response": {
+                "classification": "ok",
+                "container": "result",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "result"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            },
+            {
+              "convergence_ms": 294.62093400070444,
+              "final_response": {
+                "classification": "ok",
+                "container": "result",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "result"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            },
+            {
+              "convergence_ms": 264.3941400019685,
+              "final_response": {
+                "classification": "ok",
+                "container": "result",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "result"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            }
+          ]
+        }
+      },
+      {
+        "configuration": {
+          "BASIC_MEMORY_AUTO_UPDATE": "false",
+          "BASIC_MEMORY_CONFIG_DIR": "<sample-root>/state/basic_memory/config",
+          "BASIC_MEMORY_EXPLICIT_ROUTING": "true",
+          "BASIC_MEMORY_FORCE_LOCAL": "true",
+          "BASIC_MEMORY_HOME": "<sample-root>/state/basic_memory/home",
+          "BASIC_MEMORY_NO_PROMOS": "1",
+          "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false"
+        },
+        "corpus": {
+          "digest": "acf638d6bbbb3decdd500bfc6516b4e07897bf396d3140a9385f4fcc819ccffb",
+          "generator": "durable-closure-common-markdown-v1",
+          "named_pages": {
+            "background": "background.md",
+            "stale_link": "stale-link.md",
+            "tracker": "active-tracker.md"
+          },
+          "page_count": 8000,
+          "pages_entries": 8000,
+          "pages_omitted_reason": "Generated per-page inventory omitted; page count, named workflow pages, generator identity, and corpus digest retained."
+        },
+        "markers": [
+          "common-subset-656173c995c44915b8ce64fd2481b78d-chapter",
+          "common-subset-656173c995c44915b8ce64fd2481b78d-tracker",
+          "common-subset-656173c995c44915b8ce64fd2481b78d-capture"
+        ],
+        "measurements": {
+          "ack_p50_ms": 242.97748001117725,
+          "ack_p95_ms": 2590.2734529954614,
+          "connector_ms": null,
+          "connector_reason": "not exposed by the public MCP protocol",
+          "public_call_count": 11,
+          "shared_server_ms": null,
+          "shared_server_reason": "not exposed by the public MCP protocol"
+        },
+        "phases": {
+          "pre_timing_ms": 21683.002903999295,
+          "teardown_ms": 2102.8679839946562,
+          "wall_to_verified_closure_ms": 6542.3647400020855
+        },
+        "plan": [
+          {
+            "operation": "create_completed_chapter",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "edit_tracker",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "correct_stale_link",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "capture_independent_note",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "exact_read_changed_pages",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "search_unique_markers",
+            "surface": "public_mcp"
+          }
+        ],
+        "pre_timing_public_calls": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 728.6930789996404,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 108.53463498642668,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 28.787994000595063,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 29.420031991321594,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 28.246909991139546,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 31.2096540001221,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 29.102988992235623,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 29.878293004003353,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 30.367863990250044,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 28.78763100306969,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 32.604966007056646,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 36.373292008647695,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 40.564936003647745,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 31.410002993652597,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 30.812459997832775,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 29.349960997933522,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 31.896104002953507,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 27.60529800434597,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 29.777073010336608,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 27.863240989972837,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 29.8304619936971,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 27.265081997029483,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 29.20062601333484,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 28.410806000465527,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 29.814281995641068,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 30.894994997652248,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 29.28723400691524,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 29.935125989140943,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 32.70425999653526,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 52.952168000047095,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 73.33676399139222,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 36.43314300279599,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 61.13642899435945,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 45.009777997620404,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 232.5192389980657,
+            "tool": "search_notes"
+          }
+        ],
+        "product": "basic_memory",
+        "public_calls": [
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 242.97748001117725,
+            "tool": "write_note"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 1873.0343240022194,
+            "tool": "edit_note"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 2590.2734529954614,
+            "tool": "edit_note"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 221.84790699975565,
+            "tool": "write_note"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 267.06862800347153,
+            "tool": "read_note"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 367.3524009936955,
+            "tool": "read_note"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 164.29199800768401,
+            "tool": "read_note"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 212.83015700464603,
+            "tool": "read_note"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 167.92360600084066,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 113.5025690018665,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 128.66015599865932,
+            "tool": "search_notes"
+          }
+        ],
+        "reason": null,
+        "runtime": {
+          "dependency_inventory": {
+            "entries": [
+              "Authlib==1.8.0",
+              "Jinja2==3.1.6",
+              "Mako==1.4.1",
+              "MarkupSafe==3.0.3",
+              "PyJWT==2.13.0",
+              "PyMeta3==0.5.1",
+              "PyYAML==6.0.3",
+              "Pygments==2.21.0",
+              "SQLAlchemy==2.1.0rc1",
+              "SecretStorage==3.5.0",
+              "Unidecode==1.4.0",
+              "agent-detector==2.0.0",
+              "aiofile==3.12.3",
+              "aiofiles==25.1.0",
+              "aiohappyeyeballs==2.7.1",
+              "aiohttp==3.14.3",
+              "aiosignal==1.4.0",
+              "aiosqlite==0.22.1",
+              "alembic==1.19.2",
+              "annotated-doc==0.0.5",
+              "annotated-types==0.8.0",
+              "anyio==4.15.1",
+              "asyncpg==0.31.0",
+              "attrs==26.1.0",
+              "basic-memory==0.23.2",
+              "beartype==0.23.0rc0",
+              "cachetools==7.1.8",
+              "caio==0.12.4",
+              "certifi==2026.7.22",
+              "cffi==2.1.1",
+              "charset-normalizer==3.5.1",
+              "click==8.5.0",
+              "cryptography==50.0.1",
+              "cyclopts==5.0.0b1",
+              "dateparser==1.4.3",
+              "detect-installer==0.2.1",
+              "distro==1.9.0",
+              "dnspython==2.8.0",
+              "docstring_parser==0.18.0",
+              "email-validator==2.3.0",
+              "exceptiongroup==1.3.1",
+              "executing==2.2.1",
+              "fastapi-cli==0.0.32",
+              "fastapi-cloud-cli==0.25.0",
+              "fastapi==0.141.1",
+              "fastar==0.12.0",
+              "fastembed==0.8.0",
+              "fastmcp-slim==4.0.0b1",
+              "fastmcp==4.0.0b1",
+              "fastuuid==0.14.0",
+              "filelock==3.32.5",
+              "flatbuffers==25.12.19",
+              "frozenlist==1.8.0",
+              "fsspec==2026.7.0",
+              "googleapis-common-protos==1.75.3",
+              "greenlet==3.5.5",
+              "griffelib==2.3.0",
+              "h11==0.16.0",
+              "hf-xet==1.6.1a0",
+              "httpcore2==2.12.0",
+              "httpcore==1.0.9",
+              "httptools==0.8.0",
+              "httpx2==2.12.0",
+              "httpx==0.28.1",
+              "huggingface_hub==1.30.0",
+              "idna==3.19",
+              "importlib_metadata==8.9.0",
+              "iniconfig==2.3.0",
+              "jaraco.classes==3.4.0",
+              "jaraco.context==6.1.2",
+              "jaraco.functools==4.6.0",
+              "jeepney==0.9.0",
+              "jiter==0.16.0",
+              "joserfc==1.7.5",
+              "jsonref==1.1.0",
+              "jsonschema-path==0.5.0",
+              "jsonschema-specifications==2025.9.1",
+              "jsonschema==4.26.0",
+              "keyring==25.7.0",
+              "litellm==1.91.5",
+              "logfire==5.0.0",
+              "loguru==0.7.3",
+              "markdown-it-py==4.2.0",
+              "mcp-types==2.1.1",
+              "mcp==2.1.1",
+              "mdformat-gfm==1.0.0",
+              "mdformat==1.0.0",
+              "mdformat_frontmatter==2.1.2",
+              "mdit-py-plugins==0.6.1",
+              "mdurl==0.1.2",
+              "mmh3==5.3.0",
+              "more-itertools==11.1.0",
+              "multidict==6.7.1",
+              "nest-asyncio==1.6.0",
+              "nodeenv==1.10.0",
+              "numpy==2.5.3",
+              "onnxruntime==1.29.0",
+              "openai==2.54.0",
+              "openapi-pydantic==0.5.1",
+              "opentelemetry-api==1.44.0",
+              "opentelemetry-exporter-otlp-proto-common==1.44.0",
+              "opentelemetry-exporter-otlp-proto-http==1.44.0",
+              "opentelemetry-instrumentation==0.65b0",
+              "opentelemetry-proto==1.44.0",
+              "opentelemetry-sdk==1.44.0",
+              "opentelemetry-semantic-conventions==0.65b0",
+              "packaging==26.3",
+              "pathable==0.6.0",
+              "pillow==12.3.0",
+              "platformdirs==4.11.7",
+              "pluggy==1.6.0",
+              "propcache==0.5.2",
+              "protobuf==7.36.1",
+              "psutil==7.2.2",
+              "psycopg==3.3.1",
+              "py-key-value-aio==0.4.5",
+              "py_rust_stemmers==0.1.8",
+              "pybars3==0.9.7",
+              "pycparser==3.0",
+              "pydantic-extra-types==2.11.1",
+              "pydantic-settings==2.15.0",
+              "pydantic==2.14.0b1",
+              "pydantic_core==2.48.0",
+              "pyperclip==1.11.0",
+              "pyright==1.1.411",
+              "pytest-aio==2.1.7",
+              "pytest-asyncio==1.4.0",
+              "pytest==9.1.1",
+              "python-dateutil==2.9.0.post0",
+              "python-dotenv==1.2.3",
+              "python-frontmatter==1.3.0",
+              "python-multipart==0.0.32",
+              "pytz==2026.3.post1",
+              "referencing==0.37.0",
+              "regex==2026.9.3",
+              "requests==2.34.2",
+              "rich-rst==2.1.0",
+              "rich-toolkit==0.20.4",
+              "rich==15.0.0",
+              "rignore==0.8.1",
+              "rpds-py==2026.6.3",
+              "ruamel.yaml==0.19.1",
+              "sentry-sdk==3.0.0a7",
+              "shellingham==1.5.4",
+              "six==1.17.0",
+              "sniffio==1.3.1",
+              "sqlite-vec==0.1.10a4",
+              "sse-starlette==3.4.11",
+              "starlette==1.6.0",
+              "tiktoken==0.14.0",
+              "tokenizers==0.23.2",
+              "tqdm==4.70.0",
+              "truststore==0.10.4",
+              "typer==0.27.2",
+              "typing-inspection==0.4.4",
+              "typing_extensions==4.16.0",
+              "tzlocal==5.4.4",
+              "uncalled-for==0.4.0",
+              "urllib3==2.7.0",
+              "uvicorn==0.52.4",
+              "uvloop==0.22.1",
+              "watchfiles==1.2.0",
+              "wcwidth==0.8.3",
+              "websockets==17.1",
+              "wrapt==2.4.1rc1",
+              "yarl==1.24.5",
+              "zipp==4.1.0"
+            ],
+            "status": "ok"
+          },
+          "executable": "<basic-memory-runtime>/venv/bin/basic-memory",
+          "executable_sha256": "304a53db252684b55a42b761d6818bfc0ec692eeb4eeac6e8662d06110003249",
+          "installed": {
+            "module_sha256": "76d9a3572dd0e3f0d875d483c12f573aade8904ac631f62d559fbfd6ce69db34",
+            "package_root": "<basic-memory-runtime>/venv/lib/python3.13/site-packages/basic_memory",
+            "runtime_pythonpath_root": "<candidate-worktree>/src",
+            "version": "0.23.2"
+          },
+          "installed_version_matches_expected": true,
+          "wheel": "<basic-memory-runtime>/basic_memory-0.23.2-py3-none-any.whl",
+          "wheel_matches_pinned_digest": true,
+          "wheel_sha256": "a1679a16319d8a7fb9c0486033551a47dedc0fbae7f5da81444eb3c4bf0ccecb"
+        },
+        "status": "pass",
+        "verification": {
+          "body_proof": [
+            {
+              "actual_bytes": 124,
+              "actual_sha256": "b2c6485668c4a0baf06ae8106a93482124b1e2a9011f8d329bcd035ee94f9206",
+              "expected_bytes": 124,
+              "expected_sha256": "b2c6485668c4a0baf06ae8106a93482124b1e2a9011f8d329bcd035ee94f9206",
+              "matches": true
+            },
+            {
+              "actual_bytes": 1210,
+              "actual_sha256": "1bc561639284d198e88bb86a611b9412cd4134fd9d0d2b938baafda8cdcba695",
+              "expected_bytes": 1210,
+              "expected_sha256": "1bc561639284d198e88bb86a611b9412cd4134fd9d0d2b938baafda8cdcba695",
+              "matches": true
+            },
+            {
+              "actual_bytes": 3175,
+              "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+              "expected_bytes": 3175,
+              "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+              "matches": true
+            },
+            {
+              "actual_bytes": 107,
+              "actual_sha256": "c04faacf794e50f21472b751a06a67f5c3bfd2c8f32d2878b8c6f38385c9fbc8",
+              "expected_bytes": 107,
+              "expected_sha256": "c04faacf794e50f21472b751a06a67f5c3bfd2c8f32d2878b8c6f38385c9fbc8",
+              "matches": true
+            }
+          ],
+          "exact_read_your_write": true,
+          "expected_bodies_match": true,
+          "search_converged": true,
+          "searches": [
+            {
+              "convergence_ms": 167.93710499769077,
+              "final_response": {
+                "classification": "ok",
+                "container": "results",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "current_page",
+                  "has_more",
+                  "page_size",
+                  "results",
+                  "total",
+                  "total_is_exact"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            },
+            {
+              "convergence_ms": 113.517788995523,
+              "final_response": {
+                "classification": "ok",
+                "container": "results",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "current_page",
+                  "has_more",
+                  "page_size",
+                  "results",
+                  "total",
+                  "total_is_exact"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            },
+            {
+              "convergence_ms": 128.67651200213004,
+              "final_response": {
+                "classification": "ok",
+                "container": "results",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "current_page",
+                  "has_more",
+                  "page_size",
+                  "results",
+                  "total",
+                  "total_is_exact"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "role": "internal-common-markdown-diagnostic",
+  "sanitization": "Private checkout/runtime paths replaced by named placeholders; generated per-page inventory omitted. All call, result, correctness, timing, unknown/null, and runtime package values retained."
+}

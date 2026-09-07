@@ -504,8 +504,10 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
         flips.append(leaf)
         return real_publish(filesystem, parent, leaf, data, **kwargs)
 
-    def register(_root: Path, paths: list[Path]) -> None:
+    def register(_root: Path, paths: list[Path], *, return_publication_result: bool = False):
         watcher_calls.append(tuple(paths))
+        registered: set[object] = set()
+        return (registered, True) if return_publication_result else registered
 
     def index(_root: Path, paths: list[Path], **_kwargs) -> object:
         index_calls.append(tuple(paths))
@@ -548,13 +550,13 @@ def test_batch_atomic_write_rechecks_expected_hash_after_snapshot_race(
     original_snapshot = vault_module._capture_batch_snapshot
     swapped = False
 
-    def replace_before_snapshot(path: Path):
+    def replace_before_snapshot(path: Path, **kwargs):
         nonlocal swapped
         if Path(path) == target and not swapped:
             replacement.write_text("concurrent replacement", encoding="utf-8")
             os.replace(replacement, target)
             swapped = True
-        return original_snapshot(path)
+        return original_snapshot(path, **kwargs)
 
     monkeypatch.setattr(vault_module, "_capture_batch_snapshot", replace_before_snapshot)
 
@@ -1473,7 +1475,7 @@ def test_batch_atomic_write_retains_fully_bound_stage_when_content_drifts(
     drifted = b"same-owner drift must not be deleted"
     raw_errors: list[PermissionError] = []
 
-    def drift_stage_then_fail(_path: Path):
+    def drift_stage_then_fail(_path: Path, **_kwargs):
         workspace = _workspaces(tmp_path)[0]
         stage = next(workspace.glob("stage-*.tmp"))
         stage.write_bytes(drifted)
@@ -1649,8 +1651,10 @@ def test_batch_atomic_write_fans_out_once_before_committed_cleanup_error(
         (self.path / "unexpected.tmp").write_bytes(b"post-commit residue")
         return real_cleanup(self)
 
-    def register(_root: Path, paths: list[Path]) -> None:
+    def register(_root: Path, paths: list[Path], *, return_publication_result: bool = False):
         watcher_calls.append(tuple(paths))
+        registered: set[object] = set()
+        return (registered, True) if return_publication_result else registered
 
     def index(_root: Path, paths: list[Path], **_kwargs) -> object:
         index_calls.append(tuple(paths))

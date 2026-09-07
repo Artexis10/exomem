@@ -248,6 +248,99 @@ def test_compact_omits_warnings_when_the_leaf_did_not_warn() -> None:
     assert "warnings" not in compact
 
 
+def test_compact_projection_preserves_only_valid_bounded_media_results() -> None:
+    mutation_terminal = _terminal_module()
+    terminal = mutation_terminal.committed_terminal(
+        {
+            "operation": "process",
+            "index_refreshed": 0,
+            "index_refresh_remaining": 2,
+            "paths": [
+                "Knowledge Base/Evidence/Images/first.png",
+                "Knowledge Base/Evidence/Images/second.png",
+            ],
+            "results": [
+                {
+                    "path": "Knowledge Base/Evidence/Images/first.png",
+                    "outcome": "processed",
+                    "state": "pending",
+                    "media_type": "image",
+                    "sidecar_path": "Knowledge Base/Evidence/Images/first.png.md",
+                    "job_id": 4,
+                    "requeued": 0,
+                },
+                {
+                    "path": "Knowledge Base/Evidence/Images/second.png",
+                    "outcome": "failed",
+                    "state": "failed",
+                    "code": "MEDIA_CHANGED",
+                    "remediation": "Inspect the media artifact and retry processing.",
+                    "error": {"untrusted": "must not cross compact"},
+                },
+            ],
+        },
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id="receipt-media",
+        idempotency_key="media-key",
+    )
+
+    compact = mutation_terminal.project_terminal(terminal)
+
+    assert compact["paths"] == [
+        "Knowledge Base/Evidence/Images/first.png",
+        "Knowledge Base/Evidence/Images/second.png",
+    ]
+    assert compact["media_results"] == [
+        {
+            "path": "Knowledge Base/Evidence/Images/first.png",
+            "outcome": "processed",
+            "state": "pending",
+            "media_type": "image",
+            "sidecar_path": "Knowledge Base/Evidence/Images/first.png.md",
+            "job_id": 4,
+            "requeued": 0,
+        },
+        {
+            "path": "Knowledge Base/Evidence/Images/second.png",
+            "outcome": "failed",
+            "state": "failed",
+            "code": "MEDIA_CHANGED",
+            "remediation": "Inspect the media artifact and retry processing.",
+        },
+    ]
+
+
+def test_compact_projection_preserves_legacy_single_media_fields() -> None:
+    mutation_terminal = _terminal_module()
+    terminal = mutation_terminal.committed_terminal(
+        {
+            "operation": "process",
+            "path": "Knowledge Base/Evidence/Audio/interview.m4a",
+            "media_type": "audio",
+            "state": "pending",
+            "sidecar_path": "Knowledge Base/Evidence/Audio/interview.m4a.md",
+            "job_id": 9,
+            "index_refreshed": 0,
+            "index_refresh_remaining": 3,
+        },
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id="receipt-media-single",
+        idempotency_key="media-single",
+    )
+
+    compact = mutation_terminal.project_terminal(terminal)
+
+    assert compact["operation"] == "process"
+    assert compact["path"] == "Knowledge Base/Evidence/Audio/interview.m4a"
+    assert compact["media_type"] == "audio"
+    assert compact["state"] == "committed"
+    assert compact["media_state"] == "pending"
+    assert compact["sidecar_path"] == "Knowledge Base/Evidence/Audio/interview.m4a.md"
+    assert compact["job_id"] == 9
+    assert compact["index_refreshed"] == 0
+    assert compact["index_refresh_remaining"] == 3
+
+
 def test_compact_does_not_repeat_artifact_receipt_warnings_at_the_top_level() -> None:
     """Artifact warnings are already per-file rows; listing them twice is noise."""
     mutation_terminal = _terminal_module()

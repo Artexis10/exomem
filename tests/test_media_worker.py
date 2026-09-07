@@ -15,7 +15,9 @@ from exomem import (
     asr_runtime,
     deferred_index,
     embeddings,
+    epistemic_graph,
     extract,
+    file_watcher,
     graph_sync,
     index_sync,
     media_jobs,
@@ -121,6 +123,542 @@ def test_worker_fills_pending_sidecar(vault, monkeypatch: pytest.MonkeyPatch) ->
     assert "water damage" in body
     assert "extracted_by: faster-whisper:test" in body
     assert "extracted_by: pending" not in body
+
+
+def test_process_child_hands_extraction_to_parent_without_sidecar_write(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="parent-owned.mp3")
+    sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="parent-only transcript", media_type="audio", engine="test"
+        ),
+    )
+
+    outcome = media_worker.MediaWorker(vault, execution_mode="process")._process(claimed)
+
+    assert outcome.state == "handoff"
+    assert sidecar.read_text(encoding="utf-8") == before
+    [pending] = store.pending_results()
+    assert pending.payload["text"] == "parent-only transcript"
+
+
+def test_process_handoff_projects_diarization_turns_and_caps_extraction_text(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="long-diarized.mp3")
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio"
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    turns = [
+        {"speaker": f"S{index % 2}", "start": float(index), "end": float(index + 1), "text": "turn"}
+        for index in range(80)
+    ]
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="x" * (600 * 1024), media_type="audio", engine="test", speakers=turns
+        ),
+    )
+
+    outcome = media_worker.MediaWorker(vault, execution_mode="process")._process(claimed)
+
+    assert outcome.state == "handoff"
+    [pending] = store.pending_results()
+    assert pending.payload["speakers"] == [{"speaker": "S0"}, {"speaker": "S1"}]
+    assert "truncated:" in str(pending.payload["text"])
+    assert len(str(pending.payload["text"]).encode("utf-8")) < 768 * 1024
+
+
+def test_parent_publishes_handed_result_and_requeues_only_remaining_stages(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="parent-publish.mp3")
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+            do_ocr=True,
+            do_clip=True,
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    before = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+    identity = media_worker._binary_identity(claimed.binary_path)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="extraction",
+        sidecar_before_hash=before,
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"text": "published by parent", "engine": "test"},
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    publication_intents: list[object] = []
+    monkeypatch.setattr(
+        worker,
+        "_complete_deferred_graph_completion",
+        lambda *_args, **kwargs: publication_intents.extend(kwargs["publication_intents"]) or True,
+    )
+
+    worker._publish_parent_result(store.pending_results()[0])
+
+    assert "published by parent" in sidecar.read_text(encoding="utf-8")
+    assert publication_intents
+    assert store.pending_result_count() == 0
+    remaining = store.get(claimed.id)
+    assert remaining is not None and not remaining.do_ocr and remaining.do_clip
+
+
+def test_parent_represents_binary_stale_result_as_pending_fresh_claim(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="parent-binary-stale.mp3")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    before = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+    identity = media_worker._binary_identity(binary)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="extraction",
+        sidecar_before_hash=before,
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"text": "stale binary transcript", "engine": "test"},
+    )
+    binary.write_bytes(b"replacement media")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_a, **_k: True)
+
+    worker._publish_parent_result(store.pending_results()[0])
+
+    body = sidecar.read_text(encoding="utf-8")
+    assert "processing_state: pending" in body
+    assert "processing_error: media identity changed" in body
+    assert "stale binary transcript" not in body
+    assert store.pending_result_count() == 0
+    requeued = store.get(claimed.id)
+    assert requeued is not None and requeued.state == media_jobs.PENDING and requeued.do_ocr
+
+
+def test_parent_requeues_changed_binary_after_failure_result(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="parent-failed-binary-stale.mp3")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    identity = media_worker._binary_identity(binary)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="failure",
+        sidecar_before_hash=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"error": "decoder failed", "next_action": "replace it"},
+        terminal_state=media_jobs.FAILED,
+    )
+    binary.write_bytes(b"replacement media")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_a, **_k: True)
+
+    worker._publish_parent_result(store.pending_results()[0])
+
+    assert "processing_state: pending" in sidecar.read_text(encoding="utf-8")
+    assert store.pending_result_count() == 0
+    requeued = store.get(claimed.id)
+    assert requeued is not None and requeued.state == media_jobs.PENDING and requeued.do_ocr
+    fresh = store.claim_next()
+    assert fresh is not None and fresh.claim_revision > claimed.claim_revision
+
+
+def test_parent_keeps_ocr_enqueued_during_deferred_result_completion(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="parent-rerequest.mp3")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio"))
+    claimed = store.claim_next()
+    assert claimed is not None
+    identity = media_worker._binary_identity(binary)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="extraction",
+        sidecar_before_hash=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"text": "first transcript", "engine": "test"},
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+
+    def complete_then_enqueue(*_args, **_kwargs):
+        store.enqueue(media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio"))
+        return True
+
+    monkeypatch.setattr(worker, "_complete_deferred_graph_completion", complete_then_enqueue)
+    worker._publish_parent_result(store.pending_results()[0])
+
+    assert "first transcript" in sidecar.read_text(encoding="utf-8")
+    assert store.pending_result_count() == 0
+    requeued = store.get(claimed.id)
+    assert requeued is not None and requeued.state == media_jobs.PENDING and requeued.do_ocr
+    fresh = store.claim_next()
+    assert fresh is not None and fresh.claim_revision > claimed.claim_revision
+
+
+@pytest.mark.parametrize(
+    "foreign_bytes",
+    (b"FOREIGN EDIT", b"\xffforeign", None),
+    ids=("text", "opaque", "missing"),
+)
+def test_parent_retires_failed_result_after_foreign_sidecar_change(
+    vault, foreign_bytes: bytes | None
+) -> None:
+    result = _preserve_media_stub(vault, filename="foreign-failure.mp3")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio"))
+    claimed = store.claim_next()
+    assert claimed is not None
+    identity = media_worker._binary_identity(binary)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="failure",
+        sidecar_before_hash=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"error": "decoder failed", "next_action": "replace it"},
+        terminal_state=media_jobs.FAILED,
+    )
+    if foreign_bytes is None:
+        sidecar.unlink()
+    elif foreign_bytes == b"FOREIGN EDIT":
+        sidecar.write_bytes(sidecar.read_bytes() + b"\n" + foreign_bytes + b"\n")
+    else:
+        sidecar.write_bytes(foreign_bytes)
+
+    media_worker.MediaWorker(vault, execution_mode="process")._publish_parent_result(
+        store.pending_results()[0]
+    )
+
+    assert store.pending_result_count() == 0
+    current = store.get(claimed.id)
+    assert current is not None and current.state == media_jobs.FAILED
+    assert current.last_error == "stale media result: sidecar content changed"
+
+
+@pytest.mark.parametrize("recovery_raises", [False, True])
+def test_failed_deferred_completion_aborts_held_publication_intent(
+    vault, monkeypatch: pytest.MonkeyPatch, recovery_raises: bool
+) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "deferred-intent.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"before")
+    staged = vault / "staged.md"
+    staged.write_bytes(b"after")
+    descriptor = os.open(staged, os.O_RDONLY)
+    try:
+        (intent,) = file_watcher.register_publication_intents(
+            vault,
+            [
+                (
+                    target,
+                    descriptor,
+                    hashlib.sha256(b"after").hexdigest(),
+                    hashlib.sha256(b"before").hexdigest(),
+                    len(b"before"),
+                )
+            ],
+        )
+    finally:
+        os.close(descriptor)
+    watcher = file_watcher.FileWatcher(vault)
+    file_watcher.begin_publication_installation([intent])
+    target.write_bytes(b"after")
+    file_watcher.mark_publication_installed([intent])
+    watcher._record(target, deleted=False)
+    assert watcher._pending_publication_intents[target] is intent
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1,
+        mutation_id="a" * 24,
+        paths=((target.relative_to(vault).as_posix(), hashlib.sha256(b"after").hexdigest()),),
+        created_paths=(),
+    )
+    token = vault_module.DeferredGraphCompletion((target,), checkpoint, None)
+    worker = object.__new__(media_worker.MediaWorker)
+    worker._vault_root = vault
+    monkeypatch.setattr(media_worker, "get_manager", lambda: _RecordingMutationManager(vault))
+    monkeypatch.setattr(graph_sync, "floor_path", lambda _vault: vault / "missing-floor")
+    if recovery_raises:
+        monkeypatch.setattr(
+            media_worker.index_sync,
+            "recover_full_receipt_graph_epoch",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("recovery failed")),
+        )
+    else:
+        monkeypatch.setattr(
+            media_worker.index_sync, "recover_full_receipt_graph_epoch", lambda *_args, **_kwargs: False
+        )
+
+    assert not worker._complete_deferred_graph_completion(
+        token, [], publication_intents=[intent], recover_on_mismatch=True
+    )
+    assert intent.disposition == "aborted"
+    assert target in watcher._drain()[1]
+
+
+@pytest.mark.parametrize("fanout_success", [False, True])
+def test_parent_deferred_completion_detaches_registered_graph_before_receipt_finalization(
+    vault, monkeypatch: pytest.MonkeyPatch, fanout_success: bool
+) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "parent-deferred.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("canonical", encoding="utf-8")
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1,
+        mutation_id="b" * 24,
+        paths=((target.relative_to(vault).as_posix(), "c" * 64),),
+        created_paths=(),
+    )
+    token = vault_module.DeferredGraphCompletion((target,), checkpoint, None)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    coordinator = media_worker.get_manager()._mutation_coordinator_for(vault)
+    [receipt] = deferred_index.add_full_receipts(
+        vault, [target.relative_to(vault).as_posix()]
+    )
+    monkeypatch.setattr(graph_sync, "floor_path", lambda _vault: vault / "missing-floor")
+    monkeypatch.setattr(
+        media_worker.index_sync,
+        "recover_full_receipt_graph_epoch",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(graph_sync, "read_checkpoint", lambda _vault: checkpoint)
+    detached: list[graph_sync.GraphSyncCheckpoint | None] = []
+    monkeypatch.setattr(
+        graph_sync,
+        "start_registered_detached",
+        lambda _root, **kwargs: detached.append(kwargs.get("expected_checkpoint")),
+    )
+
+    def fanout(
+        root: Path,
+        _paths: list[Path],
+        index_reports: list[object],
+        _states: object,
+        **_kwargs,
+    ) -> bool:
+        assert epistemic_graph._parent_receipted_graph_handoff_active(
+            root, coordinator.state_root
+        )
+        index_reports.append(
+            index_sync.IndexSyncReport(
+                "upsert",
+                (target.relative_to(vault).as_posix(),),
+                (target.relative_to(vault).as_posix(),),
+                (
+                    index_sync.IndexComponentOutcome(
+                        "epistemic_graph", "registered", "graph_rebuild_registered"
+                    ),
+                ),
+            )
+        )
+        return fanout_success
+
+    original_clear = deferred_index.clear_full_receipts
+
+    def clear_after_detach(root: Path, receipts: list[deferred_index.DeferredReceipt]) -> None:
+        assert detached == [checkpoint]
+        original_clear(root, receipts)
+
+    monkeypatch.setattr(media_worker, "post_commit_batch_fanout", fanout)
+    monkeypatch.setattr(deferred_index, "clear_full_receipts", clear_after_detach)
+
+    assert worker._complete_deferred_graph_completion(
+        token, [receipt], recover_on_mismatch=True, parent_receipted_handoff=True
+    ) is fanout_success
+    assert detached == [checkpoint]
+    assert deferred_index.snapshot_full(vault) == ([] if fanout_success else [receipt])
+
+
+@pytest.mark.parametrize("fanout_success", [True, False])
+def test_parent_recovers_prepared_target_without_replacing_sidecar(
+    vault, monkeypatch: pytest.MonkeyPatch, fanout_success: bool
+) -> None:
+    result = _preserve_media_stub(vault, filename="prepared-target.mp3")
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio"
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    before = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+    identity = media_worker._binary_identity(claimed.binary_path)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="extraction",
+        sidecar_before_hash=before,
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"text": "crash target", "engine": "test"},
+    )
+    pending = store.pending_results()[0]
+    target = preserve.render_sidecar_extraction(
+        sidecar.read_text(encoding="utf-8"), text="crash target", engine="test", attempts=1
+    )
+    assert store.persist_prepared_result(
+        pending,
+        target_hash=hashlib.sha256(target.encode("utf-8")).hexdigest(),
+        target_size=len(target.encode("utf-8")),
+        receipt_revision=1,
+    )
+    assert deferred_index.add_full_receipts(
+        vault, [sidecar.relative_to(vault).as_posix()]
+    ) == [deferred_index.DeferredReceipt(sidecar.relative_to(vault).as_posix(), 1)]
+    sidecar.write_text(target, encoding="utf-8")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    recovered: list[bool] = []
+    fanned_out: list[bool] = []
+    coordinator = media_worker.get_manager()._mutation_coordinator_for(vault)
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1,
+        mutation_id="a" * 24,
+        paths=((sidecar.relative_to(vault).as_posix(), "b" * 64),),
+        created_paths=(),
+    )
+    graph_sync.register_rebuild(
+        vault,
+        checkpoint,
+        lambda required: graph_sync.GraphBuildOutcome.covering(required),
+        state_root=coordinator.state_root,
+    )
+    monkeypatch.setattr(
+        media_worker.index_sync,
+        "recover_full_receipt_graph_epoch",
+        lambda *_a, **_k: recovered.append(True) or True,
+    )
+    def fanout_under_parent_scope(
+        root: Path, _paths: list[Path], index_reports: list[object], _states: object
+    ) -> bool:
+        assert epistemic_graph._parent_receipted_graph_handoff_active(
+            root, coordinator.state_root
+        )
+        index_reports.append(
+            index_sync.IndexSyncReport(
+                "upsert",
+                (sidecar.relative_to(vault).as_posix(),),
+                (sidecar.relative_to(vault).as_posix(),),
+                (
+                    index_sync.IndexComponentOutcome(
+                        "epistemic_graph", "registered", "graph_rebuild_registered"
+                    ),
+                ),
+            )
+        )
+        fanned_out.append(True)
+        return fanout_success
+
+    monkeypatch.setattr(graph_sync, "read_checkpoint", lambda _root: checkpoint)
+    detached: list[graph_sync.GraphSyncCheckpoint | None] = []
+    monkeypatch.setattr(
+        graph_sync,
+        "start_registered_detached",
+        lambda _root, **kwargs: detached.append(kwargs.get("expected_checkpoint")),
+    )
+    monkeypatch.setattr(media_worker, "post_commit_batch_fanout", fanout_under_parent_scope)
+
+    worker._publish_parent_result(store.pending_results()[0])
+
+    assert sidecar.read_text(encoding="utf-8") == target
+    assert recovered == [True]
+    assert fanned_out == [True]
+    assert detached == [checkpoint]
+    if fanout_success:
+        assert store.pending_result_count() == 0
+    else:
+        assert store.pending_result_count() == 1
+        assert deferred_index.snapshot_full(vault) == [
+            deferred_index.DeferredReceipt(sidecar.relative_to(vault).as_posix(), 1)
+        ]
+
+
+def test_parent_terminalizes_ambiguous_preserved_notes_handoff(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="ambiguous-parent.mp3")
+    sidecar = vault / result.sidecar_path
+    sidecar.write_text(
+        sidecar.read_text(encoding="utf-8")
+        + "# Existing document heading\n\n## Preserved notes\n\nuser-owned text\n",
+        encoding="utf-8",
+    )
+    before = sidecar.read_text(encoding="utf-8")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio"
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    identity = media_worker._binary_identity(claimed.binary_path)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="extraction",
+        sidecar_before_hash=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"text": "new transcript", "engine": "test"},
+    )
+
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 0
+    current = store.get(claimed.id)
+    assert current is not None and current.state == media_jobs.BLOCKED
+    assert current.last_error is not None and "AMBIGUOUS_SIDECAR_BOUNDARY" in current.last_error
 
 
 def test_extraction_compute_stays_outside_guard_and_sidecar_commit_is_inside(
@@ -953,6 +1491,7 @@ def test_checkpoint_publication_failure_keeps_completed_media_and_durable_receip
     """A held derived checkpoint cannot roll back or terminalize canonical media."""
     result = _preserve_media_stub(vault, filename="checkpoint-failure.m4a")
     sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
     checkpoint = graph_sync.checkpoint_path(vault)
     original_replace_artifact = vault_module._BatchWorkspace.replace_artifact
     extraction_calls = 0
@@ -991,11 +1530,14 @@ def test_checkpoint_publication_failure_keeps_completed_media_and_durable_receip
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
 
     assert extraction_calls == 1
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     assert "transcript survives checkpoint failure" in sidecar.read_text(encoding="utf-8")
     assert deferred_index.snapshot_full(vault) == [
         deferred_index.DeferredReceipt(sidecar.relative_to(vault).as_posix(), 1)
     ]
-    assert media_jobs.status(vault)["jobs"] == []
+    assert store.pending_result_count() == 1
 
 
 def test_post_checkpoint_fanout_failure_keeps_committed_media_and_exact_receipt(
@@ -1004,6 +1546,7 @@ def test_post_checkpoint_fanout_failure_keeps_committed_media_and_exact_receipt(
     """Derived fanout failure is durable work, never a media rollback failure."""
     result = _preserve_media_stub(vault, filename="fanout-failure.m4a")
     sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
     rel = sidecar.relative_to(vault).as_posix()
     original_add_full = deferred_index.add_full
     original_batch = preserve.batch_atomic_write
@@ -1055,11 +1598,15 @@ def test_post_checkpoint_fanout_failure_keeps_committed_media_and_exact_receipt(
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
 
     assert extraction_calls == 1
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     body = sidecar.read_text(encoding="utf-8")
     assert body.count("transcript survives fanout failure") == 1
     assert deferred_index.snapshot_full(vault) == [deferred_index.DeferredReceipt(rel, 1)]
+    assert store.pending_result_count() == 1
     jobs = media_jobs.status(vault)["jobs"]
-    assert jobs == []
+    assert len(jobs) == 1 and jobs[0]["state"] == media_jobs.RUNNING
     assert all("BATCH_ROLLBACK_INCOMPLETE" not in (job["error"] or "") for job in jobs)
 
 
@@ -1162,7 +1709,9 @@ def test_changed_media_identity_is_automatically_reconciled_without_retry(
     )
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
-    assert media_jobs.status(vault)["jobs"] == []
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+    [pending] = media_jobs.status(vault)["jobs"]
+    assert pending["state"] == media_jobs.PENDING
     assert "processing_state: pending" in sidecar.read_text(encoding="utf-8")
 
     reconciled = media_processing.reconcile_media(vault, binary)
@@ -1202,11 +1751,12 @@ def test_pending_sidecar_edit_during_durable_asr_is_persisted_as_retryable_failu
     )
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
 
     [failed] = media_jobs.status(vault)["jobs"]
     assert failed["state"] == media_jobs.FAILED
     assert failed["retryable"] is True
-    assert failed["error"] == "stale extraction: sidecar content changed"
+    assert failed["error"] == "stale media result: sidecar content changed"
     assert failed["next_action"] == "review the sidecar changes, then retry media processing"
     assert "USER CANONICAL EDIT" in sidecar.read_text(encoding="utf-8")
     assert "stale transcript" not in sidecar.read_text(encoding="utf-8")
@@ -1241,11 +1791,11 @@ def test_combined_binary_and_sidecar_stale_remains_actionable(
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
 
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     [failed] = media_jobs.status(vault)["jobs"]
     assert failed["state"] == media_jobs.FAILED
-    assert failed["error"] == (
-        "stale extraction: sidecar content changed, media identity changed"
-    )
+    assert failed["error"] == "stale media result: sidecar content changed"
     assert failed["next_action"] == "review the sidecar changes, then retry media processing"
 
 
@@ -1875,6 +2425,42 @@ def test_scan_pending_reenqueues(vault, monkeypatch: pytest.MonkeyPatch) -> None
     assert w.scan_pending() == 2
 
 
+def test_scan_pending_does_not_reenqueue_a_claimed_ocr(vault) -> None:
+    result = _preserve_media_stub(vault, filename="claimed-before-scan.mp3")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio"))
+    claimed = store.claim_next()
+    assert claimed is not None
+
+    assert media_worker.MediaWorker(vault, execution_mode="process")._scan_pending_ocr() == 0
+
+    current = store.get(claimed.id)
+    assert current is not None and current.ocr_generation == claimed.ocr_generation
+
+
+def test_scan_pending_adds_ocr_to_a_clip_only_job(vault) -> None:
+    result = _preserve_media_stub(vault, filename="clip-only-before-scan.mp3")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=sidecar,
+            media_type="audio",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
+
+    assert media_worker.MediaWorker(vault, execution_mode="process")._scan_pending_ocr() == 1
+
+    current = store.get_by_binary(binary)
+    assert current is not None and current.do_ocr and current.do_clip
+
+
 def test_scan_pending_ignores_non_canonical_sidecar_copies(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2391,6 +2977,8 @@ def test_child_keeps_other_preserve_errors_as_failed_extraction(
     monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     result = _preserve_media_stub(vault, filename="other-preserve-error.m4a")
+    sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
     monkeypatch.setattr(
         extract,
         "extract_text",
@@ -2404,7 +2992,7 @@ def test_child_keeps_other_preserve_errors_as_failed_extraction(
     def _other_preserve_error(*_args, **_kwargs):
         raise preserve.PreserveError("OTHER_PRESERVE_ERROR", [], "unexpected write refusal")
 
-    monkeypatch.setattr(preserve, "update_sidecar_extraction", _other_preserve_error)
+    monkeypatch.setattr(preserve, "render_sidecar_extraction", _other_preserve_error)
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(
         media_jobs.MediaJob(
@@ -2416,6 +3004,9 @@ def test_child_keeps_other_preserve_errors_as_failed_extraction(
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
 
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     [status] = media_jobs.status(vault)["jobs"]
     assert status["state"] == media_jobs.FAILED
     assert status["error"].startswith("PreserveError:")
@@ -2460,14 +3051,16 @@ def test_compute_ledger_remains_blocked_when_sidecar_publish_faults(
         ),
     )
     monkeypatch.setattr(
-        media_worker.MediaWorker,
-        "_commit_processing_failure",
+        preserve,
+        "commit_media_sidecar_writes",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("sidecar disk full")),
     )
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     assert store.counts()[media_jobs.BLOCKED] == 1
     assert (vault / result.path).read_bytes() == source_before
 
@@ -2479,11 +3072,13 @@ def test_compute_ledger_remains_blocked_when_sidecar_publish_returns_false(
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     result = _preserve_media_stub(vault, filename="ledger-false.m4a")
     monkeypatch.setattr(extract, "extract_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(asr_runtime.ASRComputeRuntimeError("cuBLAS failed")))
-    monkeypatch.setattr(media_worker.MediaWorker, "_commit_processing_failure", lambda *_a, **_kw: False)
+    monkeypatch.setattr(preserve, "commit_media_sidecar_writes", lambda *_a, **_kw: False)
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     assert store.counts()[media_jobs.BLOCKED] == 1
 
 
@@ -2515,7 +3110,10 @@ def test_blocked_compute_sidecar_converges_without_asr(vault, monkeypatch: pytes
     blocked = store.get(job.id)
     assert blocked is not None
 
-    assert media_worker.MediaWorker(vault, execution_mode="process").converge_compute_runtime_blocked(blocked)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    assert worker.converge_compute_runtime_blocked(blocked)
+    assert store.pending_result_count() == 1
+    worker._drain_parent_results()
     frontmatter = _parsed_frontmatter(vault / result.sidecar_path)
     assert frontmatter["processing_state"] == "blocked"
 
@@ -2560,6 +3158,7 @@ def test_child_converges_stale_blocked_sidecar_after_canonical_limit(
     assert store.needs_worker() is True
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     assert _parsed_frontmatter(stale_sidecar)["processing_state"] == "blocked"
     assert store.needs_worker() is False
 
@@ -2577,6 +3176,7 @@ def test_child_recovers_failed_cuda_only_vault_without_asr(vault, monkeypatch: p
 
     assert store.needs_worker() is True
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     assert store.counts()[media_jobs.BLOCKED] == 1
     assert _parsed_frontmatter(vault / result.sidecar_path)["processing_state"] == "blocked"
 
@@ -2587,6 +3187,8 @@ def test_child_retains_actionable_asr_dependency_failure(
     monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     result = _preserve_media_stub(vault, filename="dependency-blocked.m4a")
+    sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
 
     def _unavailable(*_args, **_kwargs):
         raise extract.ExtractionUnavailable("ASR backend: install the media extra")
@@ -2603,6 +3205,9 @@ def test_child_retains_actionable_asr_dependency_failure(
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
 
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     [status] = media_jobs.status(vault)["jobs"]
     assert status["state"] == media_jobs.BLOCKED
     assert status["attempts"] == 1
@@ -2628,6 +3233,8 @@ def test_child_retains_actionable_corrupt_media_failure(
     monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     result = _preserve_media_stub(vault, filename="corrupt.m4a")
+    sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
 
     def _corrupt(*_args, **_kwargs):
         raise ValueError("invalid audio container: missing moov atom")
@@ -2644,6 +3251,9 @@ def test_child_retains_actionable_corrupt_media_failure(
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
 
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     [status] = media_jobs.status(vault)["jobs"]
     assert status["state"] == media_jobs.FAILED
     assert status["attempts"] == 1
@@ -2669,6 +3279,8 @@ def test_child_blocks_timestamp_renderer_failure_with_renderer_remediation(
     monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     result = _preserve_media_stub(vault, filename="renderer-blocked.m4a")
+    sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
 
     def _renderer_unavailable(*_args, **_kwargs):
         raise extract.TimestampRenderingUnavailable("timed renderer: unavailable")
@@ -2685,6 +3297,9 @@ def test_child_blocks_timestamp_renderer_failure_with_renderer_remediation(
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
 
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     [status] = media_jobs.status(vault)["jobs"]
     assert status["state"] == media_jobs.BLOCKED
     assert status["error"] == (
@@ -2704,9 +3319,10 @@ def test_success_refreshes_sidecar_before_completing_durable_job(
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     result = _preserve_media_stub(vault, filename="indexed-success.m4a")
     sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
     events: list[str] = []
     original_write = preserve.batch_atomic_write
-    original_complete = media_jobs.MediaJobStore.complete
+    original_finalize = media_jobs.MediaJobStore.finalize_result
 
     monkeypatch.setattr(
         extract,
@@ -2722,15 +3338,15 @@ def test_success_refreshes_sidecar_before_completing_durable_job(
         events.append("sidecar-write-and-index-refresh")
         return original_write(*args, **kwargs)
 
-    def _complete_after_commit(store, job):
+    def _finalize_after_commit(store, job, **kwargs):
         body = sidecar.read_text(encoding="utf-8")
         assert "[0:00] indexed transcript" in body
         assert "extracted_by: faster-whisper:test+timed" in body
         events.append("durable-complete")
-        return original_complete(store, job)
+        return original_finalize(store, job, **kwargs)
 
     monkeypatch.setattr(preserve, "batch_atomic_write", _write_and_refresh)
-    monkeypatch.setattr(media_jobs.MediaJobStore, "complete", _complete_after_commit)
+    monkeypatch.setattr(media_jobs.MediaJobStore, "finalize_result", _finalize_after_commit)
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(
         media_jobs.MediaJob(
@@ -2741,6 +3357,10 @@ def test_success_refreshes_sidecar_before_completing_durable_job(
     )
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
 
     assert events == ["sidecar-write-and-index-refresh", "durable-complete"]
     assert media_jobs.status(vault)["jobs"] == []

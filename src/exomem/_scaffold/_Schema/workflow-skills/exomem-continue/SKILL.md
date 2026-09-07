@@ -2,7 +2,7 @@
 name: exomem-continue
 description: Resume prior project or session context from Exomem when the user wants to continue, pick something back up, or remember what was happening on a topic.
 metadata:
-  skill_contract: c57a5e842d7885f429fa2d7d808560c8d412a7223028c21febb66b722e134b64
+  skill_contract: c29752b4969560fe1781f0487c2bb39bdcb300cabc8ff9f145d91da49a7bebe2
   version: "0.1.0"
 ---
 
@@ -19,9 +19,11 @@ Use when the user asks to continue, resume, pick up a project, recover prior sta
 Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Sources/Evidence are immutable, and content outside the managed Knowledge Base
-is read-only. Before a compiled write: search/read for duplicates, draft, run
-`connect_memory(operation="suggest-links")`, and include known source references
-and reviewed connections in the first write. Honor the live confirmation ceiling;
+is read-only. Before a compiled write: reuse current relevant search/read results,
+check for duplicates, and include known source references and reviewed connections
+in the first write. Use `connect_memory(operation="suggest-links")` when useful
+connections are still unknown, not to recheck links already established in context.
+Honor the live confirmation ceiling;
 a workflow or standing capture preference does not grant restructure authority.
 
 Inspect mutation results before reporting success. On `success: false`, follow

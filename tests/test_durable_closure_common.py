@@ -1,0 +1,435 @@
+"""Unit coverage for the bounded public-MCP common-subset diagnostic."""
+
+from __future__ import annotations
+
+import importlib.util
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "durable_closure_common.py"
+spec = importlib.util.spec_from_file_location("durable_closure_common", MODULE_PATH)
+common = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = common
+spec.loader.exec_module(common)
+
+
+def test_semantic_setup_retries_only_warming_and_requires_a_reviewed_draft() -> None:
+    calls = []
+
+    class Client:
+        async def call(self, tool, arguments, **kwargs):
+            calls.append((tool, arguments, kwargs))
+            if len(calls) == 1:
+                return {"success": False, "error": {"code": "MUTATION_WARMING"}}
+            return {"draft_id": "ready", "draft_hash": "hash"}
+
+    asyncio.run(common._await_exomem_mutation(Client(), timeout=1))
+
+    assert len(calls) == 2
+    assert all(tool == "remember" and args["validate_only"] for tool, args, _ in calls)
+
+
+@pytest.mark.parametrize("payload", [
+    {"success": False, "error": {"code": "MUTATION_WARMING"}},
+    {"success": False, "error": {"code": "VALIDATION_FAILED"}},
+    {"success": True},
+])
+def test_semantic_setup_rejects_timeout_refusal_and_missing_draft(payload) -> None:
+    class Client:
+        async def call(self, *args, **kwargs):
+            return payload
+
+    with pytest.raises(common.AdapterFault, match="initial public mutation"):
+        asyncio.run(common._await_exomem_mutation(Client(), timeout=0))
+
+
+def test_empty_disposable_roots_reject_nonempty_and_overlapping_paths(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    vault = tmp_path / "vault"
+    state.mkdir()
+    vault.mkdir()
+    (state / "old.json").write_text("old", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="empty"):
+        common.prepare_roots(state=state, vault=vault)
+    with pytest.raises(ValueError, match="distinct"):
+        common.prepare_roots(state=tmp_path / "same", vault=tmp_path / "same")
+
+
+def test_deterministic_fixture_has_required_existing_pages_and_digest(tmp_path: Path) -> None:
+    first = common.materialize_fixture(tmp_path / "one", pages=7)
+    second = common.materialize_fixture(tmp_path / "two", pages=7)
+
+    assert first["digest"] == second["digest"]
+    assert first["page_count"] == 7
+    assert {"tracker", "background", "stale_link"} <= set(first["named_pages"])
+    assert all(entry["bytes"] > 0 and len(entry["sha256"]) == 64 for entry in first["pages"])
+
+
+def test_fixture_size_is_bounded() -> None:
+    with pytest.raises(ValueError, match="4"):
+        common.fixture_pages(3)
+    with pytest.raises(ValueError, match="8000"):
+        common.fixture_pages(8001)
+
+
+def test_malformed_or_failed_mcp_results_invalidate_instead_of_becoming_product_loss() -> None:
+    with pytest.raises(common.AdapterFault, match="malformed"):
+        common.decode_result({"structured_content": {"result": "not-an-object"}})
+    with pytest.raises(common.AdapterFault, match="failed"):
+        common.decode_result({"structured_content": {"result": {"success": False}}})
+
+
+def test_mcp_error_envelope_overrides_a_parseable_structured_payload() -> None:
+    class FailedResult:
+        is_error = True
+        structured_content = {"message": "tool failed"}
+        content = []
+
+    payload = common._decode_payload(FailedResult())
+
+    assert common.result_classification(payload) == "refused"
+    with pytest.raises(common.AdapterFault, match="failed"):
+        common.decode_result(FailedResult())
+
+
+def test_exact_marker_and_search_verification_require_every_unique_marker() -> None:
+    marker = "common-subset-marker-123"
+    payload = {"content": f"# Result\n\n{marker}\n"}
+    assert common.exact_marker_present(payload, marker) is True
+    assert common.exact_marker_present({"content": "missing"}, marker) is False
+
+    hits = {"results": [{"content": marker}, {"title": "other"}]}
+    assert common.search_marker_present(hits, marker) is True
+    assert common.search_marker_present({"results": [{"title": marker}]}, marker) is False
+    assert common.search_marker_present({"results": []}, marker) is False
+
+
+def test_common_markdown_payload_is_byte_identical_for_both_adapters() -> None:
+    payload = common.common_markdown_payload("common-subset-marker")
+
+    assert "## Observations" in payload["chapter"]
+    assert "## Observations" in payload["capture"]
+    assert payload["tracker_append"].endswith("common-subset-marker-tracker\n")
+    assert common.common_markdown_payload("common-subset-marker") == payload
+
+
+def test_search_verification_never_treats_query_echo_as_a_hit() -> None:
+    marker = "common-subset-marker-123"
+
+    assert common.search_marker_present({"query": marker, "results": []}, marker) is False
+    assert common.search_marker_present({"query": marker, "hits": []}, marker) is False
+    assert common.search_marker_present({"results": [{"query": marker}]}, marker) is False
+    assert (
+        common.search_marker_present({"hits": [{"diagnostic": f"no match for {marker}"}]}, marker)
+        is False
+    )
+    assert common.search_marker_present({"hits": [{"excerpt": marker}]}, marker) is True
+    assert common.search_marker_present({"result": [{"excerpt": marker}]}, marker) is True
+    assert common._search_proof({"result": [{"excerpt": marker}]}) == {
+        "classification": "ok",
+        "container": "result",
+        "hit_count": 1,
+        "top_level_keys": ["result"],
+    }
+
+
+def test_exact_read_requires_each_expected_suffix_and_stale_replacement() -> None:
+    marker = "common-subset-marker"
+    assert common.read_body_has_markers(
+        {"content": f"---\ntitle: x\n---\n# Result\n{marker}-chapter\n"},
+        [f"{marker}-chapter"],
+    )
+    assert not common.read_body_has_markers(
+        {"content": f"{marker}-chapter\n"}, [f"{marker}-capture"]
+    )
+    assert common.stale_replacement_verified(
+        {"content": "Archived runbook retired\n"},
+        old="[[Archived Runbook]]",
+        replacement="Archived runbook retired",
+    )
+    assert not common.stale_replacement_verified(
+        {"content": "[[Archived Runbook]]\n"},
+        old="[[Archived Runbook]]",
+        replacement="Archived runbook retired",
+    )
+    assert common.read_body_equals(
+        {"content": "---\ntitle: x\n---\n# Result\nbody\n"}, "# Result\nbody\n"
+    )
+    assert not common.read_body_equals({"content": "# Result\nbody\n"}, "# Result\nother\n")
+
+
+def test_stale_replacement_body_has_the_explicit_common_terminal_newline(tmp_path: Path) -> None:
+    fixture = common.materialize_fixture(tmp_path / "fixture", pages=4)
+    markdown = common.common_markdown_payload("common-subset-marker")
+
+    expected = common.stale_replacement_body(fixture, markdown)
+
+    assert expected.endswith("-->\n")
+    assert markdown["stale_replacement"] in expected
+    assert "[[Archived Runbook]]" not in expected
+
+
+def test_refusal_classification_covers_error_envelopes_and_terminal_states() -> None:
+    assert common.result_classification({"success": False, "error": {"code": "NOPE"}}) == "refused"
+    assert common.result_classification({"error": {"code": "NOPE"}}) == "refused"
+    assert common.result_classification({"outcome": "rejected"}) == "refused"
+    assert common.result_classification({"status": "failed"}) == "refused"
+    assert common.result_classification({"ok": False}) == "refused"
+    assert common.result_classification({"hits": []}) == "ok"
+
+
+def test_equivalent_plan_uses_only_shared_markdown_operations() -> None:
+    plan = common.common_plan("basic_memory")
+    assert plan == common.common_plan("exomem")
+    assert [step["operation"] for step in plan] == [
+        "create_completed_chapter",
+        "edit_tracker",
+        "correct_stale_link",
+        "capture_independent_note",
+        "exact_read_changed_pages",
+        "search_unique_markers",
+    ]
+    assert all(step["surface"] == "public_mcp" for step in plan)
+
+
+def test_phase_clock_keeps_setup_teardown_and_timed_work_separate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticks = iter((10.0, 11.0, 13.5, 15.0))
+    monkeypatch.setattr(common.time, "perf_counter", lambda: next(ticks))
+    clock = common.PhaseClock()
+    clock.start_timing()
+    clock.finish_closure()
+    clock.finish_teardown()
+
+    assert clock.report() == {
+        "pre_timing_ms": 1000.0,
+        "wall_to_verified_closure_ms": 2500.0,
+        "teardown_ms": 1500.0,
+    }
+
+
+def test_phase_clock_reports_partial_startup_failure_without_raising() -> None:
+    clock = common.PhaseClock()
+    clock.finish_teardown()
+
+    assert clock.report() == {
+        "pre_timing_ms": None,
+        "wall_to_verified_closure_ms": None,
+        "teardown_ms": None,
+    }
+
+
+def test_exomem_runtime_storage_resolves_inside_disposable_state(tmp_path: Path) -> None:
+    from exomem.writer_lease import LeaseConfig
+
+    state = tmp_path / "state"
+    environment = common.exomem_environment(state, tmp_path / "vault")
+
+    assert LeaseConfig.from_env(environment).state_dir.is_relative_to(state)
+    for key in ("EXOMEM_LOG_DIR", "EXOMEM_CALL_LEDGER_DIR"):
+        assert Path(environment[key]).is_relative_to(state)
+
+
+def test_basic_memory_environment_is_fresh_and_only_has_basic_memory_prefixes(
+    tmp_path: Path,
+) -> None:
+    env = common.basic_memory_environment(tmp_path / "state", tmp_path / "vault")
+
+    assert env["BASIC_MEMORY_HOME"] == str(tmp_path / "state" / "home")
+    assert env["BASIC_MEMORY_CONFIG_DIR"] == str(tmp_path / "state" / "config")
+    assert env["BASIC_MEMORY_FORCE_LOCAL"] == "true"
+    assert env["BASIC_MEMORY_EXPLICIT_ROUTING"] == "true"
+    assert env["BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED"] == "false"
+    assert env["BASIC_MEMORY_AUTO_UPDATE"] == "false"
+    assert env["BASIC_MEMORY_NO_PROMOS"] == "1"
+    assert not any(key.startswith("EXOMEM_") for key in env)
+
+
+def test_percentiles_and_call_counts_only_include_public_calls() -> None:
+    calls = [
+        {"tool": "write", "elapsed_ms": 1.0, "ack": True},
+        {"tool": "read", "elapsed_ms": 3.0, "ack": False},
+        {"tool": "edit", "elapsed_ms": 2.0, "ack": True},
+    ]
+    assert common.call_measurements(calls) == {
+        "public_call_count": 3,
+        "ack_p50_ms": 1.0,
+        "ack_p95_ms": 2.0,
+        "shared_server_ms": None,
+        "shared_server_reason": "not exposed by the public MCP protocol",
+        "connector_ms": None,
+        "connector_reason": "not exposed by the public MCP protocol",
+    }
+
+
+def test_failed_ack_is_excluded_from_ack_percentiles() -> None:
+    calls = [
+        {"tool": "write", "elapsed_ms": 1.0, "ack": True, "classification": "ok"},
+        {"tool": "edit", "elapsed_ms": 99.0, "ack": True, "classification": "refused"},
+    ]
+    assert common.call_measurements(calls) == {
+        "public_call_count": 2,
+        "ack_p50_ms": 1.0,
+        "ack_p95_ms": 1.0,
+        "shared_server_ms": None,
+        "shared_server_reason": "not exposed by the public MCP protocol",
+        "connector_ms": None,
+        "connector_reason": "not exposed by the public MCP protocol",
+    }
+
+
+def test_fixture_pages_have_deterministic_kilobyte_scale_variation() -> None:
+    sizes = [len(body.encode()) for _, body in common.fixture_pages(12)]
+    assert max(sizes) - min(sizes) >= 1_000
+
+
+def test_main_shares_an_explicit_marker_between_both_product_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: list[str] = []
+
+    async def fake_run_product(**kwargs: object) -> dict[str, object]:
+        seen.append(str(kwargs["marker"]))
+        return {"product": kwargs["product"], "status": "pass"}
+
+    monkeypatch.setattr(common, "run_product", fake_run_product)
+
+    assert (
+        common.main(
+            [
+                "--product",
+                "both",
+                "--state",
+                str(tmp_path / "state"),
+                "--vault",
+                str(tmp_path / "vault"),
+                "--marker",
+                "paired-marker",
+                "--basic-memory-executable",
+                "/bin/true",
+            ]
+        )
+        == 0
+    )
+    assert seen == ["paired-marker", "paired-marker"]
+    assert [row["product"] for row in json.loads(capsys.readouterr().out)["rows"]] == [
+        "exomem",
+        "basic_memory",
+    ]
+
+
+def test_startup_failure_becomes_an_invalid_json_row(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    result = common.main(
+        [
+            "--product",
+            "exomem",
+            "--state",
+            str(tmp_path / "state"),
+            "--vault",
+            str(tmp_path / "vault"),
+            "--python",
+            str(tmp_path / "missing-python"),
+            "--basic-memory-executable",
+            "/bin/true",
+        ]
+    )
+
+    row = json.loads(capsys.readouterr().out)["rows"][0]
+    assert result == 1
+    assert row["status"] == "invalid"
+    assert row["reason"].startswith("MCP runtime failure:")
+    assert row["phases"]["wall_to_verified_closure_ms"] is None
+
+
+def test_basic_memory_provenance_requires_the_pinned_wheel_version_and_inventory() -> None:
+    assert common.basic_memory_provenance_is_pinned(
+        {
+            "wheel_matches_pinned_digest": True,
+            "installed_version_matches_expected": True,
+            "dependency_inventory": {"status": "ok"},
+        }
+    )
+    assert not common.basic_memory_provenance_is_pinned(
+        {
+            "wheel_matches_pinned_digest": False,
+            "installed_version_matches_expected": True,
+            "dependency_inventory": {"status": "ok"},
+        }
+    )
+
+
+def test_exomem_provenance_uses_the_explicit_runtime_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    direct = common.runtime_provenance(
+        executable=Path(sys.executable),
+        wheel=None,
+        python=Path(sys.executable),
+        package="exomem",
+        expected_version=None,
+    )
+    provenance = common.runtime_provenance(
+        executable=Path(sys.executable),
+        wheel=None,
+        python=Path(sys.executable),
+        package="exomem",
+        expected_version=None,
+        environment={"PYTHONPATH": str(common.ROOT / "src")},
+    )
+
+    identity = provenance["source_identity"]
+    assert direct["source_identity"]["runtime_pythonpath_root"] is None
+    assert identity["runtime_pythonpath_root"] == str(common.ROOT / "src")
+    assert identity["revision"]
+    assert identity["tree"]
+    assert len(identity["source_digest"]) == 64
+
+
+@pytest.mark.parametrize("error", ["Entity not found", "AMBIGUOUS_IDENTIFIER"])
+def test_basic_memory_string_error_is_a_refusal(error):
+    payload = {"file_path": None, "error": error}
+    assert common.result_classification(payload) == "refused"
+    with pytest.raises(common.AdapterFault, match="failed MCP result"):
+        common.decode_result({"structuredContent": payload})
+
+
+def test_basic_memory_adapter_uses_exact_fixture_and_returned_paths(tmp_path):
+    fixture = common.materialize_fixture(tmp_path / "fixture", pages=4)
+    calls = []
+    returned_paths = iter(("notes/created-a.md", "notes/created-b.md"))
+
+    class Client:
+        async def call(self, tool, arguments, **kwargs):
+            calls.append((tool, arguments, kwargs))
+            if tool == "write_note":
+                return {"file_path": next(returned_paths)}
+            if tool == "search_notes":
+                return {"results": [{"content": arguments["query"]}]}
+            return {}
+
+    result = asyncio.run(common._run_basic_memory(Client(), "marker", fixture, 0))
+    expected = ["notes/created-a.md", "active-tracker.md", "stale-link.md", "notes/created-b.md"]
+    assert result["changed"] == expected
+    assert [args["identifier"] for tool, args, _ in calls if tool == "edit_note"] == expected[1:3]
+    assert [args["identifier"] for tool, args, _ in calls if tool == "read_note"] == expected
+
+
+def test_basic_memory_adapter_rejects_a_missing_created_path(tmp_path):
+    fixture = common.materialize_fixture(tmp_path / "fixture", pages=4)
+
+    class Client:
+        async def call(self, tool, arguments, **kwargs):
+            return {}
+
+    with pytest.raises(common.AdapterFault, match="created file path"):
+        asyncio.run(common._run_basic_memory(Client(), "marker", fixture, 0))

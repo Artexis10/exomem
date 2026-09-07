@@ -110,12 +110,18 @@ it with `exomem logs verify`.
 
 - **Latency, on every call — read, write, success, refusal.** `duration_ms` is
   the tool leaf, the number the prose trace and `exomem_tool_duration_ms` have
-  always reported. `total_ms` is the wall clock the caller actually waited,
-  including the content guard and argument normalization, which run *before*
-  the leaf clock starts. When the two diverge the gap is itself the finding: it
-  says the cost was in admission, not in the work. `request_bytes` is the total
+  always reported. `total_ms` is server-wrapper wall time, including the content
+  guard and argument normalization, which run *before* the leaf clock starts.
+  It excludes connector transit and model planning; those require a client
+  trace. When the two diverge, the gap identifies wrapper overhead outside the
+  leaf, not necessarily admission alone. `request_bytes` is the total
   serialized argument size, so a slow call is interpretable rather than merely
   slow.
+
+  For a multi-call workflow, `scripts/durable_closure_ledger.py` reports both
+  summed execution and interval-union occupancy. Time between calls remains
+  unattributed without a client trace. See the
+  [durable-closure investigation](benchmarks/durable-closure-investigation-2026-09.md).
 
 - **`outcome`** is `ok`, `refused`, or `error`. `refused` is a governance
   refusal — the tool wrapper returns an error *envelope* rather than raising, so
