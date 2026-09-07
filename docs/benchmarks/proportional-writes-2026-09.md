@@ -82,13 +82,28 @@ Independent implementation and integration reviews approved the writer cache,
 graph dependency index and bounded background yielding. The final test repair
 passed 29 scoped tests independently, including both bounded rebuild joins.
 
-The full Python 3.11 lean matrix passed 17,626 tests in
-[CI run 34157824902](https://github.com/Artexis10/exomem/actions/runs/34157824902).
-That run's Python 3.13 matrix exposed a test synchronization race, repaired in
-`7c961455`: foreground completion does not guarantee a newly started thread has
-entered its callback. The repair waits for entry outside the measured interval
-and retains the publication and latency assertions. Production bytes did not
-change. A successful final Python 3.13 PR run remains the delivery gate.
+[PR CI run 34167652315](https://github.com/Artexis10/exomem/actions/runs/34167652315)
+passed all 25 executing jobs. The Python 3.13 core and harness tiers passed
+17,639 tests with zero failures or errors across all 16 JUnit shards. There are
+318 unique skips; repeated optional-module collection records account for the
+395 raw skip records. Build/privacy, lint/types, native Windows, installed-product
+E2E, onboarding, TUI and strict OpenSpec validation also passed.
+
+The exact tested merge tree is `013209b0471403855217c94021081b387d60d85b`;
+integrating current main locally produced the identical tree in `ff1b4271`.
+The subsequent delivery update changes only this report, the CI evidence and
+the OpenSpec task record.
+
+[CI verification evidence](proportional-writes-2026-09/ci-verification.json)
+retains the shard census, corrected-test outcomes and source comparison. It also
+retains the earlier Python 3.11 result (17,626 passed) and successful retrieval,
+semantic-write latency and graph-convergence gates from
+[full run 34157824902](https://github.com/Artexis10/exomem/actions/runs/34157824902).
+Those are supplemental results on the same benchmark-driver and implementation
+bytes apart from the package version literal. The final PR adds reviewed test
+corrections and unrelated hosted handoff work from main. The earlier run's overall
+failure and both repaired test defects remain explicit in the evidence; skipped
+PR jobs are not counted as fresh executions.
 
 The implementation contract is the OpenSpec change
 `make-durable-writes-proportional`. The earlier observations below retain the
