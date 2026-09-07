@@ -95,6 +95,21 @@ def _checkpoint(generation: int) -> graph_sync.GraphSyncCheckpoint:
     )
 
 
+@pytest.mark.parametrize(
+    "terminal", [graph_sync.committed_graph_pending, graph_sync.committed_graph_queued]
+)
+def test_pending_graph_guidance_does_not_require_verifying_each_write(terminal: Any) -> None:
+    result = terminal(_checkpoint(1))
+
+    assert result["graph_sync"] == "pending"
+    guidance = result["graph_sync_remediation"]
+    assert "The write is durable" in guidance
+    assert "Continue independent work" in guidance
+    assert "graph-dependent" in guidance
+    assert "re-read shortly" not in guidance
+    assert "maintain_memory" not in guidance
+
+
 def _invoke_with_registered_rebuild(
     vault_root: Path,
     builder: Any,

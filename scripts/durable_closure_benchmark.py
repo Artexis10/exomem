@@ -19,6 +19,7 @@ import json
 import math
 import os
 import shutil
+import subprocess
 import sys
 import time
 import uuid
@@ -37,6 +38,110 @@ REQUIRED_PUBLIC_TOOLS = (
 )
 MODEL_FREE_PROFILE = "model-free"
 REAL_EXTRACTION_PROFILE = "real-extraction"
+
+
+def validate_server_root(server_root: Path) -> Path:
+    """Resolve a benchmark target only when it exposes an importable source tree."""
+    target = Path(server_root).resolve()
+    if not (target / "src" / "exomem").is_dir():
+        raise ValueError(f"--server-root must contain src/exomem: {target}")
+    return target
+
+
+def normalize_python_launcher(python: Path, runner_cwd: Path) -> Path:
+    """Anchor a relative launcher to the harness cwd without dereferencing it."""
+    launcher = Path(python)
+    if not launcher.is_absolute():
+        launcher = Path(runner_cwd) / launcher
+    return Path(os.path.abspath(launcher))
+
+
+def _target_source_environment(server_root: Path) -> dict[str, str]:
+    """Import only the selected source tree; never install benchmark hooks here."""
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("EXOMEM_") and key not in {"PYTHONPATH", "XDG_STATE_HOME"}
+    }
+    environment["PYTHONPATH"] = str(server_root / "src")
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    return environment
+
+
+def _command_output(command: Sequence[str], *, cwd: Path, env: Mapping[str, str] | None = None) -> str | None:
+    try:
+        completed = subprocess.run(
+            list(command), cwd=cwd, env=dict(env) if env is not None else None,
+            check=True, capture_output=True, text=True, timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout.strip()
+
+
+def _source_sha256(source_root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted((path for path in source_root.rglob("*") if path.is_file() and "__pycache__" not in path.parts), key=lambda item: item.as_posix()):
+        relative = path.relative_to(source_root).as_posix().encode("utf-8")
+        digest.update(relative + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def runtime_provenance(server_root: Path, python: Path) -> dict[str, Any]:
+    """Record content-free identity for the exact target runtime before timing."""
+    target = validate_server_root(server_root)
+    source_root = target / "src"
+    python_path = Path(python)
+    environment = _target_source_environment(target)
+    package_origin = _command_output(
+        [str(python_path), "-c", "import exomem, pathlib; print(pathlib.Path(exomem.__file__).resolve())"],
+        cwd=target,
+        env=environment,
+    )
+    expected_package = (source_root / "exomem").resolve()
+    if package_origin is None or not Path(package_origin).is_relative_to(expected_package):
+        raise RuntimeError("selected python did not import exomem from --server-root/src")
+    runtime_output = _command_output(
+        [
+            str(python_path),
+            "-c",
+            "import importlib.metadata as metadata, json, sys; print(json.dumps({'executable': sys.executable, 'prefix': sys.prefix, 'version': sys.version, 'packages': [{'name': dist.metadata.get('Name', ''), 'version': dist.version} for dist in metadata.distributions()]}))",
+        ],
+        cwd=target,
+        env=environment,
+    )
+    try:
+        runtime = json.loads(runtime_output) if runtime_output is not None else None
+    except json.JSONDecodeError:
+        runtime = None
+    if not isinstance(runtime, Mapping) or not isinstance(runtime.get("packages"), list):
+        raise RuntimeError("selected python did not provide a package inventory")
+    package_inventory = sorted(
+        [{"name": str(item.get("name") or ""), "version": str(item.get("version") or "")} for item in runtime["packages"] if isinstance(item, Mapping)],
+        key=lambda item: item["name"].lower(),
+    )
+    status = _command_output(["git", "status", "--porcelain"], cwd=target)
+    return {
+        "source": {
+            "root": str(source_root.resolve()),
+            "package_origin": str(Path(package_origin).resolve()),
+            "sha256": _source_sha256(source_root),
+        },
+        "git": {
+            "revision": _command_output(["git", "rev-parse", "HEAD"], cwd=target),
+            "tree": _command_output(["git", "rev-parse", "HEAD^{tree}"], cwd=target),
+            "dirty": None if status is None else bool(status),
+        },
+        "python": {
+            "executable": str(python_path),
+            "invocation": str(python_path),
+            "runtime_executable": str(runtime.get("executable") or ""),
+            "prefix": str(runtime.get("prefix") or ""),
+            "version": str(runtime.get("version") or ""),
+            "packages": package_inventory,
+        },
+    }
 
 
 def load_artifact_manifest(path: Path) -> list[dict[str, str]]:
@@ -428,8 +533,9 @@ def invalid_measurement_report(
     }
 
 
-def benchmark_environment(state: Path, vault: Path) -> dict[str, str]:
+def benchmark_environment(state: Path, vault: Path, *, server_root: Path = ROOT) -> dict[str, str]:
     """Create hermetic process state without disabling watchers or scheduling."""
+    target = validate_server_root(server_root)
     env = {
         key: value
         for key, value in os.environ.items()
@@ -451,7 +557,7 @@ def benchmark_environment(state: Path, vault: Path) -> dict[str, str]:
             # the public workflow clock starts, never as an inline repair.
             "EXOMEM_EAGER_BOOT": "1",
             "XDG_STATE_HOME": str(state / "xdg"),
-            "PYTHONPATH": str(ROOT / "src"),
+            "PYTHONPATH": str(target / "src"),
             "FASTMCP_CHECK_FOR_UPDATES": "off",
             "FASTMCP_SHOW_SERVER_BANNER": "false",
         }
@@ -475,26 +581,42 @@ control = Path(control_value) if control_value else None
 COUNTER_FIELDS = (
     "graph_drain_attempts", "graph_drain_completed", "graph_rebuild_attempts", "graph_rebuild_completed",
     "graph_incremental_execution_elapsed_ms", "graph_rebuild_execution_elapsed_ms",
+    "graph_pre_reset_spillover_incremental_completed", "graph_pre_reset_spillover_rebuild_completed",
+    "graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms",
+    "graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms",
     "source_scan_pages", "source_scan_bytes", "graph_topology_paths_enumerated",
     "graph_topology_stat_estimated_bytes", "graph_topology_actual_body_read_bytes",
 )
+SNAPSHOT_FIELDS = COUNTER_FIELDS + (
+    "measurement_epoch", "graph_incremental_inflight", "graph_rebuild_inflight",
+    "graph_pre_reset_spillover_incremental_inflight", "graph_pre_reset_spillover_rebuild_inflight",
+)
 data = {
     "wrapper_status": "installed",
+    "measurement_epoch": 0,
     "graph_drain_attempts": 0, "graph_drain_completed": 0,
     "graph_rebuild_attempts": 0, "graph_rebuild_completed": 0,
     "graph_incremental_execution_elapsed_ms": 0.0,
     "graph_rebuild_execution_elapsed_ms": 0.0,
+    "graph_pre_reset_spillover_incremental_completed": 0,
+    "graph_pre_reset_spillover_rebuild_completed": 0,
+    "graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms": 0.0,
+    "graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms": 0.0,
+    "graph_incremental_inflight": 0, "graph_rebuild_inflight": 0,
+    "graph_pre_reset_spillover_incremental_inflight": 0,
+    "graph_pre_reset_spillover_rebuild_inflight": 0,
     "source_scan_pages": 0, "source_scan_bytes": 0,
     "graph_topology_paths_enumerated": 0,
     "graph_topology_stat_estimated_bytes": 0,
     "graph_topology_actual_body_read_bytes": 0,
     "snapshots": {},
     "scan_coverage": "find._walk_md only; path enumeration plus stat-estimated bytes, not body bytes",
-    "graph_topology_coverage": "EpistemicGraphIndex._sources_linking_to only; vault walk and reads are scoped to that call",
+    "graph_topology_coverage": "measurement-window observations from EpistemicGraphIndex._sources_linking_to only; vault walk and reads are scoped to that call and can include reset-crossing warm-up work",
     "graph_topology_byte_coverage": "actual body bytes via vault.read_bytes_without_pinning; stat-estimated bytes are separate and never summed",
 }
 lock = threading.RLock()
 topology = threading.local()
+active_epochs = {"incremental": {}, "rebuild": {}}
 last_command = None
 stopping = threading.Event()
 owner_path = out.with_name("instrumentation-owner.pid")
@@ -503,6 +625,16 @@ try:
     owner = True
 except FileExistsError:
     owner = owner_path.read_text(encoding="utf-8").strip() == str(os.getpid())
+
+def refresh_inflight():
+    epoch = data["measurement_epoch"]
+    for kind, current_key, spillover_key in (
+        ("incremental", "graph_incremental_inflight", "graph_pre_reset_spillover_incremental_inflight"),
+        ("rebuild", "graph_rebuild_inflight", "graph_pre_reset_spillover_rebuild_inflight"),
+    ):
+        active = active_epochs[kind]
+        data[current_key] = active.get(epoch, 0)
+        data[spillover_key] = sum(count for active_epoch, count in active.items() if active_epoch != epoch)
 
 def publish():
     if not owner:
@@ -524,14 +656,19 @@ def command():
     if not isinstance(command_id, str) or command_id == last_command:
         return
     with lock:
+        if command_id == last_command:
+            return
         action = payload.get("action")
         phase = str(payload.get("phase") or "")
         if action == "reset":
+            data["measurement_epoch"] += 1
             for key in COUNTER_FIELDS:
                 data[key] = 0
             data["snapshots"] = {}
+            refresh_inflight()
         elif action == "snapshot" and phase:
-            data["snapshots"][phase] = {key: data[key] for key in COUNTER_FIELDS}
+            refresh_inflight()
+            data["snapshots"][phase] = {key: data[key] for key in SNAPSHOT_FIELDS}
         else:
             data["instrumentation_error"] = "InvalidControl"
         data["acknowledged_command"] = command_id
@@ -542,28 +679,40 @@ def controller():
     while not stopping.wait(0.01):
         command()
 
-def wrap_graph_execution(module, name, attempts, completed, elapsed):
+def wrap_graph_execution(module, name, kind, attempts, completed, elapsed, spillover_completed, spillover_elapsed):
     original = getattr(module, name, None)
     if original is None:
         raise AttributeError(f"missing required instrumentation hook: {name}")
     def counted(*args, **kwargs):
         command()
         with lock:
+            entry_epoch = data["measurement_epoch"]
+            active_epochs[kind][entry_epoch] = active_epochs[kind].get(entry_epoch, 0) + 1
             data[attempts] += 1
+            refresh_inflight()
         publish()
         started = time.monotonic()
+        succeeded = False
         try:
             result = original(*args, **kwargs)
-        except BaseException:
+            succeeded = True
+            return result
+        finally:
+            elapsed_ms = (time.monotonic() - started) * 1000.0
             with lock:
-                data[elapsed] += (time.monotonic() - started) * 1000.0
+                active_epochs[kind][entry_epoch] -= 1
+                if not active_epochs[kind][entry_epoch]:
+                    del active_epochs[kind][entry_epoch]
+                if entry_epoch == data["measurement_epoch"]:
+                    if succeeded:
+                        data[completed] += 1
+                    data[elapsed] += elapsed_ms
+                else:
+                    if succeeded:
+                        data[spillover_completed] += 1
+                    data[spillover_elapsed] += elapsed_ms
+                refresh_inflight()
             publish()
-            raise
-        with lock:
-            data[completed] += 1
-            data[elapsed] += (time.monotonic() - started) * 1000.0
-        publish()
-        return result
     setattr(module, name, counted)
 
 def wrap_topology_discovery(module, name):
@@ -580,8 +729,8 @@ def wrap_topology_discovery(module, name):
 
 try:
     from exomem import index_sync, epistemic_graph, find, vault
-    wrap_graph_execution(epistemic_graph.EpistemicGraphIndex, "drain_paths", "graph_drain_attempts", "graph_drain_completed", "graph_incremental_execution_elapsed_ms")
-    wrap_graph_execution(epistemic_graph.EpistemicGraphIndex, "_rebuild_all_off_boundary", "graph_rebuild_attempts", "graph_rebuild_completed", "graph_rebuild_execution_elapsed_ms")
+    wrap_graph_execution(epistemic_graph.EpistemicGraphIndex, "drain_paths", "incremental", "graph_drain_attempts", "graph_drain_completed", "graph_incremental_execution_elapsed_ms", "graph_pre_reset_spillover_incremental_completed", "graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms")
+    wrap_graph_execution(epistemic_graph.EpistemicGraphIndex, "_rebuild_all_off_boundary", "rebuild", "graph_rebuild_attempts", "graph_rebuild_completed", "graph_rebuild_execution_elapsed_ms", "graph_pre_reset_spillover_rebuild_completed", "graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms")
     wrap_topology_discovery(epistemic_graph.EpistemicGraphIndex, "_sources_linking_to")
     original_walk = find._walk_md
     def walk(root):
@@ -647,6 +796,11 @@ def read_instrumentation(state: Path) -> dict[str, Any]:
     required = (
         "graph_drain_attempts", "graph_drain_completed", "graph_rebuild_attempts", "graph_rebuild_completed",
         "graph_incremental_execution_elapsed_ms", "graph_rebuild_execution_elapsed_ms",
+        "graph_pre_reset_spillover_incremental_completed", "graph_pre_reset_spillover_rebuild_completed",
+        "graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms",
+        "graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms",
+        "measurement_epoch", "graph_incremental_inflight", "graph_rebuild_inflight",
+        "graph_pre_reset_spillover_incremental_inflight", "graph_pre_reset_spillover_rebuild_inflight",
         "source_scan_pages", "source_scan_bytes", "graph_topology_paths_enumerated",
         "graph_topology_stat_estimated_bytes", "graph_topology_actual_body_read_bytes", "wrapper_status",
     )
@@ -679,7 +833,7 @@ async def instrumentation_command(state: Path, *, action: str, phase: str, timeo
     raise RuntimeError(f"benchmark instrumentation did not acknowledge {action}:{phase}")
 
 
-def materialize_corpus(vault: Path, *, pages: int) -> dict[str, Any]:
+def materialize_corpus(vault: Path, *, pages: int, server_root: Path = ROOT) -> dict[str, Any]:
     """Build realistic, deterministic Markdown before timing begins.
 
     This fixture producer never creates evidence sidecars or extraction output.
@@ -687,10 +841,11 @@ def materialize_corpus(vault: Path, *, pages: int) -> dict[str, Any]:
     """
     if not 1 <= pages <= 8_000:
         raise ValueError("pages must be between 1 and 8000")
+    target = validate_server_root(server_root)
     kb = vault / "Knowledge Base"
     schema = kb / "_Schema"
     if not schema.exists():
-        shutil.copytree(ROOT / "src" / "exomem" / "_scaffold" / "_Schema", schema)
+        shutil.copytree(target / "src" / "exomem" / "_scaffold" / "_Schema", schema)
     tracker = kb / "Notes" / "Insights" / "active-tracker.md"
     archived = kb / "Notes" / "Insights" / "archived-runbook.md"
     critique = kb / "Notes" / "Insights" / "critique.md"
@@ -1048,6 +1203,7 @@ async def run_public_workflow(
     timeout: float,
     variant: str = "optimized",
     artifacts_manifest: Path | None = None,
+    server_root: Path = ROOT,
 ) -> dict[str, Any]:
     """Run the complete public workflow through one persistent stdio session."""
     from fastmcp import Client
@@ -1055,12 +1211,15 @@ async def run_public_workflow(
 
     if profile not in {MODEL_FREE_PROFILE, REAL_EXTRACTION_PROFILE}:
         raise ValueError(f"unsupported profile: {profile}")
+    target = validate_server_root(server_root)
+    launcher = normalize_python_launcher(python, Path.cwd())
     workflow_plan(variant)
     state.mkdir(parents=True, exist_ok=True)
     vault.mkdir(parents=True, exist_ok=True)
-    corpus = materialize_corpus(vault, pages=pages)
+    provenance = runtime_provenance(target, launcher)
+    corpus = materialize_corpus(vault, pages=pages, server_root=target)
     artifacts = load_artifact_manifest(artifacts_manifest) if artifacts_manifest else None
-    env = benchmark_environment(state, vault)
+    env = benchmark_environment(state, vault, server_root=target)
     instrumentation_dir = install_subprocess_instrumentation(state)
     env["DURABLE_CLOSURE_INSTRUMENTATION"] = str(state / "instrumentation.json")
     env["DURABLE_CLOSURE_INSTRUMENTATION_CONTROL"] = str(state / "instrumentation-control.json")
@@ -1068,10 +1227,10 @@ async def run_public_workflow(
     if profile == MODEL_FREE_PROFILE:
         env.update({"EXOMEM_DISABLE_MEDIA_EXTRACTION": "1", "EXOMEM_DISABLE_CLIP": "1"})
     transport = StdioTransport(
-        command=str(python),
+        command=str(launcher),
         args=["-m", "exomem", "--transport", "stdio"],
         env=env,
-        cwd=str(ROOT),
+        cwd=str(target),
         keep_alive=False,
         log_file=state / "stdio.log",
     )
@@ -1380,6 +1539,7 @@ async def run_public_workflow(
     return {
         "variant": variant,
         "profile": profile,
+        "runtime": provenance,
         "status": workflow_status(
             core_passed=closure["passed"],
             media_status=media["status"],
@@ -1421,26 +1581,54 @@ async def run_public_workflow(
         "connector_overhead_ms": None,
         "connector_overhead_reason": "stdio client wall and server ledger are independently measured but not request-correlated",
         "graph_invocations": {
+            "semantics": "current-epoch attempts/completions only; reset-crossing warm-up invocations are reported separately as pre-reset spillover",
             "at_closure": {
                 "drain_attempts": closure_snapshot["graph_drain_attempts"],
                 "drain_completed": closure_snapshot["graph_drain_completed"],
                 "rebuild_attempts": closure_snapshot["graph_rebuild_attempts"],
                 "rebuild_completed": closure_snapshot["graph_rebuild_completed"],
+                "incremental_inflight": closure_snapshot["graph_incremental_inflight"],
+                "rebuild_inflight": closure_snapshot["graph_rebuild_inflight"],
             },
             "at_convergence": {
                 "drain_attempts": convergence_snapshot["graph_drain_attempts"],
                 "drain_completed": convergence_snapshot["graph_drain_completed"],
                 "rebuild_attempts": convergence_snapshot["graph_rebuild_attempts"],
                 "rebuild_completed": convergence_snapshot["graph_rebuild_completed"],
+                "incremental_inflight": convergence_snapshot["graph_incremental_inflight"],
+                "rebuild_inflight": convergence_snapshot["graph_rebuild_inflight"],
             },
             "after_shutdown": {
                 "drain_attempts": instrumentation["graph_drain_attempts"],
                 "drain_completed": instrumentation["graph_drain_completed"],
                 "rebuild_attempts": instrumentation["graph_rebuild_attempts"],
                 "rebuild_completed": instrumentation["graph_rebuild_completed"],
+                "incremental_inflight": instrumentation["graph_incremental_inflight"],
+                "rebuild_inflight": instrumentation["graph_rebuild_inflight"],
+            },
+            "pre_reset_spillover": {
+                "at_closure": {
+                    "incremental_completed": closure_snapshot["graph_pre_reset_spillover_incremental_completed"],
+                    "rebuild_completed": closure_snapshot["graph_pre_reset_spillover_rebuild_completed"],
+                    "incremental_inflight": closure_snapshot["graph_pre_reset_spillover_incremental_inflight"],
+                    "rebuild_inflight": closure_snapshot["graph_pre_reset_spillover_rebuild_inflight"],
+                },
+                "at_convergence": {
+                    "incremental_completed": convergence_snapshot["graph_pre_reset_spillover_incremental_completed"],
+                    "rebuild_completed": convergence_snapshot["graph_pre_reset_spillover_rebuild_completed"],
+                    "incremental_inflight": convergence_snapshot["graph_pre_reset_spillover_incremental_inflight"],
+                    "rebuild_inflight": convergence_snapshot["graph_pre_reset_spillover_rebuild_inflight"],
+                },
+                "after_shutdown": {
+                    "incremental_completed": instrumentation["graph_pre_reset_spillover_incremental_completed"],
+                    "rebuild_completed": instrumentation["graph_pre_reset_spillover_rebuild_completed"],
+                    "incremental_inflight": instrumentation["graph_pre_reset_spillover_incremental_inflight"],
+                    "rebuild_inflight": instrumentation["graph_pre_reset_spillover_rebuild_inflight"],
+                },
             },
         },
         "graph_execution_elapsed_ms": {
+            "semantics": "current-epoch values include completed invocations only; active work has no elapsed value until completion",
             "at_closure": {
                 "incremental": closure_snapshot["graph_incremental_execution_elapsed_ms"],
                 "rebuild": closure_snapshot["graph_rebuild_execution_elapsed_ms"],
@@ -1452,6 +1640,20 @@ async def run_public_workflow(
             "after_shutdown": {
                 "incremental": instrumentation["graph_incremental_execution_elapsed_ms"],
                 "rebuild": instrumentation["graph_rebuild_execution_elapsed_ms"],
+            },
+            "pre_reset_spillover_full_invocation": {
+                "at_closure": {
+                    "incremental": closure_snapshot["graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms"],
+                    "rebuild": closure_snapshot["graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms"],
+                },
+                "at_convergence": {
+                    "incremental": convergence_snapshot["graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms"],
+                    "rebuild": convergence_snapshot["graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms"],
+                },
+                "after_shutdown": {
+                    "incremental": instrumentation["graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms"],
+                    "rebuild": instrumentation["graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms"],
+                },
             },
         },
         "graph_topology_discovery": {
@@ -1506,11 +1708,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--profile", choices=(MODEL_FREE_PROFILE, REAL_EXTRACTION_PROFILE), default=MODEL_FREE_PROFILE)
     parser.add_argument("--variant", choices=("optimized", "stress"), default="optimized")
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
+    parser.add_argument("--server-root", type=Path, default=ROOT, help="target checkout containing src/exomem")
     parser.add_argument("--state", type=Path, required=True, help="empty disposable benchmark state root")
     parser.add_argument("--vault", type=Path, required=True, help="empty disposable benchmark vault")
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--artifacts-manifest", type=Path, default=None)
     args = parser.parse_args(argv)
+    validate_server_root(args.server_root)
     if args.vault.exists() and any(args.vault.iterdir()):
         parser.error("--vault must be empty and disposable")
     if args.state.exists() and any(args.state.iterdir()):
@@ -1527,6 +1731,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout=args.timeout,
             variant=args.variant,
             artifacts_manifest=args.artifacts_manifest,
+            server_root=args.server_root,
         )
     )
     print(json.dumps(report, indent=2, sort_keys=True))

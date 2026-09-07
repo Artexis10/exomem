@@ -5076,6 +5076,15 @@ def _batch_atomic_write_locked(
                 if source_guards[index] is not None
                 else None
             )
+            replacement_intents: tuple[Any, ...] = ()
+            if publication_intents_enabled:
+                from . import file_watcher
+
+                key = file_watcher._publication_key(Path(vault_root), final)
+                replacement_intents = tuple(
+                    intent for intent in publication_intents if intent.key == key
+                )
+                file_watcher.begin_publication_installation(replacement_intents)
             with _batch_replace_context(
                 Path(vault_root) if vault_root is not None else None,
                 expected_destination,
@@ -5089,6 +5098,8 @@ def _batch_atomic_write_locked(
                         expected_destination=expected_destination,
                     )
                     if installed_identity is not None:
+                        if publication_intents_enabled:
+                            file_watcher.mark_publication_installed(replacement_intents)
                         replaced.append(final)
                         final_guards[final] = _BatchArtifactGuard.capture(
                             final,
@@ -5096,6 +5107,8 @@ def _batch_atomic_write_locked(
                             expected_identity=installed_identity,
                         )
                     raise
+            if publication_intents_enabled:
+                file_watcher.mark_publication_installed(replacement_intents)
             replaced.append(final)
             final_guards[final] = _BatchArtifactGuard.capture(
                 final,

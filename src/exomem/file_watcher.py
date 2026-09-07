@@ -162,6 +162,7 @@ class _PublicationIntent:
     deadline: float
     before_content_hash: str | None = None
     before_size: int | None = None
+    phase: str = "prepared"
     disposition: str = "active"
     inflight: int = 0
     observers: list[_PublicationObservation] = field(default_factory=list)
@@ -171,7 +172,6 @@ class _PublicationIntent:
 class _PublicationObservation:
     watcher: weakref.ReferenceType[FileWatcher]
     path: Path
-    bound_active: bool
     fenced: bool = False
 
 
@@ -240,9 +240,7 @@ def _bind_publication_observer_locked(
     for observer in intent.observers:
         if observer.watcher() is watcher and observer.path == path:
             return observer
-    observer = _PublicationObservation(
-        weakref.ref(watcher), path, bound_active=intent.disposition == "active"
-    )
+    observer = _PublicationObservation(weakref.ref(watcher), path)
     intent.observers.append(observer)
     return observer
 
@@ -378,7 +376,6 @@ def _observe_publication_intent(
     *,
     watcher: FileWatcher | None = None,
     expected_intent: _PublicationIntent | None = None,
-    bound_active: bool | None = None,
 ) -> tuple[str, _PublicationIntent | None]:
     """Classify one event without holding the registry lock across file I/O."""
     key = _publication_key(vault_root, path)
@@ -399,11 +396,8 @@ def _observe_publication_intent(
                 if watcher is not None
                 else None
             )
-            observed_active = (
-                observation.bound_active
-                if observation is not None
-                else bool(bound_active)
-            )
+            start_disposition = intent.disposition
+            start_phase = intent.phase
             intent.inflight += 1
         if notifications:
             _notify_publication_observers(notifications, intent, intent.disposition)
@@ -413,6 +407,7 @@ def _observe_publication_intent(
             intent.inflight -= 1
             notifications = _expire_publication_intent_locked(intent, time.monotonic())
             disposition = intent.disposition
+            phase = intent.phase
             fenced = observation.fenced if observation is not None else False
             changed = _PUBLICATION_INTENTS.get(key) is not intent
         if notifications:
@@ -423,15 +418,30 @@ def _observe_publication_intent(
             return "external", intent
         matches_after = proof[0] == intent.content_hash and proof[2] == intent.size
         matches_before = (
-            observed_active
+            disposition == "active"
+            and phase == "prepared"
             and proof[0] == intent.before_content_hash
             and proof[2] == intent.before_size
         )
-        if not (matches_after or matches_before):
+        if (
+            not matches_after
+            and proof is not None
+            and (disposition != start_disposition or phase != start_phase)
+            and not fenced
+            and not changed
+            and attempt == 0
+        ):
+            # A descriptor proof that crossed a publication boundary cannot
+            # authorize BEFORE bytes. Re-read once; only exact current AFTER
+            # bytes remain admissible after that boundary.
+            continue
+        if not (matches_before or matches_after):
             return "external", intent
         if disposition == "active":
+            if matches_after and phase == "prepared":
+                return "external", intent
             return "held", intent
-        if disposition == "succeeded":
+        if disposition == "succeeded" and phase == "postpublish_verified" and matches_after:
             return "suppressed", intent
         return "external", intent
     return "external", None
@@ -454,6 +464,63 @@ def publication_intent_deadline(intent: _PublicationIntent) -> float | None:
         return intent.deadline
 
 
+def begin_publication_installation(intents: Iterable[_PublicationIntent]) -> None:
+    """Advance exact tokens immediately before their canonical replacement."""
+    with _SUPPRESS_LOCK:
+        for intent in intents:
+            if (
+                _PUBLICATION_INTENTS.get(intent.key) is intent
+                and intent.disposition == "active"
+                and intent.phase == "prepared"
+            ):
+                intent.phase = "installing"
+
+
+def mark_publication_installed(intents: Iterable[_PublicationIntent]) -> None:
+    """Advance exact tokens immediately after their canonical replacement."""
+    with _SUPPRESS_LOCK:
+        for intent in intents:
+            if (
+                _PUBLICATION_INTENTS.get(intent.key) is intent
+                and intent.disposition == "active"
+                and intent.phase == "installing"
+            ):
+                intent.phase = "installed"
+
+
+def _verify_publication_intents_after_publish(
+    intents: Iterable[_PublicationIntent],
+) -> tuple[set[_PublicationIntent], set[tuple[str, str]]]:
+    """Reprove exact AFTER bytes after corpus publication without registry I/O."""
+    verified: set[_PublicationIntent] = set()
+    failed: set[tuple[str, str]] = set()
+    for intent in intents:
+        with _SUPPRESS_LOCK:
+            current = _PUBLICATION_INTENTS.get(intent.key)
+            if (
+                current is not intent
+                or intent.disposition != "active"
+                or intent.phase != "installed"
+            ):
+                failed.add(intent.key)
+                continue
+        proof = _bounded_descriptor_digest(Path(intent.key[0]) / intent.key[1], intent.size)
+        with _SUPPRESS_LOCK:
+            if (
+                _PUBLICATION_INTENTS.get(intent.key) is intent
+                and intent.disposition == "active"
+                and intent.phase == "installed"
+                and proof is not None
+                and proof[0] == intent.content_hash
+                and proof[2] == intent.size
+            ):
+                intent.phase = "postpublish_verified"
+                verified.add(intent)
+            else:
+                failed.add(intent.key)
+    return verified, failed
+
+
 def finalize_publication_intents(
     intents: Iterable[_PublicationIntent],
     *,
@@ -468,7 +535,11 @@ def finalize_publication_intents(
                 continue
             if intent.disposition != "active":
                 continue
-            intent.disposition = "succeeded" if intent in succeeded_set else "aborted"
+            intent.disposition = (
+                "succeeded"
+                if intent in succeeded_set and intent.phase == "postpublish_verified"
+                else "aborted"
+            )
             if intent.disposition != "succeeded":
                 _SELF_UPSERTS.pop(intent.key, None)
             notifications.append((intent, _intent_observers_locked(intent)))
@@ -584,6 +655,8 @@ def register_self_write(
     now = time.monotonic()
     signatures: list[tuple[tuple[str, str], int, int, _PublicationIntent | None]] = []
     notifications: list[tuple[_PublicationIntent, list[_PublicationObservation]]] = []
+    intended: dict[tuple[str, str], _PublicationIntent] = {}
+    failed_keys: set[tuple[str, str]] = set()
     for p in paths:
         p = Path(p)
         if p.suffix.lower() != ".md":
@@ -598,10 +671,16 @@ def register_self_write(
                 if expired:
                     notifications.append((intent, expired))
         if intent is not None:
+            intended[key] = intent
             proof = _bounded_descriptor_digest(p, intent.size)
-            if proof is None or proof[0] != intent.content_hash:
+            if (
+                proof is None
+                or proof[0] != intent.content_hash
+                or proof[2] != intent.size
+            ):
                 # A foreign replacement after the final writer guard is never
                 # admitted by a same-size/stat suppression signature.
+                failed_keys.add(key)
                 continue
             _digest, mtime_ns, size = proof
         else:
@@ -619,7 +698,9 @@ def register_self_write(
             if intent is not None and (
                 _PUBLICATION_INTENTS.get(key) is not intent
                 or intent.disposition != "active"
+                or intent.phase != "installed"
             ):
+                failed_keys.add(key)
                 continue
             _SELF_UPSERTS[key] = (
                 mtime_ns,
@@ -629,7 +710,20 @@ def register_self_write(
             if intent is not None:
                 registered.add(intent)
         _prune_locked(now)
-    corpus_published = _publish_registry_change(vault_root, changed=paths, deleted_rels=[])
+    published = _publish_registry_change(vault_root, changed=paths, deleted_rels=[])
+    if published:
+        registered, verification_failures = _verify_publication_intents_after_publish(
+            intended.values()
+        )
+        failed_keys.update(verification_failures)
+    else:
+        failed_keys.update(key for key in intended if key not in failed_keys)
+        registered.clear()
+    if failed_keys:
+        with _SUPPRESS_LOCK:
+            for key in failed_keys:
+                _SELF_UPSERTS.pop(key, None)
+    corpus_published = published and not failed_keys
     if return_publication_result:
         return registered, corpus_published
     return registered
@@ -855,7 +949,6 @@ class FileWatcher:
                 self._vault_root,
                 path,
                 expected_intent=intent,
-                bound_active=True,
             )
             if observed is not intent:
                 disposition = "external"

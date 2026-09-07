@@ -89,6 +89,159 @@ def test_snapshot_timestamp_echo_holds_before_image_but_not_later_restoration(
     assert target in watcher._drain()[1]
 
 
+def test_delayed_before_proof_after_success_restoration_is_external(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An active observer is not proof that it read BEFORE during preparation."""
+    target = vault / "Knowledge Base" / "Notes" / "delayed-before-proof.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"old")
+    staged = vault / "staged.md"
+    staged.write_bytes(b"new")
+    descriptor = os.open(staged, os.O_RDONLY)
+    try:
+        (intent,) = file_watcher.register_publication_intents(
+            vault,
+            [
+                (
+                    target,
+                    descriptor,
+                    hashlib.sha256(b"new").hexdigest(),
+                    hashlib.sha256(b"old").hexdigest(),
+                    len(b"old"),
+                )
+            ],
+        )
+    finally:
+        os.close(descriptor)
+    watcher = file_watcher.FileWatcher(vault)
+    entered = threading.Event()
+    release = threading.Event()
+    real_digest = file_watcher._bounded_descriptor_digest
+
+    def delayed_digest(path: Path, size: int | None):
+        if threading.current_thread().name == "observed-event":
+            entered.set()
+            assert release.wait(timeout=2.0)
+        return real_digest(path, size)
+
+    monkeypatch.setattr(file_watcher, "_bounded_descriptor_digest", delayed_digest)
+    monkeypatch.setattr(file_watcher, "_publish_registry_change", lambda *_args, **_kwargs: True)
+    event = threading.Thread(
+        name="observed-event", target=lambda: watcher._record(target, deleted=False)
+    )
+    event.start()
+    assert entered.wait(timeout=2.0)
+
+    file_watcher.begin_publication_installation([intent])
+    target.write_bytes(b"new")
+    file_watcher.mark_publication_installed([intent])
+    registered = file_watcher.register_self_write(vault, [target])
+    file_watcher.finalize_publication_intents([intent], succeeded=registered)
+    target.write_bytes(b"old")
+    release.set()
+    event.join(timeout=2.0)
+
+    assert not event.is_alive()
+    assert freshness.external_pending(vault) is True
+    assert target in watcher._drain()[1]
+
+
+def test_late_after_proof_remains_held_through_installation(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "late-after-proof.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"old")
+    staged = vault / "staged.md"
+    staged.write_bytes(b"new")
+    descriptor = os.open(staged, os.O_RDONLY)
+    try:
+        (intent,) = file_watcher.register_publication_intents(
+            vault,
+            [
+                (
+                    target,
+                    descriptor,
+                    hashlib.sha256(b"new").hexdigest(),
+                    hashlib.sha256(b"old").hexdigest(),
+                    len(b"old"),
+                )
+            ],
+        )
+    finally:
+        os.close(descriptor)
+    watcher = file_watcher.FileWatcher(vault)
+    entered = threading.Event()
+    release = threading.Event()
+    real_digest = file_watcher._bounded_descriptor_digest
+    old_proof = real_digest(target, None)
+    assert old_proof is not None
+    calls = 0
+
+    def delayed_digest(path: Path, size: int | None):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        assert release.wait(timeout=2.0)
+        if calls == 1:
+            return old_proof
+        return real_digest(path, size)
+
+    monkeypatch.setattr(file_watcher, "_bounded_descriptor_digest", delayed_digest)
+    event = threading.Thread(target=lambda: watcher._record(target, deleted=False))
+    event.start()
+    assert entered.wait(timeout=2.0)
+    file_watcher.begin_publication_installation([intent])
+    target.write_bytes(b"new")
+    file_watcher.mark_publication_installed([intent])
+    release.set()
+    event.join(timeout=2.0)
+
+    assert not event.is_alive()
+    assert calls == 2
+    assert freshness.external_pending(vault) is False
+    assert watcher._pending_publication_intents[target] is intent
+
+
+def test_registry_publication_restoration_falls_back_and_aborts_batch(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = vault / "Knowledge Base" / "Notes" / "registry-first.md"
+    second = vault / "Knowledge Base" / "Notes" / "registry-second.md"
+    first_intent = _register_active_intent(vault, first, b"first-new")
+    second_intent = _register_active_intent(vault, second, b"second-new")
+    file_watcher.begin_publication_installation([first_intent, second_intent])
+    file_watcher.mark_publication_installed([first_intent, second_intent])
+    fanout: dict[str, object] = {}
+
+    def publish_then_restore(*_args, **_kwargs) -> bool:
+        first.write_bytes(b"foreign-old")
+        return True
+
+    monkeypatch.setattr(file_watcher, "_publish_registry_change", publish_then_restore)
+    monkeypatch.setattr(
+        "exomem.index_sync.upsert_after_write",
+        lambda _root, _paths, **kwargs: fanout.setdefault("kwargs", kwargs),
+    )
+    monkeypatch.setattr("exomem.index_sync.full_upsert_succeeded", lambda *_args: True)
+
+    assert vault_module.post_commit_batch_fanout(
+        vault,
+        [first, second],
+        None,
+        None,
+        publication_intents=[first_intent, second_intent],
+    ) is True
+
+    assert fanout["kwargs"] == {
+        "created_paths": [],
+        "publish_corpus_change": True,
+    }
+    assert first_intent.disposition == "aborted"
+    assert second_intent.disposition == "aborted"
+
+
 def test_stage_failure_aborts_an_already_observed_snapshot_intent(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -158,12 +311,17 @@ def test_foreign_bytes_after_publish_are_replayed_as_external(
     assert target in watcher._drain()[1]
 
 
-def test_foreign_bytes_do_not_fall_through_to_legacy_self_signature(vault: Path) -> None:
+def test_foreign_bytes_do_not_fall_through_to_legacy_self_signature(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     file_watcher.clear_self_write_registry()
     target = vault / "Knowledge Base" / "Notes" / "same-signature-foreign.md"
     intent = _register_active_intent(vault, target, b"new")
-    file_watcher.register_self_write(vault, [target])
-    file_watcher.finalize_publication_intents([intent], succeeded=[intent])
+    file_watcher.begin_publication_installation([intent])
+    file_watcher.mark_publication_installed([intent])
+    monkeypatch.setattr(file_watcher, "_publish_registry_change", lambda *_args, **_kwargs: True)
+    registered = file_watcher.register_self_write(vault, [target])
+    file_watcher.finalize_publication_intents([intent], succeeded=registered)
     signature = target.stat()
     target.write_bytes(b"bad")
     os.utime(target, ns=(signature.st_atime_ns, signature.st_mtime_ns))
@@ -349,6 +507,8 @@ def test_capacity_rejects_new_intent_without_evicting_an_observed_one(
     first = vault / "Knowledge Base" / "Notes" / "first.md"
     second = vault / "Knowledge Base" / "Notes" / "second.md"
     first_intent = _register_active_intent(vault, first, b"first")
+    file_watcher.begin_publication_installation([first_intent])
+    file_watcher.mark_publication_installed([first_intent])
     watcher = file_watcher.FileWatcher(vault)
     watcher._record(first, deleted=False)
 
@@ -430,11 +590,17 @@ def test_token_change_during_hash_retries_once_against_the_replacement(
     )
     event_thread.start()
     assert entered.wait(timeout=2.0)
+    with file_watcher._SUPPRESS_LOCK:
+        first.phase = "postpublish_verified"
     file_watcher.finalize_publication_intents([first], succeeded=[first])
     target.write_bytes(b"two")
     second = _register_active_intent(vault, target, b"two")
+    with file_watcher._SUPPRESS_LOCK:
+        second.phase = "installed"
     release.set()
     event_thread.join(timeout=2.0)
+    with file_watcher._SUPPRESS_LOCK:
+        second.phase = "postpublish_verified"
     file_watcher.finalize_publication_intents([second], succeeded=[second])
 
     assert not event_thread.is_alive()

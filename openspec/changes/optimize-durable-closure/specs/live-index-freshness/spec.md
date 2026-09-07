@@ -16,8 +16,20 @@ Related governed writes SHALL preserve exact dirty-path custody and avoid regist
 - **THEN** an exact before-image publication token already owns that event, and successful exact after-image publication does not create an external-change epoch
 
 #### Scenario: External restoration follows a successful transaction
-- **WHEN** a newly observed edit restores the before-image after a publication token has already succeeded
+- **WHEN** an edit restores the before-image after installation began, including when its watcher observation bound before installation but only reads those bytes afterward
 - **THEN** the event is external, even though those bytes matched the earlier transaction's before-image
+
+#### Scenario: Snapshot observation completes after installation
+- **WHEN** an observation of a snapshot metadata event finishes after its token leaves the prepared phase
+- **THEN** it may be suppressed only after a bounded reproof of the current path establishes the exact after-image
+
+#### Scenario: Foreign bytes arrive during corpus publication
+- **WHEN** a destination changes after its initial after-image proof but before corpus publication returns
+- **THEN** a second after-image proof rejects token success, removes legacy suppression and retains fallback publication from current bytes
+
+#### Scenario: A caller finalizes an unverified token
+- **WHEN** a caller requests success without the same token having completed installation and post-publication after-image verification
+- **THEN** the token aborts and preserves recovery custody rather than discarding held observations
 
 #### Scenario: Aborted transaction has an observation still being hashed
 - **WHEN** an observed publication intent aborts before watcher hashing has completed

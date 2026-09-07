@@ -282,9 +282,17 @@ def test_instrumentation_error_invalidates_benchmark_measurement(tmp_path: Path)
     state = tmp_path / "state"
     state.mkdir()
     (state / "instrumentation.json").write_text(
-        '{"graph_drain_attempts":0,"graph_drain_completed":0,"graph_rebuild_attempts":0,'
-        '"graph_rebuild_completed":0,"graph_incremental_execution_elapsed_ms":0,'
-        '"graph_rebuild_execution_elapsed_ms":0,"source_scan_pages":0,"source_scan_bytes":0,'
+            '{"graph_drain_attempts":0,"graph_drain_completed":0,"graph_rebuild_attempts":0,'
+            '"graph_rebuild_completed":0,"graph_incremental_execution_elapsed_ms":0,'
+            '"graph_rebuild_execution_elapsed_ms":0,'
+            '"graph_pre_reset_spillover_incremental_completed":0,'
+            '"graph_pre_reset_spillover_rebuild_completed":0,'
+            '"graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms":0,'
+            '"graph_pre_reset_spillover_rebuild_full_invocation_elapsed_ms":0,'
+            '"measurement_epoch":1,"graph_incremental_inflight":0,"graph_rebuild_inflight":0,'
+            '"graph_pre_reset_spillover_incremental_inflight":0,'
+            '"graph_pre_reset_spillover_rebuild_inflight":0,'
+            '"source_scan_pages":0,"source_scan_bytes":0,'
         '"graph_topology_paths_enumerated":0,"graph_topology_stat_estimated_bytes":0,'
         '"graph_topology_actual_body_read_bytes":0,'
         '"wrapper_status":"installed","instrumentation_error":"ImportError"}',
@@ -351,6 +359,101 @@ def test_child_hook_measures_appeared_target_topology_reads_and_graph_execution_
     assert measured["graph_topology_actual_body_read_bytes"] == len(b"appeared-body")
     assert measured["graph_incremental_execution_elapsed_ms"] > 0
     assert measured["graph_rebuild_execution_elapsed_ms"] > 0
+
+
+def test_child_hook_reports_reset_crossing_graph_work_as_pre_reset_spillover(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    hook = benchmark.install_subprocess_instrumentation(state)
+    package = tmp_path / "exomem"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "index_sync.py").write_text("", encoding="utf-8")
+    (package / "find.py").write_text("def _walk_md(root): return ()\n", encoding="utf-8")
+    (package / "vault.py").write_text(
+        "def walk_vault_md(root): return ()\n"
+        "def read_bytes_without_pinning(path): return b''\n",
+        encoding="utf-8",
+    )
+    (package / "epistemic_graph.py").write_text(
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "class EpistemicGraphIndex:\n"
+        " def drain_paths(self, paths): Path(os.environ['DURABLE_CLOSURE_ENTERED']).write_text('entered'); time.sleep(0.08); return {}\n"
+        " def _rebuild_all_off_boundary(self): return None\n"
+        " def _sources_linking_to(self, targets, *, resolver=None): return set()\n",
+        encoding="utf-8",
+    )
+    control = state / "instrumentation-control.json"
+    environment = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join((str(hook), str(tmp_path))),
+        "DURABLE_CLOSURE_INSTRUMENTATION": str(state / "instrumentation.json"),
+        "DURABLE_CLOSURE_INSTRUMENTATION_CONTROL": str(control),
+        "DURABLE_CLOSURE_ENTERED": str(state / "entered"),
+    }
+    code = (
+        "import json, os, threading, time\n"
+        "from pathlib import Path\n"
+        "from exomem.epistemic_graph import EpistemicGraphIndex as I\n"
+        "index = I()\n"
+        "thread = threading.Thread(target=lambda: index.drain_paths([]))\n"
+        "thread.start()\n"
+        "entered = Path(os.environ['DURABLE_CLOSURE_ENTERED'])\n"
+        "deadline = time.monotonic() + 1\n"
+        "while not entered.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.001)\n"
+        "assert entered.exists()\n"
+        "Path(os.environ['DURABLE_CLOSURE_INSTRUMENTATION_CONTROL']).write_text(json.dumps({'id':'reset','action':'reset','phase':'timed'}))\n"
+        "thread.join()\n"
+    )
+    subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=environment, check=True, capture_output=True, text=True)
+
+    measured = json.loads((state / "instrumentation.json").read_text(encoding="utf-8"))
+    assert measured["graph_drain_attempts"] == measured["graph_drain_completed"] == 0
+    assert measured["graph_pre_reset_spillover_incremental_completed"] == 1
+    assert measured["graph_pre_reset_spillover_incremental_full_invocation_elapsed_ms"] > 0
+    assert measured["graph_incremental_inflight"] == measured["graph_pre_reset_spillover_incremental_inflight"] == 0
+
+
+def test_child_hook_applies_one_concurrent_reset_command_once(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    hook = benchmark.install_subprocess_instrumentation(state)
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(hook),
+        "DURABLE_CLOSURE_INSTRUMENTATION": str(state / "instrumentation.json"),
+    }
+    code = """
+import threading
+import sitecustomize as sc
+
+sc.stopping.set()
+sc.publish = lambda: None
+
+class Control:
+    def is_file(self): return True
+    def read_text(self, encoding): return "ignored"
+
+barrier = threading.Barrier(2)
+outer_checks = 0
+class CommandId(str):
+    def __eq__(self, other):
+        global outer_checks
+        if other is None:
+            outer_checks += 1
+            if outer_checks <= 2:
+                barrier.wait(timeout=1)
+        return super().__eq__(other)
+
+sc.control = Control()
+sc.json.loads = lambda raw: {"id": CommandId("one-reset"), "action": "reset", "phase": "timed"}
+threads = [threading.Thread(target=sc.command) for _ in range(2)]
+for thread in threads: thread.start()
+for thread in threads: thread.join(timeout=1)
+assert not any(thread.is_alive() for thread in threads)
+assert sc.data["measurement_epoch"] == 1, sc.data
+"""
+    subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=environment, check=True, capture_output=True, text=True)
 
 
 def test_missing_required_instrumentation_hook_is_not_silently_counted_as_zero(tmp_path: Path) -> None:
@@ -584,6 +687,118 @@ def test_corpus_provenance_has_varied_content_links_and_byte_digests(tmp_path: P
     assert all(len(entry["sha256"]) == 64 for entry in inventory)
     assert len(corpus["corpus_sha256"]) == 64
     assert any("[[Knowledge Base/Notes/Reference/" in (tmp_path / "vault" / entry["path"]).read_text(encoding="utf-8") for entry in inventory)
+
+
+def test_server_root_selects_actual_subprocess_package_and_changes_source_identity(tmp_path: Path) -> None:
+    roots: list[Path] = []
+    for name, marker in (("baseline", "baseline-source"), ("candidate", "candidate-source")):
+        root = tmp_path / name
+        package = root / "src" / "exomem"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text(f"MARKER = {marker!r}\n", encoding="utf-8")
+        roots.append(root)
+
+    baseline = benchmark.runtime_provenance(roots[0], Path(sys.executable))
+    candidate = benchmark.runtime_provenance(roots[1], Path(sys.executable))
+
+    assert baseline["source"]["root"] == str((roots[0] / "src").resolve())
+    assert candidate["source"]["root"] == str((roots[1] / "src").resolve())
+    assert baseline["source"]["package_origin"] == str((roots[0] / "src" / "exomem" / "__init__.py").resolve())
+    assert candidate["source"]["package_origin"] == str((roots[1] / "src" / "exomem" / "__init__.py").resolve())
+    assert baseline["source"]["sha256"] != candidate["source"]["sha256"]
+    assert baseline["python"]["executable"] == str(Path(sys.executable).absolute())
+    assert isinstance(baseline["python"]["packages"], list)
+
+
+def test_server_root_default_remains_current_tree_and_invalid_root_fails(tmp_path: Path) -> None:
+    environment = benchmark.benchmark_environment(tmp_path / "state", tmp_path / "vault")
+
+    assert benchmark.validate_server_root(benchmark.ROOT) == benchmark.ROOT.resolve()
+    assert environment["PYTHONPATH"] == str(benchmark.ROOT / "src")
+    try:
+        benchmark.validate_server_root(tmp_path / "not-a-server")
+    except ValueError as error:
+        assert "src/exomem" in str(error)
+    else:
+        raise AssertionError("a runner root without src/exomem must fail before benchmark setup")
+
+
+def test_runtime_provenance_keeps_the_supplied_venv_launcher_and_its_runtime_identity(tmp_path: Path) -> None:
+    venv = tmp_path / "runner-venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
+    runner = venv / "bin" / "python"
+    direct = subprocess.run(
+        [str(runner), "-c", "import json, sys; print(json.dumps({'executable': sys.executable, 'prefix': sys.prefix}))"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    runtime = json.loads(direct.stdout)
+
+    provenance = benchmark.runtime_provenance(benchmark.ROOT, runner)
+
+    assert provenance["python"]["invocation"] == str(runner)
+    assert provenance["python"]["runtime_executable"] == runtime["executable"]
+    assert provenance["python"]["prefix"] == runtime["prefix"] == str(venv)
+    assert isinstance(provenance["python"]["packages"], list)
+
+
+def test_runtime_provenance_distinguishes_clean_git_from_unavailable_git(tmp_path: Path) -> None:
+    clean_root = tmp_path / "clean"
+    (clean_root / "src" / "exomem").mkdir(parents=True)
+    (clean_root / "src" / "exomem" / "__init__.py").write_text("", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(clean_root)], check=True)
+    subprocess.run(["git", "-C", str(clean_root), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(clean_root), "-c", "user.name=benchmark", "-c", "user.email=benchmark@example.test", "commit", "-qm", "fixture"],
+        check=True,
+    )
+
+    assert benchmark.runtime_provenance(clean_root, Path(sys.executable))["git"]["dirty"] is False
+    non_git_root = tmp_path / "non-git"
+    (non_git_root / "src" / "exomem").mkdir(parents=True)
+    (non_git_root / "src" / "exomem" / "__init__.py").write_text("", encoding="utf-8")
+    assert benchmark.runtime_provenance(non_git_root, Path(sys.executable))["git"]["dirty"] is None
+
+
+def test_relative_python_launcher_is_anchored_once_to_runner_cwd_not_server_root(tmp_path: Path) -> None:
+    runner_cwd = tmp_path / "runner"
+    server_root = tmp_path / "server"
+    runner_launcher = runner_cwd / ".venv" / "bin" / "python"
+    server_launcher = server_root / ".venv" / "bin" / "python"
+    runner_launcher.parent.mkdir(parents=True)
+    server_launcher.parent.mkdir(parents=True)
+    runner_launcher.symlink_to(Path(sys.executable))
+    server_launcher.symlink_to(Path(sys.executable))
+
+    launcher = benchmark.normalize_python_launcher(Path(".venv/bin/python"), runner_cwd)
+
+    assert launcher == runner_launcher.absolute()
+    assert launcher != server_launcher.absolute()
+
+
+def test_relative_python_launcher_drives_registered_stdio_workflow(tmp_path: Path, monkeypatch: object) -> None:
+    runner_cwd = tmp_path / "runner"
+    launcher = runner_cwd / ".venv" / "bin" / "python"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(f"#!/bin/sh\nexec '{Path(sys.prefix) / 'bin' / 'python'}' \"$@\"\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.chdir(runner_cwd)  # type: ignore[attr-defined]
+
+    report = benchmark.asyncio.run(
+        benchmark.run_public_workflow(
+            python=Path(".venv/bin/python"),
+            state=tmp_path / "state",
+            vault=tmp_path / "vault",
+            pages=4,
+            profile=benchmark.MODEL_FREE_PROFILE,
+            timeout=30.0,
+            server_root=benchmark.ROOT,
+        )
+    )
+
+    assert report["runtime"]["python"]["invocation"] == str(launcher.absolute())
+    assert any(call["tool"] == "bootstrap" for call in report["calls"])
 
 
 def test_small_model_free_smoke_uses_one_registered_stdio_product_session(
