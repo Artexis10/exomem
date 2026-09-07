@@ -1430,6 +1430,86 @@ def reference_identity_snapshot_is_current(
             )
 
 
+def current_writer_resolver_entries(
+    vault_root: Path,
+    *,
+    freshness_key: tuple[int, int, str] | None = None,
+) -> tuple[tuple[str, str], ...] | None:
+    """Return broad resolver entries from an exactly current resident corpus.
+
+    Writer preparation may borrow this immutable path/title projection only
+    when the event-maintained corpus caption, semantic configuration, and live
+    broad Markdown membership still all identify the same corpus.  This is
+    intentionally read-only: a miss must leave both corpus and resolver caches
+    untouched for the existing disk fallback to handle.
+    """
+    root = Path(vault_root)
+    try:
+        cache_key = _corpus_cache_key(root)
+    except Exception:  # noqa: BLE001 - an unkeyable root has no authority
+        return None
+
+    with _CORPUS_CONTEXT_UPDATE_LOCK:
+        if freshness.external_pending(root) or not freshness.is_live(root, "vault"):
+            return None
+        checkpoint = freshness.consumer_checkpoint(root, "vault")
+        if checkpoint.triple is None or (
+            freshness_key is not None and freshness_key != checkpoint.triple
+        ):
+            return None
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
+            language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
+            if entry is None or caption != checkpoint or language_hash is None:
+                return None
+            census, context = entry
+            entries = context.resolver_entries
+
+    try:
+        configuration = _config_census(root)
+        relation_definitions = relation_registry.load_registry(root)
+        language = semantic_language_registry.load_registry(root)
+        membership = tuple(
+            sorted(path.relative_to(root).as_posix() for path in vault.walk_vault_md(root))
+        )
+    except Exception:  # noqa: BLE001 - an incomplete proof must decline reuse
+        return None
+
+    if (
+        configuration is None
+        or configuration != _stored_config_census(census)
+        or (
+            context.registry.core_version,
+            context.registry.extension_hash,
+        )
+        != (
+            relation_definitions.core_version,
+            relation_definitions.extension_hash,
+        )
+        or language_hash != f"{language.schema_version}:{language.content_hash}"
+        or tuple(path for path, _title in entries) != membership
+        or _config_census(root) != configuration
+    ):
+        return None
+
+    with _CORPUS_CONTEXT_UPDATE_LOCK:
+        if freshness.external_pending(root) or not freshness.is_live(root, "vault"):
+            return None
+        if freshness.consumer_checkpoint(root, "vault") != checkpoint:
+            return None
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            current = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            return (
+                entries
+                if current is not None
+                and current[1] is context
+                and _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key) == checkpoint
+                and _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key) == language_hash
+                else None
+            )
+
+
 def _resolve_reference_wikilink_from_context(
     context: SemanticCorpusContext,
     raw_target: str,
