@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "route": {
+    "method": "POST",
+    "pathTemplate": "/private/exomem/v2/agent/{surface_profile}/command/{command_name}"
+  },
+  "requiredHeaders": {
+    "x-exomem-expected-release": {
+      "maxBytes": 128,
+      "pattern": "^[0-9][0-9A-Za-z.+-]{0,127}$"
+    },
+    "x-exomem-expected-command-fingerprint": {
+      "maxBytes": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "x-exomem-expected-contract-digest": {
+      "maxBytes": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "expectedTuple": {
+    "surfaceProfile": "hosted-alpha-agent-v4",
+    "release": "0.73.1",
+    "commandFingerprint": "4b4b71280fec7915042483207b1ab0e15e916148ac1b88ef965e03671de80968",
+    "contractDigest": "60b5aec6f872874234a214e778e26ce57fa5805af8ce744bdd68efe8ca0fcb26"
+  },
+  "contractDigest": {
+    "algorithm": "sha256",
+    "canonicalJson": "sorted-keys-no-whitespace-utf8",
+    "excludeFields": [
+      "exomem_release",
+      "digest"
+    ]
+  },
+  "compatibilityFeature": "agent-command-binding-v1",
+  "errors": {
+    "invalidExpectedTuple": "HOSTED_EXPECTED_CONTRACT_INVALID",
+    "mismatchedExpectedTuple": "HOSTED_EXPECTED_CONTRACT_MISMATCH"
+  },
+  "idempotencyNamespace": "cell-principal"
+}

@@ -1,0 +1,34 @@
+## 1. Private agent contract and cell route
+
+- [ ] 1.1 Define `contracts/hosted-agent-command-binding-v1.json` and its compatibility feature marker with exact route, header bounds, digest semantics and error mapping; verify producer/consumer fixture tests agree before either repository implements forwarding.
+- [ ] 1.2 Add red-first tests in hosted agent/private-route/security suites for missing/duplicate/malformed/mismatched expected tuple, forged cell/principal, wrong credential and no vault/leaf access on denial; implement the additive v2 route in `server_hosted.py` and canonical context helpers without duplicating command semantics, then make those tests pass.
+- [ ] 1.3 Preserve v1 behavior and cross-version idempotency/lifecycle safety; verify an acknowledged or ambiguously acknowledged mutation cannot execute twice across the two routes, cancellation releases owned admission, and an old gateway remains compatible in hosted gateway/lifecycle tests.
+- [ ] 1.4 Publish the feature in signed candidate compatibility artifacts; verify candidate digest/signature, fixture synchronization and strict runtime identity tests, then produce the pinned release required by the Substrate companion without changing live state during acceptance.
+
+## 2. Shared gateway infrastructure
+
+- [ ] 2.1 Preflight the dedicated Cloudflare origin/tunnel ownership, gateway database region/access and secret provenance using read-only checks; verify the Substrate-owned exact-path rewrite can target that origin and confirm any previously exposed provisioning credential has a rotated/revoked receipt before live expansion, reporting missing authority without altering unrelated systems.
+- [ ] 2.2 Add the pinned Substrate gateway deployment/service/probes/drain and minimal secret references to `infra/helm/platform`; red-first extend Helm/infrastructure contract tests for no mounted Kubernetes admin token, bounded pools/resources, no billing/provider-admin credentials and required network isolation.
+- [ ] 2.3 Add only the dedicated origin DNS/tunnel route under foundation ownership, consumed by the Substrate-owned native Vercel rewrite; verify streaming/cancellation and canonical audience preservation, unexpected-path rejection, ingress-only trusted source metadata and unchanged website/OAuth/transfer routing with fixture tests, Terraform validation/plan inspection and rendered chart checks. No Worker or whole-site DNS change is required.
+- [ ] 2.4 Verify the fixed private ingress origin and NetworkPolicy against actual gateway and cell pods before public cutover; show the intended local cell call succeeds while unrelated workload/direct access and endpoint/Host/redirect injection fail, without exposing credentials in evidence.
+
+## 3. Resumable unattended acceptance
+
+- [ ] 3.1 Add `infra/scripts/accept_hosted_service.py` (or a thin canonical command over the same runner) and unit tests for run manifests, exact release identity, resumable stage state, secret redaction, precise blocked actions and owned-fixture cleanup; verify interruption/resume does not reset tenants or repeat committed writes.
+- [ ] 3.2 Add deterministic synthetic corpus generation and the normal-path OAuth/MCP client integration with the Substrate companion; verify at least 1,000 notes/10 MiB varied text, public authorization, canonical discovery, small durable capture and paraphrased semantic recall with resolvable citations and retrieval dependencies enabled.
+- [ ] 3.3 Automate fresh-client, refresh-expiry/replay, fleet renewal, revocation/suspension, wrong audience/client, database/cell outages, concurrent two-tenant sentinels and ambiguous-ack idempotency checks; verify explicit pass/fail/blocked reports and unattended continuation across the >15-minute and >1-hour live windows.
+- [ ] 3.4 Integrate the existing governed backup/isolated-restore workflow into acceptance; verify source tenant preservation, restored fixture integrity and run-owned cleanup without modifying unrelated vaults or cloud resources.
+- [ ] 3.5 Add comparable old/new-path cold/warm benchmarks with five concurrent clients across explicitly reserved synthetic tenants; verify the sample counts, corpus, vantage point, p50/p95/errors and stage attribution in the performance spec, with no implicit paid preview/database branch creation.
+- [ ] 3.6 Automate genuine host-client acceptance where authorized browser/host tools permit it; verify host certification evidence is tied to the exact artifact/runtime and generic protocol results cannot satisfy the host-specific gate. Checkpoint any irreducible consent once and continue independent stages.
+
+## 4. Integrated verification and launch
+
+- [ ] 4.1 During implementation run `uv run pytest -q tests/test_hosted_agent_surface.py tests/test_hosted_private_routes.py tests/test_hosted_gateway.py tests/test_hosted_security.py` and exact affected infra/runner tests with task-local state; at the tranche boundary run the documented full lean suite, relevant infra suite, `ruff check`, public-artifact validation and `openspec validate --all --strict --no-interactive`, retaining actual output and naming unrelated baseline failures.
+- [ ] 4.2 Obtain author-independent review of the actual paired transport/admission diff and independently reproduced negative/race tests; verify canonical fixture agreement before publishing ready PRs and retain worktrees through review.
+- [ ] 4.3 Deploy the additive runtime and privately tested gateway in dependency order through existing governed release operations, activate the runtime using the Substrate companion, then switch only the public MCP edge path; verify URL/audience continuity and exact-origin rollback without deleting grants.
+- [ ] 4.4 Run the live service report through safety, usefulness, latency, restore and continuity gates with the runtime frozen; verify all required stages before expanding access and report supported clients separately from pending marketplace certification.
+- [ ] 4.5 Update launch/reconnect/rollback runbooks and reconcile affected active release/client-planning artifacts; verify strict OpenSpec validation, synchronize deltas preserving newer requirements and archive only with actual non-optional task and delivery evidence.
+
+## Execution dependencies
+
+The runtime binding (section 1) and Substrate admission can be implemented concurrently after the fixture contract is agreed. Infrastructure work starts against the gateway image/environment contract, not an invented duplicate handler. Acceptance runner scaffolding is independent; its live execution waits for the reviewed runtime, admission and gateway. Edge authority, missing credentials and host consent are distinct blocked nodes with exact next actions; they do not block ready local work. Start the unattended continuity window as soon as a fixed candidate is deployed and perform other checks while it elapses.
