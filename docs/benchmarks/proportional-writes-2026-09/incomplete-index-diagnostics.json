@@ -4,7 +4,7 @@
   "diagnostic": "durable-closure-common-subset",
   "evidence_format": 2,
   "medians": [],
-  "method": "Incomplete attempted cohort; interrupted during third Basic Memory startup after detecting that sentinel readiness admitted partial indexes. No comparative median is accepted.",
+  "method": "Incomplete attempted cohort; interrupted during the third Basic Memory run after detecting that sentinel readiness admitted partial indexes. That run performed public writes and reads, but its final closure outcome was not observed. No comparative median is accepted.",
   "readiness_defect": {
     "observations": [
       {
@@ -50,7 +50,7 @@
         "text_index_rows_at_inspection": 1604
       }
     ],
-    "reason": "Sentinel readiness admitted Basic Memory after only its first indexing batch. No comparative median is accepted. Cohort interrupted during the third Basic Memory startup; no8000runs started.",
+    "reason": "Sentinel readiness admitted Basic Memory after only its first indexing batch. No comparative median is accepted. Cohort interrupted during the third Basic Memory run after public writes and reads; final closure was not observed. No 8000-page runs started.",
     "status": "invalid_for_indexed_corpus_comparison"
   },
   "rows": [

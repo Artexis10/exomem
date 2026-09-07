@@ -78,8 +78,9 @@ However, inspecting the run-owned stores exposed a setup defect:
 The two timed creations account for Exomem's additional rows. Basic Memory's
 sentinel could become searchable during its first indexing batch, allowing the
 workflow to start before most fixture notes entered its resolver and search
-index. The third Basic Memory startup was interrupted when this defect was
-identified; no 8,000-page run began in this cohort.
+index. The third Basic Memory run was interrupted when this defect was
+identified. Its logs show public writes and reads had occurred, but no final
+closure result was captured; no 8,000-page run began in this cohort.
 
 [Incomplete-index diagnostics](proportional-writes-2026-09/incomplete-index-diagnostics.json)
 retain every completed timed call, phase, correctness result, runtime and host
