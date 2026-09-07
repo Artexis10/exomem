@@ -520,6 +520,10 @@ class FreshnessSnapshot:
     def requires_live_recall(self) -> bool:
         return self._require_live_recall
 
+    def projection_is_lagging(self, scope: str) -> bool:
+        """Whether admission proved only this scope's published projection."""
+        return scope in self._stale_recall_scopes
+
     def kb(self) -> tuple[int, int, str]:
         if self._kb is None:
             live = freshness.triple(self._root, "kb")
@@ -1557,6 +1561,7 @@ def find(
             prefer_compiled,
             prefer_active,
             widen_outside_kb,
+            snapshot.projection_is_lagging("vault") if widen_outside_kb else False,
             resolved_config,
         )
         with _span(timings, "freshness"):
@@ -4733,6 +4738,12 @@ def _find_outside_kb(
     from . import bm25, lexstore, readiness
 
     managed = readiness.runtime_managed()
+    if managed and snapshot is not None and snapshot.projection_is_lagging("vault"):
+        # Ordinary recall can use its proven pending overlay, but widening has
+        # no such overlay and requires the current vault catalogue. Its cache
+        # key also distinguishes this state from a previously live reserve.
+        _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
+        return []
     vault_freshness = snapshot.for_scope("vault") if snapshot is not None else None
     snapshot = snapshot or FreshnessSnapshot(vault_root)
     #: Applied per candidate AFTER ranking. Only the unrestricted rungs need

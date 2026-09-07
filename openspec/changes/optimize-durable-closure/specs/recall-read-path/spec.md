@@ -29,3 +29,7 @@ After managed warm-up, ordinary recall SHALL re-prove a policy-compatible publis
 #### Scenario: Nested recall or an exception ends a request
 - **WHEN** another recall begins inside a request or a request exits through an exception
 - **THEN** its catalogue binding is isolated and the prior scope is restored without leaking admission to later unscoped queries
+
+#### Scenario: Requested outside-KB widening needs a live catalogue
+- **WHEN** ordinary KB recall is admitted but the vault catalogue used by an explicitly requested widening is lagging
+- **THEN** widening declines without a scan and preserves the KB results; a cached result from an earlier live widening cannot bypass that decline

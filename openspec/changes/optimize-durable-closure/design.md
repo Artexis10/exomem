@@ -55,6 +55,10 @@ Measure and reduce the critical path from durable writes to a verified useful re
 
 ## Risks / Trade-offs
 
+Requested outside-KB widening retains its stricter live-catalogue contract. A
+lagging admitted vault projection declines that optional reserve, and the hot
+cache key distinguishes lagging admission from a previously live widened result.
+
 
 - Optional graph omission changes ranking during repair: disclose it and never apply the relaxation to graph-dependent predicates.
 - A batch can partially commit: validate shared input first and return item outcomes; retry only failed items with stable mutation identity.
