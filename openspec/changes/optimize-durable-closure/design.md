@@ -1,6 +1,6 @@
 ## Context
 
-The current personal service and repository both identify as 0.71.0. The incident ledger establishes slow server work, not just a connector gap. The existing fast-ACK feature remains default-off. Its receipt/overlay guarantees are already implemented and must survive these changes. Live queues observed after the incident were empty; this does not establish their state during it.
+The service and repository identified as 0.71.0 when the incident was captured. The resumed before/after measurements use the current 0.73.1 product baseline at `5fc2e55d`; the later integrated main revisions do not change product source bytes. The incident ledger establishes slow server work, not just a connector gap. The existing fast-ACK feature remains default-off. Its receipt/overlay guarantees are already implemented and must survive these changes. Live queues observed after the incident were empty; this does not establish their state during it.
 
 Current ordinary hybrid retrieval admits a maintained lexical snapshot, but optional graph fallback requests an exactly current resolver. A resolver refusal escapes candidate collection and discards all otherwise valid lexical/vector results. Separately, the media command synchronously calls the multi-consumer deferred drain after reconciling an artifact. Neither coupling is necessary for its public semantics.
 
