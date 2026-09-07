@@ -725,14 +725,10 @@ class AcceptanceRunner:
             ):
                 raise AcceptanceError("mutation journal does not match its fixture payload")
             status = journal.get("status")
+            terminal: dict[str, Any] | None = None
             if status == "confirmed":
                 terminal = journal.get("terminal")
-                if not isinstance(terminal, dict) or not committed_tool_receipt(
-                    {"structuredContent": terminal}
-                ):
-                    raise AcceptanceError("confirmed mutation journal has no terminal")
-                return terminal
-            if status != "prepared":
+            elif status != "prepared":
                 raise AcceptanceError("mutation journal status is invalid")
             commit_arguments = journal.get("arguments")
             if not isinstance(commit_arguments, dict):
@@ -768,6 +764,28 @@ class AcceptanceRunner:
             expected_keys = set(expected_payload) | draft_names | supplied_review_fields
             if set(commit_arguments) != expected_keys:
                 raise AcceptanceError("prepared mutation journal does not match its fixture payload")
+            commit_arguments_sha256 = hashlib.sha256(
+                canonical_json(commit_arguments)
+            ).hexdigest()
+            if journal.get("commit_arguments_sha256") != commit_arguments_sha256:
+                raise AcceptanceError("prepared mutation journal does not match its fixture payload")
+            if status == "confirmed":
+                if (
+                    not isinstance(terminal, dict)
+                    or not committed_tool_receipt({"structuredContent": terminal})
+                ):
+                    raise AcceptanceError("confirmed mutation journal has no terminal")
+                acknowledgement_sha256 = hashlib.sha256(
+                    canonical_json(
+                        {
+                            "commit_arguments_sha256": commit_arguments_sha256,
+                            "terminal": terminal,
+                        }
+                    )
+                ).hexdigest()
+                if journal.get("acknowledgement_sha256") != acknowledgement_sha256:
+                    raise AcceptanceError("confirmed mutation journal has no terminal")
+                return terminal
         else:
             validation_arguments = {
                 **payload,
@@ -817,6 +835,9 @@ class AcceptanceRunner:
                 {
                     "mutation": mutation,
                     "payload_hash": payload_hash,
+                    "commit_arguments_sha256": hashlib.sha256(
+                        canonical_json(commit_arguments)
+                    ).hexdigest(),
                     "idempotency_key": idempotency_key,
                     "status": "prepared",
                     "arguments": commit_arguments,
@@ -828,11 +849,23 @@ class AcceptanceRunner:
         if not committed_tool_receipt(result):
             raise AcceptanceError("remember commit has no durable acknowledgement")
         terminal = dict(_tool_result(result))
+        commit_arguments_sha256 = hashlib.sha256(
+            canonical_json(commit_arguments)
+        ).hexdigest()
         _atomic_json(
             journal_path,
             {
                 "mutation": mutation,
                 "payload_hash": payload_hash,
+                "commit_arguments_sha256": commit_arguments_sha256,
+                "acknowledgement_sha256": hashlib.sha256(
+                    canonical_json(
+                        {
+                            "commit_arguments_sha256": commit_arguments_sha256,
+                            "terminal": terminal,
+                        }
+                    )
+                ).hexdigest(),
                 "idempotency_key": idempotency_key,
                 "status": "confirmed",
                 "arguments": commit_arguments,
@@ -1015,7 +1048,7 @@ class AcceptanceRunner:
             raise error
         self._finish_benchmark_attempt(attempt_id, status="passed", summary={"warm": summaries, "cold_client_initialize": cold_summary})
         attempts = self.manifest()["stages"]["performance"]["benchmark_attempts"]
-        self.pass_stage("performance", {"attempt_id": attempt_id, "benchmark_attempts": attempts, "clients": 5, "tenant_clients": {"synthetic": 3, "isolation": 2}, "warm_samples_per_operation": 100, "cold_client_resets": 20, "cold_reset_semantics": "new MCPClient instance; no service, process, tenant, or storage reset", "warm_recall_semantics": "timed recall of the already-converged run-owned corpus fact; citation readback is verified outside the timed interval", "corpus": {"fixture": fixture, "cell_evidence": cell_corpus}, "runtime": {"configured": self.config["runtime"], "verified": {"status": "pending", "operator_action": "attach signed runtime evidence matching the configured tuple"}}, "warm": summaries, "cold_client_initialize": cold_summary, "targets_ms": targets})
+        self.pass_stage("performance", {"attempt_id": attempt_id, "benchmark_attempts": attempts, "clients": 5, "tenant_clients": {"synthetic": 3, "isolation": 2}, "warm_samples_per_operation": 100, "cold_client_resets": 20, "cold_reset_semantics": "new MCPClient instance; no service, process, tenant, or storage reset", "capture_measurement_semantics": "timed public validate-only round trip, prepared-journal durable write, public commit round trip, and confirmed-journal durable write", "warm_recall_semantics": "timed recall of the already-converged run-owned corpus fact; citation readback is verified outside the timed interval", "corpus": {"fixture": fixture, "cell_evidence": cell_corpus}, "runtime": {"configured": self.config["runtime"], "verified": {"status": "pending", "operator_action": "attach signed runtime evidence matching the configured tuple"}}, "warm": summaries, "cold_client_initialize": cold_summary, "targets_ms": targets})
 
     def evaluate_continuity(self, *, now: float | None = None) -> None:
         """Checkpoint token rotation and the post-renewal cell-backed read without waiting."""

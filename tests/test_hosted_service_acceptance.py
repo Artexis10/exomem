@@ -331,6 +331,7 @@ def test_remember_review_journal_replays_the_exact_prepared_commit_after_lost_ac
                     "terminal": True,
                     "status": "committed",
                     "mutated": True,
+                    "idempotency_key": "gateway-derived-key",
                 }
             }
 
@@ -386,6 +387,7 @@ def test_remember_review_journal_replays_the_exact_prepared_commit_after_lost_ac
     )
 
     assert terminal["state"] == "committed"
+    assert terminal["idempotency_key"] == "gateway-derived-key"
     assert len(calls) == 3
     assert calls[1] == calls[2]
     assert calls[1][1] == "stable-write-key"
@@ -393,7 +395,38 @@ def test_remember_review_journal_replays_the_exact_prepared_commit_after_lost_ac
         journal_path.read_text(encoding="utf-8")
     )["status"] == "confirmed"
     confirmed = json.loads(journal_path.read_text(encoding="utf-8"))
-    confirmed["terminal"]["state"] = "pending"
+    assert "acknowledgement_sha256" in confirmed
+    reused = runner.AcceptanceRunner.from_config(
+        _write_config(tmp_path), state_dir=tmp_path / "state", run_id="review-journal-001"
+    )
+    reused.prepare(resume=True)
+    assert reused.remember_with_review(
+        client,
+        mutation="protocol-reviewed-write",
+        arguments=arguments,
+        idempotency_key="stable-write-key",
+    ) == terminal
+    assert len(calls) == 3
+    confirmed["arguments"]["title"] = "Unexpected confirmed payload"
+    journal_path.write_bytes(runner.canonical_json(confirmed))
+    with pytest.raises(runner.AcceptanceError, match="prepared mutation journal"):
+        resumed.remember_with_review(
+            client,
+            mutation="protocol-reviewed-write",
+            arguments=arguments,
+            idempotency_key="stable-write-key",
+        )
+    confirmed["arguments"]["title"] = arguments["title"]
+    confirmed["terminal"]["idempotency_key"] = "swapped-gateway-key"
+    journal_path.write_bytes(runner.canonical_json(confirmed))
+    with pytest.raises(runner.AcceptanceError, match="confirmed mutation journal"):
+        resumed.remember_with_review(
+            client,
+            mutation="protocol-reviewed-write",
+            arguments=arguments,
+            idempotency_key="stable-write-key",
+        )
+    confirmed["terminal"] = None
     journal_path.write_bytes(runner.canonical_json(confirmed))
     with pytest.raises(runner.AcceptanceError, match="confirmed mutation journal"):
         resumed.remember_with_review(
@@ -503,7 +536,6 @@ def test_remember_review_commits_an_explicitly_committable_non_review_draft(
 
     assert "relation_disposition" not in commits[0]
     assert commits[0]["draft_id"] == "draft-free"
-
 
 def test_remember_review_uses_the_real_public_writer_two_phase_contract(
     tmp_path: Path, vault: Path
@@ -1022,6 +1054,7 @@ def test_benchmark_uses_five_concurrent_tenant_clients_and_never_passes_incomple
         assert evidence["warm_samples_per_operation"] == 100
         assert evidence["cold_client_resets"] == 20
         assert evidence["cold_reset_semantics"] == "new MCPClient instance; no service, process, tenant, or storage reset"
+        assert evidence["capture_measurement_semantics"] == "timed public validate-only round trip, prepared-journal durable write, public commit round trip, and confirmed-journal durable write"
         assert evidence["warm_recall_semantics"] == "timed recall of the already-converged run-owned corpus fact; citation readback is verified outside the timed interval"
         assert {sample["authorization"] for sample in requests} == {"Bearer synthetic-access", "Bearer isolation-access"}
         assert len([sample for sample in requests if sample["method"] == "initialize"]) == 124
