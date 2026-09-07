@@ -32,6 +32,7 @@ from . import (
     asr_runtime,
     deferred_index,
     embeddings,
+    epistemic_graph,
     extract,
     graph_sync,
     index_sync,
@@ -814,6 +815,7 @@ class MediaWorker:
         *,
         publication_intents: tuple[object, ...] | list[object] = (),
         recover_on_mismatch: bool = False,
+        parent_receipted_handoff: bool = False,
     ) -> bool:
         publication_intents = tuple(publication_intents)
         completed = False
@@ -880,13 +882,25 @@ class MediaWorker:
                     self._vault_root, build=False
                 ):
                     return False
-            completed = post_commit_batch_fanout(
-                self._vault_root,
-                list(token.replaced),
-                None,
-                None,
-                publication_intents=publication_intents,
+            fanout_scope = (
+                epistemic_graph.parent_receipted_graph_handoff(
+                    self._vault_root,
+                    state_root=get_manager()
+                    ._mutation_coordinator_for(self._vault_root)
+                    .state_root,
+                    receipts=tuple(receipts),
+                )
+                if parent_receipted_handoff
+                else contextlib.nullcontext()
             )
+            with fanout_scope:
+                completed = post_commit_batch_fanout(
+                    self._vault_root,
+                    list(token.replaced),
+                    None,
+                    None,
+                    publication_intents=publication_intents,
+                )
             if completed is True:
                 deferred_index.clear_full_receipts(self._vault_root, receipts)
                 completed = True
@@ -1056,8 +1070,9 @@ class MediaWorker:
         forced_recheck_at = 0.0
         try:
             while not self._stop_event.is_set():
-                self._drain_parent_results()
                 child = self._child
+                if child is not None:
+                    self._drain_parent_results()
                 if child is not None and child.poll() is not None:
                     returncode = child.returncode
                     child_pid = child.pid
@@ -1095,7 +1110,10 @@ class MediaWorker:
                         and signature == idle_signature
                         and now < forced_recheck_at
                     )
-                    if not settled and self._store.needs_worker():
+                    parent_work = not settled and self._store.has_parent_work()
+                    if parent_work:
+                        self._drain_parent_results()
+                    elif not settled and self._store.needs_worker():
                         idle_signature = None
                         refusal = _probe_writer_authority()
                         if refusal is not None:
@@ -1312,6 +1330,7 @@ class MediaWorker:
             [receipt],
             publication_intents=publication_intents,
             recover_on_mismatch=True,
+            parent_receipted_handoff=True,
         ):
             return
         self._store.finalize_result(
@@ -1368,6 +1387,7 @@ class MediaWorker:
             [receipt],
             publication_intents=publication_intents,
             recover_on_mismatch=True,
+            parent_receipted_handoff=True,
         ):
             return False
         return self._store.finalize_result(result, requeue_remaining=True, keep_ocr=True)

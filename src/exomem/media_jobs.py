@@ -1039,6 +1039,16 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def has_parent_work(self) -> bool:
+        """Whether the supervisor owns a result or stale blocked presentation."""
+        conn = self._connect()
+        try:
+            if conn.execute("SELECT 1 FROM media_job_results LIMIT 1").fetchone() is not None:
+                return True
+            return bool(self._blocked_compute_presentations(conn, limit=1))
+        finally:
+            conn.close()
+
     def discard_result(self, result: MediaJobResult) -> bool:
         """Drop a superseded handoff without touching a newer claim."""
         conn = self._connect()
@@ -1431,25 +1441,23 @@ class MediaJobStore:
             params.append(self._relative(binary_path))
         conn = self._connect()
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                candidates = conn.execute(
-                    f"SELECT id, state, last_error FROM jobs WHERE state IN ({placeholders})"
-                    f"{target_clause} AND NOT EXISTS (SELECT 1 FROM media_job_results "
-                    "WHERE media_job_results.job_id = jobs.id)",
-                    params,
-                ).fetchall()
-                admitted = [
-                    (int(row["id"]), str(row["state"]), row["last_error"])
-                    for row in candidates
-                    if allow_reconciliation_required
-                    or _classify_batch_write_failure(row["last_error"]) is None
-                ]
-                if not admitted:
-                    conn.commit()
-                    return 0
-                now = time.time()
-                changed = 0
+            candidates = conn.execute(
+                f"SELECT id, state, last_error FROM jobs WHERE state IN ({placeholders})"
+                f"{target_clause} AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                "WHERE media_job_results.job_id = jobs.id)",
+                params,
+            ).fetchall()
+            admitted = [
+                (int(row["id"]), str(row["state"]), row["last_error"])
+                for row in candidates
+                if allow_reconciliation_required
+                or _classify_batch_write_failure(row["last_error"]) is None
+            ]
+            if not admitted:
+                return 0
+            now = time.time()
+            changed = 0
+            with conn:
                 for job_id, state, error in admitted:
                     changed += conn.execute(
                         "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ? "
@@ -1458,11 +1466,7 @@ class MediaJobStore:
                         "WHERE media_job_results.job_id = jobs.id)",
                         (now, job_id, state, error),
                     ).rowcount
-                conn.commit()
-                return int(changed)
-            except Exception:
-                conn.rollback()
-                raise
+            return int(changed)
         finally:
             conn.close()
 
