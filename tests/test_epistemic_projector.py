@@ -351,6 +351,108 @@ def test_a_vault_without_collections_keeps_every_pre_existing_field_byte_identic
     assert "collections" not in snapshot.model_dump_json(exclude_defaults=True)
 
 
+def test_declared_subject_counts_use_matching_page_source_components(tmp_path: Path) -> None:
+    """Only matching eligible bodies contribute, and source derivatives collapse."""
+
+    def page(relative: str, body: str, *, sources: str = "", status: str = "active") -> None:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: insight\nstatus: {status}\n{sources}---\n{body}", encoding="utf-8"
+        )
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "_access.yaml").write_text(
+        "excluded:\n  - Private\n", encoding="utf-8"
+    )
+    page(
+        "Knowledge Base/Notes/one.md",
+        "Orchid Circle has a reusable detail.",
+        sources='sources: "[[Sources/A]]"\n',
+    )
+    page(
+        "Knowledge Base/Notes/derivative.md",
+        "A second Orchid Circle mention derives from the same source.",
+        sources='sources: "[[Sources/A]]"\n',
+    )
+    page(
+        "Knowledge Base/Notes/two.md",
+        "Orchid Circle appears under an independent source.",
+        sources='sources: "[[Sources/B]]"\n',
+    )
+    page(
+        "Knowledge Base/Notes/bridge.md",
+        "This bridge contains no declared name.",
+        sources='sources: ["[[Sources/A]]", "[[Sources/B]]"]\n',
+    )
+    page("Knowledge Base/Entities/profile.md", "Orchid Circle is listed here.")
+    page("Knowledge Base/Notes/old.md", "Orchid Circle used to be relevant.", status="archived")
+    page("Knowledge Base/Private/hidden.md", "Orchid Circle stays private.")
+    page("Knowledge Base/Notes/code.md", "```\nOrchid Circle\n```")
+    page("Knowledge Base/Notes/substring.md", "Orchid Circular is unrelated.")
+
+    projector = VaultProjector(
+        tmp_path,
+        runtime_surfaces=True,
+        declared_entity_subjects=("Orchid Circle", "Absent Ring"),
+    )
+    items = {item.id: item for item in projector._declared_entity_items()}
+
+    assert items["orchid circle"].raw["page_count"] == "3"
+    assert items["orchid circle"].raw["source_count"] == "2"
+    assert "reusable_facts" not in items["orchid circle"].raw
+    assert items["absent ring"].raw["page_count"] == "0"
+    assert items["absent ring"].raw["source_count"] == "0"
+
+
+@pytest.mark.parametrize(
+    ("relative", "expected_count"),
+    [
+        ("README.md", "0"),
+        ("Knowledge Base/_Schema/protocol.md", "0"),
+        ("Knowledge Base/Notes/index.md", "1"),
+        ("Knowledge Base/Notes/note.md", "1"),
+    ],
+)
+def test_declared_subject_counts_match_the_runtime_page_universe(
+    tmp_path: Path, relative: str, expected_count: str
+) -> None:
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("---\ntype: insight\nstatus: active\n---\nOrchid Circle appears here.\n")
+    projector = VaultProjector(
+        tmp_path, runtime_surfaces=True, declared_entity_subjects=("Orchid Circle",)
+    )
+
+    (item,) = projector._declared_entity_items()
+
+    assert item.raw["page_count"] == expected_count
+    assert item.raw["source_count"] == expected_count
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_declared_subject_counts_exclude_linked_files(tmp_path: Path, link_kind: str) -> None:
+    outside = tmp_path / "outside.md"
+    outside.write_text("---\ntype: insight\nstatus: active\n---\nOrchid Circle appears here.\n")
+    linked = tmp_path / "Knowledge Base/Notes/linked.md"
+    linked.parent.mkdir(parents=True)
+    try:
+        if link_kind == "symlink":
+            linked.symlink_to(outside)
+        else:
+            linked.hardlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"{link_kind} unavailable: {exc}")
+    projector = VaultProjector(
+        tmp_path, runtime_surfaces=True, declared_entity_subjects=("Orchid Circle",)
+    )
+
+    (item,) = projector._declared_entity_items()
+
+    assert item.raw["page_count"] == "0"
+    assert item.raw["source_count"] == "0"
+
+
 def test_a_seeded_planning_and_records_pair_appears_in_the_snapshot(tmp_path: Path) -> None:
     import sys
 
@@ -383,14 +485,14 @@ def test_a_seeded_planning_and_records_pair_appears_in_the_snapshot(tmp_path: Pa
 
 
 def test_the_collections_section_is_versioned(tmp_path: Path) -> None:
-    """0.4.0 adds the opt-in runtime-surface projection; the output schema moved.
+    """0.5.0 adds opt-in declared entity-subject measurements to runtime reads.
 
-    0.3.0 added `CollectionProjection.storage_source`. The version tracks what
-    the projector *can* emit, not what a given call did emit, so it moves for a
-    mode that emits signal and surface items the file-only build cannot produce
-    — even though this default-mode projection is byte-identical to 0.3.0's.
+    0.4.0 added runtime-surface projection. The version tracks what the
+    projector *can* emit, not what a given call did emit, so it moves for a mode
+    that emits declared-subject measurements — even though this default-mode
+    projection is byte-identical to 0.4.0's.
     """
 
     projected = VaultProjector(tmp_path).project(phase="p1", taken_at="2026-01-01T00:00:00Z")
 
-    assert projected.projector.version == "0.4.0"
+    assert projected.projector.version == "0.5.0"
