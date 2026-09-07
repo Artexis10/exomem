@@ -691,7 +691,10 @@ class ReviewStateStore:
                 records[key] = record
                 decision = record
             _compact_if_due(payload, now=moment, path=self.path)
-            self._write(payload, vocabulary_refs=(), vocabulary_families=())
+            self._write(
+                payload, vocabulary_refs=(), vocabulary_families=(),
+                vocabulary_review_id=review_id,
+            )
         return {
             "item_id": review_id,
             "ref": review_ref(review_id),
@@ -736,10 +739,10 @@ class ReviewStateStore:
         with _LOCK:
             payload = self.load()
             dispositions = payload["dispositions"]
-            from .vocabulary_notifications import REVIEW_FAMILIES
+            from .vocabulary_notifications import PROJECTION_FAMILIES
 
             vocabulary_families = (
-                (family,) if family in REVIEW_FAMILIES.values() else ()
+                (family,) if family in PROJECTION_FAMILIES else ()
             )
             if disposition == "normal":
                 record = dispositions.pop(family, None)
@@ -871,6 +874,7 @@ class ReviewStateStore:
         *,
         vocabulary_refs: Iterable[str] | None = None,
         vocabulary_families: Iterable[str] | None = None,
+        vocabulary_review_id: str | None = None,
     ) -> None:
         """Publish canonical state, then best-effort point-maintain its queue view.
 
@@ -901,6 +905,7 @@ class ReviewStateStore:
                 after_signature=after_signature,
                 vocabulary_refs=vocabulary_refs,
                 vocabulary_families=vocabulary_families,
+                vocabulary_review_id=vocabulary_review_id,
             )
         except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
             # Canonical review state is already durable.  Keeping the old

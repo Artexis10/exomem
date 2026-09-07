@@ -78,6 +78,51 @@ def test_family_quiet_preserves_explicit_work_and_integrity_state(tmp_path):
     assert "entity_type_unregistered" not in REVIEW_FAMILIES.values()
 
 
+@pytest.mark.parametrize("disposition", ["quiet", "off"])
+def test_originating_family_suppresses_advice_and_normal_restores_it(tmp_path, disposition):
+    from test_vocabulary_review import origin_currency
+
+    current = make_item(
+        family="entity-instance/v1", signal="entity-lifecycle",
+        logical_identity="entity-candidate:one", targets={"source:1": "v1"},
+        evidence=[Evidence("source:1", "v1")], registry_hashes={"entity_types": "r1"},
+        projection_status="current",
+        projection_currency=origin_currency(),
+    )
+    owner = review_state.ReviewStateStore(tmp_path)
+    owner.set_disposition("entity_recurrence", disposition, why="intentional: review on request")
+    assert deliver(tmp_path, current) is None
+    assert VocabularyState(tmp_path).get(current.ref)["state"] == "pending"
+    owner.set_disposition("entity_recurrence", "normal")
+    assert deliver(tmp_path, current)["ref"] == current.ref
+
+
+@pytest.mark.parametrize("action", ["dismiss", "snooze", "competing"])
+def test_origin_item_decision_suppresses_advice_and_reopen_restores_it(tmp_path, action):
+    from test_vocabulary_review import origin_item
+
+    current = origin_item()
+    owner = review_state.ReviewStateStore(tmp_path)
+    kwargs = {"until": (dt.date.today() + dt.timedelta(days=1)).isoformat()} if action == "snooze" else {}
+    owner.apply("0" * 24, "f" * 24, action=action, **kwargs)
+    assert deliver(tmp_path, current) is None
+    # A different review identity has no bearing on an unrelated vocabulary signal.
+    assert deliver(tmp_path, item())["ref"] == item().ref
+    owner.apply("0" * 24, "f" * 24, action="reopen")
+    assert deliver(tmp_path, current)["ref"] == current.ref
+
+
+def test_integrity_family_disposition_does_not_suppress_vocabulary_advice(tmp_path):
+    owner = review_state.ReviewStateStore(tmp_path)
+    owner.set_disposition("entity_type_unregistered", "off", why="intentional: integrity preference")
+    current = make_item(
+        family="entity-type/v1", signal="agent-meaning-question",
+        targets={"entity:one": "v1"}, evidence=[],
+        registry_hashes={"entity_types": "r1"}, projection_status="current",
+    )
+    assert deliver(tmp_path, current)["ref"] == current.ref
+
+
 def test_one_advisory_per_call_leaves_other_items_available(tmp_path):
     from exomem import vocabulary_notifications
 

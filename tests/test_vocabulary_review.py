@@ -23,7 +23,263 @@ def test_explicit_review_honors_off_without_hiding_quiet_work(tmp_path, disposit
     assert VocabularyState(tmp_path).get(item.ref)["ref"] == item.ref
 
 
-def setup_item(vault):
+@pytest.mark.parametrize("family", ["entity_recurrence", "vocabulary_entity_instances"])
+@pytest.mark.parametrize("disposition", ["off", "quiet"])
+def test_family_dispositions_compose_for_fresh_and_continued_pages(
+    tmp_path, monkeypatch, family, disposition
+):
+    from exomem import review_state
+
+    template, _ = setup_item(tmp_path, observe=False)
+    store = VocabularyState(tmp_path)
+    for index in range(4):
+        store.observe(make_item(
+            family="entity-instance/v1", signal="entity-lifecycle",
+            logical_identity=f"entity-candidate:{index}",
+            targets=dict(template.target_versions), evidence=list(template.evidence),
+            registry_hashes=dict(template.registry_hashes), projection_status="current",
+            projection_currency=origin_currency(index),
+        ))
+    with library_scope():
+        first = review.review(tmp_path, limit=1)
+        assert first["continuation"]
+        owner = review_state.ReviewStateStore(tmp_path)
+        owner.set_disposition(family, disposition, why="intentional: review on request")
+
+        def no_ledger_read(*_args, **_kwargs):
+            raise AssertionError("queue serving must not load the canonical ledger")
+
+        monkeypatch.setattr(review_state.ReviewStateStore, "load", no_ledger_read)
+        fresh = review.review(tmp_path, limit=1)
+        continued = review.review(tmp_path, continuation=first["continuation"], limit=1)
+        if disposition == "off":
+            assert fresh["items"] == continued["items"] == []
+        else:
+            assert fresh["items"][0]["family_dispositions"] == {family: "quiet"}
+            assert continued["items"][0]["family_dispositions"] == {family: "quiet"}
+            # A second continuation keeps the stored row fingerprint, not the annotation.
+            third = review.review(tmp_path, continuation=continued["continuation"], limit=1)
+            assert third["items"][0]["family_dispositions"] == {family: "quiet"}
+        all_page = review.review(tmp_path, state="all", limit=1)
+        assert all_page["items"][0]["family_dispositions"] == {family: disposition}
+        all_next = review.review(
+            tmp_path, state="all", continuation=all_page["continuation"], limit=1
+        )
+        assert all_next["items"][0]["family_dispositions"] == {family: disposition}
+
+
+def test_empty_projection_initialization_copies_preexisting_origin_disposition(tmp_path):
+    from exomem import deferred_index, review_state
+
+    owner = review_state.ReviewStateStore(tmp_path)
+    owner.set_disposition("entity_recurrence", "off", why="intentional: stop suggestions")
+    deferred_index.store_path(tmp_path).unlink()
+    # A different family's write initializes the empty projection from existing state.
+    owner.set_disposition("vocabulary_entity_instances", "normal")
+    current = make_item(
+        family="entity-instance/v1", signal="entity-lifecycle",
+        logical_identity="entity-candidate:one", targets={"source:one": "v1"},
+        evidence=[], registry_hashes={}, projection_status="current",
+        projection_currency=origin_currency(),
+    )
+    store = VocabularyState(tmp_path)
+    store.observe(current)
+    assert store.page()["items"] == []
+    assert store.page(state="all")["items"][0]["family_dispositions"] == {
+        "entity_recurrence": "off"
+    }
+
+
+def test_legacy_projection_requires_rebuild_before_serving_origin_dispositions(tmp_path, monkeypatch):
+    from exomem import deferred_index, review_state
+
+    current = make_item(
+        family="entity-instance/v1", signal="entity-lifecycle",
+        logical_identity="entity-candidate:one", targets={"source:one": "v1"},
+        evidence=[], registry_hashes={}, projection_status="current",
+        projection_currency=origin_currency(),
+    )
+    store = VocabularyState(tmp_path)
+    store.observe(current)
+    owner = review_state.ReviewStateStore(tmp_path)
+    owner.set_disposition("entity_recurrence", "off", why="intentional: stop suggestions")
+    conn = deferred_index._connect(tmp_path, create=True)
+    try:
+        with conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(vocabulary_review_meta)")}
+            if "family_projection_version" in columns:
+                conn.execute("ALTER TABLE vocabulary_review_meta DROP COLUMN family_projection_version")
+            conn.execute("DELETE FROM vocabulary_review_families WHERE family = 'entity_recurrence'")
+    finally:
+        conn.close()
+
+    def no_ledger_read(*_args, **_kwargs):
+        raise AssertionError("legacy projections must warm without loading the ledger")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(review_state.ReviewStateStore, "load", no_ledger_read)
+        assert store.page()["state"] == "warming"
+    # A point write cannot bless rows built with the old family semantics.
+    owner.set_disposition("vocabulary_entity_instances", "normal")
+    assert store.page()["state"] == "warming"
+    assert store.rebuild_review_projection()["state"] == "current"
+    assert store.page()["items"] == []
+    assert store.page(state="all")["items"][0]["family_dispositions"] == {
+        "entity_recurrence": "off"
+    }
+
+
+def test_origin_suppression_keeps_finite_window_and_fairness(tmp_path, monkeypatch):
+    from exomem import review_state, vocabulary_review_index
+
+    store = VocabularyState(tmp_path)
+    for index in range(40):
+        store.observe(make_item(
+            family="entity-instance/v1", signal="entity-lifecycle",
+            logical_identity=f"entity-candidate:{index}", targets={"source:one": "v1"},
+            evidence=[], registry_hashes={}, projection_status="current",
+            projection_currency=origin_currency(index),
+        ))
+    review_state.ReviewStateStore(tmp_path).set_disposition(
+        "entity_recurrence", "off", why="intentional: stop suggestions"
+    )
+    decoded = []
+    decode = vocabulary_review_index._decode_view
+
+    def counted(raw):
+        view = decode(raw)
+        decoded.append(view["ref"])
+        return view
+
+    monkeypatch.setattr(vocabulary_review_index, "_decode_view", counted)
+    assert store.page(limit=1)["items"] == []
+    first_window = set(decoded)
+    assert len(decoded) == len(first_window) == 16
+    decoded.clear()
+    second = store.page(limit=1)
+    assert second["items"] == []
+    assert second["coverage"]["exhaustive"] is False
+    assert len(decoded) == 16
+    assert first_window.isdisjoint(decoded)
+
+
+def origin_currency(index=0, fingerprint="f" * 24):
+    return {"review_ref": f"exomem://review/{index:024x}", "review_fingerprint": fingerprint}
+
+
+def origin_item(index=0, fingerprint="f" * 24):
+    return make_item(
+        family="entity-instance/v1", signal="entity-lifecycle",
+        logical_identity=f"exomem://review/{index:024x}", targets={"source:one": "v1"},
+        evidence=[], registry_hashes={}, projection_status="current",
+        projection_currency=origin_currency(index, fingerprint),
+    )
+
+
+@pytest.mark.parametrize("action", ["dismiss", "snooze", "competing"])
+def test_origin_item_decision_filters_fresh_and_continued_pages(tmp_path, monkeypatch, action):
+    import datetime as dt
+
+    from exomem import review_state
+
+    store = VocabularyState(tmp_path)
+    for index in range(4):
+        store.observe(origin_item(index))
+    first = store.page(limit=1)
+    hidden = next(item for item in store.page(state="all")["items"] if item["ref"] != first["items"][0]["ref"])
+    binding = hidden["projection"]["currency"]
+    review_id = review_state.parse_review_ref(binding["review_ref"])
+    owner = review_state.ReviewStateStore(tmp_path)
+    kwargs = {"until": (dt.date.today() + dt.timedelta(days=1)).isoformat()} if action == "snooze" else {}
+    owner.apply(review_id, binding["review_fingerprint"], action=action, **kwargs)
+
+    def no_ledger_read(*_args, **_kwargs):
+        raise AssertionError("serving originating decisions must not load the canonical ledger")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(review_state.ReviewStateStore, "load", no_ledger_read)
+        fresh = store.page()
+        continued = store.page(continuation=first["continuation"])
+        assert all(item["ref"] != hidden["ref"] for item in fresh["items"] + continued["items"])
+        assert len(continued["items"]) == 2
+        history = next(item for item in store.page(state="all")["items"] if item["ref"] == hidden["ref"])
+        assert history["origin_review"]["state"] == {"dismiss": "dismissed", "snooze": "snoozed", "competing": "competing"}[action]
+        assert history["state"] == "pending"
+    owner.apply(review_id, binding["review_fingerprint"], action="reopen")
+    assert hidden["ref"] in {item["ref"] for item in store.page()["items"]}
+
+
+def test_origin_snooze_expiry_uses_owner_inclusive_day_semantics(tmp_path, monkeypatch):
+    import datetime as dt
+
+    from exomem import review_state
+
+    store = VocabularyState(tmp_path)
+    store.observe(origin_item())
+    owner = review_state.ReviewStateStore(tmp_path)
+    owner.apply("0" * 24, "f" * 24, action="snooze", until="2030-01-02")
+    effective_state = review_state.ReviewStateStore.effective_state
+    day = dt.date(2030, 1, 2)
+
+    def on_day(self, *args, **kwargs):
+        return effective_state(self, *args, today=day, **kwargs)
+
+    monkeypatch.setattr(review_state.ReviewStateStore, "effective_state", on_day)
+    assert store.page()["items"] == []
+    assert store.page(state="all")["items"][0]["origin_review"]["state"] == "snoozed"
+    day = dt.date(2030, 1, 3)
+    assert store.page()["items"][0]["origin_review"]["state"] == "open"
+
+
+def test_origin_changed_fingerprint_reopens_without_rewriting_either_decision(tmp_path):
+    from exomem import review_state
+
+    store = VocabularyState(tmp_path)
+    original = origin_item()
+    store.observe(original)
+    owner = review_state.ReviewStateStore(tmp_path)
+    owner.apply("0" * 24, "f" * 24, action="dismiss")
+    before = owner.load()["records"]
+    assert store.page()["items"] == []
+    changed = origin_item(fingerprint="e" * 24)
+    store.observe(changed)
+    assert store.page()["items"][0]["origin_review"]["state"] == "open"
+    assert owner.load()["records"] == before
+    store.decide(changed, payload(changed.to_dict(), "defer"), actor="principal:test")
+    owner.apply("0" * 24, "f" * 24, action="reopen")
+    assert store.page()["items"] == []
+    assert store.page(state="all")["items"][0]["state"] == "deferred"
+
+
+def test_origin_decision_point_update_is_indexed_and_overflow_requires_rebuild(tmp_path):
+    from exomem import deferred_index, review_state
+
+    store = VocabularyState(tmp_path)
+    # Separate adapted rows can bind one originating review identity.
+    for index in range(5):
+        store.observe(make_item(
+            family="entity-instance/v1", signal="entity-lifecycle",
+            logical_identity=f"variant:{index}", targets={"source:one": "v1"},
+            evidence=[], registry_hashes={}, projection_status="current",
+            projection_currency=origin_currency(),
+        ))
+    owner = review_state.ReviewStateStore(tmp_path)
+    owner.apply("0" * 24, "f" * 24, action="dismiss")
+    assert store.page()["state"] == "warming"
+    assert store.rebuild_review_projection()["state"] == "current"
+    assert store.page()["items"] == []
+    conn = deferred_index._connect(tmp_path, create=True)
+    try:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT ref, origin_fingerprint FROM vocabulary_review_rows "
+            "WHERE origin_review_id = ? LIMIT 5", ("0" * 24,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert any("USING INDEX vocabulary_review_rows_origin" in row[-1] for row in plan)
+
+
+def setup_item(vault, *, observe=True):
     paths = {
         "a": "Knowledge Base/Entities/Organizations/a.md",
         "b": "Knowledge Base/Entities/Organizations/b.md",
@@ -46,7 +302,8 @@ def setup_item(vault):
         registry_hashes=review.registry_hashes(vault),
         projection_status="current",
     )
-    VocabularyState(vault).observe(current)
+    if observe:
+        VocabularyState(vault).observe(current)
     return current, paths
 
 

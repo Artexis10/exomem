@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 
 _MIN_WINDOW = 16
 _CONTINUATION_TTL_SECONDS = 15 * 60
+_FAMILY_PROJECTION_VERSION = 2
 _ACTIONABLE = frozenset({"pending", "proposed", "awaiting_approval", "applying"})
 _COVERAGE = {
     "source": "observed-work-items",
@@ -34,6 +35,12 @@ _COVERAGE = {
 
 class ProjectionUnavailable(RuntimeError):
     pass
+
+
+class OriginRefreshRequired(ProjectionUnavailable):
+    def __init__(self, route: dict[str, Any]) -> None:
+        self.route = route
+        super().__init__("origin review binding requires refresh")
 
 
 class PublicContinuationError(ValueError):
@@ -58,9 +65,20 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             state TEXT NOT NULL,
             priority INTEGER NOT NULL,
             view_json TEXT NOT NULL,
+            origin_review_id TEXT,
+            origin_fingerprint TEXT,
+            origin_decision_json TEXT,
             revision INTEGER NOT NULL
         )
         """
+    )
+    row_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(vocabulary_review_rows)")}
+    for column in ("origin_review_id", "origin_fingerprint", "origin_decision_json"):
+        if column not in row_columns:
+            conn.execute(f"ALTER TABLE vocabulary_review_rows ADD COLUMN {column} TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS vocabulary_review_rows_origin "
+        "ON vocabulary_review_rows(origin_review_id)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS vocabulary_review_rows_priority "
@@ -84,10 +102,21 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             source_mtime_ns INTEGER,
             source_ctime_ns INTEGER,
             projection_revision INTEGER NOT NULL DEFAULT 0,
+            family_projection_version INTEGER NOT NULL DEFAULT 0,
             rebuild_required INTEGER NOT NULL CHECK(rebuild_required IN (0, 1))
         )
         """
     )
+    meta_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(vocabulary_review_meta)")
+    }
+    if "family_projection_version" not in meta_columns:
+        # Old rows lack originating-family dispositions even when their source
+        # signature matches. Only initialization/rebuild can certify coverage.
+        conn.execute(
+            "ALTER TABLE vocabulary_review_meta "
+            "ADD COLUMN family_projection_version INTEGER NOT NULL DEFAULT 0"
+        )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS vocabulary_review_progress (
@@ -147,25 +176,36 @@ def _view_fingerprint(view: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _upsert_row(conn: sqlite3.Connection, section: Mapping[str, Any], ref: str) -> None:
+def _upsert_row(conn: sqlite3.Connection, payload: Mapping[str, Any], ref: str) -> None:
+    from . import review_state
+    from .vocabulary_notifications import origin_review_binding
     from .vocabulary_state import _view
 
+    section = payload["vocabulary"]
     items = section.get("items")
     if not isinstance(items, Mapping) or ref not in items:
         conn.execute("DELETE FROM vocabulary_review_rows WHERE ref = ?", (ref,))
         return
     view = _view(dict(section), ref)
+    binding = origin_review_binding(view)
+    origin_id, origin_fingerprint = binding if binding else (None, None)
+    record = payload.get("records", {}).get(review_state._record_key(*binding)) if binding else None
     state = str(view["state"])
     conn.execute(
         """
-        INSERT INTO vocabulary_review_rows(ref, fingerprint, family, state, priority, view_json, revision)
-        VALUES (?, ?, ?, ?, ?, ?, 1)
+        INSERT INTO vocabulary_review_rows(
+            ref, fingerprint, family, state, priority, view_json, revision,
+            origin_review_id, origin_fingerprint, origin_decision_json
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
         ON CONFLICT(ref) DO UPDATE SET
             fingerprint=excluded.fingerprint,
             family=excluded.family,
             state=excluded.state,
             priority=excluded.priority,
             view_json=excluded.view_json,
+            origin_review_id=excluded.origin_review_id,
+            origin_fingerprint=excluded.origin_fingerprint,
+            origin_decision_json=excluded.origin_decision_json,
             revision=vocabulary_review_rows.revision + 1
         """,
         (
@@ -175,6 +215,7 @@ def _upsert_row(conn: sqlite3.Connection, section: Mapping[str, Any], ref: str) 
             state,
             _priority(state),
             json.dumps(view, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+            origin_id, origin_fingerprint, json.dumps(record) if record is not None else None,
         ),
     )
 
@@ -204,16 +245,17 @@ def _set_meta(
         """
         INSERT INTO vocabulary_review_meta(
             singleton, source_dev, source_ino, source_size, source_mtime_ns, source_ctime_ns,
-            projection_revision, rebuild_required
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+            projection_revision, rebuild_required, family_projection_version
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(singleton) DO UPDATE SET
             source_dev=excluded.source_dev, source_ino=excluded.source_ino,
             source_size=excluded.source_size, source_mtime_ns=excluded.source_mtime_ns,
             source_ctime_ns=excluded.source_ctime_ns,
             projection_revision=excluded.projection_revision,
-            rebuild_required=excluded.rebuild_required
+            rebuild_required=excluded.rebuild_required,
+            family_projection_version=excluded.family_projection_version
         """,
-        (*values, revision, int(rebuild_required)),
+        (*values, revision, int(rebuild_required), _FAMILY_PROJECTION_VERSION),
     )
 
 
@@ -233,6 +275,7 @@ def publish_delta(
     after_signature: tuple[int, int, int, int, int] | None,
     vocabulary_refs: Iterable[str] | None,
     vocabulary_families: Iterable[str] | None,
+    vocabulary_review_id: str | None = None,
 ) -> None:
     """Point-maintain an already-current projection after canonical publication."""
     refs = tuple(vocabulary_refs) if vocabulary_refs is not None else None
@@ -250,13 +293,18 @@ def publish_delta(
                 return
             meta = conn.execute(
                 "SELECT source_dev, source_ino, source_size, source_mtime_ns, source_ctime_ns, "
-                "rebuild_required FROM vocabulary_review_meta WHERE singleton = 1"
+                "rebuild_required, family_projection_version "
+                "FROM vocabulary_review_meta WHERE singleton = 1"
             ).fetchone()
             section = payload.get("vocabulary")
             if not isinstance(section, Mapping):
                 _invalidate(conn)
                 return
-            current = meta is not None and not bool(meta[5]) and _meta_signature(meta) == before_signature
+            current = (
+                meta is not None and not bool(meta[5])
+                and meta[6] == _FAMILY_PROJECTION_VERSION
+                and _meta_signature(meta) == before_signature
+            )
             initialize = before_signature is None or (
                 meta is None and not section.get("items")
             )
@@ -268,8 +316,29 @@ def publish_delta(
                 conn.execute("DELETE FROM vocabulary_review_families")
                 conn.execute("DELETE FROM vocabulary_review_progress")
                 conn.execute("DELETE FROM vocabulary_review_continuations")
+                from .vocabulary_notifications import PROJECTION_FAMILIES
+
+                families = tuple(PROJECTION_FAMILIES)
             for ref in refs:
-                _upsert_row(conn, section, ref)
+                _upsert_row(conn, payload, ref)
+            if vocabulary_review_id is not None:
+                from . import review_state
+
+                origin_rows = conn.execute(
+                    "SELECT ref, origin_fingerprint FROM vocabulary_review_rows "
+                    "WHERE origin_review_id = ? LIMIT 5", (vocabulary_review_id,),
+                ).fetchall()
+                if len(origin_rows) > 4:
+                    _invalidate(conn)
+                    return
+                for ref, fingerprint in origin_rows:
+                    record = payload.get("records", {}).get(
+                        review_state._record_key(vocabulary_review_id, fingerprint)
+                    )
+                    conn.execute(
+                        "UPDATE vocabulary_review_rows SET origin_decision_json = ? WHERE ref = ?",
+                        (json.dumps(record) if record is not None else None, ref),
+                    )
             for family in families:
                 _upsert_family(conn, payload, family)
             _set_meta(conn, after_signature, rebuild_required=False)
@@ -310,10 +379,15 @@ def _principal_digest() -> str:
 def _fresh(conn: sqlite3.Connection, path: Path) -> bool:
     signature = _signature(path)
     row = conn.execute(
-        "SELECT source_dev, source_ino, source_size, source_mtime_ns, source_ctime_ns, rebuild_required "
+        "SELECT source_dev, source_ino, source_size, source_mtime_ns, source_ctime_ns, "
+        "rebuild_required, family_projection_version "
         "FROM vocabulary_review_meta WHERE singleton = 1"
     ).fetchone()
-    return row is not None and not bool(row[5]) and _meta_signature(row) == signature
+    return (
+        row is not None and not bool(row[5])
+        and row[6] == _FAMILY_PROJECTION_VERSION
+        and _meta_signature(row) == signature
+    )
 
 
 def _decode_view(raw: str) -> dict[str, Any]:
@@ -366,30 +440,64 @@ def _store_continuation(
     return token
 
 
+def _served_view(
+    conn: sqlite3.Connection,
+    vault_root: Path,
+    view: dict[str, Any],
+    *,
+    state: str,
+    visible: Callable[[Mapping[str, Any]], bool] | None,
+) -> dict[str, Any] | None:
+    from . import review_state
+    from .vocabulary_notifications import origin_review_binding, origin_review_status, review_families
+
+    dispositions = {}
+    for family in review_families(str(view["family"]), str(view["signal"])):
+        row = conn.execute(
+            "SELECT disposition FROM vocabulary_review_families WHERE family = ?", (family,)
+        ).fetchone()
+        if row is not None:
+            dispositions[family] = str(row[0])
+    if state != "all" and "off" in dispositions.values():
+        return None
+    if visible is not None and not visible(view):
+        return None
+    binding = origin_review_binding(view)
+    records = {}
+    if binding is not None:
+        row = conn.execute(
+            "SELECT origin_decision_json FROM vocabulary_review_rows WHERE ref = ?", (view["ref"],)
+        ).fetchone()
+        if row is not None and row[0] is not None:
+            records[review_state._record_key(*binding)] = json.loads(row[0])
+    origin = origin_review_status(vault_root, view, payload={"records": records})
+    if origin is not None:
+        if state != "all" and origin["state"] == "refresh_required":
+            raise OriginRefreshRequired(origin["context_route"])
+        if state != "all" and origin["state"] != "open":
+            return None
+        view = {**view, "origin_review": origin}
+    return {**view, "family_dispositions": dispositions} if dispositions else view
+
+
 def _visible_views(
     conn: sqlite3.Connection,
+    vault_root: Path,
     pairs: Iterable[tuple[str, str]],
     *,
+    state: str,
     visible: Callable[[Mapping[str, Any]], bool] | None,
-) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
+) -> list[tuple[dict[str, Any], str, str]]:
+    result: list[tuple[dict[str, Any], str, str]] = []
     for ref, fingerprint in pairs:
         row = conn.execute(
-            "SELECT fingerprint, family, view_json FROM vocabulary_review_rows WHERE ref = ?", (ref,)
+            "SELECT fingerprint, view_json FROM vocabulary_review_rows WHERE ref = ?", (ref,)
         ).fetchone()
         if row is None or row[0] != fingerprint:
             raise PublicContinuationError("VOCABULARY_CONTINUATION_STALE: refresh vocabulary review")
-        from .vocabulary_notifications import REVIEW_FAMILIES
-
-        family = conn.execute(
-            "SELECT disposition FROM vocabulary_review_families WHERE family = ?",
-            (REVIEW_FAMILIES.get(str(row[1]), str(row[1])),),
-        ).fetchone()
-        view = _decode_view(row[2])
-        if family is not None and family[0] == "off":
-            continue
-        if visible is None or visible(view):
-            result.append(view)
+        view = _served_view(conn, vault_root, _decode_view(row[1]), state=state, visible=visible)
+        if view is not None:
+            result.append((view, ref, fingerprint))
     return result
 
 
@@ -456,9 +564,11 @@ def page(
                     for pair in pairs
                 ):
                     raise ProjectionUnavailable("invalid continuation")
-                visible_rows = _visible_views(conn, [tuple(pair) for pair in pairs], visible=visible)
-                items = visible_rows[:limit]
-                remaining = [(str(row["ref"]), _view_fingerprint(row)) for row in visible_rows[limit:]]
+                visible_rows = _visible_views(
+                    conn, vault_root, [tuple(pair) for pair in pairs], state=state, visible=visible
+                )
+                items = [row[0] for row in visible_rows[:limit]]
+                remaining = [(row[1], row[2]) for row in visible_rows[limit:]]
                 result = {"state": "current", "items": items, "continuation": None, "coverage": _coverage()}
             else:
                 where = "priority = 0" if state == "open" else "1 = 1"
@@ -485,16 +595,9 @@ def page(
                     ).fetchall()
                 visible_rows = []
                 for row in rows:
-                    view = _decode_view(row[3])
-                    from .vocabulary_notifications import REVIEW_FAMILIES
-
-                    family = conn.execute(
-                        "SELECT disposition FROM vocabulary_review_families WHERE family = ?",
-                        (REVIEW_FAMILIES.get(str(view["family"]), str(view["family"])),),
-                    ).fetchone()
-                    if family is None or family[0] != "off":
-                        if visible is None or visible(view):
-                            visible_rows.append((view, row[0], row[1]))
+                    view = _served_view(conn, vault_root, _decode_view(row[3]), state=state, visible=visible)
+                    if view is not None:
+                        visible_rows.append((view, row[0], row[1]))
                 items = [row[0] for row in visible_rows[:limit]]
                 result = {"state": "current", "items": items, "continuation": None, "coverage": _coverage()}
             after = _signature(review_state_path)
@@ -530,6 +633,11 @@ def page(
             return result
         except PublicContinuationError:
             raise
+        except OriginRefreshRequired as exc:
+            return {
+                "state": "warming", "reason": "origin_review_refresh_required",
+                "recovery": exc.route, "items": [], "continuation": None, "coverage": _coverage(),
+            }
         except (
             ProjectionUnavailable,
             sqlite3.Error,
@@ -564,16 +672,16 @@ def rebuild(vault_root: Path, *, review_state_path: Path, payload: Mapping[str, 
             conn.execute("DELETE FROM vocabulary_review_progress")
             conn.execute("DELETE FROM vocabulary_review_continuations")
             for ref in section.get("items", {}):
-                _upsert_row(conn, section, str(ref))
-            from .vocabulary_notifications import REVIEW_FAMILIES
+                _upsert_row(conn, payload, str(ref))
+            from .vocabulary_notifications import PROJECTION_FAMILIES
 
-            for family in REVIEW_FAMILIES.values():
+            for family in PROJECTION_FAMILIES:
                 _upsert_family(conn, payload, family)
             _set_meta(conn, after, rebuild_required=False)
             return {
                 "state": "current",
                 "rows": len(section.get("items", {})),
-                "families": len(REVIEW_FAMILIES),
+                "families": len(PROJECTION_FAMILIES),
                 "notifications": "unchanged",
             }
     finally:

@@ -163,6 +163,20 @@ includes every latency sample, p50/p90, peak memory and instrumented whole-vault
 scan counts. Advisory-size and continuation bounds are asserted by the scoped
 vocabulary tests separately.
 
+## Existing review decisions
+
+The entity adapter reuses the lifecycle and curation owners shipped in v0.73.0.
+Independent overlap review reproduced two integration defects: an originating
+family set to off, and an individually dismissed or snoozed candidate, could
+remain actionable through the vocabulary queue. Both are corrected. Three
+original reproductions and 113 tests across vocabulary entities, review,
+notifications, vocabulary state, and review state passed independently.
+
+The tests cover fresh pages and continuations, explicit all-state inspection,
+snooze expiry, reopening, changed evidence, and safe refresh of older bindings.
+The derived queue composes the existing decisions without changing vocabulary
+meaning decisions or reading the full review ledger while serving a page.
+
 ## Activation boundary
 
 The v1 workflow retains existing confirmation rules. The v2 implementation

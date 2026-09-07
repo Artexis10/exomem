@@ -54,6 +54,7 @@ def from_candidate(vault_root: Path, candidate: Mapping[str, Any]) -> WorkItem:
     currency = {
         "provider": "entity-lifecycle/v1",
         "review_ref": binding["review_ref"],
+        "review_fingerprint": binding["review_fingerprint"],
         "candidate_state": binding["candidate_state"],
         "signal_version": binding["signal_version"],
         "binding_hash": _hash(binding),

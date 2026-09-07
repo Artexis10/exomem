@@ -219,7 +219,7 @@ def review(
         limit=limit,
         continuation=continuation,
         state=state,
-        # The index carries the three vocabulary dispositions.  Egress still
+        # The index composes vocabulary and originating-family dispositions. Egress still
         # runs for this fixed candidate window immediately before disclosure.
         visible=lambda item: _visible(vault_root, item),
     )

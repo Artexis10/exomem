@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -26,6 +26,58 @@ REVIEW_FAMILIES = MappingProxyType(
         "relation-type/v1": "vocabulary_relation_types",
     }
 )
+
+# Only adapted signals inherit an existing review owner's family. Integrity
+# findings remain independent from vocabulary consideration.
+ORIGINATING_REVIEW_FAMILIES = MappingProxyType({"entity-lifecycle": "entity_recurrence"})
+PROJECTION_FAMILIES = frozenset(
+    (*REVIEW_FAMILIES.values(), *ORIGINATING_REVIEW_FAMILIES.values())
+)
+
+
+def review_families(family: str, signal: str) -> tuple[str, ...]:
+    """The bounded set of dispositions that compose for one consideration."""
+    mapped = REVIEW_FAMILIES.get(family, family)
+    origin = ORIGINATING_REVIEW_FAMILIES.get(signal)
+    return (mapped, origin) if origin is not None and origin != mapped else (mapped,)
+
+
+def origin_review_binding(item: Mapping[str, Any]) -> tuple[str, str] | None:
+    """Read the lifecycle owner's exact material binding, never reconstruct it."""
+    if item.get("signal") != "entity-lifecycle":
+        return None
+    currency = item.get("projection", {}).get("currency", {})
+    fingerprint = currency.get("review_fingerprint")
+    if not isinstance(fingerprint, str) or len(fingerprint) != 24 or any(
+        char not in "0123456789abcdef" for char in fingerprint
+    ):
+        return None
+    try:
+        return review_state.parse_review_ref(currency.get("review_ref")), fingerprint
+    except ValueError:
+        return None
+
+
+def origin_review_status(
+    vault_root: Path, item: Mapping[str, Any], *, payload: dict[str, Any]
+) -> dict[str, Any] | None:
+    if item.get("signal") != "entity-lifecycle":
+        return None
+    binding = origin_review_binding(item)
+    if binding is None:
+        return {
+            "state": "refresh_required",
+            "context_route": {"tool": "review_item_context", "args": {"ref": item["ref"]}},
+        }
+    review_id, fingerprint = binding
+    state, decision = review_state.ReviewStateStore(vault_root).effective_state(
+        review_id, fingerprint, payload=payload
+    )
+    return {
+        "ref": review_state.review_ref(review_id), "fingerprint": fingerprint,
+        "state": state, "decision": decision.as_dict() if decision else None,
+    }
+
 
 # Legacy JSON notices and the machine-local reservation index retain the same
 # bounded history as the surfaced ledger.
@@ -123,12 +175,16 @@ def take_advisory(vault_root: Path, items: Sequence[WorkItem]) -> dict[str, Any]
         expires_at = (now + dt.timedelta(days=RETENTION_DAYS)).timestamp()
         for item in items:
             decision_key = f"{item.ref}:{item.fingerprint}"
+            origin = origin_review_status(vault_root, item.to_dict(), payload=payload)
             if (
                 selected is not None
                 or item.projection_status != "current"
                 or decision_key in section["decisions"]
-                or review_state.disposition_for(REVIEW_FAMILIES[item.family], payload=payload)
-                != "normal"
+                or (origin is not None and origin["state"] != "open")
+                or any(
+                    review_state.disposition_for(family, payload=payload) != "normal"
+                    for family in review_families(item.family, item.signal)
+                )
             ):
                 continue
             try:
