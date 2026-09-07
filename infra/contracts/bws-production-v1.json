@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "product": "exomem-hosted",
+  "environment": "production",
+  "bindings": {
+    "control-plane-key": {
+      "project_id": "69843186-5161-40a2-951f-b487011122ce",
+      "secret_id": "1d9caad4-9eba-4c62-90ec-b4a0017805cf",
+      "expected_key": "EXOMEM_CONTROL_PLANE_KEY",
+      "env": "EXOMEM_CONTROL_PLANE_KEY",
+      "format": "base64url-32"
+    }
+  }
+}

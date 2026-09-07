@@ -2,8 +2,8 @@
 
 # Secret handoff and rotation
 
-This runbook is the only supported path from Terraform, an operator prompt, or
-a pipe into Vercel and the static K3s Secret set. The command validates the
+This runbook is the supported path from a bound BWS entry, Terraform, an operator
+prompt, or a pipe into Vercel and the static K3s Secret set. The command validates the
 versioned destination matrix before reading a value. Values never appear in
 arguments or successful output; provider CLI output is captured and discarded.
 
@@ -55,6 +55,56 @@ infra/scripts/secret_handoff.py \
   --source stdin \
   --dry-run
 ```
+
+## BWS-owned control-plane key
+
+The existing production wrapping key is recorded in
+`infra/contracts/bws-production-v1.json`. The normal handoff uses this exact
+entry through the shared yadm `bwsx-secret` command; no provider export or
+name-based secret search is required. Install the shared tooling and use
+`harness bws-auth` in an operator terminal if this machine needs authentication.
+
+Check custody identity and format without printing the value:
+
+```bash
+bwsx-secret check \
+  --bindings "$repo_root/infra/contracts/bws-production-v1.json" control-plane-key
+```
+
+For an authorized delivery, choose the next unused destination version from
+the retained receipts and set `next_version` before running:
+
+```bash
+infra/scripts/secret_handoff.py \
+  --matrix "$matrix" \
+  --repository-root "$repo_root" \
+  --secret control_plane_key \
+  --version "${next_version:?set the next unused destination version}" \
+  --destination vercel.substrate.production.control-plane.active \
+  --source bws \
+  --vercel-project "$substrate_root"
+```
+
+The BWS helper verifies entry ID, project, expected key and canonical 32-byte
+base64url shape. The handoff captures its value in memory and fails without a
+fallback if retrieval fails. Dry-run does not contact BWS. Stdin/prompt remain
+deliberate compatibility inputs, not recovery from a failed BWS source.
+
+Shape is not decryptability: accepting recovery or rotation still requires
+the Substrate consumer's authenticated decryption and digest checks against
+existing envelopes. The binding records the existing key; it does not authorize
+generating another one. Other credentials, including the production database
+DSN, are not certified or migrated by this first binding. Do not substitute a
+generic `DATABASE_URL` entry from another product. The dormant gateway's new
+destinations still require their governed deployment artifacts.
+
+Adopting this matrix changes its full-file digest, even though the existing
+ciphertexts and destination selection are unchanged. Before the next K3s
+secret apply, publish a new immutable signed registry/public-key pair using
+the active-registry procedure below and pass `--verify-only` against this
+matrix. Retain the previous pair; do not re-encrypt secrets or rotate keys
+just to refresh the registry signature. This source binding does not apply
+anything to a running cluster.
 
 ## Terraform-owned credentials
 
