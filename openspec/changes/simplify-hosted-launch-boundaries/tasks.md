@@ -1,8 +1,8 @@
 ## 1. Private agent contract and cell route
 
-- [ ] 1.1 Define `contracts/hosted-agent-command-binding-v1.json` and its compatibility feature marker with exact route, header bounds, digest semantics and error mapping; verify producer/consumer fixture tests agree before either repository implements forwarding.
-- [ ] 1.2 Add red-first tests in hosted agent/private-route/security suites for missing/duplicate/malformed/mismatched expected tuple, forged cell/principal, wrong credential and no vault/leaf access on denial; implement the additive v2 route in `server_hosted.py` and canonical context helpers without duplicating command semantics, then make those tests pass.
-- [ ] 1.3 Preserve v1 behavior and cross-version idempotency/lifecycle safety; verify an acknowledged or ambiguously acknowledged mutation cannot execute twice across the two routes, cancellation releases owned admission, and an old gateway remains compatible in hosted gateway/lifecycle tests.
+- [x] 1.1 Define `contracts/hosted-agent-command-binding-v1.json` and its compatibility feature marker with exact route, header bounds, digest semantics and error mapping; verify producer/consumer fixture tests agree before either repository implements forwarding.
+- [x] 1.2 Add red-first tests in hosted agent/private-route/security suites for missing/duplicate/malformed/mismatched expected tuple, forged cell/principal, wrong credential and no vault/leaf access on denial; implement the additive v2 route in `server_hosted.py` and canonical context helpers without duplicating command semantics, then make those tests pass.
+- [x] 1.3 Preserve v1 behavior and cross-version idempotency/lifecycle safety; verify an acknowledged or ambiguously acknowledged mutation cannot execute twice across the two routes, cancellation releases owned admission, and an old gateway remains compatible in hosted gateway/lifecycle tests.
 - [ ] 1.4 Publish the feature in signed candidate compatibility artifacts; verify candidate digest/signature, fixture synchronization and strict runtime identity tests, then produce the pinned release required by the Substrate companion without changing live state during acceptance.
 
 ## 2. Shared gateway infrastructure
