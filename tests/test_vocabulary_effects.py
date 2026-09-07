@@ -2,8 +2,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from exomem import semantic_contract
-from exomem.vocabulary_effects import CanonicalWriteImage, classify_additive_effects
+from exomem.vocabulary_effects import CanonicalWriteImage, Effect, classify_additive_effects
+
+
+def test_effect_details_are_immutable_snapshots_with_an_empty_default() -> None:
+    default = Effect("entity.create", "entity.md")
+    supplied = {"relation": "supports"}
+    populated = Effect("edge.add", "note.md", details=supplied)
+    supplied["relation"] = "links_to"
+
+    assert default.as_dict()["details"] == {}
+    assert populated.as_dict()["details"] == {"relation": "supports"}
+    for effect in (default, populated):
+        with pytest.raises(TypeError):
+            effect.details["relation"] = "links_to"
 
 
 def _image(path: str, before: str | None, after: str | None) -> CanonicalWriteImage:
