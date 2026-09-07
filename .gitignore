@@ -82,3 +82,5 @@ snapshot_report.html
 
 # Test and E2E diagnostics written by CI jobs and local runs.
 test-results/
+# Local, regenerable Graft code-navigation index
+/graft/
