@@ -19,6 +19,7 @@ import time
 import weakref
 from collections.abc import Iterable, Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
@@ -51,6 +52,10 @@ from .kbdir import kb_dirname, kb_prefix
 from .markdown_relations import MarkdownRelation
 
 log = logging.getLogger(__name__)
+
+_PARENT_RECEIPTED_GRAPH_HANDOFFS: ContextVar[frozenset[tuple[Path, Path]]] = ContextVar(
+    "parent_receipted_graph_handoffs", default=frozenset()
+)
 
 
 def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
@@ -6659,10 +6664,11 @@ def _caller_can_carry_pending(
 
     Deferring repair to the queue is only honest for a caller that can *say* the
     graph has not converged. A mutation request can: its terminal carries the
-    `graph_sync` field. A direct library caller cannot -- it returns a leaf
-    result with nowhere to put the outcome, and its contract has always been a
-    converged graph, which is why `_join_registered_standalone` joins the
-    rebuild to completion for exactly this case.
+    `graph_sync` field. A receipted parent media handoff can retain its exact
+    durable full receipt for recovery. A direct library caller cannot -- it
+    returns a leaf result with nowhere to put the outcome, and its contract has
+    always been a converged graph, which is why `_join_registered_standalone`
+    joins the rebuild to completion for exactly this case.
 
     Deferring for a standalone caller does not merely under-report; it changes
     what the next call in the same process observes. Ten governance and
@@ -6674,8 +6680,40 @@ def _caller_can_carry_pending(
     """
     from .writer_lease import active_direct_mutation_guard, active_mutation_request_id
 
-    return active_mutation_request_id() is not None or active_direct_mutation_guard(
-        vault_root, state_root=mutation_coordinator.state_root
+    return (
+        active_mutation_request_id() is not None
+        or active_direct_mutation_guard(
+            vault_root, state_root=mutation_coordinator.state_root
+        )
+        or _parent_receipted_graph_handoff_active(
+            vault_root, mutation_coordinator.state_root
+        )
+    )
+
+
+@contextmanager
+def parent_receipted_graph_handoff(
+    vault_root: Path,
+    *,
+    state_root: Path,
+    receipts: tuple[deferred_index.DeferredReceipt, ...],
+) -> Iterator[None]:
+    """Allow one durable parent media handoff to report graph work as pending."""
+    if not receipts:
+        raise ValueError("a parent graph handoff requires durable full receipts")
+    scope = (Path(vault_root).resolve(), Path(state_root).resolve())
+    token = _PARENT_RECEIPTED_GRAPH_HANDOFFS.set(
+        _PARENT_RECEIPTED_GRAPH_HANDOFFS.get() | {scope}
+    )
+    try:
+        yield
+    finally:
+        _PARENT_RECEIPTED_GRAPH_HANDOFFS.reset(token)
+
+
+def _parent_receipted_graph_handoff_active(vault_root: Path, state_root: Path) -> bool:
+    return (Path(vault_root).resolve(), Path(state_root).resolve()) in (
+        _PARENT_RECEIPTED_GRAPH_HANDOFFS.get()
     )
 
 
@@ -6687,11 +6725,14 @@ def _join_registered_standalone(
     """Complete registered rebuilds for direct callers after their guard exits."""
     if result.outcome != "registered":
         return result
-    from .writer_lease import active_direct_mutation_guard, active_mutation_request_id
-
-    if active_mutation_request_id() is not None or active_direct_mutation_guard(
-        vault_root, state_root=mutation_coordinator.state_root
+    if _parent_receipted_graph_handoff_active(
+        vault_root, mutation_coordinator.state_root
     ):
+        graph_sync.start_registered_detached(
+            vault_root, state_root=mutation_coordinator.state_root
+        )
+        return result
+    if _caller_can_carry_pending(vault_root, mutation_coordinator):
         return result
     assert result.checkpoint is not None
     try:

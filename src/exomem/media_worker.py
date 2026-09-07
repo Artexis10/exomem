@@ -32,6 +32,7 @@ from . import (
     asr_runtime,
     deferred_index,
     embeddings,
+    epistemic_graph,
     extract,
     graph_sync,
     index_sync,
@@ -814,6 +815,7 @@ class MediaWorker:
         *,
         publication_intents: tuple[object, ...] | list[object] = (),
         recover_on_mismatch: bool = False,
+        parent_receipted_handoff: bool = False,
     ) -> bool:
         publication_intents = tuple(publication_intents)
         completed = False
@@ -880,13 +882,25 @@ class MediaWorker:
                     self._vault_root, build=False
                 ):
                     return False
-            completed = post_commit_batch_fanout(
-                self._vault_root,
-                list(token.replaced),
-                None,
-                None,
-                publication_intents=publication_intents,
+            fanout_scope = (
+                epistemic_graph.parent_receipted_graph_handoff(
+                    self._vault_root,
+                    state_root=get_manager()
+                    ._mutation_coordinator_for(self._vault_root)
+                    .state_root,
+                    receipts=tuple(receipts),
+                )
+                if parent_receipted_handoff
+                else contextlib.nullcontext()
             )
+            with fanout_scope:
+                completed = post_commit_batch_fanout(
+                    self._vault_root,
+                    list(token.replaced),
+                    None,
+                    None,
+                    publication_intents=publication_intents,
+                )
             if completed is True:
                 deferred_index.clear_full_receipts(self._vault_root, receipts)
                 completed = True
@@ -1312,6 +1326,7 @@ class MediaWorker:
             [receipt],
             publication_intents=publication_intents,
             recover_on_mismatch=True,
+            parent_receipted_handoff=True,
         ):
             return
         self._store.finalize_result(
@@ -1368,6 +1383,7 @@ class MediaWorker:
             [receipt],
             publication_intents=publication_intents,
             recover_on_mismatch=True,
+            parent_receipted_handoff=True,
         ):
             return False
         return self._store.finalize_result(result, requeue_remaining=True, keep_ocr=True)

@@ -3056,6 +3056,23 @@ def start_registered(vault_root: Path, *, state_root: Path | None = None) -> Gra
     return item[0].start()
 
 
+def start_registered_detached(
+    vault_root: Path, *, state_root: Path | None = None
+) -> GraphRebuildStart | None:
+    """Start one captured rebuild and release its request-local waiter without joining."""
+    key = _registration_key(vault_root, state_root)
+    pending = dict(_PENDING_WAITERS.get() or {})
+    item = pending.get(key)
+    if item is None or not isinstance(item[0], GraphRebuildRegistration):
+        return None
+    started = start_registered(vault_root, state_root=state_root)
+    current = dict(_PENDING_WAITERS.get() or {})
+    if current.get(key) is item:
+        current.pop(key, None)
+        _PENDING_WAITERS.set(current or None)
+    return started
+
+
 def registered_checkpoint(
     vault_root: Path, *, state_root: Path | None = None
 ) -> GraphSyncCheckpoint | None:
