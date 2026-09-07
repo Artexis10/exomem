@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Shared MCP gateway
 
 The Substrate gateway runs the canonical MCP handler beside tenant cells. The
