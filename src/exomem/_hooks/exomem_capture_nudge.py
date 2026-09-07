@@ -45,7 +45,7 @@ from pathlib import Path
 _KB_WRITE = re.compile(
     r"(?:exomem|knowledge[_-]?base).*(?:"
     r"note|add|edit|append|create_file|replace|remember|capture_source|"
-    r"preserve_evidence|manage_memory_file|"
+    r"preserve_evidence|preserve_artifacts|manage_memory_file|"
     r"connect_memory:(?:create-entity|accept-relation)|"
     # Structured-collection lifecycle writes. A turn that filed the record or
     # moved the plan item did exactly what the capture contract asks for, and
@@ -60,24 +60,30 @@ _KB_WRITE = re.compile(
 )
 
 REMINDER = (
-    "[Exomem capture check] This turn did substantial work. If your Exomem knowledge-base "
-    "skill is available, check whether the turn reached a durable conclusion or a "
-    "durable recurring entity recognized by the active entity registry, prioritizing "
-    "the selected knowledge packs. For an entity, first call "
-    'connect_memory(operation="resolve-entity", name=...). Update stable facts with '
-    "edit_memory or add a governed relation when one "
-    "active page matches. Only when none matches and the identity is stable, recurring, "
-    "central, and useful beyond this source may you call "
-    'connect_memory(operation="create-entity"). A single incidental mention, unresolved '
-    "identity, or transient participant stays in source/note context. Capture conclusions "
-    "as distilled compiled notes, not transcripts, then report Saved -> path. Where the "
-    "turn contradicted a conclusion an active page already states, supersede that page "
-    "with replace_memory instead of appending a correction beside it: nothing is "
-    "deleted either way, but two live versions of one conclusion both read as current. "
-    "Route a stated intent or commitment to Planning with plan_memory and an observed "
-    "outcome or event to Records with record_memory; when one landing does both, do "
-    "them together and report it once. "
-    "If neither case applies, or no Knowledge Base is configured, do nothing and stop."
+    "[Exomem capture check] After substantial work the active agent checks for a durable "
+    "conclusion, recurring entity or baseline. "
+    "Stable preference/recurring routine/historical baseline/durable affiliation needs "
+    "stability or recurrence plus reusable comparison/interpretation/decision value. "
+    "Fleeting/one-off/incidental/trivial/tentative stays quiet. "
+    "At balanced/maximal, after primary work, before the final response, "
+    'review_memory(mode="attention", categories=["entity_recurrence"], limit=3) once per session; '
+    "no local scan, no model. Resolve in the active entity registry/selected knowledge packs: "
+    'connect_memory(operation="resolve-entity"); stop on ambiguity; single incidental mention '
+    "stays in context. Uniquely resolved Entity: "
+    "narrow Entity facet, else compiled observation/proactive_capture; "
+    "affiliation relation/link_acceptance; Records only if compatible. Hydrate with "
+    "edit_memory an active match before duplicating; else "
+    'connect_memory(operation="create-entity") only for a stable recurring identity '
+    "useful beyond this source. Entity creation/substantial curation: confirmed "
+    "restructure_execution. Recheck that review ref only after a confirmed batch terminal receipt; "
+    "stop at the closure-only eighth recheck. Distilled notes, not transcripts. replace_memory "
+    "supersedes a contradicted conclusion, not a correction beside it. Stated intent -> "
+    "Planning/plan_memory; observed outcome -> Records/record_memory. Generated draft stays "
+    "ephemeral; selected is not write consent: proactive_capture keeps exact bytes as "
+    "Source/Evidence by role, not MIME. No handle: non-committing handoff; delivery needs Evidence "
+    "receipt/Record; no remote byte inference. Missing schema: "
+    "structural_suggestions/restructure_execution; relations: link_acceptance. Else/no "
+    "Knowledge Base: stop."
 )
 
 
@@ -180,7 +186,7 @@ def _hook_client() -> str:
         return explicit
     try:
         parts = {p.lower() for p in Path(__file__).resolve().parts}
-    except Exception:
+    except Exception:  # noqa: BLE001 — path resolution must not break the hook
         parts = set()
     if ".codex" in parts:
         return "codex"
@@ -264,7 +270,7 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
     for line in reversed([ln for ln in raw.splitlines() if ln.strip()]):
         try:
             obj = json.loads(line)
-        except Exception:
+        except Exception:  # noqa: BLE001 — malformed transcript rows are ignored
             continue
         payload = obj.get("payload")
         record = (
@@ -434,7 +440,7 @@ def _touch(stamp: Path) -> None:
     try:
         stamp.parent.mkdir(parents=True, exist_ok=True)
         stamp.write_text(str(time.time()), encoding="utf-8")
-    except Exception:
+    except Exception:  # noqa: BLE001 — the advisory marker is strictly best-effort
         pass
 
 
@@ -445,7 +451,7 @@ def _log(text: str) -> None:
         snippet = re.sub(r"\s+", " ", text)[-160:]
         with open(logp, "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge fired | {snippet}\n")
-    except Exception:
+    except Exception:  # noqa: BLE001 — logging must never break a stop hook
         pass
 
 
@@ -459,7 +465,7 @@ def main() -> int:
     try:
         raw = sys.stdin.read()
         data = json.loads(raw) if raw.strip() else {}
-    except Exception:
+    except Exception:  # noqa: BLE001 — malformed hook input must fail soft
         return 0
 
     if data.get("stop_hook_active") or data.get("stopHookActive"):  # already blocked once

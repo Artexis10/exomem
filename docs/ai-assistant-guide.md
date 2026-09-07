@@ -58,6 +58,17 @@ problem, diagnosed failure, reusable pattern, stable project fact, or conclusion
 that future agents should find. Save a concise compiled note, not a transcript.
 Capture raw material separately when provenance matters.
 
+Capture a stable preference, recurring routine, historical baseline, or durable
+affiliation only when both stability or recurrence and reusable comparison,
+interpretation, or decision value are clear. Put a facet or affiliation on a
+uniquely resolved Entity; otherwise write one concise compiled observation. Use
+Records only for an observed measurement accepted by a compatible existing
+collection. Fleeting preferences, one-off activity, incidental associations, trivial
+metrics, and tentative claims stay quiet; this never authorizes creating an Entity,
+collection, or schema. A concise observation or narrow Entity facet follows
+`proactive_capture`; an affiliation relation requires `link_acceptance`; Entity
+creation or substantial curation requires confirmed `restructure_execution`.
+
 ## Simple actions for agents
 
 Use the simple product actions as the first mental model. Product commands are
@@ -190,6 +201,32 @@ Agent behavior:
 2. Preserve the original file or text with `preserve_evidence` or `transfer_artifact`.
 3. Report the stored path and any metadata the server returns.
 
+### Adopt a generated artifact
+
+A generated draft is ephemeral. When the user selects, approves, sends, or
+publishes one offered output, the exact selected handle becomes eligible for
+preservation; the event is adoption evidence, not write consent. Under balanced
+or maximal prominence, agent-initiated preservation uses `proactive_capture`.
+An explicit save request remains an ordinary requested action.
+
+Choose Source or Evidence from purpose before transport: reasoning material is
+a Source, while an approved deliverable or proof-bearing final is Evidence.
+MIME never chooses. Pass the closed `adoption` envelope to `capture_source` or
+`preserve_artifacts` and preserve only `selected_file_id`; generated draft
+siblings create no canonical artifact. When no usable handle exists, report a
+non-committing `handoff_required` or `handoff_prepared` state. Do not substitute
+base64, a textual reconstruction, or a claim that the bytes were saved.
+
+A later send or publication is a separate delivery fact. Append it through
+`record_memory(..., delivery={...})` only after a committed local Evidence
+receipt and only into one existing compatible Records collection. The delivery
+envelope maps the caller-authored link, reported-reference, and verification
+fields; it creates no schema and sets no item values. Reported remote identity
+is unverified unless matching platform proof establishes remote byte equality.
+Missing schema may yield a `structural_suggestions` proposal, but creation or
+change remains confirmed `restructure_execution`; a separately accepted
+relation remains `link_acceptance`.
+
 ### Compile evidence
 
 User:
@@ -312,28 +349,13 @@ this**: both load the real skills from disk via `exomem setup`.
 Trim the tone line to your preference.
 
 ```text
-Use Exomem as my durable Knowledge Base.
+Use Exomem for governed knowledge, sources, evidence, decisions, and reusable conclusions; assistant-native memory is short-term/behavioural only.
 
-Treat Claude, ChatGPT, Codex, and other assistants' native memory as short-term
-or behavioural memory for preferences, routing, and working context. Exomem is
-the long-term governed store for project/domain knowledge, sources, evidence,
-decisions, and reusable conclusions.
+Without a loaded skill, call bootstrap(profile="compact") once per session and follow it.
 
-If no Exomem skill is loaded, call bootstrap(profile="compact") once at the
-start of a session and follow the returned contract.
+Search for prior projects, decisions, sources, failures, experiments, or domains; skip unrelated chit-chat/control and answered follow-ups. Cite hits. Empty is a scoped miss; retry terms or scope="vault" when absence matters.
 
-Search Exomem before answering when a turn touches my prior projects, notes,
-decisions, sources, failures, experiments, or domains. Do not search on unrelated
-chit-chat, short control prompts, or follow-ups where the current conversation
-already contains the needed KB evidence. Cite relevant hits. Treat an empty
-search as a scoped miss, not proof of absence; retry with better terms or
-scope="vault" when absence matters.
-
-Save durable conclusions on your own: decisions, solved problems, diagnosed
-failures, reusable patterns, and stable project context. Save concise compiled
-notes, not transcripts. Preserve raw sources or proof-bearing records separately
-when provenance matters. Use `edit_memory` for small corrections and
-`replace_memory` when a newer conclusion supersedes an older one.
+Save durable conclusions on your own: decisions, solved problems, diagnosed failures, reusable patterns/context, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; else one concise compiled observation; Records only for a compatible existing measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Concise observation or narrow Entity facet: `proactive_capture`; affiliation relation: `link_acceptance`; Entity creation or structural change: confirmed `restructure_execution`. Save compiled notes, not transcripts; keep raw sources/evidence separate. Use `edit_memory` for small corrections, `replace_memory` for supersession.
 ```
 
 ## Codex CLI

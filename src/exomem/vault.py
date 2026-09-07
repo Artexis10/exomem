@@ -4558,8 +4558,16 @@ def batch_atomic_write(
             raise ValueError(
                 "defer_graph_completion requires vault_root and post_commit_fanout=False"
             )
-        return _batch_atomic_write_locked(
-            writes,
+        caller_writes = list(writes)
+        from . import curation_witness
+
+        augmented_writes, curation_witness_state = curation_witness.augment_batch(
+            caller_writes,
+            vault_root=vault_root,
+            planned_write=PlannedWrite,
+        )
+        result = _batch_atomic_write_locked(
+            augmented_writes,
             vault_root=vault_root,
             required_guards=required_guards,
             completion_guards=completion_guards,
@@ -4569,6 +4577,8 @@ def batch_atomic_write(
             commit_point=commit_point,
             defer_graph_completion=defer_graph_completion,
         )
+        curation_witness.mark_consumed(curation_witness_state)
+        return result
 
 
 def _batch_atomic_write_locked(

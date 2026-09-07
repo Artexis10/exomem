@@ -167,6 +167,21 @@ def _body_for(action: str) -> dict[str, Any]:
             "compatibilityDigest": "e" * 64,
         }
         return body
+    if action == "renew-authorization":
+        # v2-only, so the flat version fields give way to a runtimeTarget.
+        body = _target_body()
+        body.pop("releaseVersion")
+        body.pop("protocolVersion")
+        body["runtimeTarget"] = {
+            "releaseVersion": "0.35.1",
+            "protocolVersion": "1",
+            "agentProfile": "hosted-alpha-agent-v1",
+            "gatewayContractDigest": "a" * 64,
+            "commandFingerprint": "c" * 64,
+            "schemaDigest": "d" * 64,
+            "compatibilityDigest": "e" * 64,
+        }
+        return body
     if action == "rotate-credential":
         return _target_body(
             phase="stage",
@@ -551,7 +566,7 @@ async def _complete_as_worker(
 
 
 @pytest.mark.asyncio
-async def test_api_exposes_exact_sixteen_post_paths_and_strict_pending_union(
+async def test_api_exposes_exact_seventeen_post_paths_and_strict_pending_union(
     api: tuple[httpx.AsyncClient, OperationRepository, Path],
 ) -> None:
     client, _, _ = api
@@ -562,6 +577,7 @@ async def test_api_exposes_exact_sixteen_post_paths_and_strict_pending_union(
         "rollback-rollforward",
         "rotate-credential",
         "quiesce",
+        "renew-authorization",
         "resume",
         "stop",
         "export",
@@ -586,7 +602,9 @@ async def test_api_exposes_exact_sixteen_post_paths_and_strict_pending_union(
         body["operationId"] = f"operation-{index}"
         body["fenceGeneration"] = index
         headers = _headers(f"idempotency-{index}")
-        if action in {"rollforward", "rollback-rollforward"}:
+        # v2-only actions: `provisioner-wire-v1.json` is the frozen rollback
+        # corpus and its digest is a lock anchor, so v1 never gains an action.
+        if action in {"rollforward", "rollback-rollforward", "renew-authorization"}:
             headers["X-Exomem-Provisioner-Protocol"] = WIRE_PROTOCOL_V2
         response = await client.post(
             f"/cells/{action}",

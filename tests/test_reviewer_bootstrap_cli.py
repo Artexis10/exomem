@@ -380,9 +380,7 @@ def test_load_locks_reads_the_candidates_profile_not_the_generated_root(
 
     def _write(root: pathlib.Path, declared: str, artifact: str) -> None:
         package = {**OPENAI_PACKAGE_LOCK, "profile": declared, "artifact_sha256": artifact}
-        (root / "claude.lock.json").write_text(
-            json.dumps({**package, "platform": "claude"})
-        )
+        (root / "claude.lock.json").write_text(json.dumps({**package, "platform": "claude"}))
         (root / "claude.zip.lock.json").write_text(
             json.dumps({"platform": "claude", "archive_sha256": "0d" * 32})
         )
@@ -574,9 +572,7 @@ def test_prepare_sizes_the_staged_release_from_stage_minutes(monkeypatch, tmp_pa
     cp = _prepare_cp(tmp_path)
 
     before = module.utc_now()
-    context = module.prepare(
-        cp, "cand-1", "reviewer@example.invalid", _locks(), None, 150
-    )
+    context = module.prepare(cp, "cand-1", "reviewer@example.invalid", _locks(), None, 150)
     after = module.utc_now()
 
     stage_call = next(call for call in cp.calls if call["label"] == "prepare-stage")
@@ -861,9 +857,7 @@ def _run_responses(*, owner_status: tuple[int, dict] | None = None):
     }
 
 
-def test_run_readiness_failure_makes_zero_reviewer_credential_calls(
-    monkeypatch, tmp_path
-) -> None:
+def test_run_readiness_failure_makes_zero_reviewer_credential_calls(monkeypatch, tmp_path) -> None:
     module = _load_module()
     monkeypatch.setattr(
         module, "chatgpt_cimd_identity", lambda *_: ("https://c/x.json", ["https://c/cb"])
@@ -1169,13 +1163,23 @@ def test_reset_releases_a_stranded_reviewer_tenant(tmp_path, capsys) -> None:
     assert "delete-op-1" in printed
 
 
-def test_reset_refuses_an_authority_that_bound_no_tenant(tmp_path) -> None:
+def test_reset_never_reaches_the_cleanup_preflight_without_a_consumed_authority(
+    tmp_path,
+) -> None:
     """Nothing but a consumed bootstrap authority can name a target.
 
     `reset` takes no tenant, cell or operation id from the operator. It reads the
     source operation off the authority record, so an authority that never
     consumed -- and therefore never created a reviewer tenant -- has nothing to
-    release and must stop before the preflight.
+    release and must stop before the preflight. That is the invariant; it is
+    unchanged.
+
+    What changed is the exit. This used to raise SystemExit, which is wrong now
+    that `reset` also reclaims the staged release and the internal canary: an
+    attempt that died before redeem is exactly the case where the leftover stage
+    most needs clearing, and a non-zero exit taught the operator to skip the
+    command that clears it. The stop is still absolute -- it simply reports
+    rather than fails.
     """
     module = _load_module()
     cp = _RecordingControlPlane(
@@ -1183,9 +1187,9 @@ def test_reset_refuses_an_authority_that_bound_no_tenant(tmp_path) -> None:
     )
     cp.state_dir = tmp_path
 
-    with pytest.raises(SystemExit, match="no consumed reviewer-bootstrap authority"):
-        module.reset(cp, expected_fence=7)
+    module.reset(cp, expected_fence=7)
 
+    # An empty state dir means nothing to reclaim, so this is still the only call.
     assert [call["label"] for call in cp.calls] == ["reset-authorities"]
 
 
@@ -1333,3 +1337,180 @@ def test_main_refuses_a_profile_consuming_command_without_a_profile(
 
     assert module.main() == 2
     assert "--profile is required" in capsys.readouterr().err
+
+
+class _StateDirControlPlane(_RecordingControlPlane):
+    """A recording control plane that also owns a state directory.
+
+    `reset` reclaims from what the attempt recorded on disk, so a double without
+    a state dir cannot exercise it at all.
+    """
+
+    def __init__(self, state_dir: pathlib.Path, responses: dict):
+        super().__init__(responses)
+        self.state_dir = state_dir
+
+
+def _record(state_dir: pathlib.Path, label: str, payload: dict) -> None:
+    (state_dir / f"{label}.json").write_text(json.dumps(payload))
+
+
+def _canary_request(platform: str) -> dict:
+    return {
+        "credentialKind": "internal_canary",
+        "platform": platform,
+        "tenantId": f"tenant-{platform}",
+        "candidateId": "candidate-1",
+        "assignmentId": "assignment-1",
+        "assignmentGeneration": 1,
+        "stagedClientReleaseId": f"stage-{platform}",
+        "oauthClientId": f"client-{platform}",
+        "expiresAt": "2026-09-07T07:00:00Z",
+        "fixtureVersion": "v2",
+    }
+
+
+def _reset_responses(**overrides) -> dict:
+    responses = {
+        "reset-authorities": (200, {"bootstrapAuthorities": []}),
+        "reset-revoke-run-canary-claude": (200, {"revoked": True}),
+        "reset-revoke-run-canary-openai": (200, {"revoked": True}),
+        "reset-fail-prepare-stage": (200, {"failed": True}),
+        "reset-fail-run-sibling-stage-claude": (200, {"failed": True}),
+    }
+    responses.update(overrides)
+    return responses
+
+
+def test_reset_revokes_every_canary_the_attempt_recorded(tmp_path) -> None:
+    """A live internal canary locks out the next bootstrap for 24 hours.
+
+    `DELETE /admin/reviewer-access` has always existed and was never called, so a
+    failed attempt cost a day rather than a retry. The selector cannot be
+    reconstructed from any admin route -- it is recoverable only from the request
+    this attempt wrote to its own state dir.
+    """
+    module = _load_module()
+    for platform in ("claude", "openai"):
+        _record(tmp_path, f"run-canary-{platform}.request", _canary_request(platform))
+    cp = _StateDirControlPlane(tmp_path, _reset_responses())
+
+    module.reset(cp, expected_fence=1)
+
+    revokes = [c for c in cp.calls if c["label"].startswith("reset-revoke-")]
+    assert len(revokes) == 2
+    for call, platform in zip(revokes, ("claude", "openai"), strict=True):
+        assert call["method"] == "DELETE"
+        assert call["path"] == "/api/exomem/admin/reviewer-access"
+        # The route refuses anything but the exact seven-field selector.
+        assert call["body"] == {
+            "credentialKind": "internal_canary",
+            "platform": platform,
+            "tenantId": f"tenant-{platform}",
+            "candidateId": "candidate-1",
+            "assignmentId": "assignment-1",
+            "assignmentGeneration": 1,
+            "stagedClientReleaseId": f"stage-{platform}",
+            "oauthClientId": f"client-{platform}",
+        }
+
+
+def test_reset_fails_the_leftover_stages_at_their_recorded_version(tmp_path) -> None:
+    """A leftover `staged` release collides with the next `create-stage`.
+
+    The collision answers a bare 500 inside the window. `fail-stage` needs an
+    exact `expectedVersion`, which only the create response carries.
+    """
+    module = _load_module()
+    _record(
+        tmp_path, "prepare-stage.response", {"status": 200, "stage": {"id": "s1", "version": 3}}
+    )
+    _record(
+        tmp_path,
+        "run-sibling-stage-claude.response",
+        {"status": 200, "stage": {"id": "s2", "version": 1}},
+    )
+    cp = _StateDirControlPlane(tmp_path, _reset_responses())
+
+    module.reset(cp, expected_fence=1)
+
+    fails = [c for c in cp.calls if c["label"].startswith("reset-fail-")]
+    assert [c["body"] for c in fails] == [
+        {"action": "fail-stage", "stagedClientReleaseId": "s1", "expectedVersion": 3},
+        {"action": "fail-stage", "stagedClientReleaseId": "s2", "expectedVersion": 1},
+    ]
+
+
+def test_reset_reclaims_and_returns_when_no_tenant_was_ever_created(tmp_path, capsys) -> None:
+    """An attempt that died before redeem left a stage and no tenant.
+
+    That is not a failure, and exiting non-zero on it taught the operator to skip
+    `reset` in exactly the case where the stage most needs clearing.
+    """
+    module = _load_module()
+    _record(
+        tmp_path, "prepare-stage.response", {"status": 200, "stage": {"id": "s1", "version": 1}}
+    )
+    cp = _StateDirControlPlane(tmp_path, _reset_responses())
+
+    module.reset(cp, expected_fence=1)
+
+    assert [c["label"] for c in cp.calls if c["label"].startswith("reset-fail-")] == [
+        "reset-fail-prepare-stage"
+    ]
+    out = capsys.readouterr().out
+    assert "no tenant" in out.lower()
+    assert "1 staged release(s)" in out
+
+
+def test_reset_skips_an_incomplete_canary_rather_than_sending_a_partial_selector(
+    tmp_path, capsys
+) -> None:
+    """A truncated record must not become a malformed revoke.
+
+    The route rejects an incomplete selector, but a partial DELETE would report a
+    refusal that reads like the credential is gone.
+    """
+    module = _load_module()
+    incomplete = _canary_request("claude")
+    del incomplete["oauthClientId"]
+    _record(tmp_path, "run-canary-claude.request", incomplete)
+    cp = _StateDirControlPlane(tmp_path, _reset_responses())
+
+    module.reset(cp, expected_fence=1)
+
+    assert [c for c in cp.calls if c["label"].startswith("reset-revoke-")] == []
+    assert "names no complete canary selector" in capsys.readouterr().out
+
+
+def test_reset_counts_an_already_expired_canary_as_clear_not_as_reclaimed(tmp_path, capsys) -> None:
+    """`revoked: false` means it was already gone, which is the desired end state."""
+    module = _load_module()
+    _record(tmp_path, "run-canary-claude.request", _canary_request("claude"))
+    cp = _StateDirControlPlane(
+        tmp_path,
+        _reset_responses(**{"reset-revoke-run-canary-claude": (200, {"revoked": False})}),
+    )
+
+    module.reset(cp, expected_fence=1)
+
+    out = capsys.readouterr().out
+    assert "canary claude: already clear" in out
+    assert "0 canary credential(s)" in out
+
+
+def test_reset_refuses_to_reclaim_while_an_authority_is_still_active(tmp_path) -> None:
+    """Reclaim must not run on a live attempt: the canary is what it is using."""
+    module = _load_module()
+    _record(tmp_path, "run-canary-claude.request", _canary_request("claude"))
+    cp = _StateDirControlPlane(
+        tmp_path,
+        _reset_responses(
+            **{"reset-authorities": (200, {"bootstrapAuthorities": [{"state": "active"}]})}
+        ),
+    )
+
+    with pytest.raises(SystemExit):
+        module.reset(cp, expected_fence=1)
+
+    assert [c for c in cp.calls if c["label"].startswith("reset-revoke-")] == []

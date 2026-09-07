@@ -595,6 +595,43 @@ def _item_by_ref_fallback(
     return None
 
 
+def entity_candidate_by_ref(
+    vault_root: Path,
+    reference: str,
+    *,
+    expected_fingerprint: str | None = None,
+    today=None,
+) -> AttentionItem:
+    """Resolve one current recurring-identity row without folding page signals.
+
+    Entity lifecycle plans bind the category's own material signal, not whatever
+    unrelated page-level reasons happen to share its anchor.  One explicit
+    category pass preserves that boundary and still uses the ordinary review
+    state/fingerprint machinery.
+    """
+    wanted = review_state_module.parse_review_ref(reference)
+    report = attention(
+        vault_root,
+        categories=["entity_recurrence"],
+        limit=0,
+        state="all",
+        today=today,
+        record_surfacing=False,
+    )
+    for item in report.items:
+        if item.item_id != wanted:
+            continue
+        if expected_fingerprint and item.fingerprint != expected_fingerprint:
+            raise ValueError(
+                "REVIEW_ITEM_CHANGED: the entity candidate changed; refresh the "
+                f"work item and inspect {item.ref} again"
+            )
+        return item
+    raise ValueError(
+        f"REVIEW_ITEM_NOT_FOUND: no current entity candidate for {reference}"
+    )
+
+
 def item_by_ref(
     vault_root: Path,
     reference: str,
@@ -628,6 +665,45 @@ def item_by_ref(
             break
 
     wider = _item_by_ref_fallback(vault_root, wanted, today=today)
+    if expected_fingerprint and wider is not None and wider.fingerprint != expected_fingerprint:
+        # An explicitly requested partitioned category may share an anchor with
+        # an ordinary page-level queue.  The wider resolver folds those reasons
+        # for daily review, which changes the fused fingerprint.  When a caller
+        # round-trips the exact component fingerprint it was shown, resolve that
+        # category alone instead of converting the request into a different
+        # fused decision.
+        refs = review_state_module.refs_for_paths(
+            vault_root, review_state_module.component_paths(wider)
+        )
+        for reason in wider.reasons:
+            category = str(reason.get("category") or "")
+            if category not in ATTENTION_CATEGORIES:
+                continue
+            related_paths = sorted(
+                {
+                    path
+                    for path in (reason.get("related_paths") or [])
+                    if path != wider.path and path in refs
+                }
+            )
+            component = review_state_module.component_fingerprint(
+                target_ref=str(wider.target_ref or refs.get(wider.path) or ""),
+                reason=reason,
+                related_refs=[refs[path] for path in related_paths],
+            )
+            if component != expected_fingerprint:
+                continue
+            narrowed = attention(
+                vault_root,
+                categories=[category],
+                limit=0,
+                state="all",
+                today=today,
+                record_surfacing=False,
+            )
+            for item in narrowed.items:
+                if item.item_id == wanted and item.fingerprint == expected_fingerprint:
+                    return item
     if found is None:
         if wider is None:
             raise ValueError(

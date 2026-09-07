@@ -623,6 +623,7 @@ def link(
     project: str | None = None,
     decision_status: str | None = None,
     today: dt.date | None = None,
+    validate_only: bool = False,
 ) -> LinkResult:
     """Create an entity through detached structural preflight."""
     registry = load_entity_types(vault_root)
@@ -820,6 +821,14 @@ def link(
         warnings.append(log_plan.warning)
     if log_plan.rotation_note is not None:
         warnings.append(log_plan.rotation_note)
+    if validate_only:
+        return LinkResult(
+            rel_entity,
+            memory_refs.memory_ref(identity),
+            warnings,
+            preflight.as_dict(),
+            slug=filename_slug or "",
+        )
     committed = semantic_writes.commit_creation(
         vault_root,
         preflight=preflight,

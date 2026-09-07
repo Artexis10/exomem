@@ -383,8 +383,14 @@ def test_a_seeded_planning_and_records_pair_appears_in_the_snapshot(tmp_path: Pa
 
 
 def test_the_collections_section_is_versioned(tmp_path: Path) -> None:
-    """0.3.0 adds `CollectionProjection.storage_source`; the output schema moved."""
+    """0.4.0 adds the opt-in runtime-surface projection; the output schema moved.
+
+    0.3.0 added `CollectionProjection.storage_source`. The version tracks what
+    the projector *can* emit, not what a given call did emit, so it moves for a
+    mode that emits signal and surface items the file-only build cannot produce
+    — even though this default-mode projection is byte-identical to 0.3.0's.
+    """
 
     projected = VaultProjector(tmp_path).project(phase="p1", taken_at="2026-01-01T00:00:00Z")
 
-    assert projected.projector.version == "0.3.0"
+    assert projected.projector.version == "0.4.0"

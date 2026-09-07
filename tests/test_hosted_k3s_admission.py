@@ -1397,10 +1397,71 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     serving = _render(CELL, CELL / "values.validation.yaml", namespace)
     stateful_set = next(item for item in serving if item.get("kind") == "StatefulSet")
     serving_pod = _pod(stateful_set, name="cell-alpha-serve-positive", namespace=namespace)
+    # Both init containers, in order. The second is a native sidecar
+    # (`restartPolicy: Always`) that republishes the authorization bundle while
+    # the pod runs, so a renewed bundle reaches the runtime without a restart.
+    # The policy pins this list exactly, and every place that enumerates it is
+    # part of the same change -- this assertion was the last one, and the live
+    # gate is what found it.
     assert [
         container["name"] for container in serving_pod["spec"]["initContainers"]
-    ] == ["authorization-session-custody"]
+    ] == ["authorization-session-custody", "authorization-session-refresh"]
+    assert (
+        serving_pod["spec"]["initContainers"][1].get("restartPolicy") == "Always"
+    ), "the refresh container must be a native sidecar, not a one-shot init step"
     assert _server_dry_run(k3s, serving_pod).returncode == 0
+
+    # A selected agent profile is a platform decision: the chart writes it to the
+    # namespace annotation and the pod may only echo that exact value. The policy
+    # pins an exact env count, so it has to admit both arities -- 28 without a
+    # selection, 29 with one -- and every disagreement between the two halves has
+    # to be refused. Adding the variable to the chart without this cost a real
+    # provision on 2026-09-06: the cell reached a completed init job and a bound
+    # volume, then its serving pod was denied.
+    def _with_profile(value: str, name: str) -> dict[str, Any]:
+        selected = copy.deepcopy(serving_pod)
+        selected["metadata"]["name"] = name
+        selected["spec"]["containers"][0]["env"].append(
+            {"name": "EXOMEM_HOSTED_AGENT_PROFILE", "value": value}
+        )
+        return selected
+
+    # Before the namespace announces a profile, carrying one is refused.
+    _assert_denied(
+        k3s,
+        _with_profile("hosted-alpha-agent-v4", "cell-alpha-serve-profile-unannounced"),
+        message="approved serving command and environment",
+    )
+
+    _kubectl(
+        k3s,
+        [
+            "annotate",
+            "namespace",
+            namespace,
+            "exomem.io/agent-profile=hosted-alpha-agent-v4",
+            "--overwrite",
+        ],
+    )
+
+    selected_profile = _with_profile("hosted-alpha-agent-v4", "cell-alpha-serve-profile")
+    assert len(selected_profile["spec"]["containers"][0]["env"]) == 29
+    assert _server_dry_run(k3s, selected_profile).returncode == 0
+
+    # The pod cannot echo a profile other than the announced one.
+    _assert_denied(
+        k3s,
+        _with_profile("hosted-alpha-agent-v1", "cell-alpha-serve-profile-mismatch"),
+        message="approved serving command and environment",
+    )
+
+    # An announcing namespace refuses a pod that omits the variable, so the
+    # selection cannot be silently dropped on the way to the runtime.
+    omitted = copy.deepcopy(serving_pod)
+    omitted["metadata"]["name"] = "cell-alpha-serve-profile-omitted"
+    _assert_denied(k3s, omitted, message="approved serving command and environment")
+
+    _kubectl(k3s, ["annotate", "namespace", namespace, "exomem.io/agent-profile-"])
 
     serving_group_rewrite = copy.deepcopy(serving_pod)
     serving_group_rewrite["metadata"]["name"] = "cell-alpha-serve-fsgroup"
@@ -1428,7 +1489,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     _assert_denied(
         k3s,
         serving_init_escape,
-        message="exact authorization-custody init container",
+        message="exact authorization-custody init and refresh containers",
     )
 
     serving_command_escape = copy.deepcopy(serving_pod)
@@ -1765,7 +1826,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     for field in ("ports", "env", "startupProbe", "livenessProbe", "readinessProbe"):
         helper.pop(field, None)
     side_init["spec"]["initContainers"] = [helper]
-    _assert_denied(k3s, side_init, message="exact authorization-custody init container")
+    _assert_denied(k3s, side_init, message="exact authorization-custody init and refresh containers")
 
 
 def test_exact_k3s_scopes_privileged_volume_and_deletion_mutations(k3s: str) -> None:

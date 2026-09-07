@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, hosted_plugins
+from exomem import commands, hosted_legacy_schemas, hosted_plugins
 from exomem import hosted_gateway as gateway
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -82,7 +82,18 @@ def test_epistemic_profile_is_registered_with_exact_ordered_membership() -> None
     assert all(command.tier == 1 for command in selected)
     assert all("rest" in command.surfaces for command in selected)
     canonical = {command.name: command for command in commands.PRODUCT_COMMANDS}
-    assert all(command is canonical[command.name] for command in selected)
+    pinned = hosted_legacy_schemas.LEGACY_PROFILE_PARAMS[V3_PROFILE]
+    for command in selected:
+        # v3 is published, so it resolves its pinned schema rather than the live
+        # registry object -- otherwise a parameter added for a later release
+        # would move v3's descriptor and widen its wire. What it publishes is
+        # still exactly the canonical parameters minus the later additions.
+        published = pinned[command.name]
+        canonical_names = tuple(param.name for param in canonical[command.name].params)
+        assert tuple(param.name for param in command.params) == published
+        assert tuple(name for name in canonical_names if name in set(published)) == published
+        if command is canonical[command.name]:
+            assert canonical_names == published
 
 
 def test_epistemic_profile_closes_the_loop_that_v1_and_v2_leave_open() -> None:

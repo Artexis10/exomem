@@ -25,8 +25,10 @@ import json
 import logging
 import os
 import re
+import typing
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import MappingProxyType
@@ -66,6 +68,7 @@ from . import evolution as evolution_module
 from . import find as find_module
 from . import find_types, query_log, retrieval_models, semantic_census, upload_tokens, vault
 from . import get_page as get_page_module
+from . import hosted_legacy_schemas as hosted_legacy_schemas_module
 from . import knowledge_packs as knowledge_packs_module
 from . import link as link_module
 from . import link_summary as link_summary_module
@@ -245,6 +248,95 @@ class ClientArtifactFile(TypedDict):
     file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
     mime_type: NotRequired[Annotated[str, Field(max_length=255)]]
     file_name: NotRequired[str]
+
+
+_OptionalArtifactAdoption = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["key", "trigger", "selected_file_id"],
+                    "properties": {
+                        "key": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "trigger": {"type": "string", "minLength": 1, "maxLength": 64},
+                        "selected_file_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                        },
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+
+_OptionalArtifactDelivery = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "evidence_page",
+                        "link_field",
+                        "reported_remote_ref",
+                        "reported_remote_field",
+                        "verified_remote_field",
+                    ],
+                    "properties": {
+                        "evidence_page": {"type": "string", "minLength": 1, "maxLength": 2048},
+                        "link_field": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "reported_remote_ref": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2048,
+                        },
+                        "reported_remote_field": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                        },
+                        "verified_remote_field": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                        },
+                        "platform_reference_field": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                        },
+                        "platform_proof": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["algorithm", "digest", "reference"],
+                            "properties": {
+                                "algorithm": {"const": "sha256", "type": "string"},
+                                "digest": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{64}$",
+                                },
+                                "reference": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 2048,
+                                },
+                            },
+                        },
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
 
 
 _ClientArtifactFiles = Annotated[
@@ -441,6 +533,10 @@ def op_bootstrap(
 
     compute_policy = mode_module.resolved()
     engagement_policy = prominence_module.resolved()
+    # Every projection, compact included, serves prominence's own capture text.
+    # An earlier compact-only replacement compressed it to save bytes and dropped
+    # the Planning/Records transition rule the workflow-contract feedback loop
+    # pins; the compact budget no longer needs the saving.
     # The delegation envelope rides INSIDE the engagement block rather than beside
     # it: prominence sets its defaults, so a client reading one without the other
     # would learn how eager Exomem is without learning what it is allowed to do on
@@ -553,6 +649,89 @@ def op_bootstrap(
             "status": workflow_public_status,
         }
     entity_type_registry = entity_types_module.load_entity_types(vault_root)
+    entity_recurrence_available = "review_memory" in active_product_names
+    if entity_recurrence_available:
+        ordinary_mode = (
+            "once"
+            if engagement_policy["level"] in {"balanced", "maximal"}
+            else "explicit-only"
+        )
+        entity_lifecycle = {
+            "available": True,
+            "ordinary_read": {
+                "mode": ordinary_mode,
+                "boundary": "first-turn-after-primary-work-before-final-response",
+                "maximum_per_session": 1 if ordinary_mode == "once" else 0,
+                "route": {
+                    "tool": "review_memory",
+                    "arguments": {
+                        "mode": "attention",
+                        "categories": ["entity_recurrence"],
+                        "limit": 3,
+                    },
+                },
+            },
+            "general_mutation_recheck": {
+                "after": ["entity", "accepted-relation", "entity-type-registry"],
+                "maximum_per_session": 1,
+                "requires_terminal_receipt": True,
+            },
+            "hydration_continuation": {
+                "same_identity_only": True,
+                "requires_terminal_receipt": True,
+                "fresh_confirmation_per_batch": True,
+                "route": {
+                    "tool": "maintain_memory",
+                    "arguments": {
+                        "mode": "curation",
+                        "curation_action": "work-item",
+                        # Angle brackets plus the sibling flag below: these two
+                        # values are shapes to fill in, not arguments to send.
+                        # A bare "same-review-ref" reads as a literal a client
+                        # can pass through, and the server would then reject it
+                        # as a malformed ref.
+                        "review_ref": "<same-review-ref>",
+                        "hydration_recheck": "<next-ordinal-1-through-8>",
+                    },
+                    "placeholders": True,
+                },
+                "eighth_recheck": "closure-only",
+                "later_batches": "next-session-ordinary-read",
+            },
+            "bounds": {
+                "candidates_per_read": 3,
+                "contexts_per_candidate": 8,
+                "hydration_mutations_per_session": 8,
+                "hydration_rechecks_per_session": 8,
+            },
+            "decision_order": [
+                "resolve-exact-and-alias",
+                "stop-on-ambiguity",
+                "hydrate-one-match-before-duplicate",
+                "promote-only-no-match",
+            ],
+            "authority": {
+                "sensor": "deterministic-read-only",
+                "semantic_decider": "active-agent-only",
+                "candidate": "structural_suggestions",
+                "mutation": "governed-curation-restructure_execution",
+                "relation_outside_curation": "link_acceptance",
+            },
+        }
+    else:
+        entity_lifecycle = {
+            "available": False,
+            "ordinary_read": "unavailable-skip",
+            "unavailable_reason": (
+                "The active surface cannot request an explicit review category."
+            ),
+            "forbidden_substitutes": [
+                "local-scan",
+                "model-inference",
+                "embedding",
+                "due-state",
+            ],
+        }
     relation_registry = relation_registry_module.load_registry(vault_root)
     relation_vocabulary_projection = {
         "contract_version": "2026-09-01.1",
@@ -925,6 +1104,9 @@ def op_bootstrap(
                     "id": definition.id,
                     "label": definition.label,
                     "folder": definition.folder,
+                    "family": (
+                        entity_type_registry.family_of(definition.id) or definition.id
+                    ),
                     "aliases": list(definition.aliases),
                     "capture_guidance": definition.capture_guidance,
                 }
@@ -938,6 +1120,7 @@ def op_bootstrap(
                 "with a why, never by editing frontmatter around the registry rule."
             ),
             "candidate_route": "connect_memory(operation='resolve-entity')",
+            "lifecycle": entity_lifecycle,
         },
         "workflow": {
             "requested": requested_workflow,
@@ -1076,7 +1259,17 @@ def op_bootstrap(
                 ),
             },
             "semantic_units": {
-                "contract": semantic_authoring_projection,
+                # Compact already carries these exact bytes at the top-level
+                # `semantic_authoring` key. Keep a stable pointer here instead of
+                # spending the hookless payload budget on a second 9 KiB copy.
+                # Only compact is deduplicated: it is the profile under a byte
+                # ceiling. Full and diagnostics stay self-contained, which is
+                # also what keeps diagnostics a superset of full by size.
+                "contract": (
+                    {"same_as": "semantic_authoring"}
+                    if profile == "compact"
+                    else semantic_authoring_projection
+                ),
                 "compact_syntax": semantic_authoring_module.AUTHORING_CONTRACT.compact["syntax"],
                 "compact_kind": semantic_authoring_module.AUTHORING_CONTRACT.compact["kind"],
                 "rich_relation_rule": semantic_authoring_module.AUTHORING_CONTRACT.rich[
@@ -5581,6 +5774,7 @@ def op_capture_source(
     domain: str | None = None,
     projects: list[str] | None = None,
     files: _OptionalClientArtifactFiles = (),  # noqa: B006 - read-only
+    adoption: _OptionalArtifactAdoption = None,
 ) -> dict:
     """Capture raw source material and optionally return compile guidance.
 
@@ -5621,8 +5815,11 @@ def op_capture_source(
             stored; one source may serve several projects.
         files: Temporary client file handles, captured losslessly as Sources
             instead of `content`. See the parameter schema for the shape.
+        adoption: Optional explicit adoption identity selecting exactly one
+            supplied handle. This establishes eligibility, not write consent;
+            agent-initiated use obeys proactive_capture.
     """
-    if files:
+    if files or adoption is not None:
         from . import client_artifacts
 
         return client_artifacts.capture_source_artifacts(
@@ -5637,6 +5834,7 @@ def op_capture_source(
             why_captured=why_captured,
             domain=domain,
             projects=projects,
+            adoption=adoption,
         )
     source = op_add(
         vault_root,
@@ -5720,6 +5918,7 @@ def op_preserve_artifacts(
     scope: str,
     category: str,
     files: _ClientArtifactFiles,
+    adoption: _OptionalArtifactAdoption = None,
 ) -> dict:
     """Preserve client-provided binary file handles as append-only Evidence.
 
@@ -5734,6 +5933,9 @@ def op_preserve_artifacts(
         category: Evidence category within the scope.
         files: Ordered temporary file handles. Each object requires `download_url`
             and `file_id`; `mime_type` and `file_name` are optional.
+        adoption: Optional explicit adoption identity selecting exactly one
+            supplied handle. This establishes eligibility, not write consent;
+            agent-initiated use obeys proactive_capture.
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -5742,7 +5944,7 @@ def op_preserve_artifacts(
     # one counters block rather than N: see `due_state.batch_scope`.
     with due_state_module.batch_scope(vault_root):
         result = client_artifacts.preserve_artifacts(
-            vault_root, scope=scope, category=category, files=files
+            vault_root, scope=scope, category=category, files=files, adoption=adoption
         )
     # No batch deltas: Evidence blobs author no predictions, questions,
     # experiments or supersession pointers, so this leaf's own writes never move
@@ -5779,13 +5981,16 @@ def op_transfer_artifact(
     secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
-    return upload_tokens.mint_for_endpoint(
+    handoff = upload_tokens.mint_for_endpoint(
         secret,
         base_url,
         scope=operation,
         large_base_url=large_base_url if operation == "upload" else None,
         lane=lane if operation == "upload" else None,
     )
+    if operation == "upload":
+        handoff.update(handoff_status="handoff_prepared", committed=False)
+    return handoff
 
 
 def op_process_media(
@@ -7353,7 +7558,9 @@ def op_adoption_studio(
 
 def op_maintain_memory(
     vault_root: Path,
-    mode: str = "audit",
+    mode: Literal[
+        "audit", "fix", "reconcile", "backfill-ids", "structured-files", "curation"
+    ] = "audit",
     categories: list[str] | None = None,
     dry_run: bool | None = None,
     rebuild_embeddings: bool = False,
@@ -7365,6 +7572,24 @@ def op_maintain_memory(
     plan_id: str | None = None,
     source_snapshot: str | None = None,
     why: str | None = None,
+    curation_action: Literal[
+        "work-item",
+        "propose",
+        "preview",
+        "status",
+        "apply",
+        "resume",
+        "propose-compensation",
+        "apply-compensation",
+    ]
+    | None = None,
+    run_id: str | None = None,
+    plan: dict[str, Any] | None = None,
+    refs: list[str] | None = None,
+    paths: list[str] | None = None,
+    review_ref: str | None = None,
+    hydration_recheck: int | None = None,
+    expected_plan_fingerprint: str | None = None,
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
 
@@ -7386,6 +7611,14 @@ def op_maintain_memory(
     apply requires its exact plan and source snapshot and commits atomically.
     Durable identity and mutable state stay in frontmatter, not filenames.
 
+    `mode="curation"` is the governed multi-step exception. The active agent
+    authors a closed typed plan from explicit context; Exomem validates and
+    fingerprints it, records one exact-plan approval, and executes at most one
+    content step per apply or resume request. Work-item, preview, and status are
+    read-only. Proposal, execution, and separately reviewed compensation use the
+    shared mutation terminal. Curation cannot target raw Sources or Evidence,
+    Planning, Records, workflow contracts, schema/admin state, or trash internals.
+
     `mode="fix"` also collapses media sidecars that accumulated nested copies of
     themselves (audit category `duplicated_sidecar`, reportable on its own via
     `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest
@@ -7396,7 +7629,7 @@ def op_maintain_memory(
     recovered text is only the fallback.
 
     Args:
-        mode: audit, fix, reconcile, backfill-ids, or structured-files.
+        mode: audit, fix, reconcile, backfill-ids, structured-files, or curation.
         categories: Optional audit category filter.
         dry_run: Report without writing when true. Defaults to true for
             fix/backfill-ids (safety net) and false for reconcile (matches
@@ -7411,9 +7644,140 @@ def op_maintain_memory(
         plan_id: Exact structured-files preview identity required for apply.
         source_snapshot: Exact structured-files preview snapshot required for apply.
         why: Bounded audit reason required for structured-files apply.
+        curation_action: Closed curation action when mode is curation.
+        run_id: Governed curation run identity.
+        plan: Agent-authored closed forward plan for curation propose.
+        refs: Explicit memory refs for curation work-item.
+        paths: Explicit vault-relative paths for curation work-item.
+        review_ref: Exact recurring-identity review ref for a candidate work-item.
+        hydration_recheck: Same-identity continuation ordinal, 1 through 8; the
+            eighth is closure-only and cannot bind another plan.
+        expected_plan_fingerprint: Exact reviewed plan fingerprint for approval.
     """
     if rebuild_graph and mode != "reconcile":
         raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
+    if mode == "curation":
+        from . import curation as curation_module
+        from . import due_state as due_state_module
+
+        if curation_action not in curation_module.CURATION_ACTIONS:
+            raise ValueError(
+                "INVALID_CURATION_ACTION: curation_action must be one of the closed v1 actions"
+            )
+        if (
+            categories is not None
+            or dry_run is not None
+            or rebuild_embeddings
+            or rebuild_graph
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or apply is not None
+            or source_snapshot is not None
+        ):
+            raise ValueError(
+                "INVALID_ARGUMENTS: curation does not accept another maintenance mode's arguments"
+            )
+
+        supplied = {
+            "run_id": run_id,
+            "plan_id": plan_id,
+            "plan": plan,
+            "refs": refs,
+            "paths": paths,
+            "review_ref": review_ref,
+            "hydration_recheck": hydration_recheck,
+            "expected_plan_fingerprint": expected_plan_fingerprint,
+            "why": why,
+        }
+        allowed_by_action = {
+            "work-item": {"refs", "paths", "review_ref", "hydration_recheck"},
+            "propose": {"plan"},
+            "preview": {"run_id"},
+            "status": {"run_id"},
+            "apply": {"run_id", "plan_id", "expected_plan_fingerprint", "why"},
+            "resume": {"run_id", "plan_id"},
+            "propose-compensation": {"run_id"},
+            "apply-compensation": {
+                "run_id",
+                "plan_id",
+                "expected_plan_fingerprint",
+                "why",
+            },
+        }
+        allowed = allowed_by_action[curation_action]
+        if any(value is not None and name not in allowed for name, value in supplied.items()):
+            raise ValueError(
+                f"INVALID_ARGUMENTS: curation {curation_action} received unrelated arguments"
+            )
+        required_by_action = {
+            "work-item": set(),
+            "propose": {"plan"},
+            "preview": {"run_id"},
+            "status": {"run_id"},
+            "apply": {"run_id", "plan_id", "expected_plan_fingerprint", "why"},
+            "resume": {"run_id", "plan_id"},
+            "propose-compensation": {"run_id"},
+            "apply-compensation": {
+                "run_id",
+                "plan_id",
+                "expected_plan_fingerprint",
+                "why",
+            },
+        }
+        if any(supplied[name] is None for name in required_by_action[curation_action]):
+            raise ValueError(
+                f"INVALID_ARGUMENTS: curation {curation_action} is missing required arguments"
+            )
+
+        def invoke_curation() -> dict[str, Any]:
+            if curation_action == "work-item":
+                return curation_module.work_item(
+                    vault_root,
+                    refs=refs,
+                    paths=paths,
+                    review_ref=review_ref,
+                    hydration_recheck=hydration_recheck,
+                )
+            if curation_action == "propose":
+                assert plan is not None
+                return curation_module.propose(vault_root, plan)
+            if curation_action == "preview":
+                assert run_id is not None
+                return curation_module.preview(vault_root, run_id=run_id)
+            if curation_action == "status":
+                assert run_id is not None
+                return curation_module.status(vault_root, run_id=run_id)
+            if curation_action == "apply":
+                assert None not in (run_id, plan_id, expected_plan_fingerprint, why)
+                return curation_module.apply(
+                    vault_root,
+                    run_id=run_id,
+                    plan_id=plan_id,
+                    expected_plan_fingerprint=expected_plan_fingerprint,
+                    why=why,
+                )
+            if curation_action == "resume":
+                assert run_id is not None and plan_id is not None
+                return curation_module.resume(vault_root, run_id=run_id, plan_id=plan_id)
+            if curation_action == "propose-compensation":
+                assert run_id is not None
+                return curation_module.propose_compensation(vault_root, run_id=run_id)
+            assert curation_action == "apply-compensation"
+            assert None not in (run_id, plan_id, expected_plan_fingerprint, why)
+            return curation_module.apply_compensation(
+                vault_root,
+                run_id=run_id,
+                plan_id=plan_id,
+                expected_plan_fingerprint=expected_plan_fingerprint,
+                why=why,
+            )
+
+        if curation_action in curation_module.READ_ONLY_ACTIONS:
+            return invoke_curation()
+        with due_state_module.batch_scope(vault_root):
+            curated = invoke_curation()
+        return _carrying_due_state(vault_root, curated)
     if mode == "structured-files":
         if (
             not isinstance(collection, str)
@@ -7495,7 +7859,85 @@ def op_maintain_memory(
         return _carrying_due_state(vault_root, report)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, or structured-files"
+        "backfill-ids, structured-files, or curation"
+    )
+
+
+def _hosted_v4_maintain_memory(
+    vault_root: Path,
+    mode: str = "audit",
+    categories: list[str] | None = None,
+    dry_run: bool | None = None,
+    rebuild_embeddings: bool = False,
+    rebuild_graph: bool = False,
+    detail: Literal["actionable", "full"] = "actionable",
+    legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
+    collection: str | None = None,
+    apply: bool | None = None,
+    plan_id: str | None = None,
+    source_snapshot: str | None = None,
+    why: str | None = None,
+) -> dict:
+    """Maintain vault health with explicit write-capable modes.
+
+    Default mode is read-only audit. `mode="fix"` and `mode="backfill-ids"`
+    rewrite content (wikilinks, frontmatter, stable IDs) and default to
+    dry-run here as a safety net. `mode="reconcile"` only heals index-count
+    and sidecar drift from out-of-band edits — the same canonical default as
+    `op_reconcile` itself (idempotent, non-destructive) — so it defaults to
+    writing; pass `dry_run=true` to preview instead.
+
+    MCP, REST, and hosted callers may audit or preview with `dry_run=true`, but
+    write-mode maintenance is operator-only: run `exomem maintain --fix` or
+    `exomem maintain --reconcile` on the host. Remote write attempts return
+    `MAINTENANCE_REQUIRES_CLI` before acquiring the mutation boundary.
+
+    `mode="structured-files"` is the exception: it previews one Planning or
+    Records collection's manifest-declared human filenames and managed readable
+    bodies, including governed inbound-link rewrites. Preview is read-only;
+    apply requires its exact plan and source snapshot and commits atomically.
+    Durable identity and mutable state stay in frontmatter, not filenames.
+
+    `mode="fix"` also collapses media sidecars that accumulated nested copies of
+    themselves (audit category `duplicated_sidecar`, reportable on its own via
+    `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest
+    surviving `## Extracted text` — for a sidecar whose top-level block was
+    blanked by a re-render, that is the one buried in a nested copy — and refuses
+    any rewrite that would leave less transcript than it found. Frontmatter is
+    untouched, so a still-`pending` sidecar is re-extracted normally and the
+    recovered text is only the fallback.
+
+    Args:
+        mode: audit, fix, reconcile, backfill-ids, or structured-files.
+        categories: Optional audit category filter.
+        dry_run: Report without writing when true. Defaults to true for
+            fix/backfill-ids (safety net) and false for reconcile (matches
+            `op_reconcile`'s own default). Pass explicitly to override either way.
+        rebuild_embeddings: For fix mode, rebuild embeddings when explicitly requested.
+        rebuild_graph: For reconcile only, quarantine unavailable derived graph
+            lineage and rebuild it from canonical Markdown. Default false.
+        detail: Audit output detail: actionable (default) or full.
+        legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
+        collection: One Planning or Records collection for structured-files.
+        apply: Omit for preview; true applies the exact reviewed plan.
+        plan_id: Exact structured-files preview identity required for apply.
+        source_snapshot: Exact structured-files preview snapshot required for apply.
+        why: Bounded audit reason required for structured-files apply.
+    """
+    return op_maintain_memory(
+        vault_root,
+        mode=mode,
+        categories=categories,
+        dry_run=dry_run,
+        rebuild_embeddings=rebuild_embeddings,
+        rebuild_graph=rebuild_graph,
+        detail=detail,
+        legacy_sample_limit=legacy_sample_limit,
+        collection=collection,
+        apply=apply,
+        plan_id=plan_id,
+        source_snapshot=source_snapshot,
+        why=why,
     )
 
 
@@ -8521,6 +8963,7 @@ def op_record_memory(
     expected_manifest_hash: str | None = None,
     acknowledged_gap_codes: list[str] | None = None,
     body: str | None = None,
+    delivery: _OptionalArtifactDelivery = None,
     changes: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
     refresh_presentation: bool | None = None,
@@ -8560,6 +9003,9 @@ def op_record_memory(
         expected_manifest_hash: Exact current manifest hash for revise or rebaseline.
         acknowledged_gap_codes: Exact inspect-reported gap codes for rebaseline.
         body: Optional Markdown body for append.
+        delivery: Optional receipt-gated artifact-delivery validation envelope
+            for append. Field mappings are vault-schema-neutral and never set
+            item values or create/loosen a collection.
         changes: Targeted values for update.
         expected_item_version: Exact current item version for update.
         refresh_presentation: Guardedly rebuild the managed Markdown presentation during update.
@@ -8593,6 +9039,7 @@ def op_record_memory(
         expected_manifest_hash=expected_manifest_hash,
         acknowledged_gap_codes=acknowledged_gap_codes,
         body=body,
+        delivery=delivery,
         changes=changes,
         expected_item_version=expected_item_version,
         refresh_presentation=refresh_presentation,
@@ -8831,6 +9278,11 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     """
     if command.read_only:
         return True
+    if command.name == "maintain_memory" and kwargs.get("mode") == "curation":
+        from . import curation as curation_module
+
+        action = kwargs.get("curation_action")
+        return isinstance(action, str) and action in curation_module.READ_ONLY_ACTIONS
     if command.name == "govern_memory":
         operation = _resolved_invocation_selector(command, kwargs, "operation")
         if not isinstance(operation, str) or operation not in governance_operations.OPERATION_SPECS:
@@ -9514,6 +9966,9 @@ def _build_product_commands() -> tuple[Command, ...]:
                     help=param.help,
                     cli_positional=param.cli_positional,
                     choices=param.choices,
+                    schema=param.schema,
+                    schema_description=param.schema_description,
+                    schema_default=param.schema_default,
                 )
                 for param in params
                 if param.name in {"path", "why", "operation", "validate_only"}
@@ -9544,6 +9999,9 @@ def _build_product_commands() -> tuple[Command, ...]:
                     help=param.help,
                     cli_positional=param.cli_positional,
                     choices=param.choices,
+                    schema=param.schema,
+                    schema_description=param.schema_description,
+                    schema_default=param.schema_default,
                 )
                 for param in params
             )
@@ -9622,6 +10080,7 @@ HOSTED_ALPHA_AGENT_PROFILE = "hosted-alpha-agent-v1"
 HOSTED_ALPHA_AGENT_V2_PROFILE = "hosted-alpha-agent-v2"
 HOSTED_ALPHA_AGENT_V3_PROFILE = "hosted-alpha-agent-v3"
 HOSTED_ALPHA_AGENT_V4_PROFILE = "hosted-alpha-agent-v4"
+HOSTED_ALPHA_AGENT_V5_PROFILE = "hosted-alpha-agent-v5"
 
 
 @dataclass(frozen=True, slots=True)
@@ -9850,8 +10309,96 @@ PRODUCT_SURFACE_PROFILES = MappingProxyType(
             ),
             expose_tier2=True,
         ),
+        # v5 carries the durable-baseline, generated-artifact adoption,
+        # recurring-entity lifecycle and governed-curation doctrine. Its
+        # membership is v4's, unchanged and in v4's order: those four changes
+        # add arguments and skills, not commands, and `transfer_artifact` stays
+        # withheld until its gateway bridge exists rather than being published
+        # as a call that returns an interception error.
+        #
+        # What v5 does not have is a pinned schema. It is the release those new
+        # arguments were cut for, so it discovers them through the registry --
+        # which is exactly what v1-v4 must no longer do.
+        HOSTED_ALPHA_AGENT_V5_PROFILE: ProductSurfaceProfile(
+            name=HOSTED_ALPHA_AGENT_V5_PROFILE,
+            command_names=hosted_complete_surface_names(),
+            expose_tier2=True,
+        ),
     }
 )
+
+
+def _pinned_legacy_leaf(command: Command, keep: frozenset[str]) -> Any:
+    """Return `command`'s leaf with only the pinned parameters visible.
+
+    Trimming `Command.params` alone pins the REST wire, because `cli_ops.coerce`
+    validates against it -- but not the MCP tool schema, which `bind_vault`
+    derives from the leaf's own signature. Both have to narrow together or the
+    published descriptor and the admitted call disagree.
+    """
+    leaf = command.leaf
+    injected = 2 if command.needs_schema else 1
+    signature = inspect.signature(leaf)
+    parameters = list(signature.parameters.values())
+    retained = [
+        parameter
+        for index, parameter in enumerate(parameters)
+        if index < injected or parameter.name in keep
+    ]
+
+    def pinned(*args: Any, **kwargs: Any) -> Any:
+        unexpected = sorted(set(kwargs) - keep)
+        if unexpected:
+            raise TypeError(
+                f"{command.name}() got unexpected keyword argument(s) "
+                f"{', '.join(unexpected)} for a pinned Hosted profile"
+            )
+        return leaf(*args, **kwargs)
+
+    pinned.__name__ = getattr(leaf, "__name__", command.name)
+    pinned.__qualname__ = getattr(leaf, "__qualname__", command.name)
+    pinned.__module__ = getattr(leaf, "__module__", __name__)
+    pinned.__doc__ = leaf.__doc__
+    pinned.__signature__ = signature.replace(parameters=retained)  # type: ignore[attr-defined]
+    retained_names = {parameter.name for parameter in retained} | {"return"}
+    # Resolve in the *leaf's* namespace and hand on the resolved objects. The
+    # wrapper is defined here, so its `__globals__` are this module's; copying
+    # the leaf's string annotations across would make `typing.get_type_hints`
+    # look them up in the wrong namespace and fall back silently to an
+    # unannotated parameter for any leaf that lives somewhere else.
+    try:
+        resolved = typing.get_type_hints(leaf, include_extras=True)
+    except Exception:  # noqa: BLE001 - fall back to the raw annotations
+        resolved = dict(getattr(leaf, "__annotations__", {}))
+    pinned.__annotations__ = {
+        name: annotation for name, annotation in resolved.items() if name in retained_names
+    }
+    return pinned
+
+
+def apply_legacy_profile_pin(command: Command, pinned: tuple[str, ...]) -> Command:
+    """Narrow one command to the parameter names a released profile published.
+
+    A pinned name that no longer exists, or one that moved, is raised rather
+    than tolerated: both are breaking changes to a published descriptor, and a
+    pin that absorbed them would bless the very drift it exists to catch.
+    """
+    current = tuple(param.name for param in command.params)
+    if current == pinned:
+        return command
+    missing = [name for name in pinned if name not in current]
+    if missing:
+        raise RuntimeError(
+            f"{command.name}: pinned parameter(s) no longer exist: {', '.join(missing)}"
+        )
+    keep = frozenset(pinned)
+    if tuple(name for name in current if name in keep) != pinned:
+        raise RuntimeError(f"{command.name}: pinned parameter order changed")
+    return dataclass_replace(
+        command,
+        leaf=_pinned_legacy_leaf(command, keep),
+        params=tuple(param for param in command.params if param.name in keep),
+    )
 
 
 def commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, ...]:
@@ -9877,6 +10424,7 @@ def product_commands_for_profile(
         raise ValueError(f"unsupported product surface profile: {profile!r}")
 
     canonical = {command.name: command for command in PRODUCT_COMMANDS}
+    pinned_schema = hosted_legacy_schemas_module.LEGACY_PROFILE_PARAMS.get(profile)
     selected: list[Command] = []
     for name in definition.command_names:
         command = canonical.get(name)
@@ -9888,6 +10436,23 @@ def product_commands_for_profile(
             raise RuntimeError(
                 f"product surface profile {profile!r} cannot expose {name!r} on {surface!r}"
             )
+        if profile == HOSTED_ALPHA_AGENT_V4_PROFILE and name == "maintain_memory":
+            response_detail = next(
+                param for param in command.params if param.name == "response_detail"
+            )
+            command = dataclass_replace(
+                command,
+                leaf=_hosted_v4_maintain_memory,
+                params=(*_derive_params(_hosted_v4_maintain_memory, skip=1), response_detail),
+                description=_hosted_v4_maintain_memory.__doc__ or "",
+            )
+        if pinned_schema is not None:
+            published = pinned_schema.get(name)
+            if published is None:
+                raise RuntimeError(
+                    f"released profile {profile!r} has no pinned schema for {name!r}"
+                )
+            command = apply_legacy_profile_pin(command, published)
         selected.append(command)
     return tuple(selected)
 

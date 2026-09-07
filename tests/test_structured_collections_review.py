@@ -108,7 +108,7 @@ def test_resolve_keeps_unsafe_collection_filesystem_forms_distinct_from_absence(
         outside = tmp_path / "outside"
         outside.mkdir()
         try:
-            (records / "unsafe").unlink()
+            (records / "unsafe").rmdir()
             (records / "unsafe").symlink_to(outside, target_is_directory=True)
         except OSError:
             pytest.skip("symlinks/reparse points are unavailable")

@@ -42,7 +42,7 @@ _ACTION_FIELDS = {
         }
     ),
     "append": frozenset(
-        {"collection", "item", "why", "item_key", "expected_container_hash", "body"}
+        {"collection", "item", "why", "item_key", "expected_container_hash", "body", "delivery"}
     ),
     "update": frozenset(
         {
@@ -131,6 +131,7 @@ def record_memory(
     expected_manifest_hash: str | None = None,
     acknowledged_gap_codes: list[str] | None = None,
     body: str | None = None,
+    delivery: records.ArtifactDelivery | None = None,
     changes: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
     refresh_presentation: bool | None = None,
@@ -167,6 +168,8 @@ def record_memory(
         item_key: Stable item ID for append or update.
         expected_container_hash: Exact current container hash for append or update.
         body: Optional Markdown item body for append.
+        delivery: Optional receipt-gated artifact-delivery validation envelope
+            for append. The caller still authors every mapped item field.
         changes: Targeted changes for update.
         expected_item_version: Exact current item version for update.
         refresh_presentation: Guardedly rebuild the managed Markdown presentation during update.
@@ -198,6 +201,7 @@ def record_memory(
         "expected_manifest_hash": expected_manifest_hash,
         "acknowledged_gap_codes": acknowledged_gap_codes,
         "body": body,
+        "delivery": delivery,
         "changes": changes,
         "expected_item_version": expected_item_version,
         "refresh_presentation": refresh_presentation,
@@ -282,15 +286,16 @@ def record_memory(
             manifest = record_governance.require_records_profile(
                 record_governance.resolve_collection_for_mutation(vault_root, collection)
             )
-            return records.append_record(
-                vault_root,
-                manifest,
-                item=item,
-                item_key=item_key,
-                expected_container_hash=expected_container_hash,
-                body="" if body is None else body,
-                why=why,
-            )
+            append_kwargs: dict[str, Any] = {
+                "item": item,
+                "item_key": item_key,
+                "expected_container_hash": expected_container_hash,
+                "body": "" if body is None else body,
+                "why": why,
+            }
+            if delivery is not None:
+                append_kwargs["delivery"] = delivery
+            return records.append_record(vault_root, manifest, **append_kwargs)
         if action == "revise":
             assert collection is not None
             assert manifest_text is not None

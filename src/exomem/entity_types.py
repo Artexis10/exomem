@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import unicodedata
 from collections.abc import Iterable, Mapping
@@ -68,6 +69,7 @@ ENTITY_TYPE_REGISTRY: tuple[EntityTypeDefinition, ...] = (
         aliases=("people", "individual", "individuals", "human", "humans"),
         capture_guidance="A stable person identity with reusable facts, history, or relations.",
         optional_frontmatter=("affiliation", "relationship"),
+        cue_nouns=("person", "people", "individual", "individuals", "human", "humans"),
     ),
     EntityTypeDefinition(
         id="organization",
@@ -85,6 +87,16 @@ ENTITY_TYPE_REGISTRY: tuple[EntityTypeDefinition, ...] = (
         capture_guidance=(
             "A stable organization identity with reusable facts, history, or relations."
         ),
+        cue_nouns=(
+            "organization",
+            "organizations",
+            "organisation",
+            "organisations",
+            "company",
+            "companies",
+            "institution",
+            "institutions",
+        ),
     ),
     EntityTypeDefinition(
         id="concept",
@@ -93,6 +105,7 @@ ENTITY_TYPE_REGISTRY: tuple[EntityTypeDefinition, ...] = (
         aliases=("concepts", "idea", "ideas"),
         capture_guidance="A reusable concept that anchors conclusions across sources.",
         optional_frontmatter=("domain",),
+        cue_nouns=("concept", "concepts", "idea", "ideas"),
     ),
     EntityTypeDefinition(
         id="library",
@@ -107,6 +120,14 @@ ENTITY_TYPE_REGISTRY: tuple[EntityTypeDefinition, ...] = (
         ),
         capture_guidance="A reusable software library or package with durable project context.",
         optional_frontmatter=("language", "repo", "license", "used_in"),
+        cue_nouns=(
+            "library",
+            "libraries",
+            "software-library",
+            "software-libraries",
+            "package",
+            "packages",
+        ),
     ),
     EntityTypeDefinition(
         id="decision",
@@ -115,6 +136,7 @@ ENTITY_TYPE_REGISTRY: tuple[EntityTypeDefinition, ...] = (
         aliases=("decisions", "adr", "adrs"),
         capture_guidance="A durable decision whose identity is useful as a graph node.",
         optional_frontmatter=("decided", "project", "decision_status"),
+        cue_nouns=("decision", "decisions", "adr", "adrs"),
     ),
 )
 
@@ -173,6 +195,7 @@ class EntityTypeRegistry:
 
     core_version: int
     extension_hash: str
+    fingerprint_value: str
     core: Mapping[str, EntityTypeDefinition]
     extensions: Mapping[str, EntityTypeDefinition] = field(default_factory=dict)
     findings: tuple[dict[str, str], ...] = ()
@@ -187,6 +210,45 @@ class EntityTypeRegistry:
     @property
     def active_ids(self) -> tuple[str, ...]:
         return tuple(self.by_id)
+
+    @property
+    def fingerprint(self) -> str:
+        """Stable identity of every input that can change derived families."""
+        return self.fingerprint_value
+
+    @property
+    def families(self) -> Mapping[str, tuple[str, ...]]:
+        """Deterministic family -> active leaf IDs derived from this snapshot."""
+        grouped: dict[str, list[str]] = {}
+        for definition in self.active_definitions:
+            family = definition.id if definition.core else definition.parent or definition.id
+            grouped.setdefault(family, []).append(definition.id)
+        return MappingProxyType(
+            {
+                family: tuple(sorted(members))
+                for family, members in sorted(grouped.items())
+            }
+        )
+
+    def family_of(self, value: str) -> str | None:
+        """Return the one derived family of an active leaf or registry token."""
+        definition = self.resolve(value)
+        if definition is None:
+            return None
+        return definition.id if definition.core else definition.parent or definition.id
+
+    def family_members(self, family: str) -> tuple[str, ...]:
+        """Return active leaves in ``family`` without broadening exact filters."""
+        normalized = _normalized(family)
+        resolved = self.resolve(family)
+        family_id = self.family_of(resolved.id) if resolved is not None else normalized
+        return self.families.get(family_id or normalized, ())
+
+    def matches_family(self, leaf: str, family: str) -> bool:
+        """Whether one active canonical leaf belongs to an explicit family."""
+        actual = self.family_of(leaf)
+        wanted = self.family_of(family) or _normalized(family)
+        return actual is not None and actual == wanted
 
     def resolve(self, value: str) -> EntityTypeDefinition | None:
         normalized = _normalized(value)
@@ -225,9 +287,30 @@ def _registry(
     for item in active:
         for value in (item.label, *item.aliases):
             by_alias[_normalized(value)] = item
+    fingerprint_payload = [
+        {
+            "id": item.id,
+            "folder": item.folder,
+            "label": item.label,
+            "aliases": list(item.aliases),
+            "cue_nouns": list(item.cue_nouns),
+            "parent": item.parent,
+            "status": item.status,
+        }
+        for item in sorted([*core.values(), *extension_map.values()], key=lambda row: row.id)
+    ]
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     return EntityTypeRegistry(
         core_version=core_version,
         extension_hash=extension_hash,
+        fingerprint_value=fingerprint,
         core=MappingProxyType(dict(core)),
         extensions=MappingProxyType(extension_map),
         findings=findings,

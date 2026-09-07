@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import commands, referent_resolution, referent_runtime
+from exomem import commands, curation, referent_resolution, referent_runtime
 from exomem import find as find_module
 from exomem import query_data as query_data_module
 from exomem.find_types import GraphProvenance, Hit
@@ -2750,6 +2750,11 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "reconcile": False,
             "backfill-ids": True,
             "structured-files": True,
+            # `curation` is registered "mutation": a bare `mode="curation"`
+            # carries no curation_action, and an unstated action stays on the
+            # writer path. Which curation actions are read-only is a second
+            # selector's decision, pinned by name in the conditional test below.
+            "curation": False,
         },
     }
     product = {command.name: command for command in commands.PRODUCT_COMMANDS}
@@ -2827,6 +2832,30 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
     assert not commands.invocation_is_read_only(maintain, {"mode": "reconcile"})
     assert commands.invocation_is_read_only(maintain, {"mode": "reconcile", "dry_run": True})
     assert commands.invocation_is_read_only(maintain, {"mode": "backfill-ids"})
+
+    # Curation is the one mode whose read-only-ness a SECOND selector decides,
+    # so the mode row alone under-registers it: it pins only the conservative
+    # bare-selector answer. The per-action classification is enumerated over
+    # the whole closed action set and restated by name on purpose -- deriving
+    # it from `READ_ONLY_ACTIONS` would assert the classifier against its own
+    # input, and a new curation action must land here as a decision rather
+    # than inherit one from whichever set it was added to.
+    assert not commands.invocation_is_read_only(maintain, {"mode": "curation"})
+    assert {
+        action: commands.invocation_is_read_only(
+            maintain, {"mode": "curation", "curation_action": action}
+        )
+        for action in curation.CURATION_ACTIONS
+    } == {
+        "work-item": True,
+        "preview": True,
+        "status": True,
+        "propose": False,
+        "apply": False,
+        "resume": False,
+        "propose-compensation": False,
+        "apply-compensation": False,
+    }
 
 
 def test_query_data_csv_rows_are_gated_and_receipted(vault: Path) -> None:

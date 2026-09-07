@@ -35,6 +35,7 @@ from typing import Any
 
 from . import call_spans
 from . import capabilities as capabilities_module
+from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
 from .mutation_lock import (
     VaultMutationCoordinator,
@@ -73,6 +74,43 @@ _REQUEST_BOUND_REMOTE_SURFACES = frozenset({"mcp", "rest", "hosted", "hosted-age
 REMOTE_MAINTENANCE_MESSAGE = (
     "write-mode maintenance is unavailable through request-bound remote commands"
 )
+
+
+def _profile_admits_request_bound_curation(active_surface: Any, kwargs: Mapping[str, Any]) -> bool:
+    """Whether the active profile's own schema publishes governed curation.
+
+    Write-mode maintenance is operator-only over a request-bound remote surface,
+    and `structured-files` was the single exception. Governed curation is the
+    second, and it is narrower than a mode check: it holds only while the
+    profile being served actually publishes the curation arguments.
+
+    That question is asked of the profile's resolved schema rather than of a
+    list of profile names, which is what keeps the released profiles refusing
+    without being enumerated here. v1-v4 resolve a pinned schema whose
+    `maintain_memory` has no `curation_action`, so they fail this test by
+    construction; a surface with no product profile at all -- the direct-Python
+    default, the personal MCP server -- fails it too, and keeps today's refusal.
+    """
+    if kwargs.get("mode") != "curation":
+        return False
+    profile = getattr(active_surface, "profile", None)
+    if not isinstance(profile, str):
+        return False
+    from . import commands as commands_module
+
+    if profile not in commands_module.PRODUCT_SURFACE_PROFILES:
+        return False
+    try:
+        resolved = commands_module.product_commands_for_profile(profile, "rest")
+    except (ValueError, RuntimeError):
+        return False
+    return any(
+        entry.name == "maintain_memory"
+        and any(param.name == "curation_action" for param in entry.params)
+        for entry in resolved
+    )
+
+
 REMOTE_MAINTENANCE_REMEDIATION = (
     "Run `exomem maintain --fix` or `exomem maintain --reconcile` on the host; "
     "for ID backfill, run `exomem maintain_memory --mode backfill-ids "
@@ -3536,6 +3574,9 @@ class LeaseManager:
                     or command.name == "maintain_memory"
                     and kwargs.get("mode") == "structured-files"
                     and valid_structured_files_receipt(leaf_result)
+                    or command.name == "maintain_memory"
+                    and kwargs.get("mode") == "curation"
+                    and curation_module.valid_replay_result(leaf_result)
                 ) and leaf_result.get("outcome") == "replayed":
                     return replayed_terminal(
                         leaf_result,
@@ -4773,6 +4814,7 @@ def invoke_command(
     if (
         command.name == "maintain_memory"
         and kwargs.get("mode") != "structured-files"
+        and not _profile_admits_request_bound_curation(active_surface, kwargs)
         and not read_only
         and selector_error is None
         and active_surface is not None

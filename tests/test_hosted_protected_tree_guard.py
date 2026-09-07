@@ -36,6 +36,7 @@ from exomem.server_hosted import register_hosted_routes
 REPO_ROOT = Path(__file__).resolve().parents[1]
 V3_PROFILE = "hosted-alpha-agent-v3"
 V4_PROFILE = "hosted-alpha-agent-v4"
+V5_PROFILE = "hosted-alpha-agent-v5"
 #: Drive-qualified and UNC probe spellings are assembled rather than written
 #: out. Spelled literally they trip the public-artifact privacy scan's
 #: absolute-local-path rule, and weakening a privacy rule to write a test is
@@ -49,26 +50,6 @@ PRINCIPAL = (
     .rstrip(b"=")
     .decode()
 )
-
-
-class _ProfileConfig(HostedCellConfig):
-    """A cell whose operator has selected the epistemic profile.
-
-    Only the profile *selection* input is stubbed. Everything downstream --
-    routing, auth, coercion, admission, the command leaf -- is the real thing.
-    """
-
-    @property
-    def active_agent_profile(self) -> str:
-        return V3_PROFILE
-
-
-class _ParityProfileConfig(HostedCellConfig):
-    """The same stub for the parity profile, which alone exposes some guards."""
-
-    @property
-    def active_agent_profile(self) -> str:
-        return V4_PROFILE
 
 
 def _profile_exposing(command: str) -> str:
@@ -104,11 +85,7 @@ def _cell(tmp_path: Path, *, profile: str = V3_PROFILE) -> tuple[Any, HostedCell
     vault_root = tmp_path / "vault"
     init_vault(vault_root)
     _seed_user_schema_documents(vault_root)
-    factory = {
-        V3_PROFILE: _ProfileConfig,
-        V4_PROFILE: _ParityProfileConfig,
-    }.get(profile, HostedCellConfig)
-    config = factory(
+    config = HostedCellConfig(
         cell_id="cell-protected-tree",
         vault_root=vault_root,
         state_root=tmp_path / "state",
@@ -117,6 +94,7 @@ def _cell(tmp_path: Path, *, profile: str = V3_PROFILE) -> tuple[Any, HostedCell
         enforce_transfer_v1_compatibility=False,
         records_reader_version=2,
         lifecycle_actions_enabled=(profile == commands_module.HOSTED_ALPHA_AGENT_V2_PROFILE),
+        agent_profile=profile,
         resource_limits=HostedResourceLimits(
             storage_bytes=4 * 1024 * 1024, upload_bytes=4096, worker_count=0
         ),
@@ -1043,7 +1021,10 @@ def test_guard_follows_a_symlink_that_never_names_a_protected_tree(tmp_path: Pat
     )
 
 
-def test_target_constrained_mutations_are_actually_constrained(tmp_path: Path) -> None:
+@pytest.mark.parametrize("profile", [V4_PROFILE, V5_PROFILE])
+def test_target_constrained_mutations_are_actually_constrained(
+    tmp_path: Path, profile: str
+) -> None:
     """Turn the classification from a claim into a repo guarantee.
 
     `TARGET_CONSTRAINED_MUTATIONS` silences the startup classifier, so adding a
@@ -1091,11 +1072,15 @@ def test_target_constrained_mutations_are_actually_constrained(tmp_path: Path) -
                     stack.extend(node.get(branch) or [])
         return found
 
-    # v4 is the profile that exposes every member. On a v3 cell the five this
-    # widening adds answer COMMAND_NOT_FOUND, and a 404 satisfies both
-    # assertions below without exercising anything -- the routability check in
-    # the probe loop is what keeps that from passing as evidence.
-    app, config = _cell(tmp_path, profile=V4_PROFILE)
+    # v4 and v5 are the profiles that expose every member. On a v3 cell the five
+    # the parity widening adds answer COMMAND_NOT_FOUND, and a 404 satisfies
+    # both assertions below without exercising anything -- the routability check
+    # in the probe loop is what keeps that from passing as evidence.
+    #
+    # v5 is not a formality here. Its `maintain_memory` is the live registry
+    # object, so the curation arguments this sweep probes actually reach
+    # dispatch instead of bouncing off v4's pinned schema as UNKNOWN_PARAM.
+    app, config = _cell(tmp_path, profile=profile)
 
     # A manifest the parser actually accepts, so `record_memory` is refused on
     # its *target* rather than bouncing off manifest validation first. Taken
@@ -1314,3 +1299,113 @@ def test_a_profile_with_an_unclassified_mutation_refuses_to_serve() -> None:
             gateway.assert_profile_mutations_are_classified(profile)
     finally:
         commands_module.PRODUCT_SURFACE_PROFILES = original
+
+
+def test_v5_curation_selectors_and_plan_targets_stay_out_of_the_protected_trees(
+    tmp_path: Path,
+) -> None:
+    """v5's `maintain_memory` takes caller-supplied paths; v4's did not.
+
+    `TARGET_CONSTRAINED_MUTATIONS` carries `maintain_memory` on the recorded
+    ground that it "declares no path role at all -- its arguments are a mode, a
+    category list and booleans". Curation makes that description obsolete for
+    v5: `paths` and `refs` select what to read, and a plan step names where to
+    write. The sweep above probes string arguments; these are arrays and a
+    nested plan, so they are probed here rather than left to a walker that does
+    not descend into them.
+
+    The claim is the same one the sweep makes: the leaf refuses, the gateway
+    guard never fires, and no protected-tree byte moves.
+    """
+    app, config = _cell(tmp_path, profile=V5_PROFILE)
+    injection = f"{_kb()}/_Schema/injected-by-curation-probe.md"
+    trees_before = _protected_tree_state(config.vault_root)
+
+    for argument in ("paths", "refs"):
+        response = _call(
+            app,
+            config,
+            "maintain_memory",
+            {"mode": "curation", "curation_action": "work-item", argument: [injection]},
+        )
+        # A profile that never admitted the argument proves nothing here: the
+        # call bounces on coercion and "the guard did not fire" is vacuous. Same
+        # reasoning as the routability check in the sweep above.
+        assert "COMMAND_NOT_FOUND" not in response.text, argument
+        assert "UNKNOWN_PARAM" not in response.text, f"{argument} never reached curation"
+        assert "INVALID_MODE" not in response.text, f"{argument} never reached curation"
+        assert "HOSTED_PROTECTED_TREE_MUTATION" not in response.text, argument
+        assert _protected_tree_state(config.vault_root) == trees_before, argument
+
+    plan = {
+        "version": 1,
+        "title": "Probe plan aimed at governed doctrine",
+        "steps": [
+            {
+                "step_id": "probe",
+                "kind": "create-note",
+                "args": {
+                    "title": "Curation protected probe",
+                    "slug": "curation-protected-probe",
+                    "content": "## Observations\n\n- [finding] Probe. ^probe\n",
+                    "path": injection,
+                },
+            }
+        ],
+    }
+    proposed = _call(
+        app,
+        config,
+        "maintain_memory",
+        {"mode": "curation", "curation_action": "propose", "plan": plan},
+    )
+
+    # The plan schema is closed, so an unexpected `path` on a `create-note` step
+    # is refused before any placement is decided. Either way the assertion that
+    # matters holds: nothing was proposed that could reach the protected tree.
+    assert proposed.status_code == 400, proposed.text
+    assert proposed.json()["error"]["code"] == "CURATION_UNKNOWN_FIELD"
+    assert "HOSTED_PROTECTED_TREE_MUTATION" not in proposed.text
+    assert _protected_tree_state(config.vault_root) == trees_before
+
+
+def test_v5_curation_refuses_a_plan_step_that_relocates_into_a_protected_tree(
+    tmp_path: Path,
+) -> None:
+    """A move step names its destination outright, so aim one and watch it fail."""
+    app, config = _cell(tmp_path, profile=V5_PROFILE)
+    trees_before = _protected_tree_state(config.vault_root)
+
+    plan = {
+        "version": 1,
+        "title": "Probe relocation into governed doctrine",
+        "steps": [
+            {
+                "step_id": "relocate",
+                "kind": "move",
+                "args": {
+                    "old_path": f"{_kb()}/Notes/Insights/curation-relocation-probe.md",
+                    "new_path": f"{_kb()}/_Schema/relocated-by-curation-probe.md",
+                },
+            }
+        ],
+    }
+    response = _call(
+        app,
+        config,
+        "maintain_memory",
+        {"mode": "curation", "curation_action": "propose", "plan": plan},
+    )
+
+    assert response.status_code == 400, response.text
+    # Refused by the plan's own target rules, not by the gateway guard and not
+    # by the step-kind check -- `move` is a real kind, so the destination is
+    # what is being judged here.
+    code = response.json()["error"]["code"]
+    assert code != "INVALID_STEP_KIND", response.text
+    # And it has to be curation that refused it. A profile that never admitted
+    # the mode answers UNKNOWN_PARAM or INVALID_MODE, which would read as "the
+    # destination was rejected" while nothing looked at the destination at all.
+    assert code not in {"UNKNOWN_PARAM", "INVALID_MODE"}, response.text
+    assert "HOSTED_PROTECTED_TREE_MUTATION" not in response.text
+    assert _protected_tree_state(config.vault_root) == trees_before

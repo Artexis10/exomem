@@ -2286,11 +2286,18 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
         "port": 8080,
     }
     assert contract["provisioner"]["protocol"] == "exomem-cell-provisioner.v1"
+    # `protocol` names the default wire envelope, not an exhaustive action gate.
+    # This map is the served HTTP surface, and the ingress route is generated
+    # against it, so an action absent here is unreachable however it is called.
+    # `renew-authorization` is v2-only on the wire -- the frozen v1 corpus in
+    # provisioner-wire-v1.json never gains an action -- but it is still served,
+    # so it belongs in the composition.
     assert set(contract["provisioner"]["actions"]) == {
         "provision",
         "health",
         "rotate-credential",
         "quiesce",
+        "renew-authorization",
         "resume",
         "stop",
         "export",

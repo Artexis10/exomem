@@ -5,7 +5,7 @@ The generic scaffold, installed core skill, and hookless custom-instructions pro
 
 After each separately confirmed hydration batch returns a terminal mutation receipt, the agent MAY perform exactly one immediate recheck bound to the same identity. Rechecks after processed batches 1–7 may expose at most the next eight contexts; the eighth recheck after processed batch 8 is closure-only and exposes no ninth batch. Another recheck requires another fresh confirmation and terminal receipt. The chain SHALL stop on the specified state/outcome stops or after eight mutated batches and eight identity rechecks in one session; remaining work stays open for the next session's ordinary read. Off and light SHALL remain explicit-request-only.
 
-The carriers SHALL teach resolve-before-create, ambiguity stop, hydrate-before-duplicate, and governed unknown-kind registration without listing a closed ontology. When the exported surface cannot request the category, they SHALL mark the check unavailable and skip it rather than inventing a command, local scan, model inference, or due-state result.
+The generic scaffold and installed core skill SHALL teach resolve-before-create, ambiguity stop, hydrate-before-duplicate, and governed unknown-kind registration without listing a closed ontology. The hookless custom-instructions projection is bounded by the 1,500-byte web custom-instructions limit: it SHALL carry the cadence and the unavailable-skip rule and SHALL defer the decision order to the bootstrap payload it already instructs the agent to follow, and that payload SHALL carry the order. When the exported surface cannot request the category, every carrier SHALL mark the check unavailable and skip it rather than inventing a command, local scan, model inference, or due-state result.
 
 #### Scenario: Hookless agent checks on an ordinary interaction
 - **GIVEN** a clean balanced client with only the generic portable contract and an explicit category-read surface
@@ -34,3 +34,10 @@ The carriers SHALL teach resolve-before-create, ambiguity stop, hydrate-before-d
 - **GIVEN** a hookless client without an explicit category-read surface
 - **WHEN** the recurrence boundary arrives
 - **THEN** the carrier marks the check unavailable and performs no substitute scan or semantic inference
+
+#### Scenario: Hookless projection stays within the web byte cap
+- **GIVEN** the maximal and balanced copyable custom-instruction blocks
+- **WHEN** each is measured as UTF-8 bytes
+- **THEN** each is at most 1,500 bytes
+- **AND** each names the once-per-conversation cadence and the unavailable-skip rule
+- **AND** each defers the decision order to bootstrap rather than restating it

@@ -274,6 +274,33 @@ def test_workflow_skill_docs_route_through_product_commands() -> None:
             )
 
 
+def test_curate_skill_routes_reviewed_plans_through_the_delegation_envelope() -> None:
+    text = (workflow_skills.source_dir("exomem-curate") / "SKILL.md").read_text(encoding="utf-8")
+
+    for action in ("work-item", "propose", "preview"):
+        assert f'curation_action="{action}"' in text
+    for action in ("apply", "resume", "propose-compensation", "apply-compensation"):
+        assert f'curation_action="{action}"' in text
+    assert "`structural_suggestions`" in text
+    assert "`restructure_execution`" in text
+    assert "preview the immutable plan once" in text
+    assert "one explicit confirmation for that exact plan fingerprint" in text
+    assert "resume automatically one step per request" in text
+    assert 'propose-compensation"` is `structural_suggestions`' in text
+    assert "does not need a fresh confirmation" in text
+    assert "stop on `partial` or `blocked`" in text
+    assert "standing approval" in text
+
+
+def test_hookless_core_carrier_keeps_explicit_curation_available_when_suggestions_are_off() -> None:
+    text = (workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md").read_text(encoding="utf-8")
+    compact = " ".join(text.lower().split())
+    assert "an explicit request from the user is never blocked" in compact
+    assert "curation `work-item`, `propose`, `preview`, `status`, and `propose-compensation`" in compact
+    assert "curation `apply`, `resume`, and `apply-compensation`" in compact
+    assert "one immutable plan fingerprint" in compact
+
+
 def test_core_skill_routes_tool_loading_by_current_intent() -> None:
     skill_md = workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md"
     text = skill_md.read_text(encoding="utf-8")

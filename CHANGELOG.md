@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.73.1](https://github.com/Artexis10/exomem/compare/v0.73.0...v0.73.1) (2026-09-06)
+
+
+### Bug Fixes
+
+* **hosted:** admit the serving pod that carries a selected agent profile ([#1087](https://github.com/Artexis10/exomem/issues/1087)) ([56ed902](https://github.com/Artexis10/exomem/commit/56ed902b2878fe5b9323d665f2ffc42b005da7f2))
+* **hosted:** let reset reclaim the canary and the stage it already could ([#1091](https://github.com/Artexis10/exomem/issues/1091)) ([48c348b](https://github.com/Artexis10/exomem/commit/48c348b7574e810c9b0384fcb9bc1ad09cbec7db))
+* **hosted:** renew a cell's authorization before its window lapses ([#1090](https://github.com/Artexis10/exomem/issues/1090)) ([89abe36](https://github.com/Artexis10/exomem/commit/89abe3652bd07c14f5455b6eab57fbf53771477d))
+* **schema:** document the relation disposition a compiled write requires ([#1089](https://github.com/Artexis10/exomem/issues/1089)) ([b736df9](https://github.com/Artexis10/exomem/commit/b736df9d128548395e29c371a5c02d031fdf91d5))
+
+## [0.73.0](https://github.com/Artexis10/exomem/compare/v0.72.1...v0.73.0) (2026-09-06)
+
+
+### Features
+
+* consolidate the dogfood lifecycle doctrines, mint Hosted v5, and repair collection inventory ([#1085](https://github.com/Artexis10/exomem/issues/1085)) ([f3f235b](https://github.com/Artexis10/exomem/commit/f3f235b87ca650421e1d406595e917513e3f435b))
+
+## [0.72.1](https://github.com/Artexis10/exomem/compare/v0.72.0...v0.72.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **hosted:** serve the agent profile the deployment selects ([#1083](https://github.com/Artexis10/exomem/issues/1083)) ([9c583fb](https://github.com/Artexis10/exomem/commit/9c583fbc4d0b406827ddd5ac6621cc17c663a55b))
+
+## [0.72.0](https://github.com/Artexis10/exomem/compare/v0.71.0...v0.72.0) (2026-09-05)
+
+
+### Features
+
+* **bootstrap:** avoid repeating installed skill instructions ([#1078](https://github.com/Artexis10/exomem/issues/1078)) ([ee79e01](https://github.com/Artexis10/exomem/commit/ee79e01ac993141a3936bbe98e9ff1f3e96f5227))
+
+
+### Bug Fixes
+
+* **audit:** resolve KB-relative supersession pointers ([#1070](https://github.com/Artexis10/exomem/issues/1070)) ([97e7549](https://github.com/Artexis10/exomem/commit/97e7549819706ff85fd64b1251b6acb860f8ee4e))
+* **ci:** raise the cross-platform cap over the true worst session ([#1071](https://github.com/Artexis10/exomem/issues/1071)) ([9ee485d](https://github.com/Artexis10/exomem/commit/9ee485df9f4f414387879e6fd36fdc752f8d974e))
+* **hosted:** let a first provision answer "no retarget needed" ([#1080](https://github.com/Artexis10/exomem/issues/1080)) ([c4a1977](https://github.com/Artexis10/exomem/commit/c4a1977913424a253224a74a40d8c49e6a033fc1))
+* **hosted:** re-mint an expired authorization bundle before the cell serves ([#1082](https://github.com/Artexis10/exomem/issues/1082)) ([fdc9ab4](https://github.com/Artexis10/exomem/commit/fdc9ab4df7651bffd9f3ede01a363b1d113b18d0))
+
 ## [0.71.0](https://github.com/Artexis10/exomem/compare/v0.70.0...v0.71.0) (2026-09-05)
 
 

@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 08fd3780b17e69cc553f3d1d23f67945b64af38fb998d47846c68c872a4ef6bd
+  skill_contract: 75fb5e1e3fb04874e3ea97610481708ca90661cf63579ea905122c96189f9c12
   version: "0.1.0"
 ---
 
@@ -31,6 +31,18 @@ the structured error. For warming, busy, pending, or
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, preserve the same mutation identity
 and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
+
+## Durable personal baselines
+A stable preference, recurring routine, historical baseline, or durable affiliation
+is eligible only when both stability or recurrence and reusable comparison,
+interpretation, or decision value are clear. Attach a facet or affiliation to a
+uniquely resolved Entity; otherwise write one concise compiled observation. Use
+Records only for an observed measurement accepted by a compatible existing
+collection. Fleeting preferences, one-off activity, incidental associations, trivial
+metrics, and tentative claims stay quiet. Eligibility never creates an Entity,
+collection, or schema. Concise observations and narrow additive facts follow
+`proactive_capture`; affiliation relations use `link_acceptance`; Entity creation or
+substantial curation uses confirmed `restructure_execution`.
 
 ## Workflow
 1. Decide whether the material is raw evidence or a compiled conclusion.

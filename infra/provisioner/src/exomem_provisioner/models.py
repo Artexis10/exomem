@@ -41,6 +41,7 @@ class OperationAction(StrEnum):
     ROLLBACK_ROLLFORWARD = "rollback-rollforward"
     ROTATE_CREDENTIAL = "rotate-credential"
     QUIESCE = "quiesce"
+    RENEW_AUTHORIZATION = "renew-authorization"
     RESUME = "resume"
     STOP = "stop"
     EXPORT = "export"

@@ -13,6 +13,7 @@
     "image": {"type": "string", "pattern": "^[^\\s]+@sha256:[a-f0-9]{64}$"},
     "expectedRelease": {"type": "string", "minLength": 1, "maxLength": 64},
     "expectedProtocol": {"type": "string", "const": "1"},
+    "agentProfile": {"type": "string"},
     "workerPolicyDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "recordsReaderVersion": {"type": "integer", "minimum": 2},
     "lifecycleActionsEnabled": {"type": "boolean"},

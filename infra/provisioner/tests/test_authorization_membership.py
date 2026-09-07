@@ -329,3 +329,124 @@ def test_membership_transition_commits_only_the_exact_runtime_attestation() -> N
             ttl_seconds=300,
             runtime_attestation=tampered,
         )
+
+
+def _drained_bundle(now: int):
+    """A cell that has been quiesced: DRAINING with its in-flight work acknowledged."""
+    initial = build_initial_hosted_authorization_bundle(
+        cell_id="cell-alpha",
+        logical_vault_id="tenant-alpha",
+        replica_id="exo-0123456789abcdef0123-0",
+        software_version="0.48.0",
+        schema_version=4,
+        recovery_envelope="signed-authorization-session-secret",
+        now=now,
+        entropy=_entropy,
+    )
+    common = {
+        "expected_cell_id": "cell-alpha",
+        "expected_logical_vault_id": "tenant-alpha",
+        "expected_replica_id": "exo-0123456789abcdef0123-0",
+        "expected_software_version": "0.48.0",
+        "expected_schema_version": 4,
+        "expected_recovery_envelope": "signed-authorization-session-secret",
+    }
+    drained = transition_hosted_authorization_bundle(
+        initial.files,
+        **common,
+        target_state="DRAINING",
+        target_no_in_flight=True,
+        now=now + 30,
+    )
+    return drained, common
+
+
+def test_renewal_cannot_un_quiesce_a_drained_cell() -> None:
+    """Renewal moves the window; it must not double as an unaudited resume.
+
+    `renew_authorization_session` names `target_state="SERVING"` because that is
+    the only state it ever renews. Against a drained cell that target would take
+    the resume branch, so a background sweep running every minute would silently
+    put a deliberately quiesced cell back into service.
+    """
+    now = 1_900_000_000
+    drained, common = _drained_bundle(now)
+    _, record = _runtime_membership(drained, now=now + 30)
+    assert [replica.state for replica in record.replicas] == ["DRAINING"]
+
+    with pytest.raises(MetadataConflict, match="renewal cannot change"):
+        transition_hosted_authorization_bundle(
+            drained.files,
+            **common,
+            target_state="SERVING",
+            target_no_in_flight=False,
+            now=now + 60,
+            renew=True,
+        )
+
+
+def test_renewal_cannot_resurrect_a_drained_cell_whose_window_lapsed() -> None:
+    """The drain exemption is the one path allowed to act on a stale bundle.
+
+    It exists so a fully drained cell can still be resumed after its window
+    closed. Renewal riding it would resurrect a cell expired by any amount at
+    all, which is precisely the fence the whole change exists to respect.
+    """
+    now = 1_900_000_000
+    drained, common = _drained_bundle(now)
+
+    with pytest.raises(MetadataConflict, match="renewal cannot change"):
+        transition_hosted_authorization_bundle(
+            drained.files,
+            **common,
+            target_state="SERVING",
+            target_no_in_flight=False,
+            now=now + 999_999,
+            renew=True,
+        )
+
+    # The exemption itself is untouched: a real resume of the same drained cell,
+    # past expiry, still works. The guard closes renewal, not recovery.
+    resumed = transition_hosted_authorization_bundle(
+        drained.files,
+        **common,
+        target_state="SERVING",
+        target_no_in_flight=False,
+        now=now + 999_999,
+    )
+    _, resumed_record = _runtime_membership(resumed, now=now + 999_999)
+    assert [replica.state for replica in resumed_record.replicas] == ["SERVING"]
+
+
+def test_renewal_of_an_in_date_serving_cell_still_moves_the_window() -> None:
+    """The control: the guard must not have closed the path renewal exists for."""
+    now = 1_900_000_000
+    initial = build_initial_hosted_authorization_bundle(
+        cell_id="cell-alpha",
+        logical_vault_id="tenant-alpha",
+        replica_id="exo-0123456789abcdef0123-0",
+        software_version="0.48.0",
+        schema_version=4,
+        recovery_envelope="signed-authorization-session-secret",
+        now=now,
+        entropy=_entropy,
+    )
+    _, before_record = _runtime_membership(initial, now=now)
+
+    renewed = transition_hosted_authorization_bundle(
+        initial.files,
+        expected_cell_id="cell-alpha",
+        expected_logical_vault_id="tenant-alpha",
+        expected_replica_id="exo-0123456789abcdef0123-0",
+        expected_software_version="0.48.0",
+        expected_schema_version=4,
+        expected_recovery_envelope="signed-authorization-session-secret",
+        target_state="SERVING",
+        target_no_in_flight=False,
+        now=now + 1_800,
+        renew=True,
+    )
+    _, renewed_record = _runtime_membership(renewed, now=now + 1_800)
+
+    assert [replica.state for replica in renewed_record.replicas] == ["SERVING"]
+    assert renewed_record.expires_at > before_record.expires_at
