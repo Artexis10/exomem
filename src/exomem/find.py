@@ -1190,12 +1190,14 @@ def find(
     # narrows it (an offline caller proved nothing from an index, and a
     # warming or unavailable catalogue declined).
     with _span(timings, "recall_projection", source=find_types.SOURCE_INDEX):
-        if state == "ready" and require_live_recall:
+        if state in {"ready", "unavailable"} and require_live_recall:
             # Bounded projection lag is served, not refused. `admission` takes
             # the strict proof when it binds and otherwise falls back to the
             # catalog's own published projection under an unchanged identity —
             # so a cold or reprojection-evicted registry answers from the last
-            # published projection instead of blanking semantic recall.
+            # published projection instead of blanking semantic recall. Repair
+            # and health probes can revoke strict readiness during this window;
+            # re-prove request admission even when that ready bit is clear.
             admitted = lexstore.runtime_retrieval_catalog_admission(vault_root)
             raw_proof = admitted.checkpoints if admitted is not None else None
             if raw_proof is None:
@@ -1212,6 +1214,9 @@ def find(
                     catalog_proof = None
                     state = "unavailable"
                 else:
+                    # This admits only this request. Strict health readiness
+                    # remains unavailable until the live projection catches up.
+                    state = "ready"
                     stale_recall_scopes = frozenset(admitted.lagging_scopes)
                     if stale_recall_scopes and degraded_out is not None:
                         # Rides the existing warming disclosure: the envelope

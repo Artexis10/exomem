@@ -153,6 +153,47 @@ def test_find_at_an_exact_projection_discloses_nothing(
     assert "recall_projection" not in degraded
 
 
+@pytest.mark.parametrize("invalidate", ["repair", "health"])
+def test_find_rechecks_published_catalog_after_readiness_demotion(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, invalidate: str
+) -> None:
+    """A strict readiness demotion must not disable proven lag-tolerant recall."""
+    from exomem import find as find_module, readiness
+
+    _warm_catalog(vault)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault.resolve()))
+    # Hold repair to retain the real reprojection window deterministically.
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *_args, **_kwargs: None)
+    readiness.reset()
+    try:
+        readiness.manage_runtime()
+        readiness.begin_warm()
+        readiness.mark_ready("retrieval_catalog")
+        readiness.finish_warm()
+        _go_cold()
+        if invalidate == "repair":
+            lexstore._schedule_runtime_catalog_repair(vault)
+        else:
+            readiness.retrieval_admission(vault)
+        assert readiness.retrieval_admission()["state"] == "unavailable"
+
+        for _ in range(2):
+            degraded: list[str] = []
+            hits = find_module.find(vault, query="memory", limit=5, degraded_out=degraded)
+            assert isinstance(hits, list)
+            assert "recall_projection" in degraded
+        # Request admission does not falsely promote strict health readiness.
+        assert readiness.is_ready("retrieval_catalog") is False
+
+        (vault / "Knowledge Base" / "_access.yaml").write_text(
+            "excluded:\n  - Private\n", encoding="utf-8"
+        )
+        with pytest.raises(find_module.RetrievalIndexWarming):
+            find_module.find(vault, query="memory", limit=5)
+    finally:
+        readiness.reset()
+
+
 def test_find_still_refuses_when_nothing_is_published(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
