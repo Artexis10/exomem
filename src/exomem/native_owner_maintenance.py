@@ -405,7 +405,9 @@ def exec_managed_phase(unit_file: Path, argv: Sequence[str]) -> None:
     environment = load_service_environment(unit_file)
     environment[_MANAGED] = "1"
     os.execve(
-        str(binding.interpreter), [str(binding.interpreter), "-m", __name__, *argv], environment
+        str(binding.interpreter),
+        [str(binding.interpreter), "-m", "exomem.native_owner_maintenance", *argv],
+        environment,
     )
 
 

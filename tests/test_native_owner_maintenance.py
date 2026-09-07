@@ -561,7 +561,6 @@ def test_managed_venv_interpreter_runs_metadata_and_preflight(
         expected_binding="a" * 64,
         now=now,
     )
-    managed_environment = {**environment, "EXOMEM_OWNER_MAINTENANCE_MANAGED": "1"}
     base = [
         str(Path(sys.prefix) / "bin" / "python"),
         "-m",
@@ -577,7 +576,7 @@ def test_managed_venv_interpreter_runs_metadata_and_preflight(
             "--request-id",
             review.review_id,
         ],
-        env=managed_environment,
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
@@ -591,7 +590,7 @@ def test_managed_venv_interpreter_runs_metadata_and_preflight(
             "--request-id",
             review.review_id,
         ],
-        env=managed_environment,
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
