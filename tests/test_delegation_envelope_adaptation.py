@@ -313,9 +313,9 @@ def _write_store(vault: Path, payload: dict) -> Path:
     return path
 
 
-def test_the_schema_version_moved_once(vault: Path) -> None:
-    assert review_state.SCHEMA_VERSION == 3
-    assert review_state._READABLE_SCHEMA_VERSIONS == frozenset({1, 2, 3})
+def test_vocabulary_schema_keeps_prior_review_generations_readable(vault: Path) -> None:
+    assert review_state.SCHEMA_VERSION == 4
+    assert review_state._READABLE_SCHEMA_VERSIONS == frozenset({1, 2, 3, 4})
 
 
 def test_a_previous_schema_store_is_migrated_on_load_and_rewritten_on_write(
@@ -348,7 +348,7 @@ def test_a_previous_schema_store_is_migrated_on_load_and_rewritten_on_write(
     store = review_state.ReviewStateStore(vault)
     loaded = store.load()
 
-    assert loaded["version"] == 3
+    assert loaded["version"] == review_state.SCHEMA_VERSION
     assert loaded["records"]["abc123:def456"]["action"] == "dismiss"
     # A record written before family attribution existed carries none, and is
     # therefore never counted: the store cannot invent an attribution it never
@@ -360,7 +360,7 @@ def test_a_previous_schema_store_is_migrated_on_load_and_rewritten_on_write(
     _dismiss(vault, "nag-one")
 
     rewritten = json.loads(path.read_text("utf-8"))
-    assert rewritten["version"] == 3
+    assert rewritten["version"] == review_state.SCHEMA_VERSION
     assert rewritten["records"]["abc123:def456"]["action"] == "dismiss"
 
 

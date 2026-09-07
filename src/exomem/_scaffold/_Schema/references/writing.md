@@ -19,6 +19,23 @@ Resolve entity candidates against the active entity registry and selected knowle
   A single incidental mention, unresolved identity, or transient participant
   stays in source/note context.
 
+## Vocabulary consideration
+
+Before saving durable knowledge, consider reuse, enrich, propose-new, generic, no-edge, or defer from the material and bounded review evidence. Resolve candidate entity
+types and relation meanings before proposing a new one. Generic and no-edge are
+truthful outcomes when no useful distinction is supported; there is no quota for
+types or edges. A resolver returns definitions and evidence; its null selection
+or proposal fields leave the judgment to the active agent. When a useful recurring
+identity has no fitting type, author its definition and rationale, preserve the
+existing extension definitions, and use `schema_memory(operation="save-entity-types")`
+with the reviewed registry document and current extension hash. An empty match
+does not require squeezing the identity into a core type or abandoning the type
+proposal. Record the reviewed fingerprint, family, registry hashes, target
+versions, outcome, rationale, and canonical choice through vocabulary triage.
+That record is consideration, not execution or permission: v1 canonical writers
+retain their existing confirmation rules. Do not treat a proposal, review decision,
+or generic connection as authority to create an entity, type, or edge.
+
 ## Agent write loop
 
 Use this loop whenever a durable conclusion should enter Exomem:

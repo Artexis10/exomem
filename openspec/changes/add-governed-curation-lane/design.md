@@ -389,3 +389,7 @@ deleting run artifacts or attempting an out-of-band rollback.
 None. The v1 action set, step vocabulary, one-step execution bound, witness
 protocol, compensation rules, Hosted admission, and Planning/Records exclusion
 are fixed by this change.
+
+### Additive authority integration boundary
+
+The authority and confirmation behavior above remains the v1 contract. The sole dependency for opt-in v2 additive authorization is `activate-agent-led-vocabulary-evolution`. Its canonical writer gate, supported effect set, live custody and authority checks, and individual receipt linkage apply to each additive step; a curation plan or entity candidate is never authority. Unsupported and non-additive steps keep their existing confirmation boundaries.

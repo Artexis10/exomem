@@ -2,17 +2,64 @@ from __future__ import annotations
 
 import os
 import stat
+from base64 import urlsafe_b64encode
 from pathlib import Path
 
 import pytest
 
-from exomem.governance import authorization_hosted_mount
+from exomem.governance import authorization_custody, authorization_hosted_mount
 
-_FILES = {
-    "keyring.json": b'{"keyring":"sentinel"}',
-    "control.json": b'{"control":"sentinel"}',
-    "serving-membership.json": b'{"membership":"sentinel"}',
-}
+
+def _bundle(signing_key: bytes, *, version: int = 1, membership: str = "initial") -> dict[str, bytes]:
+    encoded_key = urlsafe_b64encode(signing_key).rstrip(b"=").decode("ascii")
+    keyring = authorization_custody.AuthorizationKeyring(
+        version=1,
+        keyring_id="keyring-1",
+        cell_id="cell-1",
+        logical_vault_id="vault-1",
+        active_key_id="key-1",
+        accepted_keys=(
+            authorization_custody.AuthorizationVerifierKey(
+                key_id="key-1", key=signing_key, not_before=1, not_after=9_000_000_000
+            ),
+        ),
+    )
+    control = authorization_custody.AuthorizationControlRecord(
+        version=version,
+        keyring_id=keyring.keyring_id,
+        cell_id=keyring.cell_id,
+        logical_vault_id=keyring.logical_vault_id,
+        registry_attachment_id="attachment-1",
+        attachment_epoch=1,
+        governance_enrolled=version == 2,
+        activation_store_id="activation-1" if version == 2 else None,
+        activation_epoch=2 if version == 2 else None,
+        activation_state_digest="a" * 64 if version == 2 else None,
+        serving_membership_epoch=1,
+        serving_membership_digest="b" * 64,
+        issued_at=1,
+        expires_at=9_000_000_000,
+        signing_key_id="key-1",
+        vocabulary_authority_floor=2 if version == 2 else 1,
+    )
+    return {
+        "keyring.json": (
+            b'{"accepted_keys":[{"key":"'
+            + encoded_key.encode("ascii")
+            + b'","key_id":"key-1","not_after":9000000000,"not_before":1}],'
+            b'"active_key_id":"key-1","cell_id":"cell-1","keyring_id":"keyring-1",'
+            b'"logical_vault_id":"vault-1","version":1}'
+        ),
+        "control.json": authorization_custody._signed_control_bytes(control, signing_key=signing_key),  # noqa: SLF001
+        "serving-membership.json": f'{{"membership":"{membership}"}}'.encode("ascii"),
+    }
+
+
+_FILES = _bundle(b"a" * 32)
+
+
+def _renewed_files() -> dict[str, bytes]:
+    return _bundle(b"b" * 32, membership="renewed")
 
 
 def _projected_secret(root: Path) -> None:
@@ -168,7 +215,7 @@ def test_republish_projected_custody_replaces_a_live_generation(
     wrapper.mkdir(mode=0o700)
     authorization_hosted_mount.copy_projected_custody(source, destination)
 
-    renewed = {name: payload.replace(b"sentinel", b"renewed") for name, payload in _FILES.items()}
+    renewed = _renewed_files()
     _republished_secret(source, renewed)
 
     authorization_hosted_mount.republish_projected_custody(source, destination)
@@ -241,7 +288,7 @@ def test_republish_projected_custody_survives_a_write_failure_midway(
     wrapper.mkdir(mode=0o700)
     authorization_hosted_mount.copy_projected_custody(source, destination)
 
-    renewed = {name: payload.replace(b"sentinel", b"renewed") for name, payload in _FILES.items()}
+    renewed = _renewed_files()
     _republished_secret(source, renewed)
 
     real_write = os.write
@@ -275,7 +322,7 @@ def test_watch_republishes_only_when_the_generation_changes(tmp_path: Path) -> N
     wrapper.mkdir(mode=0o700)
     authorization_hosted_mount.copy_projected_custody(source, destination)
 
-    renewed = {name: payload.replace(b"sentinel", b"renewed") for name, payload in _FILES.items()}
+    renewed = _renewed_files()
     swapped = {"done": False}
 
     def sleeper(_seconds: float) -> None:
@@ -306,7 +353,7 @@ def test_watch_survives_a_failed_republish_and_retries(tmp_path: Path) -> None:
     wrapper.mkdir(mode=0o700)
     authorization_hosted_mount.copy_projected_custody(source, destination)
 
-    renewed = {name: payload.replace(b"sentinel", b"renewed") for name, payload in _FILES.items()}
+    renewed = _renewed_files()
     steps = {"n": 0}
 
     def sleeper(_seconds: float) -> None:
@@ -363,7 +410,7 @@ def test_watch_republishes_a_stale_destination_after_a_sidecar_restart(
     authorization_hosted_mount.copy_projected_custody(source, destination)
 
     # The swap happens while nothing is watching.
-    renewed = {name: payload.replace(b"sentinel", b"renewed") for name, payload in _FILES.items()}
+    renewed = _renewed_files()
     _republished_secret(source, renewed)
 
     # A freshly started watch sees an unchanged source for its whole life.
@@ -392,12 +439,36 @@ def test_watch_repairs_a_generation_left_mixed_by_an_interrupted_publish(
     wrapper.mkdir(mode=0o700)
     authorization_hosted_mount.copy_projected_custody(source, destination)
 
-    renewed = {name: payload.replace(b"sentinel", b"renewed") for name, payload in _FILES.items()}
+    renewed = _renewed_files()
     _republished_secret(source, renewed)
     # Exactly the state a kill between os.replace calls leaves behind.
     first = sorted(_FILES)[0]
     (destination / first).write_bytes(renewed[first])
     assert (destination / sorted(_FILES)[1]).read_bytes() != renewed[sorted(_FILES)[1]]
+
+    authorization_hosted_mount.watch_projected_custody(
+        source, destination, sleeper=lambda _seconds: None, ticks=1
+    )
+
+    for name, payload in renewed.items():
+        assert (destination / name).read_bytes() == payload
+
+
+def test_watch_repairs_a_control_first_signed_v2_publication_crash(tmp_path: Path) -> None:
+    """An authenticated projected control can repair its old-keyring interval."""
+
+    source = tmp_path / "source"
+    wrapper = tmp_path / "destination"
+    destination = wrapper / "private"
+    _projected_secret(source)
+    wrapper.mkdir(mode=0o700)
+    authorization_hosted_mount.copy_projected_custody(source, destination)
+
+    renewed = _bundle(b"c" * 32, version=2, membership="floor-two")
+    _republished_secret(source, renewed)
+    # `_FILENAMES` publishes control first. This is the retained state after a
+    # process dies before its replacement keyring reaches the destination.
+    (destination / "control.json").write_bytes(renewed["control.json"])
 
     authorization_hosted_mount.watch_projected_custody(
         source, destination, sleeper=lambda _seconds: None, ticks=1
@@ -461,7 +532,7 @@ def test_republish_sweeps_staging_files_a_crashed_attempt_left_behind(
     orphan = destination / ".keyring.json.deadbeef.tmp"
     orphan.write_bytes(b"orphaned by a crashed publish")
 
-    renewed = {name: payload.replace(b"sentinel", b"renewed") for name, payload in _FILES.items()}
+    renewed = _renewed_files()
     _republished_secret(source, renewed)
     authorization_hosted_mount.republish_projected_custody(source, destination)
 

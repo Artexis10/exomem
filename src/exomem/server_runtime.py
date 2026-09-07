@@ -539,6 +539,9 @@ def probe_hosted_mutation_authority(vault_root: Path) -> tuple[bool, str]:
     """Prove the shared mutation guard can be acquired and safely released."""
 
     try:
+        from .vocabulary_admission import require_mutation_admission
+
+        require_mutation_admission(vault_root)
         with hosted_runtime.hosted_mutation_guard(vault_root):
             pass
     except Exception as exc:  # noqa: BLE001 - any uncertainty keeps hosted writes closed

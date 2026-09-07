@@ -527,6 +527,10 @@ def test_control_record_rejects_outside_its_and_the_signing_keys_window(
 
 def test_control_record_rejects_bad_mac_duplicate_or_extra_field() -> None:
     keyring = authorization_custody.parse_keyring(_keyring_document())
+    for raw in (b"{}", b'{"version":[]}', b'{"version":{}}', b'{"version":"2"}', b'{"version":true}', b'{"version":null}', b'{"version":3}'):
+        with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+            authorization_custody.parse_control_record(raw, keyring=keyring, now=1_800_000_100)
+
     document = json.loads(_control_document())
     document["mac"] = "A" * 43
     bad_mac = json.dumps(document, separators=(",", ":")).encode()

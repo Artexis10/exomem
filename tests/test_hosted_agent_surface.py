@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import command_surface, commands, hosted_legacy_schemas, workflow_skills
+from exomem import commands, hosted_legacy_schemas, hosted_plugins, workflow_skills
 from exomem import hosted_gateway as gateway
 from exomem.capabilities import active_surface
 
@@ -42,7 +42,7 @@ FORBIDDEN_COMMANDS = {
     "query_dataset",
     "read_media",
 }
-MCP_SCHEMA_FIXTURE = Path(__file__).parent / "fixtures" / "mcp_tool_schemas.json"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _without_mcp_transport_credential(schema: dict[str, object]) -> dict[str, object]:
@@ -85,6 +85,21 @@ def _published_input_schema(
     if isinstance(required, list):
         normalized["required"] = [name for name in required if name in keep]
     return normalized
+
+
+def _committed_command(profile: str, name: str) -> dict[str, object]:
+    candidate = next(
+        candidate
+        for candidate, candidate_profile in hosted_plugins.CANDIDATE_PROFILES.items()
+        if candidate_profile == profile
+    )
+    generated = REPO_ROOT / "plugins" / "hosted" / "generated"
+    if candidate != hosted_plugins.DEFAULT_CANDIDATE:
+        generated = generated / "candidates" / candidate
+    compatibility = json.loads((generated / "compatibility.json").read_text(encoding="utf-8"))
+    return next(
+        entry for entry in compatibility["agent_contract"]["commands"] if entry["name"] == name
+    )
 
 
 #: Reasons that record a decision not yet taken rather than a technical
@@ -213,16 +228,19 @@ def test_hosted_alpha_agent_profile_is_exact_and_fail_closed() -> None:
     for command in selected:
         published = _published_parameter_names(ALPHA_PROFILE, command.name)
         assert published is not None, f"{command.name} is not pinned for a released profile"
-        # v1 is released, so it resolves its pinned schema rather than whatever
-        # the live registry holds. What it publishes must still be a strict
-        # narrowing of the canonical command -- the same parameters in canonical
-        # order, minus the ones added after v1 shipped -- so drift in a retained
-        # parameter has nowhere to hide.
-        canonical_names = tuple(param.name for param in canonical[command.name].params)
+        committed = _committed_command(ALPHA_PROFILE, command.name)
         assert tuple(param.name for param in command.params) == published
-        assert tuple(name for name in canonical_names if name in set(published)) == published
+        assert [
+            {
+                "name": param.name,
+                "type": param.type,
+                "required": param.required,
+                "description": param.help,
+            }
+            for param in command.params
+        ] == committed["params"]
         if command is canonical[command.name]:
-            assert canonical_names == published, (
+            assert tuple(param.name for param in canonical[command.name].params) == published, (
                 f"{command.name} still resolves the live object after it drifted"
             )
 
@@ -287,36 +305,18 @@ def test_agent_contract_is_mcp_ready_deterministic_and_additive() -> None:
     assert "agent_profile" not in legacy
     assert "transfer_grant" not in contract
 
-    fixture = json.loads(MCP_SCHEMA_FIXTURE.read_text(encoding="utf-8"))
     canonical_commands = {command.name: command for command in commands.PRODUCT_COMMANDS}
-    legacy_entries = {entry["name"]: entry for entry in legacy["commands"]}
     for entry in contract["commands"]:
         name = entry["name"]
         mcp_tool = entry["mcp_tool"]
-        published = _published_parameter_names(ALPHA_PROFILE, name)
+        committed = _committed_command(ALPHA_PROFILE, name)
         base_entry = {key: value for key, value in entry.items() if key != "mcp_tool"}
-        expected_entry = legacy_entries[name]
-        if published is not None:
-            expected_entry = {
-                **expected_entry,
-                "params": [
-                    param
-                    for param in expected_entry["params"]
-                    if param["name"] in set(published)
-                ],
-            }
+        expected_entry = {key: value for key, value in committed.items() if key != "mcp_tool"}
         assert base_entry == expected_entry
         assert mcp_tool["name"] == name
-        assert mcp_tool["description"] == fixture[name]["description"]
-        assert mcp_tool["inputSchema"] == _published_input_schema(
-            fixture[name]["inputSchema"], published
-        )
-        expected_annotations = command_surface.mcp_tool_annotations(
-            name,
-            read_only=canonical_commands[name].read_only,
-            open_world=True,
-            idempotent=canonical_commands[name].read_only,
-        ).model_dump(mode="json", by_alias=True)
+        assert mcp_tool["description"] == committed["mcp_tool"]["description"]
+        assert mcp_tool["inputSchema"] == committed["mcp_tool"]["inputSchema"]
+        expected_annotations = committed["mcp_tool"]["annotations"]
         assert mcp_tool["annotations"] == expected_annotations
         assert mcp_tool["annotations"]["idempotentHint"] is canonical_commands[name].read_only
 
@@ -324,8 +324,6 @@ def test_agent_contract_is_mcp_ready_deterministic_and_additive() -> None:
 def test_hosted_alpha_mcp_tools_omit_absent_optional_fields_without_losing_schema_nulls() -> None:
     contract = gateway.build_agent_gateway_contract(profile=ALPHA_PROFILE)
     repeated = gateway.build_agent_gateway_contract(profile=ALPHA_PROFILE)
-    fixture = json.loads(MCP_SCHEMA_FIXTURE.read_text(encoding="utf-8"))
-
     assert gateway.canonical_contract_json(contract) == gateway.canonical_contract_json(
         repeated
     )
@@ -336,11 +334,9 @@ def test_hosted_alpha_mcp_tools_omit_absent_optional_fields_without_losing_schem
         assert "icons" not in mcp_tool
         assert "execution" not in mcp_tool
         assert all(value is not None for value in mcp_tool.values())
-        assert mcp_tool["description"] == fixture[entry["name"]]["description"]
-        assert mcp_tool["inputSchema"] == _published_input_schema(
-            fixture[entry["name"]]["inputSchema"],
-            _published_parameter_names(ALPHA_PROFILE, entry["name"]),
-        )
+        committed = _committed_command(ALPHA_PROFILE, entry["name"])
+        assert mcp_tool["description"] == committed["mcp_tool"]["description"]
+        assert mcp_tool["inputSchema"] == committed["mcp_tool"]["inputSchema"]
         assert mcp_tool["annotations"]
         assert mcp_tool["outputSchema"]
 

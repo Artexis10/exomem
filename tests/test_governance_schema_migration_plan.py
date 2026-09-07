@@ -39,6 +39,11 @@ def _offline_state(
 ) -> Iterator[None]:
     external = tmp_path / "external"
     external.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        authorization_custody,
+        "_standalone_host_control_root",
+        lambda: tmp_path / "host-control",
+    )
     lease_state = tmp_path / "lease-state"
     lease_state.mkdir(mode=0o700)
     if os.name == "nt":  # pragma: no cover - exercised by Windows CI
