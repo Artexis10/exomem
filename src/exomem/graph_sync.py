@@ -2749,7 +2749,13 @@ class GraphRebuildCoordinator:
                 required = self._required
                 builder = self._builder
             try:
-                outcome = builder(required)
+                from .foreground_activity import background_scope
+
+                with background_scope(
+                    self.vault_root,
+                    waiter_bypass=lambda: self.waiter_count > 0,
+                ):
+                    outcome = builder(required)
             except BaseException as error:  # noqa: BLE001 - integration path
                 if isinstance(error, GraphRebuildInProgress):
                     logger.info(

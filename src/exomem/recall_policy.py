@@ -185,6 +185,9 @@ def is_recall_candidate(vault_root: Path, path: Path | str) -> bool:
     layer is admitted.  Other paths remain ordinary candidates without being
     opened; Records descendants are rejected before their content is read.
     """
+    from .foreground_activity import checkpoint
+
+    checkpoint(vault_root)
     root = Path(vault_root)
     rel = _vault_relative(root, path)
     if rel is None:
