@@ -11,10 +11,10 @@
 
 ## 3. Persist and query graph dependencies
 
-- [ ] 3.1 Add red-first tests proving bounded forward-link discovery after reopening the index, including aliases, anchors, retitles, ambiguity, deletion and rename; compare public rows with full rebuilds and prove conservative recovery for unprovable outside-KB retitle/deletion ambiguity.
-- [ ] 3.2 Populate source coverage and raw dependencies atomically in the graph sidecar, with schema recovery, full-rebuild clearing and delete/policy/purge handling; pass rollback, positive-hit-with-missing-dependent, corrupt target/key, isolation reopen and old-sidecar tests.
-- [ ] 3.3 Replace full-body dependency discovery with indexed candidate queries while retaining independent publication proofs; pass focused deferred queue, graph freshness, Records and graph parity suites.
-- [ ] 3.4 Obtain independent review approval after the reviewer reproduces topology parity, false-negative discovery and interrupted publication cases in isolated state.
+- [x] 3.1 Add red-first tests proving bounded forward-link discovery after reopening the index, including aliases, anchors, retitles, ambiguity, deletion and rename; compare public rows with full rebuilds and prove conservative recovery for unprovable outside-KB retitle/deletion ambiguity.
+- [x] 3.2 Populate source coverage and raw dependencies atomically in the graph sidecar, with schema recovery, full-rebuild clearing and delete/policy/purge handling; pass rollback, positive-hit-with-missing-dependent, corrupt target/key, isolation reopen and old-sidecar tests.
+- [x] 3.3 Replace full-body dependency discovery with indexed candidate queries while retaining independent publication proofs; pass focused deferred queue, graph freshness, Records and graph parity suites.
+- [x] 3.4 Obtain independent review approval after the reviewer reproduces topology parity, false-negative discovery and interrupted publication cases in isolated state (APPROVE on 84f3d01a after typed-identity, Windows-WAL and stale-census corrections; final targeted reviewer run: 24 passed).
 
 ## 4. Verify integrated behavior and deliver
 
