@@ -265,6 +265,44 @@ def test_rejects_cross_destination_before_reading_secret(monkeypatch: pytest.Mon
         )
 
 
+@pytest.mark.parametrize(("secret_name", "destination", "filename", "object_name", "key"), [
+    ("gateway_database_url", "k3s.gateway.database.active", "database-url", "exomem-gateway-database", "url"),
+    ("control_plane_key", "k3s.gateway.control-plane.active", "control-plane-key", "exomem-gateway-control-plane-key", "key"),
+])
+def test_gateway_handoff_uses_only_its_scoped_encrypted_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    secret_name: str, destination: str, filename: str, object_name: str, key: str,
+) -> None:
+    module = _load_module()
+    sentinel = b"gateway-test-only-secret"
+    monkeypatch.setenv("SOPS_AGE_RECIPIENTS", "age1testrecipient")
+    monkeypatch.setattr(module, "_read_secret", lambda **_kwargs: sentinel)
+    plaintext_by_path: dict[Path, dict[str, object]] = {}
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda command, **kwargs: _run_fake_sops(list(command), kwargs, plaintext_by_path),
+    )
+    module.execute_handoff(
+        matrix_path=MATRIX, repository_root=tmp_path, secret_name=secret_name,
+        version="v1", destination_ids=(destination,), source_kind="stdin",
+        terraform_bin="terraform", sops_bin="sops", vercel_bin="vercel",
+        vercel_project=None, dry_run=False,
+    )
+    output = tmp_path / f"infra/secrets/gateway/{filename}.v1.sops.json"
+    assert output.is_file()
+    assert sentinel not in output.read_bytes()
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    document, = plaintext_by_path.values()
+    assert document["metadata"]["namespace"] == "exomem-platform"
+    assert document["metadata"]["name"] == object_name
+    assert document["stringData"] == {key: sentinel.decode()}
+
+
+def test_gateway_database_secret_cannot_reach_control_plane_or_provider_destinations() -> None:
+    destinations = _matrix()["secrets"]["gateway_database_url"]["destinations"]
+    assert set(destinations) == {"k3s.gateway.database.active"}
+
+
 def test_rejects_wrong_vercel_project_before_reading_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -16,6 +16,12 @@ passed integration acceptance.
   Secret references. The database credential must belong to this gateway's
   required service operations; do not reuse a provider-admin credential or
   copy the complete Vercel environment.
+  Use the existing `secret_handoff.py` workflow: `gateway_database_url` may
+  reach only `k3s.gateway.database.active`; the existing `control_plane_key`
+  reaches `k3s.gateway.control-plane.active`. Deliver the same wrapping key as
+  the canonical Substrate service, not a newly generated unrelated key. Include
+  both ciphertexts in the signed active-secret registry before deployment.
+  Never create either Kubernetes Secret by hand or print the source value.
 - Resolve the database provider's actual HTTPS and PostgreSQL endpoints and
   populate their IPv4 `/32` addresses in `gateway.databaseEgressCidrs`. These
   addresses are a deployment input, not a permanent provider guarantee:
