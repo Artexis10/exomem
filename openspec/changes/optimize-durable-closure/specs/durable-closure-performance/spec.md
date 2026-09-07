@@ -9,6 +9,10 @@ The benchmark SHALL exercise a persistent public product surface over isolated r
 
 The model-free media variant SHALL prove preservation and durable enqueue only. The real-extraction variant SHALL await public completion, assert unique PDF/image extracted content, and report engine versions and extraction-convergence time, or explicitly report blocked/null; fixture presence or pending sidecars SHALL NOT count as extraction.
 
+#### Scenario: Disabled extraction retains durable job custody
+- **WHEN** the model-free profile disables extraction and processing reports `MEDIA_BLOCKED`
+- **THEN** the harness proves each exact artifact's durable job through public status and its binary hash through the public sidecar before dependent note work; it records the disabled blocked state and does not claim runnable work or extraction completion
+
 #### Scenario: Fast writes with unavailable recall fail acceptance
 - **WHEN** all write acknowledgements meet their latency bounds but an intervening ordinary lookup returns a call-level RETRIEVAL_INDEX_WARMING refusal
 - **THEN** the workflow correctness gate fails and records the refusal window

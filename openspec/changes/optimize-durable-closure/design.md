@@ -38,6 +38,15 @@ Measure and reduce the critical path from durable writes to a verified useful re
 
 5. **Measure the real public path.** A new benchmark drives registered product commands through a persistent MCP client/server, using disposable isolated state and production managed warm-up. Model-free runs use auto/FTS5 and declare embeddings disabled; graph scheduling and watchers remain active. Seed realistic heterogeneous Markdown, an active tracker, archived related note, critique, a PDF and two images. Preserve/process evidence, update observations and relations, correct a stale edge, then verify direct bytes and search. Model-free proves preservation and durable enqueue/custody only. A separately labelled real-extraction variant must await public completion and assert unique PDF/image content, report extraction engine/dependency versions and convergence, or report blocked/null. Run the optimized workflow with product-required calls and bounded final verification; run a separate stress variant with per-write probes and include them in its full timing/call counts. Probes can trigger repairs or warm caches, so their costs cannot simply be subtracted from the same run. Record successful graph-warming disclosure as optional lag, never as a call-level refusal.
 
+   The model-free profile explicitly disables extraction. Its `MEDIA_BLOCKED`
+   terminals are not successful extraction: public status must prove one durable,
+   disabled-extraction job per exact artifact, and public reads must prove each
+   sidecar's binary identity/hash and blocked state. Only that custody permits the
+   dependent model-free write. Retain the original failed processing rows and the
+   explicit extraction-block reason; unrelated failures or missing jobs remain
+   blocked. The real-extraction profile keeps its completed-state and unique-text
+   gate.
+
 6. **Attribution is additive only where measured.** The ledger provides leaf and server-wrapper durations. Join request identifiers where available. Report its first inferred start to last completion as `ledger_observation_span_ms` and unoccupied intervals as `server_idle_within_observed_span_ms`. Actual workflow wall time/client gaps require a client trace and remain null in ledger-only reports. Compute interval unions separately from summed server work. Model planning and connector overhead remain null unless independently timed. Instrument derived elapsed time, graph incremental/rebuild calls, and source scan counts/bytes in the benchmark. Keep raw personal logs and paths out of published evidence.
 
 7. **Compare a shared functional subset under the existing fairness programme.** The immediate result is an internal diagnostic, not a publishable competitive-suite ranking. Pin Basic Memory 0.23.2's verified wheel digest and resolved dependencies, preserve config provenance/glue accounting/variant identity, and use a warm persistent MCP session for both products with identical Markdown edits, text queries and exact-read assertions. Any adapter fault invalidates its row. Allow native background indexing to converge and measure it separately; do not invoke post-write reindex. Evidence immutability/media are separate capability observations. Publication as a competitive result must follow the existing `add-competitive-benchmark-programme` own-harness/direct-row and independent fairness-review requirements. No internal SQL search substitutes for public APIs.
@@ -45,6 +54,7 @@ Measure and reduce the critical path from durable writes to a verified useful re
 8. **Keep admitted catalogue reads on one proven projection.** Health and background repair may demote strict readiness while a compatible published catalogue remains usable. After warm-up, re-prove request admission independently of that ready bit. Bind only lagging admitted checkpoints in an immutable request-local context keyed by resolved vault and catalogue scope; an explicit checkpoint takes precedence. Every nested `find` starts an empty context and restores its predecessor on exit. Stale path projection reads exact catalogue entries at the admitted checkpoint; it never reconstructs a newer canonical triple. Catalogue readiness, pinned query transactions and resolver-entry reads recheck current access/policy and semantic identities. Exact pending rows overlay the published projection, while strict health remains unavailable until its live proof succeeds.
 
 ## Risks / Trade-offs
+
 
 - Optional graph omission changes ranking during repair: disclose it and never apply the relaxation to graph-dependent predicates.
 - A batch can partially commit: validate shared input first and return item outcomes; retry only failed items with stable mutation identity.

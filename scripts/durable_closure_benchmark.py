@@ -279,6 +279,54 @@ def media_rows_match_request(paths: Sequence[str], rows: Sequence[Mapping[str, A
     )
 
 
+def model_free_custody_jobs(
+    paths: Sequence[str], rows: Sequence[Mapping[str, Any]], status: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Prove durable disabled-extraction jobs, never successful extraction."""
+    if not paths or not _outcome_ok(status) or [row.get("path") for row in rows] != list(paths):
+        return []
+    if not all(
+        row.get("outcome") == "failed" and row.get("state") == "blocked"
+        and row.get("code") == "MEDIA_BLOCKED" for row in rows
+    ):
+        return []
+    jobs = status.get("jobs")
+    if not isinstance(jobs, list):
+        return []
+    proved: list[dict[str, Any]] = []
+    for path in paths:
+        matches = [job for job in jobs if isinstance(job, Mapping) and job.get("path") == path]
+        if len(matches) != 1:
+            return []
+        job = matches[0]
+        if (
+            type(job.get("id")) is not int or job["id"] <= 0
+            or job.get("sidecar_path") != path + ".md" or job.get("state") != "blocked"
+            or not str(job.get("error") or "").startswith("MediaExtractionDisabled:")
+        ):
+            return []
+        proved.append({key: job[key] for key in ("id", "path", "sidecar_path", "state")})
+    return proved
+
+
+def model_free_sidecars_match(
+    jobs: Sequence[Mapping[str, Any]], reads: Sequence[Mapping[str, Any]], artifacts: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Public sidecars must identify each preserved binary and its exact hash."""
+    if not jobs or len(jobs) != len(reads) or len(jobs) != len(artifacts):
+        return False
+    for job, read, artifact in zip(jobs, reads, artifacts, strict=True):
+        frontmatter = read.get("frontmatter")
+        if (
+            not _outcome_ok(read) or not isinstance(frontmatter, Mapping)
+            or frontmatter.get("evidence_file") != job["path"]
+            or frontmatter.get("binary_sha256") != artifact["sha256"]
+            or frontmatter.get("processing_state") != "blocked"
+        ):
+            return False
+    return True
+
+
 def extraction_proof(
     artifacts: Sequence[Mapping[str, Any]], reads: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any] | None:
@@ -1324,6 +1372,7 @@ async def run_public_workflow(
 
         # Evidence is preserved and queued before any compiled note can cite it.
         evidence_paths: list[str] = []
+        custody_jobs: list[dict[str, Any]] = []
         if artifacts is not None:
             preserved = await workflow_call(
                 "preserve_artifacts",
@@ -1367,6 +1416,20 @@ async def run_public_workflow(
                 "extraction_convergence_ms": None,
                 "engine_versions": None,
             }
+            if profile == MODEL_FREE_PROFILE:
+                custody_status = await workflow_call(
+                    "process_media", {"operation": "status"}, phase="media-custody"
+                )
+                custody_jobs = model_free_custody_jobs(evidence_paths, media_rows, custody_status)
+                media_enqueue_succeeded = hashes_match and len(custody_jobs) == len(artifacts)
+                extraction_sidecar_paths = [job["sidecar_path"] for job in custody_jobs]
+                media.update({
+                    "status": "queued" if media_enqueue_succeeded else "fail",
+                    "enqueue_succeeded": media_enqueue_succeeded,
+                    "durable_jobs": custody_jobs,
+                    "extraction_status": "blocked",
+                    "extraction_block_reason": "EXOMEM_DISABLE_MEDIA_EXTRACTION=1",
+                })
         tracker_path = corpus["active_tracker"]
         tracker_observation = await _observe_reviewed(
             client,
@@ -1445,11 +1508,11 @@ async def run_public_workflow(
                     await workflow_call("read_memory", {"path": sidecar_path}, phase="media-custody")
                     for sidecar_path in extraction_sidecar_paths
                 ]
-                custody_ok = bool(custody_reads) and all(_outcome_ok(read) for read in custody_reads)
+                custody_ok = model_free_sidecars_match(custody_jobs, custody_reads, artifacts)
                 media.update(
                     {
                         "status": "ready" if media.get("status") == "queued" and custody_ok else "blocked",
-                        "reason": "model-free profile records public queued sidecar custody but does not claim extraction completion",
+                        "reason": "model-free profile proves durable blocked-job and sidecar custody; extraction is disabled and completion remains unproven",
                         "custody_reads": len(custody_reads),
                         "extraction_completion": "unproven",
                     }

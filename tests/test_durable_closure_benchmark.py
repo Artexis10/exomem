@@ -22,6 +22,49 @@ sys.modules[spec.name] = benchmark
 spec.loader.exec_module(benchmark)
 
 
+def _disabled_media_custody():
+    path = "Knowledge Base/Evidence/fixture.pdf"
+    rows = [{"path": path, "outcome": "failed", "state": "blocked", "code": "MEDIA_BLOCKED"}]
+    status = {"jobs": [{"id": 7, "path": path, "sidecar_path": path + ".md", "state": "blocked",
+                        "error": "MediaExtractionDisabled: EXOMEM_DISABLE_MEDIA_EXTRACTION is set"}]}
+    return path, rows, status
+
+
+def test_model_free_custody_requires_public_durable_job_and_exact_sidecar():
+    path, rows, status = _disabled_media_custody()
+    jobs = benchmark.model_free_custody_jobs([path], rows, status)
+    assert jobs == [{"id": 7, "path": path, "sidecar_path": path + ".md", "state": "blocked"}]
+    reads = [{"frontmatter": {"evidence_file": path, "processing_state": "blocked",
+                              "binary_sha256": "a" * 64}}]
+    assert benchmark.model_free_sidecars_match(jobs, reads, [{"sha256": "a" * 64}])
+    reads[0]["frontmatter"]["binary_sha256"] = "b" * 64
+    assert not benchmark.model_free_sidecars_match(jobs, reads, [{"sha256": "a" * 64}])
+
+
+@pytest.mark.parametrize("fault", ["missing", "duplicate", "wrong_path", "wrong_sidecar", "no_id", "other_block", "failed", "refused"])
+def test_model_free_custody_never_promotes_unproved_or_failed_jobs(fault):
+    path, rows, status = _disabled_media_custody()
+    job = status["jobs"][0]
+    if fault == "missing":
+        status["jobs"] = []
+    elif fault == "duplicate":
+        status["jobs"].append(dict(job))
+    elif fault == "wrong_path":
+        job["path"] = "another.pdf"
+    elif fault == "wrong_sidecar":
+        job["sidecar_path"] = "another.md"
+    elif fault == "no_id":
+        job["id"] = True
+    elif fault == "other_block":
+        job["error"] = "MediaRuntimeUnavailable: broken interpreter"
+    elif fault == "failed":
+        rows[0]["code"] = "MEDIA_PROCESSING_FAILED"
+    elif fault == "refused":
+        status["success"] = False
+        status["error"] = {"code": "MUTATION_WARMING"}
+    assert benchmark.model_free_custody_jobs([path], rows, status) == []
+
+
 def test_workflow_warmup_waits_for_public_semantic_validation() -> None:
     calls = []
 
