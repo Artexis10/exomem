@@ -195,6 +195,17 @@ def test_phase_clock_reports_partial_startup_failure_without_raising() -> None:
     }
 
 
+def test_exomem_runtime_storage_resolves_inside_disposable_state(tmp_path: Path) -> None:
+    from exomem.writer_lease import LeaseConfig
+
+    state = tmp_path / "state"
+    environment = common.exomem_environment(state, tmp_path / "vault")
+
+    assert LeaseConfig.from_env(environment).state_dir.is_relative_to(state)
+    for key in ("EXOMEM_LOG_DIR", "EXOMEM_CALL_LEDGER_DIR"):
+        assert Path(environment[key]).is_relative_to(state)
+
+
 def test_basic_memory_environment_is_fresh_and_only_has_basic_memory_prefixes(
     tmp_path: Path,
 ) -> None:
