@@ -7,7 +7,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import NoReturn
+from typing import NoReturn, cast
 
 REQUEST_SCHEMA_NAME = "exomem.consolidate-memory-request/v1"
 ACTIONS = (
@@ -97,9 +97,7 @@ _RETIREMENT_OPTION_FIELDS = _fields(
 )
 
 
-def _retirement_options(
-    disposition: str, rollback_mode: str
-) -> _Object:
+def _retirement_options(disposition: str, rollback_mode: str) -> _Object:
     conditional: tuple[tuple[str, object], ...] = ()
     if disposition == "transfer":
         conditional += _fields(custodian_receipt_ref="ref", custodian_receipt_digest="digest")
@@ -177,84 +175,169 @@ _VARIANTS = (
         _join(
             _BASE,
             _MUTATION,
-            _fields(expected_inventory_digest="digest", decision_set_ref="ref", decision_set_digest="digest"),
+            _fields(
+                expected_inventory_digest="digest",
+                decision_set_ref="ref",
+                decision_set_digest="digest",
+            ),
             _fields(action=("const", "reconcile")),
         ),
     ),
     _Variant(
         "plan",
         _join(
-            _BASE, _MUTATION, _CONTEXT,
-            _fields(action=("const", "plan"), plan_kind=("const", "cutover"), operation=("const", "materialize"), cutover_options=_CUTOVER_OPTIONS),
+            _BASE,
+            _MUTATION,
+            _CONTEXT,
+            _fields(
+                action=("const", "plan"),
+                plan_kind=("const", "cutover"),
+                operation=("const", "materialize"),
+                cutover_options=_CUTOVER_OPTIONS,
+            ),
         ),
     ),
     _Variant(
         "plan",
         _join(
-            _BASE, _MUTATION, _CONTEXT,
-            _fields(action=("const", "plan"), plan_kind=("const", "rollback"), operation=("const", "materialize"), rollback_options=_ROLLBACK_OPTIONS),
+            _BASE,
+            _MUTATION,
+            _CONTEXT,
+            _fields(
+                action=("const", "plan"),
+                plan_kind=("const", "rollback"),
+                operation=("const", "materialize"),
+                rollback_options=_ROLLBACK_OPTIONS,
+            ),
         ),
     ),
     _Variant(
         "plan",
         _join(
-            _BASE, _MUTATION, _CONTEXT,
-            _fields(action=("const", "plan"), plan_kind=("const", "retirement"), operation=("const", "materialize"), retirement_options=_RETIREMENT_OPTIONS),
+            _BASE,
+            _MUTATION,
+            _CONTEXT,
+            _fields(
+                action=("const", "plan"),
+                plan_kind=("const", "retirement"),
+                operation=("const", "materialize"),
+                retirement_options=_RETIREMENT_OPTIONS,
+            ),
         ),
     ),
     _Variant(
         "plan",
         _join(
-            _BASE, _MUTATION, _CONTEXT,
-            _fields(action=("const", "plan"), plan_kind=("enum", ("cutover", "rollback", "retirement")), operation=("const", "render"), render_step=("const", "begin"), plan_digest="digest"),
+            _BASE,
+            _MUTATION,
+            _CONTEXT,
+            _fields(
+                action=("const", "plan"),
+                plan_kind=("enum", ("cutover", "rollback", "retirement")),
+                operation=("const", "render"),
+                render_step=("const", "begin"),
+                plan_digest="digest",
+            ),
         ),
     ),
     _Variant(
         "plan",
         _join(
-            _BASE, _MUTATION, _CONTEXT,
-            _fields(action=("const", "plan"), plan_kind=("enum", ("cutover", "rollback", "retirement")), operation=("const", "render"), render_step=("const", "page"), plan_digest="digest", render_session_ref="ref", page_ordinal="page"),
+            _BASE,
+            _MUTATION,
+            _CONTEXT,
+            _fields(
+                action=("const", "plan"),
+                plan_kind=("enum", ("cutover", "rollback", "retirement")),
+                operation=("const", "render"),
+                render_step=("const", "page"),
+                plan_digest="digest",
+                render_session_ref="ref",
+                page_ordinal="page",
+            ),
         ),
     ),
     _Variant(
         "plan",
         _join(
-            _BASE, _MUTATION, _CONTEXT,
-            _fields(action=("const", "plan"), plan_kind=("enum", ("cutover", "rollback", "retirement")), operation=("const", "render"), render_step=("const", "acknowledge"), plan_digest="digest", render_session_ref="ref", page_ordinal="page", acknowledged_page_digest="digest"),
+            _BASE,
+            _MUTATION,
+            _CONTEXT,
+            _fields(
+                action=("const", "plan"),
+                plan_kind=("enum", ("cutover", "rollback", "retirement")),
+                operation=("const", "render"),
+                render_step=("const", "acknowledge"),
+                plan_digest="digest",
+                render_session_ref="ref",
+                page_ordinal="page",
+                acknowledged_page_digest="digest",
+            ),
         ),
     ),
     _Variant(
         "plan",
         _join(
-            _BASE, _MUTATION, _CONTEXT,
-            _fields(action=("const", "plan"), plan_kind=("enum", ("cutover", "rollback", "retirement")), operation=("const", "render"), render_step=("const", "complete"), plan_digest="digest", render_session_ref="ref"),
+            _BASE,
+            _MUTATION,
+            _CONTEXT,
+            _fields(
+                action=("const", "plan"),
+                plan_kind=("enum", ("cutover", "rollback", "retirement")),
+                operation=("const", "render"),
+                render_step=("const", "complete"),
+                plan_digest="digest",
+                render_session_ref="ref",
+            ),
         ),
     ),
     _Variant(
         "approve",
         _join(
-            _BASE, _MUTATION, _CONTEXT,
-            _fields(action=("const", "approve"), plan_kind=("enum", ("cutover", "rollback", "retirement")), plan_digest="digest", rendering_completeness_ref="ref", rendering_completeness_digest="digest"),
+            _BASE,
+            _MUTATION,
+            _CONTEXT,
+            _fields(
+                action=("const", "approve"),
+                plan_kind=("enum", ("cutover", "rollback", "retirement")),
+                plan_digest="digest",
+                rendering_completeness_ref="ref",
+                rendering_completeness_digest="digest",
+            ),
         ),
     ),
     _Variant(
         "apply",
         _join(
-            _BASE, _MUTATION, _CONTEXT,
-            _fields(action=("const", "apply"), cutover_plan_digest="digest", approval_token_ref="ref", approval_token_digest="digest"),
+            _BASE,
+            _MUTATION,
+            _CONTEXT,
+            _fields(
+                action=("const", "apply"),
+                cutover_plan_digest="digest",
+                approval_token_ref="ref",
+                approval_token_digest="digest",
+            ),
         ),
     ),
     _Variant(
         "verify",
         _join(
-            _BASE, _MUTATION,
-            _fields(action=("const", "verify"), verification_kind=("enum", ("in-process", "transport")), expected_plan_digest="digest", expected_verification_basis_digest="digest"),
+            _BASE,
+            _MUTATION,
+            _fields(
+                action=("const", "verify"),
+                verification_kind=("enum", ("in-process", "transport")),
+                expected_plan_digest="digest",
+                expected_verification_basis_digest="digest",
+            ),
         ),
     ),
     _Variant(
         "recover",
         _join(
-            _BASE, _MUTATION,
+            _BASE,
+            _MUTATION,
             _fields(action=("const", "recover"), expected_journal_digest="digest"),
         ),
         _fields(expected_intent_event_id="digest"),
@@ -262,37 +345,78 @@ _VARIANTS = (
     _Variant(
         "abort",
         _join(
-            _BASE, _MUTATION,
-            _fields(action=("const", "abort"), expected_journal_digest="digest", reason_code=("enum", ("owner-cancelled", "preimage-unavailable", "verification-failed", "maintenance-window-expired"))),
+            _BASE,
+            _MUTATION,
+            _fields(
+                action=("const", "abort"),
+                expected_journal_digest="digest",
+                reason_code=(
+                    "enum",
+                    (
+                        "owner-cancelled",
+                        "preimage-unavailable",
+                        "verification-failed",
+                        "maintenance-window-expired",
+                    ),
+                ),
+            ),
         ),
         _fields(reason="reason"),
     ),
     _Variant(
         "rollback",
         _join(
-            _BASE, _MUTATION, _CONTEXT,
-            _fields(action=("const", "rollback"), rollback_mode=("const", "nonterminal-contingency")),
+            _BASE,
+            _MUTATION,
+            _CONTEXT,
+            _fields(
+                action=("const", "rollback"), rollback_mode=("const", "nonterminal-contingency")
+            ),
         ),
     ),
     _Variant(
         "rollback",
         _join(
-            _BASE, _MUTATION, _CONTEXT,
-            _fields(action=("const", "rollback"), rollback_mode=("const", "terminal-plan"), rollback_plan_digest="digest", rollback_token_ref="ref", rollback_token_digest="digest"),
+            _BASE,
+            _MUTATION,
+            _CONTEXT,
+            _fields(
+                action=("const", "rollback"),
+                rollback_mode=("const", "terminal-plan"),
+                rollback_plan_digest="digest",
+                rollback_token_ref="ref",
+                rollback_token_digest="digest",
+            ),
         ),
     ),
     _Variant(
         "retire-source",
         _join(
-            _BASE, _MUTATION, _CONTEXT,
-            _fields(action=("const", "retire-source"), phase=("const", "clearance"), retirement_plan_digest="digest", retirement_token_ref="ref", retirement_token_digest="digest"),
+            _BASE,
+            _MUTATION,
+            _CONTEXT,
+            _fields(
+                action=("const", "retire-source"),
+                phase=("const", "clearance"),
+                retirement_plan_digest="digest",
+                retirement_token_ref="ref",
+                retirement_token_digest="digest",
+            ),
         ),
     ),
     _Variant(
         "retire-source",
         _join(
-            _BASE, _MUTATION,
-            _fields(action=("const", "retire-source"), phase=("const", "finalize"), retirement_plan_digest="digest", retirement_lifecycle_ref="ref", completion_attestation_ref="ref", completion_attestation_digest="digest"),
+            _BASE,
+            _MUTATION,
+            _fields(
+                action=("const", "retire-source"),
+                phase=("const", "finalize"),
+                retirement_plan_digest="digest",
+                retirement_lifecycle_ref="ref",
+                completion_attestation_ref="ref",
+                completion_attestation_digest="digest",
+            ),
         ),
     ),
 )
@@ -334,14 +458,14 @@ def _rule_schema(rule: object) -> dict[str, object]:
         return {"$ref": "#/$defs/limit"}
     if rule == "reason":
         return {"$ref": "#/$defs/reason"}
-    kind, argument = rule
+    kind, argument = cast(tuple[str, object], rule)
     if kind == "const":
         schema: dict[str, object] = {"const": argument}
         if isinstance(argument, int):
             schema["type"] = "integer"
         return schema
     if kind == "enum":
-        return {"type": "string", "enum": list(argument)}
+        return {"type": "string", "enum": list(cast(tuple[str, ...], argument))}
     raise AssertionError(rule)
 
 
@@ -364,13 +488,29 @@ def _build_schema() -> dict[str, object]:
         "title": REQUEST_SCHEMA_NAME,
         "oneOf": [_object_schema(variant) for variant in _VARIANTS],
         "$defs": {
-            "uuid4": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?![\\s\\S])"},
+            "uuid4": {
+                "type": "string",
+                "pattern": (
+                    "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+                    "[89ab][0-9a-f]{3}-[0-9a-f]{12}(?![\\s\\S])"
+                ),
+            },
             "digest": {"type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])"},
-            "ref": {"type": "string", "minLength": 1, "maxLength": 512, "not": {"pattern": "\\u0000"}},
+            "ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "not": {"pattern": "\\u0000"},
+            },
             "revision": {"type": "integer", "minimum": 0, "maximum": _MAX_SAFE_INTEGER},
             "page_ordinal": {"type": "integer", "minimum": 0, "maximum": _MAX_PAGE_ORDINAL},
             "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-            "reason": {"type": "string", "minLength": 0, "maxLength": 500, "not": {"pattern": "\\u0000"}},
+            "reason": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 500,
+                "not": {"pattern": "\\u0000"},
+            },
         },
     }
 
@@ -413,13 +553,13 @@ def _validate_rule(value: object, rule: object) -> object:
     elif rule == "limit":
         maximum = 200
     else:
-        kind, argument = rule
+        kind, argument = cast(tuple[str, object], rule)
         if kind == "const":
             if value != argument or (isinstance(argument, int) and type(value) is not int):
                 _fail()
             return value
         if kind == "enum":
-            if not isinstance(value, str) or value not in argument:
+            if not isinstance(value, str) or value not in cast(tuple[str, ...], argument):
                 _fail()
             return value
         raise AssertionError(rule)
@@ -443,7 +583,11 @@ def _validate_object(value: object, spec: _Object | _Variant) -> dict[str, objec
 
 
 def _validate_cutover_condition(request: dict[str, object], trusted_run_mode: str | None) -> None:
-    if request.get("action") != "plan" or request.get("operation") != "materialize" or request.get("plan_kind") != "cutover":
+    if (
+        request.get("action") != "plan"
+        or request.get("operation") != "materialize"
+        or request.get("plan_kind") != "cutover"
+    ):
         return
     options = request["cutover_options"]
     assert type(options) is dict
@@ -458,6 +602,7 @@ def _validate_cutover_condition(request: dict[str, object], trusted_run_mode: st
 
 def decode_request_json(raw: bytes) -> dict[str, object]:
     """Decode UTF-8 JSON without discarding duplicate fields or numeric types."""
+
     def unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
         for key, value in pairs:
@@ -481,7 +626,11 @@ def _validate_request_fields(value: object) -> dict[str, object]:
     This is not admission: the adapter must still call ``validate_request``
     with the authenticated stored run mode before dispatch.
     """
-    if type(value) is not dict or type(value.get("action")) is not str or value["action"] not in ACTIONS:
+    if (
+        type(value) is not dict
+        or type(value.get("action")) is not str
+        or value["action"] not in ACTIONS
+    ):
         _fail()
     for variant in _VARIANTS:
         if variant.action != value["action"]:

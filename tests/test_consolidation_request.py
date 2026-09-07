@@ -34,15 +34,22 @@ def _request(action: str) -> dict[str, object]:
         return base | {"run_id": UUID, "detail": "owner-detail", "cursor": "next", "limit": 1}
     if action == "reconcile":
         return base | {
-            "operation_id": UUID, "run_id": UUID, "expected_run_revision": 0,
-            "expected_inventory_digest": DIGEST, "decision_set_ref": "decisions",
+            "operation_id": UUID,
+            "run_id": UUID,
+            "expected_run_revision": 0,
+            "expected_inventory_digest": DIGEST,
+            "decision_set_ref": "decisions",
             "decision_set_digest": DIGEST,
         }
     if action == "plan":
         return base | {
-            "operation_id": UUID, "run_id": UUID, "expected_run_revision": 0,
-            "plan_kind": "cutover", "operation": "materialize",
-            "successor_context_ref": "context", "successor_context_digest": DIGEST,
+            "operation_id": UUID,
+            "run_id": UUID,
+            "expected_run_revision": 0,
+            "plan_kind": "cutover",
+            "operation": "materialize",
+            "successor_context_ref": "context",
+            "successor_context_digest": DIGEST,
             "cutover_options": {
                 "expected_reconciliation_digest": DIGEST,
                 "expected_policy_bundle_digest": DIGEST,
@@ -55,48 +62,76 @@ def _request(action: str) -> dict[str, object]:
         }
     if action == "approve":
         return base | {
-            "operation_id": UUID, "run_id": UUID, "expected_run_revision": 0,
-            "plan_kind": "cutover", "plan_digest": DIGEST,
+            "operation_id": UUID,
+            "run_id": UUID,
+            "expected_run_revision": 0,
+            "plan_kind": "cutover",
+            "plan_digest": DIGEST,
             "rendering_completeness_ref": "completeness",
             "rendering_completeness_digest": DIGEST,
-            "successor_context_ref": "context", "successor_context_digest": DIGEST,
+            "successor_context_ref": "context",
+            "successor_context_digest": DIGEST,
         }
     if action == "apply":
         return base | {
-            "operation_id": UUID, "run_id": UUID, "expected_run_revision": 0,
-            "cutover_plan_digest": DIGEST, "approval_token_ref": "token",
-            "approval_token_digest": DIGEST, "successor_context_ref": "context",
+            "operation_id": UUID,
+            "run_id": UUID,
+            "expected_run_revision": 0,
+            "cutover_plan_digest": DIGEST,
+            "approval_token_ref": "token",
+            "approval_token_digest": DIGEST,
+            "successor_context_ref": "context",
             "successor_context_digest": DIGEST,
         }
     if action == "verify":
         return base | {
-            "operation_id": UUID, "run_id": UUID, "expected_run_revision": 0,
-            "verification_kind": "in-process", "expected_plan_digest": DIGEST,
+            "operation_id": UUID,
+            "run_id": UUID,
+            "expected_run_revision": 0,
+            "verification_kind": "in-process",
+            "expected_plan_digest": DIGEST,
             "expected_verification_basis_digest": DIGEST,
         }
     if action == "recover":
         return base | {
-            "operation_id": UUID, "run_id": UUID, "expected_run_revision": 0,
-            "expected_journal_digest": DIGEST, "expected_intent_event_id": DIGEST,
+            "operation_id": UUID,
+            "run_id": UUID,
+            "expected_run_revision": 0,
+            "expected_journal_digest": DIGEST,
+            "expected_intent_event_id": DIGEST,
         }
     if action == "abort":
         return base | {
-            "operation_id": UUID, "run_id": UUID, "expected_run_revision": 0,
-            "expected_journal_digest": DIGEST, "reason_code": "owner-cancelled", "reason": "stop",
+            "operation_id": UUID,
+            "run_id": UUID,
+            "expected_run_revision": 0,
+            "expected_journal_digest": DIGEST,
+            "reason_code": "owner-cancelled",
+            "reason": "stop",
         }
     if action == "rollback":
         return base | {
-            "operation_id": UUID, "run_id": UUID, "expected_run_revision": 0,
-            "rollback_mode": "terminal-plan", "successor_context_ref": "context",
-            "successor_context_digest": DIGEST, "rollback_plan_digest": DIGEST,
-            "rollback_token_ref": "token", "rollback_token_digest": DIGEST,
+            "operation_id": UUID,
+            "run_id": UUID,
+            "expected_run_revision": 0,
+            "rollback_mode": "terminal-plan",
+            "successor_context_ref": "context",
+            "successor_context_digest": DIGEST,
+            "rollback_plan_digest": DIGEST,
+            "rollback_token_ref": "token",
+            "rollback_token_digest": DIGEST,
         }
     if action == "retire-source":
         return base | {
-            "operation_id": UUID, "run_id": UUID, "expected_run_revision": 0,
-            "phase": "clearance", "retirement_plan_digest": DIGEST,
-            "retirement_token_ref": "token", "retirement_token_digest": DIGEST,
-            "successor_context_ref": "context", "successor_context_digest": DIGEST,
+            "operation_id": UUID,
+            "run_id": UUID,
+            "expected_run_revision": 0,
+            "phase": "clearance",
+            "retirement_plan_digest": DIGEST,
+            "retirement_token_ref": "token",
+            "retirement_token_digest": DIGEST,
+            "successor_context_ref": "context",
+            "successor_context_digest": DIGEST,
         }
     raise AssertionError(action)
 
@@ -109,9 +144,7 @@ def _validate(request: dict[str, object]) -> dict[str, object]:
         and request.get("plan_kind") == "cutover"
         else None
     )
-    return consolidation_request.validate_request(
-        request, trusted_run_mode=trusted_run_mode
-    )
+    return consolidation_request.validate_request(request, trusted_run_mode=trusted_run_mode)
 
 
 @pytest.mark.parametrize("action", consolidation_request.ACTIONS)
@@ -168,7 +201,10 @@ def test_refuses_invalid_common_field_mutations(mutate) -> None:
         ("verify", lambda request: request.__setitem__("verification_kind", "other")),
         ("recover", lambda request: request.__setitem__("expected_intent_event_id", DIGEST + "0")),
         ("abort", lambda request: request.__setitem__("reason", "x" * 501)),
-        ("rollback", lambda request: request.__setitem__("rollback_mode", "nonterminal-contingency")),
+        (
+            "rollback",
+            lambda request: request.__setitem__("rollback_mode", "nonterminal-contingency"),
+        ),
         ("retire-source", lambda request: request.__setitem__("phase", "finalize")),
     ],
 )
@@ -182,11 +218,16 @@ def test_refuses_cross_action_and_conditional_mutations(action: str, mutate) -> 
 
 def test_plan_render_steps_and_materialize_options_are_closed() -> None:
     request = _request("plan")
-    request.update({
-        "operation": "render", "render_step": "acknowledge", "plan_digest": DIGEST,
-        "render_session_ref": "session", "page_ordinal": 0,
-        "acknowledged_page_digest": DIGEST,
-    })
+    request.update(
+        {
+            "operation": "render",
+            "render_step": "acknowledge",
+            "plan_digest": DIGEST,
+            "render_session_ref": "session",
+            "page_ordinal": 0,
+            "acknowledged_page_digest": DIGEST,
+        }
+    )
     request.pop("cutover_options")
 
     assert _validate(request) == request
@@ -200,8 +241,7 @@ def test_plan_render_steps_and_materialize_options_are_closed() -> None:
     ("payload", "trusted_run_mode"),
     [
         (
-            _request("start")
-            | {"run_mode": "real-cutover"},
+            _request("start") | {"run_mode": "real-cutover"},
             None,
         ),
         (
@@ -252,8 +292,7 @@ def test_plan_render_steps_and_materialize_options_are_closed() -> None:
             None,
         ),
         (
-            _request("rollback")
-            | {"rollback_mode": "nonterminal-contingency"},
+            _request("rollback") | {"rollback_mode": "nonterminal-contingency"},
             None,
         ),
         (
@@ -285,9 +324,10 @@ def test_accepts_every_non_nested_conditional_branch(
     schema = Draft202012Validator(consolidation_request.request_schema())
 
     assert schema.is_valid(request)
-    assert consolidation_request.validate_request(
-        request, trusted_run_mode=trusted_run_mode
-    ) == request
+    assert (
+        consolidation_request.validate_request(request, trusted_run_mode=trusted_run_mode)
+        == request
+    )
 
 
 @pytest.mark.parametrize(
@@ -337,7 +377,9 @@ def test_materialize_options_enforce_trusted_real_cutover_rehearsal_proof() -> N
 
     request["cutover_options"] = copy.deepcopy(request["cutover_options"])
     request["cutover_options"]["expected_rehearsal_proof_digest"] = DIGEST  # type: ignore[index]
-    assert consolidation_request.validate_request(request, trusted_run_mode="real-cutover") == request
+    assert (
+        consolidation_request.validate_request(request, trusted_run_mode="real-cutover") == request
+    )
     with pytest.raises(consolidation_request.ConsolidationRequestUnavailable):
         consolidation_request.validate_request(request, trusted_run_mode="cloned-rehearsal")
 
@@ -401,7 +443,8 @@ def test_generated_schema_has_stable_serialized_order_across_hash_seeds() -> Non
     script = (
         "import hashlib, json; "
         "from exomem.governance.consolidation_request import REQUEST_SCHEMA; "
-        "print(hashlib.sha256(json.dumps(REQUEST_SCHEMA, separators=(',', ':')).encode()).hexdigest())"
+        "print(hashlib.sha256("
+        "json.dumps(REQUEST_SCHEMA, separators=(',', ':')).encode()).hexdigest())"
     )
     environment = os.environ.copy()
     hashes = set()

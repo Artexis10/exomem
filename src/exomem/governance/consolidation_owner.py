@@ -13,7 +13,7 @@ import secrets
 import sqlite3
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, cast
 
 from . import authorization_custody, authorization_session_lifecycle, consolidation_identity, store
 from .authorization_session_lifecycle import AuthorizationSessionContext
@@ -71,6 +71,8 @@ class ConsolidationOwnerContext:
     """Opaque internal capability, never a product argument or serialized value."""
 
     __slots__ = ("__facts", "__seal")
+    __facts: _OwnerFacts
+    __seal: object
 
     def __init__(self, facts: _OwnerFacts, *, seal: object) -> None:
         if seal is not _SEAL or type(facts) is not _OwnerFacts:
@@ -108,20 +110,21 @@ class ConsolidationOwnerContext:
 def _session(who: object, *, now: int) -> AuthorizationSessionContext:
     if type(now) is not int or now < 1 or type(who) is not RequestPrincipal:
         _fail()
+    principal = cast(RequestPrincipal, who)
     if (
-        not who.resolved
-        or who.audience_id != OWNER_AUDIENCE
-        or who.surface not in _LOCAL_SURFACES
-        or who.issuer_family != _LOCAL_SURFACES[who.surface]
+        not principal.resolved
+        or principal.audience_id != OWNER_AUDIENCE
+        or principal.surface not in _LOCAL_SURFACES
+        or principal.issuer_family != _LOCAL_SURFACES[principal.surface]
     ):
         _fail()
-    session = who.verified_authorization_session
+    session = principal.verified_authorization_session
     if (
         type(session) is not AuthorizationSessionContext
-        or session.principal_id != who.audience_id
-        or session.issuer_family != who.issuer_family
+        or session.principal_id != principal.audience_id
+        or session.issuer_family != principal.issuer_family
         or not session.session_id
-        or session.session_id != who.authorization_session_id
+        or session.session_id != principal.authorization_session_id
         or type(session.expires_at) is not int
         or now >= session.expires_at
         or type(session.credential_generation) is not int
@@ -141,15 +144,20 @@ def _action(arguments: object) -> str:
     schema = arguments.get("schema")
     action = arguments.get("action")
     if (
-        type(schema) is not str or schema != REQUEST_SCHEMA_NAME
-        or type(action) is not str or action not in ACTIONS
+        type(schema) is not str
+        or schema != REQUEST_SCHEMA_NAME
+        or type(action) is not str
+        or action not in ACTIONS
     ):
         _fail()
     return action
 
 
 def _durable_session(
-    vault_root: Path, *, principal: RequestPrincipal, now: int,
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal,
+    now: int,
 ) -> AuthorizationSessionContext:
     """Recheck issuance and current custody; public context fields are not proof."""
     session = _session(principal, now=now)
@@ -158,13 +166,19 @@ def _durable_session(
         custody = authorization_custody.load_authorization_custody(vault_root, now=now)
         connection = store.open_authorization_session_connection(vault_root)
         return authorization_session_lifecycle.status_verified_session(
-            connection, custody=custody, context=session, now=now,
+            connection,
+            custody=custody,
+            context=session,
+            now=now,
         )
     except (
         authorization_custody.AuthorizationCustodyUnavailable,
         authorization_session_lifecycle.AuthorizationSessionUnavailable,
         store.UnsupportedGovernanceSchema,
-        OSError, sqlite3.Error, TypeError, ValueError,
+        OSError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
     ):
         _fail()
     finally:
@@ -176,21 +190,23 @@ def _durable_session(
 
 
 def _check_identity(
-    identity: object, session: AuthorizationSessionContext,
+    identity: object,
+    session: AuthorizationSessionContext,
 ) -> consolidation_identity.ConsolidationCellIdentity:
     if type(identity) is not consolidation_identity.ConsolidationCellIdentity:
         _fail()
+    checked = cast(consolidation_identity.ConsolidationCellIdentity, identity)
     if (
-        identity.schema != consolidation_identity.IDENTITY_SCHEMA
-        or identity.vault_id != session.logical_vault_id
-        or identity.cell_id != session.cell_id
-        or identity.cell_id == identity.vault_id
-        or identity.installation_id in {identity.vault_id, identity.cell_id}
-        or type(identity.installation_generation) is not int
-        or identity.installation_generation < 1
+        checked.schema != consolidation_identity.IDENTITY_SCHEMA
+        or checked.vault_id != session.logical_vault_id
+        or checked.cell_id != session.cell_id
+        or checked.cell_id == checked.vault_id
+        or checked.installation_id in {checked.vault_id, checked.cell_id}
+        or type(checked.installation_generation) is not int
+        or checked.installation_generation < 1
     ):
         _fail()
-    return identity
+    return checked
 
 
 def admit_local_owner(
@@ -218,12 +234,15 @@ def admit_local_owner(
     except (
         consolidation_identity.ConsolidationIdentityUnavailable,
         authorization_custody.AuthorizationCustodyUnavailable,
-        OSError, TypeError, ValueError,
+        OSError,
+        TypeError,
+        ValueError,
     ):
         _fail()
     facts = _OwnerFacts(
         schema="ConsolidationOwnerContext/v1",
-        vault_id=identity.vault_id, cell_id=identity.cell_id,
+        vault_id=identity.vault_id,
+        cell_id=identity.cell_id,
         installation_id=identity.installation_id,
         installation_generation=identity.installation_generation,
         active_fence_digest=identity.active_fence_digest,
@@ -231,13 +250,14 @@ def admit_local_owner(
         principal_id=principal.audience_id,
         authorization_session_id=session.session_id,
         credential_generation=session.credential_generation,
-        purpose="vault-consolidation", action=action,
-        issuer_family=session.issuer_family, surface=principal.surface,
-        issued_at=now, expires_at=min(now + _CONTEXT_TTL_SECONDS, session.expires_at),
+        purpose="vault-consolidation",
+        action=action,
+        issuer_family=session.issuer_family,
+        surface=principal.surface,
+        issued_at=now,
+        expires_at=min(now + _CONTEXT_TTL_SECONDS, session.expires_at),
         nonce=secrets.token_hex(16),
-        verifier_fingerprint=hashlib.sha256(
-            identity.machine_key_id.encode("utf-8")
-        ).hexdigest(),
+        verifier_fingerprint=hashlib.sha256(identity.machine_key_id.encode("utf-8")).hexdigest(),
     )
     return ConsolidationOwnerContext(facts, seal=_SEAL)
 
@@ -270,20 +290,26 @@ def require_owner_context(
         or facts.credential_generation != session.credential_generation
         or facts.issuer_family != principal.issuer_family
         or facts.surface != principal.surface
-        or facts.verifier_fingerprint != hashlib.sha256(
-            identity.machine_key_id.encode("utf-8")
-        ).hexdigest()
+        or facts.verifier_fingerprint
+        != hashlib.sha256(identity.machine_key_id.encode("utf-8")).hexdigest()
     ):
         _fail()
     return facts
 
 
 def bind_local_owner(
-    vault_root: Path, *, principal: RequestPrincipal, arguments: object, now: int,
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal,
+    arguments: object,
+    now: int,
 ) -> RequestPrincipal:
     """Inject the exact owner capability into an already-authenticated principal."""
     context = admit_local_owner(
-        vault_root, principal=principal, arguments=arguments, now=now,
+        vault_root,
+        principal=principal,
+        arguments=arguments,
+        now=now,
     )
     _validate_admitted_request(vault_root, arguments, context._verified_facts())
     return replace(principal, consolidation_owner_context=context)
@@ -306,7 +332,11 @@ def require_local_owner_session(principal: RequestPrincipal, *, now: int) -> Non
 
 
 def require_bound_request(
-    vault_root: Path, *, principal: RequestPrincipal, arguments: object, now: int,
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal,
+    arguments: object,
+    now: int,
 ) -> None:
     """Revalidate the selected installation before dispatch or writer admission."""
     require_injected_owner(principal, now=now)
@@ -317,8 +347,11 @@ def require_bound_request(
     except (consolidation_identity.ConsolidationIdentityUnavailable, OSError):
         _fail()
     facts = require_owner_context(
-        principal.consolidation_owner_context, principal=principal,
-        identity=identity, action=action, now=now,
+        principal.consolidation_owner_context,
+        principal=principal,
+        identity=identity,
+        action=action,
+        now=now,
     )
     _validate_admitted_request(vault_root, arguments, facts)
 
@@ -329,17 +362,24 @@ def _validate_admitted_request(vault_root: Path, arguments: object, facts: _Owne
 
     request = consolidation_request._validate_request_fields(arguments)  # noqa: SLF001
     mode = None
-    if (request["action"] == "plan" and request["operation"] == "materialize"
-            and request["plan_kind"] == "cutover"):
+    if (
+        request["action"] == "plan"
+        and request["operation"] == "materialize"
+        and request["plan_kind"] == "cutover"
+    ):
         try:
-            record = consolidation_run_state.ConsolidationRunStore(vault_root).load(request["run_id"])
+            record = consolidation_run_state.ConsolidationRunStore(vault_root).load(
+                request["run_id"]
+            )
         except consolidation_run_state.ConsolidationRunUnavailable:
             raise consolidation_request.ConsolidationRequestUnavailable from None
         identity = record.identity
-        if (identity.destination_vault_id != facts.vault_id
-                or identity.destination_installation_id != facts.installation_id
-                or identity.destination_generation != facts.installation_generation
-                or identity.destination_fence_digest != facts.active_fence_digest):
+        if (
+            identity.destination_vault_id != facts.vault_id
+            or identity.destination_installation_id != facts.installation_id
+            or identity.destination_generation != facts.installation_generation
+            or identity.destination_fence_digest != facts.active_fence_digest
+        ):
             raise consolidation_request.ConsolidationRequestUnavailable
         mode = identity.run_mode
     consolidation_request.validate_request(request, trusted_run_mode=mode)

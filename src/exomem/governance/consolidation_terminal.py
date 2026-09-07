@@ -15,7 +15,7 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import NoReturn
+from typing import NoReturn, cast
 
 from . import consolidation_plan, consolidation_request, consolidation_successor
 
@@ -30,23 +30,140 @@ _STATUS_PLAN_CONTEXTS = frozenset(
 )
 _PAIR = ("successor_context_ref", "successor_context_digest")
 _ROWS = {
-    "start": (("source_fingerprint", "destination_snapshot_fingerprint"), ("source_objects", "source_bytes", "destination_objects", "destination_bytes"), ("status", "reconcile")),
-    "status": (("run_state_digest", "journal_digest"), ("completed_effects", "pending_effects", "blocked_effects", "warnings"), ("status", "reconcile", "plan", "approve", "apply", "verify", "recover", "abort", "rollback", "retire-source")),
-    "reconcile": (("inventory_digest", "reconciliation_digest", "mapping_set_digest"), ("c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "unresolved", "mappings"), ("status", "reconcile", "plan")),
-    "plan:materialize": (("plan_digest", "control_basis_digest", "plan_successor_automaton_digest"), ("content_actions", "policy_documents", "impact_rows", "render_pages"), ("status", "plan")),
-    "plan:render-begin": (("plan_digest", "render_session_digest"), ("render_pages", "acknowledged_pages"), ("status", "plan")),
-    "plan:render-page": (("plan_digest", "render_page_digest"), ("page_ordinal", "page_rows", "render_pages"), ("status", "plan")),
-    "plan:render-acknowledge": (("plan_digest", "render_ack_digest"), ("acknowledged_pages", "render_pages"), ("status", "plan")),
-    "plan:render-complete": (("plan_digest", "rendering_completeness_digest"), ("acknowledged_pages", "render_pages"), ("status", "approve")),
-    "approve": (("plan_digest", "approval_token_digest"), ("acknowledged_pages", "render_pages"), ("status", "apply", "rollback", "retire-source")),
-    "apply": (("cutover_terminal_digest", "post_cutover_census_digest", "apply_predecessor_digest"), ("policy_documents", "content_batches", "content_actions", "rebuild_kinds", "in_process_probes", "transport_probes"), ("status", "plan", "apply", "verify", "recover", "abort", "rollback", "retire-source")),
-    "verify": (("verification_basis_digest", "verification_terminal_digest"), ("positive_probes", "negative_probes", "passed_probes", "failed_probes"), ("status", "plan", "apply", "verify", "recover", "rollback", "retire-source")),
-    "recover": (("journal_digest", "recovery_terminal_digest"), ("classified_effects", "repaired_effects", "blocked_effects"), ("status", "plan", "apply", "verify", "recover", "abort", "rollback", "retire-source")),
-    "abort": (("prior_census_digest", "abort_terminal_digest"), ("restored_entries", "removed_candidates", "evidence_events"), ("status",)),
-    "rollback:nonterminal-contingency": (("cutover_plan_digest", "original_apply_journal_digest", "rollback_contingency_digest", "target_census_digest", "rollback_terminal_digest"), ("restored_entries", "retained_entries", "reapplied_entries", "discarded_entries", "rebuild_kinds", "verification_probes"), ("status", "plan", "recover", "verify", "rollback")),
-    "rollback:terminal-plan": (("rollback_plan_digest", "target_census_digest", "rollback_terminal_digest"), ("restored_entries", "retained_entries", "reapplied_entries", "discarded_entries", "rebuild_kinds", "verification_probes"), ("status", "plan", "recover", "verify", "rollback")),
-    "retire-source:clearance": (("retirement_plan_digest", "clearance_digest", "retirement_lifecycle_digest", "surviving_copy_ledger_digest"), ("survivor_rows", "verified_survivor_rows"), ("status", "retire-source")),
-    "retire-source:finalize": (("retirement_plan_digest", "retirement_lifecycle_digest", "completion_digest", "finalization_digest", "surviving_copy_ledger_digest"), ("completion_records", "survivor_rows"), ("status", "plan")),
+    "start": (
+        ("source_fingerprint", "destination_snapshot_fingerprint"),
+        ("source_objects", "source_bytes", "destination_objects", "destination_bytes"),
+        ("status", "reconcile"),
+    ),
+    "status": (
+        ("run_state_digest", "journal_digest"),
+        ("completed_effects", "pending_effects", "blocked_effects", "warnings"),
+        (
+            "status",
+            "reconcile",
+            "plan",
+            "approve",
+            "apply",
+            "verify",
+            "recover",
+            "abort",
+            "rollback",
+            "retire-source",
+        ),
+    ),
+    "reconcile": (
+        ("inventory_digest", "reconciliation_digest", "mapping_set_digest"),
+        ("c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "unresolved", "mappings"),
+        ("status", "reconcile", "plan"),
+    ),
+    "plan:materialize": (
+        ("plan_digest", "control_basis_digest", "plan_successor_automaton_digest"),
+        ("content_actions", "policy_documents", "impact_rows", "render_pages"),
+        ("status", "plan"),
+    ),
+    "plan:render-begin": (
+        ("plan_digest", "render_session_digest"),
+        ("render_pages", "acknowledged_pages"),
+        ("status", "plan"),
+    ),
+    "plan:render-page": (
+        ("plan_digest", "render_page_digest"),
+        ("page_ordinal", "page_rows", "render_pages"),
+        ("status", "plan"),
+    ),
+    "plan:render-acknowledge": (
+        ("plan_digest", "render_ack_digest"),
+        ("acknowledged_pages", "render_pages"),
+        ("status", "plan"),
+    ),
+    "plan:render-complete": (
+        ("plan_digest", "rendering_completeness_digest"),
+        ("acknowledged_pages", "render_pages"),
+        ("status", "approve"),
+    ),
+    "approve": (
+        ("plan_digest", "approval_token_digest"),
+        ("acknowledged_pages", "render_pages"),
+        ("status", "apply", "rollback", "retire-source"),
+    ),
+    "apply": (
+        ("cutover_terminal_digest", "post_cutover_census_digest", "apply_predecessor_digest"),
+        (
+            "policy_documents",
+            "content_batches",
+            "content_actions",
+            "rebuild_kinds",
+            "in_process_probes",
+            "transport_probes",
+        ),
+        ("status", "plan", "apply", "verify", "recover", "abort", "rollback", "retire-source"),
+    ),
+    "verify": (
+        ("verification_basis_digest", "verification_terminal_digest"),
+        ("positive_probes", "negative_probes", "passed_probes", "failed_probes"),
+        ("status", "plan", "apply", "verify", "recover", "rollback", "retire-source"),
+    ),
+    "recover": (
+        ("journal_digest", "recovery_terminal_digest"),
+        ("classified_effects", "repaired_effects", "blocked_effects"),
+        ("status", "plan", "apply", "verify", "recover", "abort", "rollback", "retire-source"),
+    ),
+    "abort": (
+        ("prior_census_digest", "abort_terminal_digest"),
+        ("restored_entries", "removed_candidates", "evidence_events"),
+        ("status",),
+    ),
+    "rollback:nonterminal-contingency": (
+        (
+            "cutover_plan_digest",
+            "original_apply_journal_digest",
+            "rollback_contingency_digest",
+            "target_census_digest",
+            "rollback_terminal_digest",
+        ),
+        (
+            "restored_entries",
+            "retained_entries",
+            "reapplied_entries",
+            "discarded_entries",
+            "rebuild_kinds",
+            "verification_probes",
+        ),
+        ("status", "plan", "recover", "verify", "rollback"),
+    ),
+    "rollback:terminal-plan": (
+        ("rollback_plan_digest", "target_census_digest", "rollback_terminal_digest"),
+        (
+            "restored_entries",
+            "retained_entries",
+            "reapplied_entries",
+            "discarded_entries",
+            "rebuild_kinds",
+            "verification_probes",
+        ),
+        ("status", "plan", "recover", "verify", "rollback"),
+    ),
+    "retire-source:clearance": (
+        (
+            "retirement_plan_digest",
+            "clearance_digest",
+            "retirement_lifecycle_digest",
+            "surviving_copy_ledger_digest",
+        ),
+        ("survivor_rows", "verified_survivor_rows"),
+        ("status", "retire-source"),
+    ),
+    "retire-source:finalize": (
+        (
+            "retirement_plan_digest",
+            "retirement_lifecycle_digest",
+            "completion_digest",
+            "finalization_digest",
+            "surviving_copy_ledger_digest",
+        ),
+        ("completion_records", "survivor_rows"),
+        ("status", "plan"),
+    ),
 }
 
 
@@ -75,6 +192,7 @@ class TerminalProjectionState:
 
 class _ValidatedTerminal(Mapping[str, object]):
     __slots__ = ("_value",)
+    _value: Mapping[str, object]
 
     def __init__(self, value: Mapping[str, object], *, seal: object) -> None:
         if seal is not _TERMINAL_SEAL:
@@ -172,7 +290,14 @@ def _output_forms(action: str) -> tuple[tuple[str, ...], ...]:
     if action in {"start", "abort"}:
         return ((),)
     if action == "status":
-        return ((), ("next_cursor",), _PAIR, _PAIR + ("eligible_plan_kinds",), ("next_cursor",) + _PAIR, ("next_cursor",) + _PAIR + ("eligible_plan_kinds",))
+        return (
+            (),
+            ("next_cursor",),
+            _PAIR,
+            _PAIR + ("eligible_plan_kinds",),
+            ("next_cursor",) + _PAIR,
+            ("next_cursor",) + _PAIR + ("eligible_plan_kinds",),
+        )
     if action == "reconcile":
         return ((), _PAIR + ("eligible_plan_kinds",))
     if action == "plan:materialize":
@@ -201,7 +326,9 @@ def _validate_outputs(action: str, value: object) -> Mapping[str, object]:
         fields = frozenset(value)
     except TypeError:
         _fail()
-    if not all(isinstance(field, str) for field in fields) or fields not in {frozenset(form) for form in _output_forms(action)}:
+    if not all(isinstance(field, str) for field in fields) or fields not in {
+        frozenset(form) for form in _output_forms(action)
+    }:
         _fail()
     for name, item in value.items():
         if name.endswith("_digest"):
@@ -227,36 +354,88 @@ def _output_schema(fields: tuple[str, ...]) -> dict[str, object]:
         elif field.endswith("_ref") or field == "next_cursor":
             properties[field] = {"$ref": "#/$defs/ref"}
         else:
-            properties[field] = {"type": "array", "items": {"enum": list(_PLAN_KINDS)}, "uniqueItems": True}
-    return {"type": "object", "properties": properties, "required": list(fields), "additionalProperties": False}
+            properties[field] = {
+                "type": "array",
+                "items": {"enum": list(_PLAN_KINDS)},
+                "uniqueItems": True,
+            }
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(fields),
+        "additionalProperties": False,
+    }
 
 
 def _branch_schema(action: str) -> dict[str, object]:
     digest_fields, count_fields, next_actions = _ROWS[action]
-    required = ["schema", "action", "outcome", "run_id", "run_revision", "phase", "artifact_digests", "counts", "next_actions", "trusted_outputs"]
+    required = [
+        "schema",
+        "action",
+        "outcome",
+        "run_id",
+        "run_revision",
+        "phase",
+        "artifact_digests",
+        "counts",
+        "next_actions",
+        "trusted_outputs",
+    ]
     properties: dict[str, object] = {
-        "schema": {"const": TERMINAL_SCHEMA_NAME}, "action": {"const": action},
+        "schema": {"const": TERMINAL_SCHEMA_NAME},
+        "action": {"const": action},
         "outcome": {"const": "observed" if action == "status" else "committed"},
-        "run_id": {"$ref": "#/$defs/uuid4"}, "run_revision": {"$ref": "#/$defs/integer"},
+        "run_id": {"$ref": "#/$defs/uuid4"},
+        "run_revision": {"$ref": "#/$defs/integer"},
         "phase": {"$ref": "#/$defs/text"},
-        "artifact_digests": {"type": "object", "properties": {name: {"$ref": "#/$defs/digest"} for name in digest_fields}, "required": list(digest_fields), "additionalProperties": False},
-        "counts": {"type": "object", "properties": {name: {"$ref": "#/$defs/integer"} for name in count_fields}, "required": list(count_fields), "additionalProperties": False},
-        "next_actions": {"type": "array", "items": {"enum": list(next_actions)}, "uniqueItems": True},
+        "artifact_digests": {
+            "type": "object",
+            "properties": {name: {"$ref": "#/$defs/digest"} for name in digest_fields},
+            "required": list(digest_fields),
+            "additionalProperties": False,
+        },
+        "counts": {
+            "type": "object",
+            "properties": {name: {"$ref": "#/$defs/integer"} for name in count_fields},
+            "required": list(count_fields),
+            "additionalProperties": False,
+        },
+        "next_actions": {
+            "type": "array",
+            "items": {"enum": list(next_actions)},
+            "uniqueItems": True,
+        },
         "trusted_outputs": {"oneOf": [_output_schema(form) for form in _output_forms(action)]},
     }
     if action != "status":
         mutation = ("operation_id", "request_digest", "prior_state_digest", "final_state_digest")
         required.extend(mutation)
-        properties.update({name: {"$ref": "#/$defs/uuid4" if name == "operation_id" else "#/$defs/digest"} for name in mutation})
-    return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
+        properties.update(
+            {
+                name: {"$ref": "#/$defs/uuid4" if name == "operation_id" else "#/$defs/digest"}
+                for name in mutation
+            }
+        )
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
 
 
-TERMINAL_SCHEMA = {
+TERMINAL_SCHEMA: dict[str, object] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": TERMINAL_SCHEMA_NAME,
     "oneOf": [_branch_schema(action) for action in _ROWS],
     "$defs": {
-        "uuid4": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?![\\s\\S])"},
+        "uuid4": {
+            "type": "string",
+            "pattern": (
+                "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+                "[89ab][0-9a-f]{3}-[0-9a-f]{12}(?![\\s\\S])"
+            ),
+        },
         "digest": {"type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])"},
         "ref": {"type": "string", "minLength": 1, "maxLength": 512, "not": {"pattern": "\\u0000"}},
         "integer": {"type": "integer", "minimum": 0, "maximum": _MAX_SAFE_INTEGER},
@@ -278,11 +457,24 @@ def _validate_structure(value: object) -> dict[str, object]:
     if not isinstance(action, str) or action not in _ROWS:
         _fail()
     digest_fields, count_fields, allowed_actions = _ROWS[action]
-    common = {"schema", "action", "outcome", "run_id", "run_revision", "phase", "artifact_digests", "counts", "next_actions", "trusted_outputs"}
+    common = {
+        "schema",
+        "action",
+        "outcome",
+        "run_id",
+        "run_revision",
+        "phase",
+        "artifact_digests",
+        "counts",
+        "next_actions",
+        "trusted_outputs",
+    }
     mutation = {"operation_id", "request_digest", "prior_state_digest", "final_state_digest"}
     if set(value) != (common if action == "status" else common | mutation):
         _fail()
-    if value["schema"] != TERMINAL_SCHEMA_NAME or value["outcome"] != ("observed" if action == "status" else "committed"):
+    if value["schema"] != TERMINAL_SCHEMA_NAME or value["outcome"] != (
+        "observed" if action == "status" else "committed"
+    ):
         _fail()
     _uuid(value["run_id"])
     _integer(value["run_revision"])
@@ -306,9 +498,17 @@ def _request_action(value: Mapping[str, object]) -> str:
         if value.get("operation") == "materialize":
             return "plan:materialize"
         step = value.get("render_step")
-        if value.get("operation") == "render" and step in {"begin", "page", "acknowledge", "complete"}:
+        if value.get("operation") == "render" and step in {
+            "begin",
+            "page",
+            "acknowledge",
+            "complete",
+        }:
             return f"plan:render-{step}"
-    if action == "rollback" and value.get("rollback_mode") in {"nonterminal-contingency", "terminal-plan"}:
+    if action == "rollback" and value.get("rollback_mode") in {
+        "nonterminal-contingency",
+        "terminal-plan",
+    }:
         return f"rollback:{value['rollback_mode']}"
     if action == "retire-source" and value.get("phase") in {"clearance", "finalize"}:
         return f"retire-source:{value['phase']}"
@@ -366,27 +566,29 @@ def _validate_plan_entry(
     context_kinds = _eligible_plan_kinds(facts.get("eligible_plan_kinds"))
     if projected is None or projected != terminal_kinds or projected != context_kinds:
         _fail()
-    if "plan" not in terminal["next_actions"] or state.nonterminal_contingency_eligible:
+    next_actions = cast(Sequence[str], terminal["next_actions"])
+    if "plan" not in next_actions or state.nonterminal_contingency_eligible:
         _fail()
 
     action = terminal["action"]
     phase = terminal["phase"]
     if action == "status":
         allowed = (
-            projected == ("cutover",) and phase in {"reconcile", "repair-terminal"}
-        ) or (
-            projected == ("rollback",)
-            and phase
-            in {
-                "complete",
-                "rollback-complete",
-                "retirement-pending-forward-only",
-                "retirement-finalize",
-                "repair-terminal",
-            }
-        ) or (
-            projected == ("rollback", "retirement")
-            and phase in {"complete", "repair-terminal"}
+            (projected == ("cutover",) and phase in {"reconcile", "repair-terminal"})
+            or (
+                projected == ("rollback",)
+                and phase
+                in {
+                    "complete",
+                    "rollback-complete",
+                    "retirement-pending-forward-only",
+                    "retirement-finalize",
+                    "repair-terminal",
+                }
+            )
+            or (
+                projected == ("rollback", "retirement") and phase in {"complete", "repair-terminal"}
+            )
         )
     elif action == "reconcile":
         counts = terminal["counts"]
@@ -425,12 +627,16 @@ def _validate_successor_branch(
     terminal: Mapping[str, object],
     context: consolidation_successor.CanonicalSuccessorContext,
 ) -> None:
-    if context.preimage["run_id"] != terminal["run_id"] or context.preimage["run_revision"] != terminal["run_revision"]:
+    if (
+        context.preimage["run_id"] != terminal["run_id"]
+        or context.preimage["run_revision"] != terminal["run_revision"]
+    ):
         _fail()
     action = str(terminal["action"])
     outputs = terminal["trusted_outputs"]
     artifacts = terminal["artifact_digests"]
     counts = terminal["counts"]
+    next_actions = cast(Sequence[str], terminal["next_actions"])
     assert isinstance(outputs, Mapping)
     assert isinstance(artifacts, Mapping)
     assert isinstance(counts, Mapping)
@@ -439,9 +645,7 @@ def _validate_successor_branch(
     if action.startswith("plan:render-") or action == "approve":
         if request["plan_digest"] != artifacts["plan_digest"]:
             _fail()
-    if state.nonterminal_contingency_eligible != (
-        kind == "rollback-nonterminal-contingency"
-    ):
+    if state.nonterminal_contingency_eligible != (kind == "rollback-nonterminal-contingency"):
         _fail()
 
     if kind == "plan-materialize":
@@ -451,54 +655,123 @@ def _validate_successor_branch(
         _fail()
 
     if action == "status":
-        if "plan" in terminal["next_actions"] and kind not in _STATUS_PLAN_CONTEXTS:
+        if "plan" in next_actions and kind not in _STATUS_PLAN_CONTEXTS:
             _fail()
         return
     if action == "plan:materialize":
-        if tuple(terminal["next_actions"]) != ("status", "plan"):
+        if tuple(next_actions) != ("status", "plan"):
             _fail()
-        _require_facts(context, "render-begin", {"plan_kind": request["plan_kind"], "plan_digest": artifacts["plan_digest"]})
+        _require_facts(
+            context,
+            "render-begin",
+            {"plan_kind": request["plan_kind"], "plan_digest": artifacts["plan_digest"]},
+        )
     elif action == "plan:render-begin":
-        if tuple(terminal["next_actions"]) != ("status", "plan"):
+        if tuple(next_actions) != ("status", "plan"):
             _fail()
-        _require_facts(context, "render-page", {"plan_kind": request["plan_kind"], "plan_digest": artifacts["plan_digest"], "render_session_digest": artifacts["render_session_digest"], "page_ordinal": 0})
+        _require_facts(
+            context,
+            "render-page",
+            {
+                "plan_kind": request["plan_kind"],
+                "plan_digest": artifacts["plan_digest"],
+                "render_session_digest": artifacts["render_session_digest"],
+                "page_ordinal": 0,
+            },
+        )
     elif action == "plan:render-page":
-        if tuple(terminal["next_actions"]) != ("status", "plan"):
+        if tuple(next_actions) != ("status", "plan"):
             _fail()
-        if outputs["render_session_ref"] != request["render_session_ref"] or counts["page_ordinal"] != request["page_ordinal"]:
+        if (
+            outputs["render_session_ref"] != request["render_session_ref"]
+            or counts["page_ordinal"] != request["page_ordinal"]
+        ):
             _fail()
-        _require_facts(context, "render-acknowledge", {"plan_kind": request["plan_kind"], "plan_digest": artifacts["plan_digest"], "page_ordinal": request["page_ordinal"], "page_digest": artifacts["render_page_digest"]})
+        _require_facts(
+            context,
+            "render-acknowledge",
+            {
+                "plan_kind": request["plan_kind"],
+                "plan_digest": artifacts["plan_digest"],
+                "page_ordinal": request["page_ordinal"],
+                "page_digest": artifacts["render_page_digest"],
+            },
+        )
     elif action == "plan:render-acknowledge":
-        if tuple(terminal["next_actions"]) != ("status", "plan"):
+        if tuple(next_actions) != ("status", "plan"):
             _fail()
-        if outputs["render_session_ref"] != request["render_session_ref"] or counts["acknowledged_pages"] != request["page_ordinal"] + 1 or counts["acknowledged_pages"] > counts["render_pages"]:
+        if (
+            outputs["render_session_ref"] != request["render_session_ref"]
+            or counts["acknowledged_pages"] != cast(int, request["page_ordinal"]) + 1
+            or counts["acknowledged_pages"] > counts["render_pages"]
+        ):
             _fail()
-        expected_kind = "render-complete" if counts["acknowledged_pages"] == counts["render_pages"] else "render-page"
-        expected_facts = {"plan_kind": request["plan_kind"], "plan_digest": artifacts["plan_digest"]}
+        expected_kind = (
+            "render-complete"
+            if counts["acknowledged_pages"] == counts["render_pages"]
+            else "render-page"
+        )
+        expected_facts = {
+            "plan_kind": request["plan_kind"],
+            "plan_digest": artifacts["plan_digest"],
+        }
         if expected_kind == "render-page":
             expected_facts["page_ordinal"] = counts["acknowledged_pages"]
         _require_facts(context, expected_kind, expected_facts)
     elif action == "plan:render-complete":
-        if tuple(terminal["next_actions"]) != ("status", "approve"):
+        if tuple(next_actions) != ("status", "approve"):
             _fail()
         if counts["render_pages"] == 0 or counts["acknowledged_pages"] != counts["render_pages"]:
             _fail()
-        _require_facts(context, "approve", {"plan_kind": request["plan_kind"], "plan_digest": artifacts["plan_digest"], "rendering_completeness_digest": artifacts["rendering_completeness_digest"]})
+        _require_facts(
+            context,
+            "approve",
+            {
+                "plan_kind": request["plan_kind"],
+                "plan_digest": artifacts["plan_digest"],
+                "rendering_completeness_digest": artifacts["rendering_completeness_digest"],
+            },
+        )
     elif action == "approve":
         kinds = {
             "cutover": ("apply", "cutover_plan_digest", "approval_token_digest", "apply"),
-            "rollback": ("rollback-terminal-plan", "rollback_plan_digest", "rollback_token_digest", "rollback"),
-            "retirement": ("retire-source-clearance", "retirement_plan_digest", "retirement_token_digest", "retire-source"),
+            "rollback": (
+                "rollback-terminal-plan",
+                "rollback_plan_digest",
+                "rollback_token_digest",
+                "rollback",
+            ),
+            "retirement": (
+                "retire-source-clearance",
+                "retirement_plan_digest",
+                "retirement_token_digest",
+                "retire-source",
+            ),
         }
         expected_kind, plan_field, token_field, next_action = kinds[str(request["plan_kind"])]
-        _require_facts(context, expected_kind, {plan_field: request["plan_digest"], token_field: artifacts["approval_token_digest"]})
-        if tuple(terminal["next_actions"]) != ("status", next_action):
+        _require_facts(
+            context,
+            expected_kind,
+            {plan_field: request["plan_digest"], token_field: artifacts["approval_token_digest"]},
+        )
+        if tuple(next_actions) != ("status", next_action):
             _fail()
     elif action in {"apply", "verify", "recover"} and kind == "rollback-nonterminal-contingency":
-        if terminal["phase"] == "complete" or not state.nonterminal_contingency_eligible or "plan" in terminal["next_actions"]:
+        if (
+            terminal["phase"] == "complete"
+            or not state.nonterminal_contingency_eligible
+            or "plan" in next_actions
+        ):
             _fail()
         if action == "apply":
-            _require_facts(context, kind, {"original_apply_operation_id": request["operation_id"], "cutover_plan_digest": request["cutover_plan_digest"]})
+            _require_facts(
+                context,
+                kind,
+                {
+                    "original_apply_operation_id": request["operation_id"],
+                    "cutover_plan_digest": request["cutover_plan_digest"],
+                },
+            )
     else:
         _fail()
 
@@ -515,7 +788,7 @@ def _validate_projection_binding(
     else:
         if (
             request["operation_id"] != terminal["operation_id"]
-            or request["expected_run_revision"] + 1 != terminal["run_revision"]
+            or cast(int, request["expected_run_revision"]) + 1 != terminal["run_revision"]
             or _request_digest(request) != terminal["request_digest"]
         ):
             _fail()
@@ -539,7 +812,9 @@ def _projection(value: object) -> dict[str, object]:
         _fail()
     _validate_projection_binding(value, request, terminal)
     pair = {"successor_context_ref", "successor_context_digest"}
-    has_pair = pair <= set(terminal["trusted_outputs"])
+    outputs = cast(Mapping[str, object], terminal["trusted_outputs"])
+    next_actions = cast(Sequence[str], terminal["next_actions"])
+    has_pair = pair <= set(outputs)
     context_values = (value.successor_reference, value.successor_context, value.expected_successor)
     if has_pair:
         if any(item is None for item in context_values):
@@ -551,13 +826,13 @@ def _projection(value: object) -> dict[str, object]:
         except consolidation_successor.SuccessorContextUnavailable:
             _fail()
         if (
-            terminal["trusted_outputs"]["successor_context_ref"] != _text(value.successor_reference)
-            or terminal["trusted_outputs"]["successor_context_digest"] != context.digest
+            outputs["successor_context_ref"] != _text(value.successor_reference)
+            or outputs["successor_context_digest"] != context.digest
         ):
             _fail()
         if terminal["action"] == "status" and request.get("detail", "summary") != "owner-detail":
             _fail()
-        if context.preimage["successor_action"] not in terminal["next_actions"]:
+        if context.preimage["successor_action"] not in next_actions:
             _fail()
         _validate_successor_branch(value, request, terminal, context)
     elif (
@@ -566,16 +841,20 @@ def _projection(value: object) -> dict[str, object]:
         or value.nonterminal_contingency_eligible
     ):
         _fail()
-    elif terminal["action"] in {
-        "status",
-        "reconcile",
-        "apply",
-        "verify",
-        "recover",
-        "rollback:nonterminal-contingency",
-        "rollback:terminal-plan",
-        "retire-source:finalize",
-    } and "plan" in terminal["next_actions"]:
+    elif (
+        terminal["action"]
+        in {
+            "status",
+            "reconcile",
+            "apply",
+            "verify",
+            "recover",
+            "rollback:nonterminal-contingency",
+            "rollback:terminal-plan",
+            "retire-source:finalize",
+        }
+        and "plan" in next_actions
+    ):
         _fail()
     return terminal
 
@@ -586,7 +865,7 @@ def validate_terminal(
     request: TerminalProjectionState,
     successor_context: object | None = None,
     plan_entry: object | None = None,
-) -> dict[str, object]:
+) -> Mapping[str, object]:
     """Validate an exact terminal against the coordinator's current resolved state."""
 
     if successor_context is not None or plan_entry is not None:
@@ -597,7 +876,9 @@ def validate_terminal(
     return _ValidatedTerminal(terminal, seal=_TERMINAL_SEAL)
 
 
-def success_envelope(terminal: Mapping[str, object], delivery: str = "initial") -> dict[str, object]:
+def success_envelope(
+    terminal: Mapping[str, object], delivery: str = "initial"
+) -> dict[str, object]:
     """Return a detached JSON value around a sealed validated terminal."""
 
     if type(terminal) is not _ValidatedTerminal:
@@ -614,6 +895,11 @@ def success_envelope(terminal: Mapping[str, object], delivery: str = "initial") 
 
 
 __all__ = [
-    "TERMINAL_SCHEMA", "TERMINAL_SCHEMA_NAME", "ConsolidationTerminalUnavailable", "TerminalProjectionState",
-    "success_envelope", "terminal_schema", "validate_terminal",
+    "TERMINAL_SCHEMA",
+    "TERMINAL_SCHEMA_NAME",
+    "ConsolidationTerminalUnavailable",
+    "TerminalProjectionState",
+    "success_envelope",
+    "terminal_schema",
+    "validate_terminal",
 ]
