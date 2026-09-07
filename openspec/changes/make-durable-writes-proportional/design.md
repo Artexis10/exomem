@@ -266,8 +266,7 @@ deadline; operating-system scheduling can overshoot a requested sleep.
 Release the activity mutex before sleeping or invoking a waiter callback;
 after the callback, resample activity under its mutex before deciding to sleep.
 Test requested sleep budgets and scheduling overshoot with a fake clock and
-sleeper. Resume the
-existing work unit when activity ends or the deadline expires; continuous
+sleeper. Resume the existing work unit when activity ends or the deadline expires; continuous
 requests cannot suppress that unit indefinitely. The background thread's own
 nested command must not cause it to wait for itself. Activity in another vault
 does not delay it. Do not hold a new filesystem or database lock while waiting.

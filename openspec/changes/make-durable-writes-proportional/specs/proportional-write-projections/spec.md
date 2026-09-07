@@ -130,7 +130,7 @@ for another vault SHALL NOT introduce a pause.
 - **THEN** their scan checkpoints can yield within the fixed budget throughout the request, including terminal handling and retrieval, while all admission and publication proofs remain required
 
 #### Scenario: Nested request raises or is cancelled
-- **WHEN** a foreground invocation exits through an exception or a nested invocation completes
+- **WHEN** a foreground invocation exits through an exception, its entry is interrupted while registering activity, or a nested invocation completes
 - **THEN** its activity counters unwind exactly and no completed invocation leaves a phantom foreground holder
 
 #### Scenario: Other vault or synchronous work runs
