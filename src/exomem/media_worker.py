@@ -1410,8 +1410,14 @@ class MediaWorker:
             mt_match = _MEDIA_TYPE_RE.search(head)
             media_type = mt_match.group(1) if mt_match else extract.media_type_for(binary)
             if media_type and binary.exists():
-                self.enqueue(binary_path=binary, sidecar_path=sidecar, media_type=media_type)
-                n += 1
+                existing = (
+                    self._store.get_by_binary(binary)
+                    if self._store is not None
+                    else None
+                )
+                if existing is None:
+                    self.enqueue(binary_path=binary, sidecar_path=sidecar, media_type=media_type)
+                    n += 1
                 if _PARENT_MEDIA_MARKER in head:
                     pm = re.search(r"(?m)^parent_media:\s*(.+?)\s*$", head)
                     if pm:

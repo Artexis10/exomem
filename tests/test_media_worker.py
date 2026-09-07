@@ -2294,6 +2294,21 @@ def test_scan_pending_reenqueues(vault, monkeypatch: pytest.MonkeyPatch) -> None
     assert w.scan_pending() == 2
 
 
+def test_scan_pending_does_not_reenqueue_a_claimed_ocr(vault) -> None:
+    result = _preserve_media_stub(vault, filename="claimed-before-scan.mp3")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio"))
+    claimed = store.claim_next()
+    assert claimed is not None
+
+    assert media_worker.MediaWorker(vault, execution_mode="process")._scan_pending_ocr() == 0
+
+    current = store.get(claimed.id)
+    assert current is not None and current.ocr_generation == claimed.ocr_generation
+
+
 def test_scan_pending_ignores_non_canonical_sidecar_copies(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
