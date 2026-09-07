@@ -624,12 +624,25 @@ def test_real_extraction_requires_unique_expected_text_and_named_engines() -> No
         {"expected_text": "image two"},
     ]
     reads = [
-        {"frontmatter": {"extracted_by": "pymupdf 1.25"}, "body": "pdf unique"},
-        {"frontmatter": {"extracted_by": "tesseract 5.5"}, "body": "image one"},
-        {"frontmatter": {"extracted_by": "tesseract 5.5"}, "body": "different OCR text"},
+        {"frontmatter": {"extracted_by": "pymupdf 1.25", "processing_state": "completed"}, "body": "pdf unique"},
+        {"frontmatter": {"extracted_by": "tesseract 5.5", "processing_state": "completed"}, "body": "image one"},
+        {"frontmatter": {"extracted_by": "tesseract 5.5", "processing_state": "completed"}, "body": "different OCR text"},
     ]
 
     assert benchmark.extraction_proof(artifacts, reads) is None
+
+
+@pytest.mark.parametrize("state", ["completed", "pending", "failed", None])
+def test_real_extraction_requires_completed_public_state_even_with_retained_text(state) -> None:
+    artifacts = [{"expected_text": marker} for marker in ("unique pdf", "first image", "second image")]
+    reads = [
+        {"frontmatter": {"extracted_by": "tesseract", "processing_state": state},
+         "body": artifact["expected_text"]}
+        for artifact in artifacts
+    ]
+
+    assert (benchmark.extraction_proof(artifacts, reads) is not None) == (state == "completed")
+    assert benchmark.extraction_proof(artifacts, reads[:2]) is None
 
 
 def test_missing_artifact_manifest_blocks_the_full_workflow() -> None:

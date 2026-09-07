@@ -291,7 +291,9 @@ def extraction_proof(
     engines: list[str] = []
     for marker, read in zip(expected, reads, strict=True):
         frontmatter = read.get("frontmatter")
-        engine = frontmatter.get("extracted_by") if isinstance(frontmatter, Mapping) else None
+        if not isinstance(frontmatter, Mapping) or frontmatter.get("processing_state") != "completed":
+            return None
+        engine = frontmatter.get("extracted_by")
         if not isinstance(engine, str) or not engine.strip() or engine.lower() in {"pending", "unavailable"}:
             return None
         if not _contains_marker(read.get("body"), marker):
@@ -1410,7 +1412,7 @@ async def run_public_workflow(
             if profile == REAL_EXTRACTION_PROFILE:
                 proof: dict[str, Any] | None = None
                 deadline = time.perf_counter() + timeout
-                while extraction_sidecar_paths and time.perf_counter() < deadline:
+                while len(extraction_sidecar_paths) == len(artifacts) and time.perf_counter() < deadline:
                     reads = [
                         await workflow_call("read_memory", {"path": sidecar_path}, phase="convergence-poll")
                         for sidecar_path in extraction_sidecar_paths
