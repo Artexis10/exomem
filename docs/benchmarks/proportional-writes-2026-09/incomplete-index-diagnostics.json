@@ -1,0 +1,1901 @@
+{
+  "compaction": "Runtime inventories stored once by digest. Startup calls grouped by tool/classification/ACK. Every timed public call, phase, and verification retained. Generated page inventory replaced by count and existing corpus digest. Raw JSON SHA-256 retained per row.",
+  "comparison_status": "invalid_for_indexed_corpus_comparison",
+  "diagnostic": "durable-closure-common-subset",
+  "evidence_format": 2,
+  "medians": [],
+  "method": "Incomplete attempted cohort; interrupted during the third Basic Memory run after detecting that sentinel readiness admitted partial indexes. That run performed public writes and reads, but its final closure outcome was not observed. No comparative median is accepted.",
+  "readiness_defect": {
+    "observations": [
+      {
+        "complete_observation": true,
+        "generated_fixture_pages": 3800,
+        "label": "3800-pair-1-1-exomem",
+        "metadata_rows_at_inspection": 3802,
+        "text_index_rows_at_inspection": 3802
+      },
+      {
+        "complete_observation": true,
+        "generated_fixture_pages": 3800,
+        "label": "3800-pair-2-2-exomem",
+        "metadata_rows_at_inspection": 3802,
+        "text_index_rows_at_inspection": 3802
+      },
+      {
+        "complete_observation": true,
+        "generated_fixture_pages": 3800,
+        "label": "3800-pair-3-1-exomem",
+        "metadata_rows_at_inspection": 3802,
+        "text_index_rows_at_inspection": 3802
+      },
+      {
+        "complete_observation": true,
+        "generated_fixture_pages": 3800,
+        "label": "3800-pair-1-2-basic_memory",
+        "metadata_rows_at_inspection": 103,
+        "text_index_rows_at_inspection": 103
+      },
+      {
+        "complete_observation": true,
+        "generated_fixture_pages": 3800,
+        "label": "3800-pair-2-1-basic_memory",
+        "metadata_rows_at_inspection": 103,
+        "text_index_rows_at_inspection": 103
+      },
+      {
+        "complete_observation": false,
+        "generated_fixture_pages": 3800,
+        "label": "3800-pair-3-2-basic_memory",
+        "metadata_rows_at_inspection": 1603,
+        "text_index_rows_at_inspection": 1604
+      }
+    ],
+    "reason": "Sentinel readiness admitted Basic Memory after only its first indexing batch. No comparative median is accepted. Cohort interrupted during the third Basic Memory run after public writes and reads; final closure was not observed. No 8000-page runs started.",
+    "status": "invalid_for_indexed_corpus_comparison"
+  },
+  "rows": [
+    {
+      "configuration": {
+        "EXOMEM_CALL_LEDGER_DIR": "<sample-root>/state/exomem/ledger",
+        "EXOMEM_CONFIG_PATH": "<sample-root>/state/exomem/config.json",
+        "EXOMEM_DISABLE_EMBEDDINGS": "1",
+        "EXOMEM_DISABLE_QUERY_LOG": "1",
+        "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
+        "EXOMEM_EAGER_BOOT": "1",
+        "EXOMEM_LOG_DIR": "<sample-root>/state/exomem/logs",
+        "EXOMEM_STATE_ROOT": "<sample-root>/state/exomem/state",
+        "EXOMEM_VAULT_PATH": "<sample-root>/vault/exomem",
+        "EXOMEM_WRITER_LEASE_STATE_DIR": "<sample-root>/state/exomem/leases"
+      },
+      "corpus": {
+        "digest": "9b008bff381052c3a29cb8a187c1106a315ef29130788541ae88603eb845384c",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 3800,
+        "pages_entries": 3800
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "exomem",
+          "--pages",
+          "3800",
+          "--timeout",
+          "300",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-3800-pair-1"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "79a8d123de203f880f9be40fa3a2823bff0ea833e1bf32c00c8d43f259f1a8bf",
+        "ended_utc": "2026-09-07T16:42:23.307629+00:00",
+        "exit_code": 0,
+        "label": "3800-pair-1-1-exomem",
+        "load_average_end": [
+          4.4736328125,
+          3.49267578125,
+          4.23779296875
+        ],
+        "load_average_start": [
+          2.4267578125,
+          3.09033203125,
+          4.20068359375
+        ],
+        "pair": 1,
+        "position": 1,
+        "product_order": [
+          "exomem",
+          "basic_memory"
+        ],
+        "runner_wall_s": 82.29109914100263,
+        "source_revision": "f7a20cefb4663ad511c0fd02330d5cf754a044ac",
+        "started_utc": "2026-09-07T16:40:56.493271+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "label": "3800-pair-1-1-exomem",
+      "markers": [
+        "proportional-common-3800-pair-1-chapter",
+        "proportional-common-3800-pair-1-tracker",
+        "proportional-common-3800-pair-1-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 3463.5511910018977,
+        "ack_p95_ms": 5038.870036005392,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 13,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 62079.18847599649,
+        "teardown_ms": 2102.635396004189,
+        "wall_to_verified_closure_ms": 17502.55252199713
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 104,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 123.28315099875908,
+            "min_call_ms": 123.28315099875908,
+            "summed_call_ms": 123.28315099875908,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 101,
+            "max_call_ms": 613.7508949905168,
+            "min_call_ms": 9.27708699600771,
+            "summed_call_ms": 9179.432773962617,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 12069.014884007629,
+            "min_call_ms": 12069.014884007629,
+            "summed_call_ms": 12069.014884007629,
+            "tool": "remember"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 1,
+            "max_call_ms": 12900.097436999204,
+            "min_call_ms": 12900.097436999204,
+            "summed_call_ms": 12900.097436999204,
+            "tool": "remember"
+          }
+        ]
+      },
+      "product": "exomem",
+      "public_calls": [
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 676.2293330102693,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 3729.6536290086806,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 5038.870036005392,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 3273.5901580017526,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 184.18716800806578,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 3463.5511910018977,
+          "tool": "remember"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 115.5315609939862,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 43.616156006464735,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 45.79482300323434,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 74.40215499082115,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 324.9955420033075,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 244.0389049879741,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 239.63913301122375,
+          "tool": "ask_memory"
+        }
+      ],
+      "raw_result_sha256": "9858dc1e528608f77319d0487f1b09975c77c53ee0a6a193edfe6872d1e395e9",
+      "reason": null,
+      "runtime_profile": "09dfc703e49f62554a04c7dd8a1a7da204f990e82d338a5ead3844c3ec3fec95",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "9dd29203171f2e9ded75e106e508e3dc798b6860d7e241df40382af9ea3e915a",
+            "expected_bytes": 109,
+            "expected_sha256": "9dd29203171f2e9ded75e106e508e3dc798b6860d7e241df40382af9ea3e915a",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "faa46e57853345c617b219e030f30c041f506ca654dd8e22de0aaa05bd327dbf",
+            "expected_bytes": 1195,
+            "expected_sha256": "faa46e57853345c617b219e030f30c041f506ca654dd8e22de0aaa05bd327dbf",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "a3d4cdb39091c1a45a040851f7c0b4ba3092150892f08eedbfd481bbcc27b004",
+            "expected_bytes": 92,
+            "expected_sha256": "a3d4cdb39091c1a45a040851f7c0b4ba3092150892f08eedbfd481bbcc27b004",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 325.0102050078567,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 244.05426799785346,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 239.6521790069528,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "BASIC_MEMORY_AUTO_UPDATE": "false",
+        "BASIC_MEMORY_CONFIG_DIR": "<sample-root>/state/basic_memory/config",
+        "BASIC_MEMORY_EXPLICIT_ROUTING": "true",
+        "BASIC_MEMORY_FORCE_LOCAL": "true",
+        "BASIC_MEMORY_HOME": "<sample-root>/state/basic_memory/home",
+        "BASIC_MEMORY_NO_PROMOS": "1",
+        "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false"
+      },
+      "corpus": {
+        "digest": "9b008bff381052c3a29cb8a187c1106a315ef29130788541ae88603eb845384c",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 3800,
+        "pages_entries": 3800
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "basic_memory",
+          "--pages",
+          "3800",
+          "--timeout",
+          "300",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-3800-pair-1"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "79a8d123de203f880f9be40fa3a2823bff0ea833e1bf32c00c8d43f259f1a8bf",
+        "ended_utc": "2026-09-07T16:42:45.817853+00:00",
+        "exit_code": 0,
+        "label": "3800-pair-1-2-basic_memory",
+        "load_average_end": [
+          4.5048828125,
+          3.5595703125,
+          4.24365234375
+        ],
+        "load_average_start": [
+          4.4736328125,
+          3.49267578125,
+          4.23779296875
+        ],
+        "pair": 1,
+        "position": 2,
+        "product_order": [
+          "exomem",
+          "basic_memory"
+        ],
+        "runner_wall_s": 21.053629916990758,
+        "source_revision": "f7a20cefb4663ad511c0fd02330d5cf754a044ac",
+        "started_utc": "2026-09-07T16:42:23.311981+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "label": "3800-pair-1-2-basic_memory",
+      "markers": [
+        "proportional-common-3800-pair-1-chapter",
+        "proportional-common-3800-pair-1-tracker",
+        "proportional-common-3800-pair-1-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 284.18424099800177,
+        "ack_p95_ms": 1865.5389699997613,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 11,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 13450.012039000285,
+        "teardown_ms": 2104.0706700005103,
+        "wall_to_verified_closure_ms": 4889.121586995316
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 16,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 16,
+            "max_call_ms": 811.2558279972291,
+            "min_call_ms": 26.110143997357227,
+            "summed_call_ms": 1601.2299909634748,
+            "tool": "search_notes"
+          }
+        ]
+      },
+      "product": "basic_memory",
+      "public_calls": [
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 117.0161170011852,
+          "tool": "write_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 1307.066405992373,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 1865.5389699997613,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 284.18424099800177,
+          "tool": "write_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 275.2615969948238,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 278.07881400804035,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 212.7424470090773,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 181.8522570101777,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 79.5763049973175,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 113.17991399846505,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 94.46510499401484,
+          "tool": "search_notes"
+        }
+      ],
+      "raw_result_sha256": "37adcada65ccd17e959ed4a6448f0c4a45c631637331580ada2a249a19a6679d",
+      "reason": null,
+      "runtime_profile": "094ae7536fcd0b6ebd8132a67e955948998f25f7e444a434e3915a87160735cf",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "9dd29203171f2e9ded75e106e508e3dc798b6860d7e241df40382af9ea3e915a",
+            "expected_bytes": 109,
+            "expected_sha256": "9dd29203171f2e9ded75e106e508e3dc798b6860d7e241df40382af9ea3e915a",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "faa46e57853345c617b219e030f30c041f506ca654dd8e22de0aaa05bd327dbf",
+            "expected_bytes": 1195,
+            "expected_sha256": "faa46e57853345c617b219e030f30c041f506ca654dd8e22de0aaa05bd327dbf",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "a3d4cdb39091c1a45a040851f7c0b4ba3092150892f08eedbfd481bbcc27b004",
+            "expected_bytes": 92,
+            "expected_sha256": "a3d4cdb39091c1a45a040851f7c0b4ba3092150892f08eedbfd481bbcc27b004",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 79.59169599052984,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 113.19932198966853,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 94.47794200968929,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "BASIC_MEMORY_AUTO_UPDATE": "false",
+        "BASIC_MEMORY_CONFIG_DIR": "<sample-root>/state/basic_memory/config",
+        "BASIC_MEMORY_EXPLICIT_ROUTING": "true",
+        "BASIC_MEMORY_FORCE_LOCAL": "true",
+        "BASIC_MEMORY_HOME": "<sample-root>/state/basic_memory/home",
+        "BASIC_MEMORY_NO_PROMOS": "1",
+        "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false"
+      },
+      "corpus": {
+        "digest": "9b008bff381052c3a29cb8a187c1106a315ef29130788541ae88603eb845384c",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 3800,
+        "pages_entries": 3800
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "basic_memory",
+          "--pages",
+          "3800",
+          "--timeout",
+          "300",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-3800-pair-2"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "79a8d123de203f880f9be40fa3a2823bff0ea833e1bf32c00c8d43f259f1a8bf",
+        "ended_utc": "2026-09-07T16:43:05.623998+00:00",
+        "exit_code": 0,
+        "label": "3800-pair-2-1-basic_memory",
+        "load_average_end": [
+          4.322265625,
+          3.57275390625,
+          4.23291015625
+        ],
+        "load_average_start": [
+          4.5048828125,
+          3.5595703125,
+          4.24365234375
+        ],
+        "pair": 2,
+        "position": 1,
+        "product_order": [
+          "basic_memory",
+          "exomem"
+        ],
+        "runner_wall_s": 19.80189217500447,
+        "source_revision": "f7a20cefb4663ad511c0fd02330d5cf754a044ac",
+        "started_utc": "2026-09-07T16:42:45.822113+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "label": "3800-pair-2-1-basic_memory",
+      "markers": [
+        "proportional-common-3800-pair-2-chapter",
+        "proportional-common-3800-pair-2-tracker",
+        "proportional-common-3800-pair-2-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 219.90070199535694,
+        "ack_p95_ms": 2625.320371997077,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 11,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 10738.777876991662,
+        "teardown_ms": 2102.143504002015,
+        "wall_to_verified_closure_ms": 6331.491186007042
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 16,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 16,
+            "max_call_ms": 753.4365989995422,
+            "min_call_ms": 25.91242101334501,
+            "summed_call_ms": 1519.2083700094372,
+            "tool": "search_notes"
+          }
+        ]
+      },
+      "product": "basic_memory",
+      "public_calls": [
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 139.78512499306817,
+          "tool": "write_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2004.5071329950588,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2625.320371997077,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 219.90070199535694,
+          "tool": "write_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 270.1749120024033,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 326.1971340107266,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 169.12631900049746,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 129.98263799818233,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 125.79039999400266,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 147.89903099881485,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 87.7256399980979,
+          "tool": "search_notes"
+        }
+      ],
+      "raw_result_sha256": "6272058e9e5213b9d213e66f3f8983b1042bf983b1fde298293d618b20b7727f",
+      "reason": null,
+      "runtime_profile": "094ae7536fcd0b6ebd8132a67e955948998f25f7e444a434e3915a87160735cf",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "30b7b9677918184ff1faeff642fe3364043c084192fd77a56bac901e472aeb1f",
+            "expected_bytes": 109,
+            "expected_sha256": "30b7b9677918184ff1faeff642fe3364043c084192fd77a56bac901e472aeb1f",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "df99c289a6e404a0984582cb5840cfa68e45c1c56aad5189460a078fa6571e47",
+            "expected_bytes": 1195,
+            "expected_sha256": "df99c289a6e404a0984582cb5840cfa68e45c1c56aad5189460a078fa6571e47",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "5cbb98da056f0ae19160c3abecf8ab6cd0e9a39e11f8bae4dae81f822258a37d",
+            "expected_bytes": 92,
+            "expected_sha256": "5cbb98da056f0ae19160c3abecf8ab6cd0e9a39e11f8bae4dae81f822258a37d",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 125.80502100172453,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 147.91492499352898,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 87.73966701119207,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "EXOMEM_CALL_LEDGER_DIR": "<sample-root>/state/exomem/ledger",
+        "EXOMEM_CONFIG_PATH": "<sample-root>/state/exomem/config.json",
+        "EXOMEM_DISABLE_EMBEDDINGS": "1",
+        "EXOMEM_DISABLE_QUERY_LOG": "1",
+        "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
+        "EXOMEM_EAGER_BOOT": "1",
+        "EXOMEM_LOG_DIR": "<sample-root>/state/exomem/logs",
+        "EXOMEM_STATE_ROOT": "<sample-root>/state/exomem/state",
+        "EXOMEM_VAULT_PATH": "<sample-root>/vault/exomem",
+        "EXOMEM_WRITER_LEASE_STATE_DIR": "<sample-root>/state/exomem/leases"
+      },
+      "corpus": {
+        "digest": "9b008bff381052c3a29cb8a187c1106a315ef29130788541ae88603eb845384c",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 3800,
+        "pages_entries": 3800
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "exomem",
+          "--pages",
+          "3800",
+          "--timeout",
+          "300",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-3800-pair-2"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "79a8d123de203f880f9be40fa3a2823bff0ea833e1bf32c00c8d43f259f1a8bf",
+        "ended_utc": "2026-09-07T16:44:33.833313+00:00",
+        "exit_code": 0,
+        "label": "3800-pair-2-2-exomem",
+        "load_average_end": [
+          4.892578125,
+          3.92236328125,
+          4.29638671875
+        ],
+        "load_average_start": [
+          4.322265625,
+          3.57275390625,
+          4.23291015625
+        ],
+        "pair": 2,
+        "position": 2,
+        "product_order": [
+          "basic_memory",
+          "exomem"
+        ],
+        "runner_wall_s": 83.82599458799814,
+        "source_revision": "f7a20cefb4663ad511c0fd02330d5cf754a044ac",
+        "started_utc": "2026-09-07T16:43:05.629446+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "label": "3800-pair-2-2-exomem",
+      "markers": [
+        "proportional-common-3800-pair-2-chapter",
+        "proportional-common-3800-pair-2-tracker",
+        "proportional-common-3800-pair-2-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 2673.8668030011468,
+        "ack_p95_ms": 4865.732130987453,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 13,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 64354.67076599889,
+        "teardown_ms": 2103.009063997888,
+        "wall_to_verified_closure_ms": 16753.402165995794
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 115,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 174.59815500478726,
+            "min_call_ms": 174.59815500478726,
+            "summed_call_ms": 174.59815500478726,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 112,
+            "max_call_ms": 358.9686249906663,
+            "min_call_ms": 9.363535005832091,
+            "summed_call_ms": 9316.554574950715,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 11309.416517993668,
+            "min_call_ms": 11309.416517993668,
+            "summed_call_ms": 11309.416517993668,
+            "tool": "remember"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 1,
+            "max_call_ms": 12875.25090300187,
+            "min_call_ms": 12875.25090300187,
+            "summed_call_ms": 12875.25090300187,
+            "tool": "remember"
+          }
+        ]
+      },
+      "product": "exomem",
+      "public_calls": [
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 642.783674004022,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 3499.1394670068985,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 4865.732130987453,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2568.654962000437,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 187.557151002693,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2673.8668030011468,
+          "tool": "remember"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 178.9685430121608,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 98.58810500008985,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 94.93110100447666,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 798.1817520048935,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 599.8499729903415,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 243.2317140046507,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 232.93343099066988,
+          "tool": "ask_memory"
+        }
+      ],
+      "raw_result_sha256": "391cd966a8e2e0bbb031ceb66da06e426f903551656b8520210cf351e5c8de48",
+      "reason": null,
+      "runtime_profile": "09dfc703e49f62554a04c7dd8a1a7da204f990e82d338a5ead3844c3ec3fec95",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "30b7b9677918184ff1faeff642fe3364043c084192fd77a56bac901e472aeb1f",
+            "expected_bytes": 109,
+            "expected_sha256": "30b7b9677918184ff1faeff642fe3364043c084192fd77a56bac901e472aeb1f",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "df99c289a6e404a0984582cb5840cfa68e45c1c56aad5189460a078fa6571e47",
+            "expected_bytes": 1195,
+            "expected_sha256": "df99c289a6e404a0984582cb5840cfa68e45c1c56aad5189460a078fa6571e47",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "5cbb98da056f0ae19160c3abecf8ab6cd0e9a39e11f8bae4dae81f822258a37d",
+            "expected_bytes": 92,
+            "expected_sha256": "5cbb98da056f0ae19160c3abecf8ab6cd0e9a39e11f8bae4dae81f822258a37d",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 599.864684001659,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 243.2466820027912,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 232.9461149929557,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "EXOMEM_CALL_LEDGER_DIR": "<sample-root>/state/exomem/ledger",
+        "EXOMEM_CONFIG_PATH": "<sample-root>/state/exomem/config.json",
+        "EXOMEM_DISABLE_EMBEDDINGS": "1",
+        "EXOMEM_DISABLE_QUERY_LOG": "1",
+        "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
+        "EXOMEM_EAGER_BOOT": "1",
+        "EXOMEM_LOG_DIR": "<sample-root>/state/exomem/logs",
+        "EXOMEM_STATE_ROOT": "<sample-root>/state/exomem/state",
+        "EXOMEM_VAULT_PATH": "<sample-root>/vault/exomem",
+        "EXOMEM_WRITER_LEASE_STATE_DIR": "<sample-root>/state/exomem/leases"
+      },
+      "corpus": {
+        "digest": "9b008bff381052c3a29cb8a187c1106a315ef29130788541ae88603eb845384c",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 3800,
+        "pages_entries": 3800
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "exomem",
+          "--pages",
+          "3800",
+          "--timeout",
+          "300",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-3800-pair-3"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "79a8d123de203f880f9be40fa3a2823bff0ea833e1bf32c00c8d43f259f1a8bf",
+        "ended_utc": "2026-09-07T16:46:00.656998+00:00",
+        "exit_code": 0,
+        "label": "3800-pair-3-1-exomem",
+        "load_average_end": [
+          5.6279296875,
+          4.32470703125,
+          4.4033203125
+        ],
+        "load_average_start": [
+          4.892578125,
+          3.92236328125,
+          4.29638671875
+        ],
+        "pair": 3,
+        "position": 1,
+        "product_order": [
+          "exomem",
+          "basic_memory"
+        ],
+        "runner_wall_s": 83.88693173900538,
+        "source_revision": "f7a20cefb4663ad511c0fd02330d5cf754a044ac",
+        "started_utc": "2026-09-07T16:44:33.836740+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "label": "3800-pair-3-1-exomem",
+      "markers": [
+        "proportional-common-3800-pair-3-chapter",
+        "proportional-common-3800-pair-3-tracker",
+        "proportional-common-3800-pair-3-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 2815.991141003906,
+        "ack_p95_ms": 4958.966952995979,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 13,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 63953.78547901055,
+        "teardown_ms": 2102.63987199869,
+        "wall_to_verified_closure_ms": 17165.907663991675
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 114,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 191.7979770078091,
+            "min_call_ms": 191.7979770078091,
+            "summed_call_ms": 191.7979770078091,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 111,
+            "max_call_ms": 651.6860620031366,
+            "min_call_ms": 9.408555997652002,
+            "summed_call_ms": 9584.51756296563,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 11285.640310001327,
+            "min_call_ms": 11285.640310001327,
+            "summed_call_ms": 11285.640310001327,
+            "tool": "remember"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 1,
+            "max_call_ms": 12447.625161992619,
+            "min_call_ms": 12447.625161992619,
+            "summed_call_ms": 12447.625161992619,
+            "tool": "remember"
+          }
+        ]
+      },
+      "product": "exomem",
+      "public_calls": [
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 652.5373559998116,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 3611.136860999977,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 4958.966952995979,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2385.9882069955347,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 190.64447800337803,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2815.991141003906,
+          "tool": "remember"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 171.07350500009488,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 105.34998500952497,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 103.1797020114027,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 189.19343799643684,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 1411.8667010043282,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 255.20896899979562,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 245.09627500083297,
+          "tool": "ask_memory"
+        }
+      ],
+      "raw_result_sha256": "f91653bb2c7b858b1ffa148905bea14e1c65305ff886c56b59d37e6c7d557fc4",
+      "reason": null,
+      "runtime_profile": "09dfc703e49f62554a04c7dd8a1a7da204f990e82d338a5ead3844c3ec3fec95",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "99c89dbd65cda2d4c033cb4969c5e4d15c7069ca8020d62f9e1fcc7e593ae33d",
+            "expected_bytes": 109,
+            "expected_sha256": "99c89dbd65cda2d4c033cb4969c5e4d15c7069ca8020d62f9e1fcc7e593ae33d",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "f458c77766c54e437b5c2b6291772384f10328fa6eaea23bc71383344309763e",
+            "expected_bytes": 1195,
+            "expected_sha256": "f458c77766c54e437b5c2b6291772384f10328fa6eaea23bc71383344309763e",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "5276553ebc93f99328f8b621629377cdcb0c55eddafc59037dd27b0a70ec330e",
+            "expected_bytes": 92,
+            "expected_sha256": "5276553ebc93f99328f8b621629377cdcb0c55eddafc59037dd27b0a70ec330e",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 1411.885802008328,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 255.22785799694248,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 245.11005700333044,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    }
+  ],
+  "runtime_profiles": {
+    "094ae7536fcd0b6ebd8132a67e955948998f25f7e444a434e3915a87160735cf": {
+      "dependency_inventory": {
+        "entries": [
+          "Authlib==1.8.0",
+          "Jinja2==3.1.6",
+          "Mako==1.4.1",
+          "MarkupSafe==3.0.3",
+          "PyJWT==2.13.0",
+          "PyMeta3==0.5.1",
+          "PyYAML==6.0.3",
+          "Pygments==2.21.0",
+          "SQLAlchemy==2.1.0rc1",
+          "SecretStorage==3.5.0",
+          "Unidecode==1.4.0",
+          "agent-detector==2.0.0",
+          "aiofile==3.12.3",
+          "aiofiles==25.1.0",
+          "aiohappyeyeballs==2.7.1",
+          "aiohttp==3.14.3",
+          "aiosignal==1.4.0",
+          "aiosqlite==0.22.1",
+          "alembic==1.19.2",
+          "annotated-doc==0.0.5",
+          "annotated-types==0.8.0",
+          "anyio==4.15.1",
+          "asyncpg==0.31.0",
+          "attrs==26.1.0",
+          "basic-memory==0.23.2",
+          "beartype==0.23.0rc0",
+          "cachetools==7.1.8",
+          "caio==0.12.4",
+          "certifi==2026.7.22",
+          "cffi==2.1.1",
+          "charset-normalizer==3.5.1",
+          "click==8.5.0",
+          "cryptography==50.0.1",
+          "cyclopts==5.0.0b1",
+          "dateparser==1.4.3",
+          "detect-installer==0.2.1",
+          "distro==1.9.0",
+          "dnspython==2.8.0",
+          "docstring_parser==0.18.0",
+          "email-validator==2.3.0",
+          "exceptiongroup==1.3.1",
+          "executing==2.2.1",
+          "fastapi-cli==0.0.32",
+          "fastapi-cloud-cli==0.25.0",
+          "fastapi==0.141.1",
+          "fastar==0.12.0",
+          "fastembed==0.8.0",
+          "fastmcp-slim==4.0.0b1",
+          "fastmcp==4.0.0b1",
+          "fastuuid==0.14.0",
+          "filelock==3.32.5",
+          "flatbuffers==25.12.19",
+          "frozenlist==1.8.0",
+          "fsspec==2026.7.0",
+          "googleapis-common-protos==1.75.3",
+          "greenlet==3.5.5",
+          "griffelib==2.3.0",
+          "h11==0.16.0",
+          "hf-xet==1.6.1a0",
+          "httpcore2==2.12.0",
+          "httpcore==1.0.9",
+          "httptools==0.8.0",
+          "httpx2==2.12.0",
+          "httpx==0.28.1",
+          "huggingface_hub==1.30.0",
+          "idna==3.19",
+          "importlib_metadata==8.9.0",
+          "iniconfig==2.3.0",
+          "jaraco.classes==3.4.0",
+          "jaraco.context==6.1.2",
+          "jaraco.functools==4.6.0",
+          "jeepney==0.9.0",
+          "jiter==0.16.0",
+          "joserfc==1.7.5",
+          "jsonref==1.1.0",
+          "jsonschema-path==0.5.0",
+          "jsonschema-specifications==2025.9.1",
+          "jsonschema==4.26.0",
+          "keyring==25.7.0",
+          "litellm==1.91.5",
+          "logfire==5.0.0",
+          "loguru==0.7.3",
+          "markdown-it-py==4.2.0",
+          "mcp-types==2.1.1",
+          "mcp==2.1.1",
+          "mdformat-gfm==1.0.0",
+          "mdformat==1.0.0",
+          "mdformat_frontmatter==2.1.2",
+          "mdit-py-plugins==0.6.1",
+          "mdurl==0.1.2",
+          "mmh3==5.3.0",
+          "more-itertools==11.1.0",
+          "multidict==6.7.1",
+          "nest-asyncio==1.6.0",
+          "nodeenv==1.10.0",
+          "numpy==2.5.3",
+          "onnxruntime==1.29.0",
+          "openai==2.54.0",
+          "openapi-pydantic==0.5.1",
+          "opentelemetry-api==1.44.0",
+          "opentelemetry-exporter-otlp-proto-common==1.44.0",
+          "opentelemetry-exporter-otlp-proto-http==1.44.0",
+          "opentelemetry-instrumentation==0.65b0",
+          "opentelemetry-proto==1.44.0",
+          "opentelemetry-sdk==1.44.0",
+          "opentelemetry-semantic-conventions==0.65b0",
+          "packaging==26.3",
+          "pathable==0.6.0",
+          "pillow==12.3.0",
+          "platformdirs==4.11.7",
+          "pluggy==1.6.0",
+          "propcache==0.5.2",
+          "protobuf==7.36.1",
+          "psutil==7.2.2",
+          "psycopg==3.3.1",
+          "py-key-value-aio==0.4.5",
+          "py_rust_stemmers==0.1.8",
+          "pybars3==0.9.7",
+          "pycparser==3.0",
+          "pydantic-extra-types==2.11.1",
+          "pydantic-settings==2.15.0",
+          "pydantic==2.14.0b1",
+          "pydantic_core==2.48.0",
+          "pyperclip==1.11.0",
+          "pyright==1.1.411",
+          "pytest-aio==2.1.7",
+          "pytest-asyncio==1.4.0",
+          "pytest==9.1.1",
+          "python-dateutil==2.9.0.post0",
+          "python-dotenv==1.2.3",
+          "python-frontmatter==1.3.0",
+          "python-multipart==0.0.32",
+          "pytz==2026.3.post1",
+          "referencing==0.37.0",
+          "regex==2026.9.3",
+          "requests==2.34.2",
+          "rich-rst==2.1.0",
+          "rich-toolkit==0.20.4",
+          "rich==15.0.0",
+          "rignore==0.8.1",
+          "rpds-py==2026.6.3",
+          "ruamel.yaml==0.19.1",
+          "sentry-sdk==3.0.0a7",
+          "shellingham==1.5.4",
+          "six==1.17.0",
+          "sniffio==1.3.1",
+          "sqlite-vec==0.1.10a4",
+          "sse-starlette==3.4.11",
+          "starlette==1.6.0",
+          "tiktoken==0.14.0",
+          "tokenizers==0.23.2",
+          "tqdm==4.70.0",
+          "truststore==0.10.4",
+          "typer==0.27.2",
+          "typing-inspection==0.4.4",
+          "typing_extensions==4.16.0",
+          "tzlocal==5.4.4",
+          "uncalled-for==0.4.0",
+          "urllib3==2.7.0",
+          "uvicorn==0.52.4",
+          "uvloop==0.22.1",
+          "watchfiles==1.2.0",
+          "wcwidth==0.8.3",
+          "websockets==17.1",
+          "wrapt==2.4.1rc1",
+          "yarl==1.24.5",
+          "zipp==4.1.0"
+        ],
+        "status": "ok"
+      },
+      "executable": "<basic-memory-venv>/bin/basic-memory",
+      "executable_sha256": "7362956de82eff880e0c64896b010493eb218ef26e88e25518459ffd34bb1eac",
+      "installed": {
+        "module_sha256": "76d9a3572dd0e3f0d875d483c12f573aade8904ac631f62d559fbfd6ce69db34",
+        "package_root": "<basic-memory-venv>/lib/python3.13/site-packages/basic_memory",
+        "runtime_pythonpath_root": "<source-checkout>/src",
+        "version": "0.23.2"
+      },
+      "installed_version_matches_expected": true,
+      "wheel": "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+      "wheel_matches_pinned_digest": true,
+      "wheel_sha256": "a1679a16319d8a7fb9c0486033551a47dedc0fbae7f5da81444eb3c4bf0ccecb"
+    },
+    "09dfc703e49f62554a04c7dd8a1a7da204f990e82d338a5ead3844c3ec3fec95": {
+      "dependency_inventory": {
+        "entries": [
+          "Authlib==1.7.2",
+          "PyJWT==2.12.1",
+          "PyYAML==6.0.3",
+          "Pygments==2.20.0",
+          "SecretStorage==3.5.0",
+          "aiofile==3.11.1",
+          "annotated-types==0.7.0",
+          "anyio==4.13.0",
+          "attrs==26.1.0",
+          "beartype==0.22.9",
+          "cachetools==7.1.2",
+          "caio==0.9.25",
+          "certifi==2026.4.22",
+          "cffi==2.0.0",
+          "click==8.4.0",
+          "cryptography==48.0.0",
+          "cyclopts==4.13.0",
+          "dnspython==2.8.0",
+          "docstring_parser==0.18.0",
+          "docutils==0.22.4",
+          "email-validator==2.3.0",
+          "exceptiongroup==1.3.1",
+          "exomem==0.74.0",
+          "fastmcp-slim==3.4.4",
+          "fastmcp==3.4.4",
+          "griffelib==2.0.2",
+          "h11==0.16.0",
+          "httpcore==1.0.9",
+          "httpx-sse==0.4.3",
+          "httpx==0.28.1",
+          "idna==3.15",
+          "iniconfig==2.3.0",
+          "jaraco.classes==3.4.0",
+          "jaraco.context==6.1.2",
+          "jaraco.functools==4.5.0",
+          "jeepney==0.9.0",
+          "joserfc==1.6.5",
+          "jsonref==1.1.0",
+          "jsonschema-path==0.4.6",
+          "jsonschema-specifications==2025.9.1",
+          "jsonschema==4.26.0",
+          "keyring==25.7.0",
+          "markdown-it-py==4.2.0",
+          "mcp==1.27.1",
+          "mdurl==0.1.2",
+          "more-itertools==11.0.2",
+          "numpy==2.4.6",
+          "openapi-pydantic==0.5.1",
+          "opentelemetry-api==1.43.0",
+          "packaging==26.2",
+          "pathable==0.5.0",
+          "platformdirs==4.9.6",
+          "pluggy==1.6.0",
+          "py-key-value-aio==0.4.4",
+          "pycparser==3.0",
+          "pydantic-settings==2.14.1",
+          "pydantic==2.13.4",
+          "pydantic_core==2.46.4",
+          "pyperclip==1.11.0",
+          "pytest-split==0.11.0",
+          "pytest-timeout==2.4.0",
+          "pytest==9.0.3",
+          "python-dotenv==1.2.2",
+          "python-multipart==0.0.29",
+          "python-slugify==8.0.4",
+          "rank-bm25==0.2.2",
+          "referencing==0.37.0",
+          "rich-rst==1.3.2",
+          "rich==15.0.0",
+          "rpds-py==0.30.0",
+          "snowballstemmer==3.1.0",
+          "sse-starlette==3.4.4",
+          "starlette==1.3.1",
+          "text-unidecode==1.3",
+          "typing-inspection==0.4.2",
+          "typing_extensions==4.15.0",
+          "uncalled-for==0.3.2",
+          "uvicorn==0.47.0",
+          "watchdog==6.0.0",
+          "watchfiles==1.1.1",
+          "websockets==16.0"
+        ],
+        "status": "ok"
+      },
+      "executable": "<source-checkout>/.venv/bin/python",
+      "executable_sha256": "b200d6c7ae464af64f81808ba246a856b1a1cdf3b2ae7088d37d87d31aebe9ff",
+      "installed": {
+        "module_sha256": "6923a89680de39e1abe1a58a51f39844c2e808d3891f5623633b0fa19ad27e81",
+        "package_root": "<source-checkout>/src/exomem",
+        "runtime_pythonpath_root": "<source-checkout>/src",
+        "version": "0.74.0"
+      },
+      "installed_version_matches_expected": null,
+      "source_identity": {
+        "dirty": false,
+        "dirty_source_digest": "384a1dd933cfd5e1ca2cf3a8ee8151080ea12fb56fdcc0c0bb3eefdc717cc51a",
+        "package_root": "<source-checkout>/src/exomem",
+        "revision": "f7a20cefb4663ad511c0fd02330d5cf754a044ac",
+        "runtime_pythonpath_root": "<source-checkout>/src",
+        "source_digest": "384a1dd933cfd5e1ca2cf3a8ee8151080ea12fb56fdcc0c0bb3eefdc717cc51a",
+        "tree": "94d7456ab5de906a577298b594de790c9e9bebd3"
+      },
+      "wheel": null,
+      "wheel_matches_pinned_digest": null,
+      "wheel_sha256": null
+    }
+  }
+}
