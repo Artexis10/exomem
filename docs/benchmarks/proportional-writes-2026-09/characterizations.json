@@ -1,0 +1,2382 @@
+{
+  "classification": "separate_characterizations_not_paired_acceptance",
+  "compaction": "Every timed call, phase, verification and host observation is retained. Generated page inventory is replaced by its count and existing corpus digest. Startup calls are grouped. Runtime inventories are stored once by digest. Raw result SHA-256 is retained.",
+  "evidence_format": 1,
+  "runtime_profiles": {
+    "aac99661ff654728471ce4a629b929446a1ba9c21864e9233f669891db8e4c67": {
+      "dependency_inventory": {
+        "entries": [
+          "Authlib==1.7.2",
+          "PyJWT==2.12.1",
+          "PyYAML==6.0.3",
+          "Pygments==2.20.0",
+          "SecretStorage==3.5.0",
+          "aiofile==3.11.1",
+          "annotated-types==0.7.0",
+          "anyio==4.13.0",
+          "attrs==26.1.0",
+          "beartype==0.22.9",
+          "cachetools==7.1.2",
+          "caio==0.9.25",
+          "certifi==2026.4.22",
+          "cffi==2.0.0",
+          "click==8.4.0",
+          "cryptography==48.0.0",
+          "cyclopts==4.13.0",
+          "dnspython==2.8.0",
+          "docstring_parser==0.18.0",
+          "docutils==0.22.4",
+          "email-validator==2.3.0",
+          "exceptiongroup==1.3.1",
+          "exomem==0.74.0",
+          "fastmcp-slim==3.4.4",
+          "fastmcp==3.4.4",
+          "griffelib==2.0.2",
+          "h11==0.16.0",
+          "httpcore==1.0.9",
+          "httpx-sse==0.4.3",
+          "httpx==0.28.1",
+          "idna==3.15",
+          "iniconfig==2.3.0",
+          "jaraco.classes==3.4.0",
+          "jaraco.context==6.1.2",
+          "jaraco.functools==4.5.0",
+          "jeepney==0.9.0",
+          "joserfc==1.6.5",
+          "jsonref==1.1.0",
+          "jsonschema-path==0.4.6",
+          "jsonschema-specifications==2025.9.1",
+          "jsonschema==4.26.0",
+          "keyring==25.7.0",
+          "markdown-it-py==4.2.0",
+          "mcp==1.27.1",
+          "mdurl==0.1.2",
+          "more-itertools==11.0.2",
+          "numpy==2.4.6",
+          "openapi-pydantic==0.5.1",
+          "opentelemetry-api==1.43.0",
+          "packaging==26.2",
+          "pathable==0.5.0",
+          "platformdirs==4.9.6",
+          "pluggy==1.6.0",
+          "py-key-value-aio==0.4.4",
+          "pycparser==3.0",
+          "pydantic-settings==2.14.1",
+          "pydantic==2.13.4",
+          "pydantic_core==2.46.4",
+          "pyperclip==1.11.0",
+          "pytest-split==0.11.0",
+          "pytest-timeout==2.4.0",
+          "pytest==9.0.3",
+          "python-dotenv==1.2.2",
+          "python-multipart==0.0.29",
+          "python-slugify==8.0.4",
+          "rank-bm25==0.2.2",
+          "referencing==0.37.0",
+          "rich-rst==1.3.2",
+          "rich==15.0.0",
+          "rpds-py==0.30.0",
+          "snowballstemmer==3.1.0",
+          "sse-starlette==3.4.4",
+          "starlette==1.3.1",
+          "text-unidecode==1.3",
+          "typing-inspection==0.4.2",
+          "typing_extensions==4.15.0",
+          "uncalled-for==0.3.2",
+          "uvicorn==0.47.0",
+          "watchdog==6.0.0",
+          "watchfiles==1.1.1",
+          "websockets==16.0"
+        ],
+        "status": "ok"
+      },
+      "executable": "<source-checkout>/.venv/bin/python",
+      "executable_sha256": "b200d6c7ae464af64f81808ba246a856b1a1cdf3b2ae7088d37d87d31aebe9ff",
+      "installed": {
+        "module_sha256": "6923a89680de39e1abe1a58a51f39844c2e808d3891f5623633b0fa19ad27e81",
+        "package_root": "<source-checkout>/src/exomem",
+        "runtime_pythonpath_root": "<source-checkout>/src",
+        "version": "0.74.0"
+      },
+      "installed_version_matches_expected": null,
+      "source_identity": {
+        "dirty": false,
+        "dirty_source_digest": "fb206868f2674ad8250b90929905097decf2ef2e6389c7478896cff94ca17159",
+        "package_root": "<source-checkout>/src/exomem",
+        "revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "runtime_pythonpath_root": "<source-checkout>/src",
+        "source_digest": "fb206868f2674ad8250b90929905097decf2ef2e6389c7478896cff94ca17159",
+        "tree": "e777212094b2fd363eafa4a2b1e7c54efbece3b3"
+      },
+      "wheel": null,
+      "wheel_matches_pinned_digest": null,
+      "wheel_sha256": null
+    },
+    "e5c20a1f472d097b5fa54de9773e57ae33b376071656907eee50630b10dd0f5f": {
+      "git": {
+        "dirty": false,
+        "revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "tree": "e777212094b2fd363eafa4a2b1e7c54efbece3b3"
+      },
+      "python": {
+        "executable": "<benchmark-root>/media-venv/bin/python",
+        "invocation": "<benchmark-root>/media-venv/bin/python",
+        "packages": [
+          {
+            "name": "aiofile",
+            "version": "3.11.1"
+          },
+          {
+            "name": "annotated-types",
+            "version": "0.7.0"
+          },
+          {
+            "name": "anyio",
+            "version": "4.13.0"
+          },
+          {
+            "name": "attrs",
+            "version": "26.1.0"
+          },
+          {
+            "name": "Authlib",
+            "version": "1.7.2"
+          },
+          {
+            "name": "beartype",
+            "version": "0.22.9"
+          },
+          {
+            "name": "cachetools",
+            "version": "7.1.2"
+          },
+          {
+            "name": "caio",
+            "version": "0.9.25"
+          },
+          {
+            "name": "certifi",
+            "version": "2026.4.22"
+          },
+          {
+            "name": "cffi",
+            "version": "2.0.0"
+          },
+          {
+            "name": "click",
+            "version": "8.4.0"
+          },
+          {
+            "name": "cryptography",
+            "version": "48.0.0"
+          },
+          {
+            "name": "cyclopts",
+            "version": "4.13.0"
+          },
+          {
+            "name": "dnspython",
+            "version": "2.8.0"
+          },
+          {
+            "name": "docstring_parser",
+            "version": "0.18.0"
+          },
+          {
+            "name": "docutils",
+            "version": "0.22.4"
+          },
+          {
+            "name": "email-validator",
+            "version": "2.3.0"
+          },
+          {
+            "name": "exceptiongroup",
+            "version": "1.3.1"
+          },
+          {
+            "name": "exomem",
+            "version": "0.74.0"
+          },
+          {
+            "name": "fastmcp",
+            "version": "3.4.4"
+          },
+          {
+            "name": "fastmcp-slim",
+            "version": "3.4.4"
+          },
+          {
+            "name": "griffelib",
+            "version": "2.0.2"
+          },
+          {
+            "name": "h11",
+            "version": "0.16.0"
+          },
+          {
+            "name": "httpcore",
+            "version": "1.0.9"
+          },
+          {
+            "name": "httpx",
+            "version": "0.28.1"
+          },
+          {
+            "name": "httpx-sse",
+            "version": "0.4.3"
+          },
+          {
+            "name": "idna",
+            "version": "3.15"
+          },
+          {
+            "name": "iniconfig",
+            "version": "2.3.0"
+          },
+          {
+            "name": "jaraco.classes",
+            "version": "3.4.0"
+          },
+          {
+            "name": "jaraco.context",
+            "version": "6.1.2"
+          },
+          {
+            "name": "jaraco.functools",
+            "version": "4.5.0"
+          },
+          {
+            "name": "jeepney",
+            "version": "0.9.0"
+          },
+          {
+            "name": "joserfc",
+            "version": "1.6.5"
+          },
+          {
+            "name": "jsonref",
+            "version": "1.1.0"
+          },
+          {
+            "name": "jsonschema",
+            "version": "4.26.0"
+          },
+          {
+            "name": "jsonschema-path",
+            "version": "0.4.6"
+          },
+          {
+            "name": "jsonschema-specifications",
+            "version": "2025.9.1"
+          },
+          {
+            "name": "keyring",
+            "version": "25.7.0"
+          },
+          {
+            "name": "markdown-it-py",
+            "version": "4.2.0"
+          },
+          {
+            "name": "mcp",
+            "version": "1.27.1"
+          },
+          {
+            "name": "mdurl",
+            "version": "0.1.2"
+          },
+          {
+            "name": "more-itertools",
+            "version": "11.0.2"
+          },
+          {
+            "name": "numpy",
+            "version": "2.4.6"
+          },
+          {
+            "name": "openapi-pydantic",
+            "version": "0.5.1"
+          },
+          {
+            "name": "opentelemetry-api",
+            "version": "1.43.0"
+          },
+          {
+            "name": "packaging",
+            "version": "26.2"
+          },
+          {
+            "name": "pathable",
+            "version": "0.5.0"
+          },
+          {
+            "name": "pillow",
+            "version": "12.2.0"
+          },
+          {
+            "name": "platformdirs",
+            "version": "4.9.6"
+          },
+          {
+            "name": "pluggy",
+            "version": "1.6.0"
+          },
+          {
+            "name": "py-key-value-aio",
+            "version": "0.4.4"
+          },
+          {
+            "name": "pycparser",
+            "version": "3.0"
+          },
+          {
+            "name": "pydantic",
+            "version": "2.13.4"
+          },
+          {
+            "name": "pydantic-settings",
+            "version": "2.14.1"
+          },
+          {
+            "name": "pydantic_core",
+            "version": "2.46.4"
+          },
+          {
+            "name": "Pygments",
+            "version": "2.20.0"
+          },
+          {
+            "name": "PyJWT",
+            "version": "2.12.1"
+          },
+          {
+            "name": "PyMuPDF",
+            "version": "1.27.2.3"
+          },
+          {
+            "name": "pyperclip",
+            "version": "1.11.0"
+          },
+          {
+            "name": "pytesseract",
+            "version": "0.3.13"
+          },
+          {
+            "name": "pytest",
+            "version": "9.0.3"
+          },
+          {
+            "name": "pytest-split",
+            "version": "0.11.0"
+          },
+          {
+            "name": "pytest-timeout",
+            "version": "2.4.0"
+          },
+          {
+            "name": "python-dotenv",
+            "version": "1.2.2"
+          },
+          {
+            "name": "python-multipart",
+            "version": "0.0.29"
+          },
+          {
+            "name": "python-slugify",
+            "version": "8.0.4"
+          },
+          {
+            "name": "PyYAML",
+            "version": "6.0.3"
+          },
+          {
+            "name": "rank-bm25",
+            "version": "0.2.2"
+          },
+          {
+            "name": "referencing",
+            "version": "0.37.0"
+          },
+          {
+            "name": "rich",
+            "version": "15.0.0"
+          },
+          {
+            "name": "rich-rst",
+            "version": "1.3.2"
+          },
+          {
+            "name": "rpds-py",
+            "version": "0.30.0"
+          },
+          {
+            "name": "SecretStorage",
+            "version": "3.5.0"
+          },
+          {
+            "name": "snowballstemmer",
+            "version": "3.1.0"
+          },
+          {
+            "name": "sse-starlette",
+            "version": "3.4.4"
+          },
+          {
+            "name": "starlette",
+            "version": "1.3.1"
+          },
+          {
+            "name": "text-unidecode",
+            "version": "1.3"
+          },
+          {
+            "name": "typing-inspection",
+            "version": "0.4.2"
+          },
+          {
+            "name": "typing_extensions",
+            "version": "4.15.0"
+          },
+          {
+            "name": "uncalled-for",
+            "version": "0.3.2"
+          },
+          {
+            "name": "uvicorn",
+            "version": "0.47.0"
+          },
+          {
+            "name": "watchdog",
+            "version": "6.0.0"
+          },
+          {
+            "name": "watchfiles",
+            "version": "1.1.1"
+          },
+          {
+            "name": "websockets",
+            "version": "16.0"
+          }
+        ],
+        "prefix": "<benchmark-root>/media-venv",
+        "runtime_executable": "<benchmark-root>/media-venv/bin/python",
+        "version": "3.13.14 (main, Jun 23 2026, 15:18:27) [Clang 22.1.3 ]"
+      },
+      "source": {
+        "package_origin": "<source-checkout>/src/exomem/__init__.py",
+        "root": "<source-checkout>/src",
+        "sha256": "37a02fbe1e8c82d2ff3bb92d84f0dbbab3a81b4ed66199f89ce2462deddd60f1"
+      }
+    }
+  },
+  "samples": [
+    {
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "exomem",
+          "--pages",
+          "3800",
+          "--timeout",
+          "300",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<benchmark-root>/basic-memory-venv/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+        "ended_utc": "2026-09-07T19:35:22.526725+00:00",
+        "exit_code": 0,
+        "load_average_end": [
+          3.2783203125,
+          3.568359375,
+          4.0810546875
+        ],
+        "load_average_start": [
+          2.923828125,
+          3.587890625,
+          4.12158203125
+        ],
+        "mode": "common",
+        "pages": 3800,
+        "runner_wall_s": 55.31462183399708,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T19:34:23.436773+00:00",
+        "task_test_workers_quiescent": true,
+        "wrapper_sha256": null
+      },
+      "label": "common-2b172de1-3800",
+      "raw_result_sha256": "c18c88cb3bb5b0f52f8bc8b9a6aa86038e5ed3e51fcf6eec4a71047f0980afd4",
+      "result": {
+        "diagnostic": "durable-closure-common-subset",
+        "rows": [
+          {
+            "configuration": {
+              "EXOMEM_CALL_LEDGER_DIR": "<sample-root>/state/exomem/ledger",
+              "EXOMEM_CONFIG_PATH": "<sample-root>/state/exomem/config.json",
+              "EXOMEM_DISABLE_EMBEDDINGS": "1",
+              "EXOMEM_DISABLE_QUERY_LOG": "1",
+              "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
+              "EXOMEM_EAGER_BOOT": "1",
+              "EXOMEM_LOG_DIR": "<sample-root>/state/exomem/logs",
+              "EXOMEM_STATE_ROOT": "<sample-root>/state/exomem/state",
+              "EXOMEM_VAULT_PATH": "<sample-root>/vault/exomem",
+              "EXOMEM_WRITER_LEASE_STATE_DIR": "<sample-root>/state/exomem/leases"
+            },
+            "corpus": {
+              "digest": "9b008bff381052c3a29cb8a187c1106a315ef29130788541ae88603eb845384c",
+              "generator": "durable-closure-common-markdown-v1",
+              "named_pages": {
+                "background": "background.md",
+                "stale_link": "stale-link.md",
+                "tracker": "active-tracker.md"
+              },
+              "page_count": 3800,
+              "pages_entries": 3800
+            },
+            "initial_indexed_corpus": {
+              "expected_path_count": 3800,
+              "expected_path_digest": "a4cc1b475b1b53b95656c2c283914f9f48e10b7786db0ca3b4f266c10f8b0044",
+              "identity_join_proof": "pages.rowid = fts.rowid",
+              "observed_path_count": 3800,
+              "observed_path_digest": "a4cc1b475b1b53b95656c2c283914f9f48e10b7786db0ca3b4f266c10f8b0044",
+              "product_binding": {
+                "fixture_prefix": "Knowledge Base/Reference/",
+                "vault_state_key": "exomem-2679af42b00ffbda"
+              },
+              "proof_method": "pages/fts rowid identity join with recall admission",
+              "ready": true,
+              "reason": null,
+              "schema_identity": {
+                "digest": "4fc1ab5d9988401675c793e9a4460aefb3f7fb869a1665103feb338e6d090d93",
+                "tables": [
+                  "fts",
+                  "meta",
+                  "pages"
+                ]
+              },
+              "store": "<sample-root>/state/exomem/state/exomem-2679af42b00ffbda/.lexical.sqlite"
+            },
+            "markers": [
+              "common-subset-fbbaf14afcc74f82ac226bc1732a1ba8-chapter",
+              "common-subset-fbbaf14afcc74f82ac226bc1732a1ba8-tracker",
+              "common-subset-fbbaf14afcc74f82ac226bc1732a1ba8-capture"
+            ],
+            "measurements": {
+              "ack_p50_ms": 1450.0786659918958,
+              "ack_p95_ms": 2563.9032589970157,
+              "connector_ms": null,
+              "connector_reason": "not exposed by the public MCP protocol",
+              "public_call_count": 13,
+              "shared_server_ms": null,
+              "shared_server_reason": "not exposed by the public MCP protocol"
+            },
+            "phases": {
+              "pre_timing_ms": 44585.67299800052,
+              "teardown_ms": 2103.180648991838,
+              "wall_to_verified_closure_ms": 7736.767851005425
+            },
+            "plan": [
+              {
+                "operation": "create_completed_chapter",
+                "surface": "public_mcp"
+              },
+              {
+                "operation": "edit_tracker",
+                "surface": "public_mcp"
+              },
+              {
+                "operation": "correct_stale_link",
+                "surface": "public_mcp"
+              },
+              {
+                "operation": "capture_independent_note",
+                "surface": "public_mcp"
+              },
+              {
+                "operation": "exact_read_changed_pages",
+                "surface": "public_mcp"
+              },
+              {
+                "operation": "search_unique_markers",
+                "surface": "public_mcp"
+              }
+            ],
+            "pre_timing_public_calls_summary": {
+              "call_count": 109,
+              "groups": [
+                {
+                  "ack": false,
+                  "classification": "refused",
+                  "count": 107,
+                  "max_call_ms": 321.59546100592706,
+                  "min_call_ms": 8.679088001372293,
+                  "summed_call_ms": 8596.980203088606,
+                  "tool": "ask_memory"
+                },
+                {
+                  "ack": false,
+                  "classification": "ok",
+                  "count": 1,
+                  "max_call_ms": 112.06493899226189,
+                  "min_call_ms": 112.06493899226189,
+                  "summed_call_ms": 112.06493899226189,
+                  "tool": "ask_memory"
+                },
+                {
+                  "ack": false,
+                  "classification": "ok",
+                  "count": 1,
+                  "max_call_ms": 6408.280031013419,
+                  "min_call_ms": 6408.280031013419,
+                  "summed_call_ms": 6408.280031013419,
+                  "tool": "remember"
+                }
+              ]
+            },
+            "product": "exomem",
+            "public_calls": [
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 495.9147430054145,
+                "tool": "remember"
+              },
+              {
+                "ack": true,
+                "classification": "ok",
+                "elapsed_ms": 2563.9032589970157,
+                "tool": "remember"
+              },
+              {
+                "ack": true,
+                "classification": "ok",
+                "elapsed_ms": 1912.3407699953532,
+                "tool": "edit_memory"
+              },
+              {
+                "ack": true,
+                "classification": "ok",
+                "elapsed_ms": 1450.0786659918958,
+                "tool": "edit_memory"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 152.08874900417868,
+                "tool": "remember"
+              },
+              {
+                "ack": true,
+                "classification": "ok",
+                "elapsed_ms": 681.9886900048004,
+                "tool": "remember"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 63.43774301058147,
+                "tool": "read_memory"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 22.76327900472097,
+                "tool": "read_memory"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 52.98485700041056,
+                "tool": "read_memory"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 23.35304900771007,
+                "tool": "read_memory"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 134.77585799410008,
+                "tool": "ask_memory"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 50.76243799703661,
+                "tool": "ask_memory"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 79.32234900363255,
+                "tool": "ask_memory"
+              }
+            ],
+            "reason": null,
+            "runtime_profile": "aac99661ff654728471ce4a629b929446a1ba9c21864e9233f669891db8e4c67",
+            "status": "pass",
+            "verification": {
+              "body_proof": [
+                {
+                  "actual_bytes": 124,
+                  "actual_sha256": "9f383dabd7d09461d5a2e1aeed37c0ba04fbc860f451caecf0bb100e823fd6a9",
+                  "expected_bytes": 124,
+                  "expected_sha256": "9f383dabd7d09461d5a2e1aeed37c0ba04fbc860f451caecf0bb100e823fd6a9",
+                  "matches": true
+                },
+                {
+                  "actual_bytes": 1210,
+                  "actual_sha256": "f03976ac0433783e175fb8efb41c193ddda95b58b0ded0adbe7e9624eb32b6ad",
+                  "expected_bytes": 1210,
+                  "expected_sha256": "f03976ac0433783e175fb8efb41c193ddda95b58b0ded0adbe7e9624eb32b6ad",
+                  "matches": true
+                },
+                {
+                  "actual_bytes": 3175,
+                  "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+                  "expected_bytes": 3175,
+                  "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+                  "matches": true
+                },
+                {
+                  "actual_bytes": 107,
+                  "actual_sha256": "13e48379b70f75e5358b69a3d10ab1037fbd241c5d843258dd834181b9effe6f",
+                  "expected_bytes": 107,
+                  "expected_sha256": "13e48379b70f75e5358b69a3d10ab1037fbd241c5d843258dd834181b9effe6f",
+                  "matches": true
+                }
+              ],
+              "exact_read_your_write": true,
+              "expected_bodies_match": true,
+              "search_converged": true,
+              "searches": [
+                {
+                  "convergence_ms": 134.79051100148354,
+                  "final_response": {
+                    "classification": "ok",
+                    "container": "result",
+                    "hit_count": 1,
+                    "top_level_keys": [
+                      "result"
+                    ]
+                  },
+                  "found": true,
+                  "waits_ms": []
+                },
+                {
+                  "convergence_ms": 50.77816599805374,
+                  "final_response": {
+                    "classification": "ok",
+                    "container": "result",
+                    "hit_count": 1,
+                    "top_level_keys": [
+                      "result"
+                    ]
+                  },
+                  "found": true,
+                  "waits_ms": []
+                },
+                {
+                  "convergence_ms": 79.33416399464477,
+                  "final_response": {
+                    "classification": "ok",
+                    "container": "result",
+                    "hit_count": 1,
+                    "top_level_keys": [
+                      "result"
+                    ]
+                  },
+                  "found": true,
+                  "waits_ms": []
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<benchmark-root>/warm_graph_common.py",
+          "<source-checkout>",
+          "--product",
+          "exomem",
+          "--pages",
+          "8000",
+          "--timeout",
+          "300",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<benchmark-root>/basic-memory-venv/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+        "ended_utc": "2026-09-07T22:32:56.534634+00:00",
+        "exit_code": 0,
+        "load_average_end": [
+          18.2138671875,
+          13.70556640625,
+          10.23046875
+        ],
+        "load_average_start": [
+          13.15771484375,
+          11.04248046875,
+          8.9677734375
+        ],
+        "mode": "warm",
+        "pages": 8000,
+        "runner_wall_s": 145.01889051200124,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T22:30:20.298317+00:00",
+        "task_test_workers_quiescent": true,
+        "wrapper_sha256": "e37be3bc22db0fdf71a13006bb325fb58a8e8a8678f43012a3f53f2ddb9cd239"
+      },
+      "label": "warm-2b172de1-8000",
+      "raw_result_sha256": "ec6069b9ed38de4c3e044f067b1abec5099094109d2e766e77f3d5cfdcb58c1a",
+      "result": {
+        "diagnostic": "durable-closure-common-subset",
+        "rows": [
+          {
+            "configuration": {
+              "EXOMEM_CALL_LEDGER_DIR": "<sample-root>/state/exomem/ledger",
+              "EXOMEM_CONFIG_PATH": "<sample-root>/state/exomem/config.json",
+              "EXOMEM_DISABLE_EMBEDDINGS": "1",
+              "EXOMEM_DISABLE_QUERY_LOG": "1",
+              "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
+              "EXOMEM_EAGER_BOOT": "1",
+              "EXOMEM_LOG_DIR": "<sample-root>/state/exomem/logs",
+              "EXOMEM_STATE_ROOT": "<sample-root>/state/exomem/state",
+              "EXOMEM_VAULT_PATH": "<sample-root>/vault/exomem",
+              "EXOMEM_WRITER_LEASE_STATE_DIR": "<sample-root>/state/exomem/leases"
+            },
+            "corpus": {
+              "digest": "acf638d6bbbb3decdd500bfc6516b4e07897bf396d3140a9385f4fcc819ccffb",
+              "generator": "durable-closure-common-markdown-v1",
+              "named_pages": {
+                "background": "background.md",
+                "stale_link": "stale-link.md",
+                "tracker": "active-tracker.md"
+              },
+              "page_count": 8000,
+              "pages_entries": 8000
+            },
+            "initial_indexed_corpus": {
+              "expected_path_count": 8000,
+              "expected_path_digest": "2266721d71a975ad161da7607a780c6541df692e31f5c7bf953204a562e855af",
+              "identity_join_proof": "pages.rowid = fts.rowid",
+              "observed_path_count": 8000,
+              "observed_path_digest": "2266721d71a975ad161da7607a780c6541df692e31f5c7bf953204a562e855af",
+              "product_binding": {
+                "fixture_prefix": "Knowledge Base/Reference/",
+                "vault_state_key": "exomem-6d0c68c7c758ea67"
+              },
+              "proof_method": "pages/fts rowid identity join with recall admission",
+              "ready": true,
+              "reason": null,
+              "schema_identity": {
+                "digest": "4fc1ab5d9988401675c793e9a4460aefb3f7fb869a1665103feb338e6d090d93",
+                "tables": [
+                  "fts",
+                  "meta",
+                  "pages"
+                ]
+              },
+              "store": "<sample-root>/state/exomem/state/exomem-6d0c68c7c758ea67/.lexical.sqlite"
+            },
+            "markers": [
+              "common-subset-79ea0113e81341b99baa99e5fab603e5-chapter",
+              "common-subset-79ea0113e81341b99baa99e5fab603e5-tracker",
+              "common-subset-79ea0113e81341b99baa99e5fab603e5-capture"
+            ],
+            "measurements": {
+              "ack_p50_ms": 1396.5070730046136,
+              "ack_p95_ms": 3396.8669370078715,
+              "connector_ms": null,
+              "connector_reason": "not exposed by the public MCP protocol",
+              "public_call_count": 13,
+              "shared_server_ms": null,
+              "shared_server_reason": "not exposed by the public MCP protocol"
+            },
+            "phases": {
+              "pre_timing_ms": 130013.01827399584,
+              "teardown_ms": 2105.0846739963163,
+              "wall_to_verified_closure_ms": 11521.626963003655
+            },
+            "plan": [
+              {
+                "operation": "create_completed_chapter",
+                "surface": "public_mcp"
+              },
+              {
+                "operation": "edit_tracker",
+                "surface": "public_mcp"
+              },
+              {
+                "operation": "correct_stale_link",
+                "surface": "public_mcp"
+              },
+              {
+                "operation": "capture_independent_note",
+                "surface": "public_mcp"
+              },
+              {
+                "operation": "exact_read_changed_pages",
+                "surface": "public_mcp"
+              },
+              {
+                "operation": "search_unique_markers",
+                "surface": "public_mcp"
+              }
+            ],
+            "pre_timing_public_calls_summary": {
+              "call_count": 226,
+              "groups": [
+                {
+                  "ack": false,
+                  "classification": "refused",
+                  "count": 220,
+                  "max_call_ms": 725.7224839995615,
+                  "min_call_ms": 9.441833011806011,
+                  "summed_call_ms": 14835.413045118912,
+                  "tool": "ask_memory"
+                },
+                {
+                  "ack": false,
+                  "classification": "ok",
+                  "count": 1,
+                  "max_call_ms": 137.15276299626566,
+                  "min_call_ms": 137.15276299626566,
+                  "summed_call_ms": 137.15276299626566,
+                  "tool": "ask_memory"
+                },
+                {
+                  "ack": false,
+                  "classification": "refused",
+                  "count": 1,
+                  "max_call_ms": 13849.837264002417,
+                  "min_call_ms": 13849.837264002417,
+                  "summed_call_ms": 13849.837264002417,
+                  "tool": "remember"
+                },
+                {
+                  "ack": false,
+                  "classification": "ok",
+                  "count": 2,
+                  "max_call_ms": 11341.3969539979,
+                  "min_call_ms": 1303.7347869976657,
+                  "summed_call_ms": 12645.131740995566,
+                  "tool": "remember"
+                },
+                {
+                  "ack": true,
+                  "classification": "ok",
+                  "count": 1,
+                  "max_call_ms": 5215.139730004012,
+                  "min_call_ms": 5215.139730004012,
+                  "summed_call_ms": 5215.139730004012,
+                  "tool": "remember"
+                },
+                {
+                  "ack": false,
+                  "classification": "ok",
+                  "count": 1,
+                  "max_call_ms": 23671.31556000095,
+                  "min_call_ms": 23671.31556000095,
+                  "summed_call_ms": 23671.31556000095,
+                  "tool": "connect_memory"
+                }
+              ]
+            },
+            "product": "exomem",
+            "public_calls": [
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 533.8736819976475,
+                "tool": "remember"
+              },
+              {
+                "ack": true,
+                "classification": "ok",
+                "elapsed_ms": 1396.5070730046136,
+                "tool": "remember"
+              },
+              {
+                "ack": true,
+                "classification": "ok",
+                "elapsed_ms": 1009.7389940056019,
+                "tool": "edit_memory"
+              },
+              {
+                "ack": true,
+                "classification": "ok",
+                "elapsed_ms": 3396.8669370078715,
+                "tool": "edit_memory"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 332.8276940010255,
+                "tool": "remember"
+              },
+              {
+                "ack": true,
+                "classification": "ok",
+                "elapsed_ms": 2927.3039510007948,
+                "tool": "remember"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 86.3907110033324,
+                "tool": "read_memory"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 55.99021499801893,
+                "tool": "read_memory"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 60.075986009906046,
+                "tool": "read_memory"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 106.25061800237745,
+                "tool": "read_memory"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 801.8203620013082,
+                "tool": "ask_memory"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 266.81473400094546,
+                "tool": "ask_memory"
+              },
+              {
+                "ack": false,
+                "classification": "ok",
+                "elapsed_ms": 270.55624399508815,
+                "tool": "ask_memory"
+              }
+            ],
+            "reason": null,
+            "runtime_profile": "aac99661ff654728471ce4a629b929446a1ba9c21864e9233f669891db8e4c67",
+            "setup_extra_pages": 1,
+            "setup_note": "Generated common fixture plus one public sentinel note; sentinel commit and graph readiness polling are outside the timed workflow.",
+            "setup_variant": "public-sentinel-write-then-graph-current",
+            "status": "pass",
+            "verification": {
+              "body_proof": [
+                {
+                  "actual_bytes": 124,
+                  "actual_sha256": "b6bd75763b9eea0d0e4e28c9cda76c0c929b5cb07d550a7d8f0fca25f58eba48",
+                  "expected_bytes": 124,
+                  "expected_sha256": "b6bd75763b9eea0d0e4e28c9cda76c0c929b5cb07d550a7d8f0fca25f58eba48",
+                  "matches": true
+                },
+                {
+                  "actual_bytes": 1210,
+                  "actual_sha256": "bf0fc3513eb47f29a47a91ef22fd846767570f8957e924b2c8b959d176d1607e",
+                  "expected_bytes": 1210,
+                  "expected_sha256": "bf0fc3513eb47f29a47a91ef22fd846767570f8957e924b2c8b959d176d1607e",
+                  "matches": true
+                },
+                {
+                  "actual_bytes": 3175,
+                  "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+                  "expected_bytes": 3175,
+                  "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+                  "matches": true
+                },
+                {
+                  "actual_bytes": 107,
+                  "actual_sha256": "83ec8ddfad7c90a96120d0817f9bb94daf37c0419421d845d3e32c874b5ebc41",
+                  "expected_bytes": 107,
+                  "expected_sha256": "83ec8ddfad7c90a96120d0817f9bb94daf37c0419421d845d3e32c874b5ebc41",
+                  "matches": true
+                }
+              ],
+              "exact_read_your_write": true,
+              "expected_bodies_match": true,
+              "search_converged": true,
+              "searches": [
+                {
+                  "convergence_ms": 801.8754520016955,
+                  "final_response": {
+                    "classification": "ok",
+                    "container": "result",
+                    "hit_count": 1,
+                    "top_level_keys": [
+                      "result"
+                    ]
+                  },
+                  "found": true,
+                  "waits_ms": []
+                },
+                {
+                  "convergence_ms": 266.831318003824,
+                  "final_response": {
+                    "classification": "ok",
+                    "container": "result",
+                    "hit_count": 1,
+                    "top_level_keys": [
+                      "result"
+                    ]
+                  },
+                  "found": true,
+                  "waits_ms": []
+                },
+                {
+                  "convergence_ms": 270.56776999961585,
+                  "final_response": {
+                    "classification": "ok",
+                    "container": "result",
+                    "hit_count": 1,
+                    "top_level_keys": [
+                      "result"
+                    ]
+                  },
+                  "found": true,
+                  "waits_ms": []
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "host": {
+        "argv": [
+          "<benchmark-root>/media-venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_benchmark.py",
+          "--pages",
+          "8000",
+          "--timeout",
+          "300",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--profile",
+          "real-extraction",
+          "--variant",
+          "optimized",
+          "--python",
+          "<benchmark-root>/media-venv/bin/python",
+          "--server-root",
+          "<source-checkout>",
+          "--artifacts-manifest",
+          "<source-checkout>/docs/benchmarks/durable-closure-public-artifacts.json"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7701f8265bb8ae2f55492e85a0feff19e9db90023e878168e80cc98a149dfef9",
+        "ended_utc": "2026-09-07T22:38:54.651419+00:00",
+        "exit_code": 0,
+        "load_average_end": [
+          8.22802734375,
+          11.3759765625,
+          10.302734375
+        ],
+        "load_average_start": [
+          9.0849609375,
+          11.69287109375,
+          10.09912109375
+        ],
+        "mode": "media",
+        "pages": 8000,
+        "runner_wall_s": 153.58231896199868,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T22:36:09.568335+00:00",
+        "task_test_workers_quiescent": true,
+        "wrapper_sha256": null
+      },
+      "label": "media-2b172de1-8000",
+      "raw_result_sha256": "d39557b4601fba1e70f581d4b796e5cefe9a629376d503006d19522f62d07bb7",
+      "result": {
+        "blocked_dependencies": [],
+        "call_counts": {
+          "convergence_polls": 12,
+          "probes": 0,
+          "retries": 0,
+          "verification": 4
+        },
+        "calls": [
+          {
+            "client_elapsed_ms": 369.01527098962106,
+            "ended_ms": 371.95731500105467,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "workflow",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "active_capabilities",
+              "authoring_contract",
+              "common_actions",
+              "common_tools",
+              "contract_version",
+              "engagement",
+              "entity_registry",
+              "epistemic_contract",
+              "front_door_actions",
+              "governance",
+              "knowledge_packs",
+              "memory_model",
+              "performance_profiles",
+              "planning",
+              "product_commands",
+              "profile",
+              "records",
+              "relation_vocabulary",
+              "search_guidance",
+              "semantic_authoring",
+              "server",
+              "simple_actions",
+              "source_taxonomy",
+              "tool_defaults",
+              "vocabulary_workflow",
+              "workflow",
+              "workflow_contracts",
+              "workflow_skills"
+            ],
+            "server_duration_ms": 347.16,
+            "server_interval": {
+              "ended_ms": 1788820687060.0,
+              "started_ms": 1788820686712.26
+            },
+            "server_total_ms": 347.74,
+            "started_ms": 2.942044011433609,
+            "tool": "bootstrap"
+          },
+          {
+            "client_elapsed_ms": 18666.076113993768,
+            "ended_ms": 19038.068323003245,
+            "error_code": null,
+            "mutation_ack": true,
+            "outcome": "ok",
+            "phase": "media-enqueue",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "files",
+              "graph_sync",
+              "graph_sync_checkpoint",
+              "graph_sync_code",
+              "graph_sync_remediation",
+              "mutated",
+              "ok",
+              "paths",
+              "receipt_id",
+              "request_id",
+              "state",
+              "status",
+              "summary",
+              "terminal",
+              "warnings_count"
+            ],
+            "server_duration_ms": 18656.77,
+            "server_interval": {
+              "ended_ms": 1788820705729.0,
+              "started_ms": 1788820687070.25
+            },
+            "server_total_ms": 18658.75,
+            "started_ms": 371.99220900947694,
+            "tool": "preserve_artifacts"
+          },
+          {
+            "client_elapsed_ms": 157.86156700050924,
+            "ended_ms": 19196.136070007924,
+            "error_code": null,
+            "mutation_ack": true,
+            "outcome": "ok",
+            "phase": "media-enqueue",
+            "probe": false,
+            "request_shape": {
+              "operation": "process"
+            },
+            "response_keys": [
+              "graph_sync",
+              "graph_sync_checkpoint",
+              "graph_sync_code",
+              "graph_sync_remediation",
+              "index_refresh_remaining",
+              "index_refreshed",
+              "media_results",
+              "mutated",
+              "ok",
+              "operation",
+              "paths",
+              "receipt_id",
+              "request_id",
+              "state",
+              "status",
+              "terminal",
+              "warnings_count"
+            ],
+            "server_duration_ms": 146.37,
+            "server_interval": {
+              "ended_ms": 1788820705886.0,
+              "started_ms": 1788820705738.67
+            },
+            "server_total_ms": 147.33,
+            "started_ms": 19038.274503007415,
+            "tool": "process_media"
+          },
+          {
+            "client_elapsed_ms": 222.5361629971303,
+            "ended_ms": 19418.756319006206,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "independent-closure",
+            "probe": false,
+            "request_shape": {
+              "operation": "validate"
+            },
+            "response_keys": [
+              "after_hash",
+              "before_hash",
+              "mutated",
+              "operation",
+              "path",
+              "semantic",
+              "unit",
+              "unit_ref"
+            ],
+            "server_duration_ms": 210.25,
+            "server_interval": {
+              "ended_ms": 1788820706109.0,
+              "started_ms": 1788820705897.51
+            },
+            "server_total_ms": 211.49,
+            "started_ms": 19196.220156009076,
+            "tool": "observe_memory"
+          },
+          {
+            "client_elapsed_ms": 5666.528278001351,
+            "ended_ms": 25085.32031600771,
+            "error_code": null,
+            "mutation_ack": true,
+            "outcome": "ok",
+            "phase": "independent-closure",
+            "probe": false,
+            "request_shape": {
+              "operation": "add"
+            },
+            "response_keys": [
+              "after_hash",
+              "before_hash",
+              "graph_sync",
+              "graph_sync_checkpoint",
+              "graph_sync_code",
+              "graph_sync_remediation",
+              "mutated",
+              "ok",
+              "path",
+              "receipt_id",
+              "request_id",
+              "state",
+              "status",
+              "terminal",
+              "unit_ref",
+              "vocabulary_sync",
+              "warnings_count"
+            ],
+            "server_duration_ms": 5646.95,
+            "server_interval": {
+              "ended_ms": 1788820711774.0,
+              "started_ms": 1788820706125.93
+            },
+            "server_total_ms": 5648.07,
+            "started_ms": 19418.79203800636,
+            "tool": "observe_memory"
+          },
+          {
+            "client_elapsed_ms": 288.512923012604,
+            "ended_ms": 25373.879016013234,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "independent-closure",
+            "probe": false,
+            "request_shape": {
+              "operation": "validate"
+            },
+            "response_keys": [
+              "after_hash",
+              "before_hash",
+              "mutated",
+              "operation",
+              "path",
+              "semantic",
+              "unit",
+              "unit_ref"
+            ],
+            "server_duration_ms": 274.68,
+            "server_interval": {
+              "ended_ms": 1788820712065.0,
+              "started_ms": 1788820711788.1
+            },
+            "server_total_ms": 276.9,
+            "started_ms": 25085.36609300063,
+            "tool": "observe_memory"
+          },
+          {
+            "client_elapsed_ms": 1079.72511301341,
+            "ended_ms": 26453.63424801326,
+            "error_code": null,
+            "mutation_ack": true,
+            "outcome": "ok",
+            "phase": "independent-closure",
+            "probe": false,
+            "request_shape": {
+              "operation": "add"
+            },
+            "response_keys": [
+              "after_hash",
+              "before_hash",
+              "graph_sync",
+              "graph_sync_checkpoint",
+              "graph_sync_code",
+              "graph_sync_remediation",
+              "mutated",
+              "ok",
+              "path",
+              "receipt_id",
+              "request_id",
+              "state",
+              "status",
+              "terminal",
+              "unit_ref",
+              "vocabulary_sync",
+              "warnings_count"
+            ],
+            "server_duration_ms": 1056.76,
+            "server_interval": {
+              "ended_ms": 1788820713138.0,
+              "started_ms": 1788820712075.63
+            },
+            "server_total_ms": 1062.37,
+            "started_ms": 25373.90913499985,
+            "tool": "observe_memory"
+          },
+          {
+            "client_elapsed_ms": 121.2109030020656,
+            "ended_ms": 26574.887855007546,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "independent-closure",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 107.13,
+            "server_interval": {
+              "ended_ms": 1788820713264.0,
+              "started_ms": 1788820713155.03
+            },
+            "server_total_ms": 108.97,
+            "started_ms": 26453.67695200548,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 1453.9783240034012,
+            "ended_ms": 28028.893678012537,
+            "error_code": null,
+            "mutation_ack": true,
+            "outcome": "ok",
+            "phase": "independent-closure",
+            "probe": false,
+            "request_shape": {
+              "operation": {
+                "kind": "replace_string",
+                "new_string": "",
+                "old_string": "- supports [[Knowledge Base/Notes/Insights/archived-runbook]]",
+                "replace_all": false
+              }
+            },
+            "response_keys": [
+              "after_hash",
+              "graph_sync",
+              "graph_sync_checkpoint",
+              "graph_sync_code",
+              "graph_sync_remediation",
+              "mutated",
+              "ok",
+              "path",
+              "receipt_id",
+              "request_id",
+              "state",
+              "status",
+              "terminal",
+              "vocabulary_sync",
+              "warnings",
+              "warnings_count"
+            ],
+            "server_duration_ms": 1439.28,
+            "server_interval": {
+              "ended_ms": 1788820716812.0,
+              "started_ms": 1788820715372.21
+            },
+            "server_total_ms": 1439.79,
+            "started_ms": 26574.915354009136,
+            "tool": "edit_memory"
+          },
+          {
+            "client_elapsed_ms": 69.77131401072256,
+            "ended_ms": 28098.69572101161,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "convergence-poll",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 58.78,
+            "server_interval": {
+              "ended_ms": 1788820716885.0,
+              "started_ms": 1788820716825.83
+            },
+            "server_total_ms": 59.17,
+            "started_ms": 28028.924407000886,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 109.63957499188837,
+            "ended_ms": 28208.360866003204,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "convergence-poll",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 96.18,
+            "server_interval": {
+              "ended_ms": 1788820716993.0,
+              "started_ms": 1788820716895.25
+            },
+            "server_total_ms": 97.75,
+            "started_ms": 28098.721291011316,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 162.11656699306332,
+            "ended_ms": 28370.502984005725,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "convergence-poll",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 146.75,
+            "server_interval": {
+              "ended_ms": 1788820717157.0,
+              "started_ms": 1788820717007.87
+            },
+            "server_total_ms": 149.13,
+            "started_ms": 28208.38641701266,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 165.12110500480048,
+            "ended_ms": 28735.948231013026,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "convergence-poll",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 153.0,
+            "server_interval": {
+              "ended_ms": 1788820717520.0,
+              "started_ms": 1788820717366.36
+            },
+            "server_total_ms": 153.64,
+            "started_ms": 28570.827126008226,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 138.6461099900771,
+            "ended_ms": 28874.620123999193,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "convergence-poll",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 123.46,
+            "server_interval": {
+              "ended_ms": 1788820717661.0,
+              "started_ms": 1788820717535.19
+            },
+            "server_total_ms": 125.81,
+            "started_ms": 28735.974014009116,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 67.19475000863895,
+            "ended_ms": 28941.84452301124,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "convergence-poll",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 53.09,
+            "server_interval": {
+              "ended_ms": 1788820717725.0,
+              "started_ms": 1788820717670.58
+            },
+            "server_total_ms": 54.42,
+            "started_ms": 28874.649773002602,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 44.403995998436585,
+            "ended_ms": 29186.64189201081,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "convergence-poll",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 29.64,
+            "server_interval": {
+              "ended_ms": 1788820717973.0,
+              "started_ms": 1788820717940.81
+            },
+            "server_total_ms": 32.19,
+            "started_ms": 29142.237896012375,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 63.56148899067193,
+            "ended_ms": 29250.239471002715,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "convergence-poll",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 47.77,
+            "server_interval": {
+              "ended_ms": 1788820718034.0,
+              "started_ms": 1788820717984.43
+            },
+            "server_total_ms": 49.57,
+            "started_ms": 29186.677982012043,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 115.59263600793201,
+            "ended_ms": 29365.86469601025,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "convergence-poll",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 98.72,
+            "server_interval": {
+              "ended_ms": 1788820718152.0,
+              "started_ms": 1788820718050.1
+            },
+            "server_total_ms": 101.9,
+            "started_ms": 29250.272060002317,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 102.48594000586309,
+            "ended_ms": 29668.719099005102,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "convergence-poll",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 90.64,
+            "server_interval": {
+              "ended_ms": 1788820718454.0,
+              "started_ms": 1788820718362.43
+            },
+            "server_total_ms": 91.57,
+            "started_ms": 29566.23315899924,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 116.28819999168627,
+            "ended_ms": 29785.03997500229,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "convergence-poll",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 98.93,
+            "server_interval": {
+              "ended_ms": 1788820718568.0,
+              "started_ms": 1788820718465.11
+            },
+            "server_total_ms": 102.89,
+            "started_ms": 29668.751775010605,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 90.4607029951876,
+            "ended_ms": 29875.52838800184,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "convergence-poll",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 80.91,
+            "server_interval": {
+              "ended_ms": 1788820718662.0,
+              "started_ms": 1788820718578.05
+            },
+            "server_total_ms": 83.95,
+            "started_ms": 29785.067685006652,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 572.1787119982764,
+            "ended_ms": 30447.785545999068,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "source-closure",
+            "probe": false,
+            "request_shape": {
+              "validate_only": true
+            },
+            "response_keys": [
+              "applicability",
+              "candidate_total",
+              "candidates_truncated",
+              "committable_after_review",
+              "committable_without_review",
+              "content_fingerprint",
+              "contract_result",
+              "destination",
+              "draft_hash",
+              "draft_id",
+              "draft_token",
+              "has_non_review_blockers",
+              "mutated",
+              "relation_candidates",
+              "relation_disposition",
+              "relation_review_hash",
+              "reviewed_none_required"
+            ],
+            "server_duration_ms": 560.03,
+            "server_interval": {
+              "ended_ms": 1788820719234.0,
+              "started_ms": 1788820718672.48
+            },
+            "server_total_ms": 561.52,
+            "started_ms": 29875.60683400079,
+            "tool": "remember"
+          },
+          {
+            "client_elapsed_ms": 4227.28894399188,
+            "ended_ms": 34675.11353000009,
+            "error_code": null,
+            "mutation_ack": true,
+            "outcome": "ok",
+            "phase": "source-closure",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "diagnostics",
+              "graph_sync",
+              "graph_sync_checkpoint",
+              "graph_sync_code",
+              "graph_sync_remediation",
+              "mutated",
+              "ok",
+              "path",
+              "receipt_id",
+              "request_id",
+              "state",
+              "status",
+              "terminal",
+              "vocabulary_sync",
+              "warnings",
+              "warnings_count"
+            ],
+            "server_duration_ms": 4165.99,
+            "server_interval": {
+              "ended_ms": 1788820723420.0,
+              "started_ms": 1788820719247.68
+            },
+            "server_total_ms": 4172.32,
+            "started_ms": 30447.82458600821,
+            "tool": "remember"
+          },
+          {
+            "client_elapsed_ms": 499.41967299673706,
+            "ended_ms": 35174.56520700944,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "source-closure",
+            "probe": false,
+            "request_shape": {
+              "operation": "validate"
+            },
+            "response_keys": [
+              "after_hash",
+              "before_hash",
+              "mutated",
+              "operation",
+              "path",
+              "semantic",
+              "unit",
+              "unit_ref"
+            ],
+            "server_duration_ms": 487.98,
+            "server_interval": {
+              "ended_ms": 1788820723960.0,
+              "started_ms": 1788820723471.66
+            },
+            "server_total_ms": 488.34,
+            "started_ms": 34675.1455340127,
+            "tool": "observe_memory"
+          },
+          {
+            "client_elapsed_ms": 3784.252017008839,
+            "ended_ms": 38958.8496050128,
+            "error_code": null,
+            "mutation_ack": true,
+            "outcome": "ok",
+            "phase": "source-closure",
+            "probe": false,
+            "request_shape": {
+              "operation": "add"
+            },
+            "response_keys": [
+              "after_hash",
+              "before_hash",
+              "graph_sync",
+              "graph_sync_checkpoint",
+              "graph_sync_code",
+              "graph_sync_remediation",
+              "mutated",
+              "ok",
+              "path",
+              "receipt_id",
+              "request_id",
+              "state",
+              "status",
+              "terminal",
+              "unit_ref",
+              "vocabulary_sync",
+              "warnings_count"
+            ],
+            "server_duration_ms": 3774.13,
+            "server_interval": {
+              "ended_ms": 1788820727747.0,
+              "started_ms": 1788820723972.44
+            },
+            "server_total_ms": 3774.56,
+            "started_ms": 35174.59758800396,
+            "tool": "observe_memory"
+          },
+          {
+            "client_elapsed_ms": 3898.3588770061033,
+            "ended_ms": 42857.27016800956,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "verification",
+            "probe": false,
+            "request_shape": {
+              "graph": true,
+              "mode": "hybrid",
+              "rerank": false
+            },
+            "response_keys": [
+              "degraded",
+              "hits",
+              "warming"
+            ],
+            "server_duration_ms": 3890.05,
+            "server_interval": {
+              "ended_ms": 1788820731644.0,
+              "started_ms": 1788820727753.29
+            },
+            "server_total_ms": 3890.71,
+            "started_ms": 38958.91129100346,
+            "tool": "ask_memory"
+          },
+          {
+            "client_elapsed_ms": 248.3914559998084,
+            "ended_ms": 43105.68640100246,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "verification",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 239.03,
+            "server_interval": {
+              "ended_ms": 1788820731891.0,
+              "started_ms": 1788820731651.0
+            },
+            "server_total_ms": 240.0,
+            "started_ms": 42857.29494500265,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 279.07750199665315,
+            "ended_ms": 43384.78892300918,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "verification",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path",
+              "ref"
+            ],
+            "server_duration_ms": 266.75,
+            "server_interval": {
+              "ended_ms": 1788820732168.0,
+              "started_ms": 1788820731900.28
+            },
+            "server_total_ms": 267.72,
+            "started_ms": 43105.71142101253,
+            "tool": "read_memory"
+          },
+          {
+            "client_elapsed_ms": 182.48385399056133,
+            "ended_ms": 43567.29763399926,
+            "error_code": null,
+            "mutation_ack": false,
+            "outcome": "ok",
+            "phase": "verification",
+            "probe": false,
+            "request_shape": {},
+            "response_keys": [
+              "body",
+              "content_hash",
+              "frontmatter",
+              "mtime",
+              "path"
+            ],
+            "server_duration_ms": 166.4,
+            "server_interval": {
+              "ended_ms": 1788820732352.0,
+              "started_ms": 1788820732183.04
+            },
+            "server_total_ms": 168.96,
+            "started_ms": 43384.8137800087,
+            "tool": "read_memory"
+          }
+        ],
+        "connector_overhead_ms": null,
+        "connector_overhead_reason": "stdio client wall and server ledger are independently measured but not request-correlated",
+        "corpus": {
+          "active_tracker": "Knowledge Base/Notes/Insights/active-tracker.md",
+          "archived_note": "Knowledge Base/Notes/Insights/archived-runbook.md",
+          "bytes": 1952283,
+          "corpus_sha256": "ca0586311a62e63b8beab8480455d88771b0079d8173b025dffed827b9f45ffb",
+          "critique": "Knowledge Base/Notes/Insights/critique.md",
+          "generator": "durable-closure-markdown-v1",
+          "inventory_entries": 8000,
+          "media_fixture": {
+            "images": 2,
+            "pdf": "fixture-required-via-public-handle",
+            "sidecars_created": false
+          },
+          "pages": 8000,
+          "stale_relation": "Knowledge Base/Reference/stale-relation.md"
+        },
+        "full_convergence_ms": null,
+        "full_convergence_reason": "graph, lexical, and embedding projection convergence are not publicly proven by this harness",
+        "graph_execution_elapsed_ms": {
+          "after_shutdown": {
+            "incremental": 0.1821500190999359,
+            "rebuild": 304.23093000717927
+          },
+          "at_closure": {
+            "incremental": 0.1821500190999359,
+            "rebuild": 304.23093000717927
+          },
+          "at_convergence": {
+            "incremental": 0.1821500190999359,
+            "rebuild": 304.23093000717927
+          },
+          "pre_reset_spillover_full_invocation": {
+            "after_shutdown": {
+              "incremental": 0,
+              "rebuild": 0
+            },
+            "at_closure": {
+              "incremental": 0,
+              "rebuild": 0
+            },
+            "at_convergence": {
+              "incremental": 0,
+              "rebuild": 0
+            }
+          },
+          "semantics": "current-epoch values include completed invocations only; active work has no elapsed value until completion"
+        },
+        "graph_invocations": {
+          "after_shutdown": {
+            "drain_attempts": 4,
+            "drain_completed": 4,
+            "incremental_inflight": 0,
+            "rebuild_attempts": 3,
+            "rebuild_completed": 0,
+            "rebuild_inflight": 1
+          },
+          "at_closure": {
+            "drain_attempts": 4,
+            "drain_completed": 4,
+            "incremental_inflight": 0,
+            "rebuild_attempts": 3,
+            "rebuild_completed": 0,
+            "rebuild_inflight": 1
+          },
+          "at_convergence": {
+            "drain_attempts": 4,
+            "drain_completed": 4,
+            "incremental_inflight": 0,
+            "rebuild_attempts": 3,
+            "rebuild_completed": 0,
+            "rebuild_inflight": 1
+          },
+          "pre_reset_spillover": {
+            "after_shutdown": {
+              "incremental_completed": 0,
+              "incremental_inflight": 0,
+              "rebuild_completed": 0,
+              "rebuild_inflight": 0
+            },
+            "at_closure": {
+              "incremental_completed": 0,
+              "incremental_inflight": 0,
+              "rebuild_completed": 0,
+              "rebuild_inflight": 0
+            },
+            "at_convergence": {
+              "incremental_completed": 0,
+              "incremental_inflight": 0,
+              "rebuild_completed": 0,
+              "rebuild_inflight": 0
+            }
+          },
+          "semantics": "current-epoch attempts/completions only; reset-crossing warm-up invocations are reported separately as pre-reset spillover"
+        },
+        "graph_topology_discovery": {
+          "after_shutdown": {
+            "actual_body_read_bytes": 0,
+            "paths_enumerated": 0,
+            "stat_estimated_bytes": 0
+          },
+          "at_closure": {
+            "actual_body_read_bytes": 0,
+            "paths_enumerated": 0,
+            "stat_estimated_bytes": 0
+          },
+          "at_convergence": {
+            "actual_body_read_bytes": 0,
+            "paths_enumerated": 0,
+            "stat_estimated_bytes": 0
+          },
+          "byte_coverage": "actual body bytes via vault.read_bytes_without_pinning; stat-estimated bytes are separate and never summed",
+          "coverage": "measurement-window observations from EpistemicGraphIndex._sources_linking_to only; vault walk and reads are scoped to that call and can include reset-crossing warm-up work"
+        },
+        "initial_graph_readiness": {
+          "reason": "managed keyword warm-up does not establish hybrid graph readiness",
+          "status": "unmeasured"
+        },
+        "instrumentation": {
+          "error": null,
+          "method": "child-process sitecustomize wrappers"
+        },
+        "ledger": {
+          "ledger_observation_span_ms": null,
+          "occupancy_reason": "invalid: UTC ledger clock discontinuity against client trace",
+          "server_duration_sum_ms": 42513.58,
+          "server_idle_within_observed_span_ms": null,
+          "server_occupied_union_ms": null,
+          "server_total_sum_ms": 42567.53
+        },
+        "media": {
+          "engine_versions": [
+            "pymupdf+tesseract",
+            "tesseract"
+          ],
+          "enqueue_succeeded": true,
+          "evidence_paths": [
+            "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-certificate.pdf",
+            "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-one.png",
+            "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-two.png"
+          ],
+          "expected_text_verified": [
+            "Dummy PDF file",
+            "Cautionary Statement",
+            "Introduction to the Tenth Anniversary Edition"
+          ],
+          "extraction_convergence_ms": 10837.323462998029,
+          "fixture_provenance": [
+            {
+              "download_url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+              "expected_text": "Dummy PDF file",
+              "file_id": "closure-fixture-pdf",
+              "file_name": "chapter-certificate.pdf",
+              "mime_type": "application/pdf",
+              "sha256": "3df79d34abbca99308e79cb94461c1893582604d68329a41fd4bec1885e6adb4"
+            },
+            {
+              "download_url": "https://raw.githubusercontent.com/tesseract-ocr/tessdoc/09a89d485f1f34285611562fed9f8ab85721bab8/images/2col.png",
+              "expected_text": "Cautionary Statement",
+              "file_id": "closure-fixture-image-one",
+              "file_name": "chapter-screenshot-one.png",
+              "mime_type": "image/png",
+              "sha256": "1ebe5089fd863fcec4a23912053488553fe96349f5c19850e32ba94103db2527"
+            },
+            {
+              "download_url": "https://raw.githubusercontent.com/tesseract-ocr/tessdoc/09a89d485f1f34285611562fed9f8ab85721bab8/images/toc.png",
+              "expected_text": "Introduction to the Tenth Anniversary Edition",
+              "file_id": "closure-fixture-image-two",
+              "file_name": "chapter-screenshot-two.png",
+              "mime_type": "image/png",
+              "sha256": "5502c740b734274328adeeec3d636a6c9ee78db21d77e1e978fc4b10aef990bb"
+            }
+          ],
+          "media_results": [
+            {
+              "job_id": 1,
+              "media_type": "pdf",
+              "outcome": "processed",
+              "path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-certificate.pdf",
+              "requeued": 0,
+              "sidecar_path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-certificate.pdf.md",
+              "state": "running"
+            },
+            {
+              "job_id": 2,
+              "media_type": "image",
+              "outcome": "processed",
+              "path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-one.png",
+              "requeued": 0,
+              "sidecar_path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-one.png.md",
+              "state": "running"
+            },
+            {
+              "job_id": 3,
+              "media_type": "image",
+              "outcome": "processed",
+              "path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-two.png",
+              "requeued": 0,
+              "sidecar_path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-two.png.md",
+              "state": "pending"
+            }
+          ],
+          "preserved_hashes_match": true,
+          "process_calls": 1,
+          "process_selection": "paths",
+          "status": "ready"
+        },
+        "media_convergence_wall_ms": 29875.598272003117,
+        "profile": "real-extraction",
+        "public_call_count": 29,
+        "runtime_profile": "e5c20a1f472d097b5fa54de9773e57ae33b376071656907eee50630b10dd0f5f",
+        "server_shutdown_ms": 2102.4992510065204,
+        "source_scans": {
+          "after_shutdown": {
+            "bytes": 358345,
+            "pages": 1453
+          },
+          "at_closure": {
+            "bytes": 354912,
+            "pages": 1439
+          },
+          "at_convergence": {
+            "bytes": 358345,
+            "pages": 1453
+          },
+          "coverage": "find._walk_md only; path enumeration plus stat-estimated bytes, not body bytes"
+        },
+        "startup_readiness": {
+          "elapsed_ms": 25226.7072040122,
+          "public_validation_calls": 5,
+          "server_startup_and_readiness_ms": 100573.45185999293
+        },
+        "status": "pass",
+        "useful_closure": {
+          "final_read_your_write": true,
+          "passed": true,
+          "refusal_observations": [],
+          "warming_components": [
+            "graph"
+          ]
+        },
+        "useful_closure_wall_ms": 43577.766638001776,
+        "variant": "optimized",
+        "verification": {
+          "direct_marker": true,
+          "evidence_citations": true,
+          "mutations_succeeded": true,
+          "recall_hit": true,
+          "stale_relation_absent": true,
+          "tracker_marker": true
+        },
+        "workflow_wall_ms": 43588.11618700565,
+        "write_ack": {
+          "p50_ms": 3784.252017008839,
+          "p95_ms": 18666.076113993768
+        }
+      }
+    }
+  ]
+}

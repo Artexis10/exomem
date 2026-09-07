@@ -1,0 +1,399 @@
+{
+  "evidence_format": 1,
+  "label": "baseline-common-8000",
+  "limits": [
+    "Baseline reproduction, not a repeated parity claim.",
+    "Task benchmark/test workers were quiescent; external host load was not captured for this intake run.",
+    "Cold startup and useful closure are separate phases; optional graph convergence is unmeasured.",
+    "Repeated startup polling is summarized by tool/classification/ACK; every timed public call remains explicit and the original raw-result hash is retained."
+  ],
+  "raw_result_sha256": "834e45c61a0b3b544130264d98991f3eebfbfd7d1d8c181444e8a130c5bc57b7",
+  "result": {
+    "diagnostic": "durable-closure-common-subset",
+    "rows": [
+      {
+        "configuration": {
+          "EXOMEM_CALL_LEDGER_DIR": "<sample-root>/state/exomem/ledger",
+          "EXOMEM_CONFIG_PATH": "<sample-root>/state/exomem/config.json",
+          "EXOMEM_DISABLE_EMBEDDINGS": "1",
+          "EXOMEM_DISABLE_QUERY_LOG": "1",
+          "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
+          "EXOMEM_EAGER_BOOT": "1",
+          "EXOMEM_LOG_DIR": "<sample-root>/state/exomem/logs",
+          "EXOMEM_STATE_ROOT": "<sample-root>/state/exomem/state",
+          "EXOMEM_VAULT_PATH": "<sample-root>/vault/exomem",
+          "EXOMEM_WRITER_LEASE_STATE_DIR": "<sample-root>/state/exomem/leases"
+        },
+        "corpus": {
+          "digest": "acf638d6bbbb3decdd500bfc6516b4e07897bf396d3140a9385f4fcc819ccffb",
+          "generator": "durable-closure-common-markdown-v1",
+          "named_pages": {
+            "background": "background.md",
+            "stale_link": "stale-link.md",
+            "tracker": "active-tracker.md"
+          },
+          "page_count": 8000,
+          "pages_entries": 8000,
+          "pages_omitted_reason": "Deterministic generated inventory; generator, count and corpus digest retained."
+        },
+        "markers": [
+          "common-subset-fbd156fd9f544a0598193a0f82d6eb8f-chapter",
+          "common-subset-fbd156fd9f544a0598193a0f82d6eb8f-tracker",
+          "common-subset-fbd156fd9f544a0598193a0f82d6eb8f-capture"
+        ],
+        "measurements": {
+          "ack_p50_ms": 2028.055372997187,
+          "ack_p95_ms": 16895.53116900788,
+          "connector_ms": null,
+          "connector_reason": "not exposed by the public MCP protocol",
+          "public_call_count": 13,
+          "shared_server_ms": null,
+          "shared_server_reason": "not exposed by the public MCP protocol"
+        },
+        "phases": {
+          "pre_timing_ms": 138331.30636499845,
+          "teardown_ms": 2102.2960800037254,
+          "wall_to_verified_closure_ms": 53600.532315002056
+        },
+        "plan": [
+          {
+            "operation": "create_completed_chapter",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "edit_tracker",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "correct_stale_link",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "capture_independent_note",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "exact_read_changed_pages",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "search_unique_markers",
+            "surface": "public_mcp"
+          }
+        ],
+        "pre_timing_public_calls_summary": {
+          "call_count": 232,
+          "groups": [
+            {
+              "ack": false,
+              "classification": "refused",
+              "count": 229,
+              "max_call_ms": 1010.9251260000747,
+              "min_call_ms": 9.478774998569861,
+              "summed_call_ms": 21959.529593223124,
+              "tool": "ask_memory"
+            },
+            {
+              "ack": false,
+              "classification": "ok",
+              "count": 1,
+              "max_call_ms": 116.7745530110551,
+              "min_call_ms": 116.7745530110551,
+              "summed_call_ms": 116.7745530110551,
+              "tool": "ask_memory"
+            },
+            {
+              "ack": false,
+              "classification": "refused",
+              "count": 1,
+              "max_call_ms": 26327.261325001018,
+              "min_call_ms": 26327.261325001018,
+              "summed_call_ms": 26327.261325001018,
+              "tool": "remember"
+            },
+            {
+              "ack": false,
+              "classification": "ok",
+              "count": 1,
+              "max_call_ms": 27277.055774990004,
+              "min_call_ms": 27277.055774990004,
+              "summed_call_ms": 27277.055774990004,
+              "tool": "remember"
+            }
+          ]
+        },
+        "product": "exomem",
+        "public_calls": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 21964.52201998909,
+            "tool": "remember"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 9279.936852995888,
+            "tool": "remember"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 16895.53116900788,
+            "tool": "edit_memory"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 1685.996290994808,
+            "tool": "edit_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 176.4328200079035,
+            "tool": "remember"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 2028.055372997187,
+            "tool": "remember"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 103.57934400963131,
+            "tool": "read_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 50.48279601032846,
+            "tool": "read_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 53.05927699373569,
+            "tool": "read_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 93.9627269981429,
+            "tool": "read_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 475.9940810035914,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 265.63956099562347,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 313.51753100170754,
+            "tool": "ask_memory"
+          }
+        ],
+        "reason": null,
+        "runtime": {
+          "dependency_inventory": {
+            "entries": [
+              "Authlib==1.7.2",
+              "PyJWT==2.12.1",
+              "PyYAML==6.0.3",
+              "Pygments==2.20.0",
+              "SecretStorage==3.5.0",
+              "aiofile==3.11.1",
+              "annotated-types==0.7.0",
+              "anyio==4.13.0",
+              "attrs==26.1.0",
+              "beartype==0.22.9",
+              "cachetools==7.1.2",
+              "caio==0.9.25",
+              "certifi==2026.4.22",
+              "cffi==2.0.0",
+              "click==8.4.0",
+              "cryptography==48.0.0",
+              "cyclopts==4.13.0",
+              "dnspython==2.8.0",
+              "docstring_parser==0.18.0",
+              "docutils==0.22.4",
+              "email-validator==2.3.0",
+              "exceptiongroup==1.3.1",
+              "exomem==0.74.0",
+              "fastmcp-slim==3.4.4",
+              "fastmcp==3.4.4",
+              "griffelib==2.0.2",
+              "h11==0.16.0",
+              "httpcore==1.0.9",
+              "httpx-sse==0.4.3",
+              "httpx==0.28.1",
+              "idna==3.15",
+              "iniconfig==2.3.0",
+              "jaraco.classes==3.4.0",
+              "jaraco.context==6.1.2",
+              "jaraco.functools==4.5.0",
+              "jeepney==0.9.0",
+              "joserfc==1.6.5",
+              "jsonref==1.1.0",
+              "jsonschema-path==0.4.6",
+              "jsonschema-specifications==2025.9.1",
+              "jsonschema==4.26.0",
+              "keyring==25.7.0",
+              "markdown-it-py==4.2.0",
+              "mcp==1.27.1",
+              "mdurl==0.1.2",
+              "more-itertools==11.0.2",
+              "numpy==2.4.6",
+              "openapi-pydantic==0.5.1",
+              "opentelemetry-api==1.43.0",
+              "packaging==26.2",
+              "pathable==0.5.0",
+              "platformdirs==4.9.6",
+              "pluggy==1.6.0",
+              "py-key-value-aio==0.4.4",
+              "pycparser==3.0",
+              "pydantic-settings==2.14.1",
+              "pydantic==2.13.4",
+              "pydantic_core==2.46.4",
+              "pyperclip==1.11.0",
+              "pytest-split==0.11.0",
+              "pytest-timeout==2.4.0",
+              "pytest==9.0.3",
+              "python-dotenv==1.2.2",
+              "python-multipart==0.0.29",
+              "python-slugify==8.0.4",
+              "rank-bm25==0.2.2",
+              "referencing==0.37.0",
+              "rich-rst==1.3.2",
+              "rich==15.0.0",
+              "rpds-py==0.30.0",
+              "snowballstemmer==3.1.0",
+              "sse-starlette==3.4.4",
+              "starlette==1.3.1",
+              "text-unidecode==1.3",
+              "typing-inspection==0.4.2",
+              "typing_extensions==4.15.0",
+              "uncalled-for==0.3.2",
+              "uvicorn==0.47.0",
+              "watchdog==6.0.0",
+              "watchfiles==1.1.1",
+              "websockets==16.0"
+            ],
+            "status": "ok"
+          },
+          "executable": "<source-root>/.venv/bin/python",
+          "executable_sha256": "b200d6c7ae464af64f81808ba246a856b1a1cdf3b2ae7088d37d87d31aebe9ff",
+          "installed": {
+            "module_sha256": "6923a89680de39e1abe1a58a51f39844c2e808d3891f5623633b0fa19ad27e81",
+            "package_root": "<source-root>/src/exomem",
+            "runtime_pythonpath_root": "<source-root>/src",
+            "version": "0.74.0"
+          },
+          "installed_version_matches_expected": null,
+          "source_identity": {
+            "dirty": null,
+            "dirty_source_digest": "251037ad55348bad9af7bb2679c0a78fdc8d178b347eefeae07255b8cc7678fa",
+            "package_root": "<source-root>/src/exomem",
+            "reason": "CalledProcessError",
+            "revision": null,
+            "runtime_pythonpath_root": "<source-root>/src",
+            "source_digest": "251037ad55348bad9af7bb2679c0a78fdc8d178b347eefeae07255b8cc7678fa",
+            "tree": null
+          },
+          "wheel": null,
+          "wheel_matches_pinned_digest": null,
+          "wheel_sha256": null
+        },
+        "status": "pass",
+        "verification": {
+          "body_proof": [
+            {
+              "actual_bytes": 124,
+              "actual_sha256": "7742b0e958a4d6abee91c05951dedb23e0f97c59b22bc85a6f0318d77c96146d",
+              "expected_bytes": 124,
+              "expected_sha256": "7742b0e958a4d6abee91c05951dedb23e0f97c59b22bc85a6f0318d77c96146d",
+              "matches": true
+            },
+            {
+              "actual_bytes": 1210,
+              "actual_sha256": "06ba0c476f02e18861863c794064075714f13f39561caa6671ea65daa7942ba0",
+              "expected_bytes": 1210,
+              "expected_sha256": "06ba0c476f02e18861863c794064075714f13f39561caa6671ea65daa7942ba0",
+              "matches": true
+            },
+            {
+              "actual_bytes": 3175,
+              "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+              "expected_bytes": 3175,
+              "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+              "matches": true
+            },
+            {
+              "actual_bytes": 107,
+              "actual_sha256": "ef54a29ebf5e36987b162eb67acef59b1958cf2899b2c56d1225e01eda452821",
+              "expected_bytes": 107,
+              "expected_sha256": "ef54a29ebf5e36987b162eb67acef59b1958cf2899b2c56d1225e01eda452821",
+              "matches": true
+            }
+          ],
+          "exact_read_your_write": true,
+          "expected_bodies_match": true,
+          "search_converged": true,
+          "searches": [
+            {
+              "convergence_ms": 476.0131489892956,
+              "final_response": {
+                "classification": "ok",
+                "container": "result",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "result"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            },
+            {
+              "convergence_ms": 265.65872500941623,
+              "final_response": {
+                "classification": "ok",
+                "container": "result",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "result"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            },
+            {
+              "convergence_ms": 313.530727988109,
+              "final_response": {
+                "classification": "ok",
+                "container": "result",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "result"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "revision": "9e2e6487f0b1d77c7b6f95353e8b03b1fa72df4f",
+  "samples_per_product": 1
+}

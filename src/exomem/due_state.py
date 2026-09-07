@@ -591,7 +591,10 @@ def _schedule_reconcile(
 
     def _run() -> None:
         try:
-            reconcile(vault_root, today=today)
+            from .foreground_activity import background_scope
+
+            with background_scope(vault_root):
+                reconcile(vault_root, today=today)
         except Exception:  # noqa: BLE001
             # Due state is advisory. Its recovery may be retried by a later read,
             # but it must never fail the read that happened to notice the gap.
