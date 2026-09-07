@@ -137,6 +137,12 @@ The activation record SHALL bind a minimum authority-contract reader/writer vers
 
 A standalone installation SHALL authenticate the configured owner in a separate browser-purpose transaction and require explicit CSRF-protected acceptance of the exact finite review. Ordinary agent credentials SHALL NOT establish owner consent. Initial policy, schema migration and vocabulary activation SHALL be separately reviewed; activation SHALL create no grants. Migration and deployment publication SHALL run only after an external maintenance runner verifies the exact managed service has stopped.
 
+#### Scenario: Unsupported host refuses before maintenance
+
+- **WHEN** the canonical held-filesystem capability check reports an unsupported host
+- **THEN** both native maintenance command entrypoints refuse with the canonical reason before service inspection, managed re-execution or service-manager actions
+- **AND** parsing an available service-unit format does not bypass that capability check
+
 #### Scenario: Preparing migration does not alter serving admission
 
 - **WHEN** an owner prepares initial migration after committing the reviewed baseline policy

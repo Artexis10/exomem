@@ -7,10 +7,12 @@ request, and grant or revoke bounded additive permissions. It uses the server's
 existing pinned GitHub identity. Signing in does not approve a change or create
 any grants.
 
-This workflow serves a standalone vault managed by a Linux systemd user service
-or a macOS LaunchAgent. Hosted accounts use Substrate's Exomem Home and account
-session; this page does not administer them. The native maintenance command does
-not support Windows yet. Existing unconfigured installations retain v1 behavior.
+This workflow currently serves a standalone vault managed by a Linux systemd
+user service. macOS lacks the held-filesystem backend required by Exomem, and
+Windows does not yet have a native owner maintenance runner. Unsupported hosts
+are refused before maintenance can stop a service. Hosted accounts use
+Substrate's Exomem Home and account session. Existing unconfigured installations
+retain v1 behavior.
 
 ## Configure the installation
 
@@ -26,7 +28,7 @@ existing service environment:
 
 ```text
 EXOMEM_VOCABULARY_AUTHORITY_DIR=<absolute private directory>
-EXOMEM_OWNER_SERVICE_UNIT=<absolute systemd unit or LaunchAgent plist>
+EXOMEM_OWNER_SERVICE_UNIT=<absolute systemd user unit>
 ```
 
 The unit must identify the exact vault, state root and service interpreter.

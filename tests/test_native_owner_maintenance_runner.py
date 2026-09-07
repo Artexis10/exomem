@@ -8,8 +8,11 @@ import sys
 import tarfile
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+from exomem import held_fs
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPERS = ("owner-setup.sh", "_service-common.sh", "service-transition-receipt.py")
@@ -24,8 +27,8 @@ def runner_module():
 def test_source_runner_forwards_exact_arguments_without_shell_interpolation(monkeypatch):
     runner = runner_module()
     calls = []
-    monkeypatch.setattr(runner.sys, "platform", "linux")
-    monkeypatch.setattr(runner.shutil, "which", lambda executable: "/usr/bin/bash")
+    monkeypatch.setattr(runner, "require_supported_platform", lambda: None)
+    monkeypatch.setattr(runner.shutil, "which", lambda executable, **_kwargs: "/usr/bin/bash")
     monkeypatch.setattr(
         runner.os, "execv", lambda executable, args: calls.append((executable, args))
     )
@@ -44,15 +47,15 @@ def test_source_runner_forwards_exact_arguments_without_shell_interpolation(monk
 
 def test_runner_prefers_packaged_helpers_and_preserves_sys_argv(tmp_path, monkeypatch):
     runner = runner_module()
+    monkeypatch.setattr(runner, "require_supported_platform", lambda: None)
     package = tmp_path / "exomem"
     service = package / "_service"
     service.mkdir(parents=True)
     for name in HELPERS:
         (service / name).write_text("fixture")
     monkeypatch.setattr(runner, "__file__", str(package / "native_owner_maintenance_runner.py"))
-    monkeypatch.setattr(runner.sys, "platform", "darwin")
     monkeypatch.setattr(runner.sys, "argv", ["module", "--help"])
-    monkeypatch.setattr(runner.shutil, "which", lambda executable: "/bin/bash")
+    monkeypatch.setattr(runner.shutil, "which", lambda executable, **_kwargs: "/bin/bash")
     calls = []
     monkeypatch.setattr(runner.os, "execv", lambda executable, args: calls.append(args))
     runner.main()
@@ -62,9 +65,18 @@ def test_runner_prefers_packaged_helpers_and_preserves_sys_argv(tmp_path, monkey
 @pytest.mark.parametrize("missing", ["platform", "bash", "scripts", "dependency"])
 def test_runner_refuses_unsupported_or_incomplete_installation(tmp_path, monkeypatch, missing):
     runner = runner_module()
-    monkeypatch.setattr(runner.sys, "platform", "win32" if missing == "platform" else "linux")
+    if missing == "platform":
+        monkeypatch.setattr(
+            held_fs,
+            "platform_support",
+            lambda: held_fs.PlatformSupport(False, "fixture backend is unavailable"),
+        )
+    else:
+        monkeypatch.setattr(runner, "require_supported_platform", lambda: None)
     monkeypatch.setattr(
-        runner.shutil, "which", lambda executable: None if missing == "bash" else "/bin/bash"
+        runner.shutil,
+        "which",
+        lambda executable, **_kwargs: None if missing == "bash" else "/bin/bash",
     )
     if missing in {"scripts", "dependency"}:
         package = tmp_path / "exomem"
@@ -75,6 +87,33 @@ def test_runner_refuses_unsupported_or_incomplete_installation(tmp_path, monkeyp
             (package / "_service" / "owner-setup.sh").write_text("fixture")
     with pytest.raises(SystemExit):
         runner.main(["--help"])
+
+
+def test_runner_refuses_canonical_unsupported_host_before_helper_discovery(
+    monkeypatch,
+) -> None:
+    runner = runner_module()
+    reason = "fixture held-filesystem backend is unavailable"
+    monkeypatch.setattr(held_fs, "platform_support", lambda: held_fs.PlatformSupport(False, reason))
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("unsupported maintenance reached helper discovery or execution")
+
+    monkeypatch.setattr(runner, "_script_path", unexpected)
+    monkeypatch.setattr(runner.shutil, "which", unexpected)
+    monkeypatch.setattr(runner.os, "execv", unexpected)
+
+    with pytest.raises(SystemExit, match=reason):
+        runner.main(["--unit-file", "/missing.service", "--request-id", "review"])
+
+
+def test_runner_refuses_windows_even_with_held_filesystem_support(monkeypatch) -> None:
+    runner = runner_module()
+    monkeypatch.setattr(held_fs, "platform_support", lambda: held_fs.PlatformSupport(True))
+    monkeypatch.setattr(runner, "os", SimpleNamespace(name="nt"))
+
+    with pytest.raises(SystemExit, match="Windows"):
+        runner.require_supported_platform()
 
 
 @pytest.fixture(scope="module")
@@ -113,7 +152,8 @@ def test_wheel_from_sdist_contains_exact_canonical_helpers(built_artifacts):
 
 
 @pytest.mark.skipif(
-    sys.platform not in {"linux", "darwin"} or not shutil.which("bash"), reason="Unix shell runner"
+    not held_fs.platform_support().supported or os.name == "nt" or not shutil.which("bash"),
+    reason="supported native owner maintenance runner",
 )
 def test_installed_wheel_module_and_receipt_helper_help(built_artifacts, tmp_path):
     _, _, wheel, _ = built_artifacts

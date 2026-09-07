@@ -25,6 +25,7 @@ from dotenv import dotenv_values
 
 from . import mutation_lock, state_migration
 from .governance import authorization_custody
+from .native_owner_maintenance_runner import require_supported_platform
 from .native_owner_reviews import OwnerReviewStore
 
 _MANAGED = "EXOMEM_OWNER_MAINTENANCE_MANAGED"
@@ -582,6 +583,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    require_supported_platform()
     forwarded = list(sys.argv[1:] if argv is None else argv)
     if os.environ.get(_MANAGED) != "1":
         exec_managed_phase(args.unit_file, forwarded)

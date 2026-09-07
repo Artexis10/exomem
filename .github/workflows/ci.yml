@@ -272,6 +272,21 @@ jobs:
           or test_caller_supplied_completed_text_backfills_missing_provenance_in_place
           or test_bounded_reconcile_skips_converged_prefix_and_advances_later_work"
           --session-timeout=600
+      - name: Native vocabulary authority compatibility
+        env:
+          KB_MCP_DISABLE_EMBEDDINGS: "1"
+          KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
+          EXOMEM_DISABLE_CLIP: "1"
+          EXOMEM_WRITER_LEASE_STATE_DIR: ${{ runner.temp }}\exomem-vocabulary-reserved-state
+          XDG_STATE_HOME: ${{ runner.temp }}\exomem-vocabulary-state
+          XDG_CONFIG_HOME: ${{ runner.temp }}\exomem-vocabulary-config
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          uv run --frozen --python 3.13 python -m pytest -q
+          tests/test_vocabulary_preview.py
+          tests/test_vocabulary_owner_preview.py
+          tests/test_vocabulary_placement.py
+          --session-timeout=300
 
   tui:
     name: terminal UI (textual, headless + snapshots)

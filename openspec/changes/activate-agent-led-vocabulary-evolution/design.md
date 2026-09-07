@@ -104,6 +104,12 @@ session; it must not register the native GitHub ceremony or a second dashboard.
 Shared exact previews, authority records and enforcement stay in Exomem. Hosted
 decision attestation and floor publication remain explicit integration work.
 
+The native maintenance path currently supports Linux systemd user services.
+Use the canonical held-filesystem capability check before any maintenance
+side effect. Parsing a LaunchAgent does not establish macOS runtime support:
+Darwin has no held-filesystem backend. Windows has that backend but no native
+owner maintenance runner yet.
+
 The standalone installation reuses its pinned GitHub identity verifier for a
 separate browser owner ceremony. A verified provider callback establishes
 identity; only a subsequent CSRF-protected submission accepts the displayed

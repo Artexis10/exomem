@@ -8,7 +8,19 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from . import held_fs
+
 _HELPERS = ("owner-setup.sh", "_service-common.sh", "service-transition-receipt.py")
+
+
+def require_supported_platform() -> None:
+    """Refuse maintenance where its held-filesystem safety boundary is absent."""
+
+    support = held_fs.platform_support()
+    if not support.supported:
+        raise SystemExit(f"Owner maintenance is unavailable: {support.reason}")
+    if os.name == "nt":
+        raise SystemExit("Owner maintenance is unavailable on Windows")
 
 
 def _script_path() -> Path:
@@ -24,8 +36,7 @@ def _script_path() -> Path:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    if sys.platform not in {"linux", "darwin"}:
-        raise SystemExit("Owner maintenance requires Linux or macOS; Windows is not supported")
+    require_supported_platform()
     bash = shutil.which("bash")
     if bash is None:
         raise SystemExit("Owner maintenance requires bash")

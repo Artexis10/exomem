@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import native_owner_maintenance
+from exomem import held_fs, native_owner_maintenance
 from exomem.native_owner_reviews import OwnerReviewStore
 
 
@@ -517,6 +517,30 @@ def test_exec_phase_uses_service_environment_without_printing_it(
 
     assert captured["environment"]["EXOMEM_JWT_SIGNING_KEY"] == "never-print-this"
     assert captured["environment"]["EXOMEM_OWNER_MAINTENANCE_MANAGED"] == "1"
+
+
+def test_cli_refuses_canonically_unsupported_host_before_unit_or_reexec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reason = "fixture held-filesystem backend is unavailable"
+    monkeypatch.setattr(held_fs, "platform_support", lambda: held_fs.PlatformSupport(False, reason))
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("unsupported maintenance reached a unit or re-exec side effect")
+
+    monkeypatch.setattr(native_owner_maintenance, "service_binding", unexpected)
+    monkeypatch.setattr(native_owner_maintenance, "exec_managed_phase", unexpected)
+
+    with pytest.raises(SystemExit, match=reason):
+        native_owner_maintenance.main(
+            [
+                "metadata",
+                "--unit-file",
+                "/missing/service.unit",
+                "--request-id",
+                "owner-review-" + "a" * 32,
+            ]
+        )
 
 
 def test_managed_venv_interpreter_runs_metadata_and_preflight(
