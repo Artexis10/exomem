@@ -26,12 +26,13 @@ import base64
 import datetime as dt
 import hashlib
 import io
+import json
 import logging
 import mimetypes
 import os
 import re
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, BinaryIO
@@ -92,6 +93,91 @@ MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB — HTTP /upload path (raw bytes,
 # agree. A deployment that wants larger uploads over a non-Cloudflare route (LAN/Tailscale
 # direct to the origin) raises EXOMEM_UPLOAD_MAX_BYTES in its .env.
 
+_ADOPTION_RECEIPT_FIELD = "artifact_adoption"
+_ADOPTION_RECEIPT_VERSION = 1
+_ADOPTION_SEED_FIELDS = frozenset(
+    {"key_digest", "trigger", "selected_file_id", "lane", "destination"}
+)
+_ADOPTION_RECEIPT_FIELDS = (
+    "version",
+    "committed",
+    "key_digest",
+    "trigger",
+    "selected_file_id",
+    "lane",
+    "destination",
+    "stored_path",
+    "page_path",
+    "hash_algorithm",
+    "hash",
+    "size",
+    "content_type",
+    "media_id",
+)
+
+
+def _complete_adoption_receipt(
+    seed: Mapping[str, object],
+    *,
+    stored_path: str,
+    page_path: str,
+    digest: str,
+    size: int,
+    content_type: str | None,
+) -> dict[str, object]:
+    """Bind validated adoption semantics to one committed byte identity.
+
+    The caller supplies only semantic identity. Paths and bytes are filled by
+    the canonical writer so a caller cannot manufacture a custody receipt.
+    """
+    if set(seed) != _ADOPTION_SEED_FIELDS:
+        raise ValueError("adoption receipt seed has an invalid shape")
+    for field in ("key_digest", "trigger", "selected_file_id", "lane", "destination"):
+        if not isinstance(seed[field], str) or not str(seed[field]).strip():
+            raise ValueError(f"adoption receipt seed has an invalid {field}")
+    if re.fullmatch(r"[0-9a-f]{64}", str(seed["key_digest"])) is None:
+        raise ValueError("adoption receipt seed has an invalid key digest")
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None or size < 0:
+        raise ValueError("adoption receipt requires an exact artifact identity")
+    receipt: dict[str, object] = {
+        "version": _ADOPTION_RECEIPT_VERSION,
+        "committed": True,
+        "key_digest": seed["key_digest"],
+        "trigger": seed["trigger"],
+        "selected_file_id": seed["selected_file_id"],
+        "lane": seed["lane"],
+        "destination": seed["destination"],
+        "stored_path": stored_path,
+        "page_path": page_path,
+        "hash_algorithm": "sha256",
+        "hash": digest,
+        "size": size,
+        "content_type": content_type,
+        "media_id": f"sha256:{digest}",
+    }
+    return receipt
+
+
+def _render_adoption_receipt_lines(receipt: Mapping[str, object]) -> list[str]:
+    """Render the portable receipt as one stable frontmatter block."""
+    if set(receipt) != set(_ADOPTION_RECEIPT_FIELDS):
+        raise ValueError("adoption receipt has an invalid shape")
+    lines = [f"{_ADOPTION_RECEIPT_FIELD}:"]
+    for field in _ADOPTION_RECEIPT_FIELDS:
+        value = receipt[field]
+        if isinstance(value, bool):
+            rendered = "true" if value else "false"
+        elif value is None:
+            rendered = "null"
+        else:
+            rendered = (
+                str(value)
+                if isinstance(value, int)
+                else json.dumps(str(value), ensure_ascii=True)
+            )
+        lines.append(f"  {field}: {rendered}")
+    return lines
+
 
 @dataclass
 class PreserveResult:
@@ -104,9 +190,10 @@ class PreserveResult:
     hash_algorithm: str | None = None
     media_id: str | None = None
     content_type: str | None = None
+    adoption: dict[str, object] | None = None
 
     def as_dict(self) -> dict:
-        return {
+        out = {
             "path": self.path,
             "stored_path": self.path,
             "sidecar_path": self.sidecar_path,
@@ -118,6 +205,9 @@ class PreserveResult:
             "media_id": self.media_id,
             "content_type": self.content_type,
         }
+        if self.adoption is not None:
+            out["adoption"] = self.adoption
+        return out
 
 
 @dataclass
@@ -145,6 +235,7 @@ def preserve(
     today: dt.date | None = None,
     max_decoded_bytes: int = MAX_DECODED_BYTES,
     max_stream_bytes: int = MAX_UPLOAD_BYTES,
+    adoption_seed: Mapping[str, object] | None = None,
 ) -> PreserveResult:
     """Capture an artifact to Evidence/<scope>/<category>/<filename>."""
     missing: list[str] = []
@@ -230,6 +321,7 @@ def preserve(
     sidecar_ref: str | None = None
     artifact_size: int | None = None
     artifact_hash: str | None = None
+    adoption_receipt: dict[str, object] | None = None
     content_type_effective = (
         content_type.strip()
         if content_type and content_type.strip()
@@ -325,6 +417,19 @@ def preserve(
             # them here first would change when its convergence check
             # decides a stub is already current.
             describes_artifact = not want_stub
+            sidecar_rel = sidecar_path.relative_to(vault_root).as_posix()
+            adoption_receipt = (
+                _complete_adoption_receipt(
+                    adoption_seed,
+                    stored_path=rel_artifact,
+                    page_path=sidecar_rel,
+                    digest=artifact_hash,
+                    size=artifact_size,
+                    content_type=content_type_effective,
+                )
+                if adoption_seed is not None
+                else None
+            )
             sidecar_md = _render_sidecar(
                 artifact_name=filename_safe,
                 scope=scope_safe,
@@ -341,6 +446,7 @@ def preserve(
                 governance_artifact_sha256=artifact_hash,
                 governance_artifact_size=artifact_size,
                 tree="Evidence",
+                adoption_receipt=adoption_receipt,
             )
             sidecar_ref = memory_refs.ref_from_markdown(sidecar_md)
             writes.append(
@@ -351,7 +457,6 @@ def preserve(
                     expected_hash=MISSING_CONTENT_HASH,
                 )
             )
-            sidecar_rel = sidecar_path.relative_to(vault_root).as_posix()
 
         # Index + log updates.
         rel_artifact_for_summary = rel_artifact.replace(kb_prefix(), "")
@@ -473,6 +578,7 @@ def preserve(
         hash_algorithm="sha256" if artifact_hash else None,
         media_id=f"sha256:{artifact_hash}" if artifact_hash else None,
         content_type=content_type_effective,
+        adoption=adoption_receipt,
     )
 
 
@@ -488,6 +594,7 @@ def preserve_stream(
     text: str | None = None,
     today: dt.date | None = None,
     max_bytes: int = MAX_UPLOAD_BYTES,
+    adoption_seed: Mapping[str, object] | None = None,
 ) -> PreserveResult:
     """Capture a binary STREAM to Evidence/ — the entrypoint for HTTP /upload.
 
@@ -511,6 +618,7 @@ def preserve_stream(
         text=text,
         today=today,
         max_stream_bytes=max_bytes,
+        adoption_seed=adoption_seed,
     )
 
 
@@ -526,6 +634,7 @@ def preserve_bytes(
     text: str | None = None,
     today: dt.date | None = None,
     max_bytes: int = MAX_UPLOAD_BYTES,
+    adoption_seed: Mapping[str, object] | None = None,
 ) -> PreserveResult:
     """Capture an in-memory `bytes` artifact to Evidence/ (back-compat wrapper).
 
@@ -544,6 +653,7 @@ def preserve_bytes(
         text=text,
         today=today,
         max_bytes=max_bytes,
+        adoption_seed=adoption_seed,
     )
 
 
@@ -666,6 +776,7 @@ def _render_sidecar(
     governance_parent_sha256: str | None = None,
     governance_frame_timestamp_ms: int | None = None,
     tree: str = "Evidence",
+    adoption_receipt: Mapping[str, object] | None = None,
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
@@ -765,6 +876,8 @@ def _render_sidecar(
         lines.append(f"binary_sha256: {binary_sha256}")
         if binary_size is not None:
             lines.append(f"binary_size: {binary_size}")
+    if adoption_receipt is not None:
+        lines.extend(_render_adoption_receipt_lines(adoption_receipt))
     if parent_media:
         lines.append(f"parent_media: {parent_media}")
     if frame_ts is not None:

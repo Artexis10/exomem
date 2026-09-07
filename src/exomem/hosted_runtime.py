@@ -69,6 +69,23 @@ _DEFAULT_UPLOAD_LIMIT_BYTES = 90 * 1024 * 1024
 _DEFAULT_WORKER_LIMIT = 0
 
 
+def _validate_agent_profile(profile_name: str, records_reader_version: int) -> str:
+    from . import commands as commands_module
+
+    profile = commands_module.PRODUCT_SURFACE_PROFILES.get(profile_name)
+    if profile is None:
+        raise HostedConfigError(
+            "HOSTED_AGENT_PROFILE_UNSUPPORTED",
+            "hosted agent profile is not supported by this release",
+        )
+    if "record_memory" in profile.command_names and records_reader_version != 2:
+        raise HostedConfigError(
+            "HOSTED_RECORDS_READER_UNSUPPORTED",
+            "Records profiles require Records reader version 2",
+        )
+    return profile.name
+
+
 class HostedConfigError(RuntimeError):
     """Fail-closed hosted configuration/provisioning error with a stable code."""
 
@@ -140,6 +157,7 @@ class HostedCellConfig:
     enforce_transfer_v1_compatibility: bool = True
     records_reader_version: int = 2
     lifecycle_actions_enabled: bool = False
+    agent_profile: str | None = None
     authorization_session_replica_id: str | None = None
 
     @classmethod
@@ -287,6 +305,9 @@ class HostedCellConfig:
                 "HOSTED_RECORDS_READER_UNSUPPORTED",
                 "lifecycle actions require Records reader version 2",
             )
+        agent_profile = str(values.get("EXOMEM_HOSTED_AGENT_PROFILE", "")).strip() or None
+        if agent_profile is not None:
+            agent_profile = _validate_agent_profile(agent_profile, records_reader_version)
         authorization_session_replica_id = (
             str(values.get("EXOMEM_AUTH_SESSION_REPLICA_ID", "")).strip() or None
         )
@@ -357,6 +378,7 @@ class HostedCellConfig:
             enforce_transfer_v1_compatibility=True,
             records_reader_version=records_reader_version,
             lifecycle_actions_enabled=lifecycle_actions_enabled,
+            agent_profile=agent_profile,
             authorization_session_replica_id=authorization_session_replica_id,
         )
         if require_provisioned:
@@ -399,12 +421,14 @@ class HostedCellConfig:
             raise HostedConfigError(
                 "HOSTED_RECORDS_READER_UNSUPPORTED", "Records reader version is unsupported"
             )
+        if self.lifecycle_actions_enabled and self.records_reader_version != 2:
+            raise HostedConfigError(
+                "HOSTED_RECORDS_READER_UNSUPPORTED",
+                "lifecycle actions require Records reader version 2",
+            )
+        if self.agent_profile is not None:
+            return _validate_agent_profile(self.agent_profile, self.records_reader_version)
         if self.lifecycle_actions_enabled:
-            if self.records_reader_version != 2:
-                raise HostedConfigError(
-                    "HOSTED_RECORDS_READER_UNSUPPORTED",
-                    "lifecycle actions require Records reader version 2",
-                )
             return commands_module.HOSTED_ALPHA_AGENT_V2_PROFILE
         return commands_module.HOSTED_ALPHA_AGENT_PROFILE
 

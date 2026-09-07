@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 08fd3780b17e69cc553f3d1d23f67945b64af38fb998d47846c68c872a4ef6bd
+  skill_contract: 75fb5e1e3fb04874e3ea97610481708ca90661cf63579ea905122c96189f9c12
   version: "0.32.0"
 ---
 
@@ -199,6 +199,8 @@ apply — deletion needs its explicit confirm, and the adoption apply surface
 commits only a plan that was previewed. Supersession and entity creation have no
 server-side gate today; that is named future work, not an implied gate, so the
 confirmation is yours to obtain.
+
+Curation `work-item`, `propose`, `preview`, `status`, and `propose-compensation` map to `structural_suggestions`; `off` still permits an explicit user request. Curation `apply`, `resume`, and `apply-compensation` use `restructure_execution`: preview and confirm one immutable plan fingerprint, execute at most one step per request, let resume continue that approval, and confirm compensation separately.
 
 **Standing delegation does not exist in v1.** "Always allow this" or "do this
 kind of thing from now on" for restructure execution is refused by name: it

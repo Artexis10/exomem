@@ -61,6 +61,51 @@ spec:
               readOnly: true
             - name: authorization-session-custody
               mountPath: /run/exomem/authorization-session
+        {{- /*
+          A native sidecar (restartPolicy: Always on an init container) rather
+          than an ordinary container: the tenant boundary policy pins
+          `size(object.spec.containers) == 1`, and every other assertion in it
+          indexes `containers[0]`. Keeping the serving container alone in
+          `containers` leaves all of that untouched.
+
+          The runtime re-reads custody on every admission check and the source
+          is a Secret volume kubelet refreshes in place, so republishing each
+          new generation is what lets a renewed authorization bundle reach a
+          running pod. Without it the pod holds the generation its init
+          container copied until something restarts it.
+        */}}
+        - name: authorization-session-refresh
+          image: {{ .Values.image }}
+          imagePullPolicy: IfNotPresent
+          restartPolicy: Always
+          command: ["python"]
+          args:
+            - -m
+            - exomem.governance.authorization_hosted_mount
+            - --watch
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+              ephemeral-storage: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+              ephemeral-storage: 16Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: {{ .Values.runtimeUid }}
+            runAsGroup: {{ .Values.runtimeGid }}
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: authorization-session-source
+              mountPath: /run/exomem/authorization-session-source
+              readOnly: true
+            - name: authorization-session-custody
+              mountPath: /run/exomem/authorization-session
       containers:
         - name: exomem
           image: {{ .Values.image }}
@@ -107,6 +152,10 @@ spec:
               value: {{ printf "%.0f" .Values.recordsReaderVersion | quote }}
             - name: EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED
               value: {{ .Values.lifecycleActionsEnabled | quote }}
+            {{- with .Values.agentProfile }}
+            - name: EXOMEM_HOSTED_AGENT_PROFILE
+              value: {{ . | quote }}
+            {{- end }}
             - name: EXOMEM_AUTH_SESSION_KEYRING_FILE
               value: /run/exomem/authorization-session/private/keyring.json
             - name: EXOMEM_AUTH_SESSION_CONTROL_FILE

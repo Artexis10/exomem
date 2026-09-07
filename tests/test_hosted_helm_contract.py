@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from exomem.hosted_runtime import HostedCellConfig
+
 ROOT = Path(__file__).resolve().parents[1]
 PLATFORM = ROOT / "infra/helm/platform"
 CELL = ROOT / "infra/helm/cell"
@@ -2519,15 +2521,35 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert "runtimeClassName" not in pod
         assert "fsGroup" not in pod["securityContext"]
         assert "fsGroupChangePolicy" not in pod["securityContext"]
-        assert len(pod.get("initContainers", [])) == 1
+        assert len(pod.get("initContainers", [])) == 2
         custody_init = pod["initContainers"][0]
         assert custody_init["name"] == "authorization-session-custody"
         assert custody_init["args"] == [
             "-m",
             "exomem.governance.authorization_hosted_mount",
         ]
+        assert "restartPolicy" not in custody_init
         assert custody_init["securityContext"]["runAsUser"] == 10001
         assert custody_init["resources"]["requests"]["ephemeral-storage"] == "16Mi"
+        # A native sidecar, not an ordinary container: the tenant boundary policy
+        # pins `size(object.spec.containers) == 1` and indexes containers[0]
+        # throughout, so the refresher has to live in initContainers to leave all
+        # of that untouched. It republishes each generation kubelet projects, so
+        # a renewed authorization bundle reaches the pod without a restart.
+        refresh = pod["initContainers"][1]
+        assert refresh["name"] == "authorization-session-refresh"
+        assert refresh["restartPolicy"] == "Always"
+        assert refresh["image"] == custody_init["image"]
+        assert refresh["args"] == [
+            "-m",
+            "exomem.governance.authorization_hosted_mount",
+            "--watch",
+        ]
+        assert refresh["securityContext"] == custody_init["securityContext"]
+        assert refresh["resources"] == custody_init["resources"]
+        assert refresh["volumeMounts"] == custody_init["volumeMounts"]
+        assert "env" not in refresh and "ports" not in refresh
+        assert len(pod["containers"]) == 1
         container = pod["containers"][0]
         security = container["securityContext"]
         assert "seccompProfile" not in security
@@ -2667,6 +2689,31 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert not [item for item in documents if item.get("kind") == "Job"]
     if service:
         assert service[0]["spec"]["type"] == "ClusterIP"
+
+
+def test_cell_chart_projects_a_selected_agent_profile_only_when_configured() -> None:
+    default_documents = _render(CELL, CELL / "values.validation.yaml", namespace="cell-alpha-test")
+    default_statefulset = _find(default_documents, "StatefulSet", "cell-alpha")
+    default_environment = {
+        item["name"]: item.get("value")
+        for item in default_statefulset["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert "EXOMEM_HOSTED_AGENT_PROFILE" not in default_environment
+
+    selected_documents = _render(
+        CELL,
+        CELL / "values.validation.yaml",
+        namespace="cell-alpha-test",
+        extra_args=("--set", "agentProfile=hosted-alpha-agent-v4"),
+    )
+    selected_statefulset = _find(selected_documents, "StatefulSet", "cell-alpha")
+    selected_environment = {
+        item["name"]: item.get("value")
+        for item in selected_statefulset["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert selected_environment["EXOMEM_HOSTED_AGENT_PROFILE"] == "hosted-alpha-agent-v4"
+    config = HostedCellConfig.from_env(selected_environment, require_provisioned=False)
+    assert config.active_agent_profile == "hosted-alpha-agent-v4"
 
 
 def test_cell_schema_rejects_mutable_image_and_non_fixed_limits() -> None:
@@ -2907,11 +2954,25 @@ def test_cell_quota_holds_the_serving_pod_and_its_init_job_together() -> None:
     job's. Raising the runtime limit without raising this would have made the
     init job fail admission on quota rather than on real capacity — and it would
     have failed during provisioning, not during a test.
+
+    Native sidecars count too, and this test did not know that. An init
+    container with `restartPolicy: Always` is not merely max'd against the other
+    init containers: its resources are charged to the pod for its whole life.
+    Summing only `containers[0]` left the model 100m short of what the cluster
+    actually charges, so the quota looked sufficient here while k3s refused the
+    init job with `exceeded quota: cell-alpha-quota`.
     """
     documents = _render(CELL, CELL / "values.validation.yaml", namespace="cell-alpha-test")
     quota = _find(documents, "ResourceQuota", "cell-alpha-quota")["spec"]["hard"]
     statefulset = _find(documents, "StatefulSet", "cell-alpha")
-    runtime = statefulset["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"]
+    pod = statefulset["spec"]["template"]["spec"]
+    runtime = pod["containers"][0]["resources"]["limits"]
+    sidecars = [
+        container["resources"]["limits"]
+        for container in pod.get("initContainers", [])
+        if container.get("restartPolicy") == "Always"
+    ]
+    assert sidecars, "the refresh sidecar must be charged to the pod, not max'd away"
 
     def mebibytes(value: str) -> int:
         if value.endswith("Gi"):
@@ -2920,10 +2981,17 @@ def test_cell_quota_holds_the_serving_pod_and_its_init_job_together() -> None:
             return int(value.removesuffix("Mi"))
         raise AssertionError(f"unhandled memory unit: {value}")
 
+    def millicores(value: str) -> int:
+        if value.endswith("m"):
+            return int(value.removesuffix("m"))
+        return int(value) * 1000
+
     init_job_memory = mebibytes("1Gi")  # init-job.yaml, limits.memory
-    init_job_cpu = 1  # init-job.yaml, limits.cpu
-    assert mebibytes(quota["limits.memory"]) >= mebibytes(runtime["memory"]) + init_job_memory
-    assert int(quota["limits.cpu"]) >= int(runtime["cpu"]) + init_job_cpu
+    init_job_cpu = 1000  # init-job.yaml, limits.cpu
+    pod_memory = mebibytes(runtime["memory"]) + sum(mebibytes(s["memory"]) for s in sidecars)
+    pod_cpu = millicores(runtime["cpu"]) + sum(millicores(s["cpu"]) for s in sidecars)
+    assert mebibytes(quota["limits.memory"]) >= pod_memory + init_job_memory
+    assert millicores(quota["limits.cpu"]) >= pod_cpu + init_job_cpu
 
 
 def test_cell_routes_expose_only_exact_control_and_transfer_paths() -> None:

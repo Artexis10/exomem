@@ -16,6 +16,7 @@ spec:
         Path(`/cells/health`) ||
         Path(`/cells/rotate-credential`) ||
         Path(`/cells/quiesce`) ||
+        Path(`/cells/renew-authorization`) ||
         Path(`/cells/resume`) ||
         Path(`/cells/stop`) ||
         Path(`/cells/export`) ||

@@ -2381,3 +2381,64 @@ async def test_a_fresh_authorization_bundle_is_reused_rather_than_reminted() -> 
 
     assert not written, "a fresh bundle must be reused, not re-minted"
     assert applied and applied[0]["authorizationSessionRevision"] == original.revision
+
+
+@pytest.mark.asyncio
+async def test_renewing_a_healthy_session_moves_the_window_without_rolling_the_pod() -> None:
+    """Renewal must be invisible: a fresh window, and no Helm transition.
+
+    The bundle carries a one-hour TTL and nothing renewed it, so a cell stopped
+    admitting mutations an hour after provisioning while still serving reads.
+    The rendered `authorizationSessionRevision` is a pod-template annotation, so
+    routing a renewal through Helm would roll the StatefulSet every hour; the
+    new bundle reaches the running pod through the projected Secret instead.
+    """
+
+    metadata = _metadata()
+    minted_at = 1_900_000_000
+    plane, request, _config, original, written, applied = _expiring_bundle_plane(
+        metadata,
+        minted_at=minted_at,
+        now=minted_at + 3_000,  # still inside the 3600s attestation TTL
+        serving=True,
+        runtime_admitted=True,
+        routes=(True, True),
+    )
+    plane._runtime = SimpleNamespace(
+        attest_authorization_session_membership=_no_runtime_attestation
+    )
+    request = {
+        **request,
+        "serviceCredential": "credential-current",
+        "releaseVersion": "0.68.3",
+        "protocolVersion": "1",
+    }
+
+    revision = await plane.renew_authorization_session(metadata, request)
+
+    assert revision != original.revision
+    assert written, "a renewal must commit a successor bundle"
+    assert written[-1]["membership_epoch"] == original.epoch + 1
+    # Compare-and-swap against the revision this pass read.
+    assert written[-1]["expected_revision"] == original.revision
+    assert not applied, "a renewal must not apply Helm values and roll the pod"
+
+    renewed = inspect_hosted_authorization_bundle(
+        written[-1]["files"],
+        expected_cell_id=metadata.subject_id,
+        expected_logical_vault_id=metadata.tenant_id,
+        expected_replica_id=metadata.resource_name + "-0",
+        expected_software_version=None,
+        expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+        expected_recovery_envelope=request["_providerRecoveryEnvelopes"][
+            "authorizationSessionSecret"
+        ],
+        now=minted_at + 3_000,
+    )
+    assert renewed.replica_state == "SERVING"
+    assert renewed.expires_at > original.expires_at
+
+
+async def _no_runtime_attestation(*_args, **_kwargs):
+    """The synthesized path; the runtime signature is covered by its own tests."""
+    return None

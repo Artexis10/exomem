@@ -26,6 +26,7 @@ pure function of its arguments, so a snapshot round-trips and a run reproduces.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 
 from ..snapshot import (
     DECLARABLE_FIELDS,
@@ -475,6 +476,122 @@ def f21_corpus(*, surfaced: bool = True, projection: str = "complete") -> Episte
             )
     items.extend(surface_markers(projection))
     return _snapshot(tuple(items), phase="f21")
+
+
+# --------------------------------------------------------------------------
+# f21 again, as content the product itself writes rather than as a snapshot.
+# --------------------------------------------------------------------------
+
+#: ``scenario subject -> the referent it names in the vault``. The scenario ids
+#: are opaque by design (see :func:`assert_no_vocabulary_leak`); this is the one
+#: place they are bound to text, and the text is synthetic.
+#:
+#: :func:`f21_corpus` models the *pre-change* runtime: it writes the answer into
+#: a snapshot and is red because that answer is "nothing surfaced". This corpus
+#: writes no answer at all. It supplies the content a reader would have written,
+#: `epistemic.journeys.f21_runtime` puts it through the product's own capture and
+#: note leaves, and whatever the product makes of it is the measurement.
+F21_RUNTIME_REFERENTS: Mapping[str, str] = {
+    "f21-subject-lower": "saffron atelier",
+    "f21-subject-cyrillic": "кедровый круг",
+    "f21-twin-incidental": "harbor annex",
+}
+
+#: All three referents ride the SAME three notes, so they share page count,
+#: origin count and mention count exactly — a stricter match than counting them
+#: separately and hoping the totals agree. What differs is only the frame each
+#: line is written in:
+#:
+#: - the lowercase-Latin positive: `typed-copula`/`copula.is`,
+#:   `body-field`/`field.membership`, `subject-relation`/`work.work_with`;
+#: - the non-Latin positive: `typed-label`/`label.em_dash`,
+#:   `body-field`/`field.location`, `subject-relation`/`attendance.attend`.
+#:
+#: No predicate ID is shared between the two positives in any origin, so
+#: "structurally different" is literally true rather than approximately true —
+#: a detector keyed to one frame or one predicate surfaces at most one of them.
+#:
+#: The twin's three lines match no frame in the closed grammar at all, which is
+#: what "recurs with no reusable facts" means when the grammar rather than a
+#: word list decides.
+F21_RUNTIME_LINES: tuple[tuple[str, str, str], ...] = (
+    (
+        "saffron atelier is an organization.",
+        "organization — кедровый круг.",
+        "harbor annex came up again in passing.",
+    ),
+    (
+        "Membership: saffron atelier.",
+        "Location: кедровый круг.",
+        "harbor annex came up here too.",
+    ),
+    (
+        "I work with saffron atelier.",
+        "I attend кедровый круг.",
+        "harbor annex came up once more.",
+    ),
+)
+
+
+@dataclass(frozen=True)
+class F21Origin:
+    """One independent origin: a Source, and the note compiled from it.
+
+    One Source per note is what makes three notes three *independent origins*
+    rather than three pages, which is the distinction f21's acceptance predicate
+    is explicitly about — "distinct sources, never occurrence counts".
+    """
+
+    ordinal: int
+    source_title: str
+    source_content: str
+    note_title: str
+    note_body: str
+
+
+def f21_runtime_pages() -> tuple[F21Origin, ...]:
+    """The real-runtime f21 corpus as content, never as file bytes.
+
+    Pure, like every other corpus here: no clock, no product import, no I/O.
+    Where the content is *stored* and which frontmatter it carries are the
+    product's decisions, not this corpus's, which is why nothing here names a
+    path.
+    """
+
+    return tuple(
+        F21Origin(
+            ordinal=index,
+            source_title=f"Recurrence source {index}",
+            source_content="Captured for the entity-recurrence corpus.",
+            note_title=f"Recurrence context {index}",
+            note_body="## Claim\n\n" + "\n\n".join(lines) + "\n",
+        )
+        for index, lines in enumerate(F21_RUNTIME_LINES, start=1)
+    )
+
+
+def f21_runtime_matching_report() -> Mapping[str, tuple[int, int, int]]:
+    """``referent -> (mentioning pages, independent origins, mentions)``.
+
+    Frequency-matching is a property of the corpus, so it is measured from the
+    corpus rather than asserted in prose — the same rule :func:`matching_report`
+    follows for f20.
+    """
+
+    report: dict[str, tuple[int, int, int]] = {}
+    for referent in F21_RUNTIME_REFERENTS.values():
+        pages = 0
+        mentions = 0
+        origins: set[int] = set()
+        for origin in f21_runtime_pages():
+            occurrences = f"{origin.source_content}\n{origin.note_body}".count(referent)
+            if not occurrences:
+                continue
+            pages += 1
+            mentions += occurrences
+            origins.add(origin.ordinal)
+        report[referent] = (pages, len(origins), mentions)
+    return report
 
 
 # --------------------------------------------------------------------------

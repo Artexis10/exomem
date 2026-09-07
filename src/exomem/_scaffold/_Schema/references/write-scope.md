@@ -26,28 +26,33 @@ Is the artifact something you reason from (input to your thinking)?
   │         (a markdown source-note in Sources/<type>/ captures the analytical surface;
   │          the binary lives alongside as the original reference)
   │
-  └─ No → was the artifact produced by your own compiled note?
+  └─ No → is this a selected/approved final deliverable or proof-bearing output?
            │
-           ├─ Yes → Notes/<type>/<scope>/_attachments/
-           │         (output of an experiment, research-note, or production-log;
-           │          lives near the parent note that produced it)
+           ├─ Yes → Evidence/<scope>/<category>/
+           │         (the exact adopted final; drafts and revised-away siblings stay ephemeral)
            │
-           └─ No → the artifact came from a third party and must be preserved as-received
-                  → Evidence/<scope>/<category>/
-                    (official letters, signed contracts, third-party documents;
-                     append-only, no analytical processing, no frontmatter)
+           └─ No → was the artifact produced by your own compiled note?
+                    │
+                    ├─ Yes → Notes/<type>/<scope>/_attachments/
+                    │         (supporting output kept with the note that produced it)
+                    │
+                    └─ No → Evidence/<scope>/<category>/
+                             (a third-party artifact preserved as-received;
+                              append-only, no analytical processing, no frontmatter)
 ```
 
 **Worked examples:**
 
 - An article or PDF you found that informs a project → `Sources/Articles/_attachments/` with a markdown capture in `Sources/Articles/`. You reason from it.
-- A protocol or document you authored and shared → `Notes/<...>/_attachments/`. Your work produced it.
+- A selected social image, approved report, or published export → `Evidence/<scope>/<category>/`. Preserve the exact adopted final, not its draft siblings.
+- Supporting output from a compiled note that was never adopted as a deliverable → `Notes/<...>/_attachments/`.
 - An official document received from a third party → `Evidence/<scope>/`. Third party, preserve as-received.
 - A Sources/Sessions transcript of a conversation → not a binary case; lives as markdown in `Sources/Sessions/` directly.
 
 **Why this matters:** mixing layers dilutes their epistemic discipline. Evidence
-binaries reasoned over become "sources we lightly analysed," losing the
-as-received guarantee. Keep the layers honest and the categories stay useful.
+holds exact proof-bearing or adopted-final bytes; Sources hold material reasoned
+from. MIME never chooses between them. Keep the layers honest and the categories
+stay useful.
 
 **How the bytes get there (never base64 through the model):** the tree above is
 *where* a binary lands; delivery is a separate question of *how*. Encoding a file
@@ -66,7 +71,7 @@ per-operation rules:
 | `Knowledge Base/Sources/**` | add | Append-only; never edit existing files. `_attachments/` subfolders may hold binary originals (append-only). |
 | `Knowledge Base/Notes/**` | note, replace | Propose-then-confirm by default. `_attachments/` subfolders may hold binary outputs (append-only). |
 | `Knowledge Base/Entities/**` | link, replace | Propose-then-confirm by default |
-| `Knowledge Base/Evidence/**` | preserve | Append-only store for third-party artifacts; never edit existing files; no frontmatter required on binaries |
+| `Knowledge Base/Evidence/**` | preserve | Append-only proof-bearing and adopted-final artifacts; never edit existing files; no frontmatter required on binaries |
 | `Knowledge Base/index.md` | any write | Catalog of what exists; auto-updated as part of every confirmed write |
 | `Knowledge Base/log.md` | any write | Chronological activity log; appended (never edited) on every confirmed write |
 | `Knowledge Base/<subfolder>/index.md` | any write | Catalog only; no orientation prose (orientation lives in `_Schema/references/`) |

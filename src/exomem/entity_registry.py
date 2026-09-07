@@ -86,6 +86,7 @@ def _build_registry(
                 path=rel_path,
                 title=str(frontmatter.get("title") or page.title or path.stem).strip(),
                 entity_type=registered.id,
+                entity_family=registry.family_of(registered.id) or registered.id,
                 status=str(frontmatter.get("status") or "active").strip().casefold(),
                 aliases=_strings(frontmatter.get("aliases")),
                 tags=_strings(frontmatter.get("tags")),

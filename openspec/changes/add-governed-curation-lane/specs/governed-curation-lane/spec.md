@@ -110,29 +110,59 @@ approved forward or compensation plan.
   plan whose approval is stored
 - **THEN** the request is refused and neither plan advances
 
-### Requirement: Every committed step has atomic commit evidence
+### Requirement: Every committed step has exact reconstructible commit evidence
 
-Before invoking a content leaf, the executor SHALL persist a prepared step with
-a deterministic operation id derived from plan id, ordinal, and step id. The
-governed leaf SHALL commit one content-free curation witness in the same atomic
-batch as its canonical effect. The witness SHALL bind the run, plan, ordinal,
-step, operation id, exact before/after target manifest, governed leaf identity,
-result digest, and optional parent compensation identity. Terminal attempt
-receipts and approval artifacts SHALL be create-only, at most one committed or
-recovered-committed receipt SHALL exist per step, and state SHALL be derivable
-from the immutable plan, approval, witnesses, and receipts.
+Before invoking a governed leaf, the executor SHALL persist a prepared step with
+a deterministic operation id equal to the SHA-256 digest of canonical JSON for
+the domain-separated tuple `["exomem-curation-operation-v1", plan_id, ordinal,
+step_id]`. The encoding SHALL preserve the ordinal as a number and MUST NOT use
+ambiguous field concatenation.
 
-#### Scenario: Process stops before the leaf commit
+Content-write leaves SHALL commit one content-free curation witness in the same
+atomic batch as their canonical effect.
 
-- **WHEN** a crash occurs after prepared state is durable but before a matching
-  leaf witness commits
+Relocation steps (`move`, `delete`, `recover`) remain valid in the plan schema
+so a reviewer can express them, but until the held filesystem exposes durable
+monotonic parent-namespace generation tokens the executor SHALL refuse them.
+The refusal SHALL occur at proposal, preview, and apply, before any transition
+record is published and before any rename is attempted, and SHALL be reported as
+`CURATION_RENAME_HISTORY_UNPROVABLE`. A refused relocation step SHALL leave no
+rename, no rollback, no trash write, no relocation candidate or authorization,
+no witness, and no terminal receipt, and SHALL create no governed run store. The
+prepared-relocation protocol that would lift this refusal is specified by the
+`add-curation-relocation-protocol` change and is out of scope for v1.
+
+Every curation witness SHALL bind the run, plan, ordinal, step, operation id,
+exact before/after target manifest, governed leaf identity, result digest, and
+optional parent compensation identity. Terminal attempt receipts and approval
+artifacts SHALL be create-only; at most one committed
+or recovered-committed receipt SHALL exist per step; and state SHALL be
+derivable from immutable verified governed evidence rather than mutable
+projection state. This is governed-store authorization, not cryptographic
+authentication against an actor able to forge `_Governance`; adding such a
+threat model requires a separate portable signing-root design.
+
+#### Scenario: Process stops before any leaf effect
+
+- **WHEN** a crash occurs after prepared state is durable but, for a content
+  leaf, before its matching witness commits
 - **THEN** recovery proves no step effect committed and permits exact retry only
   if every live guard still matches
 
+#### Scenario: Reviewed plan contains a relocation step
+
+- **WHEN** a plan containing a `move`, `delete`, or `recover` step is proposed,
+  previewed, or applied on a filesystem without durable parent-namespace
+  generation tokens
+- **THEN** the request fails with `CURATION_RENAME_HISTORY_UNPROVABLE` before any
+  transition record is published and before any rename is attempted
+- **AND** no rename, rollback, trash write, relocation candidate, authorization,
+  witness, terminal receipt, or governed run store is created
+
 #### Scenario: Process stops after the leaf commit
 
-- **WHEN** a crash occurs after effect and matching witness commit atomically but
-  before the terminal step receipt is stored
+- **WHEN** a crash occurs after a content effect and matching witness commit
+  but before the terminal step receipt is stored
 - **THEN** read-only status reports that exact recovery is required, and the
   next resume verifies the witness and live postcondition, writes one
   recovered-committed receipt, and never invokes the leaf again
@@ -147,7 +177,8 @@ from the immutable plan, approval, witnesses, and receipts.
 ### Requirement: Run phases report partial truth and exact replay
 
 The system SHALL derive run phase from the immutable plan, create-only approval,
-witnesses, and terminal receipts and SHALL expose at least `proposed`, `approved`, `executing`,
+verified relocation candidates and authorizations, witnesses, and terminal
+receipts and SHALL expose at least `proposed`, `approved`, `executing`,
 `partial`, `failed`, `completed`, `blocked`, `compensating`, `compensation-partial`,
 and `compensated`. It MUST NOT report a multi-step atomic commit. Exact replay
 SHALL return already-committed step outcomes without executing their leaves;

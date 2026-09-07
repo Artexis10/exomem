@@ -14,7 +14,7 @@ import re
 import stat
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -1140,9 +1140,13 @@ def _render_pending_sidecar(
     preserve = _preserve_module()
     existing_id: str | None = None
     preserved_notes: str | None = None
+    adoption_receipt: Mapping[str, object] | None = None
     if original is not None:
         frontmatter, body, raw_frontmatter = parse_frontmatter(original)
         existing_id = memory_refs.normalize_id(frontmatter.get("exomem_id"))
+        candidate_receipt = frontmatter.get("artifact_adoption")
+        if isinstance(candidate_receipt, Mapping):
+            adoption_receipt = candidate_receipt
         if _is_canonical_pending_shape(frontmatter, media_type, provenance):
             rendered = original
             pending_fields = _pending_fields(provenance)
@@ -1165,6 +1169,7 @@ def _render_pending_sidecar(
         evidence_file=provenance.relative_path,
         extracted_by="pending",
         tree=tree,
+        adoption_receipt=adoption_receipt,
     )
     if existing_id is not None:
         rendered = preserve._set_frontmatter_field(rendered, "exomem_id", existing_id)

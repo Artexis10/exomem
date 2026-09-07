@@ -80,6 +80,14 @@ class DeleteFileError(Exception):
         return {"code": self.code, "reason": self.reason}
 
 
+@dataclass(frozen=True)
+class DeleteFileValidation:
+    """Private exact rename manifest from the canonical delete guard path."""
+
+    result: DeleteFileResult
+    content_hash: str
+
+
 def delete_file(
     vault_root: Path,
     *,
@@ -91,7 +99,8 @@ def delete_file(
     expected_dead_inbound: list[str] | None = None,
     today: dt.date | None = None,
     now: dt.datetime | None = None,
-) -> DeleteFileResult:
+    validate_only: bool = False,
+) -> DeleteFileResult | DeleteFileValidation:
     if not confirm:
         raise DeleteFileError(
             code="UNCONFIRMED",
@@ -326,6 +335,27 @@ def delete_file(
                 "DELETE_FAILED",
                 "trash metadata destination could not be acquired safely",
             ) from None
+
+    if validate_only:
+        try:
+            source_hash = hashlib.sha256(
+                reserved_paths.read_generic_bytes(vault_root, rel_path).data
+            ).hexdigest()
+        except reserved_paths.ReservedPathLeafError as error:
+            raise DeleteFileError(
+                "DELETE_FAILED", "delete source changed during canonical validation"
+            ) from error
+        return DeleteFileValidation(
+            DeleteFileResult(
+                path=rel_path,
+                trash_path=trash_rel,
+                trash_meta_path=meta_rel,
+                inbound_link_count=len(inbound),
+                inbound_ignored_count=len(inbound_ignored),
+                warnings=list(warnings),
+            ),
+            source_hash,
+        )
 
     today_iso = today.isoformat()
     rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path

@@ -1,0 +1,352 @@
+{
+  "schema_version": 1,
+  "family": "generated-artifact-adoption",
+  "required_commands": [
+    "capture_source",
+    "preserve_artifacts",
+    "record_memory"
+  ],
+  "withheld_commands": [
+    "transfer_artifact"
+  ],
+  "authority_context": {
+    "proactive_capture": "silent",
+    "link_acceptance": "confirm-shortcut",
+    "structural_suggestions": "advisory",
+    "restructure_execution": "confirm"
+  },
+  "traces": [
+    {
+      "id": "direct-source-adoption",
+      "turn": "The second generated research diagram is the one to keep as material for later analysis.",
+      "starting_context": {
+        "direct_handles": true,
+        "semantic_role": "reasoning-input",
+        "selected_file_id": "diagram-final",
+        "local_adoption_receipt": false,
+        "compatible_records_collection": false
+      },
+      "offered_file_ids": [
+        "diagram-draft",
+        "diagram-final"
+      ],
+      "expected": {
+        "tool_sequence": [
+          {
+            "tool": "capture_source",
+            "operation": null,
+            "arguments": {
+              "adoption": {
+                "key": "synthetic-diagram:final",
+                "trigger": "selected",
+                "selected_file_id": "diagram-final"
+              }
+            }
+          }
+        ],
+        "authority": {
+          "action_class": "proactive_capture",
+          "disposition": "silent",
+          "selection_is_write_confirmation": false
+        },
+        "selected_file_id": "diagram-final",
+        "expected_writes": [
+          {
+            "kind": "source-artifact-with-adoption-receipt",
+            "file_id": "diagram-final",
+            "exact_bytes": true
+          }
+        ],
+        "forbidden_write_file_ids": [
+          "diagram-draft"
+        ],
+        "forbidden_tools": [
+          "preserve_artifacts",
+          "record_memory",
+          "transfer_artifact"
+        ],
+        "terminal": {
+          "committed_receipt_required_for_success": true,
+          "lane": "source"
+        }
+      }
+    },
+    {
+      "id": "direct-evidence-adoption",
+      "turn": "The exported report is approved as the final deliverable.",
+      "starting_context": {
+        "direct_handles": true,
+        "semantic_role": "approved-deliverable",
+        "selected_file_id": "report-final",
+        "local_adoption_receipt": false,
+        "compatible_records_collection": false
+      },
+      "offered_file_ids": [
+        "report-draft",
+        "report-final"
+      ],
+      "expected": {
+        "tool_sequence": [
+          {
+            "tool": "preserve_artifacts",
+            "operation": null,
+            "arguments": {
+              "adoption": {
+                "key": "synthetic-report:approved",
+                "trigger": "approved",
+                "selected_file_id": "report-final"
+              }
+            }
+          }
+        ],
+        "authority": {
+          "action_class": "proactive_capture",
+          "disposition": "silent",
+          "selection_is_write_confirmation": false
+        },
+        "selected_file_id": "report-final",
+        "expected_writes": [
+          {
+            "kind": "evidence-artifact-with-adoption-receipt",
+            "file_id": "report-final",
+            "exact_bytes": true
+          }
+        ],
+        "forbidden_write_file_ids": [
+          "report-draft"
+        ],
+        "forbidden_tools": [
+          "capture_source",
+          "record_memory",
+          "transfer_artifact"
+        ],
+        "terminal": {
+          "committed_receipt_required_for_success": true,
+          "lane": "evidence"
+        }
+      }
+    },
+    {
+      "id": "unselected-drafts-stay-ephemeral",
+      "turn": "Show the generated variants; no variant has been selected or approved.",
+      "starting_context": {
+        "direct_handles": true,
+        "semantic_role": "unadopted-drafts",
+        "selected_file_id": null,
+        "local_adoption_receipt": false,
+        "compatible_records_collection": false
+      },
+      "offered_file_ids": [
+        "variant-a",
+        "variant-b",
+        "variant-c"
+      ],
+      "expected": {
+        "tool_sequence": [],
+        "authority": {
+          "action_class": null,
+          "disposition": null,
+          "selection_is_write_confirmation": false
+        },
+        "selected_file_id": null,
+        "expected_writes": [],
+        "forbidden_write_file_ids": [
+          "variant-a",
+          "variant-b",
+          "variant-c"
+        ],
+        "forbidden_tools": [
+          "capture_source",
+          "preserve_artifacts",
+          "record_memory",
+          "transfer_artifact"
+        ],
+        "terminal": null
+      }
+    },
+    {
+      "id": "no-handle-handoff-is-honest",
+      "turn": "The final audio clip is selected, but this client cannot supply its bytes or a direct handle.",
+      "starting_context": {
+        "direct_handles": false,
+        "semantic_role": "approved-deliverable",
+        "selected_file_id": "audio-final",
+        "local_adoption_receipt": false,
+        "compatible_records_collection": false
+      },
+      "offered_file_ids": [
+        "audio-final"
+      ],
+      "expected": {
+        "tool_sequence": [],
+        "authority": {
+          "action_class": "proactive_capture",
+          "disposition": "silent",
+          "selection_is_write_confirmation": false
+        },
+        "selected_file_id": "audio-final",
+        "expected_writes": [],
+        "forbidden_write_file_ids": [
+          "audio-final"
+        ],
+        "forbidden_tools": [
+          "capture_source",
+          "preserve_artifacts",
+          "record_memory",
+          "transfer_artifact"
+        ],
+        "terminal": {
+          "handoff_status": "handoff_required",
+          "committed": false,
+          "forbidden_claims": [
+            "saved",
+            "stored",
+            "uploaded",
+            "adopted",
+            "delivered"
+          ]
+        }
+      }
+    },
+    {
+      "id": "receipt-linked-reported-delivery",
+      "turn": "The approved final was sent to the remote service.",
+      "starting_context": {
+        "direct_handles": true,
+        "semantic_role": "delivery-observation",
+        "selected_file_id": "document-final",
+        "local_adoption_receipt": true,
+        "adoption_lane": "evidence",
+        "evidence_page": "Knowledge Base/Evidence/synthetic/deliverables/document-final.pdf.md",
+        "compatible_records_collection": true,
+        "declared_link_field": "artifact"
+      },
+      "offered_file_ids": [
+        "document-final"
+      ],
+      "expected": {
+        "tool_sequence": [
+          {
+            "tool": "record_memory",
+            "operation": "append",
+            "arguments": {
+              "action": "append",
+              "delivery": {
+                "evidence_page": "Knowledge Base/Evidence/synthetic/deliverables/document-final.pdf.md",
+                "link_field": "artifact",
+                "reported_remote_ref": "remote:synthetic-123",
+                "reported_remote_field": "remote_reference",
+                "verified_remote_field": "remote_verified"
+              }
+            }
+          }
+        ],
+        "authority": {
+          "action_class": "proactive_capture",
+          "disposition": "silent",
+          "selection_is_write_confirmation": false
+        },
+        "selected_file_id": "document-final",
+        "expected_writes": [
+          {
+            "kind": "record",
+            "links_evidence_page": true,
+            "reported_remote_ref": "remote:synthetic-123",
+            "verified_remote_identity": false
+          }
+        ],
+        "forbidden_write_file_ids": [],
+        "forbidden_tools": [
+          "capture_source",
+          "preserve_artifacts",
+          "transfer_artifact"
+        ],
+        "prerequisites": {
+          "committed_local_adoption_receipt": true,
+          "receipt_lane": "evidence",
+          "existing_compatible_collection": true,
+          "declared_link_field": true,
+          "implicit_collection_creation": false
+        },
+        "terminal": {
+          "committed_record_required_for_success": true
+        }
+      }
+    },
+    {
+      "id": "reported-remote-reference-is-not-byte-proof",
+      "turn": "The platform reports the final at a remote reference but supplies no digest-bearing receipt or export.",
+      "starting_context": {
+        "direct_handles": true,
+        "semantic_role": "delivery-observation",
+        "selected_file_id": "image-final",
+        "local_adoption_receipt": true,
+        "adoption_lane": "evidence",
+        "evidence_page": "Knowledge Base/Evidence/synthetic/deliverables/image-final.png.md",
+        "compatible_records_collection": true,
+        "declared_link_field": "artifact",
+        "platform_byte_proof": false
+      },
+      "offered_file_ids": [
+        "image-final"
+      ],
+      "expected": {
+        "tool_sequence": [
+          {
+            "tool": "record_memory",
+            "operation": "append",
+            "arguments": {
+              "action": "append",
+              "delivery": {
+                "evidence_page": "Knowledge Base/Evidence/synthetic/deliverables/image-final.png.md",
+                "link_field": "artifact",
+                "reported_remote_ref": "remote:synthetic-456",
+                "reported_remote_field": "remote_reference",
+                "verified_remote_field": "remote_verified"
+              }
+            }
+          }
+        ],
+        "authority": {
+          "action_class": "proactive_capture",
+          "disposition": "silent",
+          "selection_is_write_confirmation": false
+        },
+        "selected_file_id": "image-final",
+        "expected_writes": [
+          {
+            "kind": "record",
+            "links_evidence_page": true,
+            "reported_remote_ref": "remote:synthetic-456",
+            "verified_remote_identity": false
+          }
+        ],
+        "forbidden_write_file_ids": [],
+        "forbidden_tools": [
+          "capture_source",
+          "preserve_artifacts",
+          "transfer_artifact"
+        ],
+        "prerequisites": {
+          "committed_local_adoption_receipt": true,
+          "receipt_lane": "evidence",
+          "existing_compatible_collection": true,
+          "declared_link_field": true,
+          "matching_platform_digest": false,
+          "implicit_collection_creation": false
+        },
+        "terminal": {
+          "remote_byte_identity_verified": false,
+          "forbidden_claims": [
+            "remote-bytes-match",
+            "remote-copy-verified"
+          ]
+        }
+      }
+    }
+  ],
+  "compatibility": {
+    "hosted_v1_v4": "immutable",
+    "hosted_v5": "candidate-owner-validates-canonicalises-and-freezes-this-input"
+  }
+}

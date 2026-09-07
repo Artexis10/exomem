@@ -149,6 +149,7 @@ class ConflictReason(StrEnum):
     AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID = (
         "authorization-membership-transition-is-invalid"
     )
+    AUTHORIZATION_RENEWAL_CANNOT_CHANGE_STATE = "authorization-renewal-cannot-change-state"
     AUTHORIZATION_RUNTIME_ATTESTATION_IS_INVALID = "authorization-runtime-attestation-is-invalid"
     AUTHORIZATION_SECRET_PROVIDER_AUTHORITY_IS_ABSENT = (
         "authorization-secret-provider-authority-is-absent"

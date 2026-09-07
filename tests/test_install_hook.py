@@ -21,7 +21,6 @@ import time
 from pathlib import Path
 
 import pytest
-
 from benchmark_capabilities import (
     require_posix_executable_scripts,
     require_posix_file_modes,
@@ -1871,6 +1870,62 @@ def test_capture_codex_silent_after_successful_exomem_function_call(
         },
         home,
         {"EXOMEM_HOOK_CLIENT": "codex"},
+    )
+
+    assert result.stdout.strip() == ""
+
+
+def test_capture_silent_after_successful_preserve_artifacts_adoption(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    transcript = _transcript(
+        tmp_path,
+        "Use the selected image as the final deliverable.",
+        "The selected exact Evidence bytes were preserved. " + "x" * 450,
+        assistant_tool="mcp__exomem__preserve_artifacts",
+        assistant_tool_input={
+            "scope": "synthetic-case",
+            "category": "outputs",
+            "files": [
+                {
+                    "download_url": "https://files.example/final",
+                    "file_id": "selected-file",
+                }
+            ],
+            "adoption": {
+                "key": "synthetic-case:final",
+                "trigger": "selected",
+                "selected_file_id": "selected-file",
+            },
+        },
+        assistant_tool_result={
+            "is_error": False,
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "files": [
+                                {
+                                    "file_id": "selected-file",
+                                    "outcome": "stored",
+                                    "adoption": {"committed": True},
+                                }
+                            ],
+                            "summary": {"stored": 1, "failed": 0},
+                        }
+                    ),
+                }
+            ],
+        },
+    )
+
+    result = _run(
+        CAPTURE_SCRIPT,
+        {"transcript_path": str(transcript), "session_id": "artifact-adoption-write"},
+        home,
     )
 
     assert result.stdout.strip() == ""

@@ -11,11 +11,27 @@ file the operator writes after running it; the six counts are queried from the
 control plane and the run aborts unless each is exactly 1. A harness that
 defaulted those to true/1 would turn the signed-evidence chain into decoration.
 
-Everything here is timing-critical for the FIRST promotion only. The bootstrap
-authority is capped server-side at 30 minutes, the rollout assignment inherits
-that expiry, and `storeClientArtifact` requires the assignment still be active --
-so observe, sign, both imports and promote all have to land inside it. Rehearse
-against an existing tenant before opening a window.
+The window is the staged release's, and you choose it. This paragraph used to
+say the rollout assignment inherited the bootstrap authority's thirty-minute
+expiry, so everything after `run` -- provisioning, a human completing seven
+manual operations per platform, then observe, sign, import and promote -- had to
+land inside half an hour. It never fit, and it is no longer true: substrate #140
+gives the assignment `exomem_staged_client_releases.expires_at` instead.
+
+What still bounds you, in order:
+
+* The staged release -- `reviewer_bootstrap.py prepare --stage-minutes N`, up to
+  seven days. It gates `storeClientArtifact` and the `cells` precondition inside
+  `promoteExomemHostedCohort`, both of which re-check it independently.
+* The canary credential, `LEAST(requested, assignment, stage)`, requested at 24
+  hours. The clean-client runs need it, so the manual half has 24 hours however
+  long the stage is. Size the stage past that -- 48 hours leaves a day for
+  observe/sign/import/promote after the canary dies.
+* The bootstrap authority, 28 minutes requested against a 30-minute server cap.
+  It spans only the OAuth exchange inside `run`, which is automated, and it is
+  spent the instant the assignment row exists.
+
+Rehearse against an existing tenant before opening a window anyway.
 
 Resolve these FOUR environment variables before starting, not during the window.
 Two of them name nothing that is deployed under that name, and one is not
@@ -49,9 +65,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -135,15 +153,63 @@ def canonical(value: object) -> str:
     raise TypeError(f"cannot canonicalise {type(value)!r}")
 
 
+#: Matches any connection URI so it can be stripped from output. psql echoes the
+#: whole DSN -- password included -- in connection errors such as `invalid
+#: connection option`, and that output used to be raised verbatim.
+_DSN_RE = re.compile(r"postgres(?:ql)?(?:\+\w+)?://\S*")
+
+
+def redact_dsn(text: str) -> str:
+    """Strip any connection URI from text bound for a log, error or transcript."""
+    return _DSN_RE.sub("postgresql://<redacted>", text)
+
+
+def libpq_url(url: str) -> str:
+    """Normalise an application DSN to something libpq accepts.
+
+    The provisioner stores its DSN for SQLAlchemy, so it arrives as
+    `postgresql+asyncpg://...?ssl=require`. libpq understands neither the
+    dialect suffix nor asyncpg's `ssl` parameter, and psql rejects the whole
+    string with an error that quotes it back in full.
+    """
+    url = re.sub(r"^postgres(ql)?\+\w+://", "postgresql://", url)
+    return re.sub(r"([?&])ssl=", r"\1sslmode=", url)
+
+
+def libpq_environment(url: str) -> dict[str, str]:
+    """Split a DSN into libpq's own variables.
+
+    The password never becomes a command-line argument: argv is world-readable
+    through `ps` for the life of the call, whereas another user's environment is
+    not. Unrecognised query parameters are carried through unchanged rather than
+    dropped, so a DSN that needs `channel_binding` or `options` still works.
+    """
+    parts = urllib.parse.urlsplit(libpq_url(url))
+    environment = {**os.environ}
+    for name, value in (
+        ("PGHOST", parts.hostname),
+        ("PGPORT", str(parts.port) if parts.port else None),
+        ("PGUSER", urllib.parse.unquote(parts.username) if parts.username else None),
+        ("PGPASSWORD", urllib.parse.unquote(parts.password) if parts.password else None),
+        ("PGDATABASE", parts.path.lstrip("/") or None),
+    ):
+        if value:
+            environment[name] = value
+    for key, value in urllib.parse.parse_qsl(parts.query):
+        environment[f"PG{key.upper()}"] = value
+    return environment
+
+
 def query(url: str, sql: str) -> list[str]:
     result = subprocess.run(
-        ["psql", url, "-X", "-A", "-t", "-F", "\x1f", "-c", sql],
+        ["psql", "-X", "-A", "-t", "-F", "\x1f", "-c", sql],
         capture_output=True,
         text=True,
         timeout=90,
+        env=libpq_environment(url),
     )
     if result.returncode != 0:
-        raise SystemExit(f"query failed: {result.stderr.strip()[:400]}")
+        raise SystemExit(f"query failed: {redact_dsn(result.stderr.strip())[:400]}")
     return [line for line in result.stdout.strip().split("\n") if line]
 
 

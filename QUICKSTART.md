@@ -120,6 +120,16 @@ These aliases are thin routes over product commands: `ask` -> `ask_memory`,
 leaves remain underneath for governance and validation, but new users do not need
 to learn them first.
 
+Generated drafts are ephemeral. When you select, approve, send, or publish one
+offered output, a balanced or maximal assistant may use `proactive_capture` to
+preserve that selected handle's exact bytes; unselected siblings remain
+unwritten. The assistant chooses Source or Evidence by the artifact's role,
+never its MIME type. If the client has no usable handle, it reports a
+non-committing upload handoff instead of claiming the artifact was saved.
+Delivery is recorded only after an Evidence adoption receipt and only through
+an existing compatible Records collection; a reported remote reference is not
+proof of remote byte equality.
+
 The numbered steps below are the **manual path** — exactly what `setup` does
 under the hood, kept for troubleshooting and for people who prefer explicit
 steps.
@@ -429,6 +439,15 @@ own — or just start writing; the writer auto-registers new keys as you use the
 > stepping-stone — a decision, a solved problem, a recognized pattern. There's
 > **no background daemon**: it won't save things while you're away from the chat,
 > and a fresh thread starts fresh. You can always just say *"save that to kb."*
+> A stable preference, recurring routine, historical baseline, or durable
+> affiliation is eligible only when stability or recurrence and reusable
+> comparison, interpretation, or decision value are clear. A uniquely resolved
+> Entity receives its facet; otherwise capture one concise compiled observation;
+> an observed measurement uses only compatible existing Records. Fleeting
+> preferences, one-off activity, incidental associations, trivial metrics, and
+> tentative claims stay quiet. A concise observation or narrow Entity facet follows
+> `proactive_capture`; an affiliation relation requires `link_acceptance`; Entity
+> creation or substantial curation requires confirmed `restructure_execution`.
 >
 > **Other MCP clients.** ChatGPT, Codex, Cursor, Gemini, Windsurf, or any client
 > without Skill support should call `bootstrap()` once after connecting. It returns
@@ -635,21 +654,24 @@ chatty — you should never have to tune up to get it working.
 
 This vault is served by Exomem, an MCP server (formerly kb-mcp). Once added as a
 connector, its tools appear under whatever name you assign it (e.g. "Knowledge
-Base"). The block below is the **balanced** wording, kept here as the inline
-example; paste it into the Claude app at **Settings → Profile → "What personal
-preferences should Claude consider in responses?"**:
+Base"). The Exomem block below is the **balanced** wording, kept here as the
+inline example; paste it into the Claude app at **Settings → Profile → "What
+personal preferences should Claude consider in responses?"**:
+
+```
+I keep a personal Knowledge Base served by the Exomem MCP. If no Exomem skill is loaded, call bootstrap(profile="compact") once at the start of a new chat and follow it. Exomem prominence: BALANCED. Use Exomem proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, recognized pattern, or stable preference, recurring routine, historical baseline, or durable affiliation when stability or recurrence and reusable comparison, interpretation, or decision value are clear. Route a uniquely resolved Entity facet there; otherwise write one concise compiled observation; an observed measurement uses only compatible existing Records. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. A concise observation or narrow Entity facet follows `proactive_capture`; an affiliation relation requires `link_acceptance`; Entity creation or structural change requires confirmed `restructure_execution`. Save a short compiled note, not a transcript, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
+```
+
+Optionally paste this separate response-style block too (or trim it to taste):
 
 ```
 Precise and non-performative: no hype, fluff, or motivational tone; clarity and correctness over filler. Use lists/structure only when they genuinely help; plain prose is fine. Match length to the substance, terse when simple and fuller when it's not.
-
-I keep a personal Knowledge Base served by the Exomem MCP. If no Exomem skill is loaded, call bootstrap(profile="compact") once at the start of a new chat and follow it. Exomem prominence: BALANCED. Use Exomem proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, or recognized pattern — as a short compiled note, not a transcript, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
 ```
 
-The first paragraph is general response style (trim to taste); the second is the KB
-nudge. Account-level custom instructions are always in context, so they make Claude
-reach for the connected KB on its own — the app-side equivalent of the Claude Code
-hooks. The "do not search" line keeps it from firing on unrelated or already
-answered turns.
+Account-level custom instructions are always in context, so the Exomem block makes
+Claude reach for the connected KB on its own — the app-side equivalent of the
+Claude Code hooks. The "do not search" line keeps it from firing on unrelated or
+already answered turns.
 
 For the maximal wording (recommended on web), the lighter levels, and the ChatGPT
 variants, see [docs/prominence.md](docs/prominence.md). For more client-specific

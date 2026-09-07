@@ -32,6 +32,7 @@ def resolve_entity_candidate(
     *,
     name: str,
     entity_type: str | None = None,
+    entity_family: str | None = None,
     limit: int = 8,
 ) -> dict[str, object]:
     """Return an exact active title/alias match, no match, or bounded ambiguity."""
@@ -48,6 +49,14 @@ def resolve_entity_candidate(
                 f"Active ids: {list(registry.active_ids)}"
             )
         kind_filter = kind.id
+    family_filter = None
+    if entity_family is not None:
+        family_filter = registry.family_of(entity_family)
+        if family_filter is None:
+            raise ValueError(
+                f"ENTITY_FAMILY_UNKNOWN: entity_family {entity_family!r} is not active. "
+                f"Active families: {list(registry.families)}"
+            )
 
     matches: list[dict[str, str]] = []
     entities_root = kb_root(vault_root) / "Entities"
@@ -72,6 +81,9 @@ def resolve_entity_candidate(
             registered = registry.resolve(str(frontmatter.get("entity_type") or ""))
             if registered is None or (
                 kind_filter is not None and registered.id != kind_filter
+            ) or (
+                family_filter is not None
+                and not registry.matches_family(registered.id, family_filter)
             ):
                 continue
             title = str(frontmatter.get("title") or path.stem).strip()
@@ -83,6 +95,7 @@ def resolve_entity_candidate(
                 "path": path.relative_to(vault_root).as_posix(),
                 "title": title,
                 "entity_type": registered.id,
+                "entity_family": registry.family_of(registered.id) or registered.id,
                 "matched_by": "title" if title_matches else "alias",
             }
             if exomem_id := str(frontmatter.get("exomem_id") or "").strip():

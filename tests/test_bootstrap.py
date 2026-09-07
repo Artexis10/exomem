@@ -454,14 +454,24 @@ def test_bootstrap_compact_is_compact_through_the_entire_payload(vault: Path) ->
         return False
 
     # A compact (or diagnostics) bootstrap must stay compact through the WHOLE
-    # payload: the rich example may not appear anywhere, including the nested
-    # authoring_contract.semantic_units.contract projection.
+    # payload: the rich example may not appear anywhere. Only compact is
+    # deduplicated -- its nested slot points at the top-level projection rather
+    # than spending ~9 KiB on a second copy of identical bytes. Diagnostics is a
+    # superset of full and stays self-contained, so it carries the nested
+    # projection in full (minus the rich example, like its top-level one).
     for profile in ("compact", "diagnostics"):
         payload = commands.op_bootstrap(vault, profile=profile)
         assert not contains_exact(payload, rich_example)
         nested = payload["authoring_contract"]["semantic_units"]["contract"]
-        assert nested == semantic_authoring.bootstrap_projection(profile=profile)
-        assert "rich" not in nested["portable_categories"]["examples"]
+        if profile == "compact":
+            assert nested == {"same_as": "semantic_authoring"}
+        else:
+            assert nested == semantic_authoring.bootstrap_projection(profile=profile)
+            assert "rich" not in nested["portable_categories"]["examples"]
+        assert payload["semantic_authoring"] == semantic_authoring.bootstrap_projection(
+            profile=profile
+        )
+        assert "rich" not in payload["semantic_authoring"]["portable_categories"]["examples"]
 
     # The full profile carries the rich example in both the top projection and
     # the nested authoring_contract projection.

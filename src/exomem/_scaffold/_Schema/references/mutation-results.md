@@ -60,6 +60,29 @@ following their remediation: wait before retrying a warming or busy call; retry 
 call only with the same identity; do not submit a new identity after a
 committed-uncertain result—reconcile and retry only as instructed.
 
+## Relation disposition on compiled writes
+
+Once a vault holds any compiled page, a new compiled page must either carry a
+qualifying typed relation or record that relations were reviewed and none
+applied. The first page in an empty vault has nothing to relate to and commits
+without this; every later page is subject to it. A page that genuinely cites its
+counterpart — a provenance link, a supersession, any typed relation — satisfies
+the rule as written and needs no extra argument, so connected material passes
+for free and only disconnected material needs the explicit disposition.
+
+Validation reports the obligation before it can block a commit: a
+`validate_only=true` call returns `relation_review_hash` alongside the draft
+fields, and lists the finding under `blocking_findings`. Read that list on every
+validation rather than only on failure — it is the sole notice you get. To
+commit an unrelated page, re-issue the identical creation with the returned
+`draft_id`, `draft_hash` and `draft_token`, plus
+`relation_disposition="reviewed_none"`, the returned `relation_review_hash`, and
+a `relation_review_reason` naming why nothing qualified. Committing with the
+draft fields alone refuses with `SEMANTIC_CONTRACT_BLOCKED` and a
+`RELATION_DISPOSITION_MISSING` finding whose `remediation` restates this
+sequence. Prefer adding the real relation over asserting none exists; the
+disposition is for material that genuinely stands alone.
+
 On MCP these expected refusals arrive as normal tool content with top-level
 `success: false`; inspect the structured `error` rather than treating it as a
 transport failure. A `receipt_id` is diagnostic and is not a transferable

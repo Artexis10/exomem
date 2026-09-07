@@ -80,6 +80,14 @@ _SURFACE_ENV = "EXOMEM_SURFACE"
 _HOSTED_CELL_ENV = "EXOMEM_HOSTED_CELL"
 _CONFIG_KEY = "prominence"
 
+_ARTIFACT_ADOPTION_CAPTURE = (
+    " Generated draft stays ephemeral. Selected is not write consent: proactive_capture "
+    "preserves exact bytes as Source/Evidence by role, never MIME. No handle means "
+    "non-committing handoff. Delivery requires Evidence receipt/Record; no remote byte "
+    "inference. Missing schema uses structural_suggestions/restructure_execution; "
+    "relations use link_acceptance."
+)
+
 _CAPTURE_EFFECTIVE_TEMPLATE = MappingProxyType(
     {
         "off": MappingProxyType(
@@ -213,22 +221,29 @@ CONTRACTS: dict[str, ProminenceContract] = {
     "balanced": ProminenceContract(
         level="balanced",
         recall=(
-            "Search memory first when a turn references a project, a domain, a named "
-            "entity, or asks what was concluded, tried, or decided. Skip it for "
-            "chit-chat, control messages, and fresh tasks with no prior context."
+            "Search memory for project, domain, entity, or conclusion context. "
+            "Skip chit-chat, control messages, and context-free fresh tasks."
         ),
         capture=(
-            "Capture when the conversation reaches a stepping stone: a durable "
-            "conclusion lands, a recurring entity accumulates reusable facts, or a "
-            "method was carried out and the user reports how it went. Not "
-            "mid-thought exploration, tangents, or unresolved questions. "
-            "Route stated intent to Planning and observed outcome to Records. "
+            "Capture at a stepping stone: a durable conclusion, recurring entity with "
+            "reusable facts, or method that was carried out with a reported result. Not "
+            "mid-thought exploration, tangents, or unresolved questions. Capture stable "
+            "preferences, recurring routines, historical baselines, or durable affiliations "
+            "only when stability or recurrence and reusable comparison, interpretation, or "
+            "decision value are clear. Route a uniquely resolved Entity facet or affiliation "
+            "there; otherwise use one concise compiled observation; use Records only for a "
+            "compatible existing measurement. Fleeting preferences, one-offs, incidental "
+            "associations, trivia, and tentative claims stay quiet. A concise observation or "
+            "narrow Entity facet follows proactive_capture; an affiliation relation requires "
+            "link_acceptance; Entity creation or structural change requires confirmed "
+            "restructure_execution. Route stated intent to "
+            "Planning and observed outcome to Records. "
             "Transition only on explicit user intent; otherwise leave Planning "
             "unchanged or, under the resolved posture, propose a bounded review."
-        ),
+        )
+        + _ARTIFACT_ADOPTION_CAPTURE,
         narration=(
-            "Stay quiet. Mention memory only when a search returned something you "
-            "used, and report one line after a write."
+            "Stay quiet; cite useful recall and report a write in one line."
         ),
         summary="Recall on topic match; capture durable conclusions; quiet.",
     ),
@@ -243,13 +258,23 @@ CONTRACTS: dict[str, ProminenceContract] = {
         capture=(
             "Capture at every stepping stone, and treat the bar for 'durable' as low: "
             "a decision, a resolved problem, a diagnosed failure, a reusable pattern, "
-            "a fact about a recurring entity, a method you actually ran and how it "
-            "turned out. When torn between capturing and letting it pass, capture. "
+            "a fact about a recurring entity, or a method you actually ran and how it "
+            "turned out. Capture stable preferences, recurring routines, historical baselines, "
+            "or durable affiliations only when stability or recurrence and reusable comparison, "
+            "interpretation, or decision value are clear. Route a uniquely resolved Entity "
+            "facet or affiliation there; otherwise use one concise compiled observation; use "
+            "Records only for a compatible existing measurement. Fleeting preferences, one-offs, "
+            "incidental associations, trivia, and tentative claims stay quiet. A concise observation "
+            "or narrow Entity facet follows proactive_capture; an affiliation relation requires "
+            "link_acceptance; Entity creation or structural change requires confirmed "
+            "restructure_execution. When torn between "
+            "capturing and letting it pass, capture. "
             "Prefer a real page over a mental note, and do not wait to be asked. "
             "Route stated intent to Planning and observed outcome to Records. "
             "Transition only on explicit user intent; otherwise leave Planning "
             "unchanged or, under the resolved posture, propose a bounded review."
-        ),
+        )
+        + _ARTIFACT_ADOPTION_CAPTURE,
         narration=(
             "Say what you did. Name what you recalled and cite it; state one line "
             "after every write. The user should be able to see memory working "
