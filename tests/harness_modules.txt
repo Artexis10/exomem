@@ -27,6 +27,7 @@ tests/test_equivalence_selection.py
 tests/test_harness_capture_caching.py
 tests/test_hcp_backend_verifier.py
 tests/test_hosted_ansible_secret_runner.py
+tests/test_hosted_bws_source.py
 tests/test_hosted_database_migration.py
 tests/test_hosted_operator.py
 tests/test_hosted_platform_operations.py
