@@ -89,7 +89,7 @@ def test_foundation_defaults_are_cost_safe_and_admin_cidrs_are_explicit() -> Non
     assert re.search(r"value\s*=\s*8\.99", outputs)
 
 
-def test_cloudflare_tunnel_has_exact_control_and_transfer_ingress() -> None:
+def test_cloudflare_tunnel_has_exact_control_transfer_and_optional_gateway_ingress() -> None:
     cloudflare = (FOUNDATION / "cloudflare.tf").read_text(encoding="utf-8")
     assert "cloudflare_zero_trust_tunnel_cloudflared" in cloudflare
     assert "cloudflare_zero_trust_access_service_token" in cloudflare
@@ -99,11 +99,22 @@ def test_cloudflare_tunnel_has_exact_control_and_transfer_ingress() -> None:
     assert "var.control_hostname" in cloudflare
     assert "var.transfer_hostname" in cloudflare
     expected_traefik = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
-    assert cloudflare.count(expected_traefik) == 2
+    assert cloudflare.count(expected_traefik) == 3
     assert "traefik.kube-system.svc.cluster.local" not in cloudflare
-    assert cloudflare.count("cloudflare_dns_record") == 2
+    assert cloudflare.count("cloudflare_dns_record") == 3
     assert 'type    = "CNAME"' in cloudflare
     assert "proxied = true" in cloudflare
+    assert 'var.gateway_hostname == "" ? [] : [' in cloudflare
+    assert 'var.gateway_hostname == "" ? 0 : 1' in cloudflare
+    assert "http_host_header = var.gateway_hostname" in cloudflare
+    variables = (FOUNDATION / "variables.tf").read_text(encoding="utf-8")
+    gateway = variables.split('variable "gateway_hostname"', 1)[1].split('variable ', 1)[0]
+    assert 'default     = ""' in gateway
+    assert "var.gateway_hostname != var.control_hostname" in gateway
+    assert "var.gateway_hostname != var.transfer_hostname" in gateway
+    # Gateway authentication stays in the canonical service, not control Access.
+    control_access = cloudflare.split('resource "cloudflare_zero_trust_access_application"', 1)[1]
+    assert "var.gateway_hostname" not in control_access
 
 
 def test_durability_has_object_lock_retention_and_split_credentials() -> None:

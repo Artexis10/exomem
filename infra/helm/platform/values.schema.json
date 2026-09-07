@@ -4,6 +4,32 @@
   "required": ["provisioner", "admission", "scheduler", "observability", "capacityCollector", "durability"],
   "properties": {
     "runtime": false,
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "image", "originHostname", "replicas", "maxInflight", "databaseSecretName", "databaseSecretKey", "controlPlaneKeySecretName", "controlPlaneKeySecretKey", "databaseEgressCidrs"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"type": "string"},
+        "originHostname": {"type": "string"},
+        "replicas": {"type": "integer", "minimum": 1, "maximum": 2},
+        "maxInflight": {"type": "integer", "minimum": 1, "maximum": 32},
+        "databaseSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "databaseSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "controlPlaneKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "controlPlaneKeySecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "databaseEgressCidrs": {
+          "type": "array", "maxItems": 32, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32$"}
+        }
+      },
+      "if": {"properties": {"enabled": {"const": true}}},
+      "then": {"properties": {
+        "image": {"pattern": "^ghcr\\.io/artexis10/substrate-gateway@sha256:[a-f0-9]{64}$"},
+        "originHostname": {"pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$"},
+        "databaseEgressCidrs": {"minItems": 1}
+      }}
+    },
     "provisioner": {
       "type": "object",
       "additionalProperties": false,

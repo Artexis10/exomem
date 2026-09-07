@@ -320,11 +320,18 @@ spec:
           variables.target.spec.routes[0].services[0].name == request.namespace &&
           variables.target.spec.routes[0].services[0].port == 8765 &&
           (variables.name == request.namespace + '-control'
-            ? variables.target.spec.routes[0].match ==
+            ? variables.target.spec.routes[0].match in [
                 'Host(`{{ .Values.provisioner.controlHostname }}`) && (Path(`/cells/' +
                 variables.annotations['exomem.io/cell-id'] +
                 '/private/exomem/v1`) || PathPrefix(`/cells/' +
-                variables.annotations['exomem.io/cell-id'] + '/private/exomem/v1/`))'
+                variables.annotations['exomem.io/cell-id'] + '/private/exomem/v1/`))',
+                'Host(`{{ .Values.provisioner.controlHostname }}`) && (Path(`/cells/' +
+                variables.annotations['exomem.io/cell-id'] +
+                '/private/exomem/v1`) || PathPrefix(`/cells/' +
+                variables.annotations['exomem.io/cell-id'] + '/private/exomem/v1/`) || ' +
+                '(Method(`POST`) && PathRegexp(`^/cells/' +
+                variables.annotations['exomem.io/cell-id'] +
+                '/private/exomem/v2/agent/[a-z][a-z0-9-]{0,63}/command/[a-z][a-z0-9_]{0,63}$`)))']
             : variables.target.spec.routes[0].match ==
                 'Host(`{{ .Values.provisioner.transferHostname }}`) && (Path(`/cells/' +
                 variables.annotations['exomem.io/cell-id'] +
@@ -826,12 +833,19 @@ spec:
           variables.target.spec.routes[0].services[0].name == variables.resourceName &&
           variables.target.spec.routes[0].services[0].port == 8765 &&
           (variables.name == variables.resourceName + '-control'
-            ? variables.target.spec.routes[0].match ==
+            ? variables.target.spec.routes[0].match in [
                 'Host(`{{ .Values.provisioner.controlHostname }}`) && (Path(`/cells/' +
                 namespaceObject.metadata.annotations['exomem.io/cell-id'] +
                 '/private/exomem/v1`) || PathPrefix(`/cells/' +
                 namespaceObject.metadata.annotations['exomem.io/cell-id'] +
-                '/private/exomem/v1/`))'
+                '/private/exomem/v1/`))',
+                'Host(`{{ .Values.provisioner.controlHostname }}`) && (Path(`/cells/' +
+                namespaceObject.metadata.annotations['exomem.io/cell-id'] +
+                '/private/exomem/v1`) || PathPrefix(`/cells/' +
+                namespaceObject.metadata.annotations['exomem.io/cell-id'] +
+                '/private/exomem/v1/`) || (Method(`POST`) && PathRegexp(`^/cells/' +
+                namespaceObject.metadata.annotations['exomem.io/cell-id'] +
+                '/private/exomem/v2/agent/[a-z][a-z0-9-]{0,63}/command/[a-z][a-z0-9_]{0,63}$`)))']
             : variables.target.spec.routes[0].match ==
                 'Host(`{{ .Values.provisioner.transferHostname }}`) && (Path(`/cells/' +
                 namespaceObject.metadata.annotations['exomem.io/cell-id'] +
