@@ -5,9 +5,9 @@
 
 ## 2. Reuse proven writer metadata
 
-- [ ] 2.1 Add red-first coverage for a warm semantic corpus with a cold writer resolver cache; prove detached snapshot parity, no unrelated body reads, no preview publication, configuration-race fallback, unreadable non-governed membership, new direct-disk key after an unobserved title edit, and old-key/new-corpus rejection.
-- [ ] 2.2 Implement read-only corpus-entry reuse in the shared writer resolver seam; pass focused writer, corpus-cache, semantic creation and Records recall tests.
-- [ ] 2.3 Obtain independent review approval after the reviewer reruns the resolver reproduction and cache/policy race checks in isolated state.
+- [x] 2.1 Add red-first coverage for a warm semantic corpus with a cold writer resolver cache; prove detached snapshot parity, no unrelated body reads, no preview publication, configuration-race fallback, unreadable non-governed membership, new direct-disk key after an unobserved title edit, and old-key/new-corpus rejection.
+- [x] 2.2 Implement read-only corpus-entry reuse in the shared writer resolver seam; pass focused writer, corpus-cache, semantic creation and Records recall tests.
+- [x] 2.3 Obtain independent review approval after the reviewer reruns the resolver reproduction and cache/policy race checks in isolated state (APPROVE on b94778e0; 124 scoped tests and seven independent adversarial scenarios passed).
 
 ## 3. Persist and query graph dependencies
 

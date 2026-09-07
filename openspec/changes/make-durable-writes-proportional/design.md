@@ -110,6 +110,14 @@ coverage rows. Reopening and full rebuild must not leave ghosts or repeatedly
 recreate invalid structural data. Preserve existing audit continuation and
 incomplete-result behavior for older schemas.
 
+Dependency audit pages advance by a unique persisted row identity, so a page
+boundary cannot skip remaining targets from the same source. Bind continuation
+to the database and nonempty WAL revision before and after reading the page;
+normalize an absent and empty WAL equally and exclude derived SHM churn from
+this revision identity. Retain the existing no-follow sidecar binding. A real
+revision change invalidates continuation rather than captioning old rows with
+a new revision; same-count updates must be detected.
+
 ### Replace dependency discovery without weakening publication proofs
 
 Use the indexed dependency query in both `_topology_affected_sources` and
