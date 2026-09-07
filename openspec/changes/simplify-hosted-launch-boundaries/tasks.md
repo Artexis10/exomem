@@ -3,7 +3,7 @@
 - [x] 1.1 Define `contracts/hosted-agent-command-binding-v1.json` and its compatibility feature marker with exact route, header bounds, digest semantics and error mapping; verify producer/consumer fixture tests agree before either repository implements forwarding.
 - [x] 1.2 Add red-first tests in hosted agent/private-route/security suites for missing/duplicate/malformed/mismatched expected tuple, forged cell/principal, wrong credential and no vault/leaf access on denial; implement the additive v2 route in `server_hosted.py` and canonical context helpers without duplicating command semantics, then make those tests pass.
 - [x] 1.3 Preserve v1 behavior and cross-version idempotency/lifecycle safety; verify an acknowledged or ambiguously acknowledged mutation cannot execute twice across the two routes, cancellation releases owned admission, and an old gateway remains compatible in hosted gateway/lifecycle tests.
-- [ ] 1.4 Publish the feature in signed candidate compatibility artifacts; verify candidate digest/signature, fixture synchronization and strict runtime identity tests, then produce the pinned release required by the Substrate companion without changing live state during acceptance.
+- [x] 1.4 Publish the feature in signed candidate compatibility artifacts; verify candidate digest/signature, fixture synchronization and strict runtime identity tests, then produce the pinned release required by the Substrate companion without changing live state during acceptance.
 
 ## 2. Shared gateway infrastructure
 
@@ -33,3 +33,7 @@
 ## Execution dependencies
 
 The runtime binding (section 1) and Substrate admission can be implemented concurrently after the fixture contract is agreed. Infrastructure work starts against the gateway image/environment contract, not an invented duplicate handler. Acceptance runner scaffolding is independent; its live execution waits for the reviewed runtime, admission and gateway. Edge authority, missing credentials and host consent are distinct blocked nodes with exact next actions; they do not block ready local work. Start the unattended continuity window as soon as a fixed candidate is deployed and perform other checks while it elapses.
+
+## Delivery evidence
+
+- Task 1.4: runtime `0.74.0` was published from `bd95fc9826069ec66f142c821abfda4b2f1d0912` by successful release run [34121947678](https://github.com/Artexis10/exomem/actions/runs/34121947678). The immutable image is `ghcr.io/artexis10/exomem@sha256:4fc9c71d051196bad097f7cfd5a0d3c25969abf53c7be2d767218b467586b083`; candidate SHA-256 is `60e19a9611e967ff7ea23d0576ce6122415b68193ae728bc9885d0276734665c`. The governed `hosted_image_candidate.py verify` command reverified both image and candidate subjects against the retained release bundles on 2026-09-07. Substrate's synchronized fixture/trust adoption shipped in [PR167](https://github.com/substrate-systems/substrate/pull/167), with successful main CI [34128387294](https://github.com/substrate-systems/substrate/actions/runs/34128387294). Publication and fixture adoption do not claim live cell upgrade, runtime activation, gateway cutover or service acceptance; tasks 4.3 and 4.4 remain open.
