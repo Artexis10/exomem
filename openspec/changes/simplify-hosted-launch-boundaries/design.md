@@ -40,6 +40,8 @@ Use the existing ClusterIP Traefik service and configured control Host for gatew
 
 Add a pinned gateway image/deployment/service, resource limits, readiness/liveness and graceful termination to the platform chart. No Kubernetes API token is mounted. Bind only required database and credential-unwrapping secrets; do not copy Vercel's complete environment, provider-admin, email or billing keys. Configure bounded pools, scale and rate limits for five users before increasing replicas. Do not create another Kubernetes cluster, tunnel, tenant storage stack or distributed authorization cache.
 
+The gateway image is published by Substrate's main-only, explicitly dispatched `publish-exomem-gateway.yml` workflow after CI passes at the exact source SHA. Consume only `ghcr.io/substrate-systems/substrate-gateway@sha256:<digest>` after verifying GitHub provenance against the canonical source repository, publisher workflow, main ref and exact revision. Neither a discovery tag nor successful image publication authorizes Helm deployment or the public edge cutover.
+
 ### 3. Runtime, service and marketplace evidence remain distinct
 
 The Substrate companion defines activation and certification transactions. Runtime activation still requires authentic candidate identity, current strict v2 matching evidence and the nonempty routable-set fence. Client artifact certification happens later against the active runtime. Existing canary authorization remains only a narrowly scoped operator preparation mechanism, never the normal customer path.

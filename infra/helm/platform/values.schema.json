@@ -25,7 +25,7 @@
       },
       "if": {"properties": {"enabled": {"const": true}}},
       "then": {"properties": {
-        "image": {"pattern": "^ghcr\\.io/artexis10/substrate-gateway@sha256:[a-f0-9]{64}$"},
+        "image": {"pattern": "^ghcr\\.io/substrate-systems/substrate-gateway@sha256:[a-f0-9]{64}$"},
         "originHostname": {"pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$"},
         "databaseEgressCidrs": {"minItems": 1}
       }}

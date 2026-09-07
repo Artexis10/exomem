@@ -7,8 +7,13 @@ passed integration acceptance.
 
 ## Deployment inputs
 
-- Build Substrate's `Dockerfile.exomem-gateway`; supply its published digest as
-  `gateway.image`, using `ghcr.io/artexis10/substrate-gateway@sha256:<digest>`.
+- Publish Substrate's `Dockerfile.exomem-gateway` through its main-only
+  `publish-exomem-gateway.yml` workflow after the exact source passes CI. Follow
+  Substrate's `docs/runbooks/exomem-gateway-publication.md` to verify the image
+  digest and its repository, workflow, source-ref and source-revision provenance.
+  Supply that verified digest as `gateway.image`, using
+  `ghcr.io/substrate-systems/substrate-gateway@sha256:<digest>`; a source-SHA tag
+  is discovery input only. Publishing an image does not authorize deployment.
 - Set `gateway.originHostname` to a dedicated origin on the existing tunnel,
   distinct from the control and browser-transfer hosts. Foundation's optional
   `gateway_hostname` must name the same host. Empty defaults create no route.

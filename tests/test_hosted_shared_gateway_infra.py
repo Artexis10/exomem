@@ -10,7 +10,7 @@ from test_hosted_helm_contract import PLATFORM, _find, _render, _render_process
 ROOT = Path(__file__).resolve().parents[1]
 GATEWAY_ARGS = (
     "--set", "gateway.enabled=true",
-    "--set", "gateway.image=ghcr.io/artexis10/substrate-gateway@sha256:" + "a" * 64,
+    "--set", "gateway.image=ghcr.io/substrate-systems/substrate-gateway@sha256:" + "a" * 64,
     "--set", "gateway.originHostname=mcp-origin.example.test",
     "--set", "gateway.databaseEgressCidrs[0]=203.0.113.10/32",
 )
@@ -98,7 +98,8 @@ def test_gateway_network_policy_limits_ingress_and_egress(documents: list[dict])
 
 
 @pytest.mark.parametrize("override", [
-    "gateway.image=ghcr.io/artexis10/substrate-gateway:latest",
+    "gateway.image=ghcr.io/substrate-systems/substrate-gateway:latest",
+    "gateway.image=ghcr.io/artexis10/substrate-gateway@sha256:" + "a" * 64,
     "gateway.originHostname=control.example.test",
     "gateway.databaseEgressCidrs[0]=0.0.0.0/0",
 ])
