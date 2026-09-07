@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.74.0](https://github.com/Artexis10/exomem/compare/v0.73.1...v0.74.0) (2026-09-07)
+
+
+### Features
+
+* **hosted:** bind private commands to runtime identity ([#1099](https://github.com/Artexis10/exomem/issues/1099)) ([a55ce11](https://github.com/Artexis10/exomem/commit/a55ce118f3f4159cd463d2ae16b117d4cbd5d89b))
+* **hosted:** smoke a live cell from inside its pod, with no client involved ([#1093](https://github.com/Artexis10/exomem/issues/1093)) ([85ec0a0](https://github.com/Artexis10/exomem/commit/85ec0a0627c0566cbe337ae8a10b55c74968c840))
+
+
+### Bug Fixes
+
+* **benchmarks:** align Exomem inputs and guest lifecycle ([#1069](https://github.com/Artexis10/exomem/issues/1069)) ([117915c](https://github.com/Artexis10/exomem/commit/117915c52b2f3d227edf21502433ed8377f9e431))
+* **benchmarks:** report blocked export validation stages ([#1097](https://github.com/Artexis10/exomem/issues/1097)) ([78a6f41](https://github.com/Artexis10/exomem/commit/78a6f410ee43770e19bbc486e3a51a3bd3a9eee0))
+* **scripts:** keep the promotion evidence DSN out of argv and error output ([#1092](https://github.com/Artexis10/exomem/issues/1092)) ([cb84d9a](https://github.com/Artexis10/exomem/commit/cb84d9aa3c7b7756035852e19643522b8f98ea5c))
+* **tests:** reset readiness after the warm-up node instead of only unmanaging ([#1096](https://github.com/Artexis10/exomem/issues/1096)) ([5fc2e55](https://github.com/Artexis10/exomem/commit/5fc2e55db730da25dc757d8c56af6dbcf7212979))
+
 ## [0.73.1](https://github.com/Artexis10/exomem/compare/v0.73.0...v0.73.1) (2026-09-06)
 
 

@@ -24,7 +24,7 @@ spec:
   entryPoints: [web]
   routes:
     - kind: Rule
-      match: Host(`{{ .Values.routes.controlHostname }}`) && (Path(`/cells/{{ .Values.cellId }}/private/exomem/v1`) || PathPrefix(`/cells/{{ .Values.cellId }}/private/exomem/v1/`))
+      match: Host(`{{ .Values.routes.controlHostname }}`) && (Path(`/cells/{{ .Values.cellId }}/private/exomem/v1`) || PathPrefix(`/cells/{{ .Values.cellId }}/private/exomem/v1/`) || (Method(`POST`) && PathRegexp(`^/cells/{{ .Values.cellId }}/private/exomem/v2/agent/[a-z][a-z0-9-]{0,63}/command/[a-z][a-z0-9_]{0,63}$`)))
       middlewares:
         - name: {{ .Values.resourceName }}-strip-cell
       services:

@@ -1,3 +1,18 @@
+gateway:
+  enabled: false
+  # Supplied by the reviewed Substrate image release; never a mutable tag.
+  image: ""
+  originHostname: ""
+  replicas: 1
+  maxInflight: 16
+  databaseSecretName: exomem-gateway-database
+  databaseSecretKey: url
+  controlPlaneKeySecretName: exomem-gateway-control-plane-key
+  controlPlaneKeySecretKey: key
+  # Explicit database endpoint addresses, resolved during deployment preflight.
+  # Refresh these deliberately when the database provider changes its addresses.
+  databaseEgressCidrs: []
+
 cloudflared:
   image: docker.io/cloudflare/cloudflared:2026.7.0@sha256:5e49861633763e8933475477c20bae6039ed47f32c1d267a34babc347f28f0df
   replicas: 1

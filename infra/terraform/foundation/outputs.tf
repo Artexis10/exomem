@@ -13,6 +13,11 @@ output "private_node_ip" {
   value       = var.private_node_ip
 }
 
+output "gateway_hostname" {
+  description = "Optional gateway origin consumed by the Substrate-owned exact-path rewrite."
+  value       = var.gateway_hostname
+}
+
 output "control_hostname" {
   description = "Access-protected public control hostname used by the platform release."
   value       = var.control_hostname

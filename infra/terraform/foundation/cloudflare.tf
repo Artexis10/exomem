@@ -19,7 +19,7 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "alpha" {
   source     = "cloudflare"
 
   config = {
-    ingress = [
+    ingress = concat([
       {
         hostname = var.control_hostname
         service  = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
@@ -33,11 +33,20 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "alpha" {
         origin_request = {
           http_host_header = var.transfer_hostname
         }
-      },
+      }
+      ], var.gateway_hostname == "" ? [] : [
+      {
+        hostname = var.gateway_hostname
+        service  = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
+        origin_request = {
+          http_host_header = var.gateway_hostname
+        }
+      }
+      ], [
       {
         service = "http_status:404"
       }
-    ]
+    ])
   }
 }
 
@@ -59,6 +68,18 @@ resource "cloudflare_dns_record" "transfer" {
   proxied = true
   ttl     = 1
   comment = "Exomem hosted direct browser transfer ingress"
+}
+
+resource "cloudflare_dns_record" "gateway" {
+  count = var.gateway_hostname == "" ? 0 : 1
+
+  zone_id = var.cloudflare_zone_id
+  name    = var.gateway_hostname
+  type    = "CNAME"
+  content = "${cloudflare_zero_trust_tunnel_cloudflared.alpha.id}.cfargotunnel.com"
+  proxied = true
+  ttl     = 1
+  comment = "Exomem canonical OAuth MCP gateway origin"
 }
 
 resource "cloudflare_zero_trust_access_service_token" "substrate" {
