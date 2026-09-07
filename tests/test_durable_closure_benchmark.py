@@ -10,7 +10,9 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "durable_closure_benchmark.py"
 spec = importlib.util.spec_from_file_location("durable_closure_benchmark", MODULE_PATH)
@@ -18,6 +20,40 @@ benchmark = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 sys.modules[spec.name] = benchmark
 spec.loader.exec_module(benchmark)
+
+
+def test_workflow_warmup_waits_for_public_semantic_validation() -> None:
+    calls = []
+
+    class Client:
+        async def call_tool_mcp(self, tool, arguments):
+            calls.append((tool, arguments))
+            payload = (
+                {"success": False, "error": {"code": "MUTATION_WARMING", "retry_after_ms": 1}}
+                if len(calls) == 1
+                else {"semantic": {"transition_token": "validated-preview"}}
+            )
+            return SimpleNamespace(structured_content=payload)
+
+    result = asyncio.run(benchmark._warm_public_mutation(Client(), path="tracker.md", timeout=1))
+
+    assert result["public_validation_calls"] == 2
+    assert result["elapsed_ms"] >= 0
+    assert all(tool == "observe_memory" and args["operation"] == "validate" for tool, args in calls)
+
+
+@pytest.mark.parametrize("payload", [
+    {"success": False, "error": {"code": "MUTATION_WARMING"}},
+    {"success": False, "error": {"code": "VALIDATION_FAILED"}},
+    {"success": True},
+])
+def test_workflow_warmup_never_admits_unproved_mutation_readiness(payload) -> None:
+    class Client:
+        async def call_tool_mcp(self, tool, arguments):
+            return SimpleNamespace(structured_content=payload)
+
+    with pytest.raises(RuntimeError, match="mutation warm-up failed"):
+        asyncio.run(benchmark._warm_public_mutation(Client(), path="tracker.md", timeout=0))
 
 
 def test_ordinary_recall_refusal_fails_useful_closure_and_keeps_its_window() -> None:

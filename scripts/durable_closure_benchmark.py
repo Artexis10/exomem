@@ -27,7 +27,6 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_PUBLIC_TOOLS = (
     "remember",
@@ -1141,6 +1140,30 @@ async def _warm_public_recall(client: Any, *, timeout: float) -> None:
         await asyncio.sleep(min(1.0, max(0.01, float(retry_ms) / 1000.0)))
 
 
+async def _warm_public_mutation(client: Any, *, path: str, timeout: float) -> dict[str, Any]:
+    """Prove semantic admission through a public read-only preview before timing."""
+    started = time.perf_counter()
+    deadline = started + timeout
+    attempts = 0
+    while True:
+        attempts += 1
+        payload = _decode_call(
+            await client.call_tool_mcp(
+                "observe_memory",
+                {"path": path, "operation": "validate", "category": "finding",
+                 "content": "Disposable workflow readiness observation", "id": "workflow-readiness"},
+            )
+        )
+        outcome, code = _result_outcome(payload)
+        if outcome == "ok" and _semantic_diagnostics(payload).get("transition_token"):
+            return {"public_validation_calls": attempts, "elapsed_ms": (time.perf_counter() - started) * 1000.0}
+        if code != "MUTATION_WARMING" or time.perf_counter() >= deadline:
+            raise RuntimeError(f"managed public mutation warm-up failed: {code or 'unproved semantic admission'}")
+        error = payload.get("error")
+        retry_ms = error.get("retry_after_ms", 250) if isinstance(error, Mapping) else 250
+        await asyncio.sleep(min(1.0, max(0.01, float(retry_ms) / 1000.0)))
+
+
 def _permit_refusal_envelopes(client: Any) -> None:
     """Let the MCP client deliver a public refusal envelope to the harness.
 
@@ -1189,7 +1212,9 @@ def _ack_percentiles(calls: Sequence[Mapping[str, Any]]) -> dict[str, float | No
     )
     if not values:
         return {"p50_ms": None, "p95_ms": None}
-    at = lambda fraction: values[min(len(values) - 1, max(0, int(len(values) * fraction + 0.999) - 1))]
+    def at(fraction: float) -> float:
+        return values[min(len(values) - 1, max(0, int(len(values) * fraction + 0.999) - 1))]
+
     return {"p50_ms": at(0.50), "p95_ms": at(0.95)}
 
 
@@ -1269,6 +1294,10 @@ async def run_public_workflow(
         if missing:
             raise RuntimeError(f"registered product MCP surface missing: {missing}")
         await _warm_public_recall(client, timeout=timeout)
+        startup_readiness = await _warm_public_mutation(
+            client, path=corpus["active_tracker"], timeout=timeout
+        )
+        startup_readiness["server_startup_and_readiness_ms"] = (time.perf_counter() - workflow_started) * 1000.0
         await instrumentation_command(state, action="reset", phase="timed", timeout=timeout)
         # Store the shared monotonic origin once before append-only call records.
         workflow_started = time.perf_counter()
@@ -1540,6 +1569,7 @@ async def run_public_workflow(
         "variant": variant,
         "profile": profile,
         "runtime": provenance,
+        "startup_readiness": startup_readiness,
         "status": workflow_status(
             core_passed=closure["passed"],
             media_status=media["status"],
