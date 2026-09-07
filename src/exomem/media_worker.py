@@ -214,6 +214,13 @@ def _target_digest(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _sidecar_is_pending(path: Path) -> bool:
+    try:
+        return "\nprocessing_state: pending\n" in path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+
+
 def _stat_identity(path: Path) -> tuple[int, int, int, int, int] | None:
     """Cheap parent-media identity that is safe to revalidate while locked."""
     try:
@@ -1157,11 +1164,6 @@ class MediaWorker:
                     return
             except OSError:
                 return
-            if (
-                current_binary is None
-                or _result_binary_identity(current_binary) != result.binary_identity
-            ):
-                return
             if not index_sync.recover_full_receipt_graph_epoch(
                 self._vault_root, build=False
             ):
@@ -1178,19 +1180,51 @@ class MediaWorker:
                     result.receipt_revision,
                 )],
             )
-            self._store.finalize_result(
-                result, requeue_remaining=result.kind in {"extraction", "pending"}
+            pending_target = _sidecar_is_pending(job.sidecar_path)
+            binary_changed = (
+                current_binary is None
+                or _result_binary_identity(current_binary) != result.binary_identity
             )
+            if binary_changed and not pending_target:
+                if not self._publish_pending_for_changed_binary(
+                    result, expected_sidecar=current_sidecar
+                ):
+                    return
+                return
+            self._store.finalize_result(
+                result,
+                requeue_remaining=result.kind in {"extraction", "pending"},
+                keep_ocr=pending_target,
+            )
+            return
+        if current_sidecar != result.sidecar_before_hash:
+            from . import media_processing
+
+            if media_processing.has_completed_transcript(
+                job.sidecar_path.read_text(encoding="utf-8"), media_type=job.media_type
+            ):
+                self._store.discard(job)
+            else:
+                self._store.terminalize_result(
+                    result,
+                    state=media_jobs.FAILED,
+                    error="stale media result: sidecar content changed",
+                )
             return
         if (
             current_binary is None
             or _result_binary_identity(current_binary) != result.binary_identity
-            or current_sidecar != result.sidecar_before_hash
         ):
-            # A third value is foreign/stale. It is never a license to replace
-            # canonical bytes. Keep the fenced durable result for a later
-            # reconciliation decision; never erase an OCR result merely because
-            # a sidecar now needs a distinct stale/foreign disposition.
+            if current_binary is not None:
+                self._publish_pending_for_changed_binary(
+                    result, expected_sidecar=current_sidecar
+                )
+            else:
+                self._store.terminalize_result(
+                    result,
+                    state=media_jobs.FAILED,
+                    error="stale media result: binary identity changed",
+                )
             return
         terminal_error: str | None = None
         with get_manager().mutation_guard(
@@ -1264,6 +1298,60 @@ class MediaWorker:
         self._store.finalize_result(
             result, requeue_remaining=result.kind in {"extraction", "pending"}
         )
+
+    def _publish_pending_for_changed_binary(
+        self, result: media_jobs.MediaJobResult, *, expected_sidecar: str | None
+    ) -> bool:
+        """Present changed source as pending, then leave OCR for a fresh claim."""
+        job = result.job
+        if expected_sidecar is None:
+            return False
+        publication_intents: list[object] = []
+        with get_manager().mutation_guard(
+            self._vault_root,
+            operation="background_media_parent_pending_publication",
+            holder_kind="background",
+        ):
+            try:
+                before = job.sidecar_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                return False
+            if _content_digest(job.sidecar_path) != expected_sidecar:
+                return False
+            target = preserve.render_sidecar_processing_failure(
+                before,
+                state=media_jobs.PENDING,
+                attempts=max(1, job.attempts),
+                error="media identity changed",
+                retryable=True,
+                next_action="wait for media reconciliation",
+            )
+            rel = job.sidecar_path.relative_to(self._vault_root).as_posix()
+            [receipt] = deferred_index.add_full_receipts(self._vault_root, [rel])
+            if not self._store.persist_prepared_result(
+                result,
+                target_hash=_target_digest(target),
+                target_size=len(target.encode("utf-8")),
+                receipt_revision=receipt.revision,
+            ):
+                deferred_index.clear_full_receipts(self._vault_root, [receipt])
+                return False
+            handoff = preserve.commit_media_sidecar_writes(
+                self._vault_root,
+                (PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before)),),
+                post_commit_fanout=False,
+                defer_graph_completion=True,
+                publication_intents_out=publication_intents,
+            )
+            assert isinstance(handoff, DeferredGraphCompletion)
+        if not self._complete_deferred_graph_completion(
+            handoff,
+            [receipt],
+            publication_intents=publication_intents,
+            recover_on_mismatch=True,
+        ):
+            return False
+        return self._store.finalize_result(result, requeue_remaining=True, keep_ocr=True)
 
     def scan_pending(self) -> int:
         """Restart recovery: re-enqueue pending OCR + CLIP-index un-indexed images."""

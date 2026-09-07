@@ -402,34 +402,36 @@ def reconcile_media(
             unavailable = _runtime_unavailable(vault)
             if unavailable is not None:
                 reason, next_action = unavailable
-                store.mark(job_id, media_jobs.BLOCKED, reason)
-                current_sidecar = _read_sidecar_text(vault, sidecar)
-                if current_sidecar is None:
-                    raise MediaProcessingError(
-                        "MEDIA_CHANGED_DURING_RECONCILIATION",
-                        "media sidecar disappeared after publication",
-                    )
-                if not _has_runtime_unavailable_state(
-                    current_sidecar, reason=reason, next_action=next_action
+                if durable_job is None or not store.mark(
+                    durable_job, media_jobs.BLOCKED, reason
                 ):
-                    blocked_sidecar = _preserve_module().render_sidecar_processing_failure(
-                        current_sidecar,
-                        state=media_jobs.BLOCKED,
-                        attempts=(
-                            durable_job.attempts if durable_job is not None else 0
-                        ),
-                        error=reason,
-                        retryable=True,
-                        next_action=next_action,
-                    )
-                    _write_sidecar(
-                        PlannedWrite(
-                            path=sidecar,
-                            content=blocked_sidecar,
-                            expected_hash=content_hash(current_sidecar),
+                    result = ReconcileResult(media_type, state, sidecar, job_id)
+                else:
+                    current_sidecar = _read_sidecar_text(vault, sidecar)
+                    if current_sidecar is None:
+                        raise MediaProcessingError(
+                            "MEDIA_CHANGED_DURING_RECONCILIATION",
+                            "media sidecar disappeared after publication",
                         )
-                    )
-                state = media_jobs.BLOCKED
+                    if not _has_runtime_unavailable_state(
+                        current_sidecar, reason=reason, next_action=next_action
+                    ):
+                        blocked_sidecar = _preserve_module().render_sidecar_processing_failure(
+                            current_sidecar,
+                            state=media_jobs.BLOCKED,
+                            attempts=durable_job.attempts,
+                            error=reason,
+                            retryable=True,
+                            next_action=next_action,
+                        )
+                        _write_sidecar(
+                            PlannedWrite(
+                                path=sidecar,
+                                content=blocked_sidecar,
+                                expected_hash=content_hash(current_sidecar),
+                            )
+                        )
+                    state = media_jobs.BLOCKED
             result = ReconcileResult(media_type, state, sidecar, job_id)
 
     assert result is not None
@@ -798,7 +800,7 @@ def _block_ambiguous_retry(
 ) -> ReconcileResult:
     assert job.id is not None
     store.mark(
-        job.id,
+        job,
         media_jobs.BLOCKED,
         job.last_error or "BatchWriteError: reconciliation required",
     )
@@ -1383,8 +1385,8 @@ def mark_processing_unavailable(
                     )
                     assert isinstance(written_result, list)
                     written = written_result
-                store.mark(job.id, media_jobs.BLOCKED, reason)
-                changed += 1
+                if store.mark(current_job, media_jobs.BLOCKED, reason):
+                    changed += 1
         except Exception:  # noqa: BLE001 - one stale job must not abort startup
             log.warning(
                 "media unavailable-state commit failed for %s",

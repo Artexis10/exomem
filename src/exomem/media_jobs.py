@@ -846,16 +846,21 @@ class MediaJobStore:
         if job_id is None:
             return False
         revision_clause = ""
+        state_clause = ""
         params: list[object] = [state, (error or "")[:1000] or None, time.time(), job_id]
         if isinstance(job, MediaJob):
             revision_clause = " AND claim_revision = ?"
-            params.append(job.claim_revision)
+            state_clause = " AND state = ?"
+            params.extend((job.claim_revision, job.state))
         conn = self._connect()
         try:
             with conn:
                 return conn.execute(
                     "UPDATE jobs SET state = ?, last_error = ?, updated_at = ? WHERE id = ?"
-                    + revision_clause,
+                    + revision_clause
+                    + state_clause
+                    + " AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                    "WHERE media_job_results.job_id = jobs.id)",
                     tuple(params),
                 ).rowcount == 1
         finally:
@@ -988,6 +993,7 @@ class MediaJobStore:
             raise ValueError("media result limit must be a positive integer")
         conn = self._connect()
         try:
+            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 """
                 SELECT jobs.*, media_job_results.schema_version,
@@ -1099,7 +1105,9 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def finalize_result(self, result: MediaJobResult, *, requeue_remaining: bool) -> bool:
+    def finalize_result(
+        self, result: MediaJobResult, *, requeue_remaining: bool, keep_ocr: bool = False
+    ) -> bool:
         """CAS-remove a published result, retaining only stages the child did not own."""
         conn = self._connect()
         try:
@@ -1116,7 +1124,11 @@ class MediaJobStore:
                 conn.rollback()
                 return False
             if requeue_remaining:
-                remaining_ocr = 0 if result.kind == "extraction" else int(row["do_ocr"])
+                remaining_ocr = (
+                    int(row["do_ocr"])
+                    if keep_ocr or result.kind != "extraction"
+                    else 0
+                )
                 if remaining_ocr or row["do_clip"] or row["do_reembed"]:
                     delete_job = False
                     changed = conn.execute(
@@ -1324,6 +1336,7 @@ class MediaJobStore:
         """Requeue only exact historical sidecar sharing failures below the limit."""
         conn = self._connect()
         try:
+            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 "SELECT id, sidecar_rel, attempts, last_error "
                 "FROM jobs WHERE state = 'failed' AND attempts < ? "
@@ -1340,15 +1353,22 @@ class MediaJobStore:
                 )
             ]
             if not job_ids:
+                conn.commit()
                 return 0
             placeholders = ",".join("?" for _ in job_ids)
-            with conn:
+            try:
                 changed = conn.execute(
                     f"UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ? "
-                    f"WHERE state = 'failed' AND attempts < ? AND id IN ({placeholders})",
+                    f"WHERE state = 'failed' AND attempts < ? AND id IN ({placeholders}) "
+                    "AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                    "WHERE media_job_results.job_id = jobs.id)",
                     (time.time(), MAX_SHARING_ATTEMPTS, *job_ids),
                 ).rowcount
+                conn.commit()
                 return int(changed)
+            except Exception:
+                conn.rollback()
+                raise
         finally:
             conn.close()
 
@@ -1370,7 +1390,8 @@ class MediaJobStore:
             params.append(self._relative(binary_path))
         conn = self._connect()
         try:
-            with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
                 candidates = conn.execute(
                     f"SELECT id, state, last_error FROM jobs WHERE state IN ({placeholders})"
                     f"{target_clause} AND NOT EXISTS (SELECT 1 FROM media_job_results "
@@ -1384,16 +1405,23 @@ class MediaJobStore:
                     or _classify_batch_write_failure(row["last_error"]) is None
                 ]
                 if not admitted:
+                    conn.commit()
                     return 0
                 now = time.time()
                 changed = 0
                 for job_id, state, error in admitted:
                     changed += conn.execute(
                         "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ? "
-                        "WHERE id = ? AND state = ? AND last_error IS ?",
+                        "WHERE id = ? AND state = ? AND last_error IS ? "
+                        "AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                        "WHERE media_job_results.job_id = jobs.id)",
                         (now, job_id, state, error),
                     ).rowcount
+                conn.commit()
                 return int(changed)
+            except Exception:
+                conn.rollback()
+                raise
         finally:
             conn.close()
 
