@@ -1172,6 +1172,8 @@ def commit_media_sidecar_writes(
 
     from .governance import catalog_publication, graph_producer
 
+    intent_count = len(publication_intents_out) if publication_intents_out is not None else 0
+
     def graph_replacement_provider():
         return graph_producer.replacements_for_planned_markdown(
             vault_root,
@@ -1202,6 +1204,13 @@ def commit_media_sidecar_writes(
     try:
         catalog_publication.publish_markdown_batch(prepared)
     except catalog_publication.CatalogPublicationError as error:
+        if publication_intents_out is not None and len(publication_intents_out) > intent_count:
+            from . import file_watcher
+
+            file_watcher.abort_publication_intents(
+                publication_intents_out[intent_count:],
+                force_paths=[write.path for write in writes],
+            )
         raise catalog_publication.CatalogCommitError(
             "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
             str(error),

@@ -815,6 +815,8 @@ class MediaWorker:
         publication_intents: tuple[object, ...] | list[object] = (),
         recover_on_mismatch: bool = False,
     ) -> bool:
+        publication_intents = tuple(publication_intents)
+        completed = False
         try:
             needs_recovery = False
             with get_manager().mutation_guard(
@@ -887,9 +889,17 @@ class MediaWorker:
             )
             if completed is True:
                 deferred_index.clear_full_receipts(self._vault_root, receipts)
+                completed = True
                 return True
         except Exception:  # noqa: BLE001 - canonical media is already committed
             log.exception("media deferred graph completion failed")
+        finally:
+            if not completed and publication_intents:
+                from . import file_watcher
+
+                file_watcher.abort_publication_intents(
+                    publication_intents, force_paths=token.replaced
+                )
         return False
 
     def _run_clip(self, job: _Job) -> None:
@@ -1200,8 +1210,17 @@ class MediaWorker:
         if current_sidecar != result.sidecar_before_hash:
             from . import media_processing
 
+            try:
+                current_content = job.sidecar_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                self._store.terminalize_result(
+                    result,
+                    state=media_jobs.FAILED,
+                    error="stale media result: sidecar content changed",
+                )
+                return
             if media_processing.has_completed_transcript(
-                job.sidecar_path.read_text(encoding="utf-8"), media_type=job.media_type
+                current_content, media_type=job.media_type
             ):
                 self._store.discard(job)
             else:

@@ -16,6 +16,7 @@ from exomem import (
     deferred_index,
     embeddings,
     extract,
+    file_watcher,
     graph_sync,
     index_sync,
     media_jobs,
@@ -268,6 +269,180 @@ def test_parent_represents_binary_stale_result_as_pending_fresh_claim(
     assert store.pending_result_count() == 0
     requeued = store.get(claimed.id)
     assert requeued is not None and requeued.state == media_jobs.PENDING and requeued.do_ocr
+
+
+def test_parent_requeues_changed_binary_after_failure_result(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="parent-failed-binary-stale.mp3")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    identity = media_worker._binary_identity(binary)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="failure",
+        sidecar_before_hash=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"error": "decoder failed", "next_action": "replace it"},
+        terminal_state=media_jobs.FAILED,
+    )
+    binary.write_bytes(b"replacement media")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_a, **_k: True)
+
+    worker._publish_parent_result(store.pending_results()[0])
+
+    assert "processing_state: pending" in sidecar.read_text(encoding="utf-8")
+    assert store.pending_result_count() == 0
+    requeued = store.get(claimed.id)
+    assert requeued is not None and requeued.state == media_jobs.PENDING and requeued.do_ocr
+    fresh = store.claim_next()
+    assert fresh is not None and fresh.claim_revision > claimed.claim_revision
+
+
+def test_parent_keeps_ocr_enqueued_during_deferred_result_completion(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="parent-rerequest.mp3")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio"))
+    claimed = store.claim_next()
+    assert claimed is not None
+    identity = media_worker._binary_identity(binary)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="extraction",
+        sidecar_before_hash=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"text": "first transcript", "engine": "test"},
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+
+    def complete_then_enqueue(*_args, **_kwargs):
+        store.enqueue(media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio"))
+        return True
+
+    monkeypatch.setattr(worker, "_complete_deferred_graph_completion", complete_then_enqueue)
+    worker._publish_parent_result(store.pending_results()[0])
+
+    assert "first transcript" in sidecar.read_text(encoding="utf-8")
+    assert store.pending_result_count() == 0
+    requeued = store.get(claimed.id)
+    assert requeued is not None and requeued.state == media_jobs.PENDING and requeued.do_ocr
+    fresh = store.claim_next()
+    assert fresh is not None and fresh.claim_revision > claimed.claim_revision
+
+
+@pytest.mark.parametrize(
+    "foreign_bytes",
+    (b"FOREIGN EDIT", b"\xffforeign", None),
+    ids=("text", "opaque", "missing"),
+)
+def test_parent_retires_failed_result_after_foreign_sidecar_change(
+    vault, foreign_bytes: bytes | None
+) -> None:
+    result = _preserve_media_stub(vault, filename="foreign-failure.mp3")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio"))
+    claimed = store.claim_next()
+    assert claimed is not None
+    identity = media_worker._binary_identity(binary)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="failure",
+        sidecar_before_hash=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"error": "decoder failed", "next_action": "replace it"},
+        terminal_state=media_jobs.FAILED,
+    )
+    if foreign_bytes is None:
+        sidecar.unlink()
+    elif foreign_bytes == b"FOREIGN EDIT":
+        sidecar.write_bytes(sidecar.read_bytes() + b"\n" + foreign_bytes + b"\n")
+    else:
+        sidecar.write_bytes(foreign_bytes)
+
+    media_worker.MediaWorker(vault, execution_mode="process")._publish_parent_result(
+        store.pending_results()[0]
+    )
+
+    assert store.pending_result_count() == 0
+    current = store.get(claimed.id)
+    assert current is not None and current.state == media_jobs.FAILED
+    assert current.last_error == "stale media result: sidecar content changed"
+
+
+@pytest.mark.parametrize("recovery_raises", [False, True])
+def test_failed_deferred_completion_aborts_held_publication_intent(
+    vault, monkeypatch: pytest.MonkeyPatch, recovery_raises: bool
+) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "deferred-intent.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"before")
+    staged = vault / "staged.md"
+    staged.write_bytes(b"after")
+    descriptor = os.open(staged, os.O_RDONLY)
+    try:
+        (intent,) = file_watcher.register_publication_intents(
+            vault,
+            [
+                (
+                    target,
+                    descriptor,
+                    hashlib.sha256(b"after").hexdigest(),
+                    hashlib.sha256(b"before").hexdigest(),
+                    len(b"before"),
+                )
+            ],
+        )
+    finally:
+        os.close(descriptor)
+    watcher = file_watcher.FileWatcher(vault)
+    file_watcher.begin_publication_installation([intent])
+    target.write_bytes(b"after")
+    file_watcher.mark_publication_installed([intent])
+    watcher._record(target, deleted=False)
+    assert watcher._pending_publication_intents[target] is intent
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1,
+        mutation_id="a" * 24,
+        paths=((target.relative_to(vault).as_posix(), hashlib.sha256(b"after").hexdigest()),),
+        created_paths=(),
+    )
+    token = vault_module.DeferredGraphCompletion((target,), checkpoint, None)
+    worker = object.__new__(media_worker.MediaWorker)
+    worker._vault_root = vault
+    monkeypatch.setattr(media_worker, "get_manager", lambda: _RecordingMutationManager(vault))
+    monkeypatch.setattr(graph_sync, "floor_path", lambda _vault: vault / "missing-floor")
+    if recovery_raises:
+        monkeypatch.setattr(
+            media_worker.index_sync,
+            "recover_full_receipt_graph_epoch",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("recovery failed")),
+        )
+    else:
+        monkeypatch.setattr(
+            media_worker.index_sync, "recover_full_receipt_graph_epoch", lambda *_args, **_kwargs: False
+        )
+
+    assert not worker._complete_deferred_graph_completion(
+        token, [], publication_intents=[intent], recover_on_mismatch=True
+    )
+    assert intent.disposition == "aborted"
+    assert target in watcher._drain()[1]
 
 
 def test_parent_recovers_prepared_target_without_replacing_sidecar(

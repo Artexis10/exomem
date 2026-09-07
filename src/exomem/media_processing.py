@@ -301,6 +301,15 @@ def reconcile_media(
 
     deferred_fanout: list[Path] = []
     deferred_created: list[Path] = []
+    publication_intents: list[object] = []
+
+    def _abort_publication_intents() -> None:
+        if publication_intents:
+            from . import file_watcher
+
+            file_watcher.abort_publication_intents(
+                publication_intents, force_paths=deferred_fanout
+            )
 
     def _write_sidecar(write: PlannedWrite) -> None:
         from .governance import catalog_publication
@@ -310,6 +319,7 @@ def reconcile_media(
                 vault,
                 (write,),
                 post_commit_fanout=commit_guard is None,
+                publication_intents_out=publication_intents,
                 batch_writer=batch_atomic_write,
             )
         except catalog_publication.CatalogCommitError as error:
@@ -330,13 +340,22 @@ def reconcile_media(
                 yield
         finally:
             if deferred_fanout:
-                post_commit_batch_fanout(
-                    vault,
-                    list(dict.fromkeys(deferred_fanout)),
-                    None,
-                    None,
-                    created_paths=list(dict.fromkeys(deferred_created)),
-                )
+                try:
+                    completed = post_commit_batch_fanout(
+                        vault,
+                        list(dict.fromkeys(deferred_fanout)),
+                        None,
+                        None,
+                        created_paths=list(dict.fromkeys(deferred_created)),
+                        publication_intents=publication_intents,
+                    )
+                    if completed is not True:
+                        _abort_publication_intents()
+                except Exception:
+                    _abort_publication_intents()
+                    raise
+            else:
+                _abort_publication_intents()
 
     with _commit_scope():
         commit_tier = access.access_tier(vault, rel_binary)
@@ -351,6 +370,15 @@ def reconcile_media(
         _verify_binary_identity(binary, resolved_binary, provenance)
         current = _read_sidecar_text(vault, sidecar)
         if current != original:
+            if (
+                current is not None
+                and _completed_provenance_state(
+                    current, media_type=media_type, provenance=provenance
+                )
+                == "valid"
+            ):
+                _discard_stale_job(vault, binary, sidecar, media_type)
+                return ReconcileResult(media_type, "completed", sidecar, None)
             raise MediaProcessingError(
                 "MEDIA_CHANGED_DURING_RECONCILIATION",
                 f"media sidecar changed while reconciliation was being planned: {sidecar}",
@@ -387,17 +415,20 @@ def reconcile_media(
 
             _verify_binary_identity(binary, resolved_binary, provenance)
             store = media_jobs.MediaJobStore(vault)
-            job_id = store.enqueue(
-                media_jobs.MediaJob(
-                    binary_path=binary,
-                    sidecar_path=sidecar,
-                    media_type=media_type,
-                    do_ocr=True,
-                    do_clip=media_type in {"image", "video"}
-                    and not os.environ.get("EXOMEM_DISABLE_CLIP"),
+            durable_job = store.get_by_binary(binary)
+            if original != pending or durable_job is None:
+                job_id = store.enqueue(
+                    media_jobs.MediaJob(
+                        binary_path=binary,
+                        sidecar_path=sidecar,
+                        media_type=media_type,
+                        do_ocr=True,
+                        do_clip=media_type in {"image", "video"}
+                        and not os.environ.get("EXOMEM_DISABLE_CLIP"),
+                    )
                 )
-            )
-            durable_job = store.get(job_id)
+                durable_job = store.get(job_id)
+            job_id = durable_job.id if durable_job is not None else None
             state = durable_job.state if durable_job is not None else media_jobs.PENDING
             unavailable = _runtime_unavailable(vault)
             if unavailable is not None:
@@ -1355,6 +1386,7 @@ def mark_processing_unavailable(
         if job.id is None:
             continue
         written: list[Path] = []
+        publication_intents: list[object] = []
         boundary = commit_guard() if commit_guard is not None else nullcontext()
         try:
             with boundary:
@@ -1386,6 +1418,7 @@ def mark_processing_unavailable(
                             ),
                         ),
                         post_commit_fanout=commit_guard is None,
+                        publication_intents_out=publication_intents,
                         batch_writer=batch_atomic_write,
                     )
                     assert isinstance(written_result, list)
@@ -1393,6 +1426,12 @@ def mark_processing_unavailable(
                 if store.mark(current_job, media_jobs.BLOCKED, reason):
                     changed += 1
         except Exception:  # noqa: BLE001 - one stale job must not abort startup
+            if publication_intents:
+                from . import file_watcher
+
+                file_watcher.abort_publication_intents(
+                    publication_intents, force_paths=written
+                )
             log.warning(
                 "media unavailable-state commit failed for %s",
                 job.binary_path,
@@ -1400,5 +1439,22 @@ def mark_processing_unavailable(
             )
             continue
         if written and commit_guard is not None:
-            post_commit_batch_fanout(vault, written, None, None)
+            try:
+                completed = post_commit_batch_fanout(
+                    vault, written, None, None, publication_intents=publication_intents
+                )
+                if completed is not True and publication_intents:
+                    from . import file_watcher
+
+                    file_watcher.abort_publication_intents(
+                        publication_intents, force_paths=written
+                    )
+            except Exception:
+                if publication_intents:
+                    from . import file_watcher
+
+                    file_watcher.abort_publication_intents(
+                        publication_intents, force_paths=written
+                    )
+                raise
     return changed
