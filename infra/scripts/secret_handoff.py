@@ -34,6 +34,8 @@ class SourceSpec:
     kind: str
     root: str | None = None
     output: str | None = None
+    bindings: str | None = None
+    binding: str | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +185,7 @@ def load_matrix(path: Path) -> HandoffMatrix:
                     "stdin",
                     "prompt",
                     "terraform",
+                    "bws",
                     "generated-ed25519-private",
                     "derived-ed25519-public",
                 }
@@ -192,6 +195,24 @@ def load_matrix(path: Path) -> HandoffMatrix:
             seen_source_kinds.add(kind)
             root = raw_source.get("root")
             output = raw_source.get("output")
+            bindings = raw_source.get("bindings")
+            binding = raw_source.get("binding")
+            if kind == "bws":
+                if set(raw_source) != {"kind", "bindings", "binding"}:
+                    raise HandoffError(f"secret matrix has invalid BWS binding for {name}")
+                if (
+                    not isinstance(bindings, str)
+                    or not bindings.startswith("infra/contracts/")
+                    or not bindings.endswith(".json")
+                    or any(
+                        part in {".", ".."} or not _SAFE_NAME.fullmatch(part)
+                        for part in bindings.split("/")
+                    )
+                ):
+                    raise HandoffError(f"secret matrix has invalid BWS binding path for {name}")
+                binding = _require_string(binding, "BWS binding name")
+            elif bindings is not None or binding is not None:
+                raise HandoffError(f"secret matrix has BWS binding fields on {kind} for {name}")
             if kind == "terraform":
                 root = _require_string(root, "Terraform root")
                 output = _require_string(output, "Terraform output")
@@ -199,7 +220,9 @@ def load_matrix(path: Path) -> HandoffMatrix:
                     raise HandoffError(f"secret matrix has unknown Terraform root for {name}")
             elif root is not None or output is not None:
                 raise HandoffError(f"secret matrix has source fields on {kind} for {name}")
-            sources.append(SourceSpec(kind=kind, root=root, output=output))
+            sources.append(
+                SourceSpec(kind=kind, root=root, output=output, bindings=bindings, binding=binding)
+            )
 
         destinations: dict[str, DestinationSpec] = {}
         for raw_id, raw_destination in raw_destinations.items():
@@ -344,6 +367,28 @@ def _read_secret(
         if secret_spec.value_shape == "file":
             raise HandoffError("a file-shaped secret cannot be read from a single-line prompt")
         return _normalize_secret(getpass.getpass("Secret value: ").encode("utf-8"))
+
+    if source_kind == "bws":
+        assert source.bindings is not None and source.binding is not None
+        root = repository_root.resolve()
+        try:
+            binding_path = (root / source.bindings).resolve(strict=True)
+            if (
+                root / "infra" / "contracts" not in binding_path.parents
+                or not binding_path.is_file()
+            ):
+                raise HandoffError("BWS binding path escapes infrastructure contracts")
+            result = subprocess.run(
+                ["bwsx-secret", "get", "--bindings", str(binding_path), source.binding],
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, RuntimeError, subprocess.TimeoutExpired):
+            raise HandoffError("BWS secret source failed") from None
+        if result.returncode != 0:
+            raise HandoffError("BWS secret source failed")
+        return _normalize_secret(result.stdout, secret_spec.value_shape)
 
     assert source.root is not None and source.output is not None
     terraform_root = repository_root / "infra" / "terraform" / source.root
@@ -967,7 +1012,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--secret", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--destination", action="append", required=True)
-    parser.add_argument("--source", choices=("terraform", "stdin", "prompt"), required=True)
+    parser.add_argument("--source", choices=("terraform", "stdin", "prompt", "bws"), required=True)
     parser.add_argument("--terraform-bin", default=os.environ.get("TERRAFORM_BIN", "terraform"))
     parser.add_argument("--sops-bin", default=os.environ.get("SOPS_BIN", "sops"))
     parser.add_argument("--vercel-bin", default=os.environ.get("VERCEL_BIN", "vercel"))
