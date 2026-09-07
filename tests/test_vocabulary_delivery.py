@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 from exomem import (
+    entity_types,
+    epistemic_graph,
     mutation_terminal,
     vocabulary_projection,
     vocabulary_recovery,
@@ -75,6 +77,156 @@ def test_completed_empty_projections_leave_no_per_write_recovery_history(tmp_pat
     owner = VocabularyState(tmp_path)
     assert not vocabulary_recovery.page(tmp_path, limit=4)
     assert not owner.store.path.exists()
+
+
+def test_proven_empty_write_skips_durable_vocabulary_work(tmp_path, monkeypatch):
+    from test_vocabulary_projection import fixture_no_candidate
+
+    from exomem import vocabulary_delivery
+
+    path = fixture_no_candidate(tmp_path)
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("proven empty writes must not enqueue or project vocabulary work")
+
+    monkeypatch.setattr(vocabulary_recovery, "enqueue", unexpected)
+    monkeypatch.setattr(vocabulary_projection, "for_write", unexpected)
+    with library_scope():
+        result = vocabulary_delivery.after_commit(tmp_path, terminal(path))
+
+    assert result["vocabulary_sync"] == {"state": "current"}
+    assert not VocabularyState(tmp_path).store.path.exists()
+
+
+def test_candidate_write_still_projects_vocabulary_work(tmp_path, monkeypatch):
+    from test_vocabulary_projection import fixture_graph
+
+    from exomem import vocabulary_delivery
+
+    path, _ = fixture_graph(tmp_path)
+    calls = []
+    original = vocabulary_projection.for_write
+
+    def project(*args, **kwargs):
+        calls.append(kwargs["path"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(vocabulary_projection, "for_write", project)
+    with library_scope():
+        result = vocabulary_delivery.after_commit(tmp_path, terminal(path))
+
+    assert calls == [path]
+    assert result["vocabulary_sync"]["state"] == "current"
+    assert result["vocabulary_advisory"]
+
+
+def test_stale_empty_probe_falls_back_to_recoverable_projection(tmp_path, monkeypatch):
+    from test_vocabulary_projection import fixture_no_candidate
+
+    from exomem import vocabulary_delivery
+
+    path = fixture_no_candidate(tmp_path)
+    monkeypatch.setattr(vocabulary_projection, "_live_snapshot", lambda *_args: False)
+    enqueued = []
+    original_enqueue = vocabulary_recovery.enqueue
+
+    def enqueue(root, key, queued_path):
+        enqueued.append(queued_path)
+        return original_enqueue(root, key, queued_path)
+
+    monkeypatch.setattr(vocabulary_recovery, "enqueue", enqueue)
+    monkeypatch.setattr(
+        vocabulary_delivery,
+        "_project",
+        lambda *_args, **_kwargs: {
+            "sync": {"state": "current"},
+            "items": [],
+            "continuation": None,
+        },
+    )
+    with library_scope():
+        result = vocabulary_delivery.after_commit(tmp_path, terminal(path))
+
+    assert enqueued == [path]
+    assert result["vocabulary_sync"] == {"state": "current"}
+
+
+def test_empty_probe_close_failure_falls_back_to_recoverable_projection(tmp_path, monkeypatch):
+    from test_vocabulary_projection import fixture_no_candidate
+
+    from exomem import vocabulary_delivery
+
+    path = fixture_no_candidate(tmp_path)
+    original_open = epistemic_graph.EpistemicGraphIndex._open_read_snapshot
+
+    class FailingCloseConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def close(self):
+            self.connection.close()
+            raise OSError("snapshot close failed")
+
+    def open_snapshot(index):
+        connection = original_open(index)
+        return FailingCloseConnection(connection) if connection is not None else None
+
+    enqueued = []
+    original_enqueue = vocabulary_recovery.enqueue
+
+    def enqueue(root, key, queued_path):
+        enqueued.append(queued_path)
+        return original_enqueue(root, key, queued_path)
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "_open_read_snapshot", open_snapshot)
+    monkeypatch.setattr(vocabulary_recovery, "enqueue", enqueue)
+    monkeypatch.setattr(
+        vocabulary_projection,
+        "for_write",
+        lambda *_args, **_kwargs: {"status": "current", "items": [], "continuation": None},
+    )
+    with library_scope():
+        result = vocabulary_delivery.after_commit(tmp_path, terminal(path))
+
+    assert enqueued == [path]
+    assert result["vocabulary_sync"] == {"state": "current"}
+
+
+def test_registry_change_during_empty_probe_enqueues_the_new_candidate(tmp_path, monkeypatch):
+    from test_vocabulary_projection import activate_place_type, fixture_registry_race
+
+    from exomem import vocabulary_delivery
+
+    path = fixture_registry_race(tmp_path)
+    real_load = entity_types.load_entity_types
+    changed = False
+
+    def load_then_activate(vault):
+        nonlocal changed
+        registry = real_load(vault)
+        if not changed:
+            changed = True
+            activate_place_type(vault)
+        return registry
+
+    enqueued = []
+    original_enqueue = vocabulary_recovery.enqueue
+
+    def enqueue(root, key, queued_path):
+        enqueued.append(queued_path)
+        return original_enqueue(root, key, queued_path)
+
+    monkeypatch.setattr(entity_types, "load_entity_types", load_then_activate)
+    monkeypatch.setattr(vocabulary_recovery, "enqueue", enqueue)
+    with library_scope():
+        result = vocabulary_delivery.after_commit(tmp_path, terminal(path))
+
+    assert enqueued == [path]
+    assert result["vocabulary_advisory"]
+    assert len(VocabularyState(tmp_path).page(limit=4)["items"]) == 1
 
 
 def test_pending_recovery_coalesces_repeated_writes_to_the_same_page(tmp_path, monkeypatch):

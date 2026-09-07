@@ -71,6 +71,16 @@ def after_commit(vault_root: Path, result: Any) -> Any:
     if path is None:
         return result
     try:
+        if vocabulary_projection.proven_empty_for_write(vault_root, path=path):
+            try:
+                off = (
+                    envelope.resolved()["classes"]["structural_suggestions"]["disposition"]
+                    == "off"
+                )
+            except Exception:  # noqa: BLE001 - retain recovery when policy is unavailable
+                pass
+            else:
+                return result if off else {**result, "vocabulary_sync": _sync("current")}
         key = _hash([result.get("request_id"), result.get("receipt_id"), path])
         vocabulary_recovery.enqueue(vault_root, key, path)
         job = vocabulary_recovery.Job(key, path, 0, None)

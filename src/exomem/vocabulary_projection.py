@@ -182,6 +182,92 @@ def _note_pairs(connection, path, known_types, after):
     return pairs, next_after, len(lefts) + len(rights)
 
 
+def _anchor(connection, path):
+    return connection.execute(
+        "SELECT path, source_hash, exomem_id, page_type FROM graph_nodes WHERE node_key=?",
+        (epistemic_graph._file_key(path),),
+    ).fetchone()
+
+
+def _candidate_rows(connection, path, known_types, anchor, after):
+    note_pair = anchor is not None and anchor[3] not in known_types
+    if note_pair:
+        rows, next_after, neighbour_count = _note_pairs(connection, path, known_types, after)
+    else:
+        neighbour_count = 0
+        rows = connection.execute(
+            "SELECT s.path, s.source_hash, s.exomem_id, s.page_type, "
+            "t.path, t.source_hash, t.exomem_id, t.page_type "
+            "FROM graph_edges e JOIN graph_nodes s ON s.node_key=e.src_key "
+            "JOIN graph_nodes t ON t.node_key=e.dst_key "
+            "WHERE e.source_path=? AND e.relation_type='relates_to' "
+            "AND s.kind='file' AND t.kind='file' "
+            "AND s.lifecycle_status='active' AND t.lifecycle_status='active' "
+            "AND (s.path, t.path) > (?, ?) "
+            "GROUP BY s.node_key, t.node_key ORDER BY s.path, t.path LIMIT ?",
+            (epistemic_graph._with_md(path), *after, EDGE_PAGE + 1),
+        ).fetchall()
+        next_after = (
+            [rows[EDGE_PAGE - 1][0], rows[EDGE_PAGE - 1][4]] if len(rows) > EDGE_PAGE else None
+        )
+    return note_pair, rows, next_after, neighbour_count
+
+
+def _anchor_is_current(vault_root: Path, path: str, target_hash: str) -> bool:
+    try:
+        page = vocabulary_review._read(vault_root, {"paths": {path: path}}, path)
+    except (OSError, ValueError):
+        return False
+    return page["content_hash"] == target_hash
+
+
+def _registry_currency(registry) -> tuple[int, str]:
+    return registry.core_version, registry.extension_hash
+
+
+def proven_empty_for_write(vault_root: Path, *, path: str) -> bool:
+    """Whether one live graph snapshot proves this write cannot surface work."""
+    connection = None
+    proof = None
+    try:
+        connection = epistemic_graph.EpistemicGraphIndex(vault_root)._open_read_snapshot()
+        if connection is None:
+            return False
+        generation = _generation(connection)
+        anchor = _anchor(connection, path)
+        if anchor is None:
+            return False
+        registry = entity_types.load_entity_types(vault_root)
+        known_types = sorted(registry.active_ids)
+        registry_currency = _registry_currency(registry)
+        _note_pair, rows, _next_after, _neighbour_count = _candidate_rows(
+            connection, path, known_types, anchor, ["", ""]
+        )
+        if rows:
+            return False
+        proof = (anchor[1], generation, registry_currency)
+    except Exception:  # noqa: BLE001 - a speculative fast path must fail closed
+        return False
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:  # noqa: BLE001 - a speculative fast path must fail closed
+                proof = None
+    if proof is None:
+        return False
+    target_hash, generation, registry_currency = proof
+    try:
+        return (
+            _anchor_is_current(vault_root, path, target_hash)
+            and _registry_currency(entity_types.load_entity_types(vault_root))
+            == registry_currency
+            and _live_snapshot(vault_root, path, target_hash, generation)
+        )
+    except Exception:  # noqa: BLE001 - a speculative fast path must fail closed
+        return False
+
+
 def for_write(vault_root: Path, *, path: str, continuation: str | None = None) -> dict[str, Any]:
     """Read one pair/edge page and one provenance page for a written page.
 
@@ -199,11 +285,10 @@ def for_write(vault_root: Path, *, path: str, continuation: str | None = None) -
         }
     try:
         generation = _generation(connection)
-        known_types = sorted(entity_types.load_entity_types(vault_root).active_ids)
-        anchor = connection.execute(
-            "SELECT path, source_hash, exomem_id, page_type FROM graph_nodes WHERE node_key=?",
-            (epistemic_graph._file_key(path),),
-        ).fetchone()
+        registry = entity_types.load_entity_types(vault_root)
+        known_types = sorted(registry.active_ids)
+        registry_currency = _registry_currency(registry)
+        anchor = _anchor(connection, path)
         note_pair = anchor is not None and anchor[3] not in known_types
         anchor_ref = anchor[0] if anchor is not None else None
         if note_pair and memory_refs.normalize_id(anchor[2]):
@@ -245,25 +330,9 @@ def for_write(vault_root: Path, *, path: str, continuation: str | None = None) -
                     or not all(isinstance(part, str) for part in after)
                 ):
                     raise ValueError("VOCABULARY_CONTINUATION_INVALID: refresh written edge evidence")
-        if note_pair:
-            rows, next_after, neighbour_count = _note_pairs(connection, path, known_types, after)
-        else:
-            neighbour_count = 0
-            rows = connection.execute(
-                "SELECT s.path, s.source_hash, s.exomem_id, s.page_type, "
-                "t.path, t.source_hash, t.exomem_id, t.page_type "
-                "FROM graph_edges e JOIN graph_nodes s ON s.node_key=e.src_key "
-                "JOIN graph_nodes t ON t.node_key=e.dst_key "
-                "WHERE e.source_path=? AND e.relation_type='relates_to' "
-                "AND s.kind='file' AND t.kind='file' "
-                "AND s.lifecycle_status='active' AND t.lifecycle_status='active' "
-                "AND (s.path, t.path) > (?, ?) "
-                "GROUP BY s.node_key, t.node_key ORDER BY s.path, t.path LIMIT ?",
-                (epistemic_graph._with_md(path), *after, EDGE_PAGE + 1),
-            ).fetchall()
-            next_after = (
-                [rows[EDGE_PAGE - 1][0], rows[EDGE_PAGE - 1][4]] if len(rows) > EDGE_PAGE else None
-            )
+        note_pair, rows, next_after, neighbour_count = _candidate_rows(
+            connection, path, known_types, anchor, after
+        )
         source_rows = _source_rows(connection, path, source_after)
         # A UUID-shaped value is not a resolved identity when another file has
         # the same value. Probe the identity index, never the reference scanner.
@@ -287,7 +356,6 @@ def for_write(vault_root: Path, *, path: str, continuation: str | None = None) -
                     }
     finally:
         connection.close()
-    pages, hints = _source_pages(vault_root, source_rows)
     if anchor is None:
         return {
             "status": "unavailable",
@@ -295,6 +363,18 @@ def for_write(vault_root: Path, *, path: str, continuation: str | None = None) -
             "items": [],
             "signals": [],
         }
+    if not rows and (
+        not _anchor_is_current(vault_root, path, anchor[1])
+        or _registry_currency(entity_types.load_entity_types(vault_root)) != registry_currency
+        or not _live_snapshot(vault_root, path, anchor[1], generation)
+    ):
+        return {
+            "status": "unavailable",
+            "reason": "target_projection_changed",
+            "items": [],
+            "signals": [],
+        }
+    pages, hints = _source_pages(vault_root, source_rows)
     provenance = vocabulary_provenance.advance(
         vault_root,
         path=path,

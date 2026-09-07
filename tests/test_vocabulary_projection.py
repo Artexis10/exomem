@@ -2,7 +2,7 @@ import uuid
 
 import pytest
 
-from exomem import epistemic_graph
+from exomem import entity_types, epistemic_graph
 from exomem import vocabulary_projection as projection
 from exomem.governance.principal import library_scope
 
@@ -68,6 +68,67 @@ def fixture_many_edges(vault):
     with library_scope():
         epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     return path
+
+
+def fixture_no_candidate(vault):
+    path, _ = fixture_graph(vault)
+    page = vault / path
+    page.write_text(
+        page.read_text(encoding="utf-8").replace(
+            "## Relations\n- relates_to [[Entities/Organizations/second]]\n",
+            "See [[Entities/Organizations/second]].\n",
+        ),
+        encoding="utf-8",
+    )
+    with library_scope():
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    return path
+
+
+def fixture_registry_race(vault):
+    path = "Knowledge Base/Notes/Insights/places.md"
+    for name in ("a", "b"):
+        write(
+            vault,
+            f"Knowledge Base/Entities/Places/{name}.md",
+            f"---\ntype: place\nstatus: active\nexomem_id: {uuid.uuid4()}\n---\nPlace {name}.\n",
+        )
+    for name in ("one", "two"):
+        write(
+            vault,
+            f"Knowledge Base/Sources/Articles/{name}.md",
+            f"---\ntype: source\nurl: https://example.test/{name}\n"
+            f"exomem_id: {uuid.uuid4()}\n---\nIndependent source {name}.\n",
+        )
+    write(
+        vault,
+        path,
+        '---\ntype: insight\nsources: ["[[Sources/Articles/one]]", '
+        '"[[Sources/Articles/two]]"]\n---\n'
+        "The reports connect [[Entities/Places/a]] and [[Entities/Places/b]].\n",
+    )
+    with library_scope():
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    return path
+
+
+def activate_place_type(vault):
+    registry = entity_types.extension_registry_path(vault)
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(
+        """schema_version: 1
+entity_types:
+  place:
+    folder: Places
+    label: Place
+    aliases: [location]
+    capture_guidance: A stable place identity used across notes.
+    parent: concept
+    status: active
+""",
+        encoding="utf-8",
+    )
+    entity_types._CACHE.clear()
 
 
 def test_edge_cursor_can_resume_every_pair_without_duplicates(tmp_path):
@@ -147,6 +208,44 @@ def test_real_generic_edge_and_independent_sources_produce_bounded_work(tmp_path
     assert all(ref.startswith("exomem://memory/") for ref, _ in item.target_versions)
     assert result["signals"][0]["independent_origins"] == 2
     assert result["signals"][0]["selected_relation"] is None
+
+
+def test_empty_probe_requires_a_live_snapshot(tmp_path, monkeypatch):
+    path = fixture_no_candidate(tmp_path)
+
+    assert projection.proven_empty_for_write(tmp_path, path=path)
+    monkeypatch.setattr(projection, "_live_snapshot", lambda *_args: False)
+    assert not projection.proven_empty_for_write(tmp_path, path=path)
+
+
+def test_empty_projection_refuses_an_unindexed_anchor_change(tmp_path):
+    path = fixture_no_candidate(tmp_path)
+    page = tmp_path / path
+    page.write_text(page.read_text(encoding="utf-8") + "Unindexed edit.\n", encoding="utf-8")
+
+    with library_scope():
+        result = projection.for_write(tmp_path, path=path)
+
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "target_projection_changed"
+
+
+def test_empty_probe_refuses_a_changed_entity_registry(tmp_path, monkeypatch):
+    path = fixture_registry_race(tmp_path)
+    real_load = entity_types.load_entity_types
+    changed = False
+
+    def load_then_activate(vault):
+        nonlocal changed
+        registry = real_load(vault)
+        if not changed:
+            changed = True
+            activate_place_type(vault)
+        return registry
+
+    monkeypatch.setattr(entity_types, "load_entity_types", load_then_activate)
+
+    assert not projection.proven_empty_for_write(tmp_path, path=path)
 
 
 @pytest.mark.parametrize("duplicate_endpoint", [False, True])
@@ -243,6 +342,18 @@ def test_missing_graph_is_typed_unavailable_not_clean(tmp_path):
     assert result["status"] == "unavailable"
     assert result["items"] == []
     assert result["reason"] == "graph_projection_unavailable"
+
+
+def test_missing_anchor_in_a_ready_graph_is_typed_unavailable(tmp_path):
+    fixture_graph(tmp_path)
+
+    with library_scope():
+        result = projection.for_write(
+            tmp_path, path="Knowledge Base/Entities/Organizations/missing.md"
+        )
+
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "target_projection_unavailable"
 
 
 def test_projection_does_not_walk_corpus_or_resolve_ids_by_scan(tmp_path, monkeypatch):
