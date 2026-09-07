@@ -104,3 +104,53 @@ def test_checkpoint_is_inert_before_inspecting_a_vault_spelling() -> None:
             raise AssertionError("inactive checkpoint must not inspect its vault")
 
     foreground_activity.checkpoint(UnusablePath())
+
+
+def test_checkpoint_stops_after_one_scheduling_overshoot(tmp_path, monkeypatch) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    clock = [0.0]
+    sleeps: list[float] = []
+    monkeypatch.setattr(foreground_activity.time, "monotonic", lambda: clock[0])
+
+    def sleep(requested: float) -> None:
+        sleeps.append(requested)
+        clock[0] += 1.0
+
+    monkeypatch.setattr(foreground_activity.time, "sleep", sleep)
+    entered = threading.Event()
+    release = threading.Event()
+    thread = threading.Thread(
+        target=lambda: _hold_foreground(vault, entered, release), daemon=True
+    )
+    thread.start()
+    assert entered.wait(1)
+    with foreground_activity.background_scope(vault):
+        foreground_activity.checkpoint(vault)
+    release.set()
+    thread.join(1)
+    assert sleeps == [0.005]
+
+
+def test_checkpoint_resamples_waiter_after_a_pause(tmp_path, monkeypatch) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    waiter = [False]
+    sleeps: list[float] = []
+    monkeypatch.setattr(foreground_activity.time, "sleep", lambda delay: (sleeps.append(delay), waiter.__setitem__(0, True)))
+    entered = threading.Event()
+    release = threading.Event()
+    thread = threading.Thread(target=lambda: _hold_foreground(vault, entered, release), daemon=True)
+    thread.start()
+    assert entered.wait(1)
+    with foreground_activity.background_scope(vault, waiter_bypass=lambda: waiter[0]):
+        foreground_activity.checkpoint(vault)
+    release.set()
+    thread.join(1)
+    assert sleeps == [0.005]
+
+
+def _hold_foreground(vault, entered: threading.Event, release: threading.Event) -> None:
+    with foreground_activity.foreground_scope(vault):
+        entered.set()
+        release.wait()
