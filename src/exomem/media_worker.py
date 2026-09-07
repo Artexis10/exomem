@@ -1192,21 +1192,27 @@ class MediaWorker:
                     return
             except OSError:
                 return
-            if not index_sync.recover_full_receipt_graph_epoch(
-                self._vault_root, build=False
-            ):
-                return
-            completed = post_commit_batch_fanout(
-                self._vault_root, [job.sidecar_path], None, None
+            receipt = deferred_index.DeferredReceipt(
+                job.sidecar_path.relative_to(self._vault_root).as_posix(),
+                result.receipt_revision,
             )
+            coordinator = get_manager()._mutation_coordinator_for(self._vault_root)
+            with epistemic_graph.parent_receipted_graph_handoff(
+                self._vault_root,
+                state_root=coordinator.state_root,
+                receipts=(receipt,),
+            ):
+                if not index_sync.recover_full_receipt_graph_epoch(
+                    self._vault_root, build=False
+                ):
+                    return
+                completed = post_commit_batch_fanout(
+                    self._vault_root, [job.sidecar_path], None, None
+                )
             if completed is not True:
                 return
             deferred_index.clear_full_receipts(
-                self._vault_root,
-                [deferred_index.DeferredReceipt(
-                    job.sidecar_path.relative_to(self._vault_root).as_posix(),
-                    result.receipt_revision,
-                )],
+                self._vault_root, [receipt]
             )
             pending_target = _sidecar_is_pending(job.sidecar_path)
             binary_changed = (
@@ -1264,6 +1270,7 @@ class MediaWorker:
                 )
             return
         terminal_error: str | None = None
+        terminal_state = media_jobs.BLOCKED
         with get_manager().mutation_guard(
             self._vault_root,
             operation="background_media_parent_publication",
@@ -1294,9 +1301,11 @@ class MediaWorker:
                         next_action=str(result.payload["next_action"]),
                     )
             except preserve.PreserveError as exc:
-                if exc.code != "AMBIGUOUS_SIDECAR_BOUNDARY":
-                    raise
-                terminal_error = f"{exc.code}: {exc.reason}"
+                if exc.code == "AMBIGUOUS_SIDECAR_BOUNDARY":
+                    terminal_error = f"{exc.code}: {exc.reason}"
+                else:
+                    terminal_error = f"{type(exc).__name__}: {exc}"
+                    terminal_state = media_jobs.FAILED
                 handoff = None
             if terminal_error is not None:
                 pass
@@ -1321,7 +1330,7 @@ class MediaWorker:
                 assert isinstance(handoff, DeferredGraphCompletion)
         if terminal_error is not None:
             self._store.terminalize_result(
-                result, state=media_jobs.BLOCKED, error=terminal_error
+                result, state=terminal_state, error=terminal_error
             )
             return
         assert handoff is not None
