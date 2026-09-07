@@ -27,7 +27,7 @@ import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE = re.compile(r"^ghcr\.io/artexis10/exomem@sha256:[0-9a-f]{64}$")
@@ -179,7 +179,15 @@ class WallClockDeadline:
         return max(0.0, self.started_at + self.duration_seconds - (time.time() if now is None else now))
 
 
-def latency_summary(samples: Sequence[float], *, errors: int, kind: str) -> dict[str, float | int | str]:
+class LatencySummary(TypedDict):
+    kind: str
+    samples: int
+    p50_ms: float
+    p95_ms: float
+    errors: int
+
+
+def latency_summary(samples: Sequence[float], *, errors: int, kind: str) -> LatencySummary:
     if kind not in {"warm", "cold"} or not samples or errors < 0:
         raise AcceptanceError("latency samples are invalid")
     ordered = sorted(samples)
@@ -639,7 +647,7 @@ class AcceptanceRunner:
         errors: dict[str, int] = {operation: 0 for operation in warm}
 
         def worker(worker_id: int) -> tuple[dict[str, list[float]], dict[str, int]]:
-            samples = {operation: [] for operation in warm}
+            samples: dict[str, list[float]] = {operation: [] for operation in warm}
             failures = {operation: 0 for operation in warm}
             tenant = ("synthetic", "isolation")[worker_id % 2]
             for ordinal in range(20):
@@ -816,16 +824,16 @@ def main(argv: Sequence[str] | None = None, *, allow_loopback_fixture: bool = Fa
         elif args.action == "run":
             if args.authorization_code and args.callback_state:
                 pending = _read_json(runner.tokens_path)
-                request = pending.get("pending", {}).get(args.tenant) if isinstance(pending.get("pending"), dict) else None
-                if not isinstance(request, dict):
+                pending_request = pending.get("pending", {}).get(args.tenant) if isinstance(pending.get("pending"), dict) else None
+                if not isinstance(pending_request, dict):
                     raise AcceptanceError("run authorize first to create private PKCE state")
                 oauth = runner._oauth_client()
                 tokens = oauth.exchange_code(
                     oauth.discover(),
                     code=args.authorization_code,
                     state=args.callback_state,
-                    expected_state=_string(request.get("state"), label="saved OAuth state"),
-                    code_verifier=_string(request.get("code_verifier"), label="saved PKCE verifier"),
+                    expected_state=_string(pending_request.get("state"), label="saved OAuth state"),
+                    code_verifier=_string(pending_request.get("code_verifier"), label="saved PKCE verifier"),
                 )
                 tokens["expires_at"] = time.time() + float(tokens.get("expires_in", 0))
                 runner.save_tokens(tokens, tenant=args.tenant)
