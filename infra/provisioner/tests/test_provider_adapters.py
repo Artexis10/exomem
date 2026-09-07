@@ -708,6 +708,17 @@ async def test_traefik_adapter_closes_and_reopens_only_exact_routes() -> None:
     rendered = json.dumps(custom.applied, sort_keys=True)
     assert '"stripPrefix": {"prefixes": ["/cells/cell-alpha"]}' in rendered
     assert f"/cells/{_metadata().subject_id}/private/exomem/v1" in rendered
+    control_route = next(
+        obj for obj in custom.applied if obj.get("kind") == "IngressRoute"
+        and obj["metadata"]["name"].endswith("-control")
+    )
+    assert control_route["spec"]["routes"][0]["match"] == (
+        "Host(`control.example.invalid`) && "
+        "(Path(`/cells/cell-alpha/private/exomem/v1`) || "
+        "PathPrefix(`/cells/cell-alpha/private/exomem/v1/`) || "
+        "(Method(`POST`) && PathRegexp(`^/cells/cell-alpha/private/exomem/v2/agent/"
+        "[a-z][a-z0-9-]{0,63}/command/[a-z][a-z0-9_]{0,63}$`)))"
+    )
     assert f"/cells/{_metadata().subject_id}/public/exomem/v2/transfers/upload" in rendered
     assert "upstream" not in rendered.lower()
     assert "namespaceSelector" not in rendered

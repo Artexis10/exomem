@@ -3009,7 +3009,9 @@ def test_cell_routes_expose_only_exact_control_and_transfer_paths() -> None:
     assert control["spec"]["routes"][0]["match"] == (
         "Host(`control.example.test`) && "
         "(Path(`/cells/alpha-test-original/private/exomem/v1`) || "
-        "PathPrefix(`/cells/alpha-test-original/private/exomem/v1/`))"
+        "PathPrefix(`/cells/alpha-test-original/private/exomem/v1/`) || "
+        "(Method(`POST`) && PathRegexp(`^/cells/alpha-test-original/private/exomem/v2/agent/"
+        "[a-z][a-z0-9-]{0,63}/command/[a-z][a-z0-9_]{0,63}$`)))"
     )
     control_match = control["spec"]["routes"][0]["match"]
     assert "PathPrefix(`/cells/alpha-test-original/private/exomem/v1`)" not in control_match
@@ -3070,7 +3072,8 @@ def test_cloudflare_tunnel_targets_the_rendered_production_traefik_service() -> 
     ]
     target = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
     cloudflare = (ROOT / "infra/terraform/foundation/cloudflare.tf").read_text(encoding="utf-8")
-    assert cloudflare.count(target) == 2
+    origins = re.findall(r'service\s*=\s*"(https?://[^\"]+)"', cloudflare)
+    assert origins and set(origins) == {target}
 
 
 def test_no_two_rendered_objects_share_one_kubernetes_identity() -> None:
