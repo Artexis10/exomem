@@ -304,7 +304,6 @@ class MCPClient:
         self.endpoint = _https(endpoint, label="MCP endpoint", allow_loopback_fixture=allow_loopback_fixture)
         self.access_token = _string(access_token, label="OAuth access token")
         self.protocol_version: str | None = None
-        self.session_id: str | None = None
 
     def call(self, method: str, params: Mapping[str, Any] | None = None, *, request_id: str | int | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
         request_id = secrets.token_hex(12) if request_id is None else request_id
@@ -312,8 +311,6 @@ class MCPClient:
         headers = {"Authorization": f"Bearer {self.access_token}", "Content-Type": "application/json", "Accept": "application/json, text/event-stream", "Cache-Control": "no-store"}
         if self.protocol_version and method != "initialize":
             headers["MCP-Protocol-Version"] = self.protocol_version
-        if self.session_id:
-            headers["MCP-Session-Id"] = self.session_id
         if idempotency_key:
             headers["Idempotency-Key"] = _string(idempotency_key, label="idempotency key")
         request = urllib.request.Request(self.endpoint, data=canonical_json(payload), headers=headers, method="POST")
@@ -321,7 +318,6 @@ class MCPClient:
             with _open(request, timeout=30) as response:  # nosec B310: endpoint is validated HTTPS
                 body = response.read(_MAX_RESPONSE_BYTES + 1)
                 content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
-                session_id = response.headers.get("MCP-Session-Id")
         except OSError as exc:
             raise AcceptanceError(f"MCP request failed: {type(exc).__name__}") from exc
         if len(body) > _MAX_RESPONSE_BYTES:
@@ -329,9 +325,24 @@ class MCPClient:
         envelope = _decode_mcp_envelope(body, content_type, request_id)
         if not isinstance(envelope, dict) or envelope.get("jsonrpc") != "2.0" or envelope.get("id") != request_id or "error" in envelope or not isinstance(envelope.get("result"), dict):
             raise AcceptanceError("MCP response does not match request")
-        if session_id:
-            self.session_id = session_id
         return envelope["result"]
+
+    def notify(self, method: str, params: Mapping[str, Any] | None = None) -> None:
+        payload = {"jsonrpc": "2.0", "method": method, "params": dict(params or {})}
+        headers = {"Authorization": f"Bearer {self.access_token}", "Content-Type": "application/json", "Accept": "application/json, text/event-stream", "Cache-Control": "no-store"}
+        if self.protocol_version:
+            headers["MCP-Protocol-Version"] = self.protocol_version
+        request = urllib.request.Request(self.endpoint, data=canonical_json(payload), headers=headers, method="POST")
+        try:
+            with _open(request, timeout=30) as response:  # nosec B310: endpoint is validated HTTPS
+                body = response.read(_MAX_RESPONSE_BYTES + 1)
+                status = response.status
+        except OSError as exc:
+            raise AcceptanceError(f"MCP notification failed: {type(exc).__name__}") from exc
+        if len(body) > _MAX_RESPONSE_BYTES:
+            raise AcceptanceError("MCP notification response exceeds size limit")
+        if status != 202 or body:
+            raise AcceptanceError("MCP notification was not accepted as an empty 202 response")
 
     def initialize(self) -> dict[str, Any]:
         result = self.call("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "exomem-hosted-acceptance", "version": "1"}}, request_id=1)
@@ -339,7 +350,7 @@ class MCPClient:
         if not isinstance(version, str) or version != "2025-06-18":
             raise AcceptanceError("MCP initialize did not negotiate the hosted protocol")
         self.protocol_version = version
-        self.call("notifications/initialized", {})
+        self.notify("notifications/initialized", {})
         return result
 
     def list_tools(self) -> dict[str, Any]:
@@ -532,30 +543,40 @@ class AcceptanceRunner:
 
     def run_protocol(self) -> None:
         """Exercise the canonical public tools with independent tenant tokens."""
-        self.load_tokens(tenant="synthetic")
-        self.load_tokens(tenant="isolation")
-        client = self._mcp_client("synthetic")
-        initialized = client.initialize()
-        tools = client.list_tools().get("tools")
-        names = [item.get("name") for item in tools if isinstance(item, dict)] if isinstance(tools, list) else []
-        if not {"remember", "ask_memory", "read_memory"} <= set(names):
-            raise AcceptanceError("canonical hosted v4 tools are unavailable")
-        fact = f"hosted acceptance sentinel {self.run_id}"
-        committed = self.manifest()["mutations"].get("durable-capture", {}).get("receipt", {}).get("status") == "committed"
-        if not committed:
-            capture = client.capture({"title": f"Hosted acceptance {self.run_id}", "content": f"## Observations\n- [acceptance] {fact} #hosted ^{self.run_id}", "note_type": "insight", "sources": []}, idempotency_key=self.mutation_request_id("durable-capture"))
-            content = _tool_result(capture)
-            if "committed" not in json.dumps(content).lower():
-                raise AcceptanceError("capture has no durable acknowledgement")
-            self.complete_mutation("durable-capture", receipt={"status": "committed", "request_id": self.mutation_request_id("durable-capture")})
-        fresh = self._mcp_client("synthetic")
-        fresh.initialize()
-        recalled = _tool_result(fresh.recall(f"Which hosted acceptance sentinel belongs to this run: {self.run_id}?"))
-        citation = _citation_for_fact(recalled, fact)
-        readback = _tool_result(fresh.call("tools/call", {"name": "read_memory", "arguments": {"path": citation}}))
-        if fact not in json.dumps(readback):
-            raise AcceptanceError("recall citation does not resolve to this run fact")
-        self.record_protocol_evidence(initialize=bool(initialized), tools_list=[str(name) for name in names], durable_ack={"status": "committed"}, recall={"fact": fact, "citation": citation})
+        proofs: dict[str, dict[str, Any]] = {}
+        fresh_clients: dict[str, MCPClient] = {}
+        base_fact = f"hosted acceptance sentinel {self.run_id}"
+        for tenant in ("synthetic", "isolation"):
+            client = self._mcp_client(tenant)
+            initialized = client.initialize()
+            tools = client.list_tools().get("tools")
+            names = [item.get("name") for item in tools if isinstance(item, dict)] if isinstance(tools, list) else []
+            if not {"remember", "ask_memory", "read_memory"} <= set(names):
+                raise AcceptanceError("canonical hosted v4 tools are unavailable")
+            fact = base_fact if tenant == "synthetic" else f"{base_fact} isolation"
+            mutation = "durable-capture" if tenant == "synthetic" else "durable-capture-isolation"
+            committed = self.manifest()["mutations"].get(mutation, {}).get("receipt", {}).get("status") == "committed"
+            if not committed:
+                capture = client.capture({"title": f"Hosted acceptance {self.run_id} {tenant}", "content": f"## Observations\n- [acceptance] {fact} #hosted ^{self.run_id}-{tenant}", "note_type": "insight", "sources": []}, idempotency_key=self.mutation_request_id(mutation))
+                content = _tool_result(capture)
+                if "committed" not in json.dumps(content).lower():
+                    raise AcceptanceError("capture has no durable acknowledgement")
+                self.complete_mutation(mutation, receipt={"status": "committed", "request_id": self.mutation_request_id(mutation)})
+            fresh = self._mcp_client(tenant)
+            fresh.initialize()
+            recalled = _tool_result(fresh.recall(f"Which hosted acceptance sentinel belongs to this run: {self.run_id}" + (" isolation?" if tenant == "isolation" else "?")))
+            citation = _citation_for_fact(recalled, fact)
+            readback = _tool_result(fresh.call("tools/call", {"name": "read_memory", "arguments": {"path": citation}}))
+            if fact not in json.dumps(readback):
+                raise AcceptanceError("recall citation does not resolve to this run fact")
+            proofs[tenant] = {"initialize": bool(initialized), "tools": [str(name) for name in names], "durable_ack": "committed", "fact": fact, "citation": citation}
+            fresh_clients[tenant] = fresh
+        for tenant, foreign in (("synthetic", "isolation"), ("isolation", "synthetic")):
+            foreign_fact = proofs[foreign]["fact"]
+            recalled = _tool_result(fresh_clients[tenant].recall(f"Which hosted acceptance sentinel belongs to this run: {self.run_id}" + (" isolation?" if foreign == "isolation" else "?")))
+            if foreign_fact in json.dumps(recalled):
+                raise AcceptanceError("cross-tenant recall exposed the other reserved tenant sentinel")
+        self.pass_stage("protocol", {"tenant_proofs": proofs, "cross_tenant_recall": "passed"})
 
     def _mcp_client(self, tenant: str) -> MCPClient:
         tokens = self.load_tokens(tenant=tenant)

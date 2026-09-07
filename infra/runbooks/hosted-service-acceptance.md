@@ -65,6 +65,12 @@ committed mutation. `blocked` is a checkpoint with one exact operator action;
 it is neither a pass nor a reason to stop independent stages. In particular,
 OAuth/MCP protocol evidence cannot certify Claude or OpenAI hosts.
 
+The public MCP sequence is stateless: after `initialize`, the runner sends an
+id-less `notifications/initialized` JSON-RPC notification and requires the
+canonical empty `202` response before using tools. It does not persist or send
+an MCP session identifier. A protocol pass includes distinct synthetic and
+isolation sentinels with cited readback, plus reciprocal negative recall checks.
+
 Generate the deterministic reserved-cell corpus only under run-owned fixture
 state; it has at least 1,000 notes and 10 MiB of public-safe varied content:
 

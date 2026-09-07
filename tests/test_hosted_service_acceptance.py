@@ -225,7 +225,11 @@ def test_public_oauth_and_mcp_clients_use_real_isolated_loopback_protocol_fixtur
             if request["method"] == "initialize":
                 result = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "exomem"}}
             elif request["method"] == "notifications/initialized":
-                result = {}
+                assert "id" not in request
+                self.send_response(202)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             elif request["method"] == "tools/list":
                 result = {"tools": [{"name": "remember"}, {"name": "ask_memory"}]}
             else:
@@ -267,6 +271,54 @@ def test_public_oauth_and_mcp_clients_use_real_isolated_loopback_protocol_fixtur
         assert mcp.initialize()["serverInfo"]["name"] == "exomem"
         assert [tool["name"] for tool in mcp.list_tools()["tools"]] == ["remember", "ask_memory"]
         assert mcp.capture({"title": "fixture"})["structuredContent"]["status"] == "committed"
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_mcp_initialized_notification_is_idless_and_accepts_canonical_empty_202() -> None:
+    runner = _load()
+    notifications: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - HTTP handler API
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if request["method"] == "initialize":
+                self._json({"jsonrpc": "2.0", "id": request["id"], "result": {"protocolVersion": "2025-06-18", "serverInfo": {"name": "Hosted Exomem"}}})
+                return
+            if request["method"] == "notifications/initialized":
+                notifications.append(request)
+                if "id" in request:
+                    self._json({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32601, "message": "Method not found"}})
+                    return
+                self.send_response(202)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            assert self.headers["Mcp-Protocol-Version"] == "2025-06-18"
+            self._json({"jsonrpc": "2.0", "id": request["id"], "result": {"tools": []}})
+
+        def _json(self, payload: dict[str, Any]) -> None:
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    endpoint = f"http://127.0.0.1:{server.server_port}/api/exomem/mcp/v1"
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        client = runner.MCPClient(endpoint=endpoint, access_token="fixture-access", allow_loopback_fixture=True)
+
+        client.initialize()
+        assert client.list_tools() == {"tools": []}
+        assert notifications == [{"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}]
     finally:
         server.shutdown()
         thread.join()
@@ -361,15 +413,24 @@ def test_cli_runs_producer_shaped_initialize_capture_and_fresh_cited_recall(tmp_
                 assert self.headers["Mcp-Protocol-Version"] == "2025-06-18"
                 result = {"tools": [{"name": "remember"}, {"name": "ask_memory"}, {"name": "read_memory"}]}
             elif method == "notifications/initialized":
-                result = {}
+                assert "id" not in request
+                self.send_response(202)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             else:
                 tool = request["params"]["name"]
                 if tool == "remember":
                     result = {"structuredContent": {"result": {"outcome": "committed"}}}
                 elif tool == "ask_memory":
-                    result = {"structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/acceptance.md", "text": "hosted acceptance sentinel cli-run-001"}]}}}
+                    tenant = self.headers["Authorization"].removeprefix("Bearer ").removesuffix("-access")
+                    query = request["params"]["arguments"]["query"]
+                    own_fact = "hosted acceptance sentinel cli-run-001" + (" isolation" if tenant == "isolation" else "")
+                    target_isolation = query.endswith(" isolation?")
+                    result = {"structuredContent": {"result": {"hits": [{"path": f"Knowledge Base/Notes/Insights/{tenant}.md", "text": own_fact}] if (tenant == "isolation") == target_isolation else []}}}
                 else:
-                    result = {"structuredContent": {"result": {"content": "hosted acceptance sentinel cli-run-001"}}}
+                    tenant = self.headers["Authorization"].removeprefix("Bearer ").removesuffix("-access")
+                    result = {"structuredContent": {"result": {"content": "hosted acceptance sentinel cli-run-001" + (" isolation" if tenant == "isolation" else "")}}}
             envelope = {"jsonrpc": "2.0", "id": request["id"], "result": result}
             sse = method == "tools/call" and request["params"]["name"] == "ask_memory"
             body = (f"data: {json.dumps(envelope)}\n\n" if sse else json.dumps(envelope)).encode()
@@ -399,7 +460,8 @@ def test_cli_runs_producer_shaped_initialize_capture_and_fresh_cited_recall(tmp_
 
         assert runner.main(["run", "--config", str(config_path), "--state-dir", str(tmp_path / "state"), "--run-id", "cli-run-001", "--resume"], allow_loopback_fixture=True) == 0
         assert acceptance.manifest()["stages"]["protocol"]["status"] == "passed"
-        assert [request["method"] for request in requests] == ["initialize", "notifications/initialized", "tools/list", "tools/call", "initialize", "notifications/initialized", "tools/call", "tools/call"]
+        assert [request["method"] for request in requests] == ["initialize", "notifications/initialized", "tools/list", "tools/call", "initialize", "notifications/initialized", "tools/call", "tools/call", "initialize", "notifications/initialized", "tools/list", "tools/call", "initialize", "notifications/initialized", "tools/call", "tools/call", "tools/call", "tools/call"]
+        assert {request["headers"]["Authorization"] for request in requests} == {"Bearer synthetic-access", "Bearer isolation-access"}
     finally:
         server.shutdown()
         thread.join()
@@ -418,7 +480,11 @@ def test_benchmark_uses_five_concurrent_tenant_clients_and_never_passes_incomple
             if request["method"] == "initialize":
                 result: dict[str, Any] = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "Hosted Exomem"}}
             elif request["method"] == "notifications/initialized":
-                result = {}
+                assert "id" not in request
+                self.send_response(202)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             elif request["method"] == "tools/list":
                 result = {"tools": [{"name": "remember"}, {"name": "ask_memory"}, {"name": "read_memory"}]}
             else:
@@ -512,7 +578,11 @@ def test_continuity_rotates_persisted_tokens_then_proves_service_use_after_fleet
             if request["method"] == "initialize":
                 result: dict[str, Any] = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "Hosted Exomem"}}
             elif request["method"] == "notifications/initialized":
-                result = {}
+                assert "id" not in request
+                self.send_response(202)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             elif request["method"] == "tools/call" and request["params"]["name"] == "ask_memory":
                 result = {"structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/acceptance.md", "text": "hosted acceptance sentinel continuity-001"}]}}}
             else:
