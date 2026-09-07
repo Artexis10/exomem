@@ -130,7 +130,10 @@ def test_chatgpt_records_pending_guardrail_rejects_invalid_pending_blocks(
 
 def test_operator_connector_host_is_canonical() -> None:
     instructions = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-    connector_section = instructions.split('## Connector triage', 1)[1].split('\n## ', 1)[0]
+    procedure = "docs/agent-guidance/live-cell.md"
+    assert f"`{procedure}`" in instructions
+    guidance = (REPO_ROOT / procedure).read_text(encoding="utf-8")
+    connector_section = guidance.split('## Connector triage', 1)[1].split('\n## ', 1)[0]
 
     assert "exomem.substratesystems.io" in connector_section
     assert "kb.substratesystems.io" not in connector_section
