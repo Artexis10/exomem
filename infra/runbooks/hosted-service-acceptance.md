@@ -11,12 +11,12 @@ Create a public configuration file outside the report directory:
 {
   "schema_version": 1,
   "oauth": {
-    "issuer": "https://issuer.example",
-    "audience": "https://mcp.example",
+    "authorization_server_metadata": "https://mcp.example/.well-known/oauth-authorization-server/api/exomem/oauth",
+    "resource": "https://mcp.example/api/exomem/mcp/v1",
     "client_id": "approved-hosted-acceptance-client",
     "redirect_uri": "http://127.0.0.1:8765/callback"
   },
-  "mcp_endpoint": "https://mcp.example/mcp",
+  "mcp_endpoint": "https://mcp.example/api/exomem/mcp/v1",
   "runtime": {
     "release": "0.73.1",
     "profile": "hosted-agent",
@@ -30,7 +30,8 @@ Create a public configuration file outside the report directory:
 }
 ```
 
-Issuer and public MCP endpoints must be HTTPS. The loopback redirect is the
+Authorization metadata, protected resource, and public MCP endpoint must be
+HTTPS; `oauth.resource` must byte-match `mcp_endpoint`. The loopback redirect is the
 approved local callback; it is not an exception for a live issuer or MCP
 endpoint. Keep `--state-dir` on a private task-owned filesystem. It contains
 PKCE state and, after a public authorization-code exchange, rotating tokens;
@@ -43,7 +44,7 @@ python3 infra/scripts/accept_hosted_service.py prepare \
 
 python3 infra/scripts/accept_hosted_service.py authorize \
   --config ./hosted-acceptance.json --state-dir ./private-acceptance-state \
-  --run-id hosted-acceptance-20260907 --resume
+  --run-id hosted-acceptance-20260907 --resume --tenant synthetic
 ```
 
 Open the emitted authorization URL and complete ordinary customer consent.
@@ -53,11 +54,12 @@ Resume it with the returned code and state:
 python3 infra/scripts/accept_hosted_service.py run \
   --config ./hosted-acceptance.json --state-dir ./private-acceptance-state \
   --run-id hosted-acceptance-20260907 --resume \
-  --authorization-code '<code>' --callback-state '<state>' \
+  --tenant synthetic --authorization-code '<code>' --callback-state '<state>' \
   --report ./hosted-acceptance-report.json
 ```
 
-The manifest fixes runtime identity, tenants and per-stage mutation request
+Repeat the public OAuth flow for `--tenant isolation`; each reserved tenant has
+its own normal OAuth token family. The manifest fixes runtime identity, tenants and per-stage mutation request
 IDs atomically. A resumed run refuses identity drift and never repeats a
 committed mutation. `blocked` is a checkpoint with one exact operator action;
 it is neither a pass nor a reason to stop independent stages. In particular,

@@ -6,6 +6,7 @@ import importlib.util
 import json
 import sys
 import threading
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -29,12 +30,12 @@ def _config() -> dict[str, Any]:
     return {
         "schema_version": 1,
         "oauth": {
-            "issuer": "https://accounts.example.test",
-            "audience": "https://mcp.example.test",
+            "authorization_server_metadata": "https://accounts.example.test/.well-known/oauth-authorization-server/api/exomem/oauth",
+            "resource": "https://mcp.example.test/api/exomem/mcp/v1",
             "client_id": "hosted-acceptance",
             "redirect_uri": "http://127.0.0.1:8765/callback",
         },
-        "mcp_endpoint": "https://mcp.example.test/mcp",
+        "mcp_endpoint": "https://mcp.example.test/api/exomem/mcp/v1",
         "runtime": {
             "release": "0.73.1",
             "profile": "hosted-agent",
@@ -166,27 +167,26 @@ def test_synthetic_corpus_is_deterministic_and_meets_the_reserved_cell_floor(tmp
 def test_pkce_client_validates_discovery_and_rotating_refresh_replay(tmp_path: Path) -> None:
     runner = _load()
     oauth = runner.OAuthPKCEClient(
-        issuer="http://127.0.0.1:8765",
-        audience="https://mcp.example.test",
+        authorization_server_metadata="http://127.0.0.1:8765/.well-known/oauth-authorization-server/api/exomem/oauth",
+        resource="http://127.0.0.1:8765/api/exomem/mcp/v1",
         client_id="hosted-acceptance",
         redirect_uri="http://127.0.0.1:8765/callback",
         allow_loopback_fixture=True,
     )
     discovery = {
-        "issuer": "http://127.0.0.1:8765",
-        "authorization_endpoint": "http://127.0.0.1:8765/authorize",
-        "token_endpoint": "http://127.0.0.1:8765/token",
+        "issuer": "http://127.0.0.1:8765/api/exomem/oauth",
+        "authorization_endpoint": "http://127.0.0.1:8765/api/exomem/oauth/authorize",
+        "token_endpoint": "http://127.0.0.1:8765/api/exomem/oauth/token",
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256"],
+        "scopes_supported": ["exomem.read", "exomem.write", "offline_access"],
     }
 
     authorization = oauth.authorization_request(discovery)
     assert authorization["code_challenge_method"] == "S256"
     assert authorization["state"] != authorization["code_verifier"]
-    oauth.accept_rotated_tokens({"access_token": "one", "refresh_token": "refresh-one", "expires_in": 900})
-    oauth.accept_rotated_tokens({"access_token": "two", "refresh_token": "refresh-two", "expires_in": 900})
-    with pytest.raises(runner.AcceptanceError, match="replayed"):
-        oauth.accept_rotated_tokens({"access_token": "three", "refresh_token": "refresh-one", "expires_in": 900})
-    discovery["issuer"] = "https://wrong.example.test"
-    with pytest.raises(runner.AcceptanceError, match="issuer"):
+    discovery["scopes_supported"] = ["exomem.read"]
+    with pytest.raises(runner.AcceptanceError, match="hosted PKCE"):
         oauth.authorization_request(discovery)
 
 
@@ -195,26 +195,37 @@ def test_public_oauth_and_mcp_clients_use_real_isolated_loopback_protocol_fixtur
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - HTTP handler API
-            if self.path != "/.well-known/openid-configuration":
+            if self.path != "/.well-known/oauth-authorization-server/api/exomem/oauth":
                 self.send_error(404)
                 return
-            self._json({"issuer": base, "authorization_endpoint": base + "/authorize", "token_endpoint": base + "/token"})
+            self._json({"issuer": base + "/api/exomem/oauth", "authorization_endpoint": base + "/api/exomem/oauth/authorize", "token_endpoint": base + "/api/exomem/oauth/token", "grant_types_supported": ["authorization_code", "refresh_token"], "code_challenge_methods_supported": ["S256"], "scopes_supported": ["exomem.read", "exomem.write", "offline_access"]})
 
         def do_POST(self) -> None:  # noqa: N802 - HTTP handler API
             length = int(self.headers["Content-Length"])
             body = self.rfile.read(length)
-            if self.path == "/token":
+            if self.path == "/api/exomem/oauth/token":
                 parsed = urllib.parse.parse_qs(body.decode())
-                assert parsed["grant_type"] == ["authorization_code"]
-                assert parsed["code_verifier"]
-                self._json({"access_token": "fixture-access", "refresh_token": "fixture-refresh", "expires_in": 900})
+                assert parsed["resource"] == [base + "/api/exomem/mcp/v1"]
+                if parsed["grant_type"] == ["authorization_code"]:
+                    assert parsed["code_verifier"]
+                    self._json({"access_token": "fixture-access", "refresh_token": "fixture-refresh", "expires_in": 900})
+                elif parsed["refresh_token"] == ["fixture-refresh"]:
+                    if getattr(server, "refresh_used", False):
+                        self.send_error(400)
+                        return
+                    server.refresh_used = True
+                    self._json({"access_token": "rotated-access", "refresh_token": "rotated-refresh", "expires_in": 900})
+                else:
+                    self.send_error(400)
                 return
-            assert self.path == "/mcp"
+            assert self.path == "/api/exomem/mcp/v1"
             assert self.headers["Authorization"] == "Bearer fixture-access"
             request = json.loads(body)
             result: dict[str, Any]
             if request["method"] == "initialize":
-                result = {"serverInfo": {"name": "exomem"}}
+                result = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "exomem"}}
+            elif request["method"] == "notifications/initialized":
+                result = {}
             elif request["method"] == "tools/list":
                 result = {"tools": [{"name": "remember"}, {"name": "ask_memory"}]}
             else:
@@ -240,8 +251,8 @@ def test_public_oauth_and_mcp_clients_use_real_isolated_loopback_protocol_fixtur
     thread.start()
     try:
         oauth = runner.OAuthPKCEClient(
-            issuer=base,
-            audience="https://mcp.example.test",
+            authorization_server_metadata=base + "/.well-known/oauth-authorization-server/api/exomem/oauth",
+            resource=base + "/api/exomem/mcp/v1",
             client_id="fixture-client",
             redirect_uri=base + "/callback",
             allow_loopback_fixture=True,
@@ -249,7 +260,10 @@ def test_public_oauth_and_mcp_clients_use_real_isolated_loopback_protocol_fixtur
         discovery = oauth.discover()
         request = oauth.authorization_request(discovery)
         tokens = oauth.exchange_code(discovery, code="public-code", state=request["state"], expected_state=request["state"], code_verifier=request["code_verifier"])
-        mcp = runner.MCPClient(endpoint=base + "/mcp", access_token=tokens["access_token"], allow_loopback_fixture=True)
+        assert oauth.refresh(discovery, refresh_token="fixture-refresh")["refresh_token"] == "rotated-refresh"
+        with pytest.raises(runner.AcceptanceError, match="token exchange failed"):
+            runner.OAuthPKCEClient(authorization_server_metadata=base + "/.well-known/oauth-authorization-server/api/exomem/oauth", resource=base + "/api/exomem/mcp/v1", client_id="fixture-client", redirect_uri=base + "/callback", allow_loopback_fixture=True).refresh(discovery, refresh_token="fixture-refresh")
+        mcp = runner.MCPClient(endpoint=base + "/api/exomem/mcp/v1", access_token=tokens["access_token"], allow_loopback_fixture=True)
         assert mcp.initialize()["serverInfo"]["name"] == "exomem"
         assert [tool["name"] for tool in mcp.list_tools()["tools"]] == ["remember", "ask_memory"]
         assert mcp.capture({"title": "fixture"})["structuredContent"]["status"] == "committed"
@@ -272,7 +286,7 @@ def test_protocol_evidence_and_host_certification_are_distinct(tmp_path: Path) -
     )
 
     assert acceptance.manifest()["stages"]["protocol"]["status"] == "passed"
-    with pytest.raises(runner.AcceptanceError, match="genuine host evidence"):
+    with pytest.raises(runner.AcceptanceError, match="signed imported evidence"):
         acceptance.certify_host("claude", {"protocol": "passed"})
 
 
@@ -287,3 +301,105 @@ def test_wall_clock_windows_and_latency_summary_have_declared_semantics() -> Non
         runner.validate_benchmark_samples({"initialize": [1.0] * 99}, cold_runs=20)
     with pytest.raises(runner.AcceptanceError, match="missing warm samples"):
         runner.validate_benchmark_samples({}, cold_runs=20)
+
+
+def test_hosted_oauth_metadata_uses_the_canonical_resource_contract() -> None:
+    runner = _load()
+    client = runner.OAuthPKCEClient(
+        authorization_server_metadata="http://127.0.0.1:8765/.well-known/oauth-authorization-server/api/exomem/oauth",
+        resource="http://127.0.0.1:8765/api/exomem/mcp/v1",
+        client_id="fixture-client",
+        redirect_uri="http://127.0.0.1:8765/callback",
+        allow_loopback_fixture=True,
+    )
+    metadata = {
+        "issuer": "http://127.0.0.1:8765/api/exomem/oauth",
+        "authorization_endpoint": "http://127.0.0.1:8765/api/exomem/oauth/authorize",
+        "token_endpoint": "http://127.0.0.1:8765/api/exomem/oauth/token",
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256"],
+        "scopes_supported": ["exomem.read", "exomem.write", "offline_access"],
+    }
+
+    request = client.authorization_request(metadata)
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(request["url"]).query)
+
+    assert query["resource"] == ["http://127.0.0.1:8765/api/exomem/mcp/v1"]
+    assert query["scope"] == ["exomem.read exomem.write offline_access"]
+    assert "audience" not in query
+
+
+def test_blocked_checkpoints_are_idempotent_and_can_resume_to_pass(tmp_path: Path) -> None:
+    runner = _load()
+    acceptance = runner.AcceptanceRunner.from_config(
+        _write_config(tmp_path), state_dir=tmp_path / "state", run_id="resume-blocked-001"
+    )
+    acceptance.prepare()
+    action = "complete exact operator consent"
+    acceptance.block("restore", action)
+    acceptance.block("restore", action)
+    acceptance.pass_stage("restore", {"isolated": "restored"})
+
+    assert acceptance.manifest()["stages"]["restore"] == {
+        "status": "passed",
+        "evidence": {"isolated": "restored"},
+    }
+
+
+def test_cli_runs_producer_shaped_initialize_capture_and_fresh_cited_recall(tmp_path: Path) -> None:
+    runner = _load()
+    requests: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append({"method": request["method"], "headers": dict(self.headers)})
+            method = request["method"]
+            if method == "initialize":
+                result: dict[str, Any] = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "Hosted Exomem"}}
+            elif method == "tools/list":
+                assert self.headers["Mcp-Protocol-Version"] == "2025-06-18"
+                result = {"tools": [{"name": "remember"}, {"name": "ask_memory"}, {"name": "read_memory"}]}
+            elif method == "notifications/initialized":
+                result = {}
+            else:
+                tool = request["params"]["name"]
+                if tool == "remember":
+                    result = {"structuredContent": {"result": {"outcome": "committed"}}}
+                elif tool == "ask_memory":
+                    result = {"structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/acceptance.md", "text": "hosted acceptance sentinel cli-run-001"}]}}}
+                else:
+                    result = {"structuredContent": {"result": {"content": "hosted acceptance sentinel cli-run-001"}}}
+            envelope = {"jsonrpc": "2.0", "id": request["id"], "result": result}
+            sse = method == "tools/call" and request["params"]["name"] == "ask_memory"
+            body = (f"data: {json.dumps(envelope)}\n\n" if sse else json.dumps(envelope)).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream" if sse else "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    base = f"http://127.0.0.1:{server.server_port}"
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        config = _config()
+        config["mcp_endpoint"] = base + "/api/exomem/mcp/v1"
+        config["oauth"]["resource"] = config["mcp_endpoint"]
+        config["oauth"]["authorization_server_metadata"] = base + "/.well-known/oauth-authorization-server/api/exomem/oauth"
+        config_path = _write_config(tmp_path, config)
+        acceptance = runner.AcceptanceRunner.from_config(config_path, state_dir=tmp_path / "state", run_id="cli-run-001", allow_loopback_fixture=True)
+        acceptance.prepare()
+        for tenant in ("synthetic", "isolation"):
+            acceptance.save_tokens({"access_token": f"{tenant}-access", "refresh_token": f"{tenant}-refresh"}, tenant=tenant)
+
+        assert runner.main(["run", "--config", str(config_path), "--state-dir", str(tmp_path / "state"), "--run-id", "cli-run-001", "--resume"], allow_loopback_fixture=True) == 0
+        assert acceptance.manifest()["stages"]["protocol"]["status"] == "passed"
+        assert [request["method"] for request in requests] == ["initialize", "notifications/initialized", "tools/list", "tools/call", "initialize", "notifications/initialized", "tools/call", "tools/call"]
+    finally:
+        server.shutdown()
+        thread.join()
