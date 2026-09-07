@@ -1070,8 +1070,9 @@ class MediaWorker:
         forced_recheck_at = 0.0
         try:
             while not self._stop_event.is_set():
-                self._drain_parent_results()
                 child = self._child
+                if child is not None:
+                    self._drain_parent_results()
                 if child is not None and child.poll() is not None:
                     returncode = child.returncode
                     child_pid = child.pid
@@ -1109,7 +1110,10 @@ class MediaWorker:
                         and signature == idle_signature
                         and now < forced_recheck_at
                     )
-                    if not settled and self._store.needs_worker():
+                    parent_work = not settled and self._store.has_parent_work()
+                    if parent_work:
+                        self._drain_parent_results()
+                    elif not settled and self._store.needs_worker():
                         idle_signature = None
                         refusal = _probe_writer_authority()
                         if refusal is not None:
