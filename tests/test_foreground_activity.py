@@ -253,6 +253,36 @@ def test_fork_child_drops_vanished_foreground_holders_and_background_scope(tmp_p
     assert not holder.is_alive()
 
 
+def test_interrupted_foreground_entry_restores_background_scope(tmp_path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def hold_lock() -> None:
+        with foreground_activity._LOCK:
+            acquired.set()
+            assert release.wait(5)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert acquired.wait(5)
+    interrupt = threading.Timer(0.05, lambda: os.kill(os.getpid(), signal.SIGINT))
+    interrupt.start()
+    try:
+        with foreground_activity.background_scope(vault):
+            with pytest.raises(KeyboardInterrupt):
+                with foreground_activity.foreground_scope(vault):
+                    pytest.fail("interrupted foreground entry reached its body")
+            assert foreground_activity.background_active(vault)
+    finally:
+        interrupt.cancel()
+        interrupt.join(5)
+        release.set()
+        holder.join(5)
+    assert not holder.is_alive()
+
+
 def test_checkpoint_stops_after_one_scheduling_overshoot(tmp_path, monkeypatch) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()

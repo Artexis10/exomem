@@ -64,29 +64,49 @@ def foreground_scope(vault_root: os.PathLike[str] | str) -> Iterator[None]:
         yield
         return
     stack = _background_stack()
-    _LOCAL.foreground_depth = _foreground_depth() + 1
-    for scope in stack:
-        scope.suppressed += 1
     thread_id = threading.get_ident()
-    with _LOCK:
-        holders = _FOREGROUND.setdefault(canonical, {})
-        holders[thread_id] = holders.get(thread_id, 0) + 1
+    prior_depth_present = hasattr(_LOCAL, "foreground_depth")
+    prior_depth = _foreground_depth()
+    prior_holder_count = 0
+    registration_started = False
+    depth_started = False
+    suppressed_scopes: list[tuple[_BackgroundScope, int]] = []
     try:
+        with _LOCK:
+            holders = _FOREGROUND.get(canonical)
+            prior_holder_count = 0 if holders is None else holders.get(thread_id, 0)
+            registration_started = True
+            if holders is None:
+                _FOREGROUND[canonical] = {thread_id: 1}
+            else:
+                holders[thread_id] = prior_holder_count + 1
+        depth_started = True
+        _LOCAL.foreground_depth = prior_depth + 1
+        for scope in stack:
+            suppressed_scopes.append((scope, scope.suppressed))
+            scope.suppressed += 1
         yield
     finally:
-        with _LOCK:
-            current_holders = _FOREGROUND.get(canonical)
-            if current_holders is not None:
-                remaining = current_holders.get(thread_id, 0) - 1
-                if remaining > 0:
-                    current_holders[thread_id] = remaining
-                else:
-                    current_holders.pop(thread_id, None)
-                if not current_holders:
-                    _FOREGROUND.pop(canonical, None)
-        for scope in stack:
-            scope.suppressed -= 1
-        _LOCAL.foreground_depth = _foreground_depth() - 1
+        for scope, prior_suppression in reversed(suppressed_scopes):
+            scope.suppressed = prior_suppression
+        if depth_started:
+            if prior_depth_present:
+                _LOCAL.foreground_depth = prior_depth
+            else:
+                try:
+                    delattr(_LOCAL, "foreground_depth")
+                except AttributeError:
+                    pass
+        if registration_started:
+            with _LOCK:
+                holders = _FOREGROUND.get(canonical)
+                if holders is not None:
+                    if prior_holder_count:
+                        holders[thread_id] = prior_holder_count
+                    else:
+                        holders.pop(thread_id, None)
+                    if not holders:
+                        _FOREGROUND.pop(canonical, None)
 
 
 @contextmanager
