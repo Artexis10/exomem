@@ -4850,6 +4850,24 @@ def active_direct_mutation_guard(vault_root: os.PathLike[str] | str, *, state_ro
     return boundary in _ACTIVE_DIRECT_MUTATION_GUARDS.get()
 
 
+def _foreground_command_activity(
+    function: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Cover the dispatcher and its projected completion with foreground activity."""
+    @wraps(function)
+    def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:
+        from .governance.egress import is_vault_root
+
+        if not injected or not is_vault_root(injected[0]):
+            return function(command, *injected, **kwargs)
+        from .foreground_activity import foreground_scope
+
+        with foreground_scope(injected[0]):
+            return function(command, *injected, **kwargs)
+
+    return wrapped
+
+
 def _fixed_projected_command_completion(
     function: Callable[..., Any],
 ) -> Callable[..., Any]:
@@ -4915,6 +4933,7 @@ def _fixed_projected_command_completion(
     return wrapped
 
 
+@_foreground_command_activity
 @_fixed_projected_command_completion
 def invoke_command(
     command: Any,

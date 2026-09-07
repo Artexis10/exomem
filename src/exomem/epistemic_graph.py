@@ -7005,9 +7005,12 @@ def schedule_background_rebuild(
 
     def _run() -> None:
         try:
-            EpistemicGraphIndex(
-                vault_root, mutation_coordinator=mutation_coordinator
-            ).rebuild_all()
+            from .foreground_activity import background_scope
+
+            with background_scope(vault_root):
+                EpistemicGraphIndex(
+                    vault_root, mutation_coordinator=mutation_coordinator
+                ).rebuild_all()
         except graph_sync.GraphRebuildInProgress:
             # Another process owns the kernel-backed rebuild claim.  That is a
             # healthy coalescing state, not a failed publication requiring a

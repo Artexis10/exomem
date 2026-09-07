@@ -334,6 +334,9 @@ def parse_page(
     content: bytes | None = None,
     resolved_relative: str | None = None,
 ) -> ParsedPage | None:
+    from .foreground_activity import checkpoint
+
+    checkpoint(vault_root)
     if content is None:
         content = _read_page_bytes(path, vault_root)
         if content is None:
