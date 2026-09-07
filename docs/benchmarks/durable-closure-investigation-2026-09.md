@@ -4,7 +4,8 @@
 
 This investigation measures whether an agent can finish a multi-note evidence
 workflow, not just whether a canonical file replacement is fast. The associated
-contract is `openspec/changes/optimize-durable-closure/`.
+contract is `openspec/specs/durable-closure-performance/spec.md`; its change
+record is `openspec/changes/archive/2026-09-07-optimize-durable-closure/`.
 
 ## Current production evidence
 
