@@ -210,6 +210,47 @@ The analyzer reports malformed/unreadable input instead of silently dropping it.
 It does not authenticate client identity or verify the ledger hash chain; use
 the existing ledger verification command for that separate check.
 
+## Resumed baseline and diagnostic measurements
+
+The resumed measurements use product baseline `5fc2e55d` (0.73.1), with the same
+product source bytes as integrated main `4f583144`. Each row starts a persistent
+MCP service over a fresh synthetic corpus and waits for public semantic-write
+validation before starting the workflow clock. Startup is recorded separately.
+The PDF and two images come from the pinned
+[public artifact manifest](durable-closure-public-artifacts.json); successful
+real-extraction rows must prove their three distinct expected texts.
+
+| Source and corpus | Result | Workflow wall | Public calls | Evidence |
+| --- | --- | ---: | ---: | --- |
+| Baseline, 3,800 pages | Final recall refused; writes and extraction proved | 35.94 s | 61 | [Machine-readable row](durable-closure-2026-09/before-3800-real-optimized.json) |
+| Baseline, 8,000 pages | Media reconciliation raced with extraction; dependent write blocked; final recall refused | 60.85 s | 14 | [Machine-readable row](durable-closure-2026-09/before-8000-real-optimized.json) |
+| Candidate before parent graph repair, 3,800 pages | Correct final state; parent graph wait made closure unacceptably slow | 214.18 s | 1,244 | [Diagnostic row](durable-closure-2026-09/after-3800-real-optimized.json) |
+
+The baseline rows did not finish successfully, so their elapsed times are not
+completed latency baselines and no speed ratio is inferred. Each is one sample
+with recorded host load; task test workers were idle, but external host load was
+not identical. All three used the same Python 3.13.12 runtime, resolved package
+set, and declared optional-model configuration. Real extraction used PyMuPDF and
+Tesseract; embeddings and CLIP models were unavailable. The optimized baseline
+used three single-path media calls, while the candidate used one selected-path
+batch.
+
+The slow candidate completed all direct-read, citation, tracker, stale-relation
+and ordinary-recall checks, with no recall refusal. Of its 1,244 calls, 1,227
+polled extraction convergence. Its completed image computations waited behind
+parent fanout that entered graph rebuilding after releasing mutation authority.
+This diagnostic motivates preserving a receipt-backed pending context through
+both first publication and exact-target recovery, including inner graph
+fallbacks; detaching only the outer dispatcher is insufficient.
+
+Graph timing and invocation wrappers cover the MCP service process only, not its
+disposable media children. Source-scan fields cover their named wrapped
+functions, not every filesystem read. Full graph/lexical/embedding convergence,
+connector overhead and model planning remain null where unmeasured. The
+published JSON preserves these limits, per-call observations, corpus digest,
+fixture hashes, runtime packages and host metadata; private runtime paths and
+the generated per-page inventory are omitted with explicit annotations.
+
 ## Acceptance boundary
 
 Production was not restarted, drained, benchmarked with synthetic writes or
