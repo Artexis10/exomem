@@ -17,6 +17,18 @@ _LOCAL = threading.local()
 _FOREGROUND: dict[Path, dict[int, int]] = {}
 
 
+def _reset_in_forked_child() -> None:
+    """Discard parent thread activity without acquiring its possibly held lock."""
+    global _FOREGROUND, _LOCAL, _LOCK
+    _FOREGROUND = {}
+    _LOCAL = threading.local()
+    _LOCK = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_in_forked_child)
+
+
 @dataclass
 class _BackgroundScope:
     canonical: Path
