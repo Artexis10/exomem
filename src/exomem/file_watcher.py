@@ -416,26 +416,30 @@ def _observe_publication_intent(
             _notify_publication_observers(notifications, intent, disposition)
         if changed and not fenced and expected_intent is None and attempt == 0:
             continue
-        if fenced or changed or proof is None:
+        if fenced or changed:
             return "external", intent
-        matches_after = proof[0] == intent.content_hash and proof[2] == intent.size
+        matches_after = (
+            proof is not None
+            and proof[0] == intent.content_hash
+            and proof[2] == intent.size
+        )
         matches_before = (
-            disposition == "active"
+            proof is not None
+            and disposition == "active"
             and phase == "prepared"
             and proof[0] == intent.before_content_hash
             and proof[2] == intent.before_size
         )
         if (
             not matches_after
-            and proof is not None
             and (disposition != start_disposition or phase != start_phase)
             and not fenced
             and not changed
             and attempt == 0
         ):
-            # A descriptor proof that crossed a publication boundary cannot
-            # authorize BEFORE bytes. Re-read once; only exact current AFTER
-            # bytes remain admissible after that boundary.
+            # Replacement can invalidate an open BEFORE descriptor entirely.
+            # Re-read once after a publication boundary; only exact current
+            # AFTER bytes remain admissible after that boundary.
             continue
         if not (matches_before or matches_after):
             return "external", intent

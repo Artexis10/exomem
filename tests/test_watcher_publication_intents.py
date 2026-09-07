@@ -204,6 +204,62 @@ def test_late_after_proof_remains_held_through_installation(
     assert watcher._pending_publication_intents[target] is intent
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires replacement of an open POSIX inode")
+@pytest.mark.parametrize("replacement, external", [(b"new", False), (b"foreign", True)])
+def test_replaced_open_descriptor_reproves_current_after_image(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, replacement: bytes, external: bool
+) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "replaced-descriptor.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"old")
+    staged = vault / "staged.md"
+    staged.write_bytes(b"new")
+    descriptor = os.open(staged, os.O_RDONLY)
+    try:
+        (intent,) = file_watcher.register_publication_intents(
+            vault,
+            [(target, descriptor, hashlib.sha256(b"new").hexdigest(),
+              hashlib.sha256(b"old").hexdigest(), len(b"old"))],
+        )
+    finally:
+        os.close(descriptor)
+    watcher = file_watcher.FileWatcher(vault)
+    entered = threading.Event()
+    release = threading.Event()
+    real_read = os.read
+    reads = 0
+
+    def delayed_read(fd: int, size: int) -> bytes:
+        nonlocal reads
+        if threading.current_thread().name == "replaced-descriptor-event":
+            reads += 1
+            if reads == 1:
+                entered.set()
+                assert release.wait(timeout=5.0)
+        return real_read(fd, size)
+
+    monkeypatch.setattr(os, "read", delayed_read)
+    event = threading.Thread(
+        name="replaced-descriptor-event", target=lambda: watcher._record(target, deleted=False)
+    )
+    event.start()
+    try:
+        assert entered.wait(timeout=5.0)
+        file_watcher.begin_publication_installation([intent])
+        staged.write_bytes(replacement)
+        os.replace(staged, target)
+        file_watcher.mark_publication_installed([intent])
+    finally:
+        release.set()
+        event.join(timeout=5.0)
+
+    assert not event.is_alive()
+    assert reads == 2
+    assert freshness.external_pending(vault) is external
+    if not external:
+        assert watcher._pending_publication_intents[target] is intent
+
+
 def test_registry_publication_restoration_falls_back_and_aborts_batch(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
