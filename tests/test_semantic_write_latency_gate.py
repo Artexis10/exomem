@@ -681,7 +681,21 @@ def test_managed_recall_warmup_actually_admits(tmp_path) -> None:
         # The proof itself, not merely a finished warm window.
         assert module.readiness.is_ready("retrieval_catalog")
     finally:
-        module.readiness.unmanage_runtime()
+        # `reset()`, not `unmanage_runtime()`. This node deliberately drives a
+        # real warm-up to completion, so on the way out it leaves `_warm_finished`
+        # set and the `retrieval_catalog` event published -- the two pieces of
+        # module state its own docstring is about. `unmanage_runtime()` clears
+        # neither; it only drops `_runtime_managed`.
+        #
+        # `readiness` is process-global, so that residue is inherited by whatever
+        # runs next in the same worker. Shards are cut by measured duration
+        # (`pytest-split --splitting-algorithm=least_duration`), so which test
+        # that is changes whenever timings shift -- and when it landed on
+        # `test_server_runtime.py::test_disable_warmup_preserves_unverified_lazy_runtime_admission`,
+        # which asserts the clean-start value, that node read `unavailable`
+        # instead of `unverified` and failed. It passes alone and fails in the
+        # shard, which is exactly the shape that reads as CI flakiness.
+        module.readiness.reset()
 
 
 def test_the_file_watcher_switch_does_not_gate_admission(tmp_path, monkeypatch) -> None:
