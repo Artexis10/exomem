@@ -15,6 +15,7 @@ from exomem import (
     asr_runtime,
     deferred_index,
     embeddings,
+    epistemic_graph,
     extract,
     file_watcher,
     graph_sync,
@@ -487,11 +488,15 @@ def test_parent_recovers_prepared_target_without_replacing_sidecar(
         "recover_full_receipt_graph_epoch",
         lambda *_a, **_k: recovered.append(True) or True,
     )
-    monkeypatch.setattr(
-        media_worker,
-        "post_commit_batch_fanout",
-        lambda *_a, **_k: fanned_out.append(True) or True,
-    )
+    def fanout_under_parent_scope(root: Path, *_args, **_kwargs) -> bool:
+        coordinator = media_worker.get_manager()._mutation_coordinator_for(root)
+        assert epistemic_graph._parent_receipted_graph_handoff_active(
+            root, coordinator.state_root
+        )
+        fanned_out.append(True)
+        return True
+
+    monkeypatch.setattr(media_worker, "post_commit_batch_fanout", fanout_under_parent_scope)
 
     worker._publish_parent_result(store.pending_results()[0])
 
@@ -1369,6 +1374,7 @@ def test_checkpoint_publication_failure_keeps_completed_media_and_durable_receip
     """A held derived checkpoint cannot roll back or terminalize canonical media."""
     result = _preserve_media_stub(vault, filename="checkpoint-failure.m4a")
     sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
     checkpoint = graph_sync.checkpoint_path(vault)
     original_replace_artifact = vault_module._BatchWorkspace.replace_artifact
     extraction_calls = 0
@@ -1407,11 +1413,14 @@ def test_checkpoint_publication_failure_keeps_completed_media_and_durable_receip
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
 
     assert extraction_calls == 1
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     assert "transcript survives checkpoint failure" in sidecar.read_text(encoding="utf-8")
     assert deferred_index.snapshot_full(vault) == [
         deferred_index.DeferredReceipt(sidecar.relative_to(vault).as_posix(), 1)
     ]
-    assert media_jobs.status(vault)["jobs"] == []
+    assert store.pending_result_count() == 1
 
 
 def test_post_checkpoint_fanout_failure_keeps_committed_media_and_exact_receipt(
@@ -1420,6 +1429,7 @@ def test_post_checkpoint_fanout_failure_keeps_committed_media_and_exact_receipt(
     """Derived fanout failure is durable work, never a media rollback failure."""
     result = _preserve_media_stub(vault, filename="fanout-failure.m4a")
     sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
     rel = sidecar.relative_to(vault).as_posix()
     original_add_full = deferred_index.add_full
     original_batch = preserve.batch_atomic_write
@@ -1471,11 +1481,15 @@ def test_post_checkpoint_fanout_failure_keeps_committed_media_and_exact_receipt(
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
 
     assert extraction_calls == 1
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     body = sidecar.read_text(encoding="utf-8")
     assert body.count("transcript survives fanout failure") == 1
     assert deferred_index.snapshot_full(vault) == [deferred_index.DeferredReceipt(rel, 1)]
+    assert store.pending_result_count() == 1
     jobs = media_jobs.status(vault)["jobs"]
-    assert jobs == []
+    assert len(jobs) == 1 and jobs[0]["state"] == media_jobs.RUNNING
     assert all("BATCH_ROLLBACK_INCOMPLETE" not in (job["error"] or "") for job in jobs)
 
 
@@ -1660,11 +1674,11 @@ def test_combined_binary_and_sidecar_stale_remains_actionable(
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
 
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     [failed] = media_jobs.status(vault)["jobs"]
     assert failed["state"] == media_jobs.FAILED
-    assert failed["error"] == (
-        "stale extraction: sidecar content changed, media identity changed"
-    )
+    assert failed["error"] == "stale media result: sidecar content changed"
     assert failed["next_action"] == "review the sidecar changes, then retry media processing"
 
 
@@ -2846,6 +2860,8 @@ def test_child_keeps_other_preserve_errors_as_failed_extraction(
     monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     result = _preserve_media_stub(vault, filename="other-preserve-error.m4a")
+    sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
     monkeypatch.setattr(
         extract,
         "extract_text",
@@ -2859,7 +2875,7 @@ def test_child_keeps_other_preserve_errors_as_failed_extraction(
     def _other_preserve_error(*_args, **_kwargs):
         raise preserve.PreserveError("OTHER_PRESERVE_ERROR", [], "unexpected write refusal")
 
-    monkeypatch.setattr(preserve, "update_sidecar_extraction", _other_preserve_error)
+    monkeypatch.setattr(preserve, "render_sidecar_extraction", _other_preserve_error)
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(
         media_jobs.MediaJob(
@@ -2871,6 +2887,9 @@ def test_child_keeps_other_preserve_errors_as_failed_extraction(
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
 
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     [status] = media_jobs.status(vault)["jobs"]
     assert status["state"] == media_jobs.FAILED
     assert status["error"].startswith("PreserveError:")
@@ -2915,14 +2934,16 @@ def test_compute_ledger_remains_blocked_when_sidecar_publish_faults(
         ),
     )
     monkeypatch.setattr(
-        media_worker.MediaWorker,
-        "_commit_processing_failure",
+        preserve,
+        "commit_media_sidecar_writes",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("sidecar disk full")),
     )
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     assert store.counts()[media_jobs.BLOCKED] == 1
     assert (vault / result.path).read_bytes() == source_before
 
@@ -2934,11 +2955,13 @@ def test_compute_ledger_remains_blocked_when_sidecar_publish_returns_false(
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     result = _preserve_media_stub(vault, filename="ledger-false.m4a")
     monkeypatch.setattr(extract, "extract_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(asr_runtime.ASRComputeRuntimeError("cuBLAS failed")))
-    monkeypatch.setattr(media_worker.MediaWorker, "_commit_processing_failure", lambda *_a, **_kw: False)
+    monkeypatch.setattr(preserve, "commit_media_sidecar_writes", lambda *_a, **_kw: False)
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     assert store.counts()[media_jobs.BLOCKED] == 1
 
 
@@ -2970,7 +2993,10 @@ def test_blocked_compute_sidecar_converges_without_asr(vault, monkeypatch: pytes
     blocked = store.get(job.id)
     assert blocked is not None
 
-    assert media_worker.MediaWorker(vault, execution_mode="process").converge_compute_runtime_blocked(blocked)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    assert worker.converge_compute_runtime_blocked(blocked)
+    assert store.pending_result_count() == 1
+    worker._drain_parent_results()
     frontmatter = _parsed_frontmatter(vault / result.sidecar_path)
     assert frontmatter["processing_state"] == "blocked"
 
@@ -3015,6 +3041,7 @@ def test_child_converges_stale_blocked_sidecar_after_canonical_limit(
     assert store.needs_worker() is True
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     assert _parsed_frontmatter(stale_sidecar)["processing_state"] == "blocked"
     assert store.needs_worker() is False
 
@@ -3032,6 +3059,7 @@ def test_child_recovers_failed_cuda_only_vault_without_asr(vault, monkeypatch: p
 
     assert store.needs_worker() is True
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     assert store.counts()[media_jobs.BLOCKED] == 1
     assert _parsed_frontmatter(vault / result.sidecar_path)["processing_state"] == "blocked"
 
@@ -3042,6 +3070,8 @@ def test_child_retains_actionable_asr_dependency_failure(
     monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     result = _preserve_media_stub(vault, filename="dependency-blocked.m4a")
+    sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
 
     def _unavailable(*_args, **_kwargs):
         raise extract.ExtractionUnavailable("ASR backend: install the media extra")
@@ -3058,6 +3088,9 @@ def test_child_retains_actionable_asr_dependency_failure(
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
 
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     [status] = media_jobs.status(vault)["jobs"]
     assert status["state"] == media_jobs.BLOCKED
     assert status["attempts"] == 1
@@ -3083,6 +3116,8 @@ def test_child_retains_actionable_corrupt_media_failure(
     monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     result = _preserve_media_stub(vault, filename="corrupt.m4a")
+    sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
 
     def _corrupt(*_args, **_kwargs):
         raise ValueError("invalid audio container: missing moov atom")
@@ -3099,6 +3134,9 @@ def test_child_retains_actionable_corrupt_media_failure(
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
 
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     [status] = media_jobs.status(vault)["jobs"]
     assert status["state"] == media_jobs.FAILED
     assert status["attempts"] == 1
@@ -3124,6 +3162,8 @@ def test_child_blocks_timestamp_renderer_failure_with_renderer_remediation(
     monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     result = _preserve_media_stub(vault, filename="renderer-blocked.m4a")
+    sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
 
     def _renderer_unavailable(*_args, **_kwargs):
         raise extract.TimestampRenderingUnavailable("timed renderer: unavailable")
@@ -3140,6 +3180,9 @@ def test_child_blocks_timestamp_renderer_failure_with_renderer_remediation(
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
 
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
     [status] = media_jobs.status(vault)["jobs"]
     assert status["state"] == media_jobs.BLOCKED
     assert status["error"] == (
@@ -3159,9 +3202,10 @@ def test_success_refreshes_sidecar_before_completing_durable_job(
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     result = _preserve_media_stub(vault, filename="indexed-success.m4a")
     sidecar = vault / result.sidecar_path
+    before = sidecar.read_text(encoding="utf-8")
     events: list[str] = []
     original_write = preserve.batch_atomic_write
-    original_complete = media_jobs.MediaJobStore.complete
+    original_finalize = media_jobs.MediaJobStore.finalize_result
 
     monkeypatch.setattr(
         extract,
@@ -3177,15 +3221,15 @@ def test_success_refreshes_sidecar_before_completing_durable_job(
         events.append("sidecar-write-and-index-refresh")
         return original_write(*args, **kwargs)
 
-    def _complete_after_commit(store, job):
+    def _finalize_after_commit(store, job, **kwargs):
         body = sidecar.read_text(encoding="utf-8")
         assert "[0:00] indexed transcript" in body
         assert "extracted_by: faster-whisper:test+timed" in body
         events.append("durable-complete")
-        return original_complete(store, job)
+        return original_finalize(store, job, **kwargs)
 
     monkeypatch.setattr(preserve, "batch_atomic_write", _write_and_refresh)
-    monkeypatch.setattr(media_jobs.MediaJobStore, "complete", _complete_after_commit)
+    monkeypatch.setattr(media_jobs.MediaJobStore, "finalize_result", _finalize_after_commit)
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(
         media_jobs.MediaJob(
@@ -3196,6 +3240,10 @@ def test_success_refreshes_sidecar_before_completing_durable_job(
     )
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert store.pending_result_count() == 1
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
 
     assert events == ["sidecar-write-and-index-refresh", "durable-complete"]
     assert media_jobs.status(vault)["jobs"] == []
