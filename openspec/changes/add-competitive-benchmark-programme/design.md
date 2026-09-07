@@ -2,6 +2,84 @@
 
 ## Governing decisions
 
+### 2026-09-05 Exomem transport parity correction
+
+The real preflight exposed different capture renderers, payload hash domains,
+namespace descriptions, read hydration and privileged clocks. Both Exomem
+paths use `exomem.lme.capture/v2`: UTC session timestamps at second precision,
+dataset-order ordinals, NFC message text and the neutral session renderer.
+Guest ordinals come from the pinned converter's generated `-session-N` suffix,
+not an ingest batch position: MemoryBench calls `ingest([session])` separately
+and can resume with a new provider. Only the numeric suffix enters the payload.
+The complete product payload includes content, content-derived neutral title
+and slug, source type, tags and compilation guidance. Compare its canonical
+JSON digest; retain the complete transmitted-body digest separately, including
+fresh request and idempotency identities. Only those two transport fields may
+be omitted from the product digest. Unknown product fields refuse projection.
+Competitor-authored renderers are unchanged.
+
+Both paths use the normal public product clock and read selected content via
+`read_memory`. Session time remains evidence inside captured content. Both
+derive Exomem's internal namespace from the first 24 hex characters of SHA-256
+of MemoryBench's external `case-id + '-' + run-id` tag, contained below a
+separate run root. The guest records the scheme and actual namespace; export
+checks that namespace against the case's evidence-directory basename before
+projecting the scheme. Existing guest directory names stay intact.
+
+The current case's hybrid doctor report supplies readiness, including its live
+embedding-sidecar probe. A successful probe in another vault cannot promote a
+failed current-case doctor report. Typed traces retain the actual check IDs,
+statuses and normalized lane evidence; free-form doctor messages and private
+runtime paths are omitted. Scored retrieval and reading finish before diagnostic canary
+ingestion in the same namespace; typed traces retain probe identities, content
+digests and exact-token matches. Single-case diagnostics explicitly report
+that cross-case isolation needs at least two cases. The observed 55-session
+singleton returned its presence canary at rank one; its aggregate verdict was
+unverifiable because there was no second case.
+
+Direct case teardown closes and evicts only lease managers whose configured
+state directory is the case's held `leases` path, including partial setup.
+The runner waits for synchronous provider operations to return before teardown;
+the standalone lease manager does not track active mutations. Teardown closes
+store owner locks before retiring directories and refuses a live coordinator
+renewer. This prevents a reused
+OS directory descriptor from finding a previous case's cached manager; other
+managers remain untouched. Doctor readiness names failing runtime check IDs
+without exporting private error messages.
+
+Old exports retain their original renderer and hash meanings. New evidence
+uses a fresh frozen source pin and run IDs. This repairs the existing
+equivalence prerequisite; it changes no cohort, threshold, exception predicate,
+or ratified Epistemic State Bench family, assertion or gate.
+
+The pinned public dataset includes example filesystem paths. Export permits
+these only in exact complete capture/v2 source bodies or exact question text
+bound to the same case HMAC, after verifying the repository-owned source tuple,
+actual bytes and frozen ordered 25-case selection. A run plan's own SHA does
+not establish public provenance. Other fields, altered or partial bodies and
+unrecognized datasets receive the unchanged shared privacy scan. All private
+runtime identifiers, the HMAC key and every run-plan runtime root are rejected
+first, including decoded strings, even if they also occur in canonical source
+text. No content is redacted or replaced to make an export pass.
+The guest transport also refuses responses containing its actual bearer or
+canonical encodings before evidence, retries or provider return. It inspects
+keys, values and bounded nested JSON, reports a constant error and uses normal
+failure cleanup. This boundary still owns the secret; normal search retirement
+removes service descriptors before export, so no plaintext credential ledger
+is introduced. The public provider marker is named `product_input_contract`
+so the generic evidence scrubber preserves it without a broad key exception.
+
+### CPU profile and programme decisions
+
+CPU-profile repair: `lme_profile()` owns the explicit normal-mode, CPU device
+and empty CUDA visibility pins. The controlled export imports that profile;
+the TypeScript transport mirror is checked by executing it against the Python
+profile. Text and CLIP overrides are pinned because they outrank the global
+device selector. `EXOMEM_ALLOW_CPU_TORCH` only permits the doctor fallback and
+does not enforce a device. Run and provider evidence label these as requested
+settings, not observed model placement. Both equivalence halves require fresh
+artifacts at the repaired provider pin; old evidence is retained unchanged.
+
 1. **Inverted configuration authorship is the fairness answer.** The rescope
    retired comparison because the author configured the competitor. This
    programme makes competitor-side configuration competitor-authored:
@@ -461,8 +539,22 @@
     its derived graph current with a reconcile barrier, then proves its owned
     process group and secure descriptor absent before spawning.  The exact
     transient `GRAPH_SYNC_STABILIZATION_EXHAUSTED` result may be retried with
-    fresh mutation identities, bounded to three total attempts; every other
-    non-current result fails closed without retirement.
+    fresh attempt identities, bounded to three stabilization failures. Exact
+    pending registered-rebuild state with a valid checkpoint digest waits five
+    seconds before rechecking. All attempts share a 120-second budget; each
+    subprocess receives at most 70 seconds and the remaining allowance.
+    Queued repair, malformed state, other non-current outcomes and deadline
+    exhaustion fail closed without retirement. No live CLI index drain is used.
+    The transport owns this single barrier implementation; provider-map
+    eviction, descriptor-based cross-stage admission and indexing completion
+    call it before retirement. Completed indexing progress is emitted only
+    after that proof and retirement. Terminal or failure cleanup still
+    terminates services directly.
+    Reconcile uses the pinned checkout's local CLI with the owned vault/state
+    environment and canonical CPU profile. Remote write-mode maintenance is
+    operator-only and refuses REST; the CLI selects the vault through
+    `EXOMEM_VAULT_PATH` because `maintain --vault` is reserved for migration.
+    Request/response evidence identifies each local attempt and its exit code.
     Residency eviction preserves the container's owned vault and work root so
     the later indexing or search process can restart against the same corpus;
     terminal container cleanup still proves process, descriptor, guest-process,

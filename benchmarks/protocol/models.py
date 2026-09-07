@@ -327,6 +327,62 @@ class IngestRecordV2(IngestRecord):
 class SearchRecordV2(SearchRecord):
     protocol_version: Literal[PROTOCOL_VERSION]
     schema_version: Literal[CASE_TRACE_V2_SCHEMA_VERSION]
+    clock: Literal["product-wall-clock"] | None = None
+    started_at_utc: str | None = None
+
+    @model_validator(mode="after")
+    def _clock_has_an_observed_instant(self) -> SearchRecordV2:
+        if (self.clock is None) != (self.started_at_utc is None):
+            raise ValueError("search clock and observed instant must be recorded together")
+        if self.started_at_utc is not None:
+            import datetime as dt
+            instant = dt.datetime.fromisoformat(self.started_at_utc.replace("Z", "+00:00"))
+            if not self.started_at_utc.endswith("Z") or instant.utcoffset() != dt.timedelta(0):
+                raise ValueError("search instant must be UTC")
+        return self
+
+
+class IsolationProbeRecordV2(StrictModel):
+    protocol_version: Literal[PROTOCOL_VERSION]
+    schema_version: Literal[CASE_TRACE_V2_SCHEMA_VERSION]
+    record: Literal["isolation-probe"] = "isolation-probe"
+    kind: Literal["presence", "cross_case", "never_ingested"]
+    query: str | None
+    top_k: int = Field(ge=1)
+    normalized_hit_ids: list[str]
+    normalized_hit_shas: list[Sha256Digest]
+    matched_hit_ids: list[str]
+    skipped: Literal["no-prior-case"] | None = None
+
+    @model_validator(mode="after")
+    def consistent_hits(self) -> IsolationProbeRecordV2:
+        if len(self.normalized_hit_ids) != len(self.normalized_hit_shas):
+            raise ValueError("probe hit identities and digests differ in length")
+        if len(self.normalized_hit_ids) > self.top_k:
+            raise ValueError("probe returned more than its requested limit")
+        if not set(self.matched_hit_ids) <= set(self.normalized_hit_ids):
+            raise ValueError("probe matches must name returned hits")
+        if self.skipped is not None:
+            if self.kind != "cross_case" or self.query is not None or self.normalized_hit_ids:
+                raise ValueError("only a missing prior case permits an unexecuted probe")
+        elif not self.query:
+            raise ValueError("executed probe requires its query")
+        return self
+
+
+class DoctorCheckEvidence(StrictModel):
+    id: str
+    status: Literal["pass", "warn", "fail"]
+
+
+class ReadinessRecordV2(StrictModel):
+    protocol_version: Literal[PROTOCOL_VERSION]
+    schema_version: Literal[CASE_TRACE_V2_SCHEMA_VERSION]
+    record: Literal["readiness"] = "readiness"
+    profile: Literal["hybrid"]
+    success: bool
+    checks: list[DoctorCheckEvidence]
+    lanes: list[LaneReadiness]
 
 
 class AnswerRecordV2(AnswerRecord):
@@ -367,7 +423,7 @@ TraceRecord = Annotated[
 ]
 
 TraceRecordV2 = Annotated[
-    IngestRecordV2 | SearchRecordV2 | AnswerRecordV2 | JudgeRecordV2 | TimingRecordV2 | CleanupRecordV2,
+    IngestRecordV2 | SearchRecordV2 | IsolationProbeRecordV2 | ReadinessRecordV2 | AnswerRecordV2 | JudgeRecordV2 | TimingRecordV2 | CleanupRecordV2,
     Field(discriminator="record"),
 ]
 
@@ -793,6 +849,13 @@ class MemoryBenchSearchObservation(StrictModel):
 
 class MemoryBenchIngestObservation(StrictModel):
     transmitted_payload_sha256: list[str]
+    product_payload_sha256: list[Sha256Digest] | None = None
+
+    @model_validator(mode="after")
+    def _payload_domains_cover_the_same_calls(self) -> MemoryBenchIngestObservation:
+        if self.product_payload_sha256 is not None and len(self.product_payload_sha256) != len(self.transmitted_payload_sha256):
+            raise ValueError("product and wire payload digests must cover the same calls")
+        return self
 
     @field_validator("transmitted_payload_sha256")
     @classmethod
@@ -828,6 +891,8 @@ class MemoryBenchExportCase(StrictModel):
     missing_fields: list[MissingField]
     search: MemoryBenchSearchObservation | None = None
     ingest: MemoryBenchIngestObservation | None = None
+    namespace_pattern: Literal["exomem-container-tag-sha256-24hex"] | None = None
+    readiness: list[LaneReadiness] | None = None
 
     @field_validator("failure_codes", "missing_fields")
     @classmethod

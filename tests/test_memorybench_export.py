@@ -631,6 +631,22 @@ def test_exomem_stage_environment_preserves_explicit_model_cache_binding(
     assert environment["HF_HUB_CACHE"] == str(hub)
 
 
+def test_exomem_stage_environment_carries_the_canonical_cpu_profile(tmp_path, monkeypatch):
+    from lme.adapter import lme_profile
+    from memorybench.export import _stage_environment
+    from protocol.models import MemoryBenchRunPlan
+
+    for key in ("EXOMEM_DEVICE", "EXOMEM_EMBED_DEVICE", "EXOMEM_CLIP_DEVICE"):
+        monkeypatch.setenv(key, "cuda")
+    monkeypatch.setenv("EXOMEM_MODE", "performance")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    profile = lme_profile()
+    assert profile.settings.get("EXOMEM_DEVICE") == "cpu"
+    environment = _stage_environment(MemoryBenchRunPlan.model_validate(_plan_payload(tmp_path)))
+    assert {key: environment.get(key) for key in profile.settings} == profile.settings
+    assert environment["CUDA_VISIBLE_DEVICES"] == ""
+
+
 def test_stage_environment_preserves_explicit_uv_cache_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1856,6 +1872,52 @@ def test_public_privacy_does_not_misclassify_json_escaped_relative_backslashes(
     )
 
 
+def test_public_privacy_decodes_the_guest_session_json_before_confirming_path_findings(
+    tmp_path: Path,
+) -> None:
+    from memorybench.export import _validate_public_privacy
+
+    # The literal apostrophe makes the trailing s plus JSON-escaped newline
+    # resemble a drive prefix, although the original message contains no path.
+    messages = [{"role": "assistant", "content": "Tell me about your group's:" + "\n\n* Focus"}]
+    capture = "# Session\n\nHere is the session as a stringified JSON:\n" + json.dumps(messages)
+    _validate_public_privacy(
+        json.dumps({"hits": [{"content": capture}]}).encode(),
+        _privacy_plan(tmp_path),
+    )
+
+
+@pytest.mark.parametrize("location", ["prefix", "message", "message-key", "malformed-tail"])
+@pytest.mark.parametrize("path_kind", ["posix", "drive", "unc"])
+def test_public_privacy_keeps_real_paths_blocking_in_guest_session_json(
+    tmp_path: Path, location: str, path_kind: str,
+) -> None:
+    from memorybench.export import _validate_public_privacy
+
+    private_path = {
+        "posix": "/" + "home/private-user/runtime",
+        "drive": "Z:" + "\\private-user\\runtime",
+        "unc": "\\" * 2 + "private-machine\\private-share\\runtime",
+    }[path_kind]
+    message = {"role": "assistant", "content": "ordinary text"}
+    prefix = "# Session\n\n"
+    if location == "prefix":
+        prefix += private_path + "\n"
+    elif location == "message":
+        message["content"] = private_path
+    elif location == "message-key":
+        message[private_path] = "ordinary text"
+    tail = json.dumps([message])
+    if location == "malformed-tail":
+        tail += "\n" + private_path
+    capture = prefix + "Here is the session as a stringified JSON:\n" + tail
+    with pytest.raises(ValueError, match="shared privacy validation"):
+        _validate_public_privacy(
+            json.dumps({"hits": [{"content": capture}]}).encode(),
+            _privacy_plan(tmp_path),
+        )
+
+
 def test_cleanup_retains_checkpoint_target_after_late_private_projection_write_failure(
     tmp_path: Path,
 ) -> None:
@@ -2756,3 +2818,98 @@ def test_started_manifest_omits_lineage_for_an_unamended_preregistration(
     )
 
     assert manifest["preregistration_lineage"] is None
+
+
+def _public_source_export_fixture(tmp_path, monkeypatch, *, source_text=None):
+    """Freeze a compact synthetic source through the real selection algorithm."""
+    from equivalence import selection
+    from lme.dataset import load_dataset_bytes
+    from lme.exomem_capture import CAPTURE_CONTRACT, capture_read_body
+    from lme.normalize import neutralize
+    from memorybench import export
+    from protocol.models import MemoryBenchRunPlan
+
+    payload = _plan_payload(tmp_path)
+    text = source_text or ('Examples: ' + 'Z:' + r'\example\document' + ' and /' + 'home/example/document and ' + '\\' * 2 + r'example\share\document')
+    rows = []
+    for kind, count in selection.CANONICAL_LME_S_SOURCE['type_census'].items():
+        for index in range(count):
+            ordinal = len(rows)
+            row = copy.deepcopy(json.loads(DATASET.read_text())[0])
+            row.update(question_id=f'case-{ordinal:04d}' + ('_abs' if ordinal < 30 else ''), question_type=kind, question=f'Where is public example number {ordinal}? {text}')
+            row['sessions'][0]['messages'][0]['content'] = f'Public example number {ordinal}: {text}'
+            session = row.pop('sessions')[0]
+            row.update(haystack_session_ids=[session['session_id']], haystack_dates=[session['date']], haystack_sessions=[session['messages']], answer_session_ids=[])
+            rows.append(row)
+    raw = json.dumps(rows).encode()
+    dataset_path = Path(payload['dataset_path'])
+    dataset_path.write_bytes(raw)
+    source = {**selection.CANONICAL_LME_S_SOURCE, 'sha256': hashlib.sha256(raw).hexdigest(), 'byte_count': len(raw)}
+    monkeypatch.setattr(selection, 'CANONICAL_LME_S_SOURCE', source)
+    monkeypatch.setattr(export, 'CANONICAL_LME_S_SOURCE', source)
+    artifact = selection.select_lme_s_25(rows, source=source)
+    artifact_raw = json.dumps(artifact, indent=2, sort_keys=True).encode() + b'\n'
+    # Inject fixture authority; keep byte checking, exact regeneration and
+    # ordered membership real. The frozen artifact's literal schema is tested
+    # independently and deliberately cannot accept a synthetic dataset digest.
+    monkeypatch.setattr(export, 'load_frozen_lme_selection', lambda: (artifact, artifact_raw))
+    payload['dataset'].update(source=source['repository'], revision=source['revision'], sha256=source['sha256'], case_count=source['row_count'])
+    payload['selection'] = {'mode': 'explicit', 'target_question_ids': artifact['target_question_ids']}
+    plan = MemoryBenchRunPlan.model_validate(payload)
+    by_id = {row['question_id']: row for row in rows}
+    cases = []
+    for case_id in artifact['target_question_ids'][:2]:
+        row = by_id[case_id]
+        question = load_dataset_bytes(json.dumps([row]).encode()).questions[0]
+        body = capture_read_body(neutralize(question, plan.dataset))
+        cases.append({'case_id_hmac_sha256': export.privacy_hmac_sha256(plan.privacy_hmac_key_hex, 'case-id', case_id), 'question': {'text': row['question']}, 'hits': [{'content': body}]})
+    return plan, {'session_normalization': CAPTURE_CONTRACT, 'cases': cases}
+
+
+def test_public_source_paths_require_exact_canonical_case_documents(tmp_path, monkeypatch):
+    from memorybench.export import _validate_public_privacy
+
+    plan, payload = _public_source_export_fixture(tmp_path, monkeypatch)
+    _validate_public_privacy(json.dumps(payload).encode(), plan)
+
+
+@pytest.mark.parametrize('fault', ['wrong-case', 'wrong-field', 'prefix', 'suffix', 'truncate', 'duplicate', 'mutation', 'contract', 'source', 'revision', 'sha256', 'byte-count', 'order', 'full-selection', 'derived-source'])
+def test_public_source_exception_refuses_unproven_or_modified_content(tmp_path, monkeypatch, fault):
+    from memorybench import export
+    plan, payload = _public_source_export_fixture(tmp_path, monkeypatch)
+    hit = payload['cases'][0]['hits'][0]
+    if fault == 'wrong-case':
+        hit['content'] = payload['cases'][1]['hits'][0]['content']
+    elif fault == 'wrong-field':
+        payload['unexpected'] = hit['content']
+    elif fault in {'prefix', 'suffix', 'truncate', 'duplicate', 'mutation'}:
+        body = hit['content']
+        hit['content'] = {'prefix': 'extra\n' + body, 'suffix': body + '\nextra', 'truncate': body[:-5], 'duplicate': body + body, 'mutation': body.replace('Public', 'Changed')}[fault]
+    elif fault == 'contract':
+        payload['session_normalization'] = 'unknown'
+    elif fault in {'source', 'revision', 'sha256'}:
+        value = 'a' * 64 if fault == 'sha256' else 'untrusted'
+        plan = plan.model_copy(update={'dataset': plan.dataset.model_copy(update={fault: value})})
+    elif fault == 'byte-count':
+        monkeypatch.setitem(export.CANONICAL_LME_S_SOURCE, 'byte_count', 1)
+    elif fault == 'order':
+        plan = plan.model_copy(update={'selection': plan.selection.model_copy(update={'target_question_ids': list(reversed(plan.selection.target_question_ids))})})
+    elif fault == 'full-selection':
+        plan = plan.model_copy(update={'selection': plan.selection.model_copy(update={'mode': 'full', 'target_question_ids': None})})
+    elif fault == 'derived-source':
+        # A valid self-declared SHA never grants public provenance.
+        monkeypatch.setitem(export.CANONICAL_LME_S_SOURCE, 'sha256', 'b' * 64)
+    with pytest.raises(ValueError):
+        export._validate_public_privacy(json.dumps(payload).encode(), plan)
+
+
+@pytest.mark.parametrize('private_kind', ['hmac', 'raw-id', 'runtime-root', 'escaped-hmac'])
+def test_runtime_material_wins_even_inside_exact_public_source(tmp_path, monkeypatch, private_kind):
+    from memorybench.export import _validate_public_privacy
+    value = {'hmac': HMAC_KEY_HEX, 'raw-id': 'case-0000_abs', 'runtime-root': str(tmp_path / 'output'), 'escaped-hmac': HMAC_KEY_HEX}[private_kind]
+    plan, payload = _public_source_export_fixture(tmp_path, monkeypatch, source_text='Example /' + 'home/public/example ' + value)
+    raw = json.dumps(payload)
+    if private_kind == 'escaped-hmac':
+        raw = raw.replace(HMAC_KEY_HEX, ''.join('\\u%04x' % ord(char) for char in HMAC_KEY_HEX))
+    with pytest.raises(ValueError, match='private runtime material'):
+        _validate_public_privacy(raw.encode(), plan)

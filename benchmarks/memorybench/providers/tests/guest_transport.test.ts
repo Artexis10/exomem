@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
 import { EventEmitter, once } from "node:events"
-import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink } from "node:fs/promises"
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -55,6 +55,7 @@ describe("guest transport", () => {
       containerTag: string
       maxLiveServices: number
       discover: () => Promise<ResidencyRecord[]>
+      prepareRetirement: (service: Record<string, unknown>) => Promise<void>
       retire: (service: Record<string, unknown>) => Promise<void>
       launch: () => Promise<Record<string, unknown>>
       touch: (service: Record<string, unknown>) => Promise<void>
@@ -70,6 +71,7 @@ describe("guest transport", () => {
       containerTag,
       maxLiveServices: 1,
       discover: async () => [...live.values()],
+      prepareRetirement: async (service) => { events.push(`ready:${service.container_tag}`) },
       retire: async (service) => {
         const tag = String(service.container_tag)
         events.push(`retire:${tag}`)
@@ -98,6 +100,9 @@ describe("guest transport", () => {
     expect(live.size).toBe(1)
     expect(live.has("container-1")).toBe(true)
     expect(events.indexOf("retire:container-1")).toBeLessThan(events.indexOf("launch:container-2"))
+    for (const [index, event] of events.entries()) {
+      if (event.startsWith("retire:")) expect(events[index - 1]).toBe(event.replace("retire:", "ready:"))
+    }
   })
 
   test("residency admission evicts the least-recently-used service at a configured cap", async () => {
@@ -113,6 +118,7 @@ describe("guest transport", () => {
       containerTag: "new",
       maxLiveServices: 2,
       discover: async () => records,
+      prepareRetirement: async () => {},
       retire: async (service: { container_tag: string }) => { retired.push(service.container_tag) },
       launch: async () => ({ container_tag: "new" }),
       touch: async () => {},
@@ -268,7 +274,7 @@ describe("guest transport", () => {
     const envelope = { protocol_version: 1, request_id: requestId, operation: "same" }
     const result = await postJsonWithRetry<{ value: number }>({
       url: "http://127.0.0.1:9/v1/ingest",
-      token: "private",
+      token: "fixture-retry-credential-0123456789abcdef",
       envelope,
       timeoutMs: 1_000,
       fetcher,
@@ -448,6 +454,11 @@ describe("guest transport", () => {
       EXOMEM_DISABLE_CORPUS_CACHE: "1",
       EXOMEM_VEC_BACKEND: "numpy",
       EXOMEM_LEXICAL_BACKEND: "python",
+      EXOMEM_MODE: "normal",
+      EXOMEM_DEVICE: "cpu",
+      EXOMEM_EMBED_DEVICE: "cpu",
+      EXOMEM_CLIP_DEVICE: "cpu",
+      CUDA_VISIBLE_DEVICES: "",
       EXOMEM_ALLOW_CPU_TORCH: "1",
       HF_HUB_OFFLINE: "1",
       TRANSFORMERS_OFFLINE: "1",
@@ -459,6 +470,11 @@ describe("guest transport", () => {
       EXOMEM_DISABLE_WARMUP: "0",
       EXOMEM_VEC_BACKEND: "sqlite-vec",
       EXOMEM_LEXICAL_BACKEND: "native",
+      EXOMEM_MODE: "performance",
+      EXOMEM_DEVICE: "cuda",
+      EXOMEM_EMBED_DEVICE: "cuda:1",
+      EXOMEM_CLIP_DEVICE: "mps",
+      CUDA_VISIBLE_DEVICES: "0",
       HF_HUB_OFFLINE: "0",
       TRANSFORMERS_OFFLINE: "0",
     }, { EXOMEM_VAULT_PATH: "/owned/vault", EXOMEM_REST_API_KEY: "owned-key" })
@@ -489,13 +505,61 @@ describe("guest transport", () => {
     )
   })
 
-  test("Exomem writer-lease state is bound inside the owned service root", async () => {
+  test("retirement reconciliation uses the owned CLI and rejects unsuccessful process envelopes", async () => {
+    const transport = await import("../_guest_transport") as Record<string, unknown>
+    const reconcile = transport.runExomemReconcile as undefined |
+      ((service: Record<string, unknown>, attemptId: string) => Promise<unknown>)
+    expect(typeof reconcile).toBe("function")
+    const work = await root()
+    const bin = join(work, "bin")
+    const evidence = join(work, "evidence")
+    await mkdir(bin)
+    await mkdir(evidence)
+    const observed = join(work, "observed.json")
+    const outcome = join(work, "outcome.json")
+    const fakeUv = join(bin, "uv")
+    await writeFile(fakeUv, `#!${process.execPath}\n` +
+      `import {readFileSync,writeFileSync} from "node:fs";\n` +
+      `writeFileSync(${JSON.stringify(observed)},JSON.stringify({args:process.argv.slice(2),` +
+      `cwd:process.cwd(),vault:process.env.EXOMEM_VAULT_PATH,state:process.env.EXOMEM_STATE_ROOT,` +
+      `device:process.env.EXOMEM_DEVICE,work:process.env.MEMORYBENCH_GUEST_WORK_ROOT}));\n` +
+      `const r=JSON.parse(readFileSync(${JSON.stringify(outcome)},"utf8"));\n` +
+      `console.log(JSON.stringify(r.envelope));process.exit(r.exit);\n`)
+    await chmod(fakeUv, 0o700)
+    const oldPath = process.env.PATH
+    const oldHome = process.env.EXOMEM_HOME
+    process.env.PATH = `${bin}:${oldPath ?? ""}`
+    process.env.EXOMEM_HOME = join(work, "checkout")
+    const service = { provider: "exomem", work_root: work, evidence_root: evidence,
+      vault_root: join(work, "vault"), instance_id: "test-reconcile-instance" }
+    try {
+      await writeFile(outcome, JSON.stringify({exit: 0, envelope: {success: true, data: {graph_status: "current"}}}))
+      expect(await reconcile!(service, crypto.randomUUID())).toEqual({graph_status: "current"})
+      expect(JSON.parse(await readFile(observed, "utf8"))).toEqual({
+        args: ["run", "--project", process.env.EXOMEM_HOME, "--no-sync", "exomem", "maintain", "--reconcile", "--json"],
+        cwd: work, vault: service.vault_root, state: join(work, "state"), device: "cpu", work,
+      })
+      await writeFile(outcome, JSON.stringify({exit: 1, envelope: {success: true, data: {graph_status: "current"}}}))
+      await expect(reconcile!(service, crypto.randomUUID())).rejects.toThrow("reconcile failed")
+      await writeFile(outcome, JSON.stringify({exit: 0, envelope: {success: false, data: {graph_status: "current"}}}))
+      await expect(reconcile!(service, crypto.randomUUID())).rejects.toThrow("reconcile failed")
+      const records = await Promise.all((await readdir(evidence)).filter((name) => name.startsWith("operation-")).map(
+        async (name) => JSON.parse(await readFile(join(evidence, name), "utf8"))))
+      expect(records.some((record) => record.event === "reconcile-request" && record.data.transport === "owned-local-cli")).toBe(true)
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath
+      if (oldHome === undefined) delete process.env.EXOMEM_HOME; else process.env.EXOMEM_HOME = oldHome
+    }
+  })
+
+  test("Exomem machine and writer-lease state are bound inside the owned service root", async () => {
     const transport = await import("../_guest_transport") as Record<string, unknown>
     const bind = transport.exomemOwnedStateEnvironment as undefined |
       ((workRoot: string) => Record<string, string>)
     expect(typeof bind).toBe("function")
     const work = join(await root(), "service")
     expect(bind!(work)).toEqual({
+      EXOMEM_STATE_ROOT: join(work, "state"),
       EXOMEM_WRITER_LEASE_STATE_DIR: join(work, "writer-lease-state"),
     })
 
@@ -646,7 +710,7 @@ describe("guest transport", () => {
       server.close()
       await once(server, "close")
     }
-    expect(thrown).toMatch(/Exomem request refused|remote_failure/)
+    expect(thrown).toMatch(/Exomem request refused|remote_failure|guest response contains private runtime material/)
     expect(thrown).not.toContain(token)
     expect(thrown).not.toContain(privatePath)
     expect(thrown).not.toContain(encoded)
@@ -1023,4 +1087,56 @@ describe("guest transport", () => {
     await expect(lstat(work)).rejects.toThrow()
     expect(() => process.kill(child.pid!, 0)).toThrow()
   })
+})
+
+test("successful guest responses refuse the actual service secret before checkpointing", async () => {
+  const token = "fixture-credential-" + "x".repeat(24)
+  const variants = [token, Buffer.from(token).toString("base64"), Buffer.from(token).toString("hex"), [...token].map(char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`).join("")]
+  variants.push(JSON.stringify({ nested: JSON.stringify({ content: variants[3] }) }))
+  variants.push(Buffer.from(token).toString("hex").toUpperCase())
+  variants.push(Buffer.from(token).toString("hex").replace(/a/g, "A"))
+  let leak = ""
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" })
+    response.end(JSON.stringify({ success: true, data: { body: `retrieved text ${leak}` } }))
+  })
+  server.listen(0, "127.0.0.1")
+  await once(server, "listening")
+  const address = server.address()
+  if (!address || typeof address === "string") throw new Error("fixture server address missing")
+  const work = await root()
+  const service = { protocol_version: 1 as const, provider: "exomem" as const, base_url: `http://127.0.0.1:${address.port}`, bearer_token: token, pid: process.pid, process_start_identity: await processStartIdentity(process.pid), checkout_pin: "fixture", work_root: work, evidence_root: join(work, "evidence") }
+  try {
+    for (const variant of variants) {
+      leak = variant
+      await expect(postExomem(service, "/api/read_memory", { path: "source.md" })).rejects.toThrow("private runtime material")
+      const requestId = crypto.randomUUID()
+      await expect(postJsonWithRetry({ url: service.base_url, token, envelope: { request_id: requestId }, timeoutMs: 1000, fetcher: (async () => new Response(JSON.stringify({ protocol_version: 1, request_id: requestId, ok: true, data: { [variant]: "value" }, error: null }), { headers: { "content-type": "application/json" } })) as typeof fetch })).rejects.toThrow("private runtime material")
+    }
+    const { ExomemProvider } = await import("../exomem")
+    let cleanupCalls = 0
+    const provider = new ExomemProvider({ ensureService: async () => service, clearAllServices: async () => { cleanupCalls++ } })
+    await expect(provider.search("query", { containerTag: "fixture", limit: 1 })).rejects.toThrow("private runtime material")
+    expect(cleanupCalls).toBe(1)
+  } finally {
+    server.close()
+    await once(server, "close")
+  }
+})
+
+test("cross-stage admission cannot retire or replace a service whose graph is unproved", async () => {
+  const transport = await import("../_guest_transport")
+  const provider = await import("../exomem")
+  expect(provider.prepareExomemRetirement).toBe(transport.prepareExomemRetirement)
+  const events: string[] = []
+  const service = { protocol_version: 1 as const, provider: "exomem" as const, base_url: "http://127.0.0.1:1", bearer_token: "fixture", pid: 1, process_start_identity: "fixture", checkout_pin: "fixture", work_root: "fixture", evidence_root: "fixture" }
+  await expect(transport.enforceExomemResidency({
+    containerTag: "next", maxLiveServices: 1,
+    discover: async () => [{ containerTag: "previous", lastUsed: 1, service }],
+    prepareRetirement: async () => { events.push("prepare"); throw new Error("graph-current unproved") },
+    retire: async () => { events.push("retire") },
+    launch: async () => { events.push("launch"); return service },
+    touch: async () => { events.push("touch") },
+  })).rejects.toThrow("graph-current")
+  expect(events).toEqual(["prepare"])
 })

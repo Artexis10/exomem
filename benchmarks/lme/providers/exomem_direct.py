@@ -9,6 +9,7 @@ from membench.adapters.base import Profile
 from membench.adapters.base import AdapterEnvironmentError
 from protocol.custody import retire_child_directory
 from protocol.models import CaseHandle, LaneReadiness, ProtocolEvent
+from protocol.readiness import semantic_doctor_readiness
 
 from ..adapter import LmeExomemAdapter, lme_profile
 from .base import ProviderHit, ProviderSessionContext, RetrievalPurpose, require_neutral
@@ -19,7 +20,7 @@ class ExomemDirectProvider:
 
     The adapter remains the only code that writes and searches the product
     vault.  This wrapper merely supplies its workdir/profile requirements and
-    retains the neutral case clock required for retrieval.
+    retains neutral case metadata without overriding the product clock.
     """
 
     def __init__(self) -> None:
@@ -27,6 +28,7 @@ class ExomemDirectProvider:
         self._context: ProviderSessionContext | None = None
         self._question_date: dt.datetime | None = None
         self._profile: Profile | None = None
+        self.last_doctor_report: dict | None = None
 
     def setup(self, profile: Profile | None, context: ProviderSessionContext) -> None:
         self._profile = profile or lme_profile()
@@ -65,21 +67,54 @@ class ExomemDirectProvider:
 
     def cleanup(self) -> None:
         try:
-            self._adapter.cleanup()
-        finally:
             try:
-                if self._context is not None:
-                    for component in ("vault", "logs", "leases"):
-                        retire_child_directory(
-                            self._context.work_root,
-                            component,
-                            max_entries=100_000,
-                            max_depth=64,
-                        )
+                self._close_writer_runtime()
             finally:
-                self._context = None
-                self._question_date = None
-                self._adapter.last_ingest_results = ()
+                self._adapter.cleanup()
+            if self._context is not None:
+                for component in ("vault", "logs", "leases"):
+                    retire_child_directory(
+                        self._context.work_root,
+                        component,
+                        max_entries=100_000,
+                        max_depth=64,
+                    )
+        finally:
+            self._context = None
+            self._question_date = None
+            self._adapter.last_ingest_results = ()
+
+    def _close_writer_runtime(self) -> None:
+        """Retire only this case's in-process leases before its FD is reusable.
+
+        The product caches managers by configured path. A runner capability
+        path can name a different inode in the next case after FD reuse.
+        Do not reset the process-wide cache or resolve the held path back to
+        an unprotected filesystem name. Setup failures can create a manager,
+        so find owned entries even when adapter setup did not return.
+        The runner calls this only after synchronous provider operations
+        return; the local lease manager does not count active mutations.
+        """
+        if self._context is None:
+            return
+        from exomem import writer_lease
+
+        state_dir = self._context.work_root / "leases"
+        with writer_lease._MANAGERS_LOCK:
+            owned = [
+                (config, manager) for config, manager in writer_lease._MANAGERS.items()
+                if config.state_dir == state_dir
+            ]
+            for config, manager in owned:
+                with manager._lock:
+                    if manager._renewer is not None and manager._renewer.is_alive():
+                        raise RuntimeError("direct provider lease renewer is still active")
+                    manager.close()
+                    handle = manager.idempotency._owner_lock_handle
+                    if handle is not None:
+                        handle.close()
+                        manager.idempotency._owner_lock_handle = None
+                    del writer_lease._MANAGERS[config]
 
     def variant_id(self) -> str:
         return "exomem-source-only"
@@ -87,10 +122,12 @@ class ExomemDirectProvider:
     def readiness(self) -> list[LaneReadiness]:
         profile = self._profile or lme_profile()
         disabled = bool(profile.settings.get("EXOMEM_DISABLE_EMBEDDINGS"))
-        return [LaneReadiness(
-            lane="semantic",
-            requested=not disabled,
-            verified=False,
-            method="readiness-unverifiable",
-            evidence="semantic readiness is established by recorded known-answer probes",
-        )]
+        if disabled:
+            return [LaneReadiness(lane="semantic", requested=False, verified=False, method="doctor-check", evidence="semantic lane not requested")]
+        if self._adapter._vault is None:
+            raise RuntimeError("readiness called before setup")
+        from exomem import doctor
+
+        report = doctor.doctor(vault=str(self._adapter._vault), profile="hybrid").as_dict()
+        self.last_doctor_report = report
+        return [semantic_doctor_readiness(report)]
