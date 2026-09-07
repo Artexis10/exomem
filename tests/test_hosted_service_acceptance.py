@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+from exomem import semantic_units
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "infra/scripts/accept_hosted_service.py"
 
@@ -162,6 +164,87 @@ def test_synthetic_corpus_is_deterministic_and_meets_the_reserved_cell_floor(tmp
     assert first["bytes"] >= 10 * 1024 * 1024
     assert first["digest"] == second["digest"]
     assert (tmp_path / "one" / "note-0000.md").read_text(encoding="utf-8") == (tmp_path / "two" / "note-0000.md").read_text(encoding="utf-8")
+
+
+def test_synthetic_corpus_notes_are_valid_compiled_compact_observations(tmp_path: Path) -> None:
+    runner = _load()
+    runner.generate_synthetic_corpus(tmp_path / "corpus")
+
+    categories: set[str] = set()
+    for note in (tmp_path / "corpus").glob("note-*.md"):
+        content = note.read_text(encoding="utf-8")
+        parsed = semantic_units.parse_semantic_units(content, path=str(note))
+        assert parsed.errors == ()
+        assert "\n## Observations\n" in content
+        assert len(parsed.units) == 1
+        assert parsed.units[0].form == "compact"
+        assert parsed.units[0].kind == "observation"
+        assert parsed.units[0].content
+        categories.add(parsed.units[0].category)
+    assert len(categories) >= 8
+
+
+def test_tenant_sentinels_are_stable_distinct_and_non_overlapping() -> None:
+    runner = _load()
+
+    synthetic = runner.tenant_sentinel("sentinel-001", "synthetic")
+    isolation = runner.tenant_sentinel("sentinel-001", "isolation")
+
+    assert synthetic == runner.tenant_sentinel("sentinel-001", "synthetic")
+    assert isolation == runner.tenant_sentinel("sentinel-001", "isolation")
+    assert synthetic != isolation
+    assert synthetic not in isolation
+    assert isolation not in synthetic
+
+
+@pytest.mark.parametrize(
+    ("result", "committed"),
+    [
+        (
+            {
+                "structuredContent": {
+                    "result": {
+                        "ok": True,
+                        "state": "committed",
+                        "terminal": True,
+                        "status": "committed",
+                        "mutated": True,
+                    }
+                }
+            },
+            True,
+        ),
+        (
+            {
+                "structuredContent": {
+                    "ok": True,
+                    "state": "committed",
+                    "terminal": True,
+                    "status": "committed",
+                    "mutated": True,
+                }
+            },
+            True,
+        ),
+        ({"isError": True, "structuredContent": {"result": {"ok": True, "state": "committed", "terminal": True, "status": "committed", "mutated": True}}}, False),
+        ({"structuredContent": {"result": {"ok": True, "state": "pending", "terminal": True, "status": "committed", "mutated": True}}}, False),
+        ({"structuredContent": {"result": {"ok": True, "state": "committed", "terminal": False, "status": "committed", "mutated": True}}}, False),
+        ({"structuredContent": {"result": {"ok": True, "state": "committed", "terminal": True, "status": "committed", "mutated": False}}}, False),
+        ({"structuredContent": {"result": {"status": "failed", "message": "nothing committed"}}}, False),
+        ({"structuredContent": {"result": {"message": "committed"}}}, False),
+    ],
+)
+def test_durable_acknowledgement_requires_canonical_committed_terminal(result: dict[str, Any], committed: bool) -> None:
+    runner = _load()
+
+    assert runner.committed_tool_receipt(result) is committed
+
+
+def test_tool_results_marked_as_errors_are_not_usable_as_recall_evidence() -> None:
+    runner = _load()
+
+    with pytest.raises(runner.AcceptanceError, match="unsuccessful"):
+        runner._tool_result({"isError": True, "structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/sentinel.md", "text": "forged"}]}}})
 
 
 def test_pkce_client_validates_discovery_and_rotating_refresh_replay(tmp_path: Path) -> None:
@@ -421,16 +504,16 @@ def test_cli_runs_producer_shaped_initialize_capture_and_fresh_cited_recall(tmp_
             else:
                 tool = request["params"]["name"]
                 if tool == "remember":
-                    result = {"structuredContent": {"result": {"outcome": "committed"}}}
+                    result = {"structuredContent": {"ok": True, "state": "committed", "terminal": True, "status": "committed", "mutated": True}}
                 elif tool == "ask_memory":
                     tenant = self.headers["Authorization"].removeprefix("Bearer ").removesuffix("-access")
                     query = request["params"]["arguments"]["query"]
-                    own_fact = "hosted acceptance sentinel cli-run-001" + (" isolation" if tenant == "isolation" else "")
-                    target_isolation = query.endswith(" isolation?")
-                    result = {"structuredContent": {"result": {"hits": [{"path": f"Knowledge Base/Notes/Insights/{tenant}.md", "text": own_fact}] if (tenant == "isolation") == target_isolation else []}}}
+                    own_fact = runner.tenant_sentinel("cli-run-001", tenant)
+                    assert query == "What tenant-local acceptance marker was recorded for run cli-run-001?"
+                    result = {"structuredContent": {"result": {"hits": [{"path": f"Knowledge Base/Notes/Insights/{tenant}.md", "text": own_fact}]}}}
                 else:
                     tenant = self.headers["Authorization"].removeprefix("Bearer ").removesuffix("-access")
-                    result = {"structuredContent": {"result": {"content": "hosted acceptance sentinel cli-run-001" + (" isolation" if tenant == "isolation" else "")}}}
+                    result = {"structuredContent": {"result": {"content": runner.tenant_sentinel("cli-run-001", tenant)}}}
             envelope = {"jsonrpc": "2.0", "id": request["id"], "result": result}
             sse = method == "tools/call" and request["params"]["name"] == "ask_memory"
             body = (f"data: {json.dumps(envelope)}\n\n" if sse else json.dumps(envelope)).encode()
@@ -467,6 +550,47 @@ def test_cli_runs_producer_shaped_initialize_capture_and_fresh_cited_recall(tmp_
         thread.join()
 
 
+def test_protocol_refuses_a_genuine_foreign_tenant_sentinel_leak(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _load()
+    acceptance = runner.AcceptanceRunner.from_config(
+        _write_config(tmp_path), state_dir=tmp_path / "state", run_id="leak-001"
+    )
+    acceptance.prepare()
+    for tenant in ("synthetic", "isolation"):
+        acceptance.save_tokens({"access_token": f"{tenant}-access", "refresh_token": f"{tenant}-refresh"}, tenant=tenant)
+
+    recall_counts = {"synthetic": 0, "isolation": 0}
+
+    class Client:
+        def __init__(self, tenant: str) -> None:
+            self.tenant = tenant
+
+        def initialize(self) -> dict[str, Any]:
+            return {"protocolVersion": "2025-06-18"}
+
+        def list_tools(self) -> dict[str, Any]:
+            return {"tools": [{"name": "remember"}, {"name": "ask_memory"}, {"name": "read_memory"}]}
+
+        def capture(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+            return {"structuredContent": {"result": {"ok": True, "state": "committed", "terminal": True, "status": "committed", "mutated": True}}}
+
+        def recall(self, query: str) -> dict[str, Any]:
+            foreign = runner.tenant_sentinel("leak-001", "isolation")
+            own = runner.tenant_sentinel("leak-001", self.tenant)
+            assert query == "What tenant-local acceptance marker was recorded for run leak-001?"
+            recall_counts[self.tenant] += 1
+            fact = foreign if self.tenant == "synthetic" and recall_counts[self.tenant] == 2 else own
+            return {"structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/sentinel.md", "text": fact}]}}}
+
+        def call(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+            return {"structuredContent": {"result": {"content": runner.tenant_sentinel("leak-001", self.tenant)}}}
+
+    monkeypatch.setattr(runner.AcceptanceRunner, "_mcp_client", lambda _self, tenant: Client(tenant))
+
+    with pytest.raises(runner.AcceptanceError, match="cross-tenant"):
+        acceptance.run_protocol()
+
+
 def test_benchmark_uses_five_concurrent_tenant_clients_and_never_passes_incomplete_samples(tmp_path: Path) -> None:
     runner = _load()
     requests: list[dict[str, Any]] = []
@@ -476,7 +600,11 @@ def test_benchmark_uses_five_concurrent_tenant_clients_and_never_passes_incomple
         def do_POST(self) -> None:  # noqa: N802
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             with request_lock:
-                requests.append({"method": request["method"], "authorization": self.headers["Authorization"]})
+                requests.append({
+                    "method": request["method"],
+                    "authorization": self.headers["Authorization"],
+                    "arguments": request.get("params", {}).get("arguments"),
+                })
             if request["method"] == "initialize":
                 result: dict[str, Any] = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "Hosted Exomem"}}
             elif request["method"] == "notifications/initialized":
@@ -490,11 +618,15 @@ def test_benchmark_uses_five_concurrent_tenant_clients_and_never_passes_incomple
             else:
                 tool = request["params"]["name"]
                 if tool == "ask_memory":
-                    result = {"structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/corpus.md", "text": "Synthetic acceptance note 999."}]}}}
+                    tenant = self.headers["Authorization"].removeprefix("Bearer ").removesuffix("-access")
+                    assert request["params"]["arguments"]["query"] == "What already-converged corpus marker belongs to run benchmark-001?"
+                    fact = runner.tenant_sentinel("benchmark-001", tenant) + " corpus"
+                    result = {"structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/corpus.md", "text": fact}]}}}
                 elif tool == "read_memory":
-                    result = {"structuredContent": {"result": {"content": "Synthetic acceptance note 999."}}}
+                    tenant = self.headers["Authorization"].removeprefix("Bearer ").removesuffix("-access")
+                    result = {"structuredContent": {"result": {"content": runner.tenant_sentinel("benchmark-001", tenant) + " corpus"}}}
                 else:
-                    result = {"structuredContent": {"result": {"outcome": "committed"}}}
+                    result = {"structuredContent": {"ok": True, "state": "committed", "terminal": True, "status": "committed", "mutated": True}}
             body = json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -533,8 +665,23 @@ def test_benchmark_uses_five_concurrent_tenant_clients_and_never_passes_incomple
         assert evidence["warm_samples_per_operation"] == 100
         assert evidence["cold_client_resets"] == 20
         assert evidence["cold_reset_semantics"] == "new MCPClient instance; no service, process, tenant, or storage reset"
+        assert evidence["warm_recall_semantics"] == "timed recall of the already-converged run-owned corpus fact; citation readback is verified outside the timed interval"
         assert {sample["authorization"] for sample in requests} == {"Bearer synthetic-access", "Bearer isolation-access"}
         assert len([sample for sample in requests if sample["method"] == "initialize"]) == 124
+        benchmark_captures = [
+            sample["arguments"]
+            for sample in requests
+            if isinstance(sample["arguments"], dict)
+            and str(sample["arguments"].get("title", "")).startswith("Hosted benchmark")
+        ]
+        assert len(benchmark_captures) == 100
+        for capture in benchmark_captures:
+            content = capture["content"]
+            assert isinstance(content, str)
+            parsed = semantic_units.parse_semantic_units(content)
+            assert content.startswith("## Observations\n")
+            assert parsed.errors == ()
+            assert [(unit.form, unit.kind) for unit in parsed.units] == [("compact", "observation")]
 
         incomplete = runner.AcceptanceRunner.from_config(config_path, state_dir=tmp_path / "state", run_id="benchmark-002", allow_loopback_fixture=True)
         incomplete.prepare()
@@ -546,6 +693,59 @@ def test_benchmark_uses_five_concurrent_tenant_clients_and_never_passes_incomple
     finally:
         server.shutdown()
         thread.join()
+
+
+@pytest.mark.parametrize("failure", ("capture", "recall"))
+def test_benchmark_refuses_failed_capture_and_unresolvable_warm_recall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    runner = _load()
+    acceptance = runner.AcceptanceRunner.from_config(
+        _write_config(tmp_path), state_dir=tmp_path / "state", run_id=f"benchmark-{failure}-001"
+    )
+    acceptance.prepare()
+    manifest = acceptance.manifest()
+    facts = {
+        tenant: runner.tenant_sentinel(acceptance.run_id, tenant) + " corpus"
+        for tenant in ("synthetic", "isolation")
+    }
+    manifest["stages"]["performance"] = {
+        "status": "pending",
+        "fixture": {"notes": 1000, "bytes": 10 * 1024 * 1024, "digest": "fixture"},
+        "cell_corpus": {
+            tenant: {"status": "committed", "convergence": "passed", "fact": fact}
+            for tenant, fact in facts.items()
+        },
+    }
+    acceptance._write_manifest(manifest)
+
+    class Client:
+        def __init__(self, tenant: str) -> None:
+            self.tenant = tenant
+
+        def initialize(self) -> dict[str, Any]:
+            return {"protocolVersion": "2025-06-18"}
+
+        def list_tools(self) -> dict[str, Any]:
+            return {"tools": []}
+
+        def capture(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+            if failure == "capture":
+                return {"isError": True, "structuredContent": {"result": {"message": "committed elsewhere"}}}
+            return {"structuredContent": {"result": {"ok": True, "state": "committed", "terminal": True, "status": "committed", "mutated": True}}}
+
+        def recall(self, _query: str) -> dict[str, Any]:
+            hits = [] if failure == "recall" else [{"path": "Knowledge Base/Notes/Insights/corpus.md", "text": facts[self.tenant]}]
+            return {"structuredContent": {"result": {"hits": hits}}}
+
+        def call(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+            return {"structuredContent": {"result": {"content": facts[self.tenant]}}}
+
+    monkeypatch.setattr(runner.AcceptanceRunner, "_mcp_client", lambda _self, tenant: Client(tenant))
+
+    with pytest.raises(runner.AcceptanceError, match="warm samples"):
+        acceptance.run_benchmark()
+    assert acceptance.manifest()["stages"]["performance"]["status"] == "failed"
 
 
 def test_continuity_rotates_persisted_tokens_then_proves_service_use_after_fleet_window(tmp_path: Path) -> None:
@@ -584,9 +784,9 @@ def test_continuity_rotates_persisted_tokens_then_proves_service_use_after_fleet
                 self.end_headers()
                 return
             elif request["method"] == "tools/call" and request["params"]["name"] == "ask_memory":
-                result = {"structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/acceptance.md", "text": "hosted acceptance sentinel continuity-001"}]}}}
+                result = {"structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/acceptance.md", "text": runner.tenant_sentinel("continuity-001", "synthetic")}]}}}
             else:
-                result = {"structuredContent": {"result": {"content": "hosted acceptance sentinel continuity-001"}}}
+                result = {"structuredContent": {"result": {"content": runner.tenant_sentinel("continuity-001", "synthetic")}}}
             self._json({"jsonrpc": "2.0", "id": request["id"], "result": result})
 
         def _json(self, payload: dict[str, Any]) -> None:

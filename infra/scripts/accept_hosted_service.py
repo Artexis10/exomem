@@ -209,6 +209,17 @@ def validate_benchmark_samples(warm: Mapping[str, Sequence[float]], *, cold_runs
         raise AcceptanceError(f"missing warm samples for {', '.join(sorted(missing))}")
 
 
+def tenant_sentinel(run_id: str, tenant: str) -> str:
+    """Return one stable, tenant-specific fact that cannot overlap its peer."""
+    if tenant not in {"synthetic", "isolation"}:
+        raise AcceptanceError("sentinel tenant is not reserved by this run")
+    return f"hosted acceptance marker for run {run_id} tenant {tenant}"
+
+
+def tenant_recall_query(run_id: str) -> str:
+    return f"What tenant-local acceptance marker was recorded for run {run_id}?"
+
+
 def generate_synthetic_corpus(destination: Path, *, notes: int = 1000, minimum_bytes: int = 10 * 1024 * 1024) -> dict[str, int | str]:
     if notes < 1000 or minimum_bytes < 10 * 1024 * 1024:
         raise AcceptanceError("corpus must contain at least 1,000 notes and 10 MiB")
@@ -216,16 +227,50 @@ def generate_synthetic_corpus(destination: Path, *, notes: int = 1000, minimum_b
     content_bytes = 0
     digest = hashlib.sha256()
     per_note = max(512, (minimum_bytes + notes - 1) // notes)
+    topics = (
+        ("operating profile", "The synthetic operating profile records a routine service condition."),
+        ("incident exercise", "The synthetic incident exercise records a bounded recovery decision."),
+        ("retrieval scenario", "The synthetic retrieval scenario records an expected cited answer."),
+        ("capacity sample", "The synthetic capacity sample records an ordinary resource observation."),
+        ("governance example", "The synthetic governance example records an approved access boundary."),
+        ("continuity probe", "The synthetic continuity probe records a token-rotation outcome."),
+        ("audit fixture", "The synthetic audit fixture records a repeatable validation result."),
+        ("collaboration trace", "The synthetic collaboration trace records a tenant-local handoff."),
+    )
     for ordinal in range(notes):
         seed = hashlib.sha256(f"exomem-hosted-acceptance-v1:{ordinal}".encode()).hexdigest()
-        body = (f"Synthetic acceptance note {ordinal}. Sentinel {seed}. " * ((per_note // 96) + 2))[:per_note]
-        rendered = f"# Acceptance corpus {ordinal:04d}\n\n{body}\n"
+        category, topic = topics[ordinal % len(topics)]
+        body = (f"{topic} Synthetic acceptance note {ordinal}. Sentinel {seed}. " * ((per_note // 160) + 2))[:per_note]
+        rendered = (
+            f"# Acceptance corpus {ordinal:04d}\n\n"
+            "## Observations\n\n"
+            f"- [{category}] {body} #hosted #benchmark ^corpus-{ordinal:04d}\n"
+        )
         encoded = rendered.encode("utf-8")
         path = destination / f"note-{ordinal:04d}.md"
         path.write_bytes(encoded)
         digest.update(encoded)
         content_bytes += len(encoded)
     return {"notes": notes, "bytes": content_bytes, "digest": digest.hexdigest()}
+
+
+def committed_tool_receipt(result: Mapping[str, Any]) -> bool:
+    """Recognize the compact terminal emitted by successful public mutations."""
+    if result.get("isError") is True:
+        return False
+    content = result.get("structuredContent")
+    if not isinstance(content, Mapping):
+        return False
+    receipt = content.get("result", content)
+    if not isinstance(receipt, Mapping):
+        return False
+    return (
+        receipt.get("ok") is True
+        and receipt.get("state") == "committed"
+        and receipt.get("terminal") is True
+        and receipt.get("status") == "committed"
+        and receipt.get("mutated") is True
+    )
 
 
 class OAuthPKCEClient:
@@ -553,7 +598,6 @@ class AcceptanceRunner:
         """Exercise the canonical public tools with independent tenant tokens."""
         proofs: dict[str, dict[str, Any]] = {}
         fresh_clients: dict[str, MCPClient] = {}
-        base_fact = f"hosted acceptance sentinel {self.run_id}"
         for tenant in ("synthetic", "isolation"):
             client = self._mcp_client(tenant)
             initialized = client.initialize()
@@ -561,18 +605,17 @@ class AcceptanceRunner:
             names = [item.get("name") for item in tools if isinstance(item, dict)] if isinstance(tools, list) else []
             if not {"remember", "ask_memory", "read_memory"} <= set(names):
                 raise AcceptanceError("canonical hosted v4 tools are unavailable")
-            fact = base_fact if tenant == "synthetic" else f"{base_fact} isolation"
+            fact = tenant_sentinel(self.run_id, tenant)
             mutation = "durable-capture" if tenant == "synthetic" else "durable-capture-isolation"
             committed = self.manifest()["mutations"].get(mutation, {}).get("receipt", {}).get("status") == "committed"
             if not committed:
                 capture = client.capture({"title": f"Hosted acceptance {self.run_id} {tenant}", "content": f"## Observations\n- [acceptance] {fact} #hosted ^{self.run_id}-{tenant}", "note_type": "insight", "sources": []}, idempotency_key=self.mutation_request_id(mutation))
-                content = _tool_result(capture)
-                if "committed" not in json.dumps(content).lower():
+                if not committed_tool_receipt(capture):
                     raise AcceptanceError("capture has no durable acknowledgement")
-                self.complete_mutation(mutation, receipt={"status": "committed", "request_id": self.mutation_request_id(mutation)})
+                self.complete_mutation(mutation, receipt=dict(_tool_result(capture)))
             fresh = self._mcp_client(tenant)
             fresh.initialize()
-            recalled = _tool_result(fresh.recall(f"Which hosted acceptance sentinel belongs to this run: {self.run_id}" + (" isolation?" if tenant == "isolation" else "?")))
+            recalled = _tool_result(fresh.recall(tenant_recall_query(self.run_id)))
             citation = _citation_for_fact(recalled, fact)
             readback = _tool_result(fresh.call("tools/call", {"name": "read_memory", "arguments": {"path": citation}}))
             if fact not in json.dumps(readback):
@@ -581,7 +624,7 @@ class AcceptanceRunner:
             fresh_clients[tenant] = fresh
         for tenant, foreign in (("synthetic", "isolation"), ("isolation", "synthetic")):
             foreign_fact = proofs[foreign]["fact"]
-            recalled = _tool_result(fresh_clients[tenant].recall(f"Which hosted acceptance sentinel belongs to this run: {self.run_id}" + (" isolation?" if foreign == "isolation" else "?")))
+            recalled = _tool_result(fresh_clients[tenant].recall(tenant_recall_query(self.run_id)))
             if foreign_fact in json.dumps(recalled):
                 raise AcceptanceError("cross-tenant recall exposed the other reserved tenant sentinel")
         self.pass_stage("protocol", {"tenant_proofs": proofs, "cross_tenant_recall": "passed"})
@@ -617,19 +660,21 @@ class AcceptanceRunner:
                 continue
             client = self._mcp_client(tenant)
             client.initialize()
+            corpus_fact = f"{tenant_sentinel(self.run_id, tenant)} corpus"
             for ordinal, note in enumerate(notes):
                 content = note.read_text(encoding="utf-8")
-                result = _tool_result(client.capture({"title": f"Hosted corpus {self.run_id} {ordinal:04d}", "content": content, "note_type": "insight", "sources": []}, idempotency_key=self.mutation_request_id(f"corpus-{tenant}-{ordinal}")))
-                if "committed" not in json.dumps(result).lower():
+                if ordinal == len(notes) - 1:
+                    content += f"- [acceptance] {corpus_fact} #hosted ^{self.run_id}-{tenant}-corpus\n"
+                result = client.capture({"title": f"Hosted corpus {self.run_id} {ordinal:04d}", "content": content, "note_type": "insight", "sources": []}, idempotency_key=self.mutation_request_id(f"corpus-{tenant}-{ordinal}"))
+                if not committed_tool_receipt(result):
                     raise AcceptanceError(f"corpus capture {tenant}/{ordinal} has no durable acknowledgement")
-            fact = f"Synthetic acceptance note {len(notes) - 1}."
             converged = self._mcp_client(tenant)
             converged.initialize()
-            citation = _citation_for_fact(_tool_result(converged.recall(f"Which acceptance corpus note begins {fact}")), fact)
+            citation = _citation_for_fact(_tool_result(converged.recall(f"What already-converged corpus marker belongs to run {self.run_id}?")), corpus_fact)
             readback = _tool_result(converged.call("tools/call", {"name": "read_memory", "arguments": {"path": citation}}))
-            if fact not in json.dumps(readback):
+            if corpus_fact not in json.dumps(readback):
                 raise AcceptanceError(f"corpus convergence citation {tenant} does not resolve to its seeded note")
-            seeded[tenant] = {"status": "committed", "notes": len(notes), "fixture_digest": fixture.get("digest"), "convergence": "passed", "citation": citation}
+            seeded[tenant] = {"status": "committed", "notes": len(notes), "fixture_digest": fixture.get("digest"), "convergence": "passed", "fact": corpus_fact, "citation": citation}
             manifest = self.manifest()
             manifest["stages"]["performance"]["cell_corpus"] = seeded
             self._write_manifest(manifest)
@@ -650,6 +695,9 @@ class AcceptanceRunner:
             samples: dict[str, list[float]] = {operation: [] for operation in warm}
             failures = {operation: 0 for operation in warm}
             tenant = ("synthetic", "isolation")[worker_id % 2]
+            corpus_fact = cell_corpus[tenant].get("fact")
+            if not isinstance(corpus_fact, str) or not corpus_fact:
+                raise AcceptanceError("benchmark requires a resolvable run-owned corpus fact")
             for ordinal in range(20):
                 client = self._mcp_client(tenant)
                 started = time.perf_counter()
@@ -659,21 +707,33 @@ class AcceptanceRunner:
                     failures["initialize"] += 1
                     continue
                 samples["initialize"].append((time.perf_counter() - started) * 1000)
-                capture_arguments = {"title": f"Hosted benchmark {self.run_id} {worker_id}-{ordinal}", "content": f"benchmark sample {self.run_id} {worker_id}-{ordinal}", "note_type": "insight", "sources": []}
+                benchmark_fact = f"hosted benchmark sample {self.run_id} {worker_id}-{ordinal}"
+                capture_arguments = {"title": f"Hosted benchmark {self.run_id} {worker_id}-{ordinal}", "content": f"## Observations\n- [benchmark sample] {benchmark_fact} #hosted ^benchmark-{worker_id}-{ordinal}", "note_type": "insight", "sources": []}
                 capture_key = self.mutation_request_id(f"benchmark-{worker_id}-{ordinal}")
-                recall_query = f"hosted benchmark sample {self.run_id} {worker_id}-{ordinal}"
-                for operation, action in (
-                    ("tools_list", client.list_tools),
-                    ("capture", lambda client=client, arguments=capture_arguments, key=capture_key: client.capture(arguments, idempotency_key=key)),
-                    ("recall", lambda client=client, query=recall_query: client.recall(query)),
-                ):
+                for operation, action in (("tools_list", client.list_tools), ("capture", lambda client=client, arguments=capture_arguments, key=capture_key: client.capture(arguments, idempotency_key=key))):
                     started = time.perf_counter()
                     try:
-                        action()
+                        result = action()
+                        if operation == "capture" and not committed_tool_receipt(result):
+                            raise AcceptanceError("benchmark capture has no durable acknowledgement")
                     except AcceptanceError:
                         failures[operation] += 1
                     else:
                         samples[operation].append((time.perf_counter() - started) * 1000)
+                started = time.perf_counter()
+                try:
+                    recalled = _tool_result(client.recall(f"What already-converged corpus marker belongs to run {self.run_id}?"))
+                    citation = _citation_for_fact(recalled, corpus_fact)
+                except AcceptanceError:
+                    failures["recall"] += 1
+                else:
+                    samples["recall"].append((time.perf_counter() - started) * 1000)
+                    try:
+                        readback = _tool_result(client.call("tools/call", {"name": "read_memory", "arguments": {"path": citation}}))
+                        if corpus_fact not in json.dumps(readback):
+                            raise AcceptanceError("benchmark recall citation does not resolve to its run-owned corpus fact")
+                    except AcceptanceError:
+                        failures["recall"] += 1
             return samples, failures
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -704,7 +764,7 @@ class AcceptanceRunner:
             error = AcceptanceError(f"benchmark errors or p95 target misses: {', '.join(failed)}")
             self.fail("performance", error)
             raise error
-        self.pass_stage("performance", {"clients": 5, "tenant_clients": {"synthetic": 3, "isolation": 2}, "warm_samples_per_operation": 100, "cold_client_resets": 20, "cold_reset_semantics": "new MCPClient instance; no service, process, tenant, or storage reset", "corpus": {"fixture": fixture, "cell_evidence": cell_corpus}, "runtime": {"configured": self.config["runtime"], "verified": {"status": "pending", "operator_action": "attach signed runtime evidence matching the configured tuple"}}, "warm": summaries, "cold_client_initialize": cold_summary, "targets_ms": targets})
+        self.pass_stage("performance", {"clients": 5, "tenant_clients": {"synthetic": 3, "isolation": 2}, "warm_samples_per_operation": 100, "cold_client_resets": 20, "cold_reset_semantics": "new MCPClient instance; no service, process, tenant, or storage reset", "warm_recall_semantics": "timed recall of the already-converged run-owned corpus fact; citation readback is verified outside the timed interval", "corpus": {"fixture": fixture, "cell_evidence": cell_corpus}, "runtime": {"configured": self.config["runtime"], "verified": {"status": "pending", "operator_action": "attach signed runtime evidence matching the configured tuple"}}, "warm": summaries, "cold_client_initialize": cold_summary, "targets_ms": targets})
 
     def evaluate_continuity(self, *, now: float | None = None) -> None:
         """Checkpoint token rotation and the post-renewal cell-backed read without waiting."""
@@ -745,8 +805,8 @@ class AcceptanceRunner:
             return
         fresh = self._mcp_client("synthetic")
         fresh.initialize()
-        fact = f"hosted acceptance sentinel {self.run_id}"
-        recalled = _tool_result(fresh.recall(f"Which hosted acceptance sentinel belongs to this run: {self.run_id}?"))
+        fact = tenant_sentinel(self.run_id, "synthetic")
+        recalled = _tool_result(fresh.recall(tenant_recall_query(self.run_id)))
         citation = _citation_for_fact(recalled, fact)
         readback = _tool_result(fresh.call("tools/call", {"name": "read_memory", "arguments": {"path": citation}}))
         if fact not in json.dumps(readback):
@@ -764,6 +824,8 @@ class AcceptanceRunner:
 
 
 def _tool_result(result: Mapping[str, Any]) -> Mapping[str, Any]:
+    if result.get("isError") is True:
+        raise AcceptanceError("MCP tool result is unsuccessful")
     content = result.get("structuredContent")
     if not isinstance(content, dict):
         raise AcceptanceError("MCP tool result has no structured content")
