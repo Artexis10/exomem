@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import audit, epistemic_graph
+from exomem import audit, epistemic_graph, reconcile
 from exomem.epistemic_graph import EpistemicGraphIndex
 
 SOURCE = "Knowledge Base/Notes/Insights/source.md"
@@ -46,6 +46,12 @@ def test_rebuild_persists_unresolved_raw_targets_and_zero_link_coverage(vault: P
                 "SELECT source_path, expected_count FROM graph_dependency_coverage"
             ).fetchall()
         )
+        coverage_columns = {
+            name: not_null
+            for _cid, name, _kind, not_null, _default, _primary_key in conn.execute(
+                "PRAGMA table_info(graph_dependency_coverage)"
+            )
+        }
     finally:
         conn.close()
 
@@ -53,6 +59,7 @@ def test_rebuild_persists_unresolved_raw_targets_and_zero_link_coverage(vault: P
     assert any(raw == "missing#part" for _key, raw in rows)
     assert coverage[SOURCE] == len(rows)
     assert coverage[OTHER] == 0
+    assert coverage_columns["source_path"] == 1
 
 
 def test_topology_lookup_does_not_read_unrelated_bodies(
@@ -127,6 +134,24 @@ def test_rebuild_and_exact_deletion_remove_dependency_rows(vault: Path) -> None:
         assert conn.execute(
             "SELECT 1 FROM graph_dependency_coverage WHERE source_path IN (?, ?) LIMIT 1",
             (SOURCE, "Knowledge Base/Notes/Insights/orphan.md"),
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_exact_node_purge_invalidates_its_dependency_rows_and_coverage(vault: Path) -> None:
+    """A quarantined graph node cannot leave its private dependency projection behind."""
+    index = EpistemicGraphIndex(vault)
+
+    assert index.purge_exact_persisted_rows([SOURCE], {}) > 0
+
+    conn = sqlite3.connect(index.path)
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM graph_dependencies WHERE source_path = ?", (SOURCE,)
+        ).fetchone() is None
+        assert conn.execute(
+            "SELECT 1 FROM graph_dependency_coverage WHERE source_path = ?", (SOURCE,)
         ).fetchone() is None
     finally:
         conn.close()
@@ -209,19 +234,75 @@ def test_dependency_census_continues_across_rows_for_one_source(vault: Path) -> 
     assert reset_rows[0].dependency_raw_target == "revised"
 
 
-def test_isolation_repair_removes_non_text_dependency_rows(vault: Path) -> None:
-    """A SQLite BLOB target cannot survive by evading exact target matching."""
+def test_dependency_cursor_signature_uses_windows_wal_size(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows file-index fields cannot stand in for a nonempty WAL size."""
+    sidecar = EpistemicGraphIndex(vault).path
+    windows_main = (17, 4, 2, 8192, 100)
+    signatures: list[tuple[str, tuple[int, ...]]] = []
+
+    def bind(_path: Path, *, writable: bool):
+        assert not writable
+        return "regular", audit._BoundSidecarRepair((), sidecar, (), tuple(signatures))
+
+    monkeypatch.setattr(audit, "_bind_sidecar", bind)
+    signatures[:] = [(sidecar.name, windows_main)]
+    absent_wal = audit._graph_dependency_census_signature(vault, sidecar)
+    signatures[:] = [
+        (sidecar.name, windows_main),
+        (f"{sidecar.name}-wal", (17, 4, 9, 0, 100)),
+    ]
+    assert audit._graph_dependency_census_signature(vault, sidecar) == absent_wal
+    signatures[:] = [
+        (sidecar.name, windows_main),
+        (f"{sidecar.name}-wal", (17, 4, 0, 4096, 100)),
+    ]
+    nonempty_wal = audit._graph_dependency_census_signature(vault, sidecar)
+    assert nonempty_wal != absent_wal
+    signatures[:] = [
+        (sidecar.name, windows_main),
+        (f"{sidecar.name}-wal", (17, 4, 0, 4096, 101)),
+    ]
+    assert audit._graph_dependency_census_signature(vault, sidecar) != nonempty_wal
+
+
+def test_dependency_census_refuses_continuation_without_durable_signature(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable revision cannot authorize reuse or caption a census page."""
+    monkeypatch.setattr(audit, "_graph_dependency_census_signature", lambda *_args: None)
+
+    census = audit.semantic_recall_isolation_census(
+        vault,
+        limit=1,
+        after={
+            "graph_dependency_coverage": {"cursor": "999", "signature": None},
+            "graph_dependencies": {"cursor": "999", "signature": None},
+        },
+    )
+
+    assert "graph_dependency_coverage" not in census.continuation
+    assert "graph_dependencies" not in census.continuation
+    assert census.incomplete["graph_dependency_coverage"] == "sidecar_revision_unavailable"
+    assert census.incomplete["graph_dependencies"] == "sidecar_revision_unavailable"
+
+
+def test_isolation_repair_removes_blob_dependency_source_and_coverage(vault: Path) -> None:
+    """A BLOB source identity is retained for exact graph-sidecar cleanup."""
     index = EpistemicGraphIndex(vault)
+    corrupt_source = sqlite3.Binary(b"corrupt-source.md")
     conn = index._connect()
     try:
         conn.execute(
             "INSERT INTO graph_dependencies(source_path, lookup_key, raw_target) VALUES (?, ?, ?)",
-            (SOURCE, sqlite3.Binary(b"corrupt-key"), sqlite3.Binary(b"corrupt-target")),
+            (corrupt_source, sqlite3.Binary(b"corrupt-key"), sqlite3.Binary(b"corrupt-target")),
         )
         conn.execute(
-            "UPDATE graph_dependency_coverage SET expected_count = expected_count + 1 "
-            "WHERE source_path = ?",
-            (SOURCE,),
+            "INSERT INTO graph_dependency_coverage("
+            "source_path, source_hash, dependency_format, expected_count"
+            ") VALUES (?, ?, ?, ?)",
+            (corrupt_source, "corrupt", 1, 1),
         )
         conn.commit()
     finally:
@@ -235,10 +316,96 @@ def test_isolation_repair_removes_non_text_dependency_rows(vault: Path) -> None:
     conn = sqlite3.connect(index.path)
     try:
         assert conn.execute(
-            "SELECT 1 FROM graph_dependencies WHERE source_path = ?", (SOURCE,)
+            "SELECT 1 FROM graph_dependencies WHERE source_path = ?", (corrupt_source,)
         ).fetchone() is None
         assert conn.execute(
-            "SELECT 1 FROM graph_dependency_coverage WHERE source_path = ?", (SOURCE,)
+            "SELECT 1 FROM graph_dependency_coverage WHERE source_path = ?", (corrupt_source,)
         ).fetchone() is None
     finally:
         conn.close()
+    assert not [
+        row
+        for row in audit.semantic_recall_isolation_census(vault).corrupt_rows
+        if row.component in {"graph_dependencies", "graph_dependency_coverage"}
+    ]
+
+
+def test_isolation_repair_removes_corrupt_coverage_without_dependency_rows(vault: Path) -> None:
+    """A corrupt coverage-only source is routed through the graph purge seam."""
+    index = EpistemicGraphIndex(vault)
+    corrupt_source = "../../coverage-only.md"
+    conn = index._connect()
+    try:
+        conn.execute(
+            "INSERT INTO graph_dependency_coverage("
+            "source_path, source_hash, dependency_format, expected_count"
+            ") VALUES (?, ?, ?, ?)",
+            (corrupt_source, "corrupt", 1, 0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    census = audit.semantic_recall_isolation_census(vault)
+    corrupt = tuple(
+        row for row in census.corrupt_rows if row.component == "graph_dependency_coverage"
+    )
+    assert corrupt
+    audit.purge_corrupt_semantic_recall_isolation_rows(vault, corrupt)
+
+    conn = sqlite3.connect(index.path)
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM graph_dependency_coverage WHERE source_path = ?", (corrupt_source,)
+        ).fetchone() is None
+    finally:
+        conn.close()
+    assert not [
+        row
+        for row in audit.semantic_recall_isolation_census(vault).corrupt_rows
+        if row.component == "graph_dependency_coverage"
+    ]
+    assert reconcile.reconcile(vault, dry_run=True).semantic_suppressed_corrupt == []
+
+
+def test_isolation_repair_enumerates_legacy_null_coverage_source(vault: Path) -> None:
+    """A legacy nullable coverage row is found by its rowid and purged exactly."""
+    index = EpistemicGraphIndex(vault)
+    conn = index._connect()
+    try:
+        conn.execute("DROP TABLE graph_dependency_coverage")
+        conn.execute(
+            "CREATE TABLE graph_dependency_coverage ("
+            "source_path TEXT PRIMARY KEY, source_hash TEXT NOT NULL, "
+            "dependency_format INTEGER NOT NULL, expected_count INTEGER NOT NULL"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO graph_dependency_coverage("
+            "source_path, source_hash, dependency_format, expected_count"
+            ") VALUES (?, ?, ?, ?)",
+            (None, "corrupt", 1, 0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    census = audit.semantic_recall_isolation_census(vault)
+    corrupt = tuple(
+        row for row in census.corrupt_rows if row.component == "graph_dependency_coverage"
+    )
+    assert corrupt
+    audit.purge_corrupt_semantic_recall_isolation_rows(vault, corrupt)
+
+    conn = sqlite3.connect(index.path)
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM graph_dependency_coverage WHERE source_path IS NULL"
+        ).fetchone() is None
+    finally:
+        conn.close()
+    assert not [
+        row
+        for row in audit.semantic_recall_isolation_census(vault).corrupt_rows
+        if row.component == "graph_dependency_coverage"
+    ]

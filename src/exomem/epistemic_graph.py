@@ -68,7 +68,7 @@ def _sqlite_connect_owned(
 ) -> sqlite3.Connection:
     return sqlite3.connect(database, *args, **kwargs)
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 _DEPENDENCY_FORMAT = 1
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
@@ -1689,7 +1689,7 @@ class EpistemicGraphIndex:
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS graph_dependency_coverage (
-                source_path TEXT PRIMARY KEY, source_hash TEXT NOT NULL,
+                source_path TEXT PRIMARY KEY NOT NULL, source_hash TEXT NOT NULL,
                 dependency_format INTEGER NOT NULL, expected_count INTEGER NOT NULL
             )
         """)
@@ -4484,8 +4484,8 @@ class EpistemicGraphIndex:
         node_paths: list[str],
         edge_values: dict[str, list[str]],
         *,
-        dependency_rows: list[tuple[str, str, str]] | None = None,
-        dependency_source_paths: list[str] | None = None,
+        dependency_rows: list[tuple[object, object, object]] | None = None,
+        dependency_source_paths: list[object] | None = None,
         connection_path: Path | None = None,
     ) -> int:
         """Purge quarantined sidecar values without normalizing them as paths."""
@@ -4498,16 +4498,8 @@ class EpistemicGraphIndex:
             if column in {"source_path", "src_key", "dst_key"}
         }
         paths = sorted({value for value in node_paths if isinstance(value, str)})
-        dependency_records = sorted(
-            {
-                (source_path, lookup_key, raw_target)
-                for source_path, lookup_key, raw_target in dependency_rows or ()
-                if all(isinstance(value, str) for value in (source_path, lookup_key, raw_target))
-            }
-        )
-        dependency_sources = sorted(
-            {value for value in dependency_source_paths or () if isinstance(value, str)}
-        )
+        dependency_records = list(dict.fromkeys(dependency_rows or ()))
+        dependency_sources = list(dict.fromkeys([*paths, *(dependency_source_paths or ())]))
         if not paths and not values and not dependency_records and not dependency_sources:
             return 0
         with self._mutation_coordinator.hold(
@@ -4538,22 +4530,22 @@ class EpistemicGraphIndex:
                                 f"DELETE FROM graph_edges WHERE {column} IN ({placeholders})",
                                 batch,
                             ).rowcount
-                    invalidated_sources = set(dependency_sources)
+                    invalidated_sources = list(dependency_sources)
                     for source_path, lookup_key, raw_target in dependency_records:
                         removed = conn.execute(
-                            "DELETE FROM graph_dependencies WHERE source_path = ? "
-                            "AND lookup_key = ? AND raw_target = ?",
+                            "DELETE FROM graph_dependencies WHERE source_path IS ? "
+                            "AND lookup_key IS ? AND raw_target IS ?",
                             (source_path, lookup_key, raw_target),
                         ).rowcount
                         changed += removed
-                        if removed:
-                            invalidated_sources.add(source_path)
+                        if source_path not in invalidated_sources:
+                            invalidated_sources.append(source_path)
                     for source_path in invalidated_sources:
                         changed += conn.execute(
-                            "DELETE FROM graph_dependencies WHERE source_path = ?", (source_path,)
+                            "DELETE FROM graph_dependencies WHERE source_path IS ?", (source_path,)
                         ).rowcount
                         changed += conn.execute(
-                            "DELETE FROM graph_dependency_coverage WHERE source_path = ?",
+                            "DELETE FROM graph_dependency_coverage WHERE source_path IS ?",
                             (source_path,),
                         ).rowcount
                     if changed:
