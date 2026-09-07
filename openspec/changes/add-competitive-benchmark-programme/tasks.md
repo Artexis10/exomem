@@ -471,6 +471,11 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 
 ## 7. Runs (W9) — every metered step ⛳-gated
 
+- [ ] 7.0 Ship and exercise a bounded scored diagnostic replay: seven questions
+      spanning six answerable types plus abstention from a verified guest
+      export, the common reader, and unchanged pinned official judge under one
+      reserved budget. Preserve source artifacts; diagnostics remain
+      non-publishable and cannot authorize a full run.
 - [ ] 7.1 Fixture tier across all lanes, zero spend
 - [ ] 7.2 LongMemEval-S fetched + sha pinned; canonical selection artifact
       committed (direct stub pilot remains open)

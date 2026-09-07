@@ -84,3 +84,5 @@ snapshot_report.html
 test-results/
 # Local, regenerable Graft code-navigation index
 /graft/
+# Project-local pinned uv writer installed per CONTRIBUTING.md.
+/.uvbin/

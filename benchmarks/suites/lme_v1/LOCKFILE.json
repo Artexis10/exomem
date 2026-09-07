@@ -1,0 +1,18 @@
+{
+  "suite": "lme_v1",
+  "repo_url": "https://github.com/xiaowu0162/LongMemEval",
+  "commit_sha": "9e0b455f4ef0e2ab8f2e582289761153549043fc",
+  "license_spdx": "MIT",
+  "checkout_env_var": "LONGMEMEVAL_HOME",
+  "verified_at_utc": "2026-09-08",
+  "evaluate_qa": {
+    "path": "src/evaluation/evaluate_qa.py",
+    "sha256": "ecce9c4c79dc89d99534ac17b383a5cbb5b9f0c69ee98adaf0684742e3d95251",
+    "invocation": "positional",
+    "argv_template": ["<metric_model_short>", "<hyp_file>", "<ref_file>"],
+    "result_file_derivation": "<hyp_file>.eval-results-<metric_model_short>",
+    "metric_model_short": "gpt-4o",
+    "model": "gpt-4o-2024-08-06"
+  },
+  "notes": "The scored pilot executes the unchanged pinned script, binding its OpenAI client to the shared metered transport and its inputs to verified byte snapshots. Its prompts, temperature, output limit, and label rule remain upstream-owned. Diagnostic results do not authorize full or comparative runs."
+}

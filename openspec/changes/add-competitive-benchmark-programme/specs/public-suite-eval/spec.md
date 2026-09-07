@@ -43,3 +43,39 @@ subset.
   variants, Supermemory's MemoryBench provider row is paired with the 4.7
   direct-SDK spot-check, and no paired observations are collapsed into one
   product number
+
+## ADDED Requirements
+
+### Requirement: Small Scored Diagnostics Reuse Verified Retrieval
+The programme MAY prepare a seven-question diagnostic from an existing valid
+guest export, selecting one answerable case per question type and one abstention
+case before scoring, or replay the complete existing 25-case source. Preparation
+SHALL validate source projections, requested per-case readiness, pre-registration
+identity and guest cleanup evidence without network calls. Execution SHALL bind
+the prepared plan digest, consume validated byte snapshots throughout execution,
+revalidate source identity, use the common reader for retrieved, gold-evidence
+and empty contexts, and execute the unchanged pinned official LongMemEval judge
+through the same metered transport. Every billable call SHALL reserve a
+conservative upper bound before transmission. Uncertain billing SHALL retain
+the reservation and halt further calls. The diagnostic SHALL preserve original
+artifacts, report unmeasured isolation and equivalence explicitly, remain
+non-publishable, and SHALL NOT supply full-run approval evidence.
+
+#### Scenario: A small diagnostic gives a measured spending baseline
+- **WHEN** seven representative cases are prepared and approved for execution
+- **THEN** the reader and judge share one immutable capped ledger
+- **AND** the result preserves actual usage and separate retrieval, evidence-only
+  and empty-context scores
+
+#### Scenario: Source changes or uncertain spend halt execution
+- **WHEN** a prepared artifact or source identity changes before validation,
+  or a response does not establish its billed usage
+- **THEN** changed inputs refuse scoring before transmission, and uncertain
+  billing retains its reservation and stops subsequent calls
+- **AND** path replacement after validation cannot change the bytes consumed
+  by the reader or judge
+
+#### Scenario: Diagnostic results cannot become a full-run approval
+- **WHEN** a diagnostic finishes successfully
+- **THEN** its result remains non-publishable and does not replace equivalence,
+  scored-pilot, full-run approval or comparative publication gates
