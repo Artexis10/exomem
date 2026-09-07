@@ -429,10 +429,12 @@ def search_marker_present(payload: Mapping[str, Any], marker: str) -> bool:
 
 
 def result_classification(payload: Mapping[str, Any]) -> str:
+    error = payload.get("error")
     if (
         payload.get("success") is False
         or payload.get("ok") is False
-        or isinstance(payload.get("error"), Mapping)
+        or isinstance(error, Mapping)
+        or (isinstance(error, str) and bool(error.strip()))
     ):
         return "refused"
     if str(payload.get("outcome") or "").lower() in {"error", "failed", "refused", "rejected"}:
@@ -785,11 +787,20 @@ async def _run_basic_memory(
 ) -> dict[str, Any]:
     markdown = common_markdown_payload(marker)
     source = dict(fixture_pages(int(fixture["page_count"])))
-    changed = ["Completed chapter", "Active tracker", "Stale link", "Independent capture"]
-    await client.call(
+    def created_path(payload: Mapping[str, Any]) -> str:
+        path = payload.get("file_path")
+        if not isinstance(path, str) or not path.strip():
+            raise AdapterFault("write_note result omitted created file path")
+        return path
+
+    # Known fixture paths remain resolvable before the background title index
+    # reaches them. Creation paths come from the actual public write result.
+    tracker_path = str(fixture["named_pages"]["tracker"])
+    stale_path = str(fixture["named_pages"]["stale_link"])
+    chapter = await client.call(
         "write_note",
         {
-            "title": changed[0],
+            "title": "Completed chapter",
             "content": markdown["chapter"],
             "directory": "notes",
             "project": "main",
@@ -797,10 +808,11 @@ async def _run_basic_memory(
         },
         ack=True,
     )
+    chapter_path = created_path(chapter)
     await client.call(
         "edit_note",
         {
-            "identifier": changed[1],
+            "identifier": tracker_path,
             "operation": "append",
             "content": markdown["tracker_append"],
             "project": "main",
@@ -811,7 +823,7 @@ async def _run_basic_memory(
     await client.call(
         "edit_note",
         {
-            "identifier": changed[2],
+            "identifier": stale_path,
             "operation": "find_replace",
             "find_text": source[str(fixture["named_pages"]["stale_link"])],
             "content": stale_replacement_body(fixture, markdown),
@@ -821,10 +833,10 @@ async def _run_basic_memory(
         },
         ack=True,
     )
-    await client.call(
+    captured = await client.call(
         "write_note",
         {
-            "title": changed[3],
+            "title": "Independent capture",
             "content": markdown["capture"],
             "directory": "notes",
             "project": "main",
@@ -832,11 +844,12 @@ async def _run_basic_memory(
         },
         ack=True,
     )
+    changed = [chapter_path, tracker_path, stale_path, created_path(captured)]
     reads = [
         await client.call(
-            "read_note", {"identifier": title, "project": "main", "output_format": "json"}
+            "read_note", {"identifier": path, "project": "main", "output_format": "json"}
         )
-        for title in changed
+        for path in changed
     ]
     searches = [
         await _await_search(

@@ -393,3 +393,43 @@ def test_exomem_provenance_uses_the_explicit_runtime_environment(
     assert identity["revision"]
     assert identity["tree"]
     assert len(identity["source_digest"]) == 64
+
+
+@pytest.mark.parametrize("error", ["Entity not found", "AMBIGUOUS_IDENTIFIER"])
+def test_basic_memory_string_error_is_a_refusal(error):
+    payload = {"file_path": None, "error": error}
+    assert common.result_classification(payload) == "refused"
+    with pytest.raises(common.AdapterFault, match="failed MCP result"):
+        common.decode_result({"structuredContent": payload})
+
+
+def test_basic_memory_adapter_uses_exact_fixture_and_returned_paths(tmp_path):
+    fixture = common.materialize_fixture(tmp_path / "fixture", pages=4)
+    calls = []
+    returned_paths = iter(("notes/created-a.md", "notes/created-b.md"))
+
+    class Client:
+        async def call(self, tool, arguments, **kwargs):
+            calls.append((tool, arguments, kwargs))
+            if tool == "write_note":
+                return {"file_path": next(returned_paths)}
+            if tool == "search_notes":
+                return {"results": [{"content": arguments["query"]}]}
+            return {}
+
+    result = asyncio.run(common._run_basic_memory(Client(), "marker", fixture, 0))
+    expected = ["notes/created-a.md", "active-tracker.md", "stale-link.md", "notes/created-b.md"]
+    assert result["changed"] == expected
+    assert [args["identifier"] for tool, args, _ in calls if tool == "edit_note"] == expected[1:3]
+    assert [args["identifier"] for tool, args, _ in calls if tool == "read_note"] == expected
+
+
+def test_basic_memory_adapter_rejects_a_missing_created_path(tmp_path):
+    fixture = common.materialize_fixture(tmp_path / "fixture", pages=4)
+
+    class Client:
+        async def call(self, tool, arguments, **kwargs):
+            return {}
+
+    with pytest.raises(common.AdapterFault, match="created file path"):
+        asyncio.run(common._run_basic_memory(Client(), "marker", fixture, 0))
