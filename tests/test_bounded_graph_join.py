@@ -335,6 +335,56 @@ def test_parent_receipted_handoff_does_not_join_registered_rebuild(
     assert graph_sync.registered_checkpoint(vault, state_root=state_dir) is None
 
 
+def test_parent_receipted_handoff_detaches_refresh_fallback_registration(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The incremental refresh fallback also leaves the parent result pending."""
+    from exomem import writer_lease
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    state_dir = vault / "parent-refresh-fallback-state"
+    manager = LeaseManager(LeaseConfig(state_dir=state_dir))
+    coordinator = manager._mutation_coordinator_for(vault)
+    required = _checkpoint(9)
+    [receipt] = deferred_index.add_full_receipts(vault, [PAGE_A])
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    monkeypatch.setattr(graph_sync, "read_checkpoint", lambda _vault: required)
+    monkeypatch.setattr(EpistemicGraphIndex, "available", lambda _self: False)
+    monkeypatch.setattr(
+        EpistemicGraphIndex, "_graph_sync_predecessor_state", lambda _self, _required: "available"
+    )
+
+    def register_from_refresh(
+        index: EpistemicGraphIndex, _paths: list[Path], **_kwargs: object
+    ) -> dict[str, int]:
+        graph_sync.register_rebuild(
+            vault,
+            required,
+            lambda checkpoint: graph_sync.GraphBuildOutcome.covering(checkpoint),
+            state_root=coordinator.state_root,
+        )
+        return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_refresh_paths_locked", register_from_refresh)
+    detached: list[Path] = []
+    monkeypatch.setattr(
+        graph_sync, "start_registered_detached", lambda root, **_kwargs: detached.append(root)
+    )
+    monkeypatch.setattr(
+        graph_sync,
+        "wait_for_registered",
+        lambda *_args, **_kwargs: pytest.fail("parent refresh fallback joined a registered rebuild"),
+    )
+
+    with epistemic_graph.parent_receipted_graph_handoff(
+        vault, state_root=coordinator.state_root, receipts=(receipt,)
+    ):
+        result = epistemic_graph.upsert_after_write(vault, [vault / PAGE_A])
+
+    assert result.outcome == "registered"
+    assert detached == [vault]
+
+
 def test_parent_receipted_handoff_scope_does_not_relax_standalone(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

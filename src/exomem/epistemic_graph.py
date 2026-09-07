@@ -3664,13 +3664,9 @@ class EpistemicGraphIndex:
                     "coalesced": 1,
                 }
         # Standalone callers have already left the graph mutation hold. Command
-        # callers retain their exact registration for writer_lease to start and
-        # join only after canonical authority releases.
-        from .writer_lease import active_direct_mutation_guard, active_mutation_request_id
-
-        if active_mutation_request_id() is None and not active_direct_mutation_guard(
-            self.vault_root, state_root=self._mutation_coordinator.state_root
-        ):
+        # callers and receipted parent handoffs retain their exact registration
+        # for the response boundary to start without blocking publication.
+        if not _caller_can_carry_pending(self.vault_root, self._mutation_coordinator):
             graph_sync.start_registered(
                 self.vault_root, state_root=self._mutation_coordinator.state_root
             )
