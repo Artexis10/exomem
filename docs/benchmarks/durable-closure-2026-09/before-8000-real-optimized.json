@@ -1,0 +1,1095 @@
+{
+  "driver_sha256": {
+    "docs/benchmarks/durable-closure-public-artifacts.json": "8c7e9741f4a8b4d13bd54105804e9b9ec48bee84ef08fe78d96845eaa16edc5a",
+    "scripts/durable_closure_benchmark.py": "cb27b482fa7a044e795dde85b9a303f5c33a13087871d79795d1fce1cb4d7edf",
+    "scripts/durable_closure_common.py": "ecb47bde354f1bca5cf18536ccc8c7ce22891952f6ad3756dc03e4c94283515f"
+  },
+  "evidence_format": 1,
+  "host": {
+    "cpu_count": 16,
+    "ended_utc": "2026-09-07T09:21:33.432657+00:00",
+    "exit_code": 1,
+    "load_average_end": [
+      5.01318359375,
+      4.6513671875,
+      5.95361328125
+    ],
+    "load_average_start": [
+      2.56640625,
+      4.4853515625,
+      6.19677734375
+    ],
+    "runner_wall_s": 179.08561299600115,
+    "samples": 1,
+    "started_utc": "2026-09-07T09:18:34.346992+00:00",
+    "task_test_workers_quiescent": true
+  },
+  "label": "before-8000-real-optimized",
+  "measurement_limits": [
+    "One sample per row; task-worker quiescence is declared separately from external host load.",
+    "A failed workflow is not a completed latency baseline; no speed ratio is asserted.",
+    "Graph timing and invocation wrappers instrument the MCP service owner only, excluding disposable media children.",
+    "Source scans cover only the named wrapped functions, not all filesystem reads.",
+    "Full projection convergence, connector overhead, and model planning remain unmeasured unless explicitly populated."
+  ],
+  "raw_result_sha256": "9717edb3d084f3fdc5d5a158f3f10be238a526417b793bb8d7a49b93c18f5d38",
+  "result": {
+    "blocked_dependencies": [
+      "real-extraction-proof"
+    ],
+    "call_counts": {
+      "convergence_polls": 0,
+      "probes": 0,
+      "retries": 0,
+      "verification": 3
+    },
+    "calls": [
+      {
+        "client_elapsed_ms": 137.55059499817435,
+        "ended_ms": 138.93904999713413,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "workflow",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "active_capabilities",
+          "authoring_contract",
+          "common_actions",
+          "common_tools",
+          "contract_version",
+          "engagement",
+          "entity_registry",
+          "epistemic_contract",
+          "front_door_actions",
+          "governance",
+          "knowledge_packs",
+          "memory_model",
+          "performance_profiles",
+          "planning",
+          "product_commands",
+          "profile",
+          "records",
+          "relation_vocabulary",
+          "search_guidance",
+          "semantic_authoring",
+          "server",
+          "simple_actions",
+          "source_taxonomy",
+          "tool_defaults",
+          "workflow",
+          "workflow_contracts",
+          "workflow_skills"
+        ],
+        "server_duration_ms": 127.84,
+        "server_interval": {
+          "ended_ms": 1788772830505.0,
+          "started_ms": 1788772830376.82
+        },
+        "server_total_ms": 128.18,
+        "started_ms": 1.3884549989597872,
+        "tool": "bootstrap"
+      },
+      {
+        "client_elapsed_ms": 28283.588837002753,
+        "ended_ms": 28422.56340199674,
+        "error_code": null,
+        "mutation_ack": true,
+        "outcome": "ok",
+        "phase": "media-enqueue",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "files",
+          "graph_sync",
+          "graph_sync_checkpoint",
+          "graph_sync_code",
+          "graph_sync_remediation",
+          "mutated",
+          "ok",
+          "paths",
+          "receipt_id",
+          "request_id",
+          "state",
+          "status",
+          "summary",
+          "terminal",
+          "warnings_count"
+        ],
+        "server_duration_ms": 28276.45,
+        "server_interval": {
+          "ended_ms": 1788772858791.0,
+          "started_ms": 1788772830514.28
+        },
+        "server_total_ms": 28276.72,
+        "started_ms": 138.97456499398686,
+        "tool": "preserve_artifacts"
+      },
+      {
+        "client_elapsed_ms": 268.89255899732234,
+        "ended_ms": 28691.58829999651,
+        "error_code": "MEDIA_CHANGED_DURING_RECONCILIATION",
+        "mutation_ack": true,
+        "outcome": "refused",
+        "phase": "media-enqueue",
+        "probe": false,
+        "request_shape": {
+          "operation": "process"
+        },
+        "response_keys": [
+          "error",
+          "success"
+        ],
+        "server_duration_ms": 260.08,
+        "server_interval": {
+          "ended_ms": 1788772859055.0,
+          "started_ms": 1788772858794.71
+        },
+        "server_total_ms": 260.29,
+        "started_ms": 28422.69574099919,
+        "tool": "process_media"
+      },
+      {
+        "client_elapsed_ms": 919.2438370009768,
+        "ended_ms": 29610.859594999056,
+        "error_code": null,
+        "mutation_ack": true,
+        "outcome": "ok",
+        "phase": "media-enqueue",
+        "probe": false,
+        "request_shape": {
+          "operation": "process"
+        },
+        "response_keys": [
+          "graph_sync",
+          "graph_sync_checkpoint",
+          "graph_sync_code",
+          "graph_sync_remediation",
+          "index_refresh_remaining",
+          "index_refreshed",
+          "job_id",
+          "media_type",
+          "operation",
+          "path",
+          "sidecar_path",
+          "state"
+        ],
+        "server_duration_ms": 910.17,
+        "server_interval": {
+          "ended_ms": 1788772859978.0,
+          "started_ms": 1788772859066.9
+        },
+        "server_total_ms": 911.1,
+        "started_ms": 28691.61575799808,
+        "tool": "process_media"
+      },
+      {
+        "client_elapsed_ms": 836.6158890057704,
+        "ended_ms": 30447.506299999077,
+        "error_code": null,
+        "mutation_ack": true,
+        "outcome": "ok",
+        "phase": "media-enqueue",
+        "probe": false,
+        "request_shape": {
+          "operation": "process"
+        },
+        "response_keys": [
+          "graph_sync",
+          "graph_sync_checkpoint",
+          "graph_sync_code",
+          "graph_sync_remediation",
+          "index_refresh_remaining",
+          "index_refreshed",
+          "job_id",
+          "media_type",
+          "operation",
+          "path",
+          "sidecar_path",
+          "state"
+        ],
+        "server_duration_ms": 826.57,
+        "server_interval": {
+          "ended_ms": 1788772860815.0,
+          "started_ms": 1788772859987.49
+        },
+        "server_total_ms": 827.51,
+        "started_ms": 29610.890410993306,
+        "tool": "process_media"
+      },
+      {
+        "client_elapsed_ms": 237.1269490031409,
+        "ended_ms": 30684.680690996174,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "independent-closure",
+        "probe": false,
+        "request_shape": {
+          "operation": "validate"
+        },
+        "response_keys": [
+          "after_hash",
+          "before_hash",
+          "mutated",
+          "operation",
+          "path",
+          "semantic",
+          "unit",
+          "unit_ref"
+        ],
+        "server_duration_ms": 230.52,
+        "server_interval": {
+          "ended_ms": 1788772861053.0,
+          "started_ms": 1788772860822.15
+        },
+        "server_total_ms": 230.85,
+        "started_ms": 30447.553741993033,
+        "tool": "observe_memory"
+      },
+      {
+        "client_elapsed_ms": 5868.642129004002,
+        "ended_ms": 36553.35394699796,
+        "error_code": null,
+        "mutation_ack": true,
+        "outcome": "ok",
+        "phase": "independent-closure",
+        "probe": false,
+        "request_shape": {
+          "operation": "add"
+        },
+        "response_keys": [
+          "graph_sync",
+          "graph_sync_checkpoint",
+          "graph_sync_code",
+          "graph_sync_remediation",
+          "mutated",
+          "ok",
+          "path",
+          "receipt_id",
+          "request_id",
+          "state",
+          "status",
+          "terminal",
+          "warnings_count"
+        ],
+        "server_duration_ms": 5860.14,
+        "server_interval": {
+          "ended_ms": 1788772866922.0,
+          "started_ms": 1788772861061.47
+        },
+        "server_total_ms": 5860.53,
+        "started_ms": 30684.711817993957,
+        "tool": "observe_memory"
+      },
+      {
+        "client_elapsed_ms": 10846.462592002354,
+        "ended_ms": 47399.855771996954,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "independent-closure",
+        "probe": false,
+        "request_shape": {
+          "operation": "validate"
+        },
+        "response_keys": [
+          "after_hash",
+          "before_hash",
+          "mutated",
+          "operation",
+          "path",
+          "semantic",
+          "unit",
+          "unit_ref"
+        ],
+        "server_duration_ms": 10841.04,
+        "server_interval": {
+          "ended_ms": 1788772877768.0,
+          "started_ms": 1788772866926.63
+        },
+        "server_total_ms": 10841.37,
+        "started_ms": 36553.3931799946,
+        "tool": "observe_memory"
+      },
+      {
+        "client_elapsed_ms": 4984.740903004422,
+        "ended_ms": 52384.62598899787,
+        "error_code": null,
+        "mutation_ack": true,
+        "outcome": "ok",
+        "phase": "independent-closure",
+        "probe": false,
+        "request_shape": {
+          "operation": "add"
+        },
+        "response_keys": [
+          "graph_sync",
+          "graph_sync_checkpoint",
+          "graph_sync_code",
+          "graph_sync_remediation",
+          "mutated",
+          "ok",
+          "path",
+          "receipt_id",
+          "request_id",
+          "state",
+          "status",
+          "terminal",
+          "warnings_count"
+        ],
+        "server_duration_ms": 4972.54,
+        "server_interval": {
+          "ended_ms": 1788772882751.0,
+          "started_ms": 1788772877777.37
+        },
+        "server_total_ms": 4973.63,
+        "started_ms": 47399.88508599345,
+        "tool": "observe_memory"
+      },
+      {
+        "client_elapsed_ms": 323.13607999822125,
+        "ended_ms": 52707.79697499529,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "independent-closure",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "body",
+          "content_hash",
+          "frontmatter",
+          "mtime",
+          "path",
+          "ref"
+        ],
+        "server_duration_ms": 312.05,
+        "server_interval": {
+          "ended_ms": 1788772883073.0,
+          "started_ms": 1788772882760.2
+        },
+        "server_total_ms": 312.8,
+        "started_ms": 52384.66089499707,
+        "tool": "read_memory"
+      },
+      {
+        "client_elapsed_ms": 6420.50528999971,
+        "ended_ms": 59128.329429993755,
+        "error_code": null,
+        "mutation_ack": true,
+        "outcome": "ok",
+        "phase": "independent-closure",
+        "probe": false,
+        "request_shape": {
+          "operation": {
+            "kind": "replace_string",
+            "new_string": "",
+            "old_string": "- supports [[Knowledge Base/Notes/Insights/archived-runbook]]",
+            "replace_all": false
+          }
+        },
+        "response_keys": [
+          "graph_sync",
+          "graph_sync_checkpoint",
+          "graph_sync_code",
+          "graph_sync_remediation",
+          "mutated",
+          "ok",
+          "path",
+          "receipt_id",
+          "request_id",
+          "state",
+          "status",
+          "terminal",
+          "warnings",
+          "warnings_count"
+        ],
+        "server_duration_ms": 6395.1,
+        "server_interval": {
+          "ended_ms": 1788772889492.0,
+          "started_ms": 1788772883095.65
+        },
+        "server_total_ms": 6396.35,
+        "started_ms": 52707.824139994045,
+        "tool": "edit_memory"
+      },
+      {
+        "client_elapsed_ms": 826.9748390011955,
+        "ended_ms": 59955.344041998615,
+        "error_code": "RETRIEVAL_INDEX_WARMING",
+        "mutation_ack": false,
+        "outcome": "refused",
+        "phase": "verification",
+        "probe": false,
+        "request_shape": {
+          "graph": true,
+          "mode": "hybrid",
+          "rerank": false
+        },
+        "response_keys": [
+          "error",
+          "success"
+        ],
+        "server_duration_ms": 807.35,
+        "server_interval": {
+          "ended_ms": 1788772890316.0,
+          "started_ms": 1788772889507.92
+        },
+        "server_total_ms": 808.08,
+        "started_ms": 59128.36920299742,
+        "tool": "ask_memory"
+      },
+      {
+        "client_elapsed_ms": 596.6057499972521,
+        "ended_ms": 60551.98410599405,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "verification",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "body",
+          "content_hash",
+          "frontmatter",
+          "mtime",
+          "path",
+          "ref"
+        ],
+        "server_duration_ms": 573.51,
+        "server_interval": {
+          "ended_ms": 1788772890915.0,
+          "started_ms": 1788772890334.88
+        },
+        "server_total_ms": 580.12,
+        "started_ms": 59955.3783559968,
+        "tool": "read_memory"
+      },
+      {
+        "client_elapsed_ms": 268.5504749970278,
+        "ended_ms": 60820.56089699472,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "verification",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "body",
+          "content_hash",
+          "frontmatter",
+          "mtime",
+          "path"
+        ],
+        "server_duration_ms": 250.58,
+        "server_interval": {
+          "ended_ms": 1788772891185.0,
+          "started_ms": 1788772890932.48
+        },
+        "server_total_ms": 252.52,
+        "started_ms": 60552.01042199769,
+        "tool": "read_memory"
+      }
+    ],
+    "connector_overhead_ms": null,
+    "connector_overhead_reason": "stdio client wall and server ledger are independently measured but not request-correlated",
+    "corpus": {
+      "active_tracker": "Knowledge Base/Notes/Insights/active-tracker.md",
+      "archived_note": "Knowledge Base/Notes/Insights/archived-runbook.md",
+      "bytes": 1952283,
+      "corpus_sha256": "ca0586311a62e63b8beab8480455d88771b0079d8173b025dffed827b9f45ffb",
+      "critique": "Knowledge Base/Notes/Insights/critique.md",
+      "generator": "durable-closure-markdown-v1",
+      "inventory_entries": 8000,
+      "inventory_omitted_reason": "Generated per-page inventory omitted; generator identity, corpus byte count, and corpus SHA-256 retained.",
+      "media_fixture": {
+        "images": 2,
+        "pdf": "fixture-required-via-public-handle",
+        "sidecars_created": false
+      },
+      "pages": 8000,
+      "stale_relation": "Knowledge Base/Reference/stale-relation.md"
+    },
+    "full_convergence_ms": null,
+    "full_convergence_reason": "graph, lexical, and embedding projection convergence are not publicly proven by this harness",
+    "graph_execution_elapsed_ms": {
+      "after_shutdown": {
+        "incremental": 1.4528450046782382,
+        "rebuild": 20659.080274999724
+      },
+      "at_closure": {
+        "incremental": 1.4012210012879223,
+        "rebuild": 20659.080274999724
+      },
+      "at_convergence": {
+        "incremental": 1.4012210012879223,
+        "rebuild": 20659.080274999724
+      },
+      "pre_reset_spillover_full_invocation": {
+        "after_shutdown": {
+          "incremental": 0,
+          "rebuild": 0
+        },
+        "at_closure": {
+          "incremental": 0,
+          "rebuild": 0
+        },
+        "at_convergence": {
+          "incremental": 0,
+          "rebuild": 0
+        }
+      },
+      "semantics": "current-epoch values include completed invocations only; active work has no elapsed value until completion"
+    },
+    "graph_invocations": {
+      "after_shutdown": {
+        "drain_attempts": 12,
+        "drain_completed": 12,
+        "incremental_inflight": 0,
+        "rebuild_attempts": 2,
+        "rebuild_completed": 0,
+        "rebuild_inflight": 1
+      },
+      "at_closure": {
+        "drain_attempts": 11,
+        "drain_completed": 11,
+        "incremental_inflight": 0,
+        "rebuild_attempts": 2,
+        "rebuild_completed": 0,
+        "rebuild_inflight": 1
+      },
+      "at_convergence": {
+        "drain_attempts": 11,
+        "drain_completed": 11,
+        "incremental_inflight": 0,
+        "rebuild_attempts": 2,
+        "rebuild_completed": 0,
+        "rebuild_inflight": 1
+      },
+      "pre_reset_spillover": {
+        "after_shutdown": {
+          "incremental_completed": 0,
+          "incremental_inflight": 0,
+          "rebuild_completed": 0,
+          "rebuild_inflight": 0
+        },
+        "at_closure": {
+          "incremental_completed": 0,
+          "incremental_inflight": 0,
+          "rebuild_completed": 0,
+          "rebuild_inflight": 0
+        },
+        "at_convergence": {
+          "incremental_completed": 0,
+          "incremental_inflight": 0,
+          "rebuild_completed": 0,
+          "rebuild_inflight": 0
+        }
+      },
+      "semantics": "current-epoch attempts/completions only; reset-crossing warm-up invocations are reported separately as pre-reset spillover"
+    },
+    "graph_topology_discovery": {
+      "after_shutdown": {
+        "actual_body_read_bytes": 0,
+        "paths_enumerated": 0,
+        "stat_estimated_bytes": 0
+      },
+      "at_closure": {
+        "actual_body_read_bytes": 0,
+        "paths_enumerated": 0,
+        "stat_estimated_bytes": 0
+      },
+      "at_convergence": {
+        "actual_body_read_bytes": 0,
+        "paths_enumerated": 0,
+        "stat_estimated_bytes": 0
+      },
+      "byte_coverage": "actual body bytes via vault.read_bytes_without_pinning; stat-estimated bytes are separate and never summed",
+      "coverage": "measurement-window observations from EpistemicGraphIndex._sources_linking_to only; vault walk and reads are scoped to that call and can include reset-crossing warm-up work"
+    },
+    "initial_graph_readiness": {
+      "reason": "managed keyword warm-up does not establish hybrid graph readiness",
+      "status": "unmeasured"
+    },
+    "instrumentation": {
+      "error": null,
+      "method": "child-process sitecustomize wrappers"
+    },
+    "ledger": {
+      "ledger_observation_span_ms": 60808.179931640625,
+      "server_duration_sum_ms": 60643.94,
+      "server_idle_within_observed_span_ms": 148.12939453125,
+      "server_occupied_union_ms": 60660.050537109375,
+      "server_total_sum_ms": 60660.05
+    },
+    "media": {
+      "engine_versions": null,
+      "enqueue_succeeded": false,
+      "evidence_paths": [
+        "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-certificate.pdf",
+        "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-one.png",
+        "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-two.png"
+      ],
+      "extraction_convergence_ms": null,
+      "fixture_provenance": [
+        {
+          "download_url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+          "expected_text": "Dummy PDF file",
+          "file_id": "closure-fixture-pdf",
+          "file_name": "chapter-certificate.pdf",
+          "mime_type": "application/pdf",
+          "sha256": "3df79d34abbca99308e79cb94461c1893582604d68329a41fd4bec1885e6adb4"
+        },
+        {
+          "download_url": "https://raw.githubusercontent.com/tesseract-ocr/tessdoc/09a89d485f1f34285611562fed9f8ab85721bab8/images/2col.png",
+          "expected_text": "Cautionary Statement",
+          "file_id": "closure-fixture-image-one",
+          "file_name": "chapter-screenshot-one.png",
+          "mime_type": "image/png",
+          "sha256": "1ebe5089fd863fcec4a23912053488553fe96349f5c19850e32ba94103db2527"
+        },
+        {
+          "download_url": "https://raw.githubusercontent.com/tesseract-ocr/tessdoc/09a89d485f1f34285611562fed9f8ab85721bab8/images/toc.png",
+          "expected_text": "Introduction to the Tenth Anniversary Edition",
+          "file_id": "closure-fixture-image-two",
+          "file_name": "chapter-screenshot-two.png",
+          "mime_type": "image/png",
+          "sha256": "5502c740b734274328adeeec3d636a6c9ee78db21d77e1e978fc4b10aef990bb"
+        }
+      ],
+      "media_results": [
+        {
+          "graph_sync": "pending",
+          "graph_sync_checkpoint": "0490e89d0960b7de24c758605339b4639766754e5a84d0af0b99b1d31bf713cb",
+          "graph_sync_code": "GRAPH_SYNC_REPAIR_QUEUED",
+          "graph_sync_remediation": "The write is durable. Repair of the changed pages is queued and converges on the next index drain, so relation-filtered recall may report warming and graph context may report available: false until then; re-read shortly, or run maintain_memory(mode=\"reconcile\") \u2014 `exomem maintain --reconcile` from a shell to recover the derived graph.",
+          "index_refresh_remaining": 1,
+          "index_refreshed": 0,
+          "job_id": 2,
+          "media_type": "image",
+          "operation": "process",
+          "outcome": "processed",
+          "path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-one.png",
+          "sidecar_path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-one.png.md",
+          "state": "pending"
+        },
+        {
+          "graph_sync": "pending",
+          "graph_sync_checkpoint": "0490e89d0960b7de24c758605339b4639766754e5a84d0af0b99b1d31bf713cb",
+          "graph_sync_code": "GRAPH_SYNC_REPAIR_QUEUED",
+          "graph_sync_remediation": "The write is durable. Repair of the changed pages is queued and converges on the next index drain, so relation-filtered recall may report warming and graph context may report available: false until then; re-read shortly, or run maintain_memory(mode=\"reconcile\") \u2014 `exomem maintain --reconcile` from a shell to recover the derived graph.",
+          "index_refresh_remaining": 1,
+          "index_refreshed": 0,
+          "job_id": 3,
+          "media_type": "image",
+          "operation": "process",
+          "outcome": "processed",
+          "path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-two.png",
+          "sidecar_path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-two.png.md",
+          "state": "pending"
+        }
+      ],
+      "preserved_hashes_match": true,
+      "process_calls": 3,
+      "process_selection": "legacy-single-path",
+      "reason": "public extraction-content and engine-version verification did not converge",
+      "status": "blocked"
+    },
+    "media_convergence_wall_ms": null,
+    "profile": "real-extraction",
+    "public_call_count": 14,
+    "runtime": {
+      "git": {
+        "dirty": false,
+        "revision": "5fc2e55db730da25dc757d8c56af6dbcf7212979",
+        "tree": "4807000e730e1db22d0c947f4547a5002075ac47"
+      },
+      "python": {
+        "executable": "<candidate-worktree>/.venv-perf/bin/python",
+        "invocation": "<candidate-worktree>/.venv-perf/bin/python",
+        "packages": [
+          {
+            "name": "aiofile",
+            "version": "3.11.1"
+          },
+          {
+            "name": "annotated-types",
+            "version": "0.7.0"
+          },
+          {
+            "name": "anyio",
+            "version": "4.13.0"
+          },
+          {
+            "name": "attrs",
+            "version": "26.1.0"
+          },
+          {
+            "name": "Authlib",
+            "version": "1.7.2"
+          },
+          {
+            "name": "beartype",
+            "version": "0.22.9"
+          },
+          {
+            "name": "cachetools",
+            "version": "7.1.2"
+          },
+          {
+            "name": "caio",
+            "version": "0.9.25"
+          },
+          {
+            "name": "certifi",
+            "version": "2026.4.22"
+          },
+          {
+            "name": "cffi",
+            "version": "2.0.0"
+          },
+          {
+            "name": "click",
+            "version": "8.4.0"
+          },
+          {
+            "name": "cryptography",
+            "version": "48.0.0"
+          },
+          {
+            "name": "cyclopts",
+            "version": "4.13.0"
+          },
+          {
+            "name": "dnspython",
+            "version": "2.8.0"
+          },
+          {
+            "name": "docstring_parser",
+            "version": "0.18.0"
+          },
+          {
+            "name": "docutils",
+            "version": "0.22.4"
+          },
+          {
+            "name": "email-validator",
+            "version": "2.3.0"
+          },
+          {
+            "name": "exceptiongroup",
+            "version": "1.3.1"
+          },
+          {
+            "name": "exomem",
+            "version": "0.73.1"
+          },
+          {
+            "name": "fastmcp",
+            "version": "3.4.4"
+          },
+          {
+            "name": "fastmcp-slim",
+            "version": "3.4.4"
+          },
+          {
+            "name": "griffelib",
+            "version": "2.0.2"
+          },
+          {
+            "name": "h11",
+            "version": "0.16.0"
+          },
+          {
+            "name": "httpcore",
+            "version": "1.0.9"
+          },
+          {
+            "name": "httpx",
+            "version": "0.28.1"
+          },
+          {
+            "name": "httpx-sse",
+            "version": "0.4.3"
+          },
+          {
+            "name": "idna",
+            "version": "3.15"
+          },
+          {
+            "name": "jaraco.classes",
+            "version": "3.4.0"
+          },
+          {
+            "name": "jaraco.context",
+            "version": "6.1.2"
+          },
+          {
+            "name": "jaraco.functools",
+            "version": "4.5.0"
+          },
+          {
+            "name": "jeepney",
+            "version": "0.9.0"
+          },
+          {
+            "name": "joserfc",
+            "version": "1.6.5"
+          },
+          {
+            "name": "jsonref",
+            "version": "1.1.0"
+          },
+          {
+            "name": "jsonschema",
+            "version": "4.26.0"
+          },
+          {
+            "name": "jsonschema-path",
+            "version": "0.4.6"
+          },
+          {
+            "name": "jsonschema-specifications",
+            "version": "2025.9.1"
+          },
+          {
+            "name": "keyring",
+            "version": "25.7.0"
+          },
+          {
+            "name": "markdown-it-py",
+            "version": "4.2.0"
+          },
+          {
+            "name": "mcp",
+            "version": "1.27.1"
+          },
+          {
+            "name": "mdurl",
+            "version": "0.1.2"
+          },
+          {
+            "name": "more-itertools",
+            "version": "11.0.2"
+          },
+          {
+            "name": "numpy",
+            "version": "2.4.6"
+          },
+          {
+            "name": "openapi-pydantic",
+            "version": "0.5.1"
+          },
+          {
+            "name": "opentelemetry-api",
+            "version": "1.43.0"
+          },
+          {
+            "name": "packaging",
+            "version": "26.2"
+          },
+          {
+            "name": "pathable",
+            "version": "0.5.0"
+          },
+          {
+            "name": "pillow",
+            "version": "12.2.0"
+          },
+          {
+            "name": "platformdirs",
+            "version": "4.9.6"
+          },
+          {
+            "name": "py-key-value-aio",
+            "version": "0.4.4"
+          },
+          {
+            "name": "pycparser",
+            "version": "3.0"
+          },
+          {
+            "name": "pydantic",
+            "version": "2.13.4"
+          },
+          {
+            "name": "pydantic-settings",
+            "version": "2.14.1"
+          },
+          {
+            "name": "pydantic_core",
+            "version": "2.46.4"
+          },
+          {
+            "name": "Pygments",
+            "version": "2.20.0"
+          },
+          {
+            "name": "PyJWT",
+            "version": "2.12.1"
+          },
+          {
+            "name": "PyMuPDF",
+            "version": "1.27.2.3"
+          },
+          {
+            "name": "pyperclip",
+            "version": "1.11.0"
+          },
+          {
+            "name": "pytesseract",
+            "version": "0.3.13"
+          },
+          {
+            "name": "python-dotenv",
+            "version": "1.2.2"
+          },
+          {
+            "name": "python-multipart",
+            "version": "0.0.29"
+          },
+          {
+            "name": "python-slugify",
+            "version": "8.0.4"
+          },
+          {
+            "name": "PyYAML",
+            "version": "6.0.3"
+          },
+          {
+            "name": "rank-bm25",
+            "version": "0.2.2"
+          },
+          {
+            "name": "referencing",
+            "version": "0.37.0"
+          },
+          {
+            "name": "rich",
+            "version": "15.0.0"
+          },
+          {
+            "name": "rich-rst",
+            "version": "1.3.2"
+          },
+          {
+            "name": "rpds-py",
+            "version": "0.30.0"
+          },
+          {
+            "name": "SecretStorage",
+            "version": "3.5.0"
+          },
+          {
+            "name": "snowballstemmer",
+            "version": "3.1.0"
+          },
+          {
+            "name": "sse-starlette",
+            "version": "3.4.4"
+          },
+          {
+            "name": "starlette",
+            "version": "1.3.1"
+          },
+          {
+            "name": "text-unidecode",
+            "version": "1.3"
+          },
+          {
+            "name": "typing-inspection",
+            "version": "0.4.2"
+          },
+          {
+            "name": "typing_extensions",
+            "version": "4.15.0"
+          },
+          {
+            "name": "uncalled-for",
+            "version": "0.3.2"
+          },
+          {
+            "name": "uvicorn",
+            "version": "0.47.0"
+          },
+          {
+            "name": "watchdog",
+            "version": "6.0.0"
+          },
+          {
+            "name": "watchfiles",
+            "version": "1.1.1"
+          },
+          {
+            "name": "websockets",
+            "version": "16.0"
+          }
+        ],
+        "prefix": "<candidate-worktree>/.venv-perf",
+        "runtime_executable": "<candidate-worktree>/.venv-perf/bin/python",
+        "version": "3.13.12 (main, Feb 12 2026, 00:45:41) [Clang 21.1.4 ]"
+      },
+      "source": {
+        "package_origin": "<baseline-worktree>/src/exomem/__init__.py",
+        "root": "<baseline-worktree>/src",
+        "sha256": "dc9bfca8a8f864b2e65f2f5fcd1883a59665d32ef0ac1e37614c5190b05836a3"
+      }
+    },
+    "server_shutdown_ms": 2103.6725040030433,
+    "source_scans": {
+      "after_shutdown": {
+        "bytes": 3491579,
+        "pages": 14294
+      },
+      "at_closure": {
+        "bytes": 3118174,
+        "pages": 12776
+      },
+      "at_convergence": {
+        "bytes": 3121850,
+        "pages": 12791
+      },
+      "coverage": "find._walk_md only; path enumeration plus stat-estimated bytes, not body bytes"
+    },
+    "startup_readiness": {
+      "elapsed_ms": 58015.40253100393,
+      "public_validation_calls": 10,
+      "server_startup_and_readiness_ms": 114284.39067400177
+    },
+    "status": "fail",
+    "useful_closure": {
+      "final_read_your_write": false,
+      "passed": false,
+      "refusal_observations": [
+        {
+          "code": "RETRIEVAL_INDEX_WARMING",
+          "tool": "ask_memory",
+          "window_ms": [
+            59128.36920299742,
+            59955.344041998615
+          ]
+        }
+      ],
+      "warming_components": []
+    },
+    "useful_closure_wall_ms": 60851.49802099477,
+    "variant": "optimized",
+    "verification": {
+      "direct_marker": false,
+      "evidence_citations": false,
+      "mutations_succeeded": false,
+      "recall_hit": false,
+      "stale_relation_absent": true,
+      "tracker_marker": true
+    },
+    "workflow_wall_ms": 60872.16335699486,
+    "write_ack": {
+      "p50_ms": 4984.740903004422,
+      "p95_ms": 28283.588837002753
+    }
+  },
+  "role": "baseline-incomplete",
+  "sanitization": "Private checkout/runtime paths replaced by named placeholders; generated per-page inventory omitted. All call, result, correctness, timing, unknown/null, and runtime package values retained."
+}

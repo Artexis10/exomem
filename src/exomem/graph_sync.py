@@ -3056,6 +3056,30 @@ def start_registered(vault_root: Path, *, state_root: Path | None = None) -> Gra
     return item[0].start()
 
 
+def start_registered_detached(
+    vault_root: Path,
+    *,
+    state_root: Path | None = None,
+    expected_checkpoint: GraphSyncCheckpoint | None = None,
+) -> GraphRebuildStart | None:
+    """Start one captured rebuild and release its request-local waiter without joining."""
+    key = _registration_key(vault_root, state_root)
+    pending = dict(_PENDING_WAITERS.get() or {})
+    item = pending.get(key)
+    if (
+        item is None
+        or not isinstance(item[0], GraphRebuildRegistration)
+        or (expected_checkpoint is not None and item[1] != expected_checkpoint)
+    ):
+        return None
+    started = start_registered(vault_root, state_root=state_root)
+    current = dict(_PENDING_WAITERS.get() or {})
+    if current.get(key) is item:
+        current.pop(key, None)
+        _PENDING_WAITERS.set(current or None)
+    return started
+
+
 def registered_checkpoint(
     vault_root: Path, *, state_root: Path | None = None
 ) -> GraphSyncCheckpoint | None:
@@ -3735,19 +3759,20 @@ def committed_graph_pending(checkpoint: GraphSyncCheckpoint) -> dict[str, str]:
     would be a different lie -- nothing failed, the registered rebuild is simply
     still running and will publish behind this response.
 
-    Derived reads degrade rather than break while this is true: the graph lane
-    falls back to wikilink expansion, `graph_context` reports
-    `available: false`, and relation-filtered recall raises the existing typed
-    `RETRIEVAL_INDEX_WARMING` with its own retry hint. None of them block.
+    Optional graph expansion may omit unproven contributions; `graph_context`
+    reports `available: false`, and relation-filtered recall raises the existing
+    typed `RETRIEVAL_INDEX_WARMING` with its own retry hint. Catalogue, policy and
+    pending-write admission remain separate requirements for ordinary recall.
     """
     return {
         "graph_sync": "pending",
         "graph_sync_code": "GRAPH_SYNC_REBUILD_IN_PROGRESS",
         "graph_sync_checkpoint": checkpoint.checkpoint_sha256,
         "graph_sync_remediation": (
-            "The write is durable. Derived graph relations are still rebuilding, so "
-            "relation-filtered recall may report warming and graph context may report "
-            f"available: false for a short time; re-read shortly, or {_RECONCILE_HINT}"
+            "The write is durable. Derived graph relations are still rebuilding. "
+            "Continue independent work; retry a graph-dependent query only if it "
+            "reports warming. Pending graph work alone does not require rereading "
+            "the written note or running maintenance."
         ),
     }
 
@@ -3769,8 +3794,9 @@ def committed_graph_queued(checkpoint: GraphSyncCheckpoint) -> dict[str, str]:
         "graph_sync_code": "GRAPH_SYNC_REPAIR_QUEUED",
         "graph_sync_checkpoint": checkpoint.checkpoint_sha256,
         "graph_sync_remediation": (
-            "The write is durable. Repair of the changed pages is queued and converges on "
-            "the next index drain, so relation-filtered recall may report warming and graph "
-            f"context may report available: false until then; re-read shortly, or {_RECONCILE_HINT}"
+            "The write is durable. Repair of the changed pages is queued for the "
+            "background index owner. Continue independent work; retry a graph-dependent "
+            "query only if it reports warming. Pending graph work alone does not "
+            "require rereading the written note or running maintenance."
         ),
     }

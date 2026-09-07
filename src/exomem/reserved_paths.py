@@ -591,7 +591,10 @@ _COMMAND_PATH_ROLES = MappingProxyType(
         ),
         "compile_source": _roles(("sources", "source", "path-or-ref-list")),
         "preserve_artifacts": _roles(("files", "external-source", "external-artifacts")),
-        "process_media": _roles(("path", "media-source", "path")),
+        "process_media": _roles(
+            ("path", "media-source", "path"),
+            ("paths", "media-source", "path-list"),
+        ),
         "review_memory": _roles(
             ("path", "source", "path-or-ref"),
             ("ref", "source", "ref"),

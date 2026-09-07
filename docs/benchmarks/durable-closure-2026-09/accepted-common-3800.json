@@ -1,0 +1,1664 @@
+{
+  "driver_sha256": {
+    "docs/benchmarks/durable-closure-public-artifacts.json": "8c7e9741f4a8b4d13bd54105804e9b9ec48bee84ef08fe78d96845eaa16edc5a",
+    "scripts/durable_closure_benchmark.py": "7701f8265bb8ae2f55492e85a0feff19e9db90023e878168e80cc98a149dfef9",
+    "scripts/durable_closure_common.py": "79a8d123de203f880f9be40fa3a2823bff0ea833e1bf32c00c8d43f259f1a8bf"
+  },
+  "evidence_format": 1,
+  "host": {
+    "cpu_count": 16,
+    "driver_git_revision": "938e8751bab359b2c945cbf98e29b8ed7dc19fd1",
+    "driver_sha256": {
+      "docs/benchmarks/durable-closure-public-artifacts.json": "8c7e9741f4a8b4d13bd54105804e9b9ec48bee84ef08fe78d96845eaa16edc5a",
+      "scripts/durable_closure_benchmark.py": "7701f8265bb8ae2f55492e85a0feff19e9db90023e878168e80cc98a149dfef9",
+      "scripts/durable_closure_common.py": "79a8d123de203f880f9be40fa3a2823bff0ea833e1bf32c00c8d43f259f1a8bf"
+    },
+    "ended_utc": "2026-09-07T11:55:03.756245+00:00",
+    "exit_code": 0,
+    "load_average_end": [
+      20.02001953125,
+      19.82275390625,
+      17.16357421875
+    ],
+    "load_average_start": [
+      19.67236328125,
+      19.62548828125,
+      16.73388671875
+    ],
+    "runner_wall_s": 119.11437203099194,
+    "samples_per_product": 1,
+    "started_utc": "2026-09-07T11:53:01.794875+00:00",
+    "task_test_workers_quiescent": true
+  },
+  "label": "accepted-common-3800",
+  "measurement_limits": [
+    "One sample per row; task-worker quiescence is declared separately from external host load.",
+    "A failed workflow is not a completed latency baseline; no speed ratio is asserted.",
+    "Graph timing and invocation wrappers instrument the MCP service owner only, excluding disposable media children.",
+    "Source scans cover only the named wrapped functions, not all filesystem reads.",
+    "Full projection convergence, connector overhead, and model planning remain unmeasured unless explicitly populated."
+  ],
+  "raw_result_sha256": "d5b5f9d7ed752c14e062f64a13081cd1a3cfb0175aa04c9be3105fa99b2030b6",
+  "result": {
+    "diagnostic": "durable-closure-common-subset",
+    "rows": [
+      {
+        "configuration": {
+          "EXOMEM_CALL_LEDGER_DIR": "<sample-root>/state/exomem/ledger",
+          "EXOMEM_CONFIG_PATH": "<sample-root>/state/exomem/config.json",
+          "EXOMEM_DISABLE_EMBEDDINGS": "1",
+          "EXOMEM_DISABLE_QUERY_LOG": "1",
+          "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
+          "EXOMEM_EAGER_BOOT": "1",
+          "EXOMEM_LOG_DIR": "<sample-root>/state/exomem/logs",
+          "EXOMEM_STATE_ROOT": "<sample-root>/state/exomem/state",
+          "EXOMEM_VAULT_PATH": "<sample-root>/vault/exomem",
+          "EXOMEM_WRITER_LEASE_STATE_DIR": "<sample-root>/state/exomem/leases"
+        },
+        "corpus": {
+          "digest": "9b008bff381052c3a29cb8a187c1106a315ef29130788541ae88603eb845384c",
+          "generator": "durable-closure-common-markdown-v1",
+          "named_pages": {
+            "background": "background.md",
+            "stale_link": "stale-link.md",
+            "tracker": "active-tracker.md"
+          },
+          "page_count": 3800,
+          "pages_entries": 3800,
+          "pages_omitted_reason": "Generated per-page inventory omitted; page count, named workflow pages, generator identity, and corpus digest retained."
+        },
+        "markers": [
+          "common-subset-688fc9d7aea94a1cbfb43d5fabc49acc-chapter",
+          "common-subset-688fc9d7aea94a1cbfb43d5fabc49acc-tracker",
+          "common-subset-688fc9d7aea94a1cbfb43d5fabc49acc-capture"
+        ],
+        "measurements": {
+          "ack_p50_ms": 1585.026899992954,
+          "ack_p95_ms": 8879.173184992396,
+          "connector_ms": null,
+          "connector_reason": "not exposed by the public MCP protocol",
+          "public_call_count": 13,
+          "shared_server_ms": null,
+          "shared_server_reason": "not exposed by the public MCP protocol"
+        },
+        "phases": {
+          "pre_timing_ms": 70342.73969598871,
+          "teardown_ms": 2103.097366998554,
+          "wall_to_verified_closure_ms": 22342.650284001138
+        },
+        "plan": [
+          {
+            "operation": "create_completed_chapter",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "edit_tracker",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "correct_stale_link",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "capture_independent_note",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "exact_read_changed_pages",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "search_unique_markers",
+            "surface": "public_mcp"
+          }
+        ],
+        "pre_timing_public_calls": [
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 17.016019992297515,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 13.102383993100375,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.288158999173902,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 11.577243989449926,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 13.1611879914999,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.668161990703084,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.000761001720093,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.042854002676904,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.796794998692349,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.44493800145574,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 11.139447000459768,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.12695100507699,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.310082998126745,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 12.725424996460788,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.058234998723492,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 14.642558002378792,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.045672006323002,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.446321011637338,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.773401994607411,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 31.04842599714175,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 112.36601800192147,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 145.10807700571604,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 80.2890429913532,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 96.40486199350562,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 141.5761719981674,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 126.93495099665597,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 132.67701699805912,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 142.48076699732337,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 10.85719300317578,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 80.4788099922007,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 89.26002299995162,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 84.28510899830144,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 84.85643600579351,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 38.99908499442972,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 53.37992400745861,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 55.4613279964542,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 56.64830899331719,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.280021001934074,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.000441995915025,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.636127002188005,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 44.76148099638522,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.16524800541811,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 53.57105100119952,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.611592996981926,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.998644990613684,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 53.05175299872644,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 54.90851099602878,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 55.65472799935378,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 53.56452699925285,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 43.77269399992656,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.91266699694097,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.376528997323476,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 57.69612999574747,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 62.237691003247164,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.318527988973074,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.22627700236626,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 46.786785998847336,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.011002997052856,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 47.609453002223745,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.208292995695956,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 46.633347010356374,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.65380999399349,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 55.790946003980935,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.083515005302615,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.83934100891929,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.69120099162683,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.21094701078255,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.527943003340624,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 54.202156999963336,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 54.97106300026644,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 11.886132997460663,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 54.28666299849283,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.91307599307038,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.50781399384141,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 55.081974001950584,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.656974013894796,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.01253500126768,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 47.65908600529656,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.738304002559744,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 56.363834999501705,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.90441199333873,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 53.68541300413199,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 52.41364199901,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 46.86901000968646,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 45.32033400028013,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 46.341145993210375,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.01452501164749,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 50.9016299911309,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 48.49834799824748,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 46.15777399158105,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.16826201265212,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 47.1264209918445,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 49.93639400345273,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 51.567957998486236,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 46.20546000660397,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.482192996074446,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 11.395052992156707,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 9.988845005864277,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 125.99000199406873,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 125.63016099738888,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 138.15435000287835,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 54.132225006469525,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 301.13242100924253,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 297.8587669931585,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 317.36779600032605,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 304.68436499359086,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 307.34883599507157,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 318.1227759923786,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 324.75307199638337,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 327.33455099514686,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 398.2070530037163,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 210.18530099536292,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 206.87482600624207,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 212.0665039983578,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 220.9795989911072,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 222.10543899564072,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 211.50858799228445,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 218.59446199960075,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 215.58300199103542,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 225.7896829978563,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 210.90390199969988,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 293.37665799539536,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 189.74929901014548,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "elapsed_ms": 13844.629554005223,
+            "tool": "remember"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 12090.75970799313,
+            "tool": "remember"
+          }
+        ],
+        "product": "exomem",
+        "public_calls": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 6813.535843990394,
+            "tool": "remember"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 3577.3854489962105,
+            "tool": "remember"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 8879.173184992396,
+            "tool": "edit_memory"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 1585.026899992954,
+            "tool": "edit_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 215.80581400485244,
+            "tool": "remember"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 969.8742809996475,
+            "tool": "remember"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 14.822073993855156,
+            "tool": "read_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 9.9361129978206,
+            "tool": "read_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 9.282255996367894,
+            "tool": "read_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 13.200425994000398,
+            "tool": "read_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 133.56318199657835,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 34.264724992681295,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 34.4546470005298,
+            "tool": "ask_memory"
+          }
+        ],
+        "reason": null,
+        "runtime": {
+          "dependency_inventory": {
+            "entries": [
+              "Authlib==1.7.2",
+              "PyJWT==2.12.1",
+              "PyMuPDF==1.27.2.3",
+              "PyYAML==6.0.3",
+              "Pygments==2.20.0",
+              "SecretStorage==3.5.0",
+              "aiofile==3.11.1",
+              "annotated-types==0.7.0",
+              "anyio==4.13.0",
+              "attrs==26.1.0",
+              "beartype==0.22.9",
+              "cachetools==7.1.2",
+              "caio==0.9.25",
+              "certifi==2026.4.22",
+              "cffi==2.0.0",
+              "click==8.4.0",
+              "cryptography==48.0.0",
+              "cyclopts==4.13.0",
+              "dnspython==2.8.0",
+              "docstring_parser==0.18.0",
+              "docutils==0.22.4",
+              "email-validator==2.3.0",
+              "exceptiongroup==1.3.1",
+              "exomem==0.73.1",
+              "fastmcp-slim==3.4.4",
+              "fastmcp==3.4.4",
+              "griffelib==2.0.2",
+              "h11==0.16.0",
+              "httpcore==1.0.9",
+              "httpx-sse==0.4.3",
+              "httpx==0.28.1",
+              "idna==3.15",
+              "jaraco.classes==3.4.0",
+              "jaraco.context==6.1.2",
+              "jaraco.functools==4.5.0",
+              "jeepney==0.9.0",
+              "joserfc==1.6.5",
+              "jsonref==1.1.0",
+              "jsonschema-path==0.4.6",
+              "jsonschema-specifications==2025.9.1",
+              "jsonschema==4.26.0",
+              "keyring==25.7.0",
+              "markdown-it-py==4.2.0",
+              "mcp==1.27.1",
+              "mdurl==0.1.2",
+              "more-itertools==11.0.2",
+              "numpy==2.4.6",
+              "openapi-pydantic==0.5.1",
+              "opentelemetry-api==1.43.0",
+              "packaging==26.2",
+              "pathable==0.5.0",
+              "pillow==12.2.0",
+              "platformdirs==4.9.6",
+              "py-key-value-aio==0.4.4",
+              "pycparser==3.0",
+              "pydantic-settings==2.14.1",
+              "pydantic==2.13.4",
+              "pydantic_core==2.46.4",
+              "pyperclip==1.11.0",
+              "pytesseract==0.3.13",
+              "python-dotenv==1.2.2",
+              "python-multipart==0.0.29",
+              "python-slugify==8.0.4",
+              "rank-bm25==0.2.2",
+              "referencing==0.37.0",
+              "rich-rst==1.3.2",
+              "rich==15.0.0",
+              "rpds-py==0.30.0",
+              "snowballstemmer==3.1.0",
+              "sse-starlette==3.4.4",
+              "starlette==1.3.1",
+              "text-unidecode==1.3",
+              "typing-inspection==0.4.2",
+              "typing_extensions==4.15.0",
+              "uncalled-for==0.3.2",
+              "uvicorn==0.47.0",
+              "watchdog==6.0.0",
+              "watchfiles==1.1.1",
+              "websockets==16.0"
+            ],
+            "status": "ok"
+          },
+          "executable": "<candidate-worktree>/.venv-perf/bin/python",
+          "executable_sha256": "f0b128827bc923c2b0cd365a7c75fe1a5d400fdcf1fdae822e045cc67b25ea79",
+          "installed": {
+            "module_sha256": "f69bdac87e170b47dfcc8ce631efc0045a574eb81fd0f605b990b02692e3398d",
+            "package_root": "<candidate-worktree>/src/exomem",
+            "runtime_pythonpath_root": "<candidate-worktree>/src",
+            "version": "0.73.1"
+          },
+          "installed_version_matches_expected": null,
+          "source_identity": {
+            "dirty": false,
+            "dirty_source_digest": "c31b0df2f64e135321cac38cdc0ac61489c8a281942012e4e25a53804618a03b",
+            "package_root": "<candidate-worktree>/src/exomem",
+            "revision": "938e8751bab359b2c945cbf98e29b8ed7dc19fd1",
+            "runtime_pythonpath_root": "<candidate-worktree>/src",
+            "source_digest": "c31b0df2f64e135321cac38cdc0ac61489c8a281942012e4e25a53804618a03b",
+            "tree": "2ab5b42d82efbfdbcaef304d2af0aacbd026842c"
+          },
+          "wheel": null,
+          "wheel_matches_pinned_digest": null,
+          "wheel_sha256": null
+        },
+        "status": "pass",
+        "verification": {
+          "body_proof": [
+            {
+              "actual_bytes": 124,
+              "actual_sha256": "aae5f2e7d1093f37a3688b75735fcf787c5c4d5fe4b8228b742734742dfc32fa",
+              "expected_bytes": 124,
+              "expected_sha256": "aae5f2e7d1093f37a3688b75735fcf787c5c4d5fe4b8228b742734742dfc32fa",
+              "matches": true
+            },
+            {
+              "actual_bytes": 1210,
+              "actual_sha256": "1af9214d197dee5a04004936f71294687b1b6261b6acf7d047919406b369b9c4",
+              "expected_bytes": 1210,
+              "expected_sha256": "1af9214d197dee5a04004936f71294687b1b6261b6acf7d047919406b369b9c4",
+              "matches": true
+            },
+            {
+              "actual_bytes": 3175,
+              "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+              "expected_bytes": 3175,
+              "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+              "matches": true
+            },
+            {
+              "actual_bytes": 107,
+              "actual_sha256": "82ebe886dceb6b1af9716ed804a5dd6c67bd6afbf24b2add94a803e4aa0e5d6e",
+              "expected_bytes": 107,
+              "expected_sha256": "82ebe886dceb6b1af9716ed804a5dd6c67bd6afbf24b2add94a803e4aa0e5d6e",
+              "matches": true
+            }
+          ],
+          "exact_read_your_write": true,
+          "expected_bodies_match": true,
+          "search_converged": true,
+          "searches": [
+            {
+              "convergence_ms": 133.57796899799723,
+              "final_response": {
+                "classification": "ok",
+                "container": "result",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "result"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            },
+            {
+              "convergence_ms": 34.28452399384696,
+              "final_response": {
+                "classification": "ok",
+                "container": "result",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "result"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            },
+            {
+              "convergence_ms": 34.46532800444402,
+              "final_response": {
+                "classification": "ok",
+                "container": "result",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "result"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            }
+          ]
+        }
+      },
+      {
+        "configuration": {
+          "BASIC_MEMORY_AUTO_UPDATE": "false",
+          "BASIC_MEMORY_CONFIG_DIR": "<sample-root>/state/basic_memory/config",
+          "BASIC_MEMORY_EXPLICIT_ROUTING": "true",
+          "BASIC_MEMORY_FORCE_LOCAL": "true",
+          "BASIC_MEMORY_HOME": "<sample-root>/state/basic_memory/home",
+          "BASIC_MEMORY_NO_PROMOS": "1",
+          "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false"
+        },
+        "corpus": {
+          "digest": "9b008bff381052c3a29cb8a187c1106a315ef29130788541ae88603eb845384c",
+          "generator": "durable-closure-common-markdown-v1",
+          "named_pages": {
+            "background": "background.md",
+            "stale_link": "stale-link.md",
+            "tracker": "active-tracker.md"
+          },
+          "page_count": 3800,
+          "pages_entries": 3800,
+          "pages_omitted_reason": "Generated per-page inventory omitted; page count, named workflow pages, generator identity, and corpus digest retained."
+        },
+        "markers": [
+          "common-subset-688fc9d7aea94a1cbfb43d5fabc49acc-chapter",
+          "common-subset-688fc9d7aea94a1cbfb43d5fabc49acc-tracker",
+          "common-subset-688fc9d7aea94a1cbfb43d5fabc49acc-capture"
+        ],
+        "measurements": {
+          "ack_p50_ms": 166.55871899274644,
+          "ack_p95_ms": 3156.3429689995246,
+          "connector_ms": null,
+          "connector_reason": "not exposed by the public MCP protocol",
+          "public_call_count": 11,
+          "shared_server_ms": null,
+          "shared_server_reason": "not exposed by the public MCP protocol"
+        },
+        "phases": {
+          "pre_timing_ms": 15385.2867379901,
+          "teardown_ms": 2103.258464994724,
+          "wall_to_verified_closure_ms": 6134.7992540104315
+        },
+        "plan": [
+          {
+            "operation": "create_completed_chapter",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "edit_tracker",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "correct_stale_link",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "capture_independent_note",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "exact_read_changed_pages",
+            "surface": "public_mcp"
+          },
+          {
+            "operation": "search_unique_markers",
+            "surface": "public_mcp"
+          }
+        ],
+        "pre_timing_public_calls": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 796.4113539928803,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 22.144829999888316,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 27.797583999927156,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 29.780507000396028,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 35.075651001534425,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 32.9563550039893,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 28.04906599340029,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 28.191051998874173,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 28.60201300063636,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 28.977007008506916,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 28.31580801284872,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 31.523999001365155,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 27.285101998131722,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 29.76362699700985,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 36.38410699204542,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 48.356995001086034,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 45.010508998529986,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 55.77513700700365,
+            "tool": "search_notes"
+          }
+        ],
+        "product": "basic_memory",
+        "public_calls": [
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 153.3180709957378,
+            "tool": "write_note"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 1246.4109049906256,
+            "tool": "edit_note"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 3156.3429689995246,
+            "tool": "edit_note"
+          },
+          {
+            "ack": true,
+            "classification": "ok",
+            "elapsed_ms": 166.55871899274644,
+            "tool": "write_note"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 347.5355300033698,
+            "tool": "read_note"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 321.0881159902783,
+            "tool": "read_note"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 227.5396689947229,
+            "tool": "read_note"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 165.7283499953337,
+            "tool": "read_note"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 115.45091299922206,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 110.02494899730664,
+            "tool": "search_notes"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "elapsed_ms": 94.65427900431678,
+            "tool": "search_notes"
+          }
+        ],
+        "reason": null,
+        "runtime": {
+          "dependency_inventory": {
+            "entries": [
+              "Authlib==1.8.0",
+              "Jinja2==3.1.6",
+              "Mako==1.4.1",
+              "MarkupSafe==3.0.3",
+              "PyJWT==2.13.0",
+              "PyMeta3==0.5.1",
+              "PyYAML==6.0.3",
+              "Pygments==2.21.0",
+              "SQLAlchemy==2.1.0rc1",
+              "SecretStorage==3.5.0",
+              "Unidecode==1.4.0",
+              "agent-detector==2.0.0",
+              "aiofile==3.12.3",
+              "aiofiles==25.1.0",
+              "aiohappyeyeballs==2.7.1",
+              "aiohttp==3.14.3",
+              "aiosignal==1.4.0",
+              "aiosqlite==0.22.1",
+              "alembic==1.19.2",
+              "annotated-doc==0.0.5",
+              "annotated-types==0.8.0",
+              "anyio==4.15.1",
+              "asyncpg==0.31.0",
+              "attrs==26.1.0",
+              "basic-memory==0.23.2",
+              "beartype==0.23.0rc0",
+              "cachetools==7.1.8",
+              "caio==0.12.4",
+              "certifi==2026.7.22",
+              "cffi==2.1.1",
+              "charset-normalizer==3.5.1",
+              "click==8.5.0",
+              "cryptography==50.0.1",
+              "cyclopts==5.0.0b1",
+              "dateparser==1.4.3",
+              "detect-installer==0.2.1",
+              "distro==1.9.0",
+              "dnspython==2.8.0",
+              "docstring_parser==0.18.0",
+              "email-validator==2.3.0",
+              "exceptiongroup==1.3.1",
+              "executing==2.2.1",
+              "fastapi-cli==0.0.32",
+              "fastapi-cloud-cli==0.25.0",
+              "fastapi==0.141.1",
+              "fastar==0.12.0",
+              "fastembed==0.8.0",
+              "fastmcp-slim==4.0.0b1",
+              "fastmcp==4.0.0b1",
+              "fastuuid==0.14.0",
+              "filelock==3.32.5",
+              "flatbuffers==25.12.19",
+              "frozenlist==1.8.0",
+              "fsspec==2026.7.0",
+              "googleapis-common-protos==1.75.3",
+              "greenlet==3.5.5",
+              "griffelib==2.3.0",
+              "h11==0.16.0",
+              "hf-xet==1.6.1a0",
+              "httpcore2==2.12.0",
+              "httpcore==1.0.9",
+              "httptools==0.8.0",
+              "httpx2==2.12.0",
+              "httpx==0.28.1",
+              "huggingface_hub==1.30.0",
+              "idna==3.19",
+              "importlib_metadata==8.9.0",
+              "iniconfig==2.3.0",
+              "jaraco.classes==3.4.0",
+              "jaraco.context==6.1.2",
+              "jaraco.functools==4.6.0",
+              "jeepney==0.9.0",
+              "jiter==0.16.0",
+              "joserfc==1.7.5",
+              "jsonref==1.1.0",
+              "jsonschema-path==0.5.0",
+              "jsonschema-specifications==2025.9.1",
+              "jsonschema==4.26.0",
+              "keyring==25.7.0",
+              "litellm==1.91.5",
+              "logfire==5.0.0",
+              "loguru==0.7.3",
+              "markdown-it-py==4.2.0",
+              "mcp-types==2.1.1",
+              "mcp==2.1.1",
+              "mdformat-gfm==1.0.0",
+              "mdformat==1.0.0",
+              "mdformat_frontmatter==2.1.2",
+              "mdit-py-plugins==0.6.1",
+              "mdurl==0.1.2",
+              "mmh3==5.3.0",
+              "more-itertools==11.1.0",
+              "multidict==6.7.1",
+              "nest-asyncio==1.6.0",
+              "nodeenv==1.10.0",
+              "numpy==2.5.3",
+              "onnxruntime==1.29.0",
+              "openai==2.54.0",
+              "openapi-pydantic==0.5.1",
+              "opentelemetry-api==1.44.0",
+              "opentelemetry-exporter-otlp-proto-common==1.44.0",
+              "opentelemetry-exporter-otlp-proto-http==1.44.0",
+              "opentelemetry-instrumentation==0.65b0",
+              "opentelemetry-proto==1.44.0",
+              "opentelemetry-sdk==1.44.0",
+              "opentelemetry-semantic-conventions==0.65b0",
+              "packaging==26.3",
+              "pathable==0.6.0",
+              "pillow==12.3.0",
+              "platformdirs==4.11.7",
+              "pluggy==1.6.0",
+              "propcache==0.5.2",
+              "protobuf==7.36.1",
+              "psutil==7.2.2",
+              "psycopg==3.3.1",
+              "py-key-value-aio==0.4.5",
+              "py_rust_stemmers==0.1.8",
+              "pybars3==0.9.7",
+              "pycparser==3.0",
+              "pydantic-extra-types==2.11.1",
+              "pydantic-settings==2.15.0",
+              "pydantic==2.14.0b1",
+              "pydantic_core==2.48.0",
+              "pyperclip==1.11.0",
+              "pyright==1.1.411",
+              "pytest-aio==2.1.7",
+              "pytest-asyncio==1.4.0",
+              "pytest==9.1.1",
+              "python-dateutil==2.9.0.post0",
+              "python-dotenv==1.2.3",
+              "python-frontmatter==1.3.0",
+              "python-multipart==0.0.32",
+              "pytz==2026.3.post1",
+              "referencing==0.37.0",
+              "regex==2026.9.3",
+              "requests==2.34.2",
+              "rich-rst==2.1.0",
+              "rich-toolkit==0.20.4",
+              "rich==15.0.0",
+              "rignore==0.8.1",
+              "rpds-py==2026.6.3",
+              "ruamel.yaml==0.19.1",
+              "sentry-sdk==3.0.0a7",
+              "shellingham==1.5.4",
+              "six==1.17.0",
+              "sniffio==1.3.1",
+              "sqlite-vec==0.1.10a4",
+              "sse-starlette==3.4.11",
+              "starlette==1.6.0",
+              "tiktoken==0.14.0",
+              "tokenizers==0.23.2",
+              "tqdm==4.70.0",
+              "truststore==0.10.4",
+              "typer==0.27.2",
+              "typing-inspection==0.4.4",
+              "typing_extensions==4.16.0",
+              "tzlocal==5.4.4",
+              "uncalled-for==0.4.0",
+              "urllib3==2.7.0",
+              "uvicorn==0.52.4",
+              "uvloop==0.22.1",
+              "watchfiles==1.2.0",
+              "wcwidth==0.8.3",
+              "websockets==17.1",
+              "wrapt==2.4.1rc1",
+              "yarl==1.24.5",
+              "zipp==4.1.0"
+            ],
+            "status": "ok"
+          },
+          "executable": "<basic-memory-runtime>/venv/bin/basic-memory",
+          "executable_sha256": "304a53db252684b55a42b761d6818bfc0ec692eeb4eeac6e8662d06110003249",
+          "installed": {
+            "module_sha256": "76d9a3572dd0e3f0d875d483c12f573aade8904ac631f62d559fbfd6ce69db34",
+            "package_root": "<basic-memory-runtime>/venv/lib/python3.13/site-packages/basic_memory",
+            "runtime_pythonpath_root": "<candidate-worktree>/src",
+            "version": "0.23.2"
+          },
+          "installed_version_matches_expected": true,
+          "wheel": "<basic-memory-runtime>/basic_memory-0.23.2-py3-none-any.whl",
+          "wheel_matches_pinned_digest": true,
+          "wheel_sha256": "a1679a16319d8a7fb9c0486033551a47dedc0fbae7f5da81444eb3c4bf0ccecb"
+        },
+        "status": "pass",
+        "verification": {
+          "body_proof": [
+            {
+              "actual_bytes": 124,
+              "actual_sha256": "aae5f2e7d1093f37a3688b75735fcf787c5c4d5fe4b8228b742734742dfc32fa",
+              "expected_bytes": 124,
+              "expected_sha256": "aae5f2e7d1093f37a3688b75735fcf787c5c4d5fe4b8228b742734742dfc32fa",
+              "matches": true
+            },
+            {
+              "actual_bytes": 1210,
+              "actual_sha256": "1af9214d197dee5a04004936f71294687b1b6261b6acf7d047919406b369b9c4",
+              "expected_bytes": 1210,
+              "expected_sha256": "1af9214d197dee5a04004936f71294687b1b6261b6acf7d047919406b369b9c4",
+              "matches": true
+            },
+            {
+              "actual_bytes": 3175,
+              "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+              "expected_bytes": 3175,
+              "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+              "matches": true
+            },
+            {
+              "actual_bytes": 107,
+              "actual_sha256": "82ebe886dceb6b1af9716ed804a5dd6c67bd6afbf24b2add94a803e4aa0e5d6e",
+              "expected_bytes": 107,
+              "expected_sha256": "82ebe886dceb6b1af9716ed804a5dd6c67bd6afbf24b2add94a803e4aa0e5d6e",
+              "matches": true
+            }
+          ],
+          "exact_read_your_write": true,
+          "expected_bodies_match": true,
+          "search_converged": true,
+          "searches": [
+            {
+              "convergence_ms": 115.46378399361856,
+              "final_response": {
+                "classification": "ok",
+                "container": "results",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "current_page",
+                  "has_more",
+                  "page_size",
+                  "results",
+                  "total",
+                  "total_is_exact"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            },
+            {
+              "convergence_ms": 110.04173499532044,
+              "final_response": {
+                "classification": "ok",
+                "container": "results",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "current_page",
+                  "has_more",
+                  "page_size",
+                  "results",
+                  "total",
+                  "total_is_exact"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            },
+            {
+              "convergence_ms": 94.67167500406504,
+              "final_response": {
+                "classification": "ok",
+                "container": "results",
+                "hit_count": 1,
+                "top_level_keys": [
+                  "current_page",
+                  "has_more",
+                  "page_size",
+                  "results",
+                  "total",
+                  "total_is_exact"
+                ]
+              },
+              "found": true,
+              "waits_ms": []
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "role": "internal-common-markdown-diagnostic",
+  "sanitization": "Private checkout/runtime paths replaced by named placeholders; generated per-page inventory omitted. All call, result, correctness, timing, unknown/null, and runtime package values retained."
+}

@@ -1,0 +1,1514 @@
+{
+  "driver_sha256": {
+    "docs/benchmarks/durable-closure-public-artifacts.json": "8c7e9741f4a8b4d13bd54105804e9b9ec48bee84ef08fe78d96845eaa16edc5a",
+    "scripts/durable_closure_benchmark.py": "7701f8265bb8ae2f55492e85a0feff19e9db90023e878168e80cc98a149dfef9",
+    "scripts/durable_closure_common.py": "ecb47bde354f1bca5cf18536ccc8c7ce22891952f6ad3756dc03e4c94283515f"
+  },
+  "evidence_format": 1,
+  "host": {
+    "cpu_count": 16,
+    "driver_git_revision": "fe56a3ebcf3821d2dfa8e65849ba795e14c42233",
+    "driver_sha256": {
+      "docs/benchmarks/durable-closure-public-artifacts.json": "8c7e9741f4a8b4d13bd54105804e9b9ec48bee84ef08fe78d96845eaa16edc5a",
+      "scripts/durable_closure_benchmark.py": "7701f8265bb8ae2f55492e85a0feff19e9db90023e878168e80cc98a149dfef9",
+      "scripts/durable_closure_common.py": "ecb47bde354f1bca5cf18536ccc8c7ce22891952f6ad3756dc03e4c94283515f"
+    },
+    "ended_utc": "2026-09-07T11:38:25.000277+00:00",
+    "exit_code": 0,
+    "load_average_end": [
+      20.9423828125,
+      17.69970703125,
+      11.72119140625
+    ],
+    "load_average_start": [
+      19.00537109375,
+      15.35009765625,
+      9.9482421875
+    ],
+    "runner_wall_s": 165.28037686301104,
+    "samples": 1,
+    "started_utc": "2026-09-07T11:35:36.589296+00:00",
+    "task_test_workers_quiescent": true
+  },
+  "label": "accepted-8000-model-free-stress",
+  "measurement_limits": [
+    "One sample per row; task-worker quiescence is declared separately from external host load.",
+    "A failed workflow is not a completed latency baseline; no speed ratio is asserted.",
+    "Graph timing and invocation wrappers instrument the MCP service owner only, excluding disposable media children.",
+    "Source scans cover only the named wrapped functions, not all filesystem reads.",
+    "Full projection convergence, connector overhead, and model planning remain unmeasured unless explicitly populated."
+  ],
+  "raw_result_sha256": "a12c945590a87fc0c80537561dae1eb74e432ff98953c720ec2c55ffb3647de1",
+  "result": {
+    "blocked_dependencies": [],
+    "call_counts": {
+      "convergence_polls": 0,
+      "probes": 7,
+      "retries": 0,
+      "verification": 4
+    },
+    "calls": [
+      {
+        "client_elapsed_ms": 112.75519900664221,
+        "ended_ms": 114.67231500137132,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "workflow",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "active_capabilities",
+          "authoring_contract",
+          "common_actions",
+          "common_tools",
+          "contract_version",
+          "engagement",
+          "entity_registry",
+          "epistemic_contract",
+          "front_door_actions",
+          "governance",
+          "knowledge_packs",
+          "memory_model",
+          "performance_profiles",
+          "planning",
+          "product_commands",
+          "profile",
+          "records",
+          "relation_vocabulary",
+          "search_guidance",
+          "semantic_authoring",
+          "server",
+          "simple_actions",
+          "source_taxonomy",
+          "tool_defaults",
+          "workflow",
+          "workflow_contracts",
+          "workflow_skills"
+        ],
+        "server_duration_ms": 105.24,
+        "server_interval": {
+          "ended_ms": 1788781063269.0,
+          "started_ms": 1788781063163.46
+        },
+        "server_total_ms": 105.54,
+        "started_ms": 1.9171159947291017,
+        "tool": "bootstrap"
+      },
+      {
+        "client_elapsed_ms": 14289.76655099541,
+        "ended_ms": 14404.482526995707,
+        "error_code": null,
+        "mutation_ack": true,
+        "outcome": "ok",
+        "phase": "media-enqueue",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "files",
+          "graph_sync",
+          "graph_sync_checkpoint",
+          "graph_sync_code",
+          "graph_sync_remediation",
+          "mutated",
+          "ok",
+          "paths",
+          "receipt_id",
+          "request_id",
+          "state",
+          "status",
+          "summary",
+          "terminal",
+          "warnings_count"
+        ],
+        "server_duration_ms": 14282.46,
+        "server_interval": {
+          "ended_ms": 1788781078185.0,
+          "started_ms": 1788781063901.87
+        },
+        "server_total_ms": 14283.13,
+        "started_ms": 114.71597600029781,
+        "tool": "preserve_artifacts"
+      },
+      {
+        "client_elapsed_ms": 1310.2527349983575,
+        "ended_ms": 15714.764602002106,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "probe",
+        "probe": true,
+        "request_shape": {
+          "graph": true,
+          "mode": "hybrid",
+          "rerank": false
+        },
+        "response_keys": [
+          "result"
+        ],
+        "server_duration_ms": 1265.36,
+        "server_interval": {
+          "ended_ms": 1788781079463.0,
+          "started_ms": 1788781078196.48
+        },
+        "server_total_ms": 1266.52,
+        "started_ms": 14404.511867003748,
+        "tool": "ask_memory"
+      },
+      {
+        "client_elapsed_ms": 1487.9567519965349,
+        "ended_ms": 17203.988980996655,
+        "error_code": null,
+        "mutation_ack": true,
+        "outcome": "ok",
+        "phase": "media-enqueue",
+        "probe": false,
+        "request_shape": {
+          "operation": "process"
+        },
+        "response_keys": [
+          "graph_sync",
+          "graph_sync_checkpoint",
+          "graph_sync_code",
+          "graph_sync_remediation",
+          "index_refresh_remaining",
+          "index_refreshed",
+          "media_results",
+          "mutated",
+          "ok",
+          "operation",
+          "paths",
+          "receipt_id",
+          "request_id",
+          "state",
+          "status",
+          "terminal",
+          "warnings_count"
+        ],
+        "server_duration_ms": 1443.5,
+        "server_interval": {
+          "ended_ms": 1788781080984.0,
+          "started_ms": 1788781079536.75
+        },
+        "server_total_ms": 1447.25,
+        "started_ms": 15716.03222900012,
+        "tool": "process_media"
+      },
+      {
+        "client_elapsed_ms": 417.57328499807045,
+        "ended_ms": 17621.62336599431,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "probe",
+        "probe": true,
+        "request_shape": {
+          "graph": true,
+          "mode": "hybrid",
+          "rerank": false
+        },
+        "response_keys": [
+          "result"
+        ],
+        "server_duration_ms": 407.87,
+        "server_interval": {
+          "ended_ms": 1788781081404.0,
+          "started_ms": 1788781080995.29
+        },
+        "server_total_ms": 408.71,
+        "started_ms": 17204.05008099624,
+        "tool": "ask_memory"
+      },
+      {
+        "client_elapsed_ms": 156.55351999157574,
+        "ended_ms": 17778.228184994077,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "media-custody",
+        "probe": false,
+        "request_shape": {
+          "operation": "status"
+        },
+        "response_keys": [
+          "compute_runtime_count",
+          "counts",
+          "errors",
+          "healthy",
+          "idle_seconds",
+          "index_refresh",
+          "jobs",
+          "operation",
+          "reconciliation_required_count",
+          "store",
+          "worker_active",
+          "worker_pid"
+        ],
+        "server_duration_ms": 145.35,
+        "server_interval": {
+          "ended_ms": 1788781081559.0,
+          "started_ms": 1788781081413.23
+        },
+        "server_total_ms": 145.77,
+        "started_ms": 17621.6746650025,
+        "tool": "process_media"
+      },
+      {
+        "client_elapsed_ms": 282.3813229915686,
+        "ended_ms": 18060.70034399454,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "independent-closure",
+        "probe": false,
+        "request_shape": {
+          "operation": "validate"
+        },
+        "response_keys": [
+          "after_hash",
+          "before_hash",
+          "mutated",
+          "operation",
+          "path",
+          "semantic",
+          "unit",
+          "unit_ref"
+        ],
+        "server_duration_ms": 274.71,
+        "server_interval": {
+          "ended_ms": 1788781081844.0,
+          "started_ms": 1788781081568.96
+        },
+        "server_total_ms": 275.04,
+        "started_ms": 17778.31902100297,
+        "tool": "observe_memory"
+      },
+      {
+        "client_elapsed_ms": 5971.648389007896,
+        "ended_ms": 24032.38988900557,
+        "error_code": null,
+        "mutation_ack": true,
+        "outcome": "ok",
+        "phase": "independent-closure",
+        "probe": false,
+        "request_shape": {
+          "operation": "add"
+        },
+        "response_keys": [
+          "after_hash",
+          "before_hash",
+          "graph_sync",
+          "graph_sync_checkpoint",
+          "graph_sync_code",
+          "graph_sync_remediation",
+          "mutated",
+          "ok",
+          "path",
+          "receipt_id",
+          "request_id",
+          "state",
+          "status",
+          "terminal",
+          "unit_ref",
+          "warnings_count"
+        ],
+        "server_duration_ms": 5961.8,
+        "server_interval": {
+          "ended_ms": 1788781087815.0,
+          "started_ms": 1788781081851.93
+        },
+        "server_total_ms": 5963.07,
+        "started_ms": 18060.741499997675,
+        "tool": "observe_memory"
+      },
+      {
+        "client_elapsed_ms": 564.97030799801,
+        "ended_ms": 24597.396411001682,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "probe",
+        "probe": true,
+        "request_shape": {
+          "graph": true,
+          "mode": "hybrid",
+          "rerank": false
+        },
+        "response_keys": [
+          "result"
+        ],
+        "server_duration_ms": 558.95,
+        "server_interval": {
+          "ended_ms": 1788781088380.0,
+          "started_ms": 1788781087820.7
+        },
+        "server_total_ms": 559.3,
+        "started_ms": 24032.426103003672,
+        "tool": "ask_memory"
+      },
+      {
+        "client_elapsed_ms": 173.3227550139418,
+        "ended_ms": 24770.758166007,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "independent-closure",
+        "probe": false,
+        "request_shape": {
+          "operation": "validate"
+        },
+        "response_keys": [
+          "after_hash",
+          "before_hash",
+          "mutated",
+          "operation",
+          "path",
+          "semantic",
+          "unit",
+          "unit_ref"
+        ],
+        "server_duration_ms": 168.54,
+        "server_interval": {
+          "ended_ms": 1788781088554.0,
+          "started_ms": 1788781088385.12
+        },
+        "server_total_ms": 168.88,
+        "started_ms": 24597.435410993057,
+        "tool": "observe_memory"
+      },
+      {
+        "client_elapsed_ms": 2091.8079010007204,
+        "ended_ms": 26862.602035995224,
+        "error_code": null,
+        "mutation_ack": true,
+        "outcome": "ok",
+        "phase": "independent-closure",
+        "probe": false,
+        "request_shape": {
+          "operation": "add"
+        },
+        "response_keys": [
+          "after_hash",
+          "before_hash",
+          "graph_sync",
+          "graph_sync_checkpoint",
+          "graph_sync_code",
+          "graph_sync_remediation",
+          "mutated",
+          "ok",
+          "path",
+          "receipt_id",
+          "request_id",
+          "state",
+          "status",
+          "terminal",
+          "unit_ref",
+          "warnings_count"
+        ],
+        "server_duration_ms": 2085.23,
+        "server_interval": {
+          "ended_ms": 1788781090646.0,
+          "started_ms": 1788781088559.35
+        },
+        "server_total_ms": 2086.65,
+        "started_ms": 24770.794134994503,
+        "tool": "observe_memory"
+      },
+      {
+        "client_elapsed_ms": 642.6698739960557,
+        "ended_ms": 27505.30043299659,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "probe",
+        "probe": true,
+        "request_shape": {
+          "graph": true,
+          "mode": "hybrid",
+          "rerank": false
+        },
+        "response_keys": [
+          "result"
+        ],
+        "server_duration_ms": 638.24,
+        "server_interval": {
+          "ended_ms": 1788781091289.0,
+          "started_ms": 1788781090650.43
+        },
+        "server_total_ms": 638.57,
+        "started_ms": 26862.630559000536,
+        "tool": "ask_memory"
+      },
+      {
+        "client_elapsed_ms": 60.827783003333025,
+        "ended_ms": 27566.164782998385,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "independent-closure",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "body",
+          "content_hash",
+          "frontmatter",
+          "mtime",
+          "path",
+          "ref"
+        ],
+        "server_duration_ms": 55.76,
+        "server_interval": {
+          "ended_ms": 1788781091349.0,
+          "started_ms": 1788781091292.93
+        },
+        "server_total_ms": 56.07,
+        "started_ms": 27505.336999995052,
+        "tool": "read_memory"
+      },
+      {
+        "client_elapsed_ms": 1875.6128490058472,
+        "ended_ms": 29441.8043110054,
+        "error_code": null,
+        "mutation_ack": true,
+        "outcome": "ok",
+        "phase": "independent-closure",
+        "probe": false,
+        "request_shape": {
+          "operation": {
+            "kind": "replace_string",
+            "new_string": "",
+            "old_string": "- supports [[Knowledge Base/Notes/Insights/archived-runbook]]",
+            "replace_all": false
+          }
+        },
+        "response_keys": [
+          "after_hash",
+          "graph_sync",
+          "graph_sync_checkpoint",
+          "graph_sync_code",
+          "graph_sync_remediation",
+          "mutated",
+          "ok",
+          "path",
+          "receipt_id",
+          "request_id",
+          "state",
+          "status",
+          "terminal",
+          "warnings",
+          "warnings_count"
+        ],
+        "server_duration_ms": 1869.93,
+        "server_interval": {
+          "ended_ms": 1788781093224.0,
+          "started_ms": 1788781091353.57
+        },
+        "server_total_ms": 1870.43,
+        "started_ms": 27566.19146199955,
+        "tool": "edit_memory"
+      },
+      {
+        "client_elapsed_ms": 742.0442260045093,
+        "ended_ms": 30183.88751700695,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "probe",
+        "probe": true,
+        "request_shape": {
+          "graph": true,
+          "mode": "hybrid",
+          "rerank": false
+        },
+        "response_keys": [
+          "result"
+        ],
+        "server_duration_ms": 735.0,
+        "server_interval": {
+          "ended_ms": 1788781093967.0,
+          "started_ms": 1788781093231.13
+        },
+        "server_total_ms": 735.87,
+        "started_ms": 29441.843291002442,
+        "tool": "ask_memory"
+      },
+      {
+        "client_elapsed_ms": 101.36754100676626,
+        "ended_ms": 30285.29452800285,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "media-custody",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "body",
+          "content_hash",
+          "frontmatter",
+          "mtime",
+          "path",
+          "ref"
+        ],
+        "server_duration_ms": 94.44,
+        "server_interval": {
+          "ended_ms": 1788781094068.0,
+          "started_ms": 1788781093972.9
+        },
+        "server_total_ms": 95.1,
+        "started_ms": 30183.926986996084,
+        "tool": "read_memory"
+      },
+      {
+        "client_elapsed_ms": 88.57917100249324,
+        "ended_ms": 30373.90387999767,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "media-custody",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "body",
+          "content_hash",
+          "frontmatter",
+          "mtime",
+          "path",
+          "ref"
+        ],
+        "server_duration_ms": 81.55,
+        "server_interval": {
+          "ended_ms": 1788781094156.0,
+          "started_ms": 1788781094074.0
+        },
+        "server_total_ms": 82.0,
+        "started_ms": 30285.324708995176,
+        "tool": "read_memory"
+      },
+      {
+        "client_elapsed_ms": 90.6061290006619,
+        "ended_ms": 30464.53748299973,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "media-custody",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "body",
+          "content_hash",
+          "frontmatter",
+          "mtime",
+          "path",
+          "ref"
+        ],
+        "server_duration_ms": 82.43,
+        "server_interval": {
+          "ended_ms": 1788781094247.0,
+          "started_ms": 1788781094163.98
+        },
+        "server_total_ms": 83.02,
+        "started_ms": 30373.93135399907,
+        "tool": "read_memory"
+      },
+      {
+        "client_elapsed_ms": 546.2661930068862,
+        "ended_ms": 31010.8528080018,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "source-closure",
+        "probe": false,
+        "request_shape": {
+          "validate_only": true
+        },
+        "response_keys": [
+          "applicability",
+          "candidate_total",
+          "candidates_truncated",
+          "committable_after_review",
+          "committable_without_review",
+          "content_fingerprint",
+          "contract_result",
+          "destination",
+          "draft_hash",
+          "draft_id",
+          "draft_token",
+          "has_non_review_blockers",
+          "mutated",
+          "relation_candidates",
+          "relation_disposition",
+          "relation_review_hash",
+          "reviewed_none_required"
+        ],
+        "server_duration_ms": 539.68,
+        "server_interval": {
+          "ended_ms": 1788781094793.0,
+          "started_ms": 1788781094252.75
+        },
+        "server_total_ms": 540.25,
+        "started_ms": 30464.586614994914,
+        "tool": "remember"
+      },
+      {
+        "client_elapsed_ms": 3870.399997002096,
+        "ended_ms": 34881.292619000305,
+        "error_code": null,
+        "mutation_ack": true,
+        "outcome": "ok",
+        "phase": "source-closure",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "diagnostics",
+          "graph_sync",
+          "graph_sync_checkpoint",
+          "graph_sync_code",
+          "graph_sync_remediation",
+          "mutated",
+          "ok",
+          "path",
+          "receipt_id",
+          "request_id",
+          "state",
+          "status",
+          "terminal",
+          "warnings",
+          "warnings_count"
+        ],
+        "server_duration_ms": 3863.95,
+        "server_interval": {
+          "ended_ms": 1788781098664.0,
+          "started_ms": 1788781094799.48
+        },
+        "server_total_ms": 3864.52,
+        "started_ms": 31010.89262199821,
+        "tool": "remember"
+      },
+      {
+        "client_elapsed_ms": 728.1589689955581,
+        "ended_ms": 35609.4827909983,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "probe",
+        "probe": true,
+        "request_shape": {
+          "graph": true,
+          "mode": "hybrid",
+          "rerank": false
+        },
+        "response_keys": [
+          "result"
+        ],
+        "server_duration_ms": 723.05,
+        "server_interval": {
+          "ended_ms": 1788781099393.0,
+          "started_ms": 1788781098669.41
+        },
+        "server_total_ms": 723.59,
+        "started_ms": 34881.32382200274,
+        "tool": "ask_memory"
+      },
+      {
+        "client_elapsed_ms": 201.42823198693804,
+        "ended_ms": 35810.94403099269,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "source-closure",
+        "probe": false,
+        "request_shape": {
+          "operation": "validate"
+        },
+        "response_keys": [
+          "after_hash",
+          "before_hash",
+          "mutated",
+          "operation",
+          "path",
+          "semantic",
+          "unit",
+          "unit_ref"
+        ],
+        "server_duration_ms": 196.26,
+        "server_interval": {
+          "ended_ms": 1788781099594.0,
+          "started_ms": 1788781099397.06
+        },
+        "server_total_ms": 196.94,
+        "started_ms": 35609.51579900575,
+        "tool": "observe_memory"
+      },
+      {
+        "client_elapsed_ms": 2291.9641670014244,
+        "ended_ms": 38102.93786099646,
+        "error_code": null,
+        "mutation_ack": true,
+        "outcome": "ok",
+        "phase": "source-closure",
+        "probe": false,
+        "request_shape": {
+          "operation": "add"
+        },
+        "response_keys": [
+          "after_hash",
+          "before_hash",
+          "graph_sync",
+          "graph_sync_checkpoint",
+          "graph_sync_code",
+          "graph_sync_remediation",
+          "mutated",
+          "ok",
+          "path",
+          "receipt_id",
+          "request_id",
+          "state",
+          "status",
+          "terminal",
+          "unit_ref",
+          "warnings_count"
+        ],
+        "server_duration_ms": 2285.51,
+        "server_interval": {
+          "ended_ms": 1788781101885.0,
+          "started_ms": 1788781099598.97
+        },
+        "server_total_ms": 2286.03,
+        "started_ms": 35810.97369399504,
+        "tool": "observe_memory"
+      },
+      {
+        "client_elapsed_ms": 749.3036070081871,
+        "ended_ms": 38852.26967900235,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "probe",
+        "probe": true,
+        "request_shape": {
+          "graph": true,
+          "mode": "hybrid",
+          "rerank": false
+        },
+        "response_keys": [
+          "result"
+        ],
+        "server_duration_ms": 743.22,
+        "server_interval": {
+          "ended_ms": 1788781102636.0,
+          "started_ms": 1788781101892.09
+        },
+        "server_total_ms": 743.91,
+        "started_ms": 38102.96607199416,
+        "tool": "ask_memory"
+      },
+      {
+        "client_elapsed_ms": 92.28647898999043,
+        "ended_ms": 38944.615493994206,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "verification",
+        "probe": false,
+        "request_shape": {
+          "graph": true,
+          "mode": "hybrid",
+          "rerank": false
+        },
+        "response_keys": [
+          "result"
+        ],
+        "server_duration_ms": 88.75,
+        "server_interval": {
+          "ended_ms": 1788781102729.0,
+          "started_ms": 1788781102639.81
+        },
+        "server_total_ms": 89.19,
+        "started_ms": 38852.329015004216,
+        "tool": "ask_memory"
+      },
+      {
+        "client_elapsed_ms": 14.731178001966327,
+        "ended_ms": 38959.38336799736,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "verification",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "body",
+          "content_hash",
+          "frontmatter",
+          "mtime",
+          "path",
+          "ref"
+        ],
+        "server_duration_ms": 11.53,
+        "server_interval": {
+          "ended_ms": 1788781102743.0,
+          "started_ms": 1788781102731.29
+        },
+        "server_total_ms": 11.71,
+        "started_ms": 38944.652189995395,
+        "tool": "read_memory"
+      },
+      {
+        "client_elapsed_ms": 15.29996500175912,
+        "ended_ms": 38974.709297996014,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "verification",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "body",
+          "content_hash",
+          "frontmatter",
+          "mtime",
+          "path",
+          "ref"
+        ],
+        "server_duration_ms": 11.98,
+        "server_interval": {
+          "ended_ms": 1788781102758.0,
+          "started_ms": 1788781102745.55
+        },
+        "server_total_ms": 12.45,
+        "started_ms": 38959.409332994255,
+        "tool": "read_memory"
+      },
+      {
+        "client_elapsed_ms": 8.884620008757338,
+        "ended_ms": 38983.61778400431,
+        "error_code": null,
+        "mutation_ack": false,
+        "outcome": "ok",
+        "phase": "verification",
+        "probe": false,
+        "request_shape": {},
+        "response_keys": [
+          "body",
+          "content_hash",
+          "frontmatter",
+          "mtime",
+          "path"
+        ],
+        "server_duration_ms": 6.39,
+        "server_interval": {
+          "ended_ms": 1788781102768.0,
+          "started_ms": 1788781102761.44
+        },
+        "server_total_ms": 6.56,
+        "started_ms": 38974.73316399555,
+        "tool": "read_memory"
+      }
+    ],
+    "connector_overhead_ms": null,
+    "connector_overhead_reason": "stdio client wall and server ledger are independently measured but not request-correlated",
+    "corpus": {
+      "active_tracker": "Knowledge Base/Notes/Insights/active-tracker.md",
+      "archived_note": "Knowledge Base/Notes/Insights/archived-runbook.md",
+      "bytes": 1952283,
+      "corpus_sha256": "ca0586311a62e63b8beab8480455d88771b0079d8173b025dffed827b9f45ffb",
+      "critique": "Knowledge Base/Notes/Insights/critique.md",
+      "generator": "durable-closure-markdown-v1",
+      "inventory_entries": 8000,
+      "inventory_omitted_reason": "Generated per-page inventory omitted; generator identity, corpus byte count, and corpus SHA-256 retained.",
+      "media_fixture": {
+        "images": 2,
+        "pdf": "fixture-required-via-public-handle",
+        "sidecars_created": false
+      },
+      "pages": 8000,
+      "stale_relation": "Knowledge Base/Reference/stale-relation.md"
+    },
+    "full_convergence_ms": null,
+    "full_convergence_reason": "graph, lexical, and embedding projection convergence are not publicly proven by this harness",
+    "graph_execution_elapsed_ms": {
+      "after_shutdown": {
+        "incremental": 0.5192640091991052,
+        "rebuild": 0
+      },
+      "at_closure": {
+        "incremental": 0.5192640091991052,
+        "rebuild": 0
+      },
+      "at_convergence": {
+        "incremental": 0.5192640091991052,
+        "rebuild": 0
+      },
+      "pre_reset_spillover_full_invocation": {
+        "after_shutdown": {
+          "incremental": 0,
+          "rebuild": 0
+        },
+        "at_closure": {
+          "incremental": 0,
+          "rebuild": 0
+        },
+        "at_convergence": {
+          "incremental": 0,
+          "rebuild": 0
+        }
+      },
+      "semantics": "current-epoch values include completed invocations only; active work has no elapsed value until completion"
+    },
+    "graph_invocations": {
+      "after_shutdown": {
+        "drain_attempts": 8,
+        "drain_completed": 8,
+        "incremental_inflight": 0,
+        "rebuild_attempts": 1,
+        "rebuild_completed": 0,
+        "rebuild_inflight": 1
+      },
+      "at_closure": {
+        "drain_attempts": 8,
+        "drain_completed": 8,
+        "incremental_inflight": 0,
+        "rebuild_attempts": 1,
+        "rebuild_completed": 0,
+        "rebuild_inflight": 1
+      },
+      "at_convergence": {
+        "drain_attempts": 8,
+        "drain_completed": 8,
+        "incremental_inflight": 0,
+        "rebuild_attempts": 1,
+        "rebuild_completed": 0,
+        "rebuild_inflight": 1
+      },
+      "pre_reset_spillover": {
+        "after_shutdown": {
+          "incremental_completed": 0,
+          "incremental_inflight": 0,
+          "rebuild_completed": 0,
+          "rebuild_inflight": 0
+        },
+        "at_closure": {
+          "incremental_completed": 0,
+          "incremental_inflight": 0,
+          "rebuild_completed": 0,
+          "rebuild_inflight": 0
+        },
+        "at_convergence": {
+          "incremental_completed": 0,
+          "incremental_inflight": 0,
+          "rebuild_completed": 0,
+          "rebuild_inflight": 0
+        }
+      },
+      "semantics": "current-epoch attempts/completions only; reset-crossing warm-up invocations are reported separately as pre-reset spillover"
+    },
+    "graph_topology_discovery": {
+      "after_shutdown": {
+        "actual_body_read_bytes": 0,
+        "paths_enumerated": 0,
+        "stat_estimated_bytes": 0
+      },
+      "at_closure": {
+        "actual_body_read_bytes": 0,
+        "paths_enumerated": 0,
+        "stat_estimated_bytes": 0
+      },
+      "at_convergence": {
+        "actual_body_read_bytes": 0,
+        "paths_enumerated": 0,
+        "stat_estimated_bytes": 0
+      },
+      "byte_coverage": "actual body bytes via vault.read_bytes_without_pinning; stat-estimated bytes are separate and never summed",
+      "coverage": "measurement-window observations from EpistemicGraphIndex._sources_linking_to only; vault walk and reads are scoped to that call and can include reset-crossing warm-up work"
+    },
+    "initial_graph_readiness": {
+      "reason": "managed keyword warm-up does not establish hybrid graph readiness",
+      "status": "unmeasured"
+    },
+    "instrumentation": {
+      "error": null,
+      "method": "child-process sitecustomize wrappers"
+    },
+    "ledger": {
+      "ledger_observation_span_ms": null,
+      "occupancy_reason": "invalid: UTC ledger clock discontinuity against client trace",
+      "server_duration_sum_ms": 38726.68,
+      "server_idle_within_observed_span_ms": null,
+      "server_occupied_union_ms": null,
+      "server_total_sum_ms": 38746.07
+    },
+    "media": {
+      "custody_reads": 3,
+      "durable_jobs": [
+        {
+          "id": 1,
+          "path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-certificate.pdf",
+          "sidecar_path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-certificate.pdf.md",
+          "state": "blocked"
+        },
+        {
+          "id": 2,
+          "path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-one.png",
+          "sidecar_path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-one.png.md",
+          "state": "blocked"
+        },
+        {
+          "id": 3,
+          "path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-two.png",
+          "sidecar_path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-two.png.md",
+          "state": "blocked"
+        }
+      ],
+      "engine_versions": null,
+      "enqueue_succeeded": true,
+      "evidence_paths": [
+        "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-certificate.pdf",
+        "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-one.png",
+        "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-two.png"
+      ],
+      "extraction_block_reason": "EXOMEM_DISABLE_MEDIA_EXTRACTION=1",
+      "extraction_completion": "unproven",
+      "extraction_convergence_ms": null,
+      "extraction_status": "blocked",
+      "fixture_provenance": [
+        {
+          "download_url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+          "expected_text": "Dummy PDF file",
+          "file_id": "closure-fixture-pdf",
+          "file_name": "chapter-certificate.pdf",
+          "mime_type": "application/pdf",
+          "sha256": "3df79d34abbca99308e79cb94461c1893582604d68329a41fd4bec1885e6adb4"
+        },
+        {
+          "download_url": "https://raw.githubusercontent.com/tesseract-ocr/tessdoc/09a89d485f1f34285611562fed9f8ab85721bab8/images/2col.png",
+          "expected_text": "Cautionary Statement",
+          "file_id": "closure-fixture-image-one",
+          "file_name": "chapter-screenshot-one.png",
+          "mime_type": "image/png",
+          "sha256": "1ebe5089fd863fcec4a23912053488553fe96349f5c19850e32ba94103db2527"
+        },
+        {
+          "download_url": "https://raw.githubusercontent.com/tesseract-ocr/tessdoc/09a89d485f1f34285611562fed9f8ab85721bab8/images/toc.png",
+          "expected_text": "Introduction to the Tenth Anniversary Edition",
+          "file_id": "closure-fixture-image-two",
+          "file_name": "chapter-screenshot-two.png",
+          "mime_type": "image/png",
+          "sha256": "5502c740b734274328adeeec3d636a6c9ee78db21d77e1e978fc4b10aef990bb"
+        }
+      ],
+      "media_results": [
+        {
+          "code": "MEDIA_BLOCKED",
+          "outcome": "failed",
+          "path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-certificate.pdf",
+          "remediation": "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, restart the service, then retry",
+          "state": "blocked"
+        },
+        {
+          "code": "MEDIA_BLOCKED",
+          "outcome": "failed",
+          "path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-one.png",
+          "remediation": "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, restart the service, then retry",
+          "state": "blocked"
+        },
+        {
+          "code": "MEDIA_BLOCKED",
+          "outcome": "failed",
+          "path": "Knowledge Base/Evidence/durable-closure/benchmark-evidence/chapter-screenshot-two.png",
+          "remediation": "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, restart the service, then retry",
+          "state": "blocked"
+        }
+      ],
+      "preserved_hashes_match": true,
+      "process_calls": 1,
+      "process_selection": "paths",
+      "reason": "model-free profile proves durable blocked-job and sidecar custody; extraction is disabled and completion remains unproven",
+      "status": "ready"
+    },
+    "media_convergence_wall_ms": null,
+    "profile": "model-free",
+    "public_call_count": 28,
+    "runtime": {
+      "git": {
+        "dirty": false,
+        "revision": "fe56a3ebcf3821d2dfa8e65849ba795e14c42233",
+        "tree": "135b896da556ff4ffd66e080598855a4bf8d1a4e"
+      },
+      "python": {
+        "executable": "<candidate-worktree>/.venv-perf/bin/python",
+        "invocation": "<candidate-worktree>/.venv-perf/bin/python",
+        "packages": [
+          {
+            "name": "aiofile",
+            "version": "3.11.1"
+          },
+          {
+            "name": "annotated-types",
+            "version": "0.7.0"
+          },
+          {
+            "name": "anyio",
+            "version": "4.13.0"
+          },
+          {
+            "name": "attrs",
+            "version": "26.1.0"
+          },
+          {
+            "name": "Authlib",
+            "version": "1.7.2"
+          },
+          {
+            "name": "beartype",
+            "version": "0.22.9"
+          },
+          {
+            "name": "cachetools",
+            "version": "7.1.2"
+          },
+          {
+            "name": "caio",
+            "version": "0.9.25"
+          },
+          {
+            "name": "certifi",
+            "version": "2026.4.22"
+          },
+          {
+            "name": "cffi",
+            "version": "2.0.0"
+          },
+          {
+            "name": "click",
+            "version": "8.4.0"
+          },
+          {
+            "name": "cryptography",
+            "version": "48.0.0"
+          },
+          {
+            "name": "cyclopts",
+            "version": "4.13.0"
+          },
+          {
+            "name": "dnspython",
+            "version": "2.8.0"
+          },
+          {
+            "name": "docstring_parser",
+            "version": "0.18.0"
+          },
+          {
+            "name": "docutils",
+            "version": "0.22.4"
+          },
+          {
+            "name": "email-validator",
+            "version": "2.3.0"
+          },
+          {
+            "name": "exceptiongroup",
+            "version": "1.3.1"
+          },
+          {
+            "name": "exomem",
+            "version": "0.73.1"
+          },
+          {
+            "name": "fastmcp",
+            "version": "3.4.4"
+          },
+          {
+            "name": "fastmcp-slim",
+            "version": "3.4.4"
+          },
+          {
+            "name": "griffelib",
+            "version": "2.0.2"
+          },
+          {
+            "name": "h11",
+            "version": "0.16.0"
+          },
+          {
+            "name": "httpcore",
+            "version": "1.0.9"
+          },
+          {
+            "name": "httpx",
+            "version": "0.28.1"
+          },
+          {
+            "name": "httpx-sse",
+            "version": "0.4.3"
+          },
+          {
+            "name": "idna",
+            "version": "3.15"
+          },
+          {
+            "name": "jaraco.classes",
+            "version": "3.4.0"
+          },
+          {
+            "name": "jaraco.context",
+            "version": "6.1.2"
+          },
+          {
+            "name": "jaraco.functools",
+            "version": "4.5.0"
+          },
+          {
+            "name": "jeepney",
+            "version": "0.9.0"
+          },
+          {
+            "name": "joserfc",
+            "version": "1.6.5"
+          },
+          {
+            "name": "jsonref",
+            "version": "1.1.0"
+          },
+          {
+            "name": "jsonschema",
+            "version": "4.26.0"
+          },
+          {
+            "name": "jsonschema-path",
+            "version": "0.4.6"
+          },
+          {
+            "name": "jsonschema-specifications",
+            "version": "2025.9.1"
+          },
+          {
+            "name": "keyring",
+            "version": "25.7.0"
+          },
+          {
+            "name": "markdown-it-py",
+            "version": "4.2.0"
+          },
+          {
+            "name": "mcp",
+            "version": "1.27.1"
+          },
+          {
+            "name": "mdurl",
+            "version": "0.1.2"
+          },
+          {
+            "name": "more-itertools",
+            "version": "11.0.2"
+          },
+          {
+            "name": "numpy",
+            "version": "2.4.6"
+          },
+          {
+            "name": "openapi-pydantic",
+            "version": "0.5.1"
+          },
+          {
+            "name": "opentelemetry-api",
+            "version": "1.43.0"
+          },
+          {
+            "name": "packaging",
+            "version": "26.2"
+          },
+          {
+            "name": "pathable",
+            "version": "0.5.0"
+          },
+          {
+            "name": "pillow",
+            "version": "12.2.0"
+          },
+          {
+            "name": "platformdirs",
+            "version": "4.9.6"
+          },
+          {
+            "name": "py-key-value-aio",
+            "version": "0.4.4"
+          },
+          {
+            "name": "pycparser",
+            "version": "3.0"
+          },
+          {
+            "name": "pydantic",
+            "version": "2.13.4"
+          },
+          {
+            "name": "pydantic-settings",
+            "version": "2.14.1"
+          },
+          {
+            "name": "pydantic_core",
+            "version": "2.46.4"
+          },
+          {
+            "name": "Pygments",
+            "version": "2.20.0"
+          },
+          {
+            "name": "PyJWT",
+            "version": "2.12.1"
+          },
+          {
+            "name": "PyMuPDF",
+            "version": "1.27.2.3"
+          },
+          {
+            "name": "pyperclip",
+            "version": "1.11.0"
+          },
+          {
+            "name": "pytesseract",
+            "version": "0.3.13"
+          },
+          {
+            "name": "python-dotenv",
+            "version": "1.2.2"
+          },
+          {
+            "name": "python-multipart",
+            "version": "0.0.29"
+          },
+          {
+            "name": "python-slugify",
+            "version": "8.0.4"
+          },
+          {
+            "name": "PyYAML",
+            "version": "6.0.3"
+          },
+          {
+            "name": "rank-bm25",
+            "version": "0.2.2"
+          },
+          {
+            "name": "referencing",
+            "version": "0.37.0"
+          },
+          {
+            "name": "rich",
+            "version": "15.0.0"
+          },
+          {
+            "name": "rich-rst",
+            "version": "1.3.2"
+          },
+          {
+            "name": "rpds-py",
+            "version": "0.30.0"
+          },
+          {
+            "name": "SecretStorage",
+            "version": "3.5.0"
+          },
+          {
+            "name": "snowballstemmer",
+            "version": "3.1.0"
+          },
+          {
+            "name": "sse-starlette",
+            "version": "3.4.4"
+          },
+          {
+            "name": "starlette",
+            "version": "1.3.1"
+          },
+          {
+            "name": "text-unidecode",
+            "version": "1.3"
+          },
+          {
+            "name": "typing-inspection",
+            "version": "0.4.2"
+          },
+          {
+            "name": "typing_extensions",
+            "version": "4.15.0"
+          },
+          {
+            "name": "uncalled-for",
+            "version": "0.3.2"
+          },
+          {
+            "name": "uvicorn",
+            "version": "0.47.0"
+          },
+          {
+            "name": "watchdog",
+            "version": "6.0.0"
+          },
+          {
+            "name": "watchfiles",
+            "version": "1.1.1"
+          },
+          {
+            "name": "websockets",
+            "version": "16.0"
+          }
+        ],
+        "prefix": "<candidate-worktree>/.venv-perf",
+        "runtime_executable": "<candidate-worktree>/.venv-perf/bin/python",
+        "version": "3.13.12 (main, Feb 12 2026, 00:45:41) [Clang 21.1.4 ]"
+      },
+      "source": {
+        "package_origin": "<candidate-worktree>/src/exomem/__init__.py",
+        "root": "<candidate-worktree>/src",
+        "sha256": "dc81af71111cb4c2216dc2e764942168d464462da392d868593c92d9848dd49a"
+      }
+    },
+    "server_shutdown_ms": 2103.980693995254,
+    "source_scans": {
+      "after_shutdown": {
+        "bytes": 0,
+        "pages": 0
+      },
+      "at_closure": {
+        "bytes": 0,
+        "pages": 0
+      },
+      "at_convergence": {
+        "bytes": 0,
+        "pages": 0
+      },
+      "coverage": "find._walk_md only; path enumeration plus stat-estimated bytes, not body bytes"
+    },
+    "startup_readiness": {
+      "elapsed_ms": 62811.03449300281,
+      "public_validation_calls": 11,
+      "server_startup_and_readiness_ms": 122080.75654599816
+    },
+    "status": "pass",
+    "useful_closure": {
+      "final_read_your_write": true,
+      "passed": true,
+      "refusal_observations": [],
+      "warming_components": []
+    },
+    "useful_closure_wall_ms": 38994.228555005975,
+    "variant": "stress",
+    "verification": {
+      "direct_marker": true,
+      "evidence_citations": true,
+      "mutations_succeeded": true,
+      "recall_hit": true,
+      "stale_relation_absent": true,
+      "tracker_marker": true
+    },
+    "workflow_wall_ms": 39004.52935000067,
+    "write_ack": {
+      "p50_ms": 2291.9641670014244,
+      "p95_ms": 14289.76655099541
+    }
+  },
+  "role": "reviewed-workflow-sample",
+  "sanitization": "Private checkout/runtime paths replaced by named placeholders; generated per-page inventory omitted. All call, result, correctness, timing, unknown/null, and runtime package values retained."
+}

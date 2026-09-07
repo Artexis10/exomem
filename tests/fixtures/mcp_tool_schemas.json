@@ -4055,6 +4055,21 @@
           "default": null,
           "description": "Optional governed Knowledge Base media path. Omit for bounded all-media work."
         },
+        "paths": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional list of 1-32 unique governed media paths for process or retry."
+        },
         "operation": {
           "default": "process",
           "description": "process, status, or retry.",

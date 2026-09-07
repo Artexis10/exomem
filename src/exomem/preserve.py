@@ -1095,6 +1095,38 @@ def update_sidecar_extraction(
     existing call site is unaffected.
     """
     before = sidecar_path.read_text(encoding="utf-8")
+    content = render_sidecar_extraction(
+        before,
+        text=text,
+        engine=engine,
+        speakers=speakers,
+        speaker_verification=speaker_verification,
+        attempts=attempts,
+    )
+    return commit_media_sidecar_writes(
+        vault_root,
+        (
+            PlannedWrite(
+                path=sidecar_path,
+                content=content,
+                expected_hash=content_hash(before),
+            ),
+        ),
+        post_commit_fanout=not defer_index_fanout,
+        defer_graph_completion=defer_graph_completion,
+    )
+
+
+def render_sidecar_extraction(
+    before: str,
+    *,
+    text: str,
+    engine: str,
+    speakers: list[dict] | None = None,
+    speaker_verification: str | None = None,
+    attempts: int | None = None,
+) -> str:
+    """Render an extraction sidecar without touching canonical or derived state."""
     if _has_ambiguous_legacy_preserved_notes(before):
         raise PreserveError(
             code="AMBIGUOUS_SIDECAR_BOUNDARY",
@@ -1124,18 +1156,7 @@ def update_sidecar_extraction(
         if labels:
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_extracted_text(content, _cap_extracted_text(text))
-    return commit_media_sidecar_writes(
-        vault_root,
-        (
-            PlannedWrite(
-                path=sidecar_path,
-                content=content,
-                expected_hash=content_hash(before),
-            ),
-        ),
-        post_commit_fanout=not defer_index_fanout,
-        defer_graph_completion=defer_graph_completion,
-    )
+    return content
 
 
 def commit_media_sidecar_writes(
@@ -1144,11 +1165,14 @@ def commit_media_sidecar_writes(
     *,
     post_commit_fanout: bool = True,
     defer_graph_completion: bool = False,
+    publication_intents_out: list[object] | None = None,
     batch_writer: Callable[..., list[Path] | DeferredGraphCompletion] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Publish machine-owned Markdown through the active catalog tuple."""
 
     from .governance import catalog_publication, graph_producer
+
+    intent_count = len(publication_intents_out) if publication_intents_out is not None else 0
 
     def graph_replacement_provider():
         return graph_producer.replacements_for_planned_markdown(
@@ -1169,15 +1193,24 @@ def commit_media_sidecar_writes(
             str(error),
         ) from error
     writer = batch_atomic_write if batch_writer is None else batch_writer
-    written = writer(
-        list(writes),
-        vault_root=vault_root,
-        post_commit_fanout=post_commit_fanout,
-        defer_graph_completion=defer_graph_completion,
-    )
+    writer_kwargs: dict[str, object] = {
+        "vault_root": vault_root,
+        "post_commit_fanout": post_commit_fanout,
+        "defer_graph_completion": defer_graph_completion,
+    }
+    if publication_intents_out is not None:
+        writer_kwargs["publication_intents_out"] = publication_intents_out
+    written = writer(list(writes), **writer_kwargs)
     try:
         catalog_publication.publish_markdown_batch(prepared)
     except catalog_publication.CatalogPublicationError as error:
+        if publication_intents_out is not None and len(publication_intents_out) > intent_count:
+            from . import file_watcher
+
+            file_watcher.abort_publication_intents(
+                publication_intents_out[intent_count:],
+                force_paths=[write.path for write in writes],
+            )
         raise catalog_publication.CatalogCommitError(
             "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
             str(error),

@@ -262,6 +262,47 @@ def _non_retired_rows(vault: Path) -> dict[str, str]:
     }
 
 
+@pytest.mark.parametrize("search_mode", ["keyword", "hybrid"])
+def test_pending_edit_survives_catalog_demotion_without_rewalking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, search_mode: str
+) -> None:
+    """Published catalogue identity remains pinned while pending bytes overlay it."""
+    vault = tmp_path
+    _seed_corpus(vault)
+    rel = "Knowledge Base/Notes/demotion-pending.md"
+    marker = "upsilonpendingdemotionmarker"
+    before = _page(title="Pending", body="Old content.", updated="2026-08-01")
+    _write(vault, rel, before)
+    _prime(vault)
+    after = _page(title="Pending", body=f"New {marker}.", updated="2026-09-07")
+    _publish_change(
+        vault,
+        batch_id="batch-demotion-pending",
+        generation="generation-demotion-pending",
+        changes=((rel, before, after, None),),
+    )
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault.resolve()))
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *_args, **_kwargs: None)
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
+    readiness.finish_warm()
+    freshness.clear()
+    lexstore._schedule_runtime_catalog_repair(vault)
+    assert readiness.retrieval_admission()["state"] == "unavailable"
+    _forbid_whole_corpus(monkeypatch, "admitted published projection")
+
+    degraded: list[str] = []
+    hits = find_module.find(
+        vault, query=marker, scope="kb-only", mode=search_mode,
+        limit=5, degraded_out=degraded,
+    )
+    assert [hit.path for hit in hits] == [rel]
+    assert marker in hits[0].excerpt
+    assert {"pending_visibility", "recall_projection"} <= set(degraded)
+    assert readiness.retrieval_admission()["state"] == "unavailable"
+
+
 # --------------------------------------------------------------------------- #
 # Recall helpers
 # --------------------------------------------------------------------------- #

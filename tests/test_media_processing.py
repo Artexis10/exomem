@@ -387,6 +387,116 @@ def test_passed_commit_guard_revalidates_planned_binary_before_mutation(
     assert not media_jobs.job_store_path(vault).exists()
 
 
+def test_commit_guard_accepts_completed_sidecar_for_the_same_binary(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "concurrent-completed.m4a")
+    first = media_processing.reconcile_media(vault, binary)
+    sidecar = first.sidecar_path
+    completed = sidecar.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed += "\n## Extracted text\n\n[0:00] A concurrent completed transcript.\n"
+
+    @contextmanager
+    def commit_guard():
+        sidecar.write_text(completed, encoding="utf-8")
+        yield
+
+    reconciled = media_processing.reconcile_media(vault, binary, commit_guard=commit_guard)
+
+    assert reconciled is not None and reconciled.state == "completed" and reconciled.job_id is None
+    assert sidecar.read_text(encoding="utf-8") == completed
+    assert _job_count(vault) == 0
+
+
+def test_commit_guard_keeps_foreign_sidecar_change_fenced(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "concurrent-foreign.m4a")
+    first = media_processing.reconcile_media(vault, binary)
+
+    @contextmanager
+    def commit_guard():
+        first.sidecar_path.write_text("foreign sidecar", encoding="utf-8")
+        yield
+
+    with pytest.raises(media_processing.MediaProcessingError) as raised:
+        media_processing.reconcile_media(vault, binary, commit_guard=commit_guard)
+
+    assert raised.value.code == "MEDIA_CHANGED_DURING_RECONCILIATION"
+
+
+def test_unchanged_pending_reconciliation_does_not_reenqueue_running_ocr(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "unchanged-running.m4a")
+    first = media_processing.reconcile_media(vault, binary)
+    assert first is not None and first.job_id is not None
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None
+
+    reconciled = media_processing.reconcile_media(vault, binary)
+
+    assert reconciled is not None and reconciled.job_id == claimed.id
+    current = store.get(claimed.id)
+    assert current is not None and current.ocr_generation == claimed.ocr_generation
+
+
+def test_unchanged_pending_reconciliation_adds_missing_ocr_stage(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "missing-ocr-stage.m4a")
+    first = media_processing.reconcile_media(vault, binary)
+    assert first is not None
+    store = media_jobs.MediaJobStore(vault)
+    existing = store.get_by_binary(binary)
+    assert existing is not None
+    assert store.discard(existing) == 1
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=first.sidecar_path,
+            media_type="audio",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
+
+    media_processing.reconcile_media(vault, binary)
+
+    current = store.get_by_binary(binary)
+    assert current is not None and current.do_ocr and current.do_clip
+
+
+def test_unchanged_pending_reconciliation_adds_missing_clip_without_new_ocr(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "missing-clip-stage.jpg", data=b"\xff\xd8\xff")
+    first = media_processing.reconcile_media(vault, binary)
+    assert first is not None
+    store = media_jobs.MediaJobStore(vault)
+    existing = store.get_by_binary(binary)
+    assert existing is not None and existing.do_ocr and existing.do_clip
+    assert store.discard(existing) == 1
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=first.sidecar_path,
+            media_type="image",
+            do_ocr=True,
+            do_clip=False,
+        )
+    )
+    before = store.get_by_binary(binary)
+    assert before is not None
+
+    media_processing.reconcile_media(vault, binary)
+
+    current = store.get_by_binary(binary)
+    assert current is not None and current.do_ocr and current.do_clip
+    assert current.ocr_generation == before.ocr_generation
+
+
 def test_passed_commit_guard_revalidates_access_policy_before_mutation(
     vault: Path,
 ) -> None:
@@ -505,6 +615,35 @@ def test_runtime_unavailable_background_commit_fans_out_once_after_guard_release
     assert fanout_depths == [0]
 
 
+def test_guarded_reconciliation_carries_publication_intents_to_fanout(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "guarded-intent.m4a")
+    intent = object()
+    fanned_out: list[object] = []
+
+    @contextmanager
+    def commit_guard():
+        yield
+
+    def commit(_vault, writes, *, publication_intents_out, **_kwargs):  # noqa: ANN001
+        publication_intents_out.append(intent)
+        return [write.path for write in writes]
+
+    monkeypatch.setattr(media_processing._preserve_module(), "commit_media_sidecar_writes", commit)
+    monkeypatch.setattr(
+        media_processing,
+        "post_commit_batch_fanout",
+        lambda *_args, **kwargs: fanned_out.extend(kwargs["publication_intents"]) or True,
+    )
+
+    assert media_processing.reconcile_media(vault, binary, commit_guard=commit_guard) is not None
+    assert fanned_out == [intent]
+
+
 def test_post_write_enqueue_failure_still_fans_out_after_guard_release(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -590,6 +729,41 @@ def test_mark_processing_unavailable_commits_each_sidecar_before_fanout(
     assert "processing_state: blocked" in initial.sidecar_path.read_text(
         encoding="utf-8"
     )
+
+
+def test_guarded_unavailable_presentation_carries_publication_intents_to_fanout(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "guarded-unavailable-intent.m4a")
+    media_processing.reconcile_media(vault, binary)
+    intent = object()
+    fanned_out: list[object] = []
+
+    @contextmanager
+    def commit_guard():
+        yield
+
+    def commit(_vault, writes, *, publication_intents_out, **_kwargs):  # noqa: ANN001
+        publication_intents_out.append(intent)
+        return [write.path for write in writes]
+
+    monkeypatch.setattr(media_processing._preserve_module(), "commit_media_sidecar_writes", commit)
+    monkeypatch.setattr(
+        media_processing,
+        "post_commit_batch_fanout",
+        lambda *_args, **kwargs: fanned_out.extend(kwargs["publication_intents"]) or True,
+    )
+
+    assert media_processing.mark_processing_unavailable(
+        vault,
+        reason="MediaRuntimeUnavailable: startup failed",
+        next_action="fix runtime",
+        commit_guard=commit_guard,
+    ) == 1
+    assert fanned_out == [intent]
 
 
 def test_background_batch_rechecks_access_policy_changed_during_staging(
@@ -1582,10 +1756,10 @@ def test_process_media_product_leaf_dispatches_process_status_and_retry(vault: P
     assert retried["requeued"] == 1
 
 
-def test_process_media_surfaces_and_retries_targeted_full_index_work(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
+def test_process_media_reports_global_full_index_work_without_draining(
+    vault: Path
 ) -> None:
-    from exomem import deferred_index, index_sync
+    from exomem import deferred_index
 
     media_processing = _media_processing()
     binary = _drop_media(vault, "product-index-retry.m4a")
@@ -1600,36 +1774,466 @@ def test_process_media_surfaces_and_retries_targeted_full_index_work(
             other.relative_to(vault).as_posix(),
         ],
     )
-    def _completed_full_upsert(
-        root: Path, paths: list[Path], **_kwargs: object
-    ) -> index_sync.IndexSyncReport:
-        rels = tuple(path.relative_to(root).as_posix() for path in paths)
-        outcomes = tuple(
-            index_sync.IndexComponentOutcome(component, "completed", "completed")
-            for component in (
-                "memory_refs",
-                "resolver",
-                "semantic_purge",
-                "lexstore",
-                "epistemic_graph",
-                "embeddings",
-            )
-        )
-        return index_sync.IndexSyncReport("upsert", rels, rels, outcomes)
-
-    monkeypatch.setattr(index_sync, "upsert_after_write", _completed_full_upsert)
-
     status = commands_module.op_process_media(vault, operation="status")
     assert status["index_refresh"]["count"] == 2
     assert status["index_refresh"]["retryable"] is True
 
     retried = commands_module.op_process_media(vault, path=relative, operation="retry")
 
-    assert retried["index_refreshed"] == 1
-    assert retried["index_refresh_remaining"] == 1
+    assert retried["index_refreshed"] == 0
+    assert retried["index_refresh_remaining"] == 2
     assert deferred_index.full_status(vault)["paths"] == [
-        other.relative_to(vault).as_posix()
+        other.relative_to(vault).as_posix(),
+        result.sidecar_path.relative_to(vault).as_posix(),
     ]
+
+
+def test_process_media_keeps_deferred_full_upserts_for_the_background_owner(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Foreground reconciliation enqueues; it never drains shared projections."""
+    from exomem import deferred_index, index_sync
+
+    binary = _drop_media(vault, "enqueue-only.m4a")
+    relative = binary.relative_to(vault).as_posix()
+    deferred_index.add_full(vault, ["Knowledge Base/Notes/queued.md"])
+    monkeypatch.setattr(
+        index_sync,
+        "drain_deferred_work",
+        lambda *_args, **_kwargs: pytest.fail("process_media must not drain deferred work"),
+    )
+
+    result = commands_module.op_process_media(vault, path=relative, operation="process")
+
+    assert result["index_refreshed"] == 0
+    assert result["index_refresh_remaining"] == 1
+    assert deferred_index.full_status(vault)["count"] == 1
+
+
+def test_process_media_selected_paths_preserve_order_and_partial_failures(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_processing = _media_processing()
+    first = _drop_media(vault, "selected-first.m4a")
+    second = _drop_media(vault, "selected-second.m4a")
+    first_relative = first.relative_to(vault).as_posix()
+    second_relative = second.relative_to(vault).as_posix()
+    original = media_processing.reconcile_media
+
+    def reconcile(root: Path, binary: Path, **kwargs: object):
+        if Path(binary).name == second.name:
+            raise media_processing.MediaProcessingError("MEDIA_CHANGED", "private race detail")
+        return original(root, binary, **kwargs)
+
+    monkeypatch.setattr(media_processing, "reconcile_media", reconcile)
+
+    result = commands_module.op_process_media(
+        vault,
+        paths=[first_relative, second_relative],
+        operation="process",
+    )
+
+    assert result["paths"] == [first_relative, second_relative]
+    assert result["results"] == [
+        {
+            "path": first_relative,
+            "outcome": "processed",
+            "state": media_jobs.PENDING,
+            "media_type": "audio",
+            "sidecar_path": f"{first_relative}.md",
+            "job_id": result["results"][0]["job_id"],
+            "requeued": 0,
+        },
+        {
+            "path": second_relative,
+            "outcome": "failed",
+            "state": media_jobs.FAILED,
+            "code": "MEDIA_CHANGED",
+            "remediation": "Inspect the media artifact and retry processing.",
+        },
+    ]
+
+
+def test_process_media_rejects_conflicting_or_duplicate_selected_paths_before_work(
+    vault: Path,
+) -> None:
+    binary = _drop_media(vault, "selected-duplicate.m4a")
+    relative = binary.relative_to(vault).as_posix()
+
+    with pytest.raises(OpError) as conflict:
+        commands_module.op_process_media(
+            vault,
+            path=relative,
+            paths=[relative],
+            operation="process",
+        )
+    with pytest.raises(OpError) as duplicate:
+        commands_module.op_process_media(
+            vault,
+            paths=[relative, f"Knowledge Base/Evidence/Audio/../Audio/{binary.name}"],
+            operation="process",
+        )
+
+    assert conflict.value.code == "MEDIA_PATH_SELECTOR_CONFLICT"
+    assert duplicate.value.code == "DUPLICATE_MEDIA_PATH"
+    assert not binary.with_name(binary.name + ".md").exists()
+
+
+def test_process_media_selected_batch_replays_without_reconciliation(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import writer_lease
+
+    binary = _drop_media(vault, "selected-replay.m4a")
+    relative = binary.relative_to(vault).as_posix()
+    command = next(item for item in commands_module.PRODUCT_COMMANDS if item.name == "process_media")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "media-replay-state")
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    media_processing = _media_processing()
+    original = media_processing.reconcile_media
+    calls = 0
+
+    def reconcile(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(media_processing, "reconcile_media", reconcile)
+
+    first = writer_lease.invoke_command(
+        command,
+        vault,
+        paths=[relative],
+        operation="process",
+        idempotency_key="selected-media-replay",
+    )
+    replay = writer_lease.invoke_command(
+        command,
+        vault,
+        paths=[relative],
+        operation="process",
+        idempotency_key="selected-media-replay",
+    )
+
+    assert replay == first
+    assert calls == 1
+    assert first["paths"] == [relative]
+    assert first["media_results"] == [
+        {
+            "path": relative,
+            "outcome": "processed",
+            "state": media_jobs.PENDING,
+            "media_type": "audio",
+            "sidecar_path": f"{relative}.md",
+            "job_id": first["media_results"][0]["job_id"],
+            "requeued": 0,
+        }
+    ]
+
+
+def test_selected_media_retry_without_canonical_commit_has_a_settled_terminal(
+    vault: Path,
+) -> None:
+    """A queue-only retry still has one validated, replayable public result."""
+    from exomem import writer_lease
+
+    binary = _drop_media(vault, "selected-queue-retry.m4a")
+    relative = binary.relative_to(vault).as_posix()
+    processed = commands_module.op_process_media(vault, path=relative, operation="process")
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == processed["job_id"]
+    store.mark(claimed.id, media_jobs.FAILED, "InvalidDataError: retryable")
+
+    command = next(item for item in commands_module.PRODUCT_COMMANDS if item.name == "process_media")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "selected-queue-retry-state")
+    )
+    compact = manager.invoke(
+        command,
+        (vault,),
+        {
+            "paths": [relative],
+            "operation": "retry",
+        },
+        idempotency_key="selected-queue-retry",
+    )
+    first = manager.invoke(
+        command,
+        (vault,),
+        {
+            "paths": [relative],
+            "operation": "retry",
+            "response_detail": "full",
+        },
+        idempotency_key="selected-queue-retry",
+    )
+    replay = manager.invoke(
+        command,
+        (vault,),
+        {"paths": [relative], "operation": "retry"},
+        idempotency_key="selected-queue-retry",
+    )
+
+    assert replay == compact
+    assert first["ok"] is True
+    assert first["state"] == "settled"
+    assert first["status"] == "settled"
+    assert first["terminal"] is True
+    assert first["mutated"] is False
+    assert isinstance(first["request_id"], str)
+    assert first["media_results"] == [
+        {
+            "path": relative,
+            "outcome": "retried",
+            "state": media_jobs.PENDING,
+            "media_type": "audio",
+            "sidecar_path": f"{relative}.md",
+            "job_id": processed["job_id"],
+            "requeued": 1,
+        }
+    ]
+    assert "diagnostics" not in compact
+    assert compact["media_results"] == first["media_results"]
+    assert first["diagnostics"]["results"] == [
+        {
+            "path": relative,
+            "outcome": "retried",
+            "state": media_jobs.PENDING,
+            "media_type": "audio",
+            "sidecar_path": f"{relative}.md",
+            "job_id": processed["job_id"],
+            "requeued": 1,
+        }
+    ]
+
+
+def test_single_media_retry_preserves_the_legacy_leaf_result(vault: Path) -> None:
+    from exomem import writer_lease
+
+    binary = _drop_media(vault, "legacy-queue-retry.m4a")
+    relative = binary.relative_to(vault).as_posix()
+    processed = commands_module.op_process_media(vault, path=relative, operation="process")
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == processed["job_id"]
+    store.mark(claimed.id, media_jobs.FAILED, "InvalidDataError: retryable")
+
+    command = next(item for item in commands_module.PRODUCT_COMMANDS if item.name == "process_media")
+    result = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "legacy-queue-retry-state")
+    ).invoke(
+        command,
+        (vault,),
+        {"path": relative, "operation": "retry"},
+        idempotency_key="legacy-queue-retry",
+    )
+
+    assert result["state"] == media_jobs.PENDING
+    assert result["requeued"] == 1
+    assert "terminal" not in result
+    assert "media_state" not in result
+
+
+def test_selected_media_batch_reports_policy_and_disappearance_failures_per_item(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import writer_lease
+
+    media_processing = _media_processing()
+    first = _drop_media(vault, "selected-policy-first.m4a")
+    readonly = _drop_media(vault, "selected-policy-readonly.m4a")
+    vanished = _drop_media(vault, "selected-policy-vanished.m4a")
+    first_relative = first.relative_to(vault).as_posix()
+    readonly_relative = readonly.relative_to(vault).as_posix()
+    vanished_relative = vanished.relative_to(vault).as_posix()
+    original = media_processing.reconcile_media
+
+    def reconcile(root: Path, binary: Path, **kwargs: object):
+        name = Path(binary).name
+        if name == readonly.name:
+            raise ValueError("WRITE_REFUSED")
+        if name == vanished.name:
+            raise FileNotFoundError(binary)
+        return original(root, binary, **kwargs)
+
+    monkeypatch.setattr(media_processing, "reconcile_media", reconcile)
+    command = next(item for item in commands_module.PRODUCT_COMMANDS if item.name == "process_media")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "selected-policy-state")
+    )
+
+    result = manager.invoke(
+        command,
+        (vault,),
+        {"paths": [first_relative, readonly_relative, vanished_relative], "operation": "process"},
+        idempotency_key="selected-policy-races",
+    )
+
+    assert result["terminal"] is True
+    assert result["media_results"][0]["outcome"] == "processed"
+    assert result["media_results"][1:] == [
+        {
+            "path": readonly_relative,
+            "outcome": "failed",
+            "state": media_jobs.FAILED,
+            "code": "WRITE_REFUSED",
+            "remediation": "Restore write access to the governed media path, then retry processing.",
+        },
+        {
+            "path": vanished_relative,
+            "outcome": "failed",
+            "state": media_jobs.FAILED,
+            "code": "MEDIA_NOT_FOUND",
+            "remediation": "Select an existing governed media artifact, then retry processing.",
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("error_type", "code", "remediation"),
+    [
+        (
+            PermissionError,
+            "MEDIA_PATH_ACCESS_DENIED",
+            "Restore access to the governed media path, then retry processing.",
+        ),
+        (
+            FileNotFoundError,
+            "MEDIA_NOT_FOUND",
+            "Select an existing governed media artifact, then retry processing.",
+        ),
+        (
+            NotADirectoryError,
+            "MEDIA_NOT_FOUND",
+            "Select an existing governed media artifact, then retry processing.",
+        ),
+        (
+            IsADirectoryError,
+            "MEDIA_NOT_FOUND",
+            "Select an existing governed media artifact, then retry processing.",
+        ),
+    ],
+)
+def test_selected_media_batch_reports_provenance_open_races_per_item(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[OSError],
+    code: str,
+    remediation: str,
+) -> None:
+    from exomem import writer_lease
+
+    first = _drop_media(vault, "selected-provenance-first.m4a")
+    denied = _drop_media(vault, "selected-provenance-denied.m4a")
+    first_relative = first.relative_to(vault).as_posix()
+    denied_relative = denied.relative_to(vault).as_posix()
+    original_open = Path.open
+
+    def open_for_provenance(self: Path, *args: object, **kwargs: object):
+        if self == denied.resolve():
+            raise error_type("provenance read refused")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_for_provenance)
+    command = next(item for item in commands_module.PRODUCT_COMMANDS if item.name == "process_media")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "selected-provenance-state")
+    )
+
+    result = manager.invoke(
+        command,
+        (vault,),
+        {"paths": [first_relative, denied_relative], "operation": "process"},
+        idempotency_key="selected-provenance-race",
+    )
+
+    assert result["terminal"] is True
+    assert result["media_results"][0]["outcome"] == "processed"
+    assert result["media_results"][1] == {
+        "path": denied_relative,
+        "outcome": "failed",
+        "state": media_jobs.FAILED,
+        "code": code,
+        "remediation": remediation,
+    }
+
+
+def test_selected_media_batch_keeps_unexpected_provenance_oserrors_uncertain(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import writer_lease
+
+    first = _drop_media(vault, "selected-provenance-unexpected-first.m4a")
+    broken = _drop_media(vault, "selected-provenance-unexpected-broken.m4a")
+    first_relative = first.relative_to(vault).as_posix()
+    broken_relative = broken.relative_to(vault).as_posix()
+    original_open = Path.open
+
+    def open_for_provenance(self: Path, *args: object, **kwargs: object):
+        if self == broken.resolve():
+            raise OSError("unexpected device fault")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_for_provenance)
+    command = next(item for item in commands_module.PRODUCT_COMMANDS if item.name == "process_media")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "selected-provenance-unexpected-state")
+    )
+
+    with pytest.raises(OpError) as uncertain:
+        manager.invoke(
+            command,
+            (vault,),
+            {"paths": [first_relative, broken_relative], "operation": "process"},
+            idempotency_key="selected-provenance-unexpected",
+        )
+
+    assert uncertain.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
+
+
+@pytest.mark.parametrize("state", [media_jobs.BLOCKED, media_jobs.FAILED])
+def test_selected_media_batch_makes_existing_terminal_jobs_actionable(
+    vault: Path, state: str
+) -> None:
+    from exomem import writer_lease
+
+    media_processing = _media_processing()
+    fresh = _drop_media(vault, f"selected-actionable-fresh-{state}.m4a")
+    terminal = _drop_media(vault, f"selected-actionable-{state}.m4a")
+    terminal_result = media_processing.reconcile_media(vault, terminal)
+    assert terminal_result is not None and terminal_result.job_id is not None
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == terminal_result.job_id
+    store.mark(claimed.id, state, "ExtractionUnavailable: engine absent")
+
+    command = next(item for item in commands_module.PRODUCT_COMMANDS if item.name == "process_media")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / f"selected-actionable-{state}-state")
+    )
+    result = manager.invoke(
+        command,
+        (vault,),
+        {
+            "paths": [fresh.relative_to(vault).as_posix(), terminal.relative_to(vault).as_posix()],
+            "operation": "process",
+        },
+        idempotency_key=f"selected-actionable-{state}",
+    )
+
+    assert result["media_results"][0]["outcome"] == "processed"
+    assert result["media_results"][1] == {
+        "path": terminal.relative_to(vault).as_posix(),
+        "outcome": "failed",
+        "state": state,
+        "code": "MEDIA_BLOCKED" if state == media_jobs.BLOCKED else "MEDIA_FAILED",
+        "remediation": "install the required media dependency, then retry"
+        if state == media_jobs.BLOCKED
+        else "repair or replace the media artifact, then retry",
+    }
 
 
 def test_process_media_product_status_is_stably_bounded(vault: Path) -> None:

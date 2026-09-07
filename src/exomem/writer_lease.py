@@ -51,6 +51,7 @@ from .mutation_terminal import (
     needs_review_terminal,
     project_terminal,
     replayed_terminal,
+    settled_media_terminal,
     split_response_detail,
     valid_collection_receipt,
     valid_structured_files_receipt,
@@ -3583,6 +3584,15 @@ class LeaseManager:
                         receipt_id=receipt,
                         idempotency_key=effective_public_idempotency_key,
                     )
+                if command.name == "process_media" and kwargs.get("paths") is not None:
+                    terminal = settled_media_terminal(
+                        leaf_result,
+                        request_id=request_id,
+                        receipt_id=receipt,
+                        idempotency_key=effective_public_idempotency_key,
+                    )
+                    if terminal is not None:
+                        return terminal
                 # A guarded write that validated but did not commit is mid-flight, not
                 # failed. Give it the same envelope shape as its eventual success so a
                 # client can correlate the pair on `operation_id` and see `terminal`

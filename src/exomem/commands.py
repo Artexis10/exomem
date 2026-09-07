@@ -5996,6 +5996,7 @@ def op_transfer_artifact(
 def op_process_media(
     vault_root: Path,
     path: str | None = None,
+    paths: list[str] | None = None,
     operation: Literal["process", "status", "retry"] = "process",
 ) -> dict:
     """Process, inspect, or retry governed media without waiting for extraction.
@@ -6007,18 +6008,22 @@ def op_process_media(
 
     Args:
         path: Optional governed Knowledge Base media path. Omit for bounded all-media work.
+        paths: Optional list of 1-32 unique governed media paths for process or retry.
         operation: process, status, or retry.
     """
     from . import due_state as due_state_module
+    from .cli_ops import OpError
 
     validate_process_media_operation(operation)
+    if path is not None and paths is not None:
+        raise OpError("MEDIA_PATH_SELECTOR_CONFLICT", "use either path or paths, not both")
     if operation == "status":
         # Reads only, so there is no batch to scope.
-        return _process_media(vault_root, path=path, operation=operation)
+        return _process_media(vault_root, path=path, paths=paths, operation=operation)
     # Bounded all-media work writes one transcript per artifact, so the no-path
     # form is a batch and must not deliver one counters block per artifact.
     with due_state_module.batch_scope(vault_root):
-        result = _process_media(vault_root, path=path, operation=operation)
+        result = _process_media(vault_root, path=path, paths=paths, operation=operation)
     # `retry` re-enqueues in the machine-local job store and commits nothing, so
     # the commit gate inside the carrier keeps it silent — that is the contract,
     # not an omission.
@@ -6029,6 +6034,7 @@ def _process_media(
     vault_root: Path,
     *,
     path: str | None,
+    paths: list[str] | None,
     operation: str,
 ) -> dict:
     from . import index_sync, media_jobs
@@ -6046,29 +6052,130 @@ def _process_media(
             holder_kind="command",
         )
 
-    def _drain_index_refresh(paths: list[Path] | list[str] | None = None) -> tuple[int, int]:
-        current = index_sync.deferred_work_status(vault_root)["full_upserts"]
-        selected = current["paths"] if paths is None else paths
-        index_sync.drain_deferred_work(
-            vault_root,
-            limit=media_jobs.STATUS_JOB_LIMIT,
-            paths=selected,
-        )
-        remaining = index_sync.deferred_work_status(vault_root)["full_upserts"]["count"]
-        # Measure the queue the neighbouring field measures. The drain's return
-        # counts what it processed across *every* queue it serves, and the
-        # graph dirty-path queue joined them (converge-graph-incrementally), so
-        # using it here would report a refreshed count and a remaining count
-        # drawn from different queues -- a pair that stops adding up for a
-        # reason no reader of this response can see.
-        refreshed = max(0, int(current["count"]) - remaining)
-        return refreshed, remaining
+    def _index_refresh_remaining() -> int:
+        return int(index_sync.deferred_work_status(vault_root)["full_upserts"]["count"])
 
     if operation == "status":
+        if paths is not None:
+            raise OpError(
+                "MEDIA_PATHS_UNSUPPORTED_FOR_STATUS",
+                "process_media paths is only supported for process or retry",
+            )
         return {
             "operation": operation,
             **media_jobs.status(vault_root),
             "index_refresh": index_sync.deferred_work_status(vault_root)["full_upserts"],
+        }
+
+    selected_paths = _selected_media_paths(vault_root, path=path, paths=paths)
+    if selected_paths is not None:
+        from . import media_processing
+
+        def public_code(value: object, *, fallback: str) -> str:
+            if (
+                isinstance(value, str)
+                and 0 < len(value) <= 128
+                and all(character.isupper() or character.isdigit() or character == "_" for character in value)
+            ):
+                return value
+            return fallback
+
+        def failure_row(relative: str, code: str, *, state: str = media_jobs.FAILED) -> dict[str, object]:
+            code = public_code(code, fallback="MEDIA_PROCESSING_FAILED")
+            return {
+                "path": relative,
+                "outcome": "failed",
+                "state": state,
+                "code": code,
+                "remediation": _media_remediation(code),
+            }
+
+        def terminal_job_row(relative: str, result: object) -> dict[str, object] | None:
+            state = getattr(result, "state", None)
+            if state not in {media_jobs.BLOCKED, media_jobs.FAILED}:
+                return None
+            reported = next(
+                (
+                    job
+                    for job in media_jobs.status(vault_root)["jobs"]
+                    if job.get("path") == relative
+                ),
+                None,
+            )
+            fallback_code = "MEDIA_BLOCKED" if state == media_jobs.BLOCKED else "MEDIA_FAILED"
+            code = public_code(
+                reported.get("failure_code")
+                if isinstance(reported, dict) and isinstance(reported.get("failure_code"), str)
+                else fallback_code,
+                fallback=fallback_code,
+            )
+            remediation = (
+                reported.get("next_action")
+                if (
+                    isinstance(reported, dict)
+                    and isinstance(reported.get("next_action"), str)
+                    and 0 < len(reported["next_action"]) <= 300
+                )
+                else _media_remediation(code)
+            )
+            return {
+                "path": relative,
+                "outcome": "failed",
+                "state": state,
+                "code": code,
+                "remediation": remediation,
+            }
+
+        results: list[dict[str, object]] = []
+        for binary, relative in selected_paths:
+            try:
+                result = (
+                    media_processing.reconcile_media(
+                        vault_root,
+                        binary,
+                        explicit=True,
+                        commit_guard=_commit_guard,
+                    )
+                    if operation == "process"
+                    else media_processing.retry_media(
+                        vault_root,
+                        binary,
+                        commit_guard=_commit_guard,
+                    )
+                )
+                if result is None:
+                    raise OpError("UNSUPPORTED_MEDIA", "media processing did not return a result")
+            except media_processing.MediaProcessingError as error:
+                results.append(failure_row(relative, error.code))
+                continue
+            except ValueError as error:
+                if str(error).partition(":")[0] != "WRITE_REFUSED":
+                    raise
+                results.append(failure_row(relative, "WRITE_REFUSED"))
+                continue
+            except FileNotFoundError:
+                results.append(failure_row(relative, "MEDIA_NOT_FOUND"))
+                continue
+            terminal_row = terminal_job_row(relative, result)
+            if terminal_row is not None:
+                results.append(terminal_row)
+                continue
+            row: dict[str, object] = {
+                "path": relative,
+                "outcome": "processed" if operation == "process" else "retried",
+                "state": result.state,
+                "media_type": result.media_type,
+                "sidecar_path": result.sidecar_path.relative_to(vault_root).as_posix(),
+                "job_id": result.job_id,
+                "requeued": result.requeued,
+            }
+            results.append(row)
+        return {
+            "operation": operation,
+            "paths": [relative for _, relative in selected_paths],
+            "results": results,
+            "index_refreshed": 0,
+            "index_refresh_remaining": _index_refresh_remaining(),
         }
 
     if path is None:
@@ -6081,12 +6188,11 @@ def _process_media(
                 commit_guard=_commit_guard,
                 propagate_transient_errors=True,
             )
-            refreshed, remaining = _drain_index_refresh()
             return {
                 "operation": operation,
                 "requeued": requeued,
-                "index_refreshed": refreshed,
-                "index_refresh_remaining": remaining,
+                "index_refreshed": 0,
+                "index_refresh_remaining": _index_refresh_remaining(),
             }
         from . import media_processing
 
@@ -6102,12 +6208,11 @@ def _process_media(
                 ),
                 propagate_transient_errors=True,
             )
-            refreshed, remaining = _drain_index_refresh()
             return {
                 "operation": operation,
                 "reconciled": reconciled,
-                "index_refreshed": refreshed,
-                "index_refresh_remaining": remaining,
+                "index_refreshed": 0,
+                "index_refresh_remaining": _index_refresh_remaining(),
             }
 
     from . import media_processing
@@ -6155,10 +6260,63 @@ def _process_media(
     }
     if operation == "retry":
         payload["requeued"] = result.requeued
-    refreshed, remaining = _drain_index_refresh([result.sidecar_path])
-    payload["index_refreshed"] = refreshed
-    payload["index_refresh_remaining"] = remaining
+    payload["index_refreshed"] = 0
+    payload["index_refresh_remaining"] = _index_refresh_remaining()
     return payload
+
+
+def _selected_media_paths(
+    vault_root: Path, *, path: str | None, paths: list[str] | None
+) -> list[tuple[Path, str]] | None:
+    """Validate and canonicalize the explicit media selectors before reconciliation."""
+    from .cli_ops import OpError
+    from .vault import canonical_vault_rel
+
+    if path is not None and paths is not None:
+        raise OpError("MEDIA_PATH_SELECTOR_CONFLICT", "use either path or paths, not both")
+    if paths is None:
+        return None
+    if not isinstance(paths, list) or not 1 <= len(paths) <= 32:
+        raise OpError("INVALID_MEDIA_PATHS", "process_media paths must contain 1 to 32 paths")
+    values = paths
+
+    root = Path(vault_root).resolve()
+    kb_root = root / kb_dirname()
+    selected: list[tuple[Path, str]] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value:
+            raise OpError("INVALID_MEDIA_PATHS", "process_media paths must contain only non-empty paths")
+        binary = Path(value)
+        if not binary.is_absolute():
+            binary = root / binary
+        binary = Path(os.path.abspath(binary))
+        try:
+            relative = binary.relative_to(root).as_posix()
+            binary.relative_to(kb_root)
+        except ValueError as error:
+            raise OpError(
+                "MEDIA_PATH_OUTSIDE_KB",
+                f"media path must be inside {kb_dirname()}: {value}",
+            ) from error
+        relative = canonical_vault_rel(root, relative)
+        if relative in seen:
+            raise OpError("DUPLICATE_MEDIA_PATH", "process_media paths must be unique after normalization")
+        seen.add(relative)
+        selected.append((root / relative, relative))
+    return selected
+
+
+def _media_remediation(code: str) -> str:
+    if code == "MEDIA_PATH_ACCESS_DENIED":
+        return "Restore access to the governed media path, then retry processing."
+    if code in {"MEDIA_NOT_FOUND", "MEDIA_PATH_OUTSIDE_KB"}:
+        return "Select an existing governed media artifact, then retry processing."
+    if code == "WRITE_REFUSED":
+        return "Restore write access to the governed media path, then retry processing."
+    if code == "UNSUPPORTED_MEDIA":
+        return "Select a supported governed media artifact."
+    return "Inspect the media artifact and retry processing."
 
 
 def op_read_media(

@@ -1,0 +1,28 @@
+{
+  "artifacts": [
+    {
+      "file_id": "closure-fixture-pdf",
+      "download_url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+      "mime_type": "application/pdf",
+      "file_name": "chapter-certificate.pdf",
+      "sha256": "3df79d34abbca99308e79cb94461c1893582604d68329a41fd4bec1885e6adb4",
+      "expected_text": "Dummy PDF file"
+    },
+    {
+      "file_id": "closure-fixture-image-one",
+      "download_url": "https://raw.githubusercontent.com/tesseract-ocr/tessdoc/09a89d485f1f34285611562fed9f8ab85721bab8/images/2col.png",
+      "mime_type": "image/png",
+      "file_name": "chapter-screenshot-one.png",
+      "sha256": "1ebe5089fd863fcec4a23912053488553fe96349f5c19850e32ba94103db2527",
+      "expected_text": "Cautionary Statement"
+    },
+    {
+      "file_id": "closure-fixture-image-two",
+      "download_url": "https://raw.githubusercontent.com/tesseract-ocr/tessdoc/09a89d485f1f34285611562fed9f8ab85721bab8/images/toc.png",
+      "mime_type": "image/png",
+      "file_name": "chapter-screenshot-two.png",
+      "sha256": "5502c740b734274328adeeec3d636a6c9ee78db21d77e1e978fc4b10aef990bb",
+      "expected_text": "Introduction to the Tenth Anniversary Edition"
+    }
+  ]
+}

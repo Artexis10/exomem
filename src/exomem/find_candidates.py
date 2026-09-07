@@ -564,6 +564,7 @@ def collect_candidates(
     ]
 
     graph_ranking: list[str] = []
+    graph_resolver_deferred = False
     graph_in_degree_by_path: dict[str, int] = {}
     graph_provenance_by_path: dict[str, GraphProvenance] = {}
     if not graph and timings is not None:
@@ -658,7 +659,10 @@ def collect_candidates(
                         resolver = get_query_resolver(
                             vault_root, freshness=snapshot.projection_key("vault")
                         )
-                        for seed_rel in legacy_seeds:
+                        graph_resolver_deferred = resolver is None
+                        # Passing None to the legacy helper would construct a
+                        # resolver on the reader, undoing the admission decision.
+                        for seed_rel in legacy_seeds if resolver is not None else ():
                             page = page_of(seed_rel)
                             if page is None:
                                 continue
@@ -705,9 +709,10 @@ def collect_candidates(
                         )
                         if graph_seeds else None
                     )
+                    graph_resolver_deferred = bool(graph_seeds) and resolver is None
                 with _span(timings, "graph.expand"):
                     seen_target = set()
-                    for seed_rel in graph_seeds:
+                    for seed_rel in graph_seeds if resolver is not None else ():
                         page = page_of(seed_rel)
                         if page is None:
                             continue
@@ -736,6 +741,13 @@ def collect_candidates(
                         "backend": "wikilink_fallback",
                         "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
                     }
+
+            if capture_trace and graph_resolver_deferred:
+                lane_statuses["graph"] = {
+                    "status": "warming",
+                    "reason": "resolver_warming",
+                    "backend": lane_statuses["graph"]["backend"],
+                }
 
     if not rankings:
         return empty_bundle(

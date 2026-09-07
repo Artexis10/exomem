@@ -153,6 +153,47 @@ def test_find_at_an_exact_projection_discloses_nothing(
     assert "recall_projection" not in degraded
 
 
+@pytest.mark.parametrize("invalidate", ["repair", "health"])
+def test_find_rechecks_published_catalog_after_readiness_demotion(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, invalidate: str
+) -> None:
+    """A strict readiness demotion must not disable proven lag-tolerant recall."""
+    from exomem import find as find_module, readiness
+
+    _warm_catalog(vault)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault.resolve()))
+    # Hold repair to retain the real reprojection window deterministically.
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *_args, **_kwargs: None)
+    readiness.reset()
+    try:
+        readiness.manage_runtime()
+        readiness.begin_warm()
+        readiness.mark_ready("retrieval_catalog")
+        readiness.finish_warm()
+        _go_cold()
+        if invalidate == "repair":
+            lexstore._schedule_runtime_catalog_repair(vault)
+        else:
+            readiness.retrieval_admission(vault)
+        assert readiness.retrieval_admission()["state"] == "unavailable"
+
+        for _ in range(2):
+            degraded: list[str] = []
+            hits = find_module.find(vault, query="memory", limit=5, degraded_out=degraded)
+            assert isinstance(hits, list)
+            assert "recall_projection" in degraded
+        # Request admission does not falsely promote strict health readiness.
+        assert readiness.is_ready("retrieval_catalog") is False
+
+        (vault / "Knowledge Base" / "_access.yaml").write_text(
+            "excluded:\n  - Private\n", encoding="utf-8"
+        )
+        with pytest.raises(find_module.RetrievalIndexWarming):
+            find_module.find(vault, query="memory", limit=5)
+    finally:
+        readiness.reset()
+
+
 def test_find_still_refuses_when_nothing_is_published(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -217,3 +258,88 @@ def test_a_published_row_without_a_triple_still_refuses(
     )
 
     assert lexstore.runtime_retrieval_catalog_admission(vault, schedule_repair=False) is None
+
+
+def test_admitted_catalog_scope_is_nested_and_vault_local(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _warm_catalog(vault)
+    checkpoint = lexstore.get_store(vault).published_recall_checkpoint("kb")
+    assert checkpoint is not None
+    (vault / "Knowledge Base" / "scope-new.md").write_text("# New page\n", encoding="utf-8")
+    _go_cold()
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *_a, **_kw: None)
+    other = tmp_path / "other"
+    (other / "Knowledge Base").mkdir(parents=True)
+    (other / "Knowledge Base" / "note.md").write_text("# Memory\n", encoding="utf-8")
+    _warm_catalog(other)
+
+    def query(root: Path) -> bool:
+        return lexstore.search_substring_result(root, "memory", scope="kb").readiness.complete
+
+    with pytest.raises(RuntimeError, match="scope exit"):
+        with lexstore.admitted_catalog_scope(vault):
+            lexstore.bind_admitted_catalog(vault, {"kb": checkpoint})
+            assert query(vault)
+            assert query(other), "foreign vault must use its own live checkpoint"
+            assert not lexstore.get_store(vault).catalog_readiness(
+                "kb", checkpoint.triple,
+                recall_checkpoint=checkpoint._replace(
+                    triple=(checkpoint.triple[0] + 1, *checkpoint.triple[1:])
+                ),
+            ).complete, "explicit checkpoint must override the request binding"
+            with lexstore.admitted_catalog_scope(vault):
+                assert not query(vault), "nested recall must start with an empty scope"
+            assert query(vault), "nested exit must restore the outer snapshot"
+            raise RuntimeError("scope exit")
+    assert not query(vault), "exception exit must not leak admitted checkpoints"
+
+
+@pytest.mark.parametrize("boundary", ["projection", "query"])
+@pytest.mark.parametrize("changed_identity", ["access", "semantic", "checkpoint"])
+def test_admitted_catalog_refuses_a_mid_request_identity_change(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, boundary: str, changed_identity: str
+) -> None:
+    from exomem import find as find_module, semantic_language_registry
+
+    _warm_catalog(vault)
+    _go_cold()
+    _managed_runtime(monkeypatch)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *_a, **_kw: None)
+    method = (
+        "recall_resolver_entries" if boundary == "projection"
+        else "_serve_from_ready_catalog_result"
+    )
+    original = getattr(lexstore.LexicalStore, method)
+    moved = False
+
+    def change_then_read(store, *args, **kwargs):
+        nonlocal moved
+        if not moved:
+            moved = True
+            if changed_identity == "access":
+                (vault / "Knowledge Base" / "_access.yaml").write_text(
+                    "excluded:\n  - Private\n", encoding="utf-8"
+                )
+            elif changed_identity == "semantic":
+                registry = semantic_language_registry.registry_path(vault)
+                registry.parent.mkdir(parents=True, exist_ok=True)
+                registry.write_text("kinds:\n  new-kind:\n    label: New\n", encoding="utf-8")
+            else:
+                conn = store._connect()
+                try:
+                    checkpoint = store._meta_checkpoint(conn, "kb")
+                    store._write_checkpoint(
+                        conn, "kb", checkpoint._replace(
+                            triple=(checkpoint.triple[0] + 1, *checkpoint.triple[1:])
+                        )
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+        return original(store, *args, **kwargs)
+
+    monkeypatch.setattr(lexstore.LexicalStore, method, change_then_read)
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module.find(vault, query="memory", scope="kb-only", mode="keyword")
+    assert moved

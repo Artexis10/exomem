@@ -301,6 +301,15 @@ def reconcile_media(
 
     deferred_fanout: list[Path] = []
     deferred_created: list[Path] = []
+    publication_intents: list[object] = []
+
+    def _abort_publication_intents() -> None:
+        if publication_intents:
+            from . import file_watcher
+
+            file_watcher.abort_publication_intents(
+                publication_intents, force_paths=deferred_fanout
+            )
 
     def _write_sidecar(write: PlannedWrite) -> None:
         from .governance import catalog_publication
@@ -310,6 +319,7 @@ def reconcile_media(
                 vault,
                 (write,),
                 post_commit_fanout=commit_guard is None,
+                publication_intents_out=publication_intents,
                 batch_writer=batch_atomic_write,
             )
         except catalog_publication.CatalogCommitError as error:
@@ -330,13 +340,22 @@ def reconcile_media(
                 yield
         finally:
             if deferred_fanout:
-                post_commit_batch_fanout(
-                    vault,
-                    list(dict.fromkeys(deferred_fanout)),
-                    None,
-                    None,
-                    created_paths=list(dict.fromkeys(deferred_created)),
-                )
+                try:
+                    completed = post_commit_batch_fanout(
+                        vault,
+                        list(dict.fromkeys(deferred_fanout)),
+                        None,
+                        None,
+                        created_paths=list(dict.fromkeys(deferred_created)),
+                        publication_intents=publication_intents,
+                    )
+                    if completed is not True:
+                        _abort_publication_intents()
+                except Exception:
+                    _abort_publication_intents()
+                    raise
+            else:
+                _abort_publication_intents()
 
     with _commit_scope():
         commit_tier = access.access_tier(vault, rel_binary)
@@ -351,6 +370,15 @@ def reconcile_media(
         _verify_binary_identity(binary, resolved_binary, provenance)
         current = _read_sidecar_text(vault, sidecar)
         if current != original:
+            if (
+                current is not None
+                and _completed_provenance_state(
+                    current, media_type=media_type, provenance=provenance
+                )
+                == "valid"
+            ):
+                _discard_stale_job(vault, binary, sidecar, media_type)
+                return ReconcileResult(media_type, "completed", sidecar, None)
             raise MediaProcessingError(
                 "MEDIA_CHANGED_DURING_RECONCILIATION",
                 f"media sidecar changed while reconciliation was being planned: {sidecar}",
@@ -387,49 +415,58 @@ def reconcile_media(
 
             _verify_binary_identity(binary, resolved_binary, provenance)
             store = media_jobs.MediaJobStore(vault)
-            job_id = store.enqueue(
-                media_jobs.MediaJob(
-                    binary_path=binary,
-                    sidecar_path=sidecar,
-                    media_type=media_type,
-                    do_ocr=True,
-                    do_clip=media_type in {"image", "video"}
-                    and not os.environ.get("EXOMEM_DISABLE_CLIP"),
-                )
+            durable_job = store.get_by_binary(binary)
+            requested_clip = media_type in {"image", "video"} and not os.environ.get(
+                "EXOMEM_DISABLE_CLIP"
             )
-            durable_job = store.get(job_id)
+            needs_ocr = durable_job is None or not durable_job.do_ocr
+            needs_clip = requested_clip and (durable_job is None or not durable_job.do_clip)
+            if original != pending or needs_ocr or needs_clip:
+                job_id = store.enqueue(
+                    media_jobs.MediaJob(
+                        binary_path=binary,
+                        sidecar_path=sidecar,
+                        media_type=media_type,
+                        do_ocr=original != pending or needs_ocr,
+                        do_clip=requested_clip if original != pending else needs_clip,
+                    )
+                )
+                durable_job = store.get(job_id)
+            job_id = durable_job.id if durable_job is not None else None
             state = durable_job.state if durable_job is not None else media_jobs.PENDING
             unavailable = _runtime_unavailable(vault)
             if unavailable is not None:
                 reason, next_action = unavailable
-                store.mark(job_id, media_jobs.BLOCKED, reason)
-                current_sidecar = _read_sidecar_text(vault, sidecar)
-                if current_sidecar is None:
-                    raise MediaProcessingError(
-                        "MEDIA_CHANGED_DURING_RECONCILIATION",
-                        "media sidecar disappeared after publication",
-                    )
-                if not _has_runtime_unavailable_state(
-                    current_sidecar, reason=reason, next_action=next_action
+                if durable_job is None or not store.mark(
+                    durable_job, media_jobs.BLOCKED, reason
                 ):
-                    blocked_sidecar = _preserve_module().render_sidecar_processing_failure(
-                        current_sidecar,
-                        state=media_jobs.BLOCKED,
-                        attempts=(
-                            durable_job.attempts if durable_job is not None else 0
-                        ),
-                        error=reason,
-                        retryable=True,
-                        next_action=next_action,
-                    )
-                    _write_sidecar(
-                        PlannedWrite(
-                            path=sidecar,
-                            content=blocked_sidecar,
-                            expected_hash=content_hash(current_sidecar),
+                    result = ReconcileResult(media_type, state, sidecar, job_id)
+                else:
+                    current_sidecar = _read_sidecar_text(vault, sidecar)
+                    if current_sidecar is None:
+                        raise MediaProcessingError(
+                            "MEDIA_CHANGED_DURING_RECONCILIATION",
+                            "media sidecar disappeared after publication",
                         )
-                    )
-                state = media_jobs.BLOCKED
+                    if not _has_runtime_unavailable_state(
+                        current_sidecar, reason=reason, next_action=next_action
+                    ):
+                        blocked_sidecar = _preserve_module().render_sidecar_processing_failure(
+                            current_sidecar,
+                            state=media_jobs.BLOCKED,
+                            attempts=durable_job.attempts,
+                            error=reason,
+                            retryable=True,
+                            next_action=next_action,
+                        )
+                        _write_sidecar(
+                            PlannedWrite(
+                                path=sidecar,
+                                content=blocked_sidecar,
+                                expected_hash=content_hash(current_sidecar),
+                            )
+                        )
+                    state = media_jobs.BLOCKED
             result = ReconcileResult(media_type, state, sidecar, job_id)
 
     assert result is not None
@@ -798,7 +835,7 @@ def _block_ambiguous_retry(
 ) -> ReconcileResult:
     assert job.id is not None
     store.mark(
-        job.id,
+        job,
         media_jobs.BLOCKED,
         job.last_error or "BatchWriteError: reconciliation required",
     )
@@ -1050,21 +1087,28 @@ def _read_provenance(
                 "MEDIA_NOT_FOUND", "media artifact does not exist"
             ) from None
     digest = hashlib.sha256()
-    with resolved_binary.open("rb") as stream:
-        before = os.fstat(stream.fileno())
-        if (
-            before.st_dev != expected_identity.device
-            or before.st_ino != expected_identity.inode
-            or not stat.S_ISREG(before.st_mode)
-            or before.st_nlink != 1
-        ):
-            raise MediaProcessingError(
-                "MEDIA_CHANGED_DURING_RECONCILIATION",
-                "media changed while provenance was being recorded",
-            )
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-        after = os.fstat(stream.fileno())
+    try:
+        with resolved_binary.open("rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (
+                before.st_dev != expected_identity.device
+                or before.st_ino != expected_identity.inode
+                or not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+            ):
+                raise MediaProcessingError(
+                    "MEDIA_CHANGED_DURING_RECONCILIATION",
+                    "media changed while provenance was being recorded",
+                )
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+            after = os.fstat(stream.fileno())
+    except PermissionError:
+        raise MediaProcessingError(
+            "MEDIA_PATH_ACCESS_DENIED", "media artifact cannot be read"
+        ) from None
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+        raise MediaProcessingError("MEDIA_NOT_FOUND", "media artifact does not exist") from None
     identity_before = (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
     identity_after = (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
     if identity_after != identity_before or after.st_nlink != 1:
@@ -1346,6 +1390,7 @@ def mark_processing_unavailable(
         if job.id is None:
             continue
         written: list[Path] = []
+        publication_intents: list[object] = []
         boundary = commit_guard() if commit_guard is not None else nullcontext()
         try:
             with boundary:
@@ -1377,13 +1422,20 @@ def mark_processing_unavailable(
                             ),
                         ),
                         post_commit_fanout=commit_guard is None,
+                        publication_intents_out=publication_intents,
                         batch_writer=batch_atomic_write,
                     )
                     assert isinstance(written_result, list)
                     written = written_result
-                store.mark(job.id, media_jobs.BLOCKED, reason)
-                changed += 1
+                if store.mark(current_job, media_jobs.BLOCKED, reason):
+                    changed += 1
         except Exception:  # noqa: BLE001 - one stale job must not abort startup
+            if publication_intents:
+                from . import file_watcher
+
+                file_watcher.abort_publication_intents(
+                    publication_intents, force_paths=written
+                )
             log.warning(
                 "media unavailable-state commit failed for %s",
                 job.binary_path,
@@ -1391,5 +1443,22 @@ def mark_processing_unavailable(
             )
             continue
         if written and commit_guard is not None:
-            post_commit_batch_fanout(vault, written, None, None)
+            try:
+                completed = post_commit_batch_fanout(
+                    vault, written, None, None, publication_intents=publication_intents
+                )
+                if completed is not True and publication_intents:
+                    from . import file_watcher
+
+                    file_watcher.abort_publication_intents(
+                        publication_intents, force_paths=written
+                    )
+            except Exception:
+                if publication_intents:
+                    from . import file_watcher
+
+                    file_watcher.abort_publication_intents(
+                        publication_intents, force_paths=written
+                    )
+                raise
     return changed

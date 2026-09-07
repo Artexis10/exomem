@@ -2,7 +2,7 @@
 name: exomem-reflect
 description: Distill a session or project episode into decisions, failures, patterns, open questions, and next actions.
 metadata:
-  skill_contract: 99932223e2135024a3e1d4d2ae085f4e66d6c8eb33ee6a1ac2cb458fd1cd1ee1
+  skill_contract: 75fb5e1e3fb04874e3ea97610481708ca90661cf63579ea905122c96189f9c12
   version: "0.1.0"
 ---
 
@@ -19,9 +19,11 @@ Use when the user asks what was learned, asks to reflect, closes a project episo
 Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Sources/Evidence are immutable, and content outside the managed Knowledge Base
-is read-only. Before a compiled write: search/read for duplicates, draft, run
-`connect_memory(operation="suggest-links")`, and include known source references
-and reviewed connections in the first write. Honor the live confirmation ceiling;
+is read-only. Before a compiled write: reuse current relevant search/read results,
+check for duplicates, and include known source references and reviewed connections
+in the first write. Use `connect_memory(operation="suggest-links")` when useful
+connections are still unknown, not to recheck links already established in context.
+Honor the live confirmation ceiling;
 a workflow or standing capture preference does not grant restructure authority.
 
 Inspect mutation results before reporting success. On `success: false`, follow

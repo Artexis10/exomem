@@ -19,6 +19,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
 from datetime import date
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -519,6 +520,10 @@ class FreshnessSnapshot:
     def requires_live_recall(self) -> bool:
         return self._require_live_recall
 
+    def projection_is_lagging(self, scope: str) -> bool:
+        """Whether admission proved only this scope's published projection."""
+        return scope in self._stale_recall_scopes
+
     def kb(self) -> tuple[int, int, str]:
         if self._kb is None:
             live = freshness.triple(self._root, "kb")
@@ -612,6 +617,26 @@ class FreshnessSnapshot:
                 # projection the admission already identity-checked, so it does
                 # not additionally require a live registry.
                 stale = scope in self._stale_recall_scopes
+                if stale:
+                    from . import lexstore
+
+                    expected = self._expected_recall_checkpoints.get(scope)
+                    if expected is None:
+                        raise freshness.RecallProjectionUnavailable(
+                            "admitted catalogue checkpoint is absent"
+                        )
+                    published_entries = lexstore.get_store(self._root).recall_resolver_entries(
+                        scope, expected
+                    )
+                    if published_entries is None:
+                        lexstore.request_repair(self._root)
+                        raise freshness.RecallProjectionUnavailable(
+                            "admitted catalogue projection is no longer available"
+                        )
+                    self._recall[scope] = expected
+                    self._recall_paths[scope] = frozenset(rel for rel, _title in published_entries)
+                    _set_recall_projection_timing_outcome(self._timings, "admitted")
+                    return
                 require_live = self._require_live_recall and not stale
                 projection_live = freshness.recall_is_live(self._root, scope)
                 checkpoint = (
@@ -951,6 +976,18 @@ def _freshness_key(
     return tuple(parts)
 
 
+def _with_catalog_scope(function):
+    @wraps(function)
+    def scoped(vault_root: Path, *args, **kwargs):
+        from . import lexstore
+
+        with lexstore.admitted_catalog_scope(vault_root):
+            return function(vault_root, *args, **kwargs)
+
+    return scoped
+
+
+@_with_catalog_scope
 def find(
     vault_root: Path,
     *,
@@ -1190,12 +1227,14 @@ def find(
     # narrows it (an offline caller proved nothing from an index, and a
     # warming or unavailable catalogue declined).
     with _span(timings, "recall_projection", source=find_types.SOURCE_INDEX):
-        if state == "ready" and require_live_recall:
+        if state in {"ready", "unavailable"} and require_live_recall:
             # Bounded projection lag is served, not refused. `admission` takes
             # the strict proof when it binds and otherwise falls back to the
             # catalog's own published projection under an unchanged identity —
             # so a cold or reprojection-evicted registry answers from the last
-            # published projection instead of blanking semantic recall.
+            # published projection instead of blanking semantic recall. Repair
+            # and health probes can revoke strict readiness during this window;
+            # re-prove request admission even when that ready bit is clear.
             admitted = lexstore.runtime_retrieval_catalog_admission(vault_root)
             raw_proof = admitted.checkpoints if admitted is not None else None
             if raw_proof is None:
@@ -1212,7 +1251,14 @@ def find(
                     catalog_proof = None
                     state = "unavailable"
                 else:
+                    # This admits only this request. Strict health readiness
+                    # remains unavailable until the live projection catches up.
+                    state = "ready"
                     stale_recall_scopes = frozenset(admitted.lagging_scopes)
+                    lexstore.bind_admitted_catalog(
+                        vault_root,
+                        {scope: catalog_proof[scope] for scope in stale_recall_scopes},
+                    )
                     if stale_recall_scopes and degraded_out is not None:
                         # Rides the existing warming disclosure: the envelope
                         # already projects `warming.components`, so a stale
@@ -1515,6 +1561,7 @@ def find(
             prefer_compiled,
             prefer_active,
             widen_outside_kb,
+            snapshot.projection_is_lagging("vault") if widen_outside_kb else False,
             resolved_config,
         )
         with _span(timings, "freshness"):
@@ -4076,6 +4123,27 @@ def _find_semantic(
     def _keyword_lane(vault_root_arg: Path, *args: Any, **kwargs: Any) -> list[str]:
         return _keyword_match_paths(vault_root_arg, *args, pending=pending, **kwargs)
 
+    def _optional_graph_resolver(root: Path, freshness=None):
+        try:
+            return recall_resolver_snapshot(
+                root,
+                freshness=freshness,
+                allow_fallback=not snapshot.requires_live_recall,
+                expected_checkpoint=snapshot.recall_checkpoint("vault"),
+            )
+        except RetrievalIndexWarming as error:
+            # Only optional graph expansion may be omitted. Catalogue, pending
+            # visibility and relation predicates are proved separately and must
+            # still refuse when their requested semantics cannot be established.
+            if not graph or error.site not in {
+                "resolver_checkpoint_stale", "resolver_checkpoint_absent",
+                "resolver_entries_unavailable", "resolver_build_wait",
+            }:
+                raise
+            if degraded_out is not None:
+                degraded_out.append("graph")
+            return None
+
     try:
         bundle = find_candidates.collect_candidates(
             vault_root,
@@ -4096,12 +4164,7 @@ def _find_semantic(
             page_of=_page_of,
             keyword_match_paths=_keyword_lane,
             outbound_wikilink_paths=_outbound_wikilink_paths,
-            get_query_resolver=lambda root, freshness=None: recall_resolver_snapshot(
-                root,
-                freshness=freshness,
-                allow_fallback=not snapshot.requires_live_recall,
-                expected_checkpoint=snapshot.recall_checkpoint("vault"),
-            ),
+            get_query_resolver=_optional_graph_resolver,
             record_degradation=_record_degradation,
             degraded_out=degraded_out,
             failed_out=failed_out,
@@ -4675,6 +4738,12 @@ def _find_outside_kb(
     from . import bm25, lexstore, readiness
 
     managed = readiness.runtime_managed()
+    if managed and snapshot is not None and snapshot.projection_is_lagging("vault"):
+        # Ordinary recall can use its proven pending overlay, but widening has
+        # no such overlay and requires the current vault catalogue. Its cache
+        # key also distinguishes this state from a previously live reserve.
+        _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
+        return []
     vault_freshness = snapshot.for_scope("vault") if snapshot is not None else None
     snapshot = snapshot or FreshnessSnapshot(vault_root)
     #: Applied per candidate AFTER ranking. Only the unrestricted rungs need

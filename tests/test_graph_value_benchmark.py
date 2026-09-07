@@ -2197,3 +2197,84 @@ def test_fast_local_core_fixture_executes_every_required_lean_probe(tmp_path: Pa
         )["valid"]
         is True
     )
+
+
+@pytest.mark.parametrize("owner_result", ["settled", "external", "failed", "timeout"])
+def test_lifecycle_rebuild_waits_for_registered_owner_without_hiding_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, owner_result: str
+) -> None:
+    from exomem import epistemic_graph, graph_sync
+
+    busy = graph_sync.GraphRebuildInProgress()
+    owner_error = (
+        TimeoutError("fixture convergence deadline")
+        if owner_result == "timeout"
+        else RuntimeError("registered rebuild failed")
+    )
+    rebuilds = []
+    joins = []
+
+    def rebuild(index):
+        rebuilds.append(index.vault_root)
+        if owner_result == "settled" and len(rebuilds) == 2:
+            return {}
+        raise busy
+
+    def join(root, *, timeout):
+        joins.append((root, timeout))
+        if owner_result in {"failed", "timeout"}:
+            raise owner_error
+        return None if owner_result == "external" else object()
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "rebuild_all", rebuild)
+    monkeypatch.setattr(graph_sync, "await_active_rebuild", join)
+    if owner_result == "settled":
+        bench._lifecycle_rebuild(tmp_path)
+    else:
+        expected = busy if owner_result == "external" else owner_error
+        with pytest.raises(type(expected)) as caught:
+            bench._lifecycle_rebuild(tmp_path)
+        assert caught.value is expected
+    assert rebuilds == [tmp_path] * (2 if owner_result == "settled" else 1)
+    assert joins == [(tmp_path, 30.0)]
+
+
+def test_lifecycle_rebuild_preserves_non_owner_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from exomem import epistemic_graph, graph_sync
+
+    failure = RuntimeError("projection publication failed")
+
+    def rebuild(index):
+        raise failure
+
+    def forbidden_join(*args, **kwargs):
+        pytest.fail("an unrelated rebuild error cannot become an owner wait")
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "rebuild_all", rebuild)
+    monkeypatch.setattr(graph_sync, "await_active_rebuild", forbidden_join)
+    with pytest.raises(RuntimeError) as caught:
+        bench._lifecycle_rebuild(tmp_path)
+    assert caught.value is failure
+
+
+def test_lifecycle_rebuild_cannot_accept_old_outcome_under_new_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from exomem import epistemic_graph, graph_sync
+
+    busy = graph_sync.GraphRebuildInProgress()
+
+    def rebuild(index):
+        raise busy
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "rebuild_all", rebuild)
+    monkeypatch.setattr(
+        graph_sync,
+        "await_active_rebuild",
+        lambda *args, **kwargs: graph_sync.GraphBuildOutcome(1, "old-checkpoint"),
+    )
+    with pytest.raises(graph_sync.GraphRebuildInProgress) as caught:
+        bench._lifecycle_rebuild(tmp_path)
+    assert caught.value is busy

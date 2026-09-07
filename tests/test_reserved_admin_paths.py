@@ -4465,7 +4465,7 @@ def test_every_command_and_finite_selector_has_total_path_role_metadata() -> Non
         "replace_memory": {"old_path", "sources"},
         "compile_source": {"sources"},
         "preserve_artifacts": {"files"},
-        "process_media": {"path"},
+        "process_media": {"path", "paths"},
         "review_memory": {"path", "ref", "sources"},
         "review_item_context": {"ref"},
         "triage_memory": {"ref"},

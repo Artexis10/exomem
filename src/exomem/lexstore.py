@@ -64,15 +64,58 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Generic, TypeVar
 
 from . import call_spans, reserved_paths
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
+
+_ADMITTED_CATALOG: ContextVar[tuple[Path, Mapping[str, object]] | None] = ContextVar(
+    "admitted_recall_catalog", default=None
+)
+
+
+@contextlib.contextmanager
+def admitted_catalog_scope(vault_root: Path):
+    """Isolate one recall's published checkpoints, including nested recalls."""
+    token = _ADMITTED_CATALOG.set((Path(vault_root).resolve(), MappingProxyType({})))
+    try:
+        yield
+    finally:
+        _ADMITTED_CATALOG.reset(token)
+
+
+def bind_admitted_catalog(vault_root: Path, checkpoints: Mapping[str, object]) -> None:
+    """Bind only checkpoints already admitted by this recall's policy proof."""
+    root = Path(vault_root).resolve()
+    current = _ADMITTED_CATALOG.get()
+    if current is None or current[0] != root:
+        raise RuntimeError("catalogue admission requires its request scope")
+    if set(checkpoints) - {"kb", "vault"}:
+        raise ValueError("catalogue admission requires canonical scopes")
+    _ADMITTED_CATALOG.set((root, MappingProxyType(dict(checkpoints))))
+
+
+def _admitted_catalog_checkpoint(vault_root: Path, scope: str) -> object | None:
+    current = _ADMITTED_CATALOG.get()
+    if current is None or current[0] != Path(vault_root).resolve():
+        return None
+    return current[1].get("kb" if scope == "kb-only" else scope)
+
+
+def _checkpoint_policy_current(vault_root: Path, checkpoint: object) -> bool:
+    from . import recall_policy
+
+    return (
+        getattr(checkpoint, "policy_version", None),
+        getattr(checkpoint, "access_policy_fingerprint", None),
+    ) == recall_policy.recall_policy_identity(vault_root)
 
 
 def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
@@ -5590,12 +5633,18 @@ class LexicalStore:
         from . import freshness as freshness_module
 
         backend_name = backend()
+        if recall_checkpoint is None:
+            recall_checkpoint = _admitted_catalog_checkpoint(self.vault_root, scope)
         target_checkpoint = (
             recall_checkpoint
             if recall_checkpoint is not None
             else freshness_module.recall_checkpoint(self.vault_root, scope)
         )
         target_state = _checkpoint_state(target_checkpoint)
+        if not _checkpoint_policy_current(self.vault_root, target_checkpoint):
+            if schedule_repair:
+                _schedule_runtime_catalog_repair(self.vault_root)
+            return CatalogReadiness("stale", False, backend_name)
         if backend_name == "python":
             return CatalogReadiness("unsupported", False, backend_name)
         if self._failed:
@@ -5630,8 +5679,10 @@ class LexicalStore:
                         _schedule_runtime_catalog_repair(self.vault_root)
                     return CatalogReadiness("stale", False, backend_name)
                 if _checkpoint_state(checkpoint) == target_state:
-                    if self._meta_catalog_identity(conn) != catalog_semantic_identity(
-                        self.vault_root
+                    if (
+                        self._meta_catalog_identity(conn)
+                        != catalog_semantic_identity(self.vault_root)
+                        or not _checkpoint_policy_current(self.vault_root, target_checkpoint)
                     ):
                         if schedule_repair:
                             _schedule_runtime_catalog_repair(self.vault_root)
@@ -5832,6 +5883,12 @@ class LexicalStore:
                     self._meta_checkpoint(conn, scope)
                 ) != _checkpoint_state(checkpoint):
                     return None
+                if (
+                    not _checkpoint_policy_current(self.vault_root, checkpoint)
+                    or self._meta_catalog_identity(conn)
+                    != catalog_semantic_identity(self.vault_root)
+                ):
+                    return None
                 col = "in_vault" if scope == "vault" else "in_kb"
                 rows = conn.execute(
                     f"SELECT path, title FROM pages WHERE {col} = 1 ORDER BY path"
@@ -5867,6 +5924,8 @@ class LexicalStore:
         """
         from . import freshness as freshness_module
 
+        if recall_checkpoint is None:
+            recall_checkpoint = _admitted_catalog_checkpoint(self.vault_root, scope)
         readiness = (
             self.catalog_readiness(scope, freshness)
             if recall_checkpoint is None
@@ -5890,6 +5949,7 @@ class LexicalStore:
                 )
                 if (
                     _checkpoint_state(stored) != _checkpoint_state(target)
+                    or not _checkpoint_policy_current(self.vault_root, target)
                     or not self._schema_is_current(conn)
                     or self._meta_catalog_identity(conn)
                     != catalog_semantic_identity(self.vault_root)
