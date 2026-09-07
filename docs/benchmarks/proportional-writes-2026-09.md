@@ -55,11 +55,42 @@ dependency discovery; it makes no claim about total graph publication work.
 ## Comparative reference
 
 The preceding investigation's single paired observations are retained in the
-[shared-workflow report](durable-closure-investigation-2026-09.md). Basic Memory
+[shared-workflow report](durable-closure-investigation-2026-09.md), but its
+sentinel-only startup gate did not prove the indexed corpus size. Those pairs
+must not establish large-corpus comparative latency. Basic Memory
 is pinned to wheel version 0.23.2, SHA-256
 `a1679a16319d8a7fb9c0486033551a47dedc0fbae7f5da81444eb3c4bf0ccecb`.
 Its accepted-content storage and deferred file materialization differ from
 Exomem's file-durable commit boundary; the comparison therefore verifies final
 exact reads and public search convergence for both products.
 
-After-change paired observations and full convergence evidence are pending.
+## Incomplete-index setup diagnosis
+
+The first integrated cohort used source `f7a20cef` and the unchanged common
+driver. All five completed workflows passed exact body/read/search checks.
+However, inspecting the run-owned stores exposed a setup defect:
+
+| Product | Completed 3,800-file runs | Indexed metadata/search rows after closure |
+|---|---:|---:|
+| Exomem | 3 | 3,802 in each run |
+| Basic Memory | 2 | 103 in each run |
+
+The two timed creations account for Exomem's additional rows. Basic Memory's
+sentinel could become searchable during its first indexing batch, allowing the
+workflow to start before most fixture notes entered its resolver and search
+index. The third Basic Memory startup was interrupted when this defect was
+identified; no 8,000-page run began in this cohort.
+
+[Incomplete-index diagnostics](proportional-writes-2026-09/incomplete-index-diagnostics.json)
+retain every completed timed call, phase, correctness result, runtime and host
+provenance, and the post-run index observations. They are **invalid for indexed
+corpus-size comparison**; no comparative median or parity claim is accepted.
+Exomem's three workflow times were 17.50, 16.75 and 17.17 seconds. Its first
+creation previews were below one second, so commit work is the next diagnostic
+focus. A separate instrumented run placed the remaining edit cost mainly in
+the guarded canonical batch and index fan-out; semantic preflight and mutation
+lock acquisition were small in that observation.
+
+The corrected setup must prove the complete metadata and text-index fixture
+membership for both products before timing. Valid after-change paired
+observations and full convergence evidence are pending.

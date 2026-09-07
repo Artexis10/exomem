@@ -330,6 +330,12 @@ asserted.
 
 ## Shared Markdown diagnostic
 
+**Indexed-corpus size was not proven for these pairs.** The sentinel-only setup
+can start after Basic Memory's first indexing batch. A later reproduction
+confirmed this failure with 103 indexed notes after a 3,800-file workflow.
+Retain the observations below as historical diagnostics; they do not establish
+large-corpus comparative latency. See the [readiness correction](proportional-writes-2026-09.md#incomplete-index-setup-diagnosis).
+
 This internal diagnostic runs public write, edit, exact read and text-search
 operations over identical Markdown inputs. Each product has a fresh home and
 state directory, a persistent MCP connection and its recorded configuration.

@@ -164,6 +164,43 @@ iterations; one successful full lean corpus plus existing latency/privacy/spec
 gates runs at the delivery boundary. Real media regression checks use the existing
 public benchmark and isolated state, with no live-cell mutation.
 
+### Prove the whole fixture is indexed before comparing corpus-scale writes
+
+The first integrated comparison exposed a setup defect in the existing shared
+driver: its sentinel search can succeed after Basic Memory indexes its first
+100-file batch. Two completed 3,800-file runs each held only 103 entity rows at
+teardown, including the two timed creations. They do not establish performance
+at an indexed corpus size of 3,800. Retain these observations as incomplete-index
+diagnostics and withdraw their use, and the preceding single-pair observations'
+use, as evidence of large-corpus comparative latency.
+
+Keep the generated Markdown and timed public write/edit/read/search workflow
+unchanged. Add an initial completeness gate for BOTH products, outside the
+workflow clock. Observe only the current run's disposable SQLite stores through
+read-only connections and one transaction per observation. Require the exact
+fixture path set in the Markdown metadata table and its text-search projection:
+Basic Memory `entity` plus entity rows in `search_index`, scoped to the configured
+project; Exomem `pages` plus corresponding `fts` rows, with recall eligibility.
+Missing, duplicate, unexpected, unindexed or wrong-project fixture identities
+cannot pass. Merely seeing files on disk, a row count, or one sentinel is not a
+proof. The fixture directory is exclusive to this generated corpus.
+
+The benchmark may inspect these derived stores as pre-timing evidence; it must
+not insert rows, invoke an indexer in the live service, change product defaults,
+or replace any timed public call with an internal API. Keep existing public
+sentinel readiness and Exomem semantic mutation admission as independent gates.
+Record expected and observed membership counts/digests, proof method and schema
+identity, along with full startup duration. An unsupported schema invalidates
+the adapter; a missing or still-incomplete index remains pending until a separate
+bounded startup deadline expires. A timeout yields an incomplete setup with no
+workflow timing, never a pass over a smaller corpus. The normal per-tool timeout
+continues to bound each timed public call.
+
+The common workload still does not require optional graph convergence; retain
+the separately labelled public-sentinel/current-graph characterization. This
+setup correction does not relax the median parity target or authorize enabling
+the opt-in fast-acknowledgement path only in a benchmark environment.
+
 ## Risks / Trade-offs
 
 - A cache caption can race with a watcher event. Decline reuse on any mismatch;
