@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -15,6 +16,36 @@ common = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 sys.modules[spec.name] = common
 spec.loader.exec_module(common)
+
+
+def test_semantic_setup_retries_only_warming_and_requires_a_reviewed_draft() -> None:
+    calls = []
+
+    class Client:
+        async def call(self, tool, arguments, **kwargs):
+            calls.append((tool, arguments, kwargs))
+            if len(calls) == 1:
+                return {"success": False, "error": {"code": "MUTATION_WARMING"}}
+            return {"draft_id": "ready", "draft_hash": "hash"}
+
+    asyncio.run(common._await_exomem_mutation(Client(), timeout=1))
+
+    assert len(calls) == 2
+    assert all(tool == "remember" and args["validate_only"] for tool, args, _ in calls)
+
+
+@pytest.mark.parametrize("payload", [
+    {"success": False, "error": {"code": "MUTATION_WARMING"}},
+    {"success": False, "error": {"code": "VALIDATION_FAILED"}},
+    {"success": True},
+])
+def test_semantic_setup_rejects_timeout_refusal_and_missing_draft(payload) -> None:
+    class Client:
+        async def call(self, *args, **kwargs):
+            return payload
+
+    with pytest.raises(common.AdapterFault, match="initial public mutation"):
+        asyncio.run(common._await_exomem_mutation(Client(), timeout=0))
 
 
 def test_empty_disposable_roots_reject_nonempty_and_overlapping_paths(tmp_path: Path) -> None:

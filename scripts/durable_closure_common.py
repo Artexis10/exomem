@@ -751,6 +751,26 @@ async def _await_initial_index(client: PublicClient, *, product: str, timeout: f
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
+async def _await_exomem_mutation(client: PublicClient, *, timeout: float) -> None:
+    """Keep semantic corpus startup outside the shared warm-workflow clock."""
+    deadline = time.perf_counter() + timeout
+    while True:
+        payload = await client.call(
+            "remember",
+            {"title": "Disposable readiness preview", "note_type": "insight",
+             "content": "Public semantic admission is ready for the disposable workflow.",
+             "response_detail": "full", "validate_only": True},
+            allow_refusal=True,
+        )
+        if result_classification(payload) == "ok" and payload.get("draft_id") and payload.get("draft_hash"):
+            return
+        error = payload.get("error")
+        code = error.get("code") if isinstance(error, Mapping) else None
+        if code != "MUTATION_WARMING" or time.perf_counter() >= deadline:
+            raise AdapterFault(f"initial public mutation admission failed: {code or 'unproved draft'}")
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
 def _permit_refusal_envelopes(client: Any) -> None:
     """Keep a valid Exomem warming/refusal envelope visible to this diagnostic."""
     for owner in (client, getattr(client, "session", None)):
@@ -1023,6 +1043,8 @@ async def run_product(
                 raise AdapterFault(f"registered public MCP tools missing: {missing}")
             # Discovery/initial indexing are pre-timing setup, never an inline reindex.
             await _await_initial_index(setup_public, product=product, timeout=timeout)
+            if product == "exomem":
+                await _await_exomem_mutation(setup_public, timeout=timeout)
             clock.start_timing()
             result = await (
                 _run_basic_memory(public, marker, fixture, timeout)
