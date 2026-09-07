@@ -17,7 +17,7 @@
 - [x] 3.4 Obtain independent review approval after the reviewer reproduces topology parity, false-negative discovery and interrupted publication cases in isolated state (APPROVE on 84f3d01a after typed-identity, Windows-WAL and stale-census corrections; final targeted reviewer run: 24 passed).
 
 - [x] 3.5 Resolve independent critique of the evidence-backed foreground/background scan amendment before implementation (READY after making waiter callbacks lock-free and expressing the pause limit as a monotonic requested-wait budget with overshoot tests).
-- [ ] 3.6 Add red-first tests for exact-vault activity, nested/exception cleanup, no foreground or self-wait, bounded background progress (including fake-clock sleep budgets and scheduling overshoot), lock-free dynamic graph-waiter callbacks, and unchanged graph/due-state convergence.
+- [ ] 3.6 Add red-first tests for exact-vault activity, nested/exception cleanup, fork-child lock/scope reset, no foreground or self-wait, bounded background progress (including fake-clock sleep budgets and scheduling overshoot), lock-free dynamic graph-waiter callbacks, and unchanged graph/due-state convergence.
 - [ ] 3.7 Register complete foreground dispatcher invocations and enable cooperative checkpoints only in the existing graph and due-state background workers; preserve all publication and admission proofs.
 - [ ] 3.8 Obtain independent implementation review and rerun the measured public workflow without diagnostic patches.
 

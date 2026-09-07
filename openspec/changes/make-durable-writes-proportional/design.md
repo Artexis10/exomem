@@ -246,6 +246,10 @@ Hot per-page checks use the bound identity and a cheap comparison with the
 supplied vault spelling; they must not resolve paths, probe OS locks, inspect
 SQLite, or scan other vaults on every iteration. Scope nesting restores the
 previous value, and completed foreground scopes remove their counters.
+On platforms supporting POSIX fork, replace this helper's mutex, thread-local
+scopes and activity map in the child before it starts new work. A child must
+not inherit a lock owned by a vanished parent thread or parent-only activity
+and waiter callbacks. Follow the existing graph and mutation-lock reset hooks.
 
 Enable the scope only around builders in `GraphRebuildCoordinator._run`, the
 existing `schedule_background_rebuild` worker, and the due-state

@@ -152,3 +152,7 @@ for another vault SHALL NOT introduce a pause.
 #### Scenario: Foreground activity ends
 - **WHEN** requests finish after delaying background scans
 - **THEN** the existing workers complete through normal recovery and produce graph and due-state projections equivalent to synchronous construction without dropping queued work or weakening source-version proofs
+
+#### Scenario: A process forks while foreground activity exists
+- **WHEN** a POSIX child starts after another parent thread held the activity mutex or registered foreground work
+- **THEN** the child starts with a fresh activity mutex, empty holder map and empty background scope, so vanished parent threads cannot deadlock or delay its work
