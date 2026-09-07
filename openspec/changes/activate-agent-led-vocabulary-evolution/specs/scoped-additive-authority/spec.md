@@ -132,3 +132,45 @@ The activation record SHALL bind a minimum authority-contract reader/writer vers
 
 - **WHEN** an external custody bundle is renewed or republished for a vault requiring vocabulary authority v2
 - **THEN** the authenticated floor cannot decrease and an identity substitution cannot erase the activated contract; a floor change requires matching current serving-membership evidence
+
+### Requirement: Native owner setup binds a separate durable consent ceremony
+
+A standalone installation SHALL authenticate the configured owner in a separate browser-purpose transaction and require explicit CSRF-protected acceptance of the exact finite review. Ordinary agent credentials SHALL NOT establish owner consent. Initial policy, schema migration and vocabulary activation SHALL be separately reviewed; activation SHALL create no grants. Migration and deployment publication SHALL run only after an external maintenance runner verifies the exact managed service has stopped.
+
+#### Scenario: Preparing migration does not alter serving admission
+
+- **WHEN** an owner prepares initial migration after committing the reviewed baseline policy
+- **THEN** a separate process prepares prospective custody settings without changing the serving process environment
+- **AND** the accepted review binds the service and environment source; only successful offline migration permits publication of those settings before restart
+
+#### Scenario: Expired review cannot begin new work
+
+- **WHEN** an accepted maintenance review expires before execution begins
+- **THEN** execution refuses without publishing custody or authority
+- **AND** an expired applying review can recover only an exact previously begun transition proven by retained publication evidence and its original timely start
+
+#### Scenario: Completed maintenance still finishes its approved environment publication
+
+- **WHEN** migration completes but the process exits before the approved custody settings reach the service environment
+- **THEN** exact-receipt recovery publishes only those settings and restarts the same service without repeating authority effects
+
+#### Scenario: Later activation needs current consent
+
+- **WHEN** a reviewed deployment publication finishes after the owner review expires and vocabulary authority is not yet active
+- **THEN** deployment recovery remains available but authority activation requires a fresh owner review
+
+### Requirement: Native custody renewal is deterministic and owner-authorized
+
+An owner MAY explicitly authorize ongoing renewal of the same installation's serving proof during activation. That permission SHALL be retained atomically with completed owner review and verified against the configured owner and current attachment on each renewal. Renewal SHALL preserve identity, accepted keys, authority floor and permissions, and SHALL NOT perform semantic memory work.
+
+#### Scenario: Overnight restart recovers freshness
+
+- **WHEN** an approved standalone installation restarts after its membership proof expires
+- **THEN** the lifecycle renews its verified same-authority custody before ordinary background work
+- **AND** current serving admission uses actual current time, not the historical signature verification time
+
+#### Scenario: Interrupted renewal retains the exact target
+
+- **WHEN** renewal publication is partially applied and its target expires before restart
+- **THEN** recovery completes that exact retained target before publishing a fresh successor
+- **AND** it cannot replace identity, keys, authority floor or grants while recovering

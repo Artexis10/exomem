@@ -81,6 +81,11 @@ is not.
 
 ## Hosted boundary
 
+Standalone owner permission review reuses the local server's pinned identity
+and canonical governance machinery. Its browser routes are opt-in and remain
+separate from Hosted account administration. See
+[native memory permissions](native-memory-permissions.md) for setup and recovery.
+
 The open-source runtime remains single-vault. Hosted service turns that existing
 boundary into the tenant isolation unit: one private process/container, one
 vault mount, one state root, one log root, and unique service credentials per

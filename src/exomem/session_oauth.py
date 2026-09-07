@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import secrets
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -38,6 +39,7 @@ from .auth_sessions import (
     SessionIdentity,
     SessionStoreUnavailable,
 )
+from .native_owner_auth import NativeOwnerAuth
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +92,15 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         self._session_authority = session_authority
         self._github_cleanup_transport = github_cleanup_transport
         self.revocation_options = RevocationOptions(enabled=True)
+        self._owner_auth: NativeOwnerAuth | None = None
+
+    def enable_owner_auth(
+        self, vault_root: Path, *, allow_insecure_loopback: bool = False
+    ) -> NativeOwnerAuth:
+        self._owner_auth = NativeOwnerAuth(
+            self, vault_root, allow_insecure_loopback=allow_insecure_loopback
+        )
+        return self._owner_auth
 
     @override
     async def exchange_authorization_code(
@@ -282,6 +293,8 @@ class ExomemSessionOAuthProxy(OAuthProxy):
     def get_routes(self, mcp_path: str | None = None) -> list[Route]:
         """Keep protocol-only scopes out of protected-resource metadata."""
         routes = self._rebind_cimd_assertion_audience(super().get_routes(mcp_path))
+        if self._owner_auth is not None:
+            routes.extend(self._owner_auth.get_routes())
         if self._resource_url is None or self.issuer_url is None:
             return routes
         resource_routes = create_protected_resource_routes(
@@ -382,12 +395,75 @@ class ExomemSessionOAuthProxy(OAuthProxy):
             status_code=status_code,
         )
 
+    async def _exchange_identity(
+        self, idp_code: str, transaction: dict[str, Any]
+    ) -> dict[str, Any] | HTMLResponse:
+        idp_redirect_uri = f"{str(self.base_url).rstrip('/')}{self._redirect_path}"
+        token_params: dict[str, Any] = {
+            "url": self._upstream_token_endpoint,
+            "code": idp_code,
+            "redirect_uri": idp_redirect_uri,
+        }
+        proxy_code_verifier = transaction.get("proxy_code_verifier")
+        if proxy_code_verifier:
+            token_params["code_verifier"] = proxy_code_verifier
+        exchange_scopes = self._prepare_scopes_for_token_exchange(transaction.get("scopes") or [])
+        if exchange_scopes:
+            token_params["scope"] = " ".join(exchange_scopes)
+        token_params.update(self._extra_token_params)
+
+        try:
+            async with self._upstream_oauth_client() as oauth_client:
+                idp_tokens: dict[str, Any] = await oauth_client.fetch_token(**token_params)
+        except Exception as exchange_error:  # noqa: BLE001 - OAuth callback boundary
+            logger.error(
+                "IdP token exchange failed due to %s",
+                type(exchange_error).__name__,
+            )
+            return self._error_response(
+                "Token exchange with identity provider failed.",
+                status_code=500,
+            )
+
+        raw_access_token = idp_tokens.get("access_token")
+        if not isinstance(raw_access_token, str) or not raw_access_token:
+            idp_tokens.clear()
+            return self._error_response(
+                "Identity provider returned no usable access token.",
+                status_code=403,
+            )
+
+        proof: dict[str, Any] | None = None
+        try:
+            verified = await self._token_validator.verify_token(raw_access_token)
+            proof = self._verified_identity_proof(verified)
+        except Exception as verification_error:  # noqa: BLE001 - reject verifier failures
+            logger.warning(
+                "GitHub identity verification failed due to %s",
+                type(verification_error).__name__,
+            )
+        finally:
+            await self._cleanup_github_token(raw_access_token)
+            idp_tokens.clear()
+
+        if proof is None:
+            return self._error_response(
+                "The authorized GitHub identity is not permitted.",
+                status_code=403,
+            )
+
+        return proof
+
     @override
     async def _handle_idp_callback(
         self, request: Request
     ) -> HTMLResponse | RedirectResponse:
         """Exchange, verify, dispose, and retain only a minimal identity proof."""
         try:
+            if self._owner_auth is not None:
+                owner_response = await self._owner_auth.handle_callback(request)
+                if owner_response is not None:
+                    return owner_response
             idp_code = request.query_params.get("code")
             txn_id = request.query_params.get("state")
             error = request.query_params.get("error")
@@ -453,63 +529,9 @@ class ExomemSessionOAuthProxy(OAuthProxy):
                     )
 
             transaction = transaction_model.model_dump()
-            idp_redirect_uri = f"{str(self.base_url).rstrip('/')}{self._redirect_path}"
-            token_params: dict[str, Any] = {
-                "url": self._upstream_token_endpoint,
-                "code": idp_code,
-                "redirect_uri": idp_redirect_uri,
-            }
-            proxy_code_verifier = transaction.get("proxy_code_verifier")
-            if proxy_code_verifier:
-                token_params["code_verifier"] = proxy_code_verifier
-            exchange_scopes = self._prepare_scopes_for_token_exchange(
-                transaction.get("scopes") or []
-            )
-            if exchange_scopes:
-                token_params["scope"] = " ".join(exchange_scopes)
-            token_params.update(self._extra_token_params)
-
-            try:
-                async with self._upstream_oauth_client() as oauth_client:
-                    idp_tokens: dict[str, Any] = await oauth_client.fetch_token(
-                        **token_params
-                    )
-            except Exception as exchange_error:  # noqa: BLE001 - OAuth callback boundary
-                logger.error(
-                    "IdP token exchange failed due to %s",
-                    type(exchange_error).__name__,
-                )
-                return self._error_response(
-                    "Token exchange with identity provider failed.",
-                    status_code=500,
-                )
-
-            raw_access_token = idp_tokens.get("access_token")
-            if not isinstance(raw_access_token, str) or not raw_access_token:
-                idp_tokens.clear()
-                return self._error_response(
-                    "Identity provider returned no usable access token.",
-                    status_code=403,
-                )
-
-            proof: dict[str, Any] | None = None
-            try:
-                verified = await self._token_validator.verify_token(raw_access_token)
-                proof = self._verified_identity_proof(verified)
-            except Exception as verification_error:  # noqa: BLE001 - reject verifier failures
-                logger.warning(
-                    "GitHub identity verification failed due to %s",
-                    type(verification_error).__name__,
-                )
-            finally:
-                await self._cleanup_github_token(raw_access_token)
-                idp_tokens.clear()
-
-            if proof is None:
-                return self._error_response(
-                    "The authorized GitHub identity is not permitted.",
-                    status_code=403,
-                )
+            proof = await self._exchange_identity(idp_code, transaction)
+            if isinstance(proof, HTMLResponse):
+                return proof
 
             client_code = secrets.token_urlsafe(32)
             code_expires_at = int(time.time() + DEFAULT_AUTH_CODE_EXPIRY_SECONDS)

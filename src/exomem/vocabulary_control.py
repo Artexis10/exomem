@@ -7,14 +7,14 @@ separate trusted owner decision supplied by the control-plane callback.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
+from . import vocabulary_authority
 from .governance.principal import RequestPrincipal
 from .vocabulary_authority import (
     AuthorityScope,
@@ -24,8 +24,25 @@ from .vocabulary_authority import (
     VocabularyAuthority,
     VocabularyAuthorityUnavailable,
 )
+from .vocabulary_effects import CanonicalWriteImage
 
 _ACTIONS = frozenset({"entity.create", "entity_type.add", "relation_type.add", "edge.add"})
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _detach(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _detach(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_detach(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,11 +52,41 @@ class OwnerControlIntent:
     action: str
     principal: RequestPrincipal
     request_id: str | None = None
-    display_effects: tuple[dict[str, str], ...] = ()
-    canonical_operation: dict[str, Any] | None = None
-    grant_manifest: dict[str, Any] | None = None
+    display_effects: tuple[Mapping[str, str], ...] = ()
+    canonical_operation: Mapping[str, Any] | None = None
+    grant_manifest: Mapping[str, Any] | None = None
     authority_id: str | None = None
     binding_digest: str = ""
+    write_images: tuple[CanonicalWriteImage, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("display_effects", "canonical_operation", "grant_manifest"):
+            object.__setattr__(self, name, _freeze(getattr(self, name)))
+        object.__setattr__(self, "write_images", tuple(self.write_images))
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return detached review data without an agent bearer or owner proof."""
+
+        return {
+            "action": self.action,
+            "audience_id": self.principal.audience_id,
+            "issuer_family": self.principal.issuer_family,
+            "request_id": self.request_id,
+            "display_effects": _detach(self.display_effects),
+            "canonical_operation": _detach(self.canonical_operation),
+            "grant_manifest": _detach(self.grant_manifest),
+            "authority_id": self.authority_id,
+            "binding_digest": self.binding_digest,
+            "write_images": [
+                {
+                    "path": image.path,
+                    "before": None if image.before is None else image.before.decode("utf-8"),
+                    "after": None if image.after is None else image.after.decode("utf-8"),
+                    "role": image.role,
+                }
+                for image in self.write_images
+            ],
+        }
 
 
 def _intent(
@@ -50,25 +97,16 @@ def _intent(
     canonical_operation: dict[str, Any] | None = None,
     grant_manifest: dict[str, Any] | None = None,
     authority_id: str | None = None,
+    write_images: tuple[CanonicalWriteImage, ...] = (),
 ) -> OwnerControlIntent:
-    context = principal.verified_authorization_session
-    payload = {
-        "action": action,
-        "audience": principal.audience_id,
-        "issuer": principal.issuer_family,
-        "session": None if context is None else context.session_id,
-        "cell": None if context is None else context.cell_id,
-        "logical_vault": None if context is None else context.logical_vault_id,
-        "keyring": None if context is None else context.keyring_id,
-        "generation": None if context is None else context.credential_generation,
-        "request_id": request_id,
-        "operation": canonical_operation,
-        "grant": grant_manifest,
-        "authority_id": authority_id,
-    }
-    binding = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
+    binding = vocabulary_authority._owner_binding(  # noqa: SLF001
+        action, principal, request_id=request_id, operation=canonical_operation,
+        grant=grant_manifest, authority_id=authority_id,
+    )
+    effects = () if canonical_operation is None else tuple(
+        {"action": item["action"], "path": item["path"], "key": item.get("key") or ""}
+        for item in canonical_operation.get("effects", ())
+    )
     return OwnerControlIntent(
         action,
         principal,
@@ -77,6 +115,8 @@ def _intent(
         grant_manifest=grant_manifest,
         authority_id=authority_id,
         binding_digest=binding,
+        display_effects=effects,
+        write_images=write_images,
     )
 
 
@@ -93,9 +133,9 @@ class GrantManifest:
         raw_actions = body["actions"]
         if not isinstance(raw_actions, list) or not raw_actions:
             raise ValueError("VOCABULARY_CONTROL_INVALID")
-        actions = tuple(sorted(set(raw_actions)))
-        if any(not isinstance(action, str) or action not in _ACTIONS for action in actions):
+        if any(not isinstance(action, str) or action not in _ACTIONS for action in raw_actions):
             raise ValueError("VOCABULARY_CONTROL_INVALID")
+        actions = tuple(sorted(set(raw_actions)))
         if body["scope"] != "vault":
             # Project edge scope requires canonical endpoint-membership proof
             # from the classifier; request JSON can never provide that proof.
@@ -236,50 +276,68 @@ class VocabularyControl:
     def approve_request(
         self, *, principal: RequestPrincipal, body: Mapping[str, Any]
     ) -> str:
-        if set(body) != {"request_id"} or not isinstance(body["request_id"], str):
-            raise ValueError("VOCABULARY_CONTROL_INVALID")
-        request = self.authority.inspect_request_for_owner(body["request_id"], principal=principal)
-        intent = _intent(
-            "approve-request",
-            principal,
-            request_id=body["request_id"],
-            canonical_operation=request.as_dict(),
-        )
+        intent = self.prepare_approval(principal=principal, body=body)
         return self.authority.approve_request(
-            body["request_id"],
+            intent.request_id,
             principal=principal,
             decision=self._decision(intent),
             binding=intent.binding_digest,
         )
 
+    def prepare_approval(
+        self, *, principal: RequestPrincipal, body: Mapping[str, Any]
+    ) -> OwnerControlIntent:
+        if set(body) != {"request_id"} or not isinstance(body["request_id"], str):
+            raise ValueError("VOCABULARY_CONTROL_INVALID")
+        preview = self.authority.inspect_request_preview_for_owner(body["request_id"], principal=principal)
+        return _intent(
+            "approve-request",
+            principal,
+            request_id=body["request_id"],
+            canonical_operation=preview.operation.as_dict(),
+            write_images=preview.images,
+        )
+
     def deny_request(self, *, principal: RequestPrincipal, body: Mapping[str, Any]) -> None:
+        intent = self.prepare_denial(principal=principal, body=body)
+        self.authority.deny_request(
+            intent.request_id,
+            principal=principal,
+            decision=self._decision(intent),
+            binding=intent.binding_digest,
+        )
+
+    def prepare_denial(
+        self, *, principal: RequestPrincipal, body: Mapping[str, Any]
+    ) -> OwnerControlIntent:
         if set(body) != {"request_id"} or not isinstance(body["request_id"], str):
             raise ValueError("VOCABULARY_CONTROL_INVALID")
         request = self.authority.inspect_request_for_owner(body["request_id"], principal=principal)
-        intent = _intent(
+        return _intent(
             "deny-request",
             principal,
             request_id=body["request_id"],
             canonical_operation=request.as_dict(),
         )
-        self.authority.deny_request(
-            body["request_id"],
-            principal=principal,
-            decision=self._decision(intent),
-            binding=intent.binding_digest,
-        )
-
-    def grant(self, *, principal: RequestPrincipal, body: Mapping[str, Any]) -> str:
+    def _grant_manifest(self, *, principal: RequestPrincipal, body: Mapping[str, Any]) -> GrantManifest:
         if set(body) == {"request_id", "project_ref", "expires_at"}:
             request_id = body["request_id"]
             if not isinstance(request_id, str):
                 raise ValueError("VOCABULARY_CONTROL_INVALID")
-            manifest = GrantManifest.project_edge_from_request(
+            return GrantManifest.project_edge_from_request(
                 body,
                 self.authority.inspect_request_for_owner(request_id, principal=principal),
             )
-        else:
-            manifest = GrantManifest.from_body(body)
+        return GrantManifest.from_body(body)
+
+    def prepare_grant(
+        self, *, principal: RequestPrincipal, body: Mapping[str, Any]
+    ) -> OwnerControlIntent:
+        manifest = self._grant_manifest(principal=principal, body=body)
+        return _intent("grant", principal, grant_manifest=manifest.as_dict())
+
+    def grant(self, *, principal: RequestPrincipal, body: Mapping[str, Any]) -> str:
+        manifest = self._grant_manifest(principal=principal, body=body)
         intent = _intent("grant", principal, grant_manifest=manifest.as_dict())
         decision = self._decision(intent)
         return self.authority.grant(
@@ -293,13 +351,18 @@ class VocabularyControl:
         )
 
     def revoke(self, *, principal: RequestPrincipal, body: Mapping[str, Any]) -> None:
-        if set(body) != {"authority_id"} or not isinstance(body["authority_id"], str):
-            raise ValueError("VOCABULARY_CONTROL_INVALID")
-        authority_id = body["authority_id"]
-        intent = _intent("revoke", principal, authority_id=authority_id)
+        intent = self.prepare_revocation(principal=principal, body=body)
         self.authority.revoke(
             principal=principal,
             decision=self._decision(intent),
-            authority_id=authority_id,
+            authority_id=intent.authority_id,
             binding=intent.binding_digest,
         )
+
+    def prepare_revocation(
+        self, *, principal: RequestPrincipal, body: Mapping[str, Any]
+    ) -> OwnerControlIntent:
+        if set(body) != {"authority_id"} or not isinstance(body["authority_id"], str):
+            raise ValueError("VOCABULARY_CONTROL_INVALID")
+        authority_id = body["authority_id"]
+        return _intent("revoke", principal, authority_id=authority_id)

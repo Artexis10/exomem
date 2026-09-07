@@ -2177,7 +2177,9 @@ def stage_standalone_v3_custody(
                 attachment_id=attachment_id,
                 current_time=current_time,
             )
-            _require_vocabulary_identity_unused(control_path, keyring.logical_vault_id)
+            _require_vocabulary_identity_unused(
+                control_path, keyring.logical_vault_id, vault_root=root
+            )
             _publish_private_file(keyring_path, _keyring_bytes(keyring))
         else:
             keyring = parse_keyring(loaded.data)
@@ -2276,7 +2278,9 @@ def enroll_standalone_v3_migration(
             raise AuthorizationCustodyUnavailable
 
         if control_loaded is None:
-            _require_vocabulary_identity_unused(control_path, keyring.logical_vault_id)
+            _require_vocabulary_identity_unused(
+                control_path, keyring.logical_vault_id, vault_root=root
+            )
             provisional_control = AuthorizationControlRecord(
                 version=1,
                 keyring_id=keyring.keyring_id,
@@ -2476,7 +2480,9 @@ def complete_standalone_v4_migration(
         or control.activation_state_digest != target.activation_state_digest
     ):
         raise AuthorizationCustodyUnavailable
-    _require_vocabulary_identity_unused(external.control_path, control.logical_vault_id)
+    _require_vocabulary_identity_unused(
+        external.control_path, control.logical_vault_id, vault_root=root
+    )
 
     target_control: AuthorizationControlRecord
     if control.serving_membership_epoch == 1:
@@ -3123,7 +3129,9 @@ def _complete_standalone_attachment_transfer(
         or detached.target_registry_attachment_id != target_attachment
     ):
         raise AuthorizationCustodyUnavailable
-    _require_v1_vocabulary_artifacts_absent(external.control_path, control)
+    _require_v1_vocabulary_artifacts_absent(
+        external.control_path, control, vault_root=target
+    )
     membership_path, membership_raw, replica_id = _standalone_membership_file(
         target,
         external=external,
@@ -3343,28 +3351,45 @@ def _require_v1_vocabulary_transition(vault_root: Path, *, now: int) -> None:
         raise AuthorizationCustodyUnavailable
 
 
-def _require_vocabulary_identity_unused(control_path: Path, logical_vault_id: str) -> None:
+def _require_vocabulary_identity_unused(
+    control_path: Path,
+    logical_vault_id: str,
+    *,
+    vault_root: Path | None = None,
+) -> None:
     """Do not provision a new custody identity over a retained v2 sidecar."""
     from ..vocabulary_authority import authority_artifact_paths
+    from ..vocabulary_placement import artifact_family
 
-    marker, database = authority_artifact_paths(Path(control_path), logical_vault_id)
-    for artifact in (
-        marker,
-        database,
-        *(database.with_name(f"{database.name}{suffix}") for suffix in ("-journal", "-wal", "-shm")),
-    ):
-        if os.path.lexists(artifact):
+    try:
+        paths = (
+            authority_artifact_paths(Path(control_path), logical_vault_id)
+            if vault_root is None
+            else authority_artifact_paths(
+                Path(control_path), logical_vault_id, vault_root=Path(vault_root)
+            )
+        )
+        if any(os.path.lexists(artifact) for artifact in artifact_family(paths)):
             raise AuthorizationCustodyUnavailable
+    except AuthorizationCustodyUnavailable:
+        raise
+    except Exception:  # noqa: BLE001 - placement is a fail-closed custody boundary
+        raise AuthorizationCustodyUnavailable from None
 
 
 def _require_v1_vocabulary_artifacts_absent(
-    control_path: Path, control: AuthorizationControlRecord
+    control_path: Path,
+    control: AuthorizationControlRecord,
+    *,
+    vault_root: Path,
 ) -> None:
     """Bind an attachment transition to an artifact-free signed v1 control."""
 
     if control.version != 1 or control.vocabulary_authority_floor != 1:
         raise AuthorizationCustodyUnavailable
-    _require_vocabulary_identity_unused(control_path, control.logical_vault_id)
+    _require_vocabulary_identity_unused(
+        control_path, control.logical_vault_id, vault_root=vault_root
+    )
 
 
 def _clone_publication_barrier(point: str) -> None:
@@ -3462,7 +3487,9 @@ def _clone_standalone_exact_v4_custody(
             attachment_id=attachment_id,
             current_time=current_time,
         )
-        _require_vocabulary_identity_unused(control_path, keyring.logical_vault_id)
+        _require_vocabulary_identity_unused(
+            control_path, keyring.logical_vault_id, vault_root=root
+        )
         _publish_private_file(keyring_path, _keyring_bytes(keyring))
     else:
         keyring = parse_keyring(keyring_loaded.data)
@@ -3652,7 +3679,9 @@ def provision_standalone_custody(
                 current_time=current_time,
             )
             encoded_keyring = _keyring_bytes(keyring)
-            _require_vocabulary_identity_unused(control_path, keyring.logical_vault_id)
+            _require_vocabulary_identity_unused(
+                control_path, keyring.logical_vault_id, vault_root=root
+            )
             _publish_private_file(keyring_path, encoded_keyring)
 
         if not keyring.active_key.not_before <= current_time < keyring.active_key.not_after:
@@ -3771,6 +3800,7 @@ def enroll_initial_activation_tuple(
         _verify_registered_attachment(root, current.registry_attachment_id)
         target_control = AuthorizationControlRecord(
             version=expected_control.version,
+            vocabulary_authority_floor=expected_control.vocabulary_authority_floor,
             keyring_id=expected_control.keyring_id,
             cell_id=expected_control.cell_id,
             logical_vault_id=expected_control.logical_vault_id,
@@ -3848,6 +3878,7 @@ def acknowledge_activation_tuple(
     _verify_registered_attachment(root, current.registry_attachment_id)
     target_control = AuthorizationControlRecord(
         version=expected_control.version,
+        vocabulary_authority_floor=expected_control.vocabulary_authority_floor,
         keyring_id=expected_control.keyring_id,
         cell_id=expected_control.cell_id,
         logical_vault_id=expected_control.logical_vault_id,

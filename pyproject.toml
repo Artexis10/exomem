@@ -211,17 +211,26 @@ exclude = [
 # exomem is the real package; kb_mcp is the permanent import-compat shim.
 packages = ["src/exomem", "src/kb_mcp"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# Package the canonical service helpers directly; keep their source in scripts/.
+"scripts/owner-setup.sh" = "exomem/_service/owner-setup.sh"
+"scripts/_service-common.sh" = "exomem/_service/_service-common.sh"
+"scripts/service-transition-receipt.py" = "exomem/_service/service-transition-receipt.py"
+
 [tool.hatch.build.targets.sdist]
 # Fail closed: Hatch's broad default sdist selection can sweep untracked agent
 # scratch, local databases, and maintainer files from a dirty checkout into a
-# public source archive.  The published sdist needs only the package sources and
-# standard package metadata; tests, docs, OpenSpec, plugin, and other public
+# public source archive. The sdist needs package sources, canonical service
+# helpers and standard metadata; tests, docs, OpenSpec, plugin, and other public
 # inputs are validated separately by the explicit privacy inventory.
 include = [
     "/src",
     "/LICENSE",
     "/README.md",
     "/pyproject.toml",
+    "/scripts/owner-setup.sh",
+    "/scripts/_service-common.sh",
+    "/scripts/service-transition-receipt.py",
 ]
 
 [tool.pytest.ini_options]

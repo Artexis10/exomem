@@ -101,11 +101,12 @@ class LocalRuntimeActivation:
     """Start local background workers after transport liveness is observable."""
 
     def __init__(self, vault_root: Path, *, fallback_seconds: float = 5.0) -> None:
-        from . import readiness, warmup
+        from . import native_owner_renewal, readiness, warmup
 
         if warmup.warmup_enabled():
             readiness.manage_runtime()
         self.vault_root = vault_root
+        self.owner_custody_renewal = native_owner_renewal.OwnerCustodyRenewal(vault_root)
         self.fallback_seconds = fallback_seconds
         self._lock = threading.Lock()
         self._started = False
@@ -283,6 +284,7 @@ class LocalRuntimeActivation:
 
         @lifespan
         async def _lifespan(_server):
+            self.owner_custody_renewal.start()
             timer = threading.Timer(self.fallback_seconds, self.start)
             timer.daemon = True
             with self._lock:
@@ -299,6 +301,7 @@ class LocalRuntimeActivation:
                     thread = self._thread
                 if timer is not None:
                     timer.cancel()
+                await anyio.to_thread.run_sync(self.owner_custody_renewal.stop)
                 self._stop_background_workers()
                 if thread is not None and thread is not threading.current_thread():
                     await anyio.to_thread.run_sync(thread.join)

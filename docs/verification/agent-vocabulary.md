@@ -190,3 +190,31 @@ pod-lifetime, read-only custody mount cannot supply that lifecycle. Mixed
 additive and separately controlled rewrite effects remain refused until their
 separate approval can be verified. The active OpenSpec change retains those
 integration and acceptance tasks.
+
+### Native owner integration
+
+The [local owner workflow](../native-memory-permissions.md) composes the existing
+GitHub identity verifier, canonical policy authoring, schema migration,
+serving-membership publication and vocabulary authority. Exact previews are
+retained in external private control storage. Activation creates no grants;
+subsequent grants and exact approvals require separate browser acceptance.
+
+`test_server_owner_startup.py` exercises actual FastMCP composition from owner
+login through policy preview and canonical commit, substituting only the
+external identity exchange. Missing cookies, agent-only credentials and an
+incorrect submission origin cannot approve the review. The native integration
+test runs policy, child-process migration preparation, offline migration,
+floor publication and activation, then commits a type addition through
+`schema_memory` under a grant. Revoking that grant prevents the next addition.
+
+Recovery tests cover expired unstarted reviews, exact interrupted publication,
+environment publication after ledger completion, and expiry while waiting for
+the activation guard. Packaging tests build a wheel from the source archive,
+compare its three service helpers with their canonical sources, and invoke the
+installed maintenance module. Runtime tests bind ongoing renewal to the
+approved owner, installation and keyring.
+
+These disposable checks do not claim live owner consent or Hosted activation.
+Hosted controls belong in the existing Substrate Exomem Home, using its account
+session and deployment lifecycle. The native page is registered only for a
+configured authenticated standalone server.

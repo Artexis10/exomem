@@ -65,6 +65,15 @@ require reimplementing the behavior already exercised by the shipped tests.
 - [ ] 4.3 Implement pending approval request/status variants and a trusted user-control approval ceremony distinct from ordinary agent credentials; verify agent self-approval, forged confirmation fields and retrieved permission text cannot mint approval, while an authenticated user approves the displayed exact effects. Inspect the real control surface with Chrome DevTools if rendered UI changes.
 - [x] 4.4 Implement one-shot exact-action approval and scoped grant evaluation over canonical payloads/targets; verify single operation-identity reservation, proven pre-commit retry, uncertain-outcome recovery, refusal under a new identity, out-of-scope endpoints, project-label laundering, global registry effects, changed reviewed hashes and unsupported future actions.
 
+### Owner integration implementation steps (task 4.3)
+
+- [ ] 4.3a Persist and validate exact canonical write-image previews; share immutable intent preparation and execution binding; reject incomplete or stale approval payloads.
+- [ ] 4.3b Centralize configurable durable authority placement across runtime and custody guards, including legacy-artifact and missing-store refusal.
+- [ ] 4.3c Add the native owner-purpose identity transaction and explicit browser acceptance, isolated from ordinary MCP credentials; wire finite control routes through startup.
+- [ ] 4.3d Compose explicitly reviewed initial policy, supported migration, planned deployment successor and no-grants activation in resumable native setup; preserve quiescence and recovery invariants.
+- [ ] 4.3e Exercise the owner workflow in a disposable running installation with Chrome DevTools, verify denial/replay/staleness cases, and document the live owner acceptance procedure.
+- [ ] 4.3f Extend the existing Substrate Exomem Home and account session for Hosted owner review; bind displayed cell previews to owner acceptance, wire the private decision verifier, and publish floor 2 through the existing Hosted deployment lifecycle. Never expose the native owner login in a Hosted cell.
+
 ## 5. Enforcement and recovery gates
 
 - [ ] 5.1 Add failing complete-before/after effect-classification tests for typed writers, generic file creation/replacement, imports and registry saves; verify every route enters the same authority gate in v2, a permitted type addition mixed with an unauthorized existing-definition change refuses atomically, and entity creation cannot smuggle connections or a new project-key registration through an entity-only grant.

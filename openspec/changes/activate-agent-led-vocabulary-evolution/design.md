@@ -95,6 +95,100 @@ Add pure protocol/state tests before adapters, then end-to-end cases for real en
 
 Run a small, reviewed ordinary-domain acceptance cohort without vocabulary hints. Preserve input, delivered considerations, agent decisions, tool traces and retrieval/traversal results. Include negative cases and compare against the current generic-only/missed-enrichment behaviour. Success is the supported outcome per case; counts of new labels or edges are descriptive, not a pass criterion. Live KB writes require explicit scope approval or a valid live grant; never seed private registries to manufacture a success metric.
 
+### 7. Native owner integration
+
+This delivery completes the standalone installation first. Substrate already
+owns Hosted Exomem Home, public accounts, browser sessions and cell routing.
+Hosted owner approval must extend that existing surface and reuse its account
+session; it must not register the native GitHub ceremony or a second dashboard.
+Shared exact previews, authority records and enforcement stay in Exomem. Hosted
+decision attestation and floor publication remain explicit integration work.
+
+The standalone installation reuses its pinned GitHub identity verifier for a
+separate browser owner ceremony. A verified provider callback establishes
+identity; only a subsequent CSRF-protected submission accepts the displayed
+intent. MCP clients, client registration, ordinary scopes and agent sessions
+cannot request owner purpose. Server-held transactions distinguish the owner
+flow, use short-lived HttpOnly cookies, and bind owner identity, vault, action,
+exact intent digest, expiry and a one-shot ceremony ID. The agent receiving
+authority remains the original audience; browser identity never replaces it.
+
+One canonical intent builder supplies both preview and execution. Prepared
+values are deeply immutable, preview never invokes the consent callback, and
+execution rereads current facts. Pending exact requests retain the complete
+canonical before/after write images captured before staging cleanup. Decoding
+must reproduce the classifier's existing digest, including paths, hashes,
+roles and effects. Human review displays actual definitions and page changes.
+Legacy hash-only requests remain inspectable, but exact approval requires a
+fresh complete proposal. Preview resource bounds refuse oversized proposals
+without truncation; they impose no limit on retained knowledge.
+
+Resolve authority artifacts centrally from an explicitly configured durable
+external directory when present. Admission, activation, custody transitions,
+republishing and recovery use the same resolver and inspect legacy colocated
+artifacts and SQLite sidecars. Ambiguous placement or missing activated storage
+refuses writes; there is no silent move or fallback to v1.
+
+Initial setup has its own finite plan because authorization sessions do not
+exist yet. When governance policy is absent, explicitly review a canonical
+scope named `Existing access`, with `paths: ["**"]` and
+`default_deny: false`, preserving existing disclosure and transport boundaries.
+Create no rules or grants. Commit accepted policy through canonical governance
+authoring, initialize the ordinary store, then compose the existing
+`prepare_forward_migration`, `stage_forward_migration` and
+`commit_forward_migration` coordinator. Show and bind the migration plan digest.
+The browser never runs migration inside the serving process. It records an
+accepted, expiring setup request in durable external control storage and returns
+`maintenance_required`. A local maintenance runner verifies that acceptance,
+resolves the exact service/interpreter/state binding, stops only that service,
+and proves its captured worker and listener are stopped using the existing
+service-manager helpers. It rechecks the accepted plan digest, executes the
+coordinator with its verified backup and membership publication, and restarts
+the same service only after proving a serviceable state. Partial or uncertain
+migration remains stopped with its recovery checkpoint. The runner does not
+upgrade packages or drain indexes. Automatic launch requires a separate
+user-manager unit; a child in the stopped service's cgroup is insufficient.
+The initial implementation may expose the accepted request through a local
+operator command, with that maintenance step stated explicitly in the UI.
+Do not weaken policy validation, pre-provision never-enrolled
+custody, or call test-only schema migration shortcuts.
+
+Prospective custody paths are prepared in a separate process. Merely configuring
+missing custody files changes admission, so the serving environment stays
+unconfigured until initial policy is committed and the accepted migration has
+succeeded. The maintenance review binds the actual service unit, interpreter,
+runtime version and exact environment source. After migration the runner
+persists only the four approved custody settings before restarting.
+
+An accepted review acquires a durable `started_at` when execution begins before
+expiry. Expired recovery additionally requires exact on-disk partial or completed
+publication evidence; an applying row or inert staged plan alone is insufficient.
+Recovery completes only that original transition, using actual current time for
+serving admission. A completed ledger result and its approved environment
+publication are independently resumable. If the deployment step finishes after
+consent expires, a new authority activation requires a fresh owner review.
+
+Activation first prepares and displays the exact floor-2 deployment successor
+without publishing it. Only after owner acceptance does deployment serialization
+publish the authenticated control and matching serving membership. The accepted
+setup binds the owner, vault and deployment transition across subsequent
+session opening; a final session-bound activation continuation revalidates the
+actual published state. Activate with no grants, then review bounded grants or
+exact actions separately. Store no agent bearer in prepared continuations.
+Hosted adapters may supply the same trusted decision contract from their own
+owner controller. Live setup remains an actual owner ceremony, never an agent
+assertion of consent.
+
+Activation explicitly includes ongoing mechanical renewal of the same
+installation's signed serving proof. Completion records that permission
+atomically with the original owner review. A local lifecycle worker verifies
+the retained owner and attachment, renews before membership expiry and repairs
+overnight expiry before ordinary workers start. Renewal preserves keys,
+identity, authority floor and permissions; it performs no semantic reasoning.
+Every publication retains its exact recovery checkpoint. Expired partial
+renewal finishes the original signed target before creating a fresh successor,
+and only actual-current custody can be admitted for serving.
+
 ## Risks / Trade-offs
 
 - Advisory saturation → fingerprinted decisions, resolution from actual state, one compact item per write and explicit pagination.
