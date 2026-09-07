@@ -233,6 +233,43 @@ def test_parent_publishes_handed_result_and_requeues_only_remaining_stages(
     assert remaining is not None and not remaining.do_ocr and remaining.do_clip
 
 
+def test_parent_represents_binary_stale_result_as_pending_fresh_claim(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="parent-binary-stale.mp3")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    before = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+    identity = media_worker._binary_identity(binary)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="extraction",
+        sidecar_before_hash=before,
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"text": "stale binary transcript", "engine": "test"},
+    )
+    binary.write_bytes(b"replacement media")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_a, **_k: True)
+
+    worker._publish_parent_result(store.pending_results()[0])
+
+    body = sidecar.read_text(encoding="utf-8")
+    assert "processing_state: pending" in body
+    assert "processing_error: media identity changed" in body
+    assert "stale binary transcript" not in body
+    assert store.pending_result_count() == 0
+    requeued = store.get(claimed.id)
+    assert requeued is not None and requeued.state == media_jobs.PENDING and requeued.do_ocr
+
+
 def test_parent_recovers_prepared_target_without_replacing_sidecar(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1366,7 +1403,9 @@ def test_changed_media_identity_is_automatically_reconciled_without_retry(
     )
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
-    assert media_jobs.status(vault)["jobs"] == []
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+    [pending] = media_jobs.status(vault)["jobs"]
+    assert pending["state"] == media_jobs.PENDING
     assert "processing_state: pending" in sidecar.read_text(encoding="utf-8")
 
     reconciled = media_processing.reconcile_media(vault, binary)
@@ -1406,11 +1445,12 @@ def test_pending_sidecar_edit_during_durable_asr_is_persisted_as_retryable_failu
     )
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
 
     [failed] = media_jobs.status(vault)["jobs"]
     assert failed["state"] == media_jobs.FAILED
     assert failed["retryable"] is True
-    assert failed["error"] == "stale extraction: sidecar content changed"
+    assert failed["error"] == "stale media result: sidecar content changed"
     assert failed["next_action"] == "review the sidecar changes, then retry media processing"
     assert "USER CANONICAL EDIT" in sidecar.read_text(encoding="utf-8")
     assert "stale transcript" not in sidecar.read_text(encoding="utf-8")

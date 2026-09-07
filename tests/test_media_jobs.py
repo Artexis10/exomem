@@ -101,6 +101,26 @@ def test_failed_result_remains_join_pending_until_parent_finalizes(vault: Path) 
     assert store.pending_result_count() == 1
 
 
+def test_result_bearing_terminal_claim_rejects_legacy_mark(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+    claimed = store.claim_next()
+    assert claimed is not None
+    assert store.record_result(
+        claimed,
+        kind="failure",
+        sidecar_before_hash="a" * 64,
+        binary_identity={"stat": [1, 2, 3, 4, 5], "sha256": "b" * 64},
+        payload={"error": "broken input", "next_action": "replace it"},
+        terminal_state=media_jobs.FAILED,
+    )
+
+    assert not store.mark(claimed.id, media_jobs.BLOCKED, "stale repair")
+    current = store.get(claimed.id)
+    assert current is not None and current.state == media_jobs.FAILED
+    assert store.pending_result_count() == 1
+
+
 def test_failed_result_prepares_and_finalizes_against_its_terminal_claim(vault: Path) -> None:
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(_job(vault))

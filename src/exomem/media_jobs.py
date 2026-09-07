@@ -993,7 +993,6 @@ class MediaJobStore:
             raise ValueError("media result limit must be a positive integer")
         conn = self._connect()
         try:
-            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 """
                 SELECT jobs.*, media_job_results.schema_version,
