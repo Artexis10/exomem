@@ -198,7 +198,8 @@ pending fence into its permanent post-retirement rollback rule. `recover`
 resumes only a recorded operation journal; it is not an
 alternate unreviewed plan path.
 
-The generated command schema is a closed discriminated union
+The generated structural command schema and mandatory runtime validator derive
+from one closed discriminated union
 `exomem.consolidate-memory-request/v1`, not one flat bag of optional fields. All
 variants require `schema` and `action`; all strings are NFC and bounded to 512
 UTF-8 bytes unless a smaller bound is stated; ids are canonical lowercase UUIDv4
@@ -219,6 +220,19 @@ contingency facts behind it. Opaque refs/cursors/render-session
 refs are 1..512 UTF-8 bytes, contain no NUL, and are never path-interpreted.
 Revisions and page ordinals are JSON integers (not strings/floats), with page
 ordinals 0..2^31-1. The enum spellings in the table are closed.
+
+JSON Schema describes the closed wire structure and standard-keyword bounds;
+it is not the complete admission boundary. The same mandatory semantic validator
+runs on MCP, REST, CLI, and Hosted after trusted owner admission and before
+coercion or action-specific work. It enforces valid UTF-8, NFC, byte limits,
+exact decoded integers excluding booleans/integral floats, and conditions that
+require authoritative run state. Raw decoders reject duplicate keys before
+object construction loses them. Adapters preserve decoded values rather than
+normalizing/coercing rejected input into validity, and no shape-only validator
+can authorize dispatch. Generated descriptions document these semantic checks;
+they do not claim that stock JSON Schema enforces byte/NFC/decoded-number
+semantics. Parity tests compare full admission across all surfaces, separately
+covering structural negatives and structurally admissible semantic negatives.
 
 | Action | Required action fields | Optional action fields | Forbidden notes |
 |---|---|---|---|

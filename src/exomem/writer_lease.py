@@ -4733,6 +4733,19 @@ def _consolidation_command_admission(
         mutation_request_id: str | None = None,
         **kwargs: Any,
     ) -> Any:
+        if command.name == "consolidate_memory":
+            from .governance import consolidation_owner
+            from .governance.principal import current_principal
+
+            principal = current_principal()
+            now = int(time.time())
+            consolidation_owner.require_injected_owner(principal, now=now)
+            if not injected or not isinstance(injected[0], (Path, str)):
+                raise consolidation_owner.ConsolidationOwnerUnavailable
+            consolidation_owner.require_bound_request(
+                Path(injected[0]), principal=principal, arguments=kwargs, now=now,
+            )
+
         def invoke() -> Any:
             return function(
                 command,

@@ -238,7 +238,8 @@ transition SHALL be identical.
 
 ### Requirement: Every action is one closed tagged request with explicit retry identity
 
-Generated and runtime validation SHALL use the same closed discriminated union
+Generated structural schemas and mandatory runtime validation SHALL derive from
+the same closed discriminated union
 `exomem.consolidate-memory-request/v1`. Every variant SHALL require `schema` and
 `action`, reject unknown/duplicate/null/cross-action fields, accept NFC bounded
 strings and canonical lowercase UUIDv4 ids, and treat artifact/token/attestation
@@ -262,6 +263,20 @@ bytes, contain no NUL, and SHALL not be interpreted as a filesystem path. Enum
 spellings shown below are exhaustive. Revisions, page ordinals, and limits SHALL
 be JSON integers, never strings or floats; limits are 1..200, page ordinals are
 0..2^31-1, and revisions are 0..2^53-1.
+
+Generated JSON Schema SHALL describe the closed request structure, action
+branches, required/forbidden fields, enums, and standard-keyword bounds. Passing
+that structural schema alone SHALL NOT admit a request. Every MCP, REST, CLI,
+and Hosted adapter SHALL invoke the same mandatory semantic validator, after
+trusted owner admission and before coercion or action-specific work, to enforce
+valid UTF-8, NFC, byte-length bounds, exact decoded integer types (excluding
+booleans and integral floats), and conditions derived from trusted run state.
+The raw decoder SHALL reject duplicate keys before object construction loses
+them. Adapters SHALL preserve decoded string and numeric values for semantic
+validation rather than normalizing or coercing an invalid request into validity.
+These checks SHALL remain unconditional; no schema-only or shape-only path may
+dispatch work. Generated descriptions SHALL identify the mandatory semantic
+checks without claiming that standard JSON Schema keywords enforce them.
 
 | Action | Required fields beyond `schema`,`action` | Optional/conditional fields | Forbidden |
 |---|---|---|---|
@@ -677,6 +692,21 @@ content-free sealed outcomes, idempotent retry terminals, and trusted-context
 handling across MCP, REST, CLI, and v5 Hosted. OpenAPI and generated capability
 documentation SHALL describe the same finite schemas, owner-inclusive seal,
 three distinct approvals, and Exomem-mediated enforcement boundary.
+
+Parity SHALL mean identical full admission outcomes across surfaces, using the
+shared structural definition, raw duplicate-key rejection, and mandatory semantic
+validator together. Tests SHALL distinguish structurally invalid requests from
+structurally admissible values that fail semantic validation. They SHALL include
+non-NFC strings, invalid UTF-8 strings, multibyte strings exceeding their byte
+bound, booleans and integral floats in integer fields, and missing or mismatched
+trusted run-state conditions. A stock JSON Schema validator accepting a semantic
+negative SHALL NOT count as full admission or justify weakening a runtime rule.
+
+#### Scenario: Structural acceptance cannot bypass semantic validation
+
+- **WHEN** a request passes the generated structural schema but violates a required byte, Unicode, exact-integer, or trusted-run-state rule
+- **THEN** the mandatory shared validator refuses it on MCP, REST, CLI, and Hosted before action-specific work
+- **AND** adapters neither coerce it into validity nor dispatch through a shape-only validation path
 
 #### Scenario: Generated schema changes are reviewed
 

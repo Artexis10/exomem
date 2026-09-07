@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .authorization_session_lifecycle import AuthorizationSessionContext
+    from .consolidation_owner import ConsolidationOwnerContext
 
 # The vault's own operator: stdio MCP, the CLI, the shared REST key, and any
 # in-process/library call with no surface bound.
@@ -89,6 +90,7 @@ class RequestPrincipal:
     resolved: bool = True
     issuer_family: str | None = None
     verified_authorization_session: AuthorizationSessionContext | None = None
+    consolidation_owner_context: ConsolidationOwnerContext | None = None
 
     def with_purpose(self, purpose: str | None) -> RequestPrincipal:
         """Layer a per-call declared purpose on without mutating the binding."""
@@ -112,6 +114,7 @@ class RequestPrincipal:
             authorization_session_id=context.session_id if context is not None else None,
             issuer_family=issuer_family,
             verified_authorization_session=context,
+            consolidation_owner_context=None,
         )
 
 

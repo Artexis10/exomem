@@ -22,7 +22,12 @@ from starlette.responses import JSONResponse
 from . import capabilities, cf_access, cli_ops, edit_operations, runtime_resources, upload_tokens
 from . import commands as commands_module
 from .command_surface import canonical_request_id
-from .governance import authorization_request, authorization_transport
+from .governance import (
+    authorization_request,
+    authorization_transport,
+    consolidation_owner,
+    consolidation_request,
+)
 from .server_transfer import TransferConfig
 
 _log = logging.getLogger(__name__)
@@ -310,7 +315,7 @@ def register_rest_facade(
             )
         return None, principal_scope
 
-    async def _rest_body(request: Request) -> dict | None:
+    async def _rest_body(request: Request, *, consolidation: bool = False) -> dict | None:
         try:
             raw = await request.body()
         except Exception:  # noqa: BLE001
@@ -318,7 +323,7 @@ def register_rest_facade(
         if not raw or not raw.strip():
             return {}
         try:
-            data = json.loads(raw)
+            data = consolidation_request.decode_request_json(raw) if consolidation else json.loads(raw)
         except Exception:  # noqa: BLE001
             return None
         return data if isinstance(data, dict) else None
@@ -364,7 +369,11 @@ def register_rest_facade(
                     credential=request_carrier.consume(),
                     now=int(time.time()),
                 )
-                body = await _rest_body(request)
+                if _cmd.name == "consolidate_memory":
+                    consolidation_owner.require_local_owner_session(
+                        admission.principal, now=int(time.time()),
+                    )
+                body = await _rest_body(request, consolidation=_cmd.name == "consolidate_memory")
                 if body is None:
                     raise cli_ops.OpError("INVALID_BODY", "request body must be a JSON object")
                 forbidden_identity_fields = {
@@ -378,11 +387,18 @@ def register_rest_facade(
                 }
                 if forbidden_identity_fields.intersection(body):
                     raise authorization_request.AuthorizationContextUnavailable
-                rule = authorization_request.credential_rule(_cmd.name, body)
-                bound_principal = authorization_request.enforce_credential_rule(
-                    admission,
-                    rule,
-                )
+                if _cmd.name == "consolidate_memory":
+                    bound_principal = await run_in_threadpool(
+                        consolidation_owner.bind_local_owner,
+                        vault_root, principal=admission.principal,
+                        arguments=body, now=int(time.time()),
+                    )
+                else:
+                    rule = authorization_request.credential_rule(_cmd.name, body)
+                    bound_principal = authorization_request.enforce_credential_rule(
+                        admission,
+                        rule,
+                    )
                 if _cmd.name == "edit_memory":
                     body = edit_operations.normalize_edit_surface_arguments(body)
                 kwargs = cli_ops.coerce(
@@ -426,6 +442,8 @@ def register_rest_facade(
                     status_code=cli_ops.http_status_for(err["code"]),
                 )
             except (
+                consolidation_owner.ConsolidationOwnerUnavailable,
+                consolidation_request.ConsolidationRequestUnavailable,
                 authorization_request.AuthorizationContextUnavailable,
                 authorization_request.AuthorizationRouteUnclassified,
                 cli_ops.OpError,
