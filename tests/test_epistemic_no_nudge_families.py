@@ -280,9 +280,11 @@ def _f21_runtime_snapshot(vault: Path):
 
     from epistemic.projectors.exomem_vault import VaultProjector
 
-    return VaultProjector(vault, runtime_surfaces=True).project(
-        phase="p1-recurrence", taken_at="2026-08-16T00:00:00Z"
-    )
+    return VaultProjector(
+        vault,
+        runtime_surfaces=True,
+        declared_entity_subjects=corpus.F21_RUNTIME_REFERENTS.values(),
+    ).project(phase="p1-recurrence", taken_at="2026-08-16T00:00:00Z")
 
 
 def _f21_signals(snapshot, subject: str) -> dict[str, str]:
@@ -380,6 +382,35 @@ def test_both_f21_positives_surface_from_the_real_runtime(f21_vault: Path) -> No
         corpus.F21_RUNTIME_REFERENTS["f21-subject-lower"],
         corpus.F21_RUNTIME_REFERENTS["f21-subject-cyrillic"],
     }, surfaced
+
+
+def test_f21_declared_subjects_preserve_pre_gate_counts_and_default_projection(
+    f21_vault: Path,
+) -> None:
+    """Declared names measure recurrence before the detector decides eligibility."""
+
+    from epistemic.projectors.exomem_vault import VaultProjector
+
+    default = VaultProjector(f21_vault).project(
+        phase="p1-recurrence", taken_at="2026-08-16T00:00:00Z"
+    )
+    named_but_default = VaultProjector(
+        f21_vault,
+        declared_entity_subjects=corpus.F21_RUNTIME_REFERENTS.values(),
+    ).project(phase="p1-recurrence", taken_at="2026-08-16T00:00:00Z")
+    assert named_but_default == default
+
+    snapshot = _f21_runtime_snapshot(f21_vault)
+    assert "benchmark:declared_entity_subject_counts(vault)" in snapshot.projector.endpoints_used
+    for identity in corpus.F21_RUNTIME_REFERENTS.values():
+        item = snapshot.item(identity)
+        assert item is not None
+        assert item.raw["page_count"] == "3"
+        assert item.raw["source_count"] == "3"
+
+    twin = snapshot.item(corpus.F21_RUNTIME_REFERENTS["f21-twin-incidental"])
+    assert twin is not None
+    assert "reusable_facts" not in twin.raw
 
 
 def test_the_f21_twin_is_absent_on_every_real_f21_surface(f21_vault: Path) -> None:
@@ -533,22 +564,15 @@ def test_the_real_runtime_f21_positives_go_red_when_the_ordinary_text_lane_is_di
     )
     snapshot = _f21_runtime_snapshot(f21_vault)
 
-    # `unsupported`, pinned exactly, and the pin is a declaration rather than a
-    # preference. The runtime names an identity only once the audit has raised a
-    # finding for it, so a positive that stops surfacing loses its snapshot item
-    # and the predicate reports "not present" rather than "no signal". Scoring
-    # treats `unsupported` as neutral, not as a miss, so this projection cannot
-    # yet produce the `fail` that PREREGISTRATION.md §4 means when it says an
-    # identity recurring across the frozen number of distinct sources must
-    # surface. Closing that gap needs the pre-gate page/origin counts projected
-    # for every declared subject; it is named as follow-up evidence on 6.5 and
-    # is deliberately not implemented here.
+    # The declared subjects retain their observed page and origin counts even
+    # when the ordinary-text detector yields no candidate. The assertion can
+    # therefore distinguish missing detection from an absent subject.
     for label in ("f21-subject-lower", "f21-subject-cyrillic"):
         identity = corpus.F21_RUNTIME_REFERENTS[label]
         result = resolve("entity_candidate_surfaced_from_recurrence")(
             AssertionContext(snapshot=snapshot, subject=identity)
         )
-        assert result.outcome == "unsupported", f"{label}: {result.evidence}"
+        assert result.outcome == "fail", f"{label}: {result.evidence}"
         assert _f21_signals(snapshot, identity) == {}, label
 
     synthetic = resolve("entity_candidate_surfaced_from_recurrence")(
