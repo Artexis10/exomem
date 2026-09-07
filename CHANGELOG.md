@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.75.0](https://github.com/Artexis10/exomem/compare/v0.74.0...v0.75.0) (2026-09-07)
+
+
+### Features
+
+* **hosted:** stage gateway infrastructure and acceptance runner ([#1100](https://github.com/Artexis10/exomem/issues/1100)) ([db7c226](https://github.com/Artexis10/exomem/commit/db7c226913ea8db0bdedf3061bf3d0bcc0a7f152))
+* keep evidence workflows responsive during indexing ([#1101](https://github.com/Artexis10/exomem/issues/1101)) ([0aa3b7e](https://github.com/Artexis10/exomem/commit/0aa3b7e51262cecb768dc6e1555ba6db6765e89d))
+* **vocabulary:** guide agent-led structure with reviewed decisions ([#1105](https://github.com/Artexis10/exomem/issues/1105)) ([b78e6ca](https://github.com/Artexis10/exomem/commit/b78e6ca81bc803d007a942baa108040d3048f391))
+
+
+### Bug Fixes
+
+* harden hosted service acceptance evidence ([#1115](https://github.com/Artexis10/exomem/issues/1115)) ([38754bd](https://github.com/Artexis10/exomem/commit/38754bde5b4a157c7837a730497f0d28af600bee))
+* reject redacted values before hosted secret delivery ([#1116](https://github.com/Artexis10/exomem/issues/1116)) ([fd42dcd](https://github.com/Artexis10/exomem/commit/fd42dcd49fe6af95d6160b147c6339c42f7e8d77))
+* **vocabulary:** keep effect defaults compatible with Python 3.11 ([#1117](https://github.com/Artexis10/exomem/issues/1117)) ([460b99d](https://github.com/Artexis10/exomem/commit/460b99dc69512b1e65dce61fd48dacb25fe5286f))
+
 ## [0.74.0](https://github.com/Artexis10/exomem/compare/v0.73.1...v0.74.0) (2026-09-07)
 
 
