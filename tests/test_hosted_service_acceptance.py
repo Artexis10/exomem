@@ -403,3 +403,163 @@ def test_cli_runs_producer_shaped_initialize_capture_and_fresh_cited_recall(tmp_
     finally:
         server.shutdown()
         thread.join()
+
+
+def test_benchmark_uses_five_concurrent_tenant_clients_and_never_passes_incomplete_samples(tmp_path: Path) -> None:
+    runner = _load()
+    requests: list[dict[str, Any]] = []
+    request_lock = threading.Lock()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            with request_lock:
+                requests.append({"method": request["method"], "authorization": self.headers["Authorization"]})
+            if request["method"] == "initialize":
+                result: dict[str, Any] = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "Hosted Exomem"}}
+            elif request["method"] == "notifications/initialized":
+                result = {}
+            elif request["method"] == "tools/list":
+                result = {"tools": [{"name": "remember"}, {"name": "ask_memory"}, {"name": "read_memory"}]}
+            else:
+                tool = request["params"]["name"]
+                if tool == "ask_memory":
+                    result = {"structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/corpus.md", "text": "Synthetic acceptance note 999."}]}}}
+                elif tool == "read_memory":
+                    result = {"structuredContent": {"result": {"content": "Synthetic acceptance note 999."}}}
+                else:
+                    result = {"structuredContent": {"result": {"outcome": "committed"}}}
+            body = json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    base = f"http://127.0.0.1:{server.server_port}"
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        config = _config()
+        config["mcp_endpoint"] = base + "/api/exomem/mcp/v1"
+        config["oauth"]["resource"] = config["mcp_endpoint"]
+        config["oauth"]["authorization_server_metadata"] = base + "/.well-known/oauth-authorization-server/api/exomem/oauth"
+        config_path = _write_config(tmp_path, config)
+        acceptance = runner.AcceptanceRunner.from_config(config_path, state_dir=tmp_path / "state", run_id="benchmark-001", allow_loopback_fixture=True)
+        acceptance.prepare()
+        corpus = runner.generate_synthetic_corpus(acceptance.run_dir / "fixtures" / "corpus")
+        acceptance.register_fixture(acceptance.run_dir / "fixtures" / "corpus")
+        manifest = acceptance.manifest()
+        manifest["stages"]["performance"] = {"status": "pending", "fixture": corpus}
+        acceptance._write_manifest(manifest)
+        for tenant in ("synthetic", "isolation"):
+            acceptance.save_tokens({"access_token": f"{tenant}-access", "refresh_token": f"{tenant}-refresh"}, tenant=tenant)
+
+        acceptance.seed_corpus()
+        assert runner.main(["benchmark", "--config", str(config_path), "--state-dir", str(tmp_path / "state"), "--run-id", "benchmark-001", "--resume"], allow_loopback_fixture=True) == 0
+
+        evidence = acceptance.manifest()["stages"]["performance"]["evidence"]
+        assert evidence["clients"] == 5
+        assert evidence["warm_samples_per_operation"] == 100
+        assert evidence["cold_client_resets"] == 20
+        assert evidence["cold_reset_semantics"] == "new MCPClient instance; no service, process, tenant, or storage reset"
+        assert {sample["authorization"] for sample in requests} == {"Bearer synthetic-access", "Bearer isolation-access"}
+        assert len([sample for sample in requests if sample["method"] == "initialize"]) == 124
+
+        incomplete = runner.AcceptanceRunner.from_config(config_path, state_dir=tmp_path / "state", run_id="benchmark-002", allow_loopback_fixture=True)
+        incomplete.prepare()
+        for tenant in ("synthetic", "isolation"):
+            incomplete.save_tokens({"access_token": f"{tenant}-access", "refresh_token": f"{tenant}-refresh"}, tenant=tenant)
+        with pytest.raises(runner.AcceptanceError, match="corpus"):
+            incomplete.run_benchmark()
+        assert incomplete.manifest()["stages"]["performance"]["status"] == "pending"
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_continuity_rotates_persisted_tokens_then_proves_service_use_after_fleet_window(tmp_path: Path) -> None:
+    runner = _load()
+    token_requests: list[dict[str, list[str]]] = []
+    mcp_authorizations: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            assert self.path == "/.well-known/oauth-authorization-server/api/exomem/oauth"
+            self._json({"issuer": base + "/api/exomem/oauth", "authorization_endpoint": base + "/api/exomem/oauth/authorize", "token_endpoint": base + "/api/exomem/oauth/token", "grant_types_supported": ["authorization_code", "refresh_token"], "code_challenge_methods_supported": ["S256"], "scopes_supported": ["exomem.read", "exomem.write", "offline_access"]})
+
+        def do_POST(self) -> None:  # noqa: N802
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            if self.path == "/api/exomem/oauth/token":
+                request = urllib.parse.parse_qs(body.decode())
+                token_requests.append(request)
+                assert request["grant_type"] == ["refresh_token"]
+                assert request["client_id"] == ["hosted-acceptance"]
+                assert request["resource"] == [base + "/api/exomem/mcp/v1"]
+                if request["refresh_token"] == ["synthetic-refresh"]:
+                    self._json({"access_token": "rotated-access", "refresh_token": "rotated-refresh", "expires_in": 900})
+                else:
+                    assert request["refresh_token"] == ["rotated-refresh"]
+                    self._json({"access_token": "fleet-access", "refresh_token": "fleet-refresh", "expires_in": 900})
+                return
+            request = json.loads(body)
+            mcp_authorizations.append(self.headers["Authorization"])
+            assert self.headers["Authorization"] == "Bearer fleet-access"
+            if request["method"] == "initialize":
+                result: dict[str, Any] = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "Hosted Exomem"}}
+            elif request["method"] == "notifications/initialized":
+                result = {}
+            elif request["method"] == "tools/call" and request["params"]["name"] == "ask_memory":
+                result = {"structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/acceptance.md", "text": "hosted acceptance sentinel continuity-001"}]}}}
+            else:
+                result = {"structuredContent": {"result": {"content": "hosted acceptance sentinel continuity-001"}}}
+            self._json({"jsonrpc": "2.0", "id": request["id"], "result": result})
+
+        def _json(self, payload: dict[str, Any]) -> None:
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    base = f"http://127.0.0.1:{server.server_port}"
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        config = _config()
+        config["mcp_endpoint"] = base + "/api/exomem/mcp/v1"
+        config["oauth"]["resource"] = config["mcp_endpoint"]
+        config["oauth"]["authorization_server_metadata"] = base + "/.well-known/oauth-authorization-server/api/exomem/oauth"
+        config_path = _write_config(tmp_path, config)
+        first = runner.AcceptanceRunner.from_config(config_path, state_dir=tmp_path / "state", run_id="continuity-001", allow_loopback_fixture=True)
+        first.prepare()
+        first.save_tokens({"access_token": "synthetic-access", "refresh_token": "synthetic-refresh", "expires_at": 900.0}, tenant="synthetic")
+        first.save_tokens({"access_token": "isolation-access", "refresh_token": "isolation-refresh"}, tenant="isolation")
+
+        first.evaluate_continuity(now=0.0)
+        first.evaluate_continuity(now=900.0)
+        assert first.manifest()["stages"]["continuity"]["status"] == "pending"
+        assert first.load_tokens(tenant="synthetic")["refresh_token"] == "rotated-refresh"
+        assert token_requests
+
+        resumed = runner.AcceptanceRunner.from_config(config_path, state_dir=tmp_path / "state", run_id="continuity-001", allow_loopback_fixture=True)
+        resumed.prepare(resume=True)
+        resumed.evaluate_continuity(now=3600.0)
+
+        evidence = resumed.manifest()["stages"]["continuity"]["evidence"]
+        assert evidence["refresh_rotation"] == "passed"
+        assert evidence["post_fleet_service_use"] == "passed"
+        assert evidence["citation"] == "Knowledge Base/Notes/Insights/acceptance.md"
+        assert mcp_authorizations
+    finally:
+        server.shutdown()
+        thread.join()

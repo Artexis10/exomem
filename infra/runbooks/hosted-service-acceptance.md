@@ -74,6 +74,33 @@ python3 infra/scripts/accept_hosted_service.py corpus \
   --run-id hosted-acceptance-20260907 --resume
 ```
 
+Seed that fixture through the ordinary public MCP `remember` tool for both
+reserved tenant token families before measuring. Each capture has a stable
+idempotency key, so an interrupted seeding run resumes without a second write.
+The benchmark refuses locally generated-only corpus: its performance evidence
+records only corpus that was acknowledged by both cells.
+
+```bash
+python3 infra/scripts/accept_hosted_service.py seed-corpus \
+  --config ./hosted-acceptance.json --state-dir ./private-acceptance-state \
+  --run-id hosted-acceptance-20260907 --resume
+
+python3 infra/scripts/accept_hosted_service.py benchmark \
+  --config ./hosted-acceptance.json --state-dir ./private-acceptance-state \
+  --run-id hosted-acceptance-20260907 --resume \
+  --report ./hosted-acceptance-report.json
+```
+
+`benchmark` uses five concurrent normal MCP clients (three synthetic and two
+isolation), records 100 warm samples per initialize/list/capture/recall and 20
+fresh-client resets. A reset is exactly a new `MCPClient` instance: it does not
+restart a process, cell, storage, tenant, or service. The report exposes the
+configured runtime tuple separately from runtime evidence; configuration alone
+is never a runtime verification. `run` checkpoints token expiry without
+sleeping, persists a normal refresh-token rotation after the stored expiry, and
+only passes continuity after the one-hour window when a fresh client performs a
+cited recall and readback using that persisted OAuth state.
+
 Cleanup removes only fixture paths first registered under that exact run. It
 does not delete a tenant, vault, backup, provider resource, or report:
 

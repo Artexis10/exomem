@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -305,7 +306,7 @@ class MCPClient:
         self.protocol_version: str | None = None
         self.session_id: str | None = None
 
-    def call(self, method: str, params: Mapping[str, Any] | None = None, *, request_id: str | int | None = None) -> dict[str, Any]:
+    def call(self, method: str, params: Mapping[str, Any] | None = None, *, request_id: str | int | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
         request_id = secrets.token_hex(12) if request_id is None else request_id
         payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": dict(params or {})}
         headers = {"Authorization": f"Bearer {self.access_token}", "Content-Type": "application/json", "Accept": "application/json, text/event-stream", "Cache-Control": "no-store"}
@@ -313,6 +314,8 @@ class MCPClient:
             headers["MCP-Protocol-Version"] = self.protocol_version
         if self.session_id:
             headers["MCP-Session-Id"] = self.session_id
+        if idempotency_key:
+            headers["Idempotency-Key"] = _string(idempotency_key, label="idempotency key")
         request = urllib.request.Request(self.endpoint, data=canonical_json(payload), headers=headers, method="POST")
         try:
             with _open(request, timeout=30) as response:  # nosec B310: endpoint is validated HTTPS
@@ -342,8 +345,8 @@ class MCPClient:
     def list_tools(self) -> dict[str, Any]:
         return self.call("tools/list")
 
-    def capture(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        return self.call("tools/call", {"name": "remember", "arguments": dict(arguments)})
+    def capture(self, arguments: Mapping[str, Any], *, idempotency_key: str | None = None) -> dict[str, Any]:
+        return self.call("tools/call", {"name": "remember", "arguments": dict(arguments)}, idempotency_key=idempotency_key)
 
     def recall(self, query: str) -> dict[str, Any]:
         return self.call("tools/call", {"name": "ask_memory", "arguments": {"query": _string(query, label="recall query")}})
@@ -529,21 +532,23 @@ class AcceptanceRunner:
 
     def run_protocol(self) -> None:
         """Exercise the canonical public tools with independent tenant tokens."""
-        primary = self.load_tokens(tenant="synthetic")
+        self.load_tokens(tenant="synthetic")
         self.load_tokens(tenant="isolation")
-        client = MCPClient(endpoint=self.config["mcp_endpoint"], access_token=_string(primary.get("access_token"), label="synthetic access token"), allow_loopback_fixture=self.allow_loopback_fixture)
+        client = self._mcp_client("synthetic")
         initialized = client.initialize()
         tools = client.list_tools().get("tools")
         names = [item.get("name") for item in tools if isinstance(item, dict)] if isinstance(tools, list) else []
         if not {"remember", "ask_memory", "read_memory"} <= set(names):
             raise AcceptanceError("canonical hosted v4 tools are unavailable")
         fact = f"hosted acceptance sentinel {self.run_id}"
-        capture = client.capture({"title": f"Hosted acceptance {self.run_id}", "content": f"## Observations\n- [acceptance] {fact} #hosted ^{self.run_id}", "note_type": "insight", "sources": []})
-        content = _tool_result(capture)
-        if "committed" not in json.dumps(content).lower():
-            raise AcceptanceError("capture has no durable acknowledgement")
-        self.complete_mutation("durable-capture", receipt={"status": "committed", "request_id": self.mutation_request_id("durable-capture")})
-        fresh = MCPClient(endpoint=self.config["mcp_endpoint"], access_token=_string(primary.get("access_token"), label="synthetic access token"), allow_loopback_fixture=self.allow_loopback_fixture)
+        committed = self.manifest()["mutations"].get("durable-capture", {}).get("receipt", {}).get("status") == "committed"
+        if not committed:
+            capture = client.capture({"title": f"Hosted acceptance {self.run_id}", "content": f"## Observations\n- [acceptance] {fact} #hosted ^{self.run_id}", "note_type": "insight", "sources": []}, idempotency_key=self.mutation_request_id("durable-capture"))
+            content = _tool_result(capture)
+            if "committed" not in json.dumps(content).lower():
+                raise AcceptanceError("capture has no durable acknowledgement")
+            self.complete_mutation("durable-capture", receipt={"status": "committed", "request_id": self.mutation_request_id("durable-capture")})
+        fresh = self._mcp_client("synthetic")
         fresh.initialize()
         recalled = _tool_result(fresh.recall(f"Which hosted acceptance sentinel belongs to this run: {self.run_id}?"))
         citation = _citation_for_fact(recalled, fact)
@@ -552,22 +557,172 @@ class AcceptanceRunner:
             raise AcceptanceError("recall citation does not resolve to this run fact")
         self.record_protocol_evidence(initialize=bool(initialized), tools_list=[str(name) for name in names], durable_ack={"status": "committed"}, recall={"fact": fact, "citation": citation})
 
+    def _mcp_client(self, tenant: str) -> MCPClient:
+        tokens = self.load_tokens(tenant=tenant)
+        return MCPClient(endpoint=self.config["mcp_endpoint"], access_token=_string(tokens.get("access_token"), label=f"{tenant} access token"), allow_loopback_fixture=self.allow_loopback_fixture)
+
+    def _oauth_client(self) -> OAuthPKCEClient:
+        return OAuthPKCEClient(**self.config["oauth"], allow_loopback_fixture=self.allow_loopback_fixture)
+
+    def _corpus_fixture(self) -> dict[str, Any]:
+        stage = self.manifest()["stages"]["performance"]
+        fixture = stage.get("fixture") if isinstance(stage, dict) else None
+        if not isinstance(fixture, dict) or not isinstance(fixture.get("notes"), int) or fixture["notes"] < 1000 or not isinstance(fixture.get("bytes"), int) or fixture["bytes"] < 10 * 1024 * 1024:
+            raise AcceptanceError("benchmark requires a generated 1,000-note, 10 MiB corpus fixture")
+        return fixture
+
+    def seed_corpus(self) -> None:
+        """Write the owned corpus through ordinary tenant-bound MCP capture calls."""
+        fixture = self._corpus_fixture()
+        source = self.run_dir / "fixtures" / "corpus"
+        notes = sorted(source.glob("note-*.md"))
+        if len(notes) != fixture["notes"]:
+            raise AcceptanceError("corpus fixture files do not match its recorded note count")
+        manifest = self.manifest()
+        stage = manifest["stages"]["performance"]
+        seeded = stage.get("cell_corpus", {}) if isinstance(stage, dict) else {}
+        if not isinstance(seeded, dict):
+            raise AcceptanceError("corpus cell evidence is invalid")
+        for tenant in ("synthetic", "isolation"):
+            if seeded.get(tenant, {}).get("status") == "committed":
+                continue
+            client = self._mcp_client(tenant)
+            client.initialize()
+            for ordinal, note in enumerate(notes):
+                content = note.read_text(encoding="utf-8")
+                result = _tool_result(client.capture({"title": f"Hosted corpus {self.run_id} {ordinal:04d}", "content": content, "note_type": "insight", "sources": []}, idempotency_key=self.mutation_request_id(f"corpus-{tenant}-{ordinal}")))
+                if "committed" not in json.dumps(result).lower():
+                    raise AcceptanceError(f"corpus capture {tenant}/{ordinal} has no durable acknowledgement")
+            fact = f"Synthetic acceptance note {len(notes) - 1}."
+            converged = self._mcp_client(tenant)
+            converged.initialize()
+            citation = _citation_for_fact(_tool_result(converged.recall(f"Which acceptance corpus note begins {fact}")), fact)
+            readback = _tool_result(converged.call("tools/call", {"name": "read_memory", "arguments": {"path": citation}}))
+            if fact not in json.dumps(readback):
+                raise AcceptanceError(f"corpus convergence citation {tenant} does not resolve to its seeded note")
+            seeded[tenant] = {"status": "committed", "notes": len(notes), "fixture_digest": fixture.get("digest"), "convergence": "passed", "citation": citation}
+            manifest = self.manifest()
+            manifest["stages"]["performance"]["cell_corpus"] = seeded
+            self._write_manifest(manifest)
+
+    def run_benchmark(self) -> None:
+        """Measure the public protocol only after both cells contain the owned corpus."""
+        fixture = self._corpus_fixture()
+        stage = self.manifest()["stages"]["performance"]
+        if stage.get("status") == "passed":
+            raise AcceptanceError("benchmark is already terminal")
+        cell_corpus = stage.get("cell_corpus") if isinstance(stage, dict) else None
+        if not isinstance(cell_corpus, dict) or any(cell_corpus.get(tenant, {}).get("status") != "committed" or cell_corpus.get(tenant, {}).get("convergence") != "passed" for tenant in ("synthetic", "isolation")):
+            raise AcceptanceError("benchmark requires committed corpus evidence for both reserved cells")
+        warm: dict[str, list[float]] = {operation: [] for operation in ("initialize", "tools_list", "capture", "recall")}
+        errors: dict[str, int] = {operation: 0 for operation in warm}
+
+        def worker(worker_id: int) -> tuple[dict[str, list[float]], dict[str, int]]:
+            samples = {operation: [] for operation in warm}
+            failures = {operation: 0 for operation in warm}
+            tenant = ("synthetic", "isolation")[worker_id % 2]
+            for ordinal in range(20):
+                client = self._mcp_client(tenant)
+                started = time.perf_counter()
+                try:
+                    client.initialize()
+                except AcceptanceError:
+                    failures["initialize"] += 1
+                    continue
+                samples["initialize"].append((time.perf_counter() - started) * 1000)
+                capture_arguments = {"title": f"Hosted benchmark {self.run_id} {worker_id}-{ordinal}", "content": f"benchmark sample {self.run_id} {worker_id}-{ordinal}", "note_type": "insight", "sources": []}
+                capture_key = self.mutation_request_id(f"benchmark-{worker_id}-{ordinal}")
+                recall_query = f"hosted benchmark sample {self.run_id} {worker_id}-{ordinal}"
+                for operation, action in (
+                    ("tools_list", client.list_tools),
+                    ("capture", lambda client=client, arguments=capture_arguments, key=capture_key: client.capture(arguments, idempotency_key=key)),
+                    ("recall", lambda client=client, query=recall_query: client.recall(query)),
+                ):
+                    started = time.perf_counter()
+                    try:
+                        action()
+                    except AcceptanceError:
+                        failures[operation] += 1
+                    else:
+                        samples[operation].append((time.perf_counter() - started) * 1000)
+            return samples, failures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            for samples, failures in (future.result() for future in [executor.submit(worker, worker_id) for worker_id in range(5)]):
+                for operation in warm:
+                    warm[operation].extend(samples[operation])
+                    errors[operation] += failures[operation]
+        cold: list[float] = []
+        cold_errors = 0
+        for ordinal in range(20):
+            started = time.perf_counter()
+            try:
+                self._mcp_client(("synthetic", "isolation")[ordinal % 2]).initialize()
+            except AcceptanceError:
+                cold_errors += 1
+            else:
+                cold.append((time.perf_counter() - started) * 1000)
+        try:
+            validate_benchmark_samples(warm, cold_runs=20)
+            summaries = {operation: latency_summary(samples, errors=errors[operation], kind="warm") for operation, samples in warm.items()}
+            cold_summary = latency_summary(cold, errors=cold_errors, kind="cold")
+        except AcceptanceError as exc:
+            self.fail("performance", exc)
+            raise
+        targets = {"initialize": 500.0, "tools_list": 500.0, "capture": 1000.0, "recall": 1000.0, "cold_client_initialize": 2000.0}
+        failed = [operation for operation, target in targets.items() if (cold_summary if operation == "cold_client_initialize" else summaries[operation])["errors"] or (cold_summary if operation == "cold_client_initialize" else summaries[operation])["p95_ms"] > target]
+        if failed:
+            error = AcceptanceError(f"benchmark errors or p95 target misses: {', '.join(failed)}")
+            self.fail("performance", error)
+            raise error
+        self.pass_stage("performance", {"clients": 5, "tenant_clients": {"synthetic": 3, "isolation": 2}, "warm_samples_per_operation": 100, "cold_client_resets": 20, "cold_reset_semantics": "new MCPClient instance; no service, process, tenant, or storage reset", "corpus": {"fixture": fixture, "cell_evidence": cell_corpus}, "runtime": {"configured": self.config["runtime"], "verified": {"status": "pending", "operator_action": "attach signed runtime evidence matching the configured tuple"}}, "warm": summaries, "cold_client_initialize": cold_summary, "targets_ms": targets})
+
     def evaluate_continuity(self, *, now: float | None = None) -> None:
-        """Checkpoint the real 15-minute/one-hour windows without blocking other stages."""
+        """Checkpoint token rotation and the post-renewal cell-backed read without waiting."""
         current = time.time() if now is None else now
         manifest = self.manifest()
         stage = manifest["stages"]["continuity"]
+        if stage.get("status") == "passed":
+            return
         deadline = stage.get("fleet_renewal_deadline") if isinstance(stage, dict) else None
         if not isinstance(deadline, (int, float)):
-            manifest["stages"]["continuity"] = {"status": "pending", "access_expiry_deadline": current + 15 * 60, "fleet_renewal_deadline": current + 60 * 60}
+            expires_at = self.load_tokens(tenant="synthetic").get("expires_at")
+            if not isinstance(expires_at, (int, float)):
+                manifest["stages"]["continuity"] = {"status": "pending", "renewal_evidence": "pending", "operator_action": "resume with public OAuth token state containing expires_in"}
+                self._write_manifest(manifest)
+                return
+            manifest["stages"]["continuity"] = {"status": "pending", "access_expiry_deadline": expires_at, "fleet_renewal_deadline": current + 60 * 60, "refresh_rotation": {"status": "pending"}}
             self._write_manifest(manifest)
             return
-        if current < deadline:
-            return
+        rotation = stage.get("refresh_rotation") if isinstance(stage, dict) else None
         primary = self.load_tokens(tenant="synthetic")
-        fresh = MCPClient(endpoint=self.config["mcp_endpoint"], access_token=_string(primary.get("access_token"), label="synthetic access token"), allow_loopback_fixture=self.allow_loopback_fixture)
+        expires_at = primary.get("expires_at")
+        if not isinstance(expires_at, (int, float)):
+            raise AcceptanceError("continuity requires persisted access-token expiry from the public token response")
+        if current >= expires_at:
+            oauth = self._oauth_client()
+            rotated = oauth.refresh(oauth.discover(), refresh_token=_string(primary.get("refresh_token"), label="synthetic refresh token"))
+            lifetime = rotated.get("expires_in")
+            if not isinstance(lifetime, (int, float)) or lifetime <= 0:
+                raise AcceptanceError("refresh response requires a declared positive token lifetime")
+            rotated["expires_at"] = current + lifetime
+            self.save_tokens(rotated, tenant="synthetic")
+            manifest = self.manifest()
+            stage = manifest["stages"]["continuity"]
+            stage["refresh_rotation"] = {"status": "passed", "rotated_at": current, "expires_at": rotated["expires_at"]}
+            self._write_manifest(manifest)
+            rotation = stage["refresh_rotation"]
+        if current < deadline or not isinstance(rotation, dict) or rotation.get("status") != "passed":
+            return
+        fresh = self._mcp_client("synthetic")
         fresh.initialize()
-        self.pass_stage("continuity", {"access_expiry_seconds": 15 * 60, "fleet_renewal_seconds": 60 * 60, "fresh_initialize": "passed"})
+        fact = f"hosted acceptance sentinel {self.run_id}"
+        recalled = _tool_result(fresh.recall(f"Which hosted acceptance sentinel belongs to this run: {self.run_id}?"))
+        citation = _citation_for_fact(recalled, fact)
+        readback = _tool_result(fresh.call("tools/call", {"name": "read_memory", "arguments": {"path": citation}}))
+        if fact not in json.dumps(readback):
+            raise AcceptanceError("post-renewal recall citation does not resolve to this run fact")
+        self.pass_stage("continuity", {"access_expiry_seconds": 15 * 60, "fleet_renewal_seconds": 60 * 60, "refresh_rotation": "passed", "declared_refresh_lifetime_valid_until": rotation.get("expires_at"), "post_fleet_service_use": "passed", "citation": citation, "runtime": {"configured": self.config["runtime"], "verified": {"status": "pending", "operator_action": "attach signed runtime evidence matching the configured tuple"}}})
 
     def certify_host(self, host: str, evidence: Mapping[str, Any]) -> None:
         raise AcceptanceError("host certification requires independently verified signed imported evidence")
@@ -575,6 +730,7 @@ class AcceptanceRunner:
     def report(self) -> dict[str, Any]:
         manifest = self.manifest()
         report = {key: value for key, value in manifest.items() if key not in {"fixtures"}}
+        report["runtime"] = {"configured": manifest["runtime"], "verified": manifest.get("runtime_evidence", {"status": "pending", "operator_action": "attach signed runtime evidence matching the configured tuple"})}
         return _redact(report, self._secret_values())  # type: ignore[return-value]
 
 
@@ -599,7 +755,7 @@ def _citation_for_fact(result: Mapping[str, Any], fact: str) -> str:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prepare", "authorize", "status", "run", "cleanup", "corpus"))
+    parser.add_argument("action", choices=("prepare", "authorize", "status", "run", "cleanup", "corpus", "seed-corpus", "benchmark"))
     parser.add_argument("--config", type=Path, required=True, help="public acceptance configuration JSON")
     parser.add_argument("--state-dir", type=Path, required=True, help="private task-owned state directory")
     parser.add_argument("--run-id", required=True)
@@ -617,7 +773,7 @@ def main(argv: Sequence[str] | None = None, *, allow_loopback_fixture: bool = Fa
         runner = AcceptanceRunner.from_config(args.config, state_dir=args.state_dir, run_id=args.run_id, allow_loopback_fixture=allow_loopback_fixture)
         manifest = runner.prepare(resume=args.resume)
         if args.action == "authorize":
-            oauth = OAuthPKCEClient(**runner.config["oauth"])
+            oauth = runner._oauth_client()
             request = oauth.authorization_request(oauth.discover())
             state = _read_json(runner.tokens_path) if runner.tokens_path.exists() else {"pending": {}, "tenants": {}}
             state.setdefault("pending", {})[args.tenant] = request
@@ -632,13 +788,17 @@ def main(argv: Sequence[str] | None = None, *, allow_loopback_fixture: bool = Fa
             manifest = runner.manifest()
             manifest["stages"]["performance"] = {"status": "pending", "fixture": corpus}
             runner._write_manifest(manifest)
+        elif args.action == "seed-corpus":
+            runner.seed_corpus()
+        elif args.action == "benchmark":
+            runner.run_benchmark()
         elif args.action == "run":
             if args.authorization_code and args.callback_state:
                 pending = _read_json(runner.tokens_path)
                 request = pending.get("pending", {}).get(args.tenant) if isinstance(pending.get("pending"), dict) else None
                 if not isinstance(request, dict):
                     raise AcceptanceError("run authorize first to create private PKCE state")
-                oauth = OAuthPKCEClient(**runner.config["oauth"])
+                oauth = runner._oauth_client()
                 tokens = oauth.exchange_code(
                     oauth.discover(),
                     code=args.authorization_code,
