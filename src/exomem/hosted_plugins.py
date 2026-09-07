@@ -35,6 +35,10 @@ PARITY_CANDIDATE = "hosted-alpha-agent-v4"
 #: every skill it ships, including the core skill, and one canonicalised
 #: snapshot of the four generic contribution inputs.
 BASELINE_CANDIDATE = "hosted-alpha-agent-v5"
+#: A release candidate for command-time runtime binding. It deliberately uses
+#: the v4 tool profile unchanged, so the additive transport feature does not
+#: mutate any published profile identity.
+COMMAND_BINDING_CANDIDATE = "hosted-alpha-agent-v4-command-binding-v1"
 #: Every distributable candidate and the surface profile it pins. A third
 #: candidate is what retired the old pairwise `== LIFECYCLE_CANDIDATE`
 #: branching: membership questions now ask the registry, not a constant.
@@ -45,19 +49,28 @@ CANDIDATE_PROFILES: Mapping[str, str] = MappingProxyType(
         EPISTEMIC_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V3_PROFILE,
         PARITY_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V4_PROFILE,
         BASELINE_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V5_PROFILE,
+        COMMAND_BINDING_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V4_PROFILE,
     }
 )
 #: Candidates whose profile exposes `record_memory`. These pin the Records
 #: reader floor, bind their own selection cases, and must clear live Records
 #: acceptance for their own profile identifier before promotion.
 RECORDS_CANDIDATES: frozenset[str] = frozenset(
-    {LIFECYCLE_CANDIDATE, EPISTEMIC_CANDIDATE, PARITY_CANDIDATE, BASELINE_CANDIDATE}
+    {
+        LIFECYCLE_CANDIDATE,
+        EPISTEMIC_CANDIDATE,
+        PARITY_CANDIDATE,
+        BASELINE_CANDIDATE,
+        COMMAND_BINDING_CANDIDATE,
+    }
 )
 #: Candidates that own every skill they ship rather than resolving the shared
 #: `plugins/hosted/skills` tree. v1-v4 resolve the shared copies, so editing a
 #: shared skill would move their `skills_sha256` -- which is precisely why the
 #: doctrine v5 carries could not be written into those shared files.
-SELF_CONTAINED_CANDIDATES: frozenset[str] = frozenset({BASELINE_CANDIDATE})
+SELF_CONTAINED_CANDIDATES: frozenset[str] = frozenset(
+    {BASELINE_CANDIDATE, COMMAND_BINDING_CANDIDATE}
+)
 #: Candidates that bind one combined candidate-scoped behavior fixture digest
 #: through compatibility, package, lock, archive and promotion evidence.
 FIXTURE_BOUND_CANDIDATES: frozenset[str] = frozenset({BASELINE_CANDIDATE})
@@ -91,6 +104,16 @@ CANDIDATE_SKILL_NAMES: Mapping[str, tuple[str, ...]] = MappingProxyType(
         EPISTEMIC_CANDIDATE: ("exomem-records", "exomem-supersede"),
         PARITY_CANDIDATE: ("exomem-records", "exomem-supersede"),
         BASELINE_CANDIDATE: (
+            "exomem",
+            "exomem-capture",
+            "exomem-continue",
+            "exomem-reflect",
+            "exomem-research",
+            "exomem-review",
+            "exomem-records",
+            "exomem-supersede",
+        ),
+        COMMAND_BINDING_CANDIDATE: (
             "exomem",
             "exomem-capture",
             "exomem-continue",
@@ -1903,7 +1926,10 @@ def compatibility_manifest(
     }
     published_contract = {
         **published_base,
-        "digest": {"algorithm": "sha256", "value": _sha256(_canonical_json(published_base))},
+        "digest": {
+            "algorithm": "sha256",
+            "value": hosted_gateway.published_agent_contract_digest(contract),
+        },
     }
     raw_definition = json.loads((_candidate_root(root, candidate) / "definition.json").read_text(encoding="utf-8"))
     commands_in_order = tuple(item["name"] for item in contract["commands"])
@@ -1927,6 +1953,8 @@ def compatibility_manifest(
         base["minimum_records_reader_version"] = 2
     if candidate in FIXTURE_BOUND_CANDIDATES:
         base["behavior_fixture_sha256"] = behavior_fixture_sha256(root, candidate=candidate)
+    if candidate == COMMAND_BINDING_CANDIDATE:
+        base["features"] = ["agent-command-binding-v1"]
     return {**base, "compatibility_sha256": _sha256(_canonical_json(base))}
 
 

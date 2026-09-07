@@ -685,7 +685,7 @@ def test_preregistration_plan_digest_is_only_an_assertion_against_derived_identi
     assert main(["--plan", str(plan)]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == ""
+    assert captured.err == "memorybench-export: BLOCKED during preregistration validation\n" * 2
 
 
 def test_production_default_calls_the_real_setup_verifier(
@@ -717,6 +717,47 @@ def test_production_default_calls_the_real_setup_verifier(
     )
     assert result.status == "VALID"
     assert observed and observed[0][0] == tmp_path / "memorybench"
+
+
+def test_preflight_reports_failed_provider_binding_without_private_exception(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    plan = _plan(tmp_path)
+    stage_calls: list[object] = []
+
+    def refuse_provider(_identity: dict[str, Any]) -> None:
+        raise ValueError(f"lock differs: {HMAC_KEY_HEX} at {tmp_path}")
+
+    result = _run(
+        plan,
+        checkout_verifier=lambda **_kwargs: "materialized",
+        provider_checkout_verifier=refuse_provider,
+        stage_runner=lambda *args, **kwargs: stage_calls.append((args, kwargs)),
+    )
+
+    assert result.status == "BLOCKED" and result.exit_code == 2
+    assert stage_calls == []
+    assert not (tmp_path / "output").exists()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "memorybench-export: BLOCKED during provider-checkout validation\n"
+
+
+def test_cli_reports_invalid_plan_without_echoing_private_values(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from memorybench.export import main
+
+    plan = _plan(tmp_path)
+    payload = json.loads(plan.read_text())
+    payload["provider"] = HMAC_KEY_HEX
+    plan.write_text(json.dumps(payload))
+
+    assert main(["--plan", str(plan)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "memorybench-export: BLOCKED during run-plan validation\n"
+    assert not (tmp_path / "output").exists()
 
 
 @pytest.mark.parametrize(
@@ -2104,7 +2145,7 @@ def test_python_rejects_duplicate_json_members_at_every_source_and_depth(
     "condition",
     ["missing", "symlink", "mode", "owner", "writable-parent", "malformed", "duplicate"],
 )
-def test_every_invalid_run_plan_is_a_quiet_blocked_result(
+def test_every_invalid_run_plan_has_a_constant_blocked_diagnostic(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -2136,7 +2177,8 @@ def test_every_invalid_run_plan_is_a_quiet_blocked_result(
     assert result.status == "BLOCKED" and result.exit_code == 2
     captured = capsys.readouterr()
     combined = captured.out + captured.err
-    assert combined == ""
+    assert captured.out == ""
+    assert captured.err == "memorybench-export: BLOCKED during run-plan validation\n"
     assert "Traceback" not in combined
     assert str(tmp_path) not in combined
     assert "private-exception-text" not in combined

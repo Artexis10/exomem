@@ -20,8 +20,11 @@ Require the existing service credential, cell, principal, protocol and request-I
 
 Advertise `agent-command-binding-v1` in the signed compatibility artifact. Substrate imports the canonical fixture and uses the new route only for approved candidates advertising it. Keep v1 and its current checks for existing adapters during rollout. A v2 mismatch never falls back to v1. Both routes share the same effective principal/cell idempotency namespace, mutation receipts, error codes and cancellation behavior. Contract validation and command admission use the same immutable process contract so the old GET/POST time-of-check gap disappears.
 
+<<<<<<< HEAD
 Published compatibility, locks and promotion identities remain byte-for-byte immutable. Introduce the new `hosted-alpha-agent-v4-command-binding-v1` packaging candidate, pinned to the existing `hosted-alpha-agent-v4` tool profile selected by Substrate and package version `0.4.1`. It owns copies of the existing v4 effective skills and selection cases and alone advertises `features: ["agent-command-binding-v1"]`. No public tool profile is invented for a private transport capability, and no historical candidate acquires the feature retrospectively. The gateway selects the route from the authenticated candidate's signed compatibility, not from candidate naming conventions.
 
+=======
+>>>>>>> origin/main
 The private contract GET remains for registration, diagnostics and old approved runtimes; it is no longer required on the hot path for the new route. Adding an expected tuple to the existing unversioned behavior without a clear compatibility boundary was rejected because missing-header fallback could silently remove the intended guarantee.
 
 ### 2. Reuse the existing edge and cluster transport
