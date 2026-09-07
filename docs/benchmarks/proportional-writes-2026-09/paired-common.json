@@ -1,0 +1,4294 @@
+{
+  "compaction": "Runtime inventories stored once by digest. Startup calls grouped by tool/classification/ACK. Every timed public call, phase, and verification retained. Generated page inventory replaced by count and existing corpus digest. Raw JSON SHA-256 retained per row.",
+  "diagnostic": "durable-closure-common-subset",
+  "evidence_format": 2,
+  "medians": [
+    {
+      "pages": 3800,
+      "parity_met": true,
+      "verified_closure_ms": {
+        "basic_memory": 13727.684433994,
+        "exomem": 8572.803038987331
+      }
+    },
+    {
+      "pages": 8000,
+      "parity_met": true,
+      "verified_closure_ms": {
+        "basic_memory": 18526.38600100181,
+        "exomem": 14373.23956801265
+      }
+    }
+  ],
+  "method": "Three fresh paired runs per corpus size, sequential products, alternating order; unchanged public workflow driver.",
+  "predeclared_cohort": {
+    "fresh_state_per_observation": true,
+    "order": "Exomem first in odd pairs; Basic Memory first in even pairs",
+    "pages": [
+      3800,
+      8000
+    ],
+    "samples": 3,
+    "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+    "source_tree_clean_at_start": true,
+    "startup_timeout_s": 3600.0,
+    "task_test_workers_quiescent": true,
+    "timed_call_timeout_s": 300
+  },
+  "rows": [
+    {
+      "configuration": {
+        "EXOMEM_CALL_LEDGER_DIR": "<sample-root>/state/exomem/ledger",
+        "EXOMEM_CONFIG_PATH": "<sample-root>/state/exomem/config.json",
+        "EXOMEM_DISABLE_EMBEDDINGS": "1",
+        "EXOMEM_DISABLE_QUERY_LOG": "1",
+        "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
+        "EXOMEM_EAGER_BOOT": "1",
+        "EXOMEM_LOG_DIR": "<sample-root>/state/exomem/logs",
+        "EXOMEM_STATE_ROOT": "<sample-root>/state/exomem/state",
+        "EXOMEM_VAULT_PATH": "<sample-root>/vault/exomem",
+        "EXOMEM_WRITER_LEASE_STATE_DIR": "<sample-root>/state/exomem/leases"
+      },
+      "corpus": {
+        "digest": "9b008bff381052c3a29cb8a187c1106a315ef29130788541ae88603eb845384c",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 3800,
+        "pages_entries": 3800
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "exomem",
+          "--pages",
+          "3800",
+          "--timeout",
+          "300",
+          "--startup-timeout",
+          "3600.0",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-3800-pair-1"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+        "ended_utc": "2026-09-07T19:37:15.335801+00:00",
+        "exit_code": 0,
+        "label": "3800-pair-1-1-exomem",
+        "load_average_end": [
+          2.93212890625,
+          3.2783203125,
+          3.91357421875
+        ],
+        "load_average_start": [
+          2.3740234375,
+          3.27734375,
+          3.9541015625
+        ],
+        "pair": 1,
+        "position": 1,
+        "product_order": [
+          "exomem",
+          "basic_memory"
+        ],
+        "runner_wall_s": 55.66663054699893,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T19:36:17.739247+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "initial_indexed_corpus": {
+        "expected_path_count": 3800,
+        "expected_path_digest": "a4cc1b475b1b53b95656c2c283914f9f48e10b7786db0ca3b4f266c10f8b0044",
+        "identity_join_proof": "pages.rowid = fts.rowid",
+        "observed_path_count": 3800,
+        "observed_path_digest": "a4cc1b475b1b53b95656c2c283914f9f48e10b7786db0ca3b4f266c10f8b0044",
+        "product_binding": {
+          "fixture_prefix": "Knowledge Base/Reference/",
+          "vault_state_key": "exomem-63cd56364607efe0"
+        },
+        "proof_method": "pages/fts rowid identity join with recall admission",
+        "ready": true,
+        "reason": null,
+        "schema_identity": {
+          "digest": "4fc1ab5d9988401675c793e9a4460aefb3f7fb869a1665103feb338e6d090d93",
+          "tables": [
+            "fts",
+            "meta",
+            "pages"
+          ]
+        },
+        "store": "<sample-root>/state/exomem/state/exomem-63cd56364607efe0/.lexical.sqlite"
+      },
+      "label": "3800-pair-1-1-exomem",
+      "markers": [
+        "proportional-common-3800-pair-1-chapter",
+        "proportional-common-3800-pair-1-tracker",
+        "proportional-common-3800-pair-1-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 1151.3041970029008,
+        "ack_p95_ms": 2738.9173559931805,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 13,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 45124.53588801145,
+        "teardown_ms": 2103.1344950024504,
+        "wall_to_verified_closure_ms": 7851.84811099316
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 110,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 102.96788199048024,
+            "min_call_ms": 102.96788199048024,
+            "summed_call_ms": 102.96788199048024,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 108,
+            "max_call_ms": 326.41217998752836,
+            "min_call_ms": 8.987117995275185,
+            "summed_call_ms": 8865.666952071479,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 6767.839520005509,
+            "min_call_ms": 6767.839520005509,
+            "summed_call_ms": 6767.839520005509,
+            "tool": "remember"
+          }
+        ]
+      },
+      "product": "exomem",
+      "public_calls": [
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 497.64414700621273,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2738.9173559931805,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2098.3231930003967,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 1151.3041970029008,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 86.43561300414149,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 795.2591780049261,
+          "tool": "remember"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 30.106210993835703,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 30.724266995093785,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 16.463373991427943,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 38.653398005408235,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 164.9722309957724,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 74.38682801148389,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 86.13203201093711,
+          "tool": "ask_memory"
+        }
+      ],
+      "raw_result_sha256": "20248916005e05faf17669838cc65c0cdf3a1cef22fb3713f44950b6d0a95782",
+      "reason": null,
+      "runtime_profile": "aac99661ff654728471ce4a629b929446a1ba9c21864e9233f669891db8e4c67",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "9dd29203171f2e9ded75e106e508e3dc798b6860d7e241df40382af9ea3e915a",
+            "expected_bytes": 109,
+            "expected_sha256": "9dd29203171f2e9ded75e106e508e3dc798b6860d7e241df40382af9ea3e915a",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "faa46e57853345c617b219e030f30c041f506ca654dd8e22de0aaa05bd327dbf",
+            "expected_bytes": 1195,
+            "expected_sha256": "faa46e57853345c617b219e030f30c041f506ca654dd8e22de0aaa05bd327dbf",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "a3d4cdb39091c1a45a040851f7c0b4ba3092150892f08eedbfd481bbcc27b004",
+            "expected_bytes": 92,
+            "expected_sha256": "a3d4cdb39091c1a45a040851f7c0b4ba3092150892f08eedbfd481bbcc27b004",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 164.98815499653574,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 74.39959100156557,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 86.14541700808331,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "BASIC_MEMORY_AUTO_UPDATE": "false",
+        "BASIC_MEMORY_CONFIG_DIR": "<sample-root>/state/basic_memory/config",
+        "BASIC_MEMORY_EXPLICIT_ROUTING": "true",
+        "BASIC_MEMORY_FORCE_LOCAL": "true",
+        "BASIC_MEMORY_HOME": "<sample-root>/state/basic_memory/home",
+        "BASIC_MEMORY_NO_PROMOS": "1",
+        "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false"
+      },
+      "corpus": {
+        "digest": "9b008bff381052c3a29cb8a187c1106a315ef29130788541ae88603eb845384c",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 3800,
+        "pages_entries": 3800
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "basic_memory",
+          "--pages",
+          "3800",
+          "--timeout",
+          "300",
+          "--startup-timeout",
+          "3600.0",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-3800-pair-1"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+        "ended_utc": "2026-09-07T19:49:02.469637+00:00",
+        "exit_code": 0,
+        "label": "3800-pair-1-2-basic_memory",
+        "load_average_end": [
+          4.4560546875,
+          4.4931640625,
+          4.259765625
+        ],
+        "load_average_start": [
+          2.93212890625,
+          3.2783203125,
+          3.91357421875
+        ],
+        "pair": 1,
+        "position": 2,
+        "product_order": [
+          "exomem",
+          "basic_memory"
+        ],
+        "runner_wall_s": 666.565472000002,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T19:37:15.369800+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "initial_indexed_corpus": {
+        "expected_path_count": 3800,
+        "expected_path_digest": "3e031401c25a81c2487bb6b5e3908502473e99d38198353dd93e49e4e4fce136",
+        "identity_join_proof": "entity(id,file_path,project_id) = search_index(id,file_path,project_id); entity_id = id",
+        "observed_path_count": 3800,
+        "observed_path_digest": "3e031401c25a81c2487bb6b5e3908502473e99d38198353dd93e49e4e4fce136",
+        "product_binding": {
+          "project": "main",
+          "project_id": 1
+        },
+        "proof_method": "entity/search_index identity multiset join",
+        "ready": true,
+        "reason": null,
+        "schema_identity": {
+          "digest": "42309cef36a08e57eb6ffa1bf2ee07c16250a2590dd73868ee162b157cbf7ff5",
+          "tables": [
+            "alembic_version",
+            "entity",
+            "project",
+            "search_index"
+          ]
+        },
+        "store": "<sample-root>/state/basic_memory/config/memory.db"
+      },
+      "label": "3800-pair-1-2-basic_memory",
+      "markers": [
+        "proportional-common-3800-pair-1-chapter",
+        "proportional-common-3800-pair-1-tracker",
+        "proportional-common-3800-pair-1-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 2176.7676460003713,
+        "ack_p95_ms": 2725.675431007403,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 11,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 642991.280984992,
+        "teardown_ms": 1828.2614009949611,
+        "wall_to_verified_closure_ms": 21109.6375920024
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 16,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 16,
+            "max_call_ms": 649.208948991145,
+            "min_call_ms": 25.447949999943376,
+            "summed_call_ms": 1388.0659880087478,
+            "tool": "search_notes"
+          }
+        ]
+      },
+      "product": "basic_memory",
+      "public_calls": [
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 425.3347169869812,
+          "tool": "write_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2725.675431007403,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2318.626691994723,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2176.7676460003713,
+          "tool": "write_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 316.81080799899064,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 11734.72573098843,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 117.58459199336357,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 112.52451500331517,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 67.24035300430842,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 977.756802996737,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 56.96647199511062,
+          "tool": "search_notes"
+        }
+      ],
+      "raw_result_sha256": "9e304929c5203828600d02369d299809989aa603008c6d2754ebdf2032a4ce1f",
+      "reason": null,
+      "runtime_profile": "094ae7536fcd0b6ebd8132a67e955948998f25f7e444a434e3915a87160735cf",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "9dd29203171f2e9ded75e106e508e3dc798b6860d7e241df40382af9ea3e915a",
+            "expected_bytes": 109,
+            "expected_sha256": "9dd29203171f2e9ded75e106e508e3dc798b6860d7e241df40382af9ea3e915a",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "faa46e57853345c617b219e030f30c041f506ca654dd8e22de0aaa05bd327dbf",
+            "expected_bytes": 1195,
+            "expected_sha256": "faa46e57853345c617b219e030f30c041f506ca654dd8e22de0aaa05bd327dbf",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "a3d4cdb39091c1a45a040851f7c0b4ba3092150892f08eedbfd481bbcc27b004",
+            "expected_bytes": 92,
+            "expected_sha256": "a3d4cdb39091c1a45a040851f7c0b4ba3092150892f08eedbfd481bbcc27b004",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 67.2537139907945,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 977.7721340069547,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 56.97920800594147,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "BASIC_MEMORY_AUTO_UPDATE": "false",
+        "BASIC_MEMORY_CONFIG_DIR": "<sample-root>/state/basic_memory/config",
+        "BASIC_MEMORY_EXPLICIT_ROUTING": "true",
+        "BASIC_MEMORY_FORCE_LOCAL": "true",
+        "BASIC_MEMORY_HOME": "<sample-root>/state/basic_memory/home",
+        "BASIC_MEMORY_NO_PROMOS": "1",
+        "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false"
+      },
+      "corpus": {
+        "digest": "9b008bff381052c3a29cb8a187c1106a315ef29130788541ae88603eb845384c",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 3800,
+        "pages_entries": 3800
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "basic_memory",
+          "--pages",
+          "3800",
+          "--timeout",
+          "300",
+          "--startup-timeout",
+          "3600.0",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-3800-pair-2"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+        "ended_utc": "2026-09-07T20:00:43.460966+00:00",
+        "exit_code": 0,
+        "label": "3800-pair-2-1-basic_memory",
+        "load_average_end": [
+          4.7978515625,
+          4.60302734375,
+          4.39013671875
+        ],
+        "load_average_start": [
+          4.4560546875,
+          4.4931640625,
+          4.259765625
+        ],
+        "pair": 2,
+        "position": 1,
+        "product_order": [
+          "basic_memory",
+          "exomem"
+        ],
+        "runner_wall_s": 661.0529038429959,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T19:49:02.512835+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "initial_indexed_corpus": {
+        "expected_path_count": 3800,
+        "expected_path_digest": "3e031401c25a81c2487bb6b5e3908502473e99d38198353dd93e49e4e4fce136",
+        "identity_join_proof": "entity(id,file_path,project_id) = search_index(id,file_path,project_id); entity_id = id",
+        "observed_path_count": 3800,
+        "observed_path_digest": "3e031401c25a81c2487bb6b5e3908502473e99d38198353dd93e49e4e4fce136",
+        "product_binding": {
+          "project": "main",
+          "project_id": 1
+        },
+        "proof_method": "entity/search_index identity multiset join",
+        "ready": true,
+        "reason": null,
+        "schema_identity": {
+          "digest": "ace80dcdf3418dc1144406dcf648387c90088a345067c7ceddc6beed54d782b1",
+          "tables": [
+            "alembic_version",
+            "entity",
+            "project",
+            "search_index"
+          ]
+        },
+        "store": "<sample-root>/state/basic_memory/config/memory.db"
+      },
+      "label": "3800-pair-2-1-basic_memory",
+      "markers": [
+        "proportional-common-3800-pair-2-chapter",
+        "proportional-common-3800-pair-2-tracker",
+        "proportional-common-3800-pair-2-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 798.4977230080403,
+        "ack_p95_ms": 8185.592275011004,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 11,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 644536.4453210059,
+        "teardown_ms": 2104.271364005399,
+        "wall_to_verified_closure_ms": 13727.684433994
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 20,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 20,
+            "max_call_ms": 644.6935070125619,
+            "min_call_ms": 26.852345996303484,
+            "summed_call_ms": 1748.9566060248762,
+            "tool": "search_notes"
+          }
+        ]
+      },
+      "product": "basic_memory",
+      "public_calls": [
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 798.4977230080403,
+          "tool": "write_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 8185.592275011004,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 1996.6257159976522,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 730.9663049964001,
+          "tool": "write_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 127.804699994158,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 553.1198199896608,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 74.79929699911736,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 87.46229798998684,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 73.80730099976063,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 992.6190590049373,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 31.899050998617895,
+          "tool": "search_notes"
+        }
+      ],
+      "raw_result_sha256": "91232cb3ec7209a95388aad34b3df87f9aa29cdb3724d37c791fcaa787db0bab",
+      "reason": null,
+      "runtime_profile": "094ae7536fcd0b6ebd8132a67e955948998f25f7e444a434e3915a87160735cf",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "30b7b9677918184ff1faeff642fe3364043c084192fd77a56bac901e472aeb1f",
+            "expected_bytes": 109,
+            "expected_sha256": "30b7b9677918184ff1faeff642fe3364043c084192fd77a56bac901e472aeb1f",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "df99c289a6e404a0984582cb5840cfa68e45c1c56aad5189460a078fa6571e47",
+            "expected_bytes": 1195,
+            "expected_sha256": "df99c289a6e404a0984582cb5840cfa68e45c1c56aad5189460a078fa6571e47",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "5cbb98da056f0ae19160c3abecf8ab6cd0e9a39e11f8bae4dae81f822258a37d",
+            "expected_bytes": 92,
+            "expected_sha256": "5cbb98da056f0ae19160c3abecf8ab6cd0e9a39e11f8bae4dae81f822258a37d",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 73.82192999648396,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 992.6356700016186,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 31.910890989820473,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "EXOMEM_CALL_LEDGER_DIR": "<sample-root>/state/exomem/ledger",
+        "EXOMEM_CONFIG_PATH": "<sample-root>/state/exomem/config.json",
+        "EXOMEM_DISABLE_EMBEDDINGS": "1",
+        "EXOMEM_DISABLE_QUERY_LOG": "1",
+        "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
+        "EXOMEM_EAGER_BOOT": "1",
+        "EXOMEM_LOG_DIR": "<sample-root>/state/exomem/logs",
+        "EXOMEM_STATE_ROOT": "<sample-root>/state/exomem/state",
+        "EXOMEM_VAULT_PATH": "<sample-root>/vault/exomem",
+        "EXOMEM_WRITER_LEASE_STATE_DIR": "<sample-root>/state/exomem/leases"
+      },
+      "corpus": {
+        "digest": "9b008bff381052c3a29cb8a187c1106a315ef29130788541ae88603eb845384c",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 3800,
+        "pages_entries": 3800
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "exomem",
+          "--pages",
+          "3800",
+          "--timeout",
+          "300",
+          "--startup-timeout",
+          "3600.0",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-3800-pair-2"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+        "ended_utc": "2026-09-07T20:01:47.471050+00:00",
+        "exit_code": 0,
+        "label": "3800-pair-2-2-exomem",
+        "load_average_end": [
+          4.64697265625,
+          4.5859375,
+          4.39599609375
+        ],
+        "load_average_start": [
+          4.7978515625,
+          4.60302734375,
+          4.39013671875
+        ],
+        "pair": 2,
+        "position": 2,
+        "product_order": [
+          "basic_memory",
+          "exomem"
+        ],
+        "runner_wall_s": 60.23051983201003,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T20:00:43.496788+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "initial_indexed_corpus": {
+        "expected_path_count": 3800,
+        "expected_path_digest": "a4cc1b475b1b53b95656c2c283914f9f48e10b7786db0ca3b4f266c10f8b0044",
+        "identity_join_proof": "pages.rowid = fts.rowid",
+        "observed_path_count": 3800,
+        "observed_path_digest": "a4cc1b475b1b53b95656c2c283914f9f48e10b7786db0ca3b4f266c10f8b0044",
+        "product_binding": {
+          "fixture_prefix": "Knowledge Base/Reference/",
+          "vault_state_key": "exomem-54f04387c05495f2"
+        },
+        "proof_method": "pages/fts rowid identity join with recall admission",
+        "ready": true,
+        "reason": null,
+        "schema_identity": {
+          "digest": "4fc1ab5d9988401675c793e9a4460aefb3f7fb869a1665103feb338e6d090d93",
+          "tables": [
+            "fts",
+            "meta",
+            "pages"
+          ]
+        },
+        "store": "<sample-root>/state/exomem/state/exomem-54f04387c05495f2/.lexical.sqlite"
+      },
+      "label": "3800-pair-2-2-exomem",
+      "markers": [
+        "proportional-common-3800-pair-2-chapter",
+        "proportional-common-3800-pair-2-tracker",
+        "proportional-common-3800-pair-2-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 1203.9687459910056,
+        "ack_p95_ms": 3407.5360760034528,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 13,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 48591.907879002974,
+        "teardown_ms": 2103.2214970036875,
+        "wall_to_verified_closure_ms": 8925.831793996622
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 116,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 156.65023200563155,
+            "min_call_ms": 156.65023200563155,
+            "summed_call_ms": 156.65023200563155,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 114,
+            "max_call_ms": 464.71977200417314,
+            "min_call_ms": 9.39388299593702,
+            "summed_call_ms": 10152.27658089134,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 7464.455234003253,
+            "min_call_ms": 7464.455234003253,
+            "summed_call_ms": 7464.455234003253,
+            "tool": "remember"
+          }
+        ]
+      },
+      "product": "exomem",
+      "public_calls": [
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 507.46475900814403,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 3407.5360760034528,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2304.8514889960643,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 1203.9687459910056,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 166.16669000359252,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 835.851828000159,
+          "tool": "remember"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 46.02999200869817,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 32.10615299758501,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 60.54065001080744,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 24.89305099879857,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 147.9144860059023,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 58.09197899361607,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 66.02758500957862,
+          "tool": "ask_memory"
+        }
+      ],
+      "raw_result_sha256": "d91a7a7224bf53b57e154c6135c254aa01c0d26524d63445c5adafd02f72befd",
+      "reason": null,
+      "runtime_profile": "aac99661ff654728471ce4a629b929446a1ba9c21864e9233f669891db8e4c67",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "30b7b9677918184ff1faeff642fe3364043c084192fd77a56bac901e472aeb1f",
+            "expected_bytes": 109,
+            "expected_sha256": "30b7b9677918184ff1faeff642fe3364043c084192fd77a56bac901e472aeb1f",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "df99c289a6e404a0984582cb5840cfa68e45c1c56aad5189460a078fa6571e47",
+            "expected_bytes": 1195,
+            "expected_sha256": "df99c289a6e404a0984582cb5840cfa68e45c1c56aad5189460a078fa6571e47",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "5cbb98da056f0ae19160c3abecf8ab6cd0e9a39e11f8bae4dae81f822258a37d",
+            "expected_bytes": 92,
+            "expected_sha256": "5cbb98da056f0ae19160c3abecf8ab6cd0e9a39e11f8bae4dae81f822258a37d",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 147.92956900782883,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 58.10558400116861,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 66.04384099773597,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "EXOMEM_CALL_LEDGER_DIR": "<sample-root>/state/exomem/ledger",
+        "EXOMEM_CONFIG_PATH": "<sample-root>/state/exomem/config.json",
+        "EXOMEM_DISABLE_EMBEDDINGS": "1",
+        "EXOMEM_DISABLE_QUERY_LOG": "1",
+        "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
+        "EXOMEM_EAGER_BOOT": "1",
+        "EXOMEM_LOG_DIR": "<sample-root>/state/exomem/logs",
+        "EXOMEM_STATE_ROOT": "<sample-root>/state/exomem/state",
+        "EXOMEM_VAULT_PATH": "<sample-root>/vault/exomem",
+        "EXOMEM_WRITER_LEASE_STATE_DIR": "<sample-root>/state/exomem/leases"
+      },
+      "corpus": {
+        "digest": "9b008bff381052c3a29cb8a187c1106a315ef29130788541ae88603eb845384c",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 3800,
+        "pages_entries": 3800
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "exomem",
+          "--pages",
+          "3800",
+          "--timeout",
+          "300",
+          "--startup-timeout",
+          "3600.0",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-3800-pair-3"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+        "ended_utc": "2026-09-07T20:02:50.955288+00:00",
+        "exit_code": 0,
+        "label": "3800-pair-3-1-exomem",
+        "load_average_end": [
+          4.54150390625,
+          4.556640625,
+          4.39599609375
+        ],
+        "load_average_start": [
+          4.64697265625,
+          4.5859375,
+          4.39599609375
+        ],
+        "pair": 3,
+        "position": 1,
+        "product_order": [
+          "exomem",
+          "basic_memory"
+        ],
+        "runner_wall_s": 61.545283681,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T20:01:47.511003+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "initial_indexed_corpus": {
+        "expected_path_count": 3800,
+        "expected_path_digest": "a4cc1b475b1b53b95656c2c283914f9f48e10b7786db0ca3b4f266c10f8b0044",
+        "identity_join_proof": "pages.rowid = fts.rowid",
+        "observed_path_count": 3800,
+        "observed_path_digest": "a4cc1b475b1b53b95656c2c283914f9f48e10b7786db0ca3b4f266c10f8b0044",
+        "product_binding": {
+          "fixture_prefix": "Knowledge Base/Reference/",
+          "vault_state_key": "exomem-0a5e519fb32e5839"
+        },
+        "proof_method": "pages/fts rowid identity join with recall admission",
+        "ready": true,
+        "reason": null,
+        "schema_identity": {
+          "digest": "4fc1ab5d9988401675c793e9a4460aefb3f7fb869a1665103feb338e6d090d93",
+          "tables": [
+            "fts",
+            "meta",
+            "pages"
+          ]
+        },
+        "store": "<sample-root>/state/exomem/state/exomem-0a5e519fb32e5839/.lexical.sqlite"
+      },
+      "label": "3800-pair-3-1-exomem",
+      "markers": [
+        "proportional-common-3800-pair-3-chapter",
+        "proportional-common-3800-pair-3-tracker",
+        "proportional-common-3800-pair-3-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 1298.3780799986562,
+        "ack_p95_ms": 2865.0322830071673,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 13,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 50183.61606899998,
+        "teardown_ms": 2103.804394006147,
+        "wall_to_verified_closure_ms": 8572.803038987331
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 122,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 97.54760400392115,
+            "min_call_ms": 97.54760400392115,
+            "summed_call_ms": 97.54760400392115,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 120,
+            "max_call_ms": 580.7917029887903,
+            "min_call_ms": 9.516972990240902,
+            "summed_call_ms": 10755.345138997654,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 6898.56273199257,
+            "min_call_ms": 6898.56273199257,
+            "summed_call_ms": 6898.56273199257,
+            "tool": "remember"
+          }
+        ]
+      },
+      "product": "exomem",
+      "public_calls": [
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 682.1665079914965,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2865.0322830071673,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2157.3524249979528,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 1298.3780799986562,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 85.88918400346301,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 859.4409380020807,
+          "tool": "remember"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 66.29997400159482,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 26.514348995988257,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 76.77460700506344,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 29.18056999624241,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 166.64008299994748,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 57.20214999746531,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 137.79033500759397,
+          "tool": "ask_memory"
+        }
+      ],
+      "raw_result_sha256": "b5a8f8438338241db42a1585b0c727fb61fe87584fe44ddd2cd7cc85e69df73d",
+      "reason": null,
+      "runtime_profile": "aac99661ff654728471ce4a629b929446a1ba9c21864e9233f669891db8e4c67",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "99c89dbd65cda2d4c033cb4969c5e4d15c7069ca8020d62f9e1fcc7e593ae33d",
+            "expected_bytes": 109,
+            "expected_sha256": "99c89dbd65cda2d4c033cb4969c5e4d15c7069ca8020d62f9e1fcc7e593ae33d",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "f458c77766c54e437b5c2b6291772384f10328fa6eaea23bc71383344309763e",
+            "expected_bytes": 1195,
+            "expected_sha256": "f458c77766c54e437b5c2b6291772384f10328fa6eaea23bc71383344309763e",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "5276553ebc93f99328f8b621629377cdcb0c55eddafc59037dd27b0a70ec330e",
+            "expected_bytes": 92,
+            "expected_sha256": "5276553ebc93f99328f8b621629377cdcb0c55eddafc59037dd27b0a70ec330e",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 166.65489399747457,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 57.22103400330525,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 137.80330200097524,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "BASIC_MEMORY_AUTO_UPDATE": "false",
+        "BASIC_MEMORY_CONFIG_DIR": "<sample-root>/state/basic_memory/config",
+        "BASIC_MEMORY_EXPLICIT_ROUTING": "true",
+        "BASIC_MEMORY_FORCE_LOCAL": "true",
+        "BASIC_MEMORY_HOME": "<sample-root>/state/basic_memory/home",
+        "BASIC_MEMORY_NO_PROMOS": "1",
+        "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false"
+      },
+      "corpus": {
+        "digest": "9b008bff381052c3a29cb8a187c1106a315ef29130788541ae88603eb845384c",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 3800,
+        "pages_entries": 3800
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "basic_memory",
+          "--pages",
+          "3800",
+          "--timeout",
+          "300",
+          "--startup-timeout",
+          "3600.0",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-3800-pair-3"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+        "ended_utc": "2026-09-07T20:14:37.346598+00:00",
+        "exit_code": 0,
+        "label": "3800-pair-3-2-basic_memory",
+        "load_average_end": [
+          3.16162109375,
+          3.68603515625,
+          4.02783203125
+        ],
+        "load_average_start": [
+          4.54150390625,
+          4.556640625,
+          4.39599609375
+        ],
+        "pair": 3,
+        "position": 2,
+        "product_order": [
+          "exomem",
+          "basic_memory"
+        ],
+        "runner_wall_s": 665.0280994439963,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T20:02:50.995151+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "initial_indexed_corpus": {
+        "expected_path_count": 3800,
+        "expected_path_digest": "3e031401c25a81c2487bb6b5e3908502473e99d38198353dd93e49e4e4fce136",
+        "identity_join_proof": "entity(id,file_path,project_id) = search_index(id,file_path,project_id); entity_id = id",
+        "observed_path_count": 3800,
+        "observed_path_digest": "3e031401c25a81c2487bb6b5e3908502473e99d38198353dd93e49e4e4fce136",
+        "product_binding": {
+          "project": "main",
+          "project_id": 1
+        },
+        "proof_method": "entity/search_index identity multiset join",
+        "ready": true,
+        "reason": null,
+        "schema_identity": {
+          "digest": "ace80dcdf3418dc1144406dcf648387c90088a345067c7ceddc6beed54d782b1",
+          "tables": [
+            "alembic_version",
+            "entity",
+            "project",
+            "search_index"
+          ]
+        },
+        "store": "<sample-root>/state/basic_memory/config/memory.db"
+      },
+      "label": "3800-pair-3-2-basic_memory",
+      "markers": [
+        "proportional-common-3800-pair-3-chapter",
+        "proportional-common-3800-pair-3-tracker",
+        "proportional-common-3800-pair-3-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 1087.5113629881525,
+        "ack_p95_ms": 6497.310377002577,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 11,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 649805.2313829976,
+        "teardown_ms": 2102.317637996748,
+        "wall_to_verified_closure_ms": 12450.829788998817
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 18,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 18,
+            "max_call_ms": 633.3356980030658,
+            "min_call_ms": 27.284504991257563,
+            "summed_call_ms": 1527.109263028251,
+            "tool": "search_notes"
+          }
+        ]
+      },
+      "product": "basic_memory",
+      "public_calls": [
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 879.7550939925713,
+          "tool": "write_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 6497.310377002577,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2162.5494140025694,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 1087.5113629881525,
+          "tool": "write_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 495.67471801128704,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 580.5776689958293,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 79.35823500156403,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 86.40742000716273,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 44.819033006206155,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 416.71768701053225,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 35.62571300426498,
+          "tool": "search_notes"
+        }
+      ],
+      "raw_result_sha256": "f0e11195bc0e46973c3d3e37cf82e394879a9bf572c05f9b660df659f47744a6",
+      "reason": null,
+      "runtime_profile": "094ae7536fcd0b6ebd8132a67e955948998f25f7e444a434e3915a87160735cf",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "99c89dbd65cda2d4c033cb4969c5e4d15c7069ca8020d62f9e1fcc7e593ae33d",
+            "expected_bytes": 109,
+            "expected_sha256": "99c89dbd65cda2d4c033cb4969c5e4d15c7069ca8020d62f9e1fcc7e593ae33d",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "f458c77766c54e437b5c2b6291772384f10328fa6eaea23bc71383344309763e",
+            "expected_bytes": 1195,
+            "expected_sha256": "f458c77766c54e437b5c2b6291772384f10328fa6eaea23bc71383344309763e",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "5276553ebc93f99328f8b621629377cdcb0c55eddafc59037dd27b0a70ec330e",
+            "expected_bytes": 92,
+            "expected_sha256": "5276553ebc93f99328f8b621629377cdcb0c55eddafc59037dd27b0a70ec330e",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 44.8361750022741,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 416.7336179962149,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 35.63816500536632,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "EXOMEM_CALL_LEDGER_DIR": "<sample-root>/state/exomem/ledger",
+        "EXOMEM_CONFIG_PATH": "<sample-root>/state/exomem/config.json",
+        "EXOMEM_DISABLE_EMBEDDINGS": "1",
+        "EXOMEM_DISABLE_QUERY_LOG": "1",
+        "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
+        "EXOMEM_EAGER_BOOT": "1",
+        "EXOMEM_LOG_DIR": "<sample-root>/state/exomem/logs",
+        "EXOMEM_STATE_ROOT": "<sample-root>/state/exomem/state",
+        "EXOMEM_VAULT_PATH": "<sample-root>/vault/exomem",
+        "EXOMEM_WRITER_LEASE_STATE_DIR": "<sample-root>/state/exomem/leases"
+      },
+      "corpus": {
+        "digest": "acf638d6bbbb3decdd500bfc6516b4e07897bf396d3140a9385f4fcc819ccffb",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 8000,
+        "pages_entries": 8000
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "exomem",
+          "--pages",
+          "8000",
+          "--timeout",
+          "300",
+          "--startup-timeout",
+          "3600.0",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-8000-pair-1"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+        "ended_utc": "2026-09-07T20:16:29.034913+00:00",
+        "exit_code": 0,
+        "label": "8000-pair-1-1-exomem",
+        "load_average_end": [
+          3.5302734375,
+          3.79833984375,
+          4.03857421875
+        ],
+        "load_average_start": [
+          3.16162109375,
+          3.68603515625,
+          4.02783203125
+        ],
+        "pair": 1,
+        "position": 1,
+        "product_order": [
+          "exomem",
+          "basic_memory"
+        ],
+        "runner_wall_s": 105.82737432800059,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T20:14:37.382498+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "initial_indexed_corpus": {
+        "expected_path_count": 8000,
+        "expected_path_digest": "2266721d71a975ad161da7607a780c6541df692e31f5c7bf953204a562e855af",
+        "identity_join_proof": "pages.rowid = fts.rowid",
+        "observed_path_count": 8000,
+        "observed_path_digest": "2266721d71a975ad161da7607a780c6541df692e31f5c7bf953204a562e855af",
+        "product_binding": {
+          "fixture_prefix": "Knowledge Base/Reference/",
+          "vault_state_key": "exomem-45a9259b241365a3"
+        },
+        "proof_method": "pages/fts rowid identity join with recall admission",
+        "ready": true,
+        "reason": null,
+        "schema_identity": {
+          "digest": "4fc1ab5d9988401675c793e9a4460aefb3f7fb869a1665103feb338e6d090d93",
+          "tables": [
+            "fts",
+            "meta",
+            "pages"
+          ]
+        },
+        "store": "<sample-root>/state/exomem/state/exomem-45a9259b241365a3/.lexical.sqlite"
+      },
+      "label": "8000-pair-1-1-exomem",
+      "markers": [
+        "proportional-common-8000-pair-1-chapter",
+        "proportional-common-8000-pair-1-tracker",
+        "proportional-common-8000-pair-1-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 2465.8379210013663,
+        "ack_p95_ms": 3538.0746360024204,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 13,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 89584.87178200448,
+        "teardown_ms": 2101.392890996067,
+        "wall_to_verified_closure_ms": 13477.028302993858
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 208,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 102.35244499926921,
+            "min_call_ms": 102.35244499926921,
+            "summed_call_ms": 102.35244499926921,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 205,
+            "max_call_ms": 767.5153570016846,
+            "min_call_ms": 9.256653996999376,
+            "summed_call_ms": 18562.820888095303,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 1964.6186440077145,
+            "min_call_ms": 1964.6186440077145,
+            "summed_call_ms": 1964.6186440077145,
+            "tool": "remember"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 1,
+            "max_call_ms": 14386.839893995784,
+            "min_call_ms": 14386.839893995784,
+            "summed_call_ms": 14386.839893995784,
+            "tool": "remember"
+          }
+        ]
+      },
+      "product": "exomem",
+      "public_calls": [
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 984.6941239957232,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 3538.0746360024204,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2509.17013300932,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 1802.2027570114005,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 331.3282029994298,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2465.8379210013663,
+          "tool": "remember"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 137.9852399986703,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 116.15934300061781,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 108.63813500327524,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 169.45325200504158,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 589.3236180127133,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 411.6519000090193,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 135.8196439978201,
+          "tool": "ask_memory"
+        }
+      ],
+      "raw_result_sha256": "3e8ea065c41f3d2f84c8b4ce0f97cd0d3ce3226514f7226a0203512d1f6c7267",
+      "reason": null,
+      "runtime_profile": "aac99661ff654728471ce4a629b929446a1ba9c21864e9233f669891db8e4c67",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "50e0e24335a9916f721bb5b451037cfc3ec89837affd7e17bf9367d9fe08e910",
+            "expected_bytes": 109,
+            "expected_sha256": "50e0e24335a9916f721bb5b451037cfc3ec89837affd7e17bf9367d9fe08e910",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "4cbc1db7ac02c64cd1d6b2772086d8903ff53560365eca5810ff368e5f17f313",
+            "expected_bytes": 1195,
+            "expected_sha256": "4cbc1db7ac02c64cd1d6b2772086d8903ff53560365eca5810ff368e5f17f313",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "100a9f8b13f4c7caf9f8dbdd1dd7c380a44715abe1f743d85fbbefc1ca226610",
+            "expected_bytes": 92,
+            "expected_sha256": "100a9f8b13f4c7caf9f8dbdd1dd7c380a44715abe1f743d85fbbefc1ca226610",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 589.3388800031971,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 411.6664790053619,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 135.83259099686984,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "BASIC_MEMORY_AUTO_UPDATE": "false",
+        "BASIC_MEMORY_CONFIG_DIR": "<sample-root>/state/basic_memory/config",
+        "BASIC_MEMORY_EXPLICIT_ROUTING": "true",
+        "BASIC_MEMORY_FORCE_LOCAL": "true",
+        "BASIC_MEMORY_HOME": "<sample-root>/state/basic_memory/home",
+        "BASIC_MEMORY_NO_PROMOS": "1",
+        "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false"
+      },
+      "corpus": {
+        "digest": "acf638d6bbbb3decdd500bfc6516b4e07897bf396d3140a9385f4fcc819ccffb",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 8000,
+        "pages_entries": 8000
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "basic_memory",
+          "--pages",
+          "8000",
+          "--timeout",
+          "300",
+          "--startup-timeout",
+          "3600.0",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-8000-pair-1"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+        "ended_utc": "2026-09-07T20:55:51.920013+00:00",
+        "exit_code": 0,
+        "label": "8000-pair-1-2-basic_memory",
+        "load_average_end": [
+          4.3701171875,
+          4.7470703125,
+          4.521484375
+        ],
+        "load_average_start": [
+          3.5302734375,
+          3.79833984375,
+          4.03857421875
+        ],
+        "pair": 1,
+        "position": 2,
+        "product_order": [
+          "exomem",
+          "basic_memory"
+        ],
+        "runner_wall_s": 2229.7822170750005,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T20:16:29.073431+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "initial_indexed_corpus": {
+        "expected_path_count": 8000,
+        "expected_path_digest": "733dd08c26faf7b857888804524f120d9277cc7d53bf4e369a180a290b139785",
+        "identity_join_proof": "entity(id,file_path,project_id) = search_index(id,file_path,project_id); entity_id = id",
+        "observed_path_count": 8000,
+        "observed_path_digest": "733dd08c26faf7b857888804524f120d9277cc7d53bf4e369a180a290b139785",
+        "product_binding": {
+          "project": "main",
+          "project_id": 1
+        },
+        "proof_method": "entity/search_index identity multiset join",
+        "ready": true,
+        "reason": null,
+        "schema_identity": {
+          "digest": "ace80dcdf3418dc1144406dcf648387c90088a345067c7ceddc6beed54d782b1",
+          "tables": [
+            "alembic_version",
+            "entity",
+            "project",
+            "search_index"
+          ]
+        },
+        "store": "<sample-root>/state/basic_memory/config/memory.db"
+      },
+      "label": "8000-pair-1-2-basic_memory",
+      "markers": [
+        "proportional-common-8000-pair-1-chapter",
+        "proportional-common-8000-pair-1-tracker",
+        "proportional-common-8000-pair-1-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 4406.456641008845,
+        "ack_p95_ms": 8948.990922988742,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 11,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 2187879.8752260045,
+        "teardown_ms": 2208.833783006412,
+        "wall_to_verified_closure_ms": 38993.836715992074
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 30,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 30,
+            "max_call_ms": 578.3736180019332,
+            "min_call_ms": 25.08259000023827,
+            "summed_call_ms": 1924.8002690001158,
+            "tool": "search_notes"
+          }
+        ]
+      },
+      "product": "basic_memory",
+      "public_calls": [
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 735.1063079986488,
+          "tool": "write_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 8948.990922988742,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 7438.40909699793,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 4406.456641008845,
+          "tool": "write_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 382.5668330100598,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 13293.666773999576,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 252.74168299802113,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 162.1529499971075,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 104.8415230034152,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 2955.9372820076533,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 136.2454599875491,
+          "tool": "search_notes"
+        }
+      ],
+      "raw_result_sha256": "4bcee7f8426409cb9bd72fb8a18c1cc92088315c5858447b4df83a13b9789159",
+      "reason": null,
+      "runtime_profile": "094ae7536fcd0b6ebd8132a67e955948998f25f7e444a434e3915a87160735cf",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "50e0e24335a9916f721bb5b451037cfc3ec89837affd7e17bf9367d9fe08e910",
+            "expected_bytes": 109,
+            "expected_sha256": "50e0e24335a9916f721bb5b451037cfc3ec89837affd7e17bf9367d9fe08e910",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "4cbc1db7ac02c64cd1d6b2772086d8903ff53560365eca5810ff368e5f17f313",
+            "expected_bytes": 1195,
+            "expected_sha256": "4cbc1db7ac02c64cd1d6b2772086d8903ff53560365eca5810ff368e5f17f313",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "100a9f8b13f4c7caf9f8dbdd1dd7c380a44715abe1f743d85fbbefc1ca226610",
+            "expected_bytes": 92,
+            "expected_sha256": "100a9f8b13f4c7caf9f8dbdd1dd7c380a44715abe1f743d85fbbefc1ca226610",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 104.85652201168705,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 2955.9539319889154,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 136.26256700081285,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "BASIC_MEMORY_AUTO_UPDATE": "false",
+        "BASIC_MEMORY_CONFIG_DIR": "<sample-root>/state/basic_memory/config",
+        "BASIC_MEMORY_EXPLICIT_ROUTING": "true",
+        "BASIC_MEMORY_FORCE_LOCAL": "true",
+        "BASIC_MEMORY_HOME": "<sample-root>/state/basic_memory/home",
+        "BASIC_MEMORY_NO_PROMOS": "1",
+        "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false"
+      },
+      "corpus": {
+        "digest": "acf638d6bbbb3decdd500bfc6516b4e07897bf396d3140a9385f4fcc819ccffb",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 8000,
+        "pages_entries": 8000
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "basic_memory",
+          "--pages",
+          "8000",
+          "--timeout",
+          "300",
+          "--startup-timeout",
+          "3600.0",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-8000-pair-2"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+        "ended_utc": "2026-09-07T21:35:20.201287+00:00",
+        "exit_code": 0,
+        "label": "8000-pair-2-1-basic_memory",
+        "load_average_end": [
+          3.9404296875,
+          4.56298828125,
+          4.6103515625
+        ],
+        "load_average_start": [
+          4.3701171875,
+          4.7470703125,
+          4.521484375
+        ],
+        "pair": 2,
+        "position": 1,
+        "product_order": [
+          "basic_memory",
+          "exomem"
+        ],
+        "runner_wall_s": 2223.4846001130063,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T20:55:52.062926+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "initial_indexed_corpus": {
+        "expected_path_count": 8000,
+        "expected_path_digest": "733dd08c26faf7b857888804524f120d9277cc7d53bf4e369a180a290b139785",
+        "identity_join_proof": "entity(id,file_path,project_id) = search_index(id,file_path,project_id); entity_id = id",
+        "observed_path_count": 8000,
+        "observed_path_digest": "733dd08c26faf7b857888804524f120d9277cc7d53bf4e369a180a290b139785",
+        "product_binding": {
+          "project": "main",
+          "project_id": 1
+        },
+        "proof_method": "entity/search_index identity multiset join",
+        "ready": true,
+        "reason": null,
+        "schema_identity": {
+          "digest": "ace80dcdf3418dc1144406dcf648387c90088a345067c7ceddc6beed54d782b1",
+          "tables": [
+            "alembic_version",
+            "entity",
+            "project",
+            "search_index"
+          ]
+        },
+        "store": "<sample-root>/state/basic_memory/config/memory.db"
+      },
+      "label": "8000-pair-2-1-basic_memory",
+      "markers": [
+        "proportional-common-8000-pair-2-chapter",
+        "proportional-common-8000-pair-2-tracker",
+        "proportional-common-8000-pair-2-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 1525.957206991734,
+        "ack_p95_ms": 11020.109064003918,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 11,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 2202084.0549129937,
+        "teardown_ms": 2102.3828990000766,
+        "wall_to_verified_closure_ms": 18526.38600100181
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 32,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 32,
+            "max_call_ms": 470.89068799687084,
+            "min_call_ms": 24.688970996066928,
+            "summed_call_ms": 1853.320170994266,
+            "tool": "search_notes"
+          }
+        ]
+      },
+      "product": "basic_memory",
+      "public_calls": [
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 745.9071470075287,
+          "tool": "write_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 11020.109064003918,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2036.1088850040687,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 1525.957206991734,
+          "tool": "write_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 193.55933100450784,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 2273.5041289997753,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 64.42822399549186,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 101.93360499397386,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 63.06707799376454,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 287.29353500239085,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 42.48378599004354,
+          "tool": "search_notes"
+        }
+      ],
+      "raw_result_sha256": "5111bcec96143cdb2b1fe67f328957d7ead207021f5b87c1ec06ace481a89571",
+      "reason": null,
+      "runtime_profile": "094ae7536fcd0b6ebd8132a67e955948998f25f7e444a434e3915a87160735cf",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "fd1a2e989bcb723b40a40a57e3ac095a31b0d0bbfcd5d30393840b36d982d305",
+            "expected_bytes": 109,
+            "expected_sha256": "fd1a2e989bcb723b40a40a57e3ac095a31b0d0bbfcd5d30393840b36d982d305",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "59db48ae69296207d5ec161f7594866b613cf66c19f1c9075b2a4dbecae88186",
+            "expected_bytes": 1195,
+            "expected_sha256": "59db48ae69296207d5ec161f7594866b613cf66c19f1c9075b2a4dbecae88186",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "6c3ee0586bffb263c40823c4e3517a9c016a32cc9bbc60b98bcad35a1fb47de6",
+            "expected_bytes": 92,
+            "expected_sha256": "6c3ee0586bffb263c40823c4e3517a9c016a32cc9bbc60b98bcad35a1fb47de6",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 63.087675007409416,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 287.31227200478315,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 42.49659599736333,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "EXOMEM_CALL_LEDGER_DIR": "<sample-root>/state/exomem/ledger",
+        "EXOMEM_CONFIG_PATH": "<sample-root>/state/exomem/config.json",
+        "EXOMEM_DISABLE_EMBEDDINGS": "1",
+        "EXOMEM_DISABLE_QUERY_LOG": "1",
+        "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
+        "EXOMEM_EAGER_BOOT": "1",
+        "EXOMEM_LOG_DIR": "<sample-root>/state/exomem/logs",
+        "EXOMEM_STATE_ROOT": "<sample-root>/state/exomem/state",
+        "EXOMEM_VAULT_PATH": "<sample-root>/vault/exomem",
+        "EXOMEM_WRITER_LEASE_STATE_DIR": "<sample-root>/state/exomem/leases"
+      },
+      "corpus": {
+        "digest": "acf638d6bbbb3decdd500bfc6516b4e07897bf396d3140a9385f4fcc819ccffb",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 8000,
+        "pages_entries": 8000
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "exomem",
+          "--pages",
+          "8000",
+          "--timeout",
+          "300",
+          "--startup-timeout",
+          "3600.0",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-8000-pair-2"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+        "ended_utc": "2026-09-07T21:37:20.162342+00:00",
+        "exit_code": 0,
+        "label": "8000-pair-2-2-exomem",
+        "load_average_end": [
+          4.259765625,
+          4.365234375,
+          4.52490234375
+        ],
+        "load_average_start": [
+          3.9404296875,
+          4.56298828125,
+          4.6103515625
+        ],
+        "pair": 2,
+        "position": 2,
+        "product_order": [
+          "basic_memory",
+          "exomem"
+        ],
+        "runner_wall_s": 110.90074495600129,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T21:35:20.258124+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "initial_indexed_corpus": {
+        "expected_path_count": 8000,
+        "expected_path_digest": "2266721d71a975ad161da7607a780c6541df692e31f5c7bf953204a562e855af",
+        "identity_join_proof": "pages.rowid = fts.rowid",
+        "observed_path_count": 8000,
+        "observed_path_digest": "2266721d71a975ad161da7607a780c6541df692e31f5c7bf953204a562e855af",
+        "product_binding": {
+          "fixture_prefix": "Knowledge Base/Reference/",
+          "vault_state_key": "exomem-f0a4557f52c39653"
+        },
+        "proof_method": "pages/fts rowid identity join with recall admission",
+        "ready": true,
+        "reason": null,
+        "schema_identity": {
+          "digest": "4fc1ab5d9988401675c793e9a4460aefb3f7fb869a1665103feb338e6d090d93",
+          "tables": [
+            "fts",
+            "meta",
+            "pages"
+          ]
+        },
+        "store": "<sample-root>/state/exomem/state/exomem-f0a4557f52c39653/.lexical.sqlite"
+      },
+      "label": "8000-pair-2-2-exomem",
+      "markers": [
+        "proportional-common-8000-pair-2-chapter",
+        "proportional-common-8000-pair-2-tracker",
+        "proportional-common-8000-pair-2-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 2696.062465009163,
+        "ack_p95_ms": 4630.832765993546,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 13,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 92149.70633700432,
+        "teardown_ms": 2103.659451007843,
+        "wall_to_verified_closure_ms": 15961.9002519903
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 211,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 104.4006209995132,
+            "min_call_ms": 104.4006209995132,
+            "summed_call_ms": 104.4006209995132,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 208,
+            "max_call_ms": 726.290089005488,
+            "min_call_ms": 9.176124003715813,
+            "summed_call_ms": 19880.662347961334,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 1529.4764599966584,
+            "min_call_ms": 1529.4764599966584,
+            "summed_call_ms": 1529.4764599966584,
+            "tool": "remember"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 1,
+            "max_call_ms": 14798.696490994189,
+            "min_call_ms": 14798.696490994189,
+            "summed_call_ms": 14798.696490994189,
+            "tool": "remember"
+          }
+        ]
+      },
+      "product": "exomem",
+      "public_calls": [
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 1032.6214539963985,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 4630.832765993546,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 3008.55558400508,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2135.5546900012996,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 285.7735750003485,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2696.062465009163,
+          "tool": "remember"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 157.29887899942696,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 114.68354200769681,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 127.66679000924341,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 197.1336330025224,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 641.431124007795,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 390.8103939902503,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 373.41255600040313,
+          "tool": "ask_memory"
+        }
+      ],
+      "raw_result_sha256": "1a619be62da3ea9388539f9657b721dc959a3794a10d6ef5d3de1d492c643db3",
+      "reason": null,
+      "runtime_profile": "aac99661ff654728471ce4a629b929446a1ba9c21864e9233f669891db8e4c67",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "fd1a2e989bcb723b40a40a57e3ac095a31b0d0bbfcd5d30393840b36d982d305",
+            "expected_bytes": 109,
+            "expected_sha256": "fd1a2e989bcb723b40a40a57e3ac095a31b0d0bbfcd5d30393840b36d982d305",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "59db48ae69296207d5ec161f7594866b613cf66c19f1c9075b2a4dbecae88186",
+            "expected_bytes": 1195,
+            "expected_sha256": "59db48ae69296207d5ec161f7594866b613cf66c19f1c9075b2a4dbecae88186",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "6c3ee0586bffb263c40823c4e3517a9c016a32cc9bbc60b98bcad35a1fb47de6",
+            "expected_bytes": 92,
+            "expected_sha256": "6c3ee0586bffb263c40823c4e3517a9c016a32cc9bbc60b98bcad35a1fb47de6",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 641.4459669904318,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 390.82379899627995,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 373.42496500059497,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "EXOMEM_CALL_LEDGER_DIR": "<sample-root>/state/exomem/ledger",
+        "EXOMEM_CONFIG_PATH": "<sample-root>/state/exomem/config.json",
+        "EXOMEM_DISABLE_EMBEDDINGS": "1",
+        "EXOMEM_DISABLE_QUERY_LOG": "1",
+        "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
+        "EXOMEM_EAGER_BOOT": "1",
+        "EXOMEM_LOG_DIR": "<sample-root>/state/exomem/logs",
+        "EXOMEM_STATE_ROOT": "<sample-root>/state/exomem/state",
+        "EXOMEM_VAULT_PATH": "<sample-root>/vault/exomem",
+        "EXOMEM_WRITER_LEASE_STATE_DIR": "<sample-root>/state/exomem/leases"
+      },
+      "corpus": {
+        "digest": "acf638d6bbbb3decdd500bfc6516b4e07897bf396d3140a9385f4fcc819ccffb",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 8000,
+        "pages_entries": 8000
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "exomem",
+          "--pages",
+          "8000",
+          "--timeout",
+          "300",
+          "--startup-timeout",
+          "3600.0",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-8000-pair-3"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+        "ended_utc": "2026-09-07T21:39:16.754578+00:00",
+        "exit_code": 0,
+        "label": "8000-pair-3-1-exomem",
+        "load_average_end": [
+          4.3330078125,
+          4.40966796875,
+          4.525390625
+        ],
+        "load_average_start": [
+          4.259765625,
+          4.365234375,
+          4.52490234375
+        ],
+        "pair": 3,
+        "position": 1,
+        "product_order": [
+          "exomem",
+          "basic_memory"
+        ],
+        "runner_wall_s": 110.0353762349987,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T21:37:20.199003+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "initial_indexed_corpus": {
+        "expected_path_count": 8000,
+        "expected_path_digest": "2266721d71a975ad161da7607a780c6541df692e31f5c7bf953204a562e855af",
+        "identity_join_proof": "pages.rowid = fts.rowid",
+        "observed_path_count": 8000,
+        "observed_path_digest": "2266721d71a975ad161da7607a780c6541df692e31f5c7bf953204a562e855af",
+        "product_binding": {
+          "fixture_prefix": "Knowledge Base/Reference/",
+          "vault_state_key": "exomem-78e0568581d22423"
+        },
+        "proof_method": "pages/fts rowid identity join with recall admission",
+        "ready": true,
+        "reason": null,
+        "schema_identity": {
+          "digest": "4fc1ab5d9988401675c793e9a4460aefb3f7fb869a1665103feb338e6d090d93",
+          "tables": [
+            "fts",
+            "meta",
+            "pages"
+          ]
+        },
+        "store": "<sample-root>/state/exomem/state/exomem-78e0568581d22423/.lexical.sqlite"
+      },
+      "label": "8000-pair-3-1-exomem",
+      "markers": [
+        "proportional-common-8000-pair-3-chapter",
+        "proportional-common-8000-pair-3-tracker",
+        "proportional-common-8000-pair-3-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 2263.7530630017864,
+        "ack_p95_ms": 4129.551650999929,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 13,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 92899.87919699342,
+        "teardown_ms": 2102.871242997935,
+        "wall_to_verified_closure_ms": 14373.23956801265
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 214,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 112.99154999142047,
+            "min_call_ms": 112.99154999142047,
+            "summed_call_ms": 112.99154999142047,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 211,
+            "max_call_ms": 985.4353020054987,
+            "min_call_ms": 9.292123999330215,
+            "summed_call_ms": 20413.644775922876,
+            "tool": "ask_memory"
+          },
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 1,
+            "max_call_ms": 1158.3699220063863,
+            "min_call_ms": 1158.3699220063863,
+            "summed_call_ms": 1158.3699220063863,
+            "tool": "remember"
+          },
+          {
+            "ack": false,
+            "classification": "refused",
+            "count": 1,
+            "max_call_ms": 14863.399821988423,
+            "min_call_ms": 14863.399821988423,
+            "summed_call_ms": 14863.399821988423,
+            "tool": "remember"
+          }
+        ]
+      },
+      "product": "exomem",
+      "public_calls": [
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 1024.7031830076594,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 4129.551650999929,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2762.705991000985,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 1690.0315910024801,
+          "tool": "edit_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 312.7719260082813,
+          "tool": "remember"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 2263.7530630017864,
+          "tool": "remember"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 159.7378110018326,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 117.88744799559936,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 123.55514599767048,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 201.29149800050072,
+          "tool": "read_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 601.8626820005011,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 401.33132100163493,
+          "tool": "ask_memory"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 398.51574499334674,
+          "tool": "ask_memory"
+        }
+      ],
+      "raw_result_sha256": "a42d5a2570e4447ce22c11e091c47da0c778253ad5eac9020d3ce0352d4b043e",
+      "reason": null,
+      "runtime_profile": "aac99661ff654728471ce4a629b929446a1ba9c21864e9233f669891db8e4c67",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "c6452f4e3716430139b1bfd4162f26bffad5280c4a2a23e90d595c2ea3905d60",
+            "expected_bytes": 109,
+            "expected_sha256": "c6452f4e3716430139b1bfd4162f26bffad5280c4a2a23e90d595c2ea3905d60",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "bf1f056f580e5b874fc3d21707c05ae597d4a20dd0c5cd3d9c8c97076f62206c",
+            "expected_bytes": 1195,
+            "expected_sha256": "bf1f056f580e5b874fc3d21707c05ae597d4a20dd0c5cd3d9c8c97076f62206c",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "ce42de4880c4d4ff73566bd4846dde9b9a3f585370105b49f73df16f5f2ed629",
+            "expected_bytes": 92,
+            "expected_sha256": "ce42de4880c4d4ff73566bd4846dde9b9a3f585370105b49f73df16f5f2ed629",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 601.8776150012854,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 401.34540300641675,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 398.52850399620365,
+            "final_response": {
+              "classification": "ok",
+              "container": "result",
+              "hit_count": 1,
+              "top_level_keys": [
+                "result"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    },
+    {
+      "configuration": {
+        "BASIC_MEMORY_AUTO_UPDATE": "false",
+        "BASIC_MEMORY_CONFIG_DIR": "<sample-root>/state/basic_memory/config",
+        "BASIC_MEMORY_EXPLICIT_ROUTING": "true",
+        "BASIC_MEMORY_FORCE_LOCAL": "true",
+        "BASIC_MEMORY_HOME": "<sample-root>/state/basic_memory/home",
+        "BASIC_MEMORY_NO_PROMOS": "1",
+        "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false"
+      },
+      "corpus": {
+        "digest": "acf638d6bbbb3decdd500bfc6516b4e07897bf396d3140a9385f4fcc819ccffb",
+        "generator": "durable-closure-common-markdown-v1",
+        "named_pages": {
+          "background": "background.md",
+          "stale_link": "stale-link.md",
+          "tracker": "active-tracker.md"
+        },
+        "page_count": 8000,
+        "pages_entries": 8000
+      },
+      "host": {
+        "argv": [
+          "<source-checkout>/.venv/bin/python",
+          "<source-checkout>/scripts/durable_closure_common.py",
+          "--product",
+          "basic_memory",
+          "--pages",
+          "8000",
+          "--timeout",
+          "300",
+          "--startup-timeout",
+          "3600.0",
+          "--state",
+          "<sample-root>/state",
+          "--vault",
+          "<sample-root>/vault",
+          "--basic-memory-executable",
+          "<basic-memory-venv>/bin/basic-memory",
+          "--basic-memory-wheel",
+          "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+          "--marker",
+          "proportional-common-8000-pair-3"
+        ],
+        "cpu_count": 16,
+        "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+        "ended_utc": "2026-09-07T22:20:55.508774+00:00",
+        "exit_code": 0,
+        "label": "8000-pair-3-2-basic_memory",
+        "load_average_end": [
+          12.07958984375,
+          10.3369140625,
+          7.669921875
+        ],
+        "load_average_start": [
+          4.3330078125,
+          4.40966796875,
+          4.525390625
+        ],
+        "pair": 3,
+        "position": 2,
+        "product_order": [
+          "exomem",
+          "basic_memory"
+        ],
+        "runner_wall_s": 2338.5467997929954,
+        "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "started_utc": "2026-09-07T21:39:16.792809+00:00",
+        "task_test_workers_quiescent": true
+      },
+      "initial_indexed_corpus": {
+        "expected_path_count": 8000,
+        "expected_path_digest": "733dd08c26faf7b857888804524f120d9277cc7d53bf4e369a180a290b139785",
+        "identity_join_proof": "entity(id,file_path,project_id) = search_index(id,file_path,project_id); entity_id = id",
+        "observed_path_count": 8000,
+        "observed_path_digest": "733dd08c26faf7b857888804524f120d9277cc7d53bf4e369a180a290b139785",
+        "product_binding": {
+          "project": "main",
+          "project_id": 1
+        },
+        "proof_method": "entity/search_index identity multiset join",
+        "ready": true,
+        "reason": null,
+        "schema_identity": {
+          "digest": "42309cef36a08e57eb6ffa1bf2ee07c16250a2590dd73868ee162b157cbf7ff5",
+          "tables": [
+            "alembic_version",
+            "entity",
+            "project",
+            "search_index"
+          ]
+        },
+        "store": "<sample-root>/state/basic_memory/config/memory.db"
+      },
+      "label": "8000-pair-3-2-basic_memory",
+      "markers": [
+        "proportional-common-8000-pair-3-chapter",
+        "proportional-common-8000-pair-3-tracker",
+        "proportional-common-8000-pair-3-capture"
+      ],
+      "measurements": {
+        "ack_p50_ms": 1285.7668820070103,
+        "ack_p95_ms": 9333.056174989906,
+        "connector_ms": null,
+        "connector_reason": "not exposed by the public MCP protocol",
+        "public_call_count": 11,
+        "shared_server_ms": null,
+        "shared_server_reason": "not exposed by the public MCP protocol"
+      },
+      "phases": {
+        "pre_timing_ms": 2317062.004776002,
+        "teardown_ms": 2206.014651004807,
+        "wall_to_verified_closure_ms": 18480.776074997266
+      },
+      "plan": [
+        {
+          "operation": "create_completed_chapter",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "edit_tracker",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "correct_stale_link",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "capture_independent_note",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "exact_read_changed_pages",
+          "surface": "public_mcp"
+        },
+        {
+          "operation": "search_unique_markers",
+          "surface": "public_mcp"
+        }
+      ],
+      "pre_timing_public_calls_summary": {
+        "call_count": 31,
+        "groups": [
+          {
+            "ack": false,
+            "classification": "ok",
+            "count": 31,
+            "max_call_ms": 605.0239899923326,
+            "min_call_ms": 26.774472993565723,
+            "summed_call_ms": 1919.058672938263,
+            "tool": "search_notes"
+          }
+        ]
+      },
+      "product": "basic_memory",
+      "public_calls": [
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 1285.7668820070103,
+          "tool": "write_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 9333.056174989906,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 4049.7067870019237,
+          "tool": "edit_note"
+        },
+        {
+          "ack": true,
+          "classification": "ok",
+          "elapsed_ms": 730.5786150100175,
+          "tool": "write_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 135.32560899329837,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 1293.6859399924288,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 74.62026299617719,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 94.78243500052486,
+          "tool": "read_note"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 58.17655200371519,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 1152.3079220060026,
+          "tool": "search_notes"
+        },
+        {
+          "ack": false,
+          "classification": "ok",
+          "elapsed_ms": 38.98105499683879,
+          "tool": "search_notes"
+        }
+      ],
+      "raw_result_sha256": "1a19f46a6bea92cd67ff469e4447b582903471af29ff983cf6c39a67e793e93b",
+      "reason": null,
+      "runtime_profile": "094ae7536fcd0b6ebd8132a67e955948998f25f7e444a434e3915a87160735cf",
+      "status": "pass",
+      "verification": {
+        "body_proof": [
+          {
+            "actual_bytes": 109,
+            "actual_sha256": "c6452f4e3716430139b1bfd4162f26bffad5280c4a2a23e90d595c2ea3905d60",
+            "expected_bytes": 109,
+            "expected_sha256": "c6452f4e3716430139b1bfd4162f26bffad5280c4a2a23e90d595c2ea3905d60",
+            "matches": true
+          },
+          {
+            "actual_bytes": 1195,
+            "actual_sha256": "bf1f056f580e5b874fc3d21707c05ae597d4a20dd0c5cd3d9c8c97076f62206c",
+            "expected_bytes": 1195,
+            "expected_sha256": "bf1f056f580e5b874fc3d21707c05ae597d4a20dd0c5cd3d9c8c97076f62206c",
+            "matches": true
+          },
+          {
+            "actual_bytes": 3175,
+            "actual_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "expected_bytes": 3175,
+            "expected_sha256": "8df8d06514ec9d3021463c1426eb5a9f7312e01441959d738ce0dddfe18803b2",
+            "matches": true
+          },
+          {
+            "actual_bytes": 92,
+            "actual_sha256": "ce42de4880c4d4ff73566bd4846dde9b9a3f585370105b49f73df16f5f2ed629",
+            "expected_bytes": 92,
+            "expected_sha256": "ce42de4880c4d4ff73566bd4846dde9b9a3f585370105b49f73df16f5f2ed629",
+            "matches": true
+          }
+        ],
+        "exact_read_your_write": true,
+        "expected_bodies_match": true,
+        "search_converged": true,
+        "searches": [
+          {
+            "convergence_ms": 58.22383401391562,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 1152.326281007845,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          },
+          {
+            "convergence_ms": 38.99446199648082,
+            "final_response": {
+              "classification": "ok",
+              "container": "results",
+              "hit_count": 1,
+              "top_level_keys": [
+                "current_page",
+                "has_more",
+                "page_size",
+                "results",
+                "total",
+                "total_is_exact"
+              ]
+            },
+            "found": true,
+            "waits_ms": []
+          }
+        ]
+      }
+    }
+  ],
+  "runtime_profiles": {
+    "094ae7536fcd0b6ebd8132a67e955948998f25f7e444a434e3915a87160735cf": {
+      "dependency_inventory": {
+        "entries": [
+          "Authlib==1.8.0",
+          "Jinja2==3.1.6",
+          "Mako==1.4.1",
+          "MarkupSafe==3.0.3",
+          "PyJWT==2.13.0",
+          "PyMeta3==0.5.1",
+          "PyYAML==6.0.3",
+          "Pygments==2.21.0",
+          "SQLAlchemy==2.1.0rc1",
+          "SecretStorage==3.5.0",
+          "Unidecode==1.4.0",
+          "agent-detector==2.0.0",
+          "aiofile==3.12.3",
+          "aiofiles==25.1.0",
+          "aiohappyeyeballs==2.7.1",
+          "aiohttp==3.14.3",
+          "aiosignal==1.4.0",
+          "aiosqlite==0.22.1",
+          "alembic==1.19.2",
+          "annotated-doc==0.0.5",
+          "annotated-types==0.8.0",
+          "anyio==4.15.1",
+          "asyncpg==0.31.0",
+          "attrs==26.1.0",
+          "basic-memory==0.23.2",
+          "beartype==0.23.0rc0",
+          "cachetools==7.1.8",
+          "caio==0.12.4",
+          "certifi==2026.7.22",
+          "cffi==2.1.1",
+          "charset-normalizer==3.5.1",
+          "click==8.5.0",
+          "cryptography==50.0.1",
+          "cyclopts==5.0.0b1",
+          "dateparser==1.4.3",
+          "detect-installer==0.2.1",
+          "distro==1.9.0",
+          "dnspython==2.8.0",
+          "docstring_parser==0.18.0",
+          "email-validator==2.3.0",
+          "exceptiongroup==1.3.1",
+          "executing==2.2.1",
+          "fastapi-cli==0.0.32",
+          "fastapi-cloud-cli==0.25.0",
+          "fastapi==0.141.1",
+          "fastar==0.12.0",
+          "fastembed==0.8.0",
+          "fastmcp-slim==4.0.0b1",
+          "fastmcp==4.0.0b1",
+          "fastuuid==0.14.0",
+          "filelock==3.32.5",
+          "flatbuffers==25.12.19",
+          "frozenlist==1.8.0",
+          "fsspec==2026.7.0",
+          "googleapis-common-protos==1.75.3",
+          "greenlet==3.5.5",
+          "griffelib==2.3.0",
+          "h11==0.16.0",
+          "hf-xet==1.6.1a0",
+          "httpcore2==2.12.0",
+          "httpcore==1.0.9",
+          "httptools==0.8.0",
+          "httpx2==2.12.0",
+          "httpx==0.28.1",
+          "huggingface_hub==1.30.0",
+          "idna==3.19",
+          "importlib_metadata==8.9.0",
+          "iniconfig==2.3.0",
+          "jaraco.classes==3.4.0",
+          "jaraco.context==6.1.2",
+          "jaraco.functools==4.6.0",
+          "jeepney==0.9.0",
+          "jiter==0.16.0",
+          "joserfc==1.7.5",
+          "jsonref==1.1.0",
+          "jsonschema-path==0.5.0",
+          "jsonschema-specifications==2025.9.1",
+          "jsonschema==4.26.0",
+          "keyring==25.7.0",
+          "litellm==1.91.5",
+          "logfire==5.0.0",
+          "loguru==0.7.3",
+          "markdown-it-py==4.2.0",
+          "mcp-types==2.1.1",
+          "mcp==2.1.1",
+          "mdformat-gfm==1.0.0",
+          "mdformat==1.0.0",
+          "mdformat_frontmatter==2.1.2",
+          "mdit-py-plugins==0.6.1",
+          "mdurl==0.1.2",
+          "mmh3==5.3.0",
+          "more-itertools==11.1.0",
+          "multidict==6.7.1",
+          "nest-asyncio==1.6.0",
+          "nodeenv==1.10.0",
+          "numpy==2.5.3",
+          "onnxruntime==1.29.0",
+          "openai==2.54.0",
+          "openapi-pydantic==0.5.1",
+          "opentelemetry-api==1.44.0",
+          "opentelemetry-exporter-otlp-proto-common==1.44.0",
+          "opentelemetry-exporter-otlp-proto-http==1.44.0",
+          "opentelemetry-instrumentation==0.65b0",
+          "opentelemetry-proto==1.44.0",
+          "opentelemetry-sdk==1.44.0",
+          "opentelemetry-semantic-conventions==0.65b0",
+          "packaging==26.3",
+          "pathable==0.6.0",
+          "pillow==12.3.0",
+          "platformdirs==4.11.7",
+          "pluggy==1.6.0",
+          "propcache==0.5.2",
+          "protobuf==7.36.1",
+          "psutil==7.2.2",
+          "psycopg==3.3.1",
+          "py-key-value-aio==0.4.5",
+          "py_rust_stemmers==0.1.8",
+          "pybars3==0.9.7",
+          "pycparser==3.0",
+          "pydantic-extra-types==2.11.1",
+          "pydantic-settings==2.15.0",
+          "pydantic==2.14.0b1",
+          "pydantic_core==2.48.0",
+          "pyperclip==1.11.0",
+          "pyright==1.1.411",
+          "pytest-aio==2.1.7",
+          "pytest-asyncio==1.4.0",
+          "pytest==9.1.1",
+          "python-dateutil==2.9.0.post0",
+          "python-dotenv==1.2.3",
+          "python-frontmatter==1.3.0",
+          "python-multipart==0.0.32",
+          "pytz==2026.3.post1",
+          "referencing==0.37.0",
+          "regex==2026.9.3",
+          "requests==2.34.2",
+          "rich-rst==2.1.0",
+          "rich-toolkit==0.20.4",
+          "rich==15.0.0",
+          "rignore==0.8.1",
+          "rpds-py==2026.6.3",
+          "ruamel.yaml==0.19.1",
+          "sentry-sdk==3.0.0a7",
+          "shellingham==1.5.4",
+          "six==1.17.0",
+          "sniffio==1.3.1",
+          "sqlite-vec==0.1.10a4",
+          "sse-starlette==3.4.11",
+          "starlette==1.6.0",
+          "tiktoken==0.14.0",
+          "tokenizers==0.23.2",
+          "tqdm==4.70.0",
+          "truststore==0.10.4",
+          "typer==0.27.2",
+          "typing-inspection==0.4.4",
+          "typing_extensions==4.16.0",
+          "tzlocal==5.4.4",
+          "uncalled-for==0.4.0",
+          "urllib3==2.7.0",
+          "uvicorn==0.52.4",
+          "uvloop==0.22.1",
+          "watchfiles==1.2.0",
+          "wcwidth==0.8.3",
+          "websockets==17.1",
+          "wrapt==2.4.1rc1",
+          "yarl==1.24.5",
+          "zipp==4.1.0"
+        ],
+        "status": "ok"
+      },
+      "executable": "<basic-memory-venv>/bin/basic-memory",
+      "executable_sha256": "7362956de82eff880e0c64896b010493eb218ef26e88e25518459ffd34bb1eac",
+      "installed": {
+        "module_sha256": "76d9a3572dd0e3f0d875d483c12f573aade8904ac631f62d559fbfd6ce69db34",
+        "package_root": "<basic-memory-venv>/lib/python3.13/site-packages/basic_memory",
+        "runtime_pythonpath_root": "<source-checkout>/src",
+        "version": "0.23.2"
+      },
+      "installed_version_matches_expected": true,
+      "wheel": "<pinned-wheel-dir>/basic_memory-0.23.2-py3-none-any.whl",
+      "wheel_matches_pinned_digest": true,
+      "wheel_sha256": "a1679a16319d8a7fb9c0486033551a47dedc0fbae7f5da81444eb3c4bf0ccecb"
+    },
+    "aac99661ff654728471ce4a629b929446a1ba9c21864e9233f669891db8e4c67": {
+      "dependency_inventory": {
+        "entries": [
+          "Authlib==1.7.2",
+          "PyJWT==2.12.1",
+          "PyYAML==6.0.3",
+          "Pygments==2.20.0",
+          "SecretStorage==3.5.0",
+          "aiofile==3.11.1",
+          "annotated-types==0.7.0",
+          "anyio==4.13.0",
+          "attrs==26.1.0",
+          "beartype==0.22.9",
+          "cachetools==7.1.2",
+          "caio==0.9.25",
+          "certifi==2026.4.22",
+          "cffi==2.0.0",
+          "click==8.4.0",
+          "cryptography==48.0.0",
+          "cyclopts==4.13.0",
+          "dnspython==2.8.0",
+          "docstring_parser==0.18.0",
+          "docutils==0.22.4",
+          "email-validator==2.3.0",
+          "exceptiongroup==1.3.1",
+          "exomem==0.74.0",
+          "fastmcp-slim==3.4.4",
+          "fastmcp==3.4.4",
+          "griffelib==2.0.2",
+          "h11==0.16.0",
+          "httpcore==1.0.9",
+          "httpx-sse==0.4.3",
+          "httpx==0.28.1",
+          "idna==3.15",
+          "iniconfig==2.3.0",
+          "jaraco.classes==3.4.0",
+          "jaraco.context==6.1.2",
+          "jaraco.functools==4.5.0",
+          "jeepney==0.9.0",
+          "joserfc==1.6.5",
+          "jsonref==1.1.0",
+          "jsonschema-path==0.4.6",
+          "jsonschema-specifications==2025.9.1",
+          "jsonschema==4.26.0",
+          "keyring==25.7.0",
+          "markdown-it-py==4.2.0",
+          "mcp==1.27.1",
+          "mdurl==0.1.2",
+          "more-itertools==11.0.2",
+          "numpy==2.4.6",
+          "openapi-pydantic==0.5.1",
+          "opentelemetry-api==1.43.0",
+          "packaging==26.2",
+          "pathable==0.5.0",
+          "platformdirs==4.9.6",
+          "pluggy==1.6.0",
+          "py-key-value-aio==0.4.4",
+          "pycparser==3.0",
+          "pydantic-settings==2.14.1",
+          "pydantic==2.13.4",
+          "pydantic_core==2.46.4",
+          "pyperclip==1.11.0",
+          "pytest-split==0.11.0",
+          "pytest-timeout==2.4.0",
+          "pytest==9.0.3",
+          "python-dotenv==1.2.2",
+          "python-multipart==0.0.29",
+          "python-slugify==8.0.4",
+          "rank-bm25==0.2.2",
+          "referencing==0.37.0",
+          "rich-rst==1.3.2",
+          "rich==15.0.0",
+          "rpds-py==0.30.0",
+          "snowballstemmer==3.1.0",
+          "sse-starlette==3.4.4",
+          "starlette==1.3.1",
+          "text-unidecode==1.3",
+          "typing-inspection==0.4.2",
+          "typing_extensions==4.15.0",
+          "uncalled-for==0.3.2",
+          "uvicorn==0.47.0",
+          "watchdog==6.0.0",
+          "watchfiles==1.1.1",
+          "websockets==16.0"
+        ],
+        "status": "ok"
+      },
+      "executable": "<source-checkout>/.venv/bin/python",
+      "executable_sha256": "b200d6c7ae464af64f81808ba246a856b1a1cdf3b2ae7088d37d87d31aebe9ff",
+      "installed": {
+        "module_sha256": "6923a89680de39e1abe1a58a51f39844c2e808d3891f5623633b0fa19ad27e81",
+        "package_root": "<source-checkout>/src/exomem",
+        "runtime_pythonpath_root": "<source-checkout>/src",
+        "version": "0.74.0"
+      },
+      "installed_version_matches_expected": null,
+      "source_identity": {
+        "dirty": false,
+        "dirty_source_digest": "fb206868f2674ad8250b90929905097decf2ef2e6389c7478896cff94ca17159",
+        "package_root": "<source-checkout>/src/exomem",
+        "revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+        "runtime_pythonpath_root": "<source-checkout>/src",
+        "source_digest": "fb206868f2674ad8250b90929905097decf2ef2e6389c7478896cff94ca17159",
+        "tree": "e777212094b2fd363eafa4a2b1e7c54efbece3b3"
+      },
+      "wheel": null,
+      "wheel_matches_pinned_digest": null,
+      "wheel_sha256": null
+    }
+  }
+}

@@ -2,12 +2,99 @@
 
 # Proportional-write measurements
 
-The current-main reproduction takes **53.60 seconds** to complete and verify the
-shared Markdown workflow at 8,000 pages. This is a baseline observation, not an
-after-change result or a general product ranking. The implementation contract is
-in the OpenSpec change `make-durable-writes-proportional`.
+The shared Markdown workflow reuses proven writer metadata and indexed graph
+dependencies. Existing background graph and due-state scans briefly yield while
+a foreground request runs for the same vault. Canonical file durability, source
+admission and publication proofs retain their existing boundaries.
 
-## Baseline reproduction
+| Fixture notes | Exomem median | Basic Memory median | Time reduction |
+|---|---:|---:|---:|
+| 3,800 | 8.57 s | 13.73 s | 37.6% |
+| 8,000 | 14.37 s | 18.53 s | 22.4% |
+
+All 12 observations passed. Median complete startup, outside the workflow clock,
+was 48.59 s for Exomem and 644.54 s for Basic Memory at 3,800 notes; at 8,000
+notes it was 92.15 s and 2,202.08 s respectively.
+
+These measurements use the same public create, edit, exact-read and search
+workflow for both products. Every observation starts with fresh process, corpus
+and state, and proves that all fixture paths are present in both metadata and
+full-text indexes before the workflow clock starts. Product order alternates
+across three pairs at each size. Startup has a predeclared 3,600-second bound for
+both products and is reported separately; public-call timeouts are 300 seconds.
+Durations use Python's `time.perf_counter`; UTC start/end timestamps are retained
+separately as provenance and are not substituted for the elapsed measurements.
+
+The measured source is `2b172de1`. Subsequent test corrections and report updates
+retain its implementation and benchmark-driver bytes; integration of release
+0.75.0 changes version metadata only. Basic Memory is pinned to version 0.23.2
+and the wheel digest recorded below. Task test workers were quiescent; each
+observation records start/end host load. The comparison is specific to this local
+Markdown workload and these runtimes.
+
+[Paired comparison JSON](proportional-writes-2026-09/paired-common.json)
+retains every timed call, phase, correctness check, corpus membership proof and
+host observation, with pinned runtime inventories. Earlier incomplete-index
+observations are retained below and excluded from these medians.
+
+## Separate characterizations
+
+A separate 3,800-page uninstrumented Exomem workflow passed in 7.74 s.
+At 8,000 pages, a public sentinel write followed by an available graph-context
+response preceded an 11.52 s workflow; all four exact body/read checks and all
+three marker searches passed. Setup took 130.01 s and added one sentinel note.
+This setup proves public graph snapshot availability. It does not separately
+prove sentinel membership or global graph convergence. The recorded
+`graph-current` setup label is retained as provenance with this narrower meaning.
+
+The exact [setup wrapper](proportional-writes-2026-09/warm-graph-setup.txt)
+is retained as the measured Python source snapshot. Run it with Python; it
+accepts the source checkout as its first argument, followed by the ordinary
+`scripts/durable_closure_common.py` arguments. Its only workflow change is the
+pre-timing public sentinel write and graph-context availability check.
+
+The separate real-extraction workflow at 8,000 pages passed in 43.58 s to useful
+closure. All three preserved artifact hashes matched, and local PDF extraction
+and OCR returned the expected text for one PDF and two images. Evidence citations,
+recall, edits, final reads and stale-relation removal passed. Media became ready
+29.88 s after workflow start; the extraction interval was 10.84 s.
+
+This uses the existing instrumented media harness, the pinned public artifact
+manifest, and local PyMuPDF/Tesseract extraction. It is a correctness and timing
+characterization, not an uninstrumented comparison with Basic Memory. The graph
+was still warming at useful closure; global graph, lexical and embedding
+projection convergence are not established by this harness.
+
+[Characterization JSON](proportional-writes-2026-09/characterizations.json)
+retains the separate samples, timed calls, correctness checks and host/runtime
+provenance. [Independent characterization audits](proportional-writes-2026-09/characterizations-verification.json)
+verified artifact custody, extracted sidecars and faithful evidence compaction.
+These samples do not contribute to the paired comparison medians.
+
+## Verification
+
+Independent benchmark verification recomputed all 12 paired outcomes, fixture
+and body digests, source/runtime identities and both medians. Its 411 checks
+passed; [audit evidence](proportional-writes-2026-09/benchmark-verification.json)
+records the schema and clock-domain checks as well.
+
+Independent implementation and integration reviews approved the writer cache,
+graph dependency index and bounded background yielding. The final test repair
+passed 29 scoped tests independently, including both bounded rebuild joins.
+
+The full Python 3.11 lean matrix passed 17,626 tests in
+[CI run 34157824902](https://github.com/Artexis10/exomem/actions/runs/34157824902).
+That run's Python 3.13 matrix exposed a test synchronization race, repaired in
+`7c961455`: foreground completion does not guarantee a newly started thread has
+entered its callback. The repair waits for entry outside the measured interval
+and retains the publication and latency assertions. Production bytes did not
+change. A successful final Python 3.13 PR run remains the delivery gate.
+
+The implementation contract is the OpenSpec change
+`make-durable-writes-proportional`. The earlier observations below retain the
+baseline and explain which comparisons were excluded.
+
+## Historical baseline reproduction
 
 The source is immutable commit `9e2e6487`, running Python 3.13.14 with the frozen
 lean dependency lock. `scripts/durable_closure_common.py --product exomem
@@ -129,6 +216,6 @@ These are instrumented diagnostic observations, not shipping code or accepted
 parity results. The OpenSpec amendment requires explicit scopes, exact-vault
 isolation, bounded background progress, and bypasses for synchronous work and
 explicit graph waiters. Source admission, durable custody and independent
-publication proofs remain unchanged. Repeated uninstrumented comparisons,
-real-media regression, warm-graph characterization and full-suite evidence are
-still required for delivery.
+publication proofs remain unchanged. The final uninstrumented comparison,
+separate media and graph-availability observations, and full-suite evidence
+are reported above.

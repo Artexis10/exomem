@@ -1,0 +1,132 @@
+{
+  "verdict": "VERIFIED",
+  "scope": "Read-only audit of completed paired benchmark evidence; no local tests, builds, project imports or providers. Authorized mode=ro metadata inspection of two completed run-owned Basic Memory databases only; all handles closed. Startup assertions audited against the exact committed driver and recorded proofs.",
+  "source_revision": "2b172de1cc9a9276c2f1c04713cd057d602296e0",
+  "driver_sha256": "7aa83697baf5399851007f350fc239332e81d6635326d2e08dfaae5831c555cd",
+  "source_digest": "fb206868f2674ad8250b90929905097decf2ef2e6389c7478896cff94ca17159",
+  "compact_sha256": "3505912024b1580bd9b01e737a5ebb049f83bff167db739ba44e7814321b4eb4",
+  "observations": 12,
+  "raw_files": 38,
+  "counts_by_check": {
+    "completeness": 16,
+    "method": 2,
+    "provenance": 65,
+    "outcome": 24,
+    "order": 24,
+    "roots": 24,
+    "corpus": 34,
+    "startup": 24,
+    "timed_calls": 24,
+    "phases": 12,
+    "verification": 108,
+    "compaction": 24,
+    "summary": 12,
+    "byte_recomputation": 14,
+    "medians": 3,
+    "sanitization": 1
+  },
+  "medians": [
+    {
+      "pages": 3800,
+      "verified_closure_ms": {
+        "exomem": 8572.803038987331,
+        "basic_memory": 13727.684433994
+      },
+      "parity_met": true
+    },
+    {
+      "pages": 8000,
+      "verified_closure_ms": {
+        "exomem": 14373.23956801265,
+        "basic_memory": 18526.38600100181
+      },
+      "parity_met": true
+    }
+  ],
+  "schemas": {
+    "exomem": [
+      "4fc1ab5d9988401675c793e9a4460aefb3f7fb869a1665103feb338e6d090d93"
+    ],
+    "basic_memory": [
+      "42309cef36a08e57eb6ffa1bf2ee07c16250a2590dd73868ee162b157cbf7ff5",
+      "ace80dcdf3418dc1144406dcf648387c90088a345067c7ceddc6beed54d782b1"
+    ]
+  },
+  "schema_variation": "Basic Memory schema digests differ only in ordering of project UNIQUE(name) and UNIQUE(permalink) clauses; all table_info, FTS5 SQL and Alembic version match.",
+  "clock_domain": "Driver phases and runner duration use Python time.perf_counter. UTC start/end are separate datetime clock observations; UTC spans differ, no cause inferred, no duration adjusted.",
+  "clock_observations": [
+    {
+      "label": "3800-pair-1-1-exomem",
+      "utc_span_s": 57.596554,
+      "perf_counter_runner_s": 55.66663054699893,
+      "utc_minus_perf_s": 1.9299234530010665
+    },
+    {
+      "label": "3800-pair-1-2-basic_memory",
+      "utc_span_s": 707.099837,
+      "perf_counter_runner_s": 666.565472000002,
+      "utc_minus_perf_s": 40.53436499999793
+    },
+    {
+      "label": "3800-pair-2-1-basic_memory",
+      "utc_span_s": 700.948131,
+      "perf_counter_runner_s": 661.0529038429959,
+      "utc_minus_perf_s": 39.895227157004115
+    },
+    {
+      "label": "3800-pair-2-2-exomem",
+      "utc_span_s": 63.974262,
+      "perf_counter_runner_s": 60.23051983201003,
+      "utc_minus_perf_s": 3.7437421679899714
+    },
+    {
+      "label": "3800-pair-3-1-exomem",
+      "utc_span_s": 63.444285,
+      "perf_counter_runner_s": 61.545283681,
+      "utc_minus_perf_s": 1.899001319
+    },
+    {
+      "label": "3800-pair-3-2-basic_memory",
+      "utc_span_s": 706.351447,
+      "perf_counter_runner_s": 665.0280994439963,
+      "utc_minus_perf_s": 41.32334755600368
+    },
+    {
+      "label": "8000-pair-1-1-exomem",
+      "utc_span_s": 111.652415,
+      "perf_counter_runner_s": 105.82737432800059,
+      "utc_minus_perf_s": 5.825040671999417
+    },
+    {
+      "label": "8000-pair-1-2-basic_memory",
+      "utc_span_s": 2362.846582,
+      "perf_counter_runner_s": 2229.7822170750005,
+      "utc_minus_perf_s": 133.0643649249996
+    },
+    {
+      "label": "8000-pair-2-1-basic_memory",
+      "utc_span_s": 2368.138361,
+      "perf_counter_runner_s": 2223.4846001130063,
+      "utc_minus_perf_s": 144.6537608869935
+    },
+    {
+      "label": "8000-pair-2-2-exomem",
+      "utc_span_s": 119.904218,
+      "perf_counter_runner_s": 110.90074495600129,
+      "utc_minus_perf_s": 9.00347304399871
+    },
+    {
+      "label": "8000-pair-3-1-exomem",
+      "utc_span_s": 116.555575,
+      "perf_counter_runner_s": 110.0353762349987,
+      "utc_minus_perf_s": 6.520198765001311
+    },
+    {
+      "label": "8000-pair-3-2-basic_memory",
+      "utc_span_s": 2498.715965,
+      "perf_counter_runner_s": 2338.5467997929954,
+      "utc_minus_perf_s": 160.16916520700443
+    }
+  ],
+  "failures": []
+}
