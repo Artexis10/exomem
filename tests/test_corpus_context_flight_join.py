@@ -414,11 +414,6 @@ class _UnboundedJoinVisitor(ast.NodeVisitor):
 # test-local because the worker allowlist excludes the unrelated implementations.
 _DECLARED_UNBOUNDED_JOINS = {
     (
-        "file_watcher.py",
-        "FileWatcher._run_dispatch",
-        "self._wake.wait",
-    ): "daemon debounce loop; stop() sets the event and request handlers never join it",
-    (
         "media_worker.py",
         "MediaWorker.join",
         "self._q.join",

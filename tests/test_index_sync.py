@@ -510,8 +510,9 @@ def test_durable_defer_with_no_semantic_paths_reports_accepted_noop(
         deferred_index.clear(tmp_path)
 
 
+@pytest.mark.parametrize("corpus_published", [True, False])
 def test_batch_atomic_write_collector_observes_existing_fanout_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corpus_published: bool
 ) -> None:
     target = tmp_path / "Knowledge Base" / "Notes" / "item.md"
     report = index_sync.IndexSyncReport(
@@ -530,7 +531,10 @@ def test_batch_atomic_write_collector_observes_existing_fanout_once(
         return report
 
     monkeypatch.setattr(index_sync, "upsert_after_write", _upsert)
-    monkeypatch.setattr("exomem.file_watcher.register_self_write", lambda *_args: None)
+    monkeypatch.setattr(
+        "exomem.file_watcher.register_self_write",
+        lambda *_args, **_kwargs: (corpus_published, corpus_published),
+    )
     collected: list[index_sync.IndexSyncReport] = []
 
     replaced = vault_module.batch_atomic_write(
@@ -554,7 +558,7 @@ def test_batch_atomic_write_collector_observes_existing_fanout_once(
     assert kwargs_seen == [
         {
             "created_paths": [target],
-            "publish_corpus_change": False,
+            "publish_corpus_change": not corpus_published,
         }
     ]
     assert collected == [report]
