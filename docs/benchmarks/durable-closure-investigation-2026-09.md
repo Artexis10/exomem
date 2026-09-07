@@ -251,15 +251,176 @@ published JSON preserves these limits, per-call observations, corpus digest,
 fixture hashes, runtime packages and host metadata; private runtime paths and
 the generated per-page inventory are omitted with explicit annotations.
 
-## Acceptance boundary
+## Final publication and recall repairs
 
-Production was not restarted, drained, benchmarked with synthetic writes or
-reconfigured during this investigation. The implementation requires independent
-review, isolated public-workflow measurements at approximately 3,800 and 8,000
-pages, and the repository's completion-boundary test run before delivery. Useful
-durable closure and later full projection convergence are separate measurements.
+Media children now leave bounded, durable result packets. The service parent
+publishes the exact sidecar while checking the claim revision, previous sidecar
+and binary identity. A recovered result cannot clear newer receipt debt. Parent
+publication keeps its registered graph handoff visible through the exact fanout
+acknowledgement, starts that matching handoff, and only then clears the completed
+full receipt. A changed checkpoint preserves the newer owner. This closes a
+retry loop in which detaching the registration before acknowledgement made the
+acknowledgement itself fail.
 
-A Basic Memory comparison uses its immutable 0.23.2 wheel and persistent public
-MCP operations over the shared Markdown subset. It is an internal diagnostic,
-not a competitive-suite ranking; evidence immutability, media processing and
-governance are reported separately from the common operations.
+Ordinary recall also needs one consistent catalogue snapshot for the whole
+request. A strict health check or scheduled repair can demote readiness while a
+published catalogue remains usable with its exact pending-write overlay. The
+request now re-proves that admission and carries the admitted checkpoint into
+its lexical reads and indexed-path snapshot. It still rechecks policy, access
+and catalogue identity. A cold catalogue, incomplete pending proof, changed
+checkpoint or strict relation query continues to refuse unproven results. The
+request does not promote global health or waive a mandatory proof.
+
+These fixes preserve useful closure while optional graph work continues. They
+do not establish a bound on every background recovery or every possible
+interleaving of reads and writes.
+
+## Reviewed workflow measurements
+
+Rows below name their measured source revision and use clean worktrees, Python
+3.13.12, a persistent public MCP session and fresh isolated state. Startup
+precedes the timed workflow. Each row is one sample with task test workers
+idle; the recorded external host load varies. Real extraction uses PyMuPDF
+and Tesseract with the three pinned artifacts. Embeddings and CLIP models are
+disabled or unavailable. Model-free rows prove preservation and durable
+blocked-job custody only.
+
+| Pages | Profile | Variant | Result | Workflow | Startup | Calls | ACK p50 / p95 | Source | Evidence |
+| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 3,800 | Real extraction | optimized | Pass | 27.98 s | 55.63 s | 20 | 1.89 / 13.51 s | `3d04d8cc` | [JSON](durable-closure-2026-09/reviewed-3800-real-optimized.json) |
+| 8,000 | Real extraction | optimized | Pass | 37.11 s | 117.07 s | 23 | 2.68 / 15.37 s | `3d04d8cc` | [JSON](durable-closure-2026-09/reviewed-8000-real-optimized.json) |
+| 3,800 | Real extraction | stress | Pass | 32.97 s | 55.19 s | 27 | 2.69 / 13.48 s | `3d04d8cc` | [JSON](durable-closure-2026-09/reviewed-3800-real-stress.json) |
+| 8,000 | Real extraction | stress | Pass | 346.55 s | 119.32 s | 27 | 19.92 / 149.59 s | `3d04d8cc` | [JSON](durable-closure-2026-09/reviewed-8000-real-stress.json) |
+| 3,800 | Model-free | optimized | Pass | 26.90 s | 58.42 s | 21 | 1.82 / 13.51 s | `fe56a3eb` | [JSON](durable-closure-2026-09/accepted-3800-model-free-optimized.json) |
+| 8,000 | Model-free | optimized | Pass | 35.18 s | 127.25 s | 21 | 2.26 / 14.96 s | `fe56a3eb` | [JSON](durable-closure-2026-09/accepted-8000-model-free-optimized.json) |
+| 3,800 | Model-free | stress | Pass | 31.97 s | 57.37 s | 28 | 2.04 / 14.49 s | `fe56a3eb` | [JSON](durable-closure-2026-09/accepted-3800-model-free-stress.json) |
+| 8,000 | Model-free | stress | Pass | 38.99 s | 122.08 s | 28 | 2.29 / 14.29 s | `fe56a3eb` | [JSON](durable-closure-2026-09/accepted-8000-model-free-stress.json) |
+
+The measured one-minute host load ranged from 3.80 to 20.94 on 16 logical CPUs.
+Per-call timings and summed/union server occupancy remain in each JSON row.
+No connector or model-planning duration is inferred from unexplained gaps.
+
+The real-extraction rows precede two bounded follow-ups: model-free custody
+verification in the harness and strict catalogue admission for explicitly
+requested outside-KB widening. The real-extraction workload does not select
+either path. Later rows also include main `a55ce118`, whose additional
+product changes affect hosted command binding rather than this stdio workflow.
+Each JSON records its exact product source and driver hashes. The final shared
+Markdown rows use driver `938e8751`, which corrects canonical path addressing
+and string-error classification in the Basic Memory adapter. Earlier rows from
+that adapter were invalidated and are excluded.
+
+Every row proves the final direct content, citations, tracker update, stale
+relation removal, successful mutations and ordinary recall. Optional graph
+warming is allowed only when those mandatory checks succeed.
+
+The 8,000-page real-extraction stress sample remains expensive: 346.55 seconds
+with one 149.59-second mutation. Its mutation boundary remained held while
+a predecessor-recovery full rebuild published in 143.41 seconds. This
+foreground recovery coupling is a remaining performance limitation.
+Its seven inserted probes account for about 23.89 seconds directly; subtracting them would miss the changed execution
+interleaving. At closure the service recorded 17 graph rebuild attempts, one
+completed rebuild and one still active, plus 46,576 path observations in
+`find._walk_md`. These are attempts and named-hook observations, not 17
+completed full scans. The 3,800-page stress sample finished in 32.97 seconds.
+This evidence establishes useful closure, not uniformly bounded latency.
+No ratio against the failed baseline or between these single samples is
+asserted.
+
+## Shared Markdown diagnostic
+
+This internal diagnostic runs public write, edit, exact read and text-search
+operations over identical Markdown inputs. Each product has a fresh home and
+state directory, a persistent MCP connection and its recorded configuration.
+Semantic search is disabled for both. Basic Memory is the immutable 0.23.2
+wheel with SHA-256
+`a1679a16319d8a7fb9c0486033551a47dedc0fbae7f5da81444eb3c4bf0ccecb`.
+Resolved dependencies are recorded; this is not a claim that its entire
+dependency tree was locked by that wheel hash.
+
+| Pages | Product | Result | Verified closure | Startup | Calls | ACK p50 / p95 | Search checks | Evidence |
+| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 3,800 | exomem | Pass | 22.34 s | 70.34 s | 13 | 1.59 / 8.88 s | 0.13 / 0.03 / 0.03 s | [JSON](durable-closure-2026-09/accepted-common-3800.json) |
+| 3,800 | basic_memory | Pass | 6.13 s | 15.39 s | 11 | 0.17 / 3.16 s | 0.12 / 0.11 / 0.09 s | [JSON](durable-closure-2026-09/accepted-common-3800.json) |
+| 8,000 | exomem | Pass | 54.00 s | 131.57 s | 13 | 2.28 / 17.24 s | 0.50 / 0.29 / 0.26 s | [JSON](durable-closure-2026-09/accepted-common-8000.json) |
+| 8,000 | basic_memory | Pass | 6.54 s | 21.68 s | 11 | 0.24 / 2.59 s | 0.17 / 0.11 / 0.13 s | [JSON](durable-closure-2026-09/accepted-common-8000.json) |
+
+The three search-check durations measure each public search through its first
+verified expected result; they do not measure indexing delay independently.
+The paired runs recorded one-minute external host load from 19.67 to 20.08
+on 16 logical CPUs, with task test workers idle. Exact body hashes prove all
+four edited/created Markdown bodies. Calls include
+product-required preparation and any public convergence polling. No SQL read
+or post-write reindex substitutes for a public operation.
+
+The shared row does not exercise evidence immutability, PDF/image extraction
+or Exomem's governance and relation-review contracts. Those richer operations
+are exercised separately by the Exomem workflow and regression tests; absence
+from this adapter says nothing about another product's overall capabilities.
+These samples do not satisfy the paired own-harness/direct-row fairness
+programme and are not a competitive-suite ranking.
+
+## Rerunning the public workflow
+
+Use an explicit Python interpreter with the selected Exomem checkout and the
+runtime dependencies recorded in the sample JSON. Real extraction also requires
+PyMuPDF, Pillow, pytesseract and the Tesseract executable. The harness reports
+missing extraction dependencies as blocked; model-free results do not claim OCR.
+
+```sh
+bench_python=/absolute/path/to/python
+bench_run=$(mktemp -d)
+XDG_STATE_HOME="$bench_run/runner-xdg" \
+EXOMEM_STATE_ROOT="$bench_run/runner-state" \
+EXOMEM_CONFIG_PATH="$bench_run/runner-config.json" \
+EXOMEM_DISABLE_EMBEDDINGS=1 PYTHONPATH=src \
+"$bench_python" scripts/durable_closure_benchmark.py \
+  --pages 3800 --profile real-extraction --variant optimized \
+  --python "$bench_python" --server-root "$PWD" \
+  --state "$bench_run/service" --vault "$bench_run/vault" \
+  --artifacts-manifest docs/benchmarks/durable-closure-public-artifacts.json \
+  --timeout 180
+```
+
+Use a fresh disposable root for every row. Change pages to 8000, select `stress`
+for per-write probes, or select `model-free` for preservation/enqueue checks
+without extraction claims. The stress rows are independent full runs, not an
+optimized run with probe costs subtracted. Keep local test workers idle during
+performance samples and record other host load.
+
+For the shared Markdown diagnostic, use the immutable wheel and its matching
+installed executable. The complete resolved dependency inventory is recorded in
+each JSON; installing the wheel alone does not reproduce that inventory.
+
+```sh
+common_run=$(mktemp -d)
+XDG_STATE_HOME="$common_run/runner-xdg" \
+EXOMEM_STATE_ROOT="$common_run/runner-state" \
+EXOMEM_CONFIG_PATH="$common_run/runner-config.json" \
+EXOMEM_DISABLE_EMBEDDINGS=1 PYTHONPATH=src \
+"$bench_python" scripts/durable_closure_common.py \
+  --product both --pages 3800 --timeout 180 --python "$bench_python" \
+  --basic-memory-executable /absolute/path/to/basic-memory \
+  --basic-memory-wheel /absolute/path/to/basic_memory-0.23.2-py3-none-any.whl \
+  --state "$common_run/state" --vault "$common_run/vault"
+```
+
+## Review and delivery evidence
+
+Author-independent review exercised the watcher publication race, media child
+and parent handoff, exact receipt acknowledgement ordering, pending-catalogue
+recall with policy changes, and strict outside-KB widening. The resulting source
+and shared-Markdown adapter changes were approved. The adapter's 31-test suite
+and an independent run against the pinned Basic Memory wheel passed; the two
+paired diagnostic rows above then passed all exact-body and search checks.
+
+Public-artifact validation passed for 3,848 repository files and 3,960 text
+payloads. The repository-pinned OpenSpec 1.10.0 validator reported
+`185 passed, 0 failed`; archive discipline reported no task-complete active
+changes. Completion-boundary CI and its exact revision are recorded in the
+pull request.
+
+Useful durable closure and later full projection convergence remain separate
+measurements. Production was not restarted, drained, benchmarked with synthetic
+writes or reconfigured. Merge, deployment and OpenSpec archival follow separately
+authorized shipping evidence.
