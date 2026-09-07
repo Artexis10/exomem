@@ -640,10 +640,18 @@ class AcceptanceRunner:
             mutation = "durable-capture" if tenant == "synthetic" else "durable-capture-isolation"
             committed = self.manifest()["mutations"].get(mutation, {}).get("receipt", {}).get("status") == "committed"
             if not committed:
-                capture = client.capture({"title": f"Hosted acceptance {self.run_id} {tenant}", "content": f"## Observations\n- [acceptance] {fact} #hosted ^{self.run_id}-{tenant}", "note_type": "insight", "sources": []}, idempotency_key=self.mutation_request_id(mutation))
-                if not committed_tool_receipt(capture):
-                    raise AcceptanceError("capture has no durable acknowledgement")
-                self.complete_mutation(mutation, receipt=dict(_tool_result(capture)))
+                terminal = self.remember_with_review(
+                    client,
+                    mutation=mutation,
+                    arguments={
+                        "title": f"Hosted acceptance {self.run_id} {tenant}",
+                        "content": f"## Observations\n- [acceptance] {fact} #hosted ^{self.run_id}-{tenant}",
+                        "note_type": "insight",
+                        "sources": [],
+                    },
+                    idempotency_key=self.mutation_request_id(mutation),
+                )
+                self.complete_mutation(mutation, receipt=terminal)
             fresh = self._mcp_client(tenant)
             fresh.initialize()
             recalled = _tool_result(fresh.recall(tenant_recall_query(self.run_id)))
@@ -694,6 +702,146 @@ class AcceptanceRunner:
         if identity != dict(fixture):
             raise AcceptanceError("corpus fixture identity does not match its recorded evidence")
 
+    def remember_with_review(
+        self,
+        client: MCPClient,
+        *,
+        mutation: str,
+        arguments: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Validate a public remember draft, journal it, then commit that draft."""
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", mutation):
+            raise AcceptanceError("mutation journal name is invalid")
+        payload = dict(arguments)
+        payload_hash = hashlib.sha256(canonical_json(payload)).hexdigest()
+        journal_path = self.run_dir / "mutations" / f"{mutation}.json"
+        if journal_path.exists():
+            journal = _read_json(journal_path)
+            if (
+                journal.get("mutation") != mutation
+                or journal.get("payload_hash") != payload_hash
+                or journal.get("idempotency_key") != idempotency_key
+            ):
+                raise AcceptanceError("mutation journal does not match its fixture payload")
+            status = journal.get("status")
+            if status == "confirmed":
+                terminal = journal.get("terminal")
+                if not isinstance(terminal, dict) or not committed_tool_receipt(
+                    {"structuredContent": terminal}
+                ):
+                    raise AcceptanceError("confirmed mutation journal has no terminal")
+                return terminal
+            if status != "prepared":
+                raise AcceptanceError("mutation journal status is invalid")
+            commit_arguments = journal.get("arguments")
+            if not isinstance(commit_arguments, dict):
+                raise AcceptanceError("prepared mutation journal has no commit arguments")
+            expected_payload = {**payload, "response_detail": "full"}
+            draft_names = {"draft_id", "draft_hash", "draft_token"}
+            review_fields = {
+                "relation_disposition",
+                "relation_review_hash",
+                "relation_review_reason",
+            }
+            if (
+                any(commit_arguments.get(key) != value for key, value in expected_payload.items())
+                or not draft_names <= set(commit_arguments)
+                or not all(
+                    isinstance(commit_arguments[field], str) and commit_arguments[field]
+                    for field in draft_names
+                )
+            ):
+                raise AcceptanceError("prepared mutation journal does not match its fixture payload")
+            supplied_review_fields = review_fields & set(commit_arguments)
+            if supplied_review_fields:
+                if (
+                    supplied_review_fields != review_fields
+                    or commit_arguments["relation_disposition"] != "reviewed_none"
+                    or commit_arguments["relation_review_hash"] != commit_arguments["draft_hash"]
+                    or not isinstance(commit_arguments["relation_review_reason"], str)
+                    or not commit_arguments["relation_review_reason"].strip()
+                    or len(commit_arguments["relation_review_reason"]) > 2000
+                    or len(commit_arguments["relation_review_reason"].encode("utf-8")) > 8192
+                ):
+                    raise AcceptanceError("prepared mutation journal does not match its fixture payload")
+            expected_keys = set(expected_payload) | draft_names | supplied_review_fields
+            if set(commit_arguments) != expected_keys:
+                raise AcceptanceError("prepared mutation journal does not match its fixture payload")
+        else:
+            validation_arguments = {
+                **payload,
+                "response_detail": "full",
+                "validate_only": True,
+            }
+            validation = _tool_result(client.capture(validation_arguments))
+            diagnostics = validation.get("diagnostics")
+            if (
+                validation.get("state") != "needs_review"
+                or not isinstance(diagnostics, dict)
+                or diagnostics.get("has_non_review_blockers") is not False
+            ):
+                raise AcceptanceError("remember validation is not a reviewable needs_review terminal")
+            draft_fields = ("draft_id", "draft_hash", "draft_token")
+            if any(
+                not isinstance(diagnostics.get(field), str) or not diagnostics[field]
+                for field in draft_fields
+            ):
+                raise AcceptanceError("remember validation is not a reviewable needs_review terminal")
+            commit_arguments = {
+                **payload,
+                "response_detail": "full",
+                "draft_id": diagnostics["draft_id"],
+                "draft_hash": diagnostics["draft_hash"],
+                "draft_token": diagnostics["draft_token"],
+            }
+            if diagnostics.get("reviewed_none_required") is True:
+                relation_hash = diagnostics.get("relation_review_hash")
+                if (
+                    diagnostics.get("committable_after_review") is not True
+                    or not isinstance(relation_hash, str)
+                    or relation_hash != diagnostics["draft_hash"]
+                ):
+                    raise AcceptanceError("remember validation is not a reviewable needs_review terminal")
+                commit_arguments.update(
+                    {
+                        "relation_disposition": "reviewed_none",
+                        "relation_review_hash": relation_hash,
+                        "relation_review_reason": "No honest typed relation applies to this isolated acceptance diagnostic.",
+                    }
+                )
+            elif diagnostics.get("committable_without_review") is not True:
+                raise AcceptanceError("remember validation is not a committable needs_review terminal")
+            _atomic_json(
+                journal_path,
+                {
+                    "mutation": mutation,
+                    "payload_hash": payload_hash,
+                    "idempotency_key": idempotency_key,
+                    "status": "prepared",
+                    "arguments": commit_arguments,
+                },
+                private=True,
+            )
+
+        result = client.capture(commit_arguments, idempotency_key=idempotency_key)
+        if not committed_tool_receipt(result):
+            raise AcceptanceError("remember commit has no durable acknowledgement")
+        terminal = dict(_tool_result(result))
+        _atomic_json(
+            journal_path,
+            {
+                "mutation": mutation,
+                "payload_hash": payload_hash,
+                "idempotency_key": idempotency_key,
+                "status": "confirmed",
+                "arguments": commit_arguments,
+                "terminal": terminal,
+            },
+            private=True,
+        )
+        return terminal
+
     def seed_corpus(self) -> None:
         """Write the owned corpus through ordinary tenant-bound MCP capture calls."""
         fixture = self._corpus_fixture()
@@ -717,9 +865,17 @@ class AcceptanceRunner:
                 content = note.read_text(encoding="utf-8")
                 if ordinal == len(notes) - 1:
                     content += f"- [acceptance] {corpus_fact} #hosted ^{self.run_id}-{tenant}-corpus\n"
-                result = client.capture({"title": f"Hosted corpus {self.run_id} {ordinal:04d}", "content": content, "note_type": "insight", "sources": []}, idempotency_key=self.mutation_request_id(f"corpus-{tenant}-{ordinal}"))
-                if not committed_tool_receipt(result):
-                    raise AcceptanceError(f"corpus capture {tenant}/{ordinal} has no durable acknowledgement")
+                self.remember_with_review(
+                    client,
+                    mutation=f"corpus-{tenant}-{ordinal}",
+                    arguments={
+                        "title": f"Hosted corpus {self.run_id} {ordinal:04d}",
+                        "content": content,
+                        "note_type": "insight",
+                        "sources": [],
+                    },
+                    idempotency_key=self.mutation_request_id(f"corpus-{tenant}-{ordinal}"),
+                )
             converged = self._mcp_client(tenant)
             converged.initialize()
             citation = _citation_for_fact(_tool_result(converged.recall(f"What already-converged corpus marker belongs to run {self.run_id}?")), corpus_fact)
@@ -792,12 +948,21 @@ class AcceptanceRunner:
                 benchmark_fact = f"hosted benchmark sample {self.run_id} {attempt_id} {worker_id}-{ordinal}"
                 capture_arguments = {"title": f"Hosted benchmark {self.run_id} {attempt_id} {worker_id}-{ordinal}", "content": f"## Observations\n- [benchmark sample] {benchmark_fact} #hosted ^{attempt_id}-{worker_id}-{ordinal}", "note_type": "insight", "sources": []}
                 capture_key = self.mutation_request_id(f"{attempt_id}-{worker_id}-{ordinal}")
-                for operation, action in (("tools_list", client.list_tools), ("capture", lambda client=client, arguments=capture_arguments, key=capture_key: client.capture(arguments, idempotency_key=key))):
+                for operation, action in (
+                    ("tools_list", client.list_tools),
+                    (
+                        "capture",
+                        lambda client=client, arguments=capture_arguments, key=capture_key, mutation=f"{attempt_id}-{worker_id}-{ordinal}": self.remember_with_review(
+                            client,
+                            mutation=mutation,
+                            arguments=arguments,
+                            idempotency_key=key,
+                        ),
+                    ),
+                ):
                     started = time.perf_counter()
                     try:
-                        result = action()
-                        if operation == "capture" and not committed_tool_receipt(result):
-                            raise AcceptanceError("benchmark capture has no durable acknowledgement")
+                        action()
                     except AcceptanceError:
                         failures[operation] += 1
                     else:

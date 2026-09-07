@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from exomem import semantic_units
+from exomem import commands, semantic_units, writer_lease
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "infra/scripts/accept_hosted_service.py"
@@ -287,6 +287,268 @@ def test_tool_results_marked_as_errors_are_not_usable_as_recall_evidence() -> No
 
     with pytest.raises(runner.AcceptanceError, match="unsuccessful"):
         runner._tool_result({"isError": True, "structuredContent": {"result": {"hits": [{"path": "Knowledge Base/Notes/Insights/sentinel.md", "text": "forged"}]}}})
+
+
+def test_remember_review_journal_replays_the_exact_prepared_commit_after_lost_ack(
+    tmp_path: Path,
+) -> None:
+    runner = _load()
+    acceptance = runner.AcceptanceRunner.from_config(
+        _write_config(tmp_path), state_dir=tmp_path / "state", run_id="review-journal-001"
+    )
+    acceptance.prepare()
+    calls: list[tuple[dict[str, Any], str | None]] = []
+
+    class Client:
+        interrupted = True
+
+        def capture(
+            self, arguments: dict[str, Any], *, idempotency_key: str | None = None
+        ) -> dict[str, Any]:
+            calls.append((dict(arguments), idempotency_key))
+            if arguments.get("validate_only") is True:
+                return {
+                    "structuredContent": {
+                        "state": "needs_review",
+                        "diagnostics": {
+                            "draft_id": "draft-001",
+                            "draft_hash": "a" * 64,
+                            "draft_token": "draft-token-001",
+                            "relation_review_hash": "a" * 64,
+                            "reviewed_none_required": True,
+                            "has_non_review_blockers": False,
+                            "committable_after_review": True,
+                        },
+                    }
+                }
+            if self.interrupted:
+                self.interrupted = False
+                raise runner.AcceptanceError("lost terminal acknowledgement")
+            return {
+                "structuredContent": {
+                    "ok": True,
+                    "state": "committed",
+                    "terminal": True,
+                    "status": "committed",
+                    "mutated": True,
+                }
+            }
+
+    arguments = {
+        "title": "Journalled reviewed write",
+        "content": "## Observations\n- [acceptance] preserve exact prepared commit.\n",
+        "note_type": "insight",
+        "sources": [],
+    }
+    client = Client()
+    with pytest.raises(runner.AcceptanceError, match="lost terminal"):
+        acceptance.remember_with_review(
+            client,
+            mutation="protocol-reviewed-write",
+            arguments=arguments,
+            idempotency_key="stable-write-key",
+        )
+
+    journal = json.loads(
+        (acceptance.run_dir / "mutations" / "protocol-reviewed-write.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert journal["status"] == "prepared"
+    assert journal["arguments"]["draft_token"] == "draft-token-001"
+    assert journal["arguments"]["relation_disposition"] == "reviewed_none"
+    assert "validate_only" not in journal["arguments"]
+    assert calls[0][1] is None
+    assert calls[0][0]["validate_only"] is True
+
+    tampered = json.loads(json.dumps(journal))
+    tampered["arguments"]["title"] = "Unexpected replacement payload"
+    journal_path = acceptance.run_dir / "mutations" / "protocol-reviewed-write.json"
+    journal_path.write_bytes(runner.canonical_json(tampered))
+    resumed = runner.AcceptanceRunner.from_config(
+        _write_config(tmp_path), state_dir=tmp_path / "state", run_id="review-journal-001"
+    )
+    resumed.prepare(resume=True)
+    with pytest.raises(runner.AcceptanceError, match="prepared mutation journal"):
+        resumed.remember_with_review(
+            client,
+            mutation="protocol-reviewed-write",
+            arguments=arguments,
+            idempotency_key="stable-write-key",
+        )
+    journal_path.write_bytes(runner.canonical_json(journal))
+
+    terminal = resumed.remember_with_review(
+        client,
+        mutation="protocol-reviewed-write",
+        arguments=arguments,
+        idempotency_key="stable-write-key",
+    )
+
+    assert terminal["state"] == "committed"
+    assert len(calls) == 3
+    assert calls[1] == calls[2]
+    assert calls[1][1] == "stable-write-key"
+    assert json.loads(
+        journal_path.read_text(encoding="utf-8")
+    )["status"] == "confirmed"
+    confirmed = json.loads(journal_path.read_text(encoding="utf-8"))
+    confirmed["terminal"]["state"] = "pending"
+    journal_path.write_bytes(runner.canonical_json(confirmed))
+    with pytest.raises(runner.AcceptanceError, match="confirmed mutation journal"):
+        resumed.remember_with_review(
+            client,
+            mutation="protocol-reviewed-write",
+            arguments=arguments,
+            idempotency_key="stable-write-key",
+        )
+
+
+def test_remember_review_rejects_unknown_validation_without_preparing_a_commit(
+    tmp_path: Path,
+) -> None:
+    runner = _load()
+    acceptance = runner.AcceptanceRunner.from_config(
+        _write_config(tmp_path), state_dir=tmp_path / "state", run_id="review-refusal-001"
+    )
+    acceptance.prepare()
+
+    class Client:
+        def capture(
+            self, arguments: dict[str, Any], *, idempotency_key: str | None = None
+        ) -> dict[str, Any]:
+            assert idempotency_key is None
+            assert arguments["validate_only"] is True
+            return {
+                "structuredContent": {
+                    "state": "needs_review",
+                    "diagnostics": {
+                        "draft_id": "draft-refused",
+                        "draft_hash": "a" * 64,
+                        "draft_token": "draft-token-refused",
+                        "relation_review_hash": "a" * 64,
+                        "reviewed_none_required": True,
+                        "has_non_review_blockers": True,
+                        "committable_after_review": True,
+                    },
+                }
+            }
+
+    with pytest.raises(runner.AcceptanceError, match="validation is not a reviewable"):
+        acceptance.remember_with_review(
+            Client(),
+            mutation="refused-write",
+            arguments={
+                "title": "Refused reviewed write",
+                "content": "## Observations\n- [acceptance] reject unknown diagnostic.\n",
+                "note_type": "insight",
+                "sources": [],
+            },
+            idempotency_key="stable-refusal-key",
+        )
+    assert not (acceptance.run_dir / "mutations" / "refused-write.json").exists()
+
+
+def test_remember_review_commits_an_explicitly_committable_non_review_draft(
+    tmp_path: Path,
+) -> None:
+    runner = _load()
+    acceptance = runner.AcceptanceRunner.from_config(
+        _write_config(tmp_path), state_dir=tmp_path / "state", run_id="review-free-001"
+    )
+    acceptance.prepare()
+    commits: list[dict[str, Any]] = []
+
+    class Client:
+        def capture(
+            self, arguments: dict[str, Any], *, idempotency_key: str | None = None
+        ) -> dict[str, Any]:
+            if arguments.get("validate_only") is True:
+                assert idempotency_key is None
+                return {
+                    "structuredContent": {
+                        "state": "needs_review",
+                        "diagnostics": {
+                            "draft_id": "draft-free",
+                            "draft_hash": "c" * 64,
+                            "draft_token": "draft-token-free",
+                            "reviewed_none_required": False,
+                            "has_non_review_blockers": False,
+                            "committable_without_review": True,
+                        },
+                    }
+                }
+            commits.append(dict(arguments))
+            return {
+                "structuredContent": {
+                    "ok": True,
+                    "state": "committed",
+                    "terminal": True,
+                    "status": "committed",
+                    "mutated": True,
+                }
+            }
+
+    acceptance.remember_with_review(
+        Client(),
+        mutation="direct-reviewed-write",
+        arguments={
+            "title": "Direct committable write",
+            "content": "## Observations\n- [acceptance] commit no-review draft.\n",
+            "note_type": "insight",
+            "sources": [],
+        },
+        idempotency_key="stable-direct-key",
+    )
+
+    assert "relation_disposition" not in commits[0]
+    assert commits[0]["draft_id"] == "draft-free"
+
+
+def test_remember_review_uses_the_real_public_writer_two_phase_contract(
+    tmp_path: Path, vault: Path
+) -> None:
+    runner = _load()
+    acceptance = runner.AcceptanceRunner.from_config(
+        _write_config(tmp_path), state_dir=tmp_path / "state", run_id="real-review-001"
+    )
+    acceptance.prepare()
+    command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "remember")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "writer-state")
+    )
+    calls: list[tuple[dict[str, Any], str | None]] = []
+
+    class Client:
+        def capture(
+            self, arguments: dict[str, Any], *, idempotency_key: str | None = None
+        ) -> dict[str, Any]:
+            calls.append((dict(arguments), idempotency_key))
+            return {
+                "structuredContent": manager.invoke(
+                    command, (vault,), arguments, idempotency_key=idempotency_key
+                )
+            }
+
+    terminal = acceptance.remember_with_review(
+        Client(),
+        mutation="real-public-writer",
+        arguments={
+            "title": "Hosted public writer relation review",
+            "content": "## Observations\n- [acceptance] The public writer preserves exact reviewed draft state.\n",
+            "note_type": "insight",
+            "sources": [],
+        },
+        idempotency_key="real-public-writer-key",
+    )
+
+    assert terminal["state"] == "committed"
+    assert calls[0][1] is None
+    assert calls[0][0]["validate_only"] is True
+    assert calls[1][1] == "real-public-writer-key"
+    assert calls[1][0]["relation_disposition"] == "reviewed_none"
+    assert calls[1][0]["relation_review_hash"] == calls[1][0]["draft_hash"]
+    assert "relation_review_reason" in calls[1][0]
 
 
 def test_protocol_failure_is_persisted_and_redacted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -575,7 +837,25 @@ def test_cli_runs_producer_shaped_initialize_capture_and_fresh_cited_recall(tmp_
             else:
                 tool = request["params"]["name"]
                 if tool == "remember":
-                    result = {"structuredContent": {"ok": True, "state": "committed", "terminal": True, "status": "committed", "mutated": True}}
+                    arguments = request["params"]["arguments"]
+                    if arguments.get("validate_only") is True:
+                        assert "Idempotency-Key" not in self.headers
+                        result = {
+                            "structuredContent": {
+                                "state": "needs_review",
+                                "diagnostics": {
+                                    "draft_id": "cli-draft",
+                                    "draft_hash": "a" * 64,
+                                    "draft_token": "cli-token",
+                                    "relation_review_hash": "a" * 64,
+                                    "reviewed_none_required": True,
+                                    "has_non_review_blockers": False,
+                                    "committable_after_review": True,
+                                },
+                            }
+                        }
+                    else:
+                        result = {"structuredContent": {"ok": True, "state": "committed", "terminal": True, "status": "committed", "mutated": True}}
                 elif tool == "ask_memory":
                     tenant = self.headers["Authorization"].removeprefix("Bearer ").removesuffix("-access")
                     query = request["params"]["arguments"]["query"]
@@ -614,7 +894,7 @@ def test_cli_runs_producer_shaped_initialize_capture_and_fresh_cited_recall(tmp_
 
         assert runner.main(["run", "--config", str(config_path), "--state-dir", str(tmp_path / "state"), "--run-id", "cli-run-001", "--resume"], allow_loopback_fixture=True) == 0
         assert acceptance.manifest()["stages"]["protocol"]["status"] == "passed"
-        assert [request["method"] for request in requests] == ["initialize", "notifications/initialized", "tools/list", "tools/call", "initialize", "notifications/initialized", "tools/call", "tools/call", "initialize", "notifications/initialized", "tools/list", "tools/call", "initialize", "notifications/initialized", "tools/call", "tools/call", "tools/call", "tools/call"]
+        assert [request["method"] for request in requests] == ["initialize", "notifications/initialized", "tools/list", "tools/call", "tools/call", "initialize", "notifications/initialized", "tools/call", "tools/call", "initialize", "notifications/initialized", "tools/list", "tools/call", "tools/call", "initialize", "notifications/initialized", "tools/call", "tools/call", "tools/call", "tools/call"]
         assert {request["headers"]["Authorization"] for request in requests} == {"Bearer synthetic-access", "Bearer isolation-access"}
     finally:
         server.shutdown()
@@ -642,7 +922,9 @@ def test_protocol_refuses_a_genuine_foreign_tenant_sentinel_leak(tmp_path: Path,
         def list_tools(self) -> dict[str, Any]:
             return {"tools": [{"name": "remember"}, {"name": "ask_memory"}, {"name": "read_memory"}]}
 
-        def capture(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+        def capture(self, arguments: dict[str, Any], **_kwargs: object) -> dict[str, Any]:
+            if arguments.get("validate_only") is True:
+                return {"structuredContent": {"state": "needs_review", "diagnostics": {"draft_id": "leak-draft", "draft_hash": "a" * 64, "draft_token": "leak-token", "relation_review_hash": "a" * 64, "reviewed_none_required": True, "has_non_review_blockers": False, "committable_after_review": True}}}
             return {"structuredContent": {"result": {"ok": True, "state": "committed", "terminal": True, "status": "committed", "mutated": True}}}
 
         def recall(self, query: str) -> dict[str, Any]:
@@ -697,7 +979,11 @@ def test_benchmark_uses_five_concurrent_tenant_clients_and_never_passes_incomple
                     tenant = self.headers["Authorization"].removeprefix("Bearer ").removesuffix("-access")
                     result = {"structuredContent": {"result": {"content": runner.tenant_sentinel("benchmark-001", tenant) + " corpus"}}}
                 else:
-                    result = {"structuredContent": {"ok": True, "state": "committed", "terminal": True, "status": "committed", "mutated": True}}
+                    arguments = request["params"]["arguments"]
+                    if arguments.get("validate_only") is True:
+                        result = {"structuredContent": {"state": "needs_review", "diagnostics": {"draft_id": "benchmark-draft", "draft_hash": "a" * 64, "draft_token": "benchmark-token", "relation_review_hash": "a" * 64, "reviewed_none_required": True, "has_non_review_blockers": False, "committable_after_review": True}}}
+                    else:
+                        result = {"structuredContent": {"ok": True, "state": "committed", "terminal": True, "status": "committed", "mutated": True}}
             body = json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -743,6 +1029,7 @@ def test_benchmark_uses_five_concurrent_tenant_clients_and_never_passes_incomple
             sample["arguments"]
             for sample in requests
             if isinstance(sample["arguments"], dict)
+            and not sample["arguments"].get("validate_only")
             and str(sample["arguments"].get("title", "")).startswith("Hosted benchmark")
         ]
         assert len(benchmark_captures) == 100
@@ -801,7 +1088,9 @@ def test_benchmark_refuses_failed_capture_and_unresolvable_warm_recall(
         def list_tools(self) -> dict[str, Any]:
             return {"tools": []}
 
-        def capture(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+        def capture(self, arguments: dict[str, Any], **_kwargs: object) -> dict[str, Any]:
+            if arguments.get("validate_only") is True:
+                return {"structuredContent": {"state": "needs_review", "diagnostics": {"draft_id": "failure-draft", "draft_hash": "a" * 64, "draft_token": "failure-token", "relation_review_hash": "a" * 64, "reviewed_none_required": True, "has_non_review_blockers": False, "committable_after_review": True}}}
             if failure == "capture":
                 return {"isError": True, "structuredContent": {"result": {"message": "committed elsewhere"}}}
             return {"structuredContent": {"result": {"ok": True, "state": "committed", "terminal": True, "status": "committed", "mutated": True}}}
@@ -866,7 +1155,13 @@ def test_benchmark_rerun_cannot_measure_cached_captures_as_fresh_latency(
         def list_tools(self) -> dict[str, Any]:
             return {"tools": []}
 
-        def capture(self, _arguments: dict[str, Any], *, idempotency_key: str) -> dict[str, Any]:
+        def capture(
+            self, arguments: dict[str, Any], *, idempotency_key: str | None = None
+        ) -> dict[str, Any]:
+            if arguments.get("validate_only") is True:
+                assert idempotency_key is None
+                return {"structuredContent": {"state": "needs_review", "diagnostics": {"draft_id": "replay-draft", "draft_hash": "a" * 64, "draft_token": "replay-token", "relation_review_hash": "a" * 64, "reviewed_none_required": True, "has_non_review_blockers": False, "committable_after_review": True}}}
+            assert idempotency_key is not None
             if idempotency_key not in seen_keys:
                 seen_keys.add(idempotency_key)
                 local.capture_started = True
