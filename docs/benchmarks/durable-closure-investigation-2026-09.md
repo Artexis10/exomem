@@ -417,8 +417,23 @@ paired diagnostic rows above then passed all exact-body and search checks.
 Public-artifact validation passed for 3,848 repository files and 3,960 text
 payloads. The repository-pinned OpenSpec 1.10.0 validator reported
 `185 passed, 0 failed`; archive discipline reported no task-complete active
-changes. Completion-boundary CI and its exact revision are recorded in the
-pull request.
+changes.
+
+The [completion-boundary CI run at `fe56a3eb`](https://github.com/Artexis10/exomem/actions/runs/34116795095)
+finished with 69 of 71 jobs passing. Its 32 JUnit artifacts contain 17,345
+unique named cases per Python version (3.11 and 3.13), including 302 ordinary
+skips per runtime. Python 3.11 had no failure or error. Python 3.13 had one
+fixture-setup error; the other failed job was the dependent aggregate gate.
+
+The graph-value fixture waited only 450 ms for a registered rebuild that took
+601 ms in CI. Commit `a93e4509` replaces that polling window with a bounded
+registered-owner join followed by current publication proof. It preserves
+foreign-owner refusals and exact builder failures. The corrected full graph-value
+suite reported `163 passed in 221.98s`; independent review forced an 800 ms
+owner delay and exercised the refusal/error cases: `7 passed in 36.45s`.
+Product source is byte-identical to `fe56a3eb`; the subsequent changes are
+benchmark harnesses, tests and evidence. The final-tree CI result is tracked on
+[PR #1101](https://github.com/Artexis10/exomem/pull/1101).
 
 Useful durable closure and later full projection convergence remain separate
 measurements. Production was not restarted, drained, benchmarked with synthetic

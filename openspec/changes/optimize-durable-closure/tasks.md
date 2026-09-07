@@ -21,6 +21,6 @@
 ## 4. Review and delivery
 
 - [x] 4.1 Obtain author-independent diff review and rerun important reproductions in isolated state; resolve blocking findings to APPROVE.
-- [ ] 4.2 Run the full test corpus once at the completion boundary, public-artifact privacy validation and `openspec validate --all --strict`; fix attributable failures and record actual outputs.
-- [ ] 4.3 Integrate current remote main safely, commit intended changes, push and open a ready pull request with measured results and validation evidence.
+- [x] 4.2 Run the full test corpus once at the completion boundary, public-artifact privacy validation and `openspec validate --all --strict`; fix attributable failures and record actual outputs.
+- [x] 4.3 Integrate current remote main safely, commit intended changes, push and open a ready pull request with measured results and validation evidence.
 - [ ] 4.4 After separately authorized merge and shipping evidence, synchronize the delta specs and archive through OpenSpec, validating strictly before and after; do not claim rollout completion before this evidence exists.
