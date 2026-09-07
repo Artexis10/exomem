@@ -1,4 +1,5 @@
 import hashlib
+import json
 
 import pytest
 
@@ -33,7 +34,8 @@ def setup_item(vault):
         target = vault / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
-            f"---\ntype: {'source' if name == 'source' else 'organization'}\ntitle: {name}\n---\nRecorded facts about {name}.\n"
+            f"---\ntype: {'source' if name == 'source' else 'organization'}\n"
+            f"title: {name}\n---\nRecorded facts about {name}.\n"
         )
         versions[path] = hashlib.sha256(target.read_bytes()).hexdigest()
     current = make_item(
@@ -132,6 +134,93 @@ def test_live_entity_type_proposal_uses_the_existing_registry_validator(tmp_path
     assert result["state"] == "proposed"
 
 
+@pytest.mark.parametrize("family", ["relation-type/v1", "entity-type/v1"])
+@pytest.mark.parametrize("registered", [True, False])
+def test_proposal_references_use_the_complete_live_registry(tmp_path, family, registered):
+    from exomem import entity_types, relation_registry
+
+    if family == "relation-type/v1":
+        existing = {
+            "parent": "relates_to",
+            "description": "Applies to",
+            "direction": "directed",
+        }
+        canonical, reference = "vault.applied_from", "vault.applies_to"
+        proposed = existing | {"description": "Applied from", "inverse": reference}
+        path = relation_registry.extension_registry_path(tmp_path)
+        registry = {"schema_version": 1, "extensions": {reference: existing}}
+    else:
+        existing = {
+            "folder": "Workshops",
+            "label": "Workshop",
+            "aliases": [],
+            "capture_guidance": "A recurring practical activity.",
+        }
+        canonical, reference = "legacy-workshop", "workshop"
+        proposed = existing | {
+            "folder": "LegacyWorkshops",
+            "label": "Legacy workshop",
+            "status": "deprecated",
+            "replaced_by": reference,
+        }
+        path = entity_types.extension_registry_path(tmp_path)
+        registry = {"schema_version": 1, "entity_types": {reference: existing}}
+    if registered:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(registry))
+    original, _ = setup_item(tmp_path)
+    current = make_item(
+        family=family,
+        signal="agent-meaning-question",
+        targets=dict(original.target_versions),
+        evidence=original.evidence,
+        registry_hashes=review.registry_hashes(tmp_path),
+        projection_status="current",
+    )
+    state = VocabularyState(tmp_path)
+    state.observe(current)
+    selected = payload(current.to_dict(), "propose-new") | {
+        "choice": {"canonical": canonical, "definition": proposed}
+    }
+    before = state.store.path.read_bytes()
+    with library_scope():
+        if registered:
+            assert (
+                review.decide(tmp_path, ref=current.ref, decision=selected)["state"] == "proposed"
+            )
+        else:
+            with pytest.raises(
+                ValueError, match="proposal conflicts with the current registry"
+            ) as rejected:
+                review.decide(tmp_path, ref=current.ref, decision=selected)
+            assert "inverse" in str(rejected.value) or "replaced_by" in str(rejected.value)
+            assert state.store.path.read_bytes() == before
+
+
+def test_relation_context_publishes_a_proposal_that_the_canonical_route_accepts(tmp_path):
+    from exomem import commands
+
+    current, _ = setup_item(tmp_path)
+    guidance = review.context(tmp_path, ref=current.ref)["definitions"]["registration"]
+    proposal = guidance["propose"]["proposal"] | {
+        "requested_label": "coordinates",
+        "namespace": "activities",
+        "parent": "relates_to",
+        "description": "Coordinates the activities of another entity.",
+        "direction": "directed",
+    }
+    result = commands.op_schema_memory(
+        tmp_path,
+        subject="relations",
+        operation="propose-relation",
+        proposal=proposal,
+    )
+    assert result["valid"] is True
+    assert "activities.coordinates" in result["delta"]["upsert"]
+    assert guidance["save"]["proposal_from"] == "delta"
+    assert guidance["save"]["expected_hash_from"] == "expected_hash"
+
+
 def test_withheld_targets_make_review_item_unavailable_without_leaking_queue_count(
     tmp_path, monkeypatch
 ):
@@ -197,7 +286,9 @@ def test_context_keeps_a_provenance_page_cursor_while_paging_within_that_page(
         path = f"Knowledge Base/Sources/Articles/{name}.md"
         page = tmp_path / path
         page.write_text(f"---\ntype: source\n---\n{name}.\n")
-        evidence.append(Evidence(name, hashlib.sha256(page.read_bytes()).hexdigest(), "origin:checkpoint"))
+        evidence.append(
+            Evidence(name, hashlib.sha256(page.read_bytes()).hexdigest(), "origin:checkpoint")
+        )
         evidence_paths[name] = path
     current = make_item(
         family=original.family,

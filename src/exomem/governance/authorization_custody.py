@@ -751,8 +751,8 @@ def parse_control_record(
         raise AuthorizationCustodyUnavailable from None
     if not isinstance(value, dict):
         raise AuthorizationCustodyUnavailable
-    version = value["version"]
-    if isinstance(version, bool) or version not in {1, 2}:
+    version = value.get("version")
+    if type(version) is not int or version not in {1, 2}:
         raise AuthorizationCustodyUnavailable
     if set(value) != (_CONTROL_FIELDS_V2 if version == 2 else _CONTROL_FIELDS_V1):
         raise AuthorizationCustodyUnavailable

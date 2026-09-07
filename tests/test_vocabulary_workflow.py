@@ -92,10 +92,21 @@ def test_rejected_type_choice_reports_the_canonical_validator_findings():
     assert "alias 'programmes' collides" in str(rejected.value)
 
 
+@pytest.mark.parametrize("reference", [{"bad": 1}, "not a canonical relation"])
+def test_pure_choice_does_not_defer_malformed_references(reference):
+    current = item()
+    selected = decision(current, "propose-new")
+    selected["choice"]["definition"]["inverse"] = reference
+    with pytest.raises(ValueError, match="extensions.vault.supplies.inverse"):
+        workflow.validate_decision(current, selected)
+
+
 @pytest.mark.parametrize(
     "family,entry_path",
-    [("entity-type/v1", "entity_types[choice.canonical]"),
-     ("relation-type/v1", "extensions[choice.canonical]")],
+    [
+        ("entity-type/v1", "entity_types[choice.canonical]"),
+        ("relation-type/v1", "extensions[choice.canonical]"),
+    ],
 )
 def test_type_choice_contract_names_the_selected_entry_in_the_proposal(family, entry_path):
     definition = workflow.choice_contract(family)["propose-new"]["definition"]

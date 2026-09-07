@@ -8,7 +8,16 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import commands, epistemic_graph, vocabulary_review
+from exomem import (
+    commands,
+    epistemic_graph,
+    relation_registry,
+    semantic_contract,
+    vocabulary_questions,
+    vocabulary_review,
+    writer_lease,
+)
+from exomem.governance.principal import library_scope
 from exomem.vocabulary_state import VocabularyState
 from exomem.vocabulary_workflow import Evidence, make_item
 
@@ -26,7 +35,7 @@ def _anchor(
     page = vault / path
     page.parent.mkdir(parents=True, exist_ok=True)
     page.write_text(
-        f"---\ntype: note\nexomem_id: {identity}\n---\n{body}\n",
+        f"---\ntype: insight\nstatus: active\nexomem_id: {identity}\n---\n{body}\n",
         encoding="utf-8",
     )
     return path
@@ -146,6 +155,302 @@ def test_questions_deduplicate_only_when_anchor_and_question_match(tmp_path: Pat
     assert changed_content["item"]["ref"] == first["item"]["ref"]
     assert changed_content["item"]["fingerprint"] != first["item"]["fingerprint"]
 
+
+def test_relation_question_binds_the_exact_current_queue_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _anchor(
+        tmp_path,
+        "See [[Knowledge Base/Notes/meaning-target]].",
+        path="Knowledge Base/Notes/meaning-source.md",
+    )
+    target = _anchor(
+        tmp_path,
+        "A distinct target.",
+        path="Knowledge Base/Notes/meaning-target.md",
+        identity="00000000-0000-4000-8000-000000000002",
+    )
+    with library_scope():
+        relation_registry.save_registry(
+            tmp_path,
+            {
+                "schema_version": 1,
+                "extensions": {
+                    "venue.hosts": {
+                        "parent": "relates_to",
+                        "description": "A venue hosts a recurring event.",
+                        "direction": "directed",
+                        "origins": ["markdown_relation", "semantic_relation"],
+                    }
+                },
+            },
+        )
+        epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    semantic_contract.build_corpus_context(tmp_path)
+    queue = commands.op_review_memory(tmp_path, mode="relation-queue")
+    candidate = next(
+        entry
+        for group in queue["groups"]
+        for entry in group["items"]
+        if entry["from"] == source and entry["to"] == target
+    )
+
+    result = commands.op_review_memory(
+        tmp_path,
+        mode="vocabulary",
+        path=source,
+        query="Should this relation remain generic?",
+        family="relation-type/v1",
+        ref=candidate["ref"],
+    )
+
+    item = result["item"]
+    assert set(item["target_versions"]) == {
+        "exomem://memory/00000000-0000-4000-8000-000000000001",
+        "exomem://memory/00000000-0000-4000-8000-000000000002",
+    }
+    assert {entry["origin"] for entry in item["evidence"]} == {"agent-meaning-question"}
+    assert result["application_route"] == {
+        "tool": "connect_memory",
+        "operation": "accept-relation",
+        "ref": candidate["ref"],
+        "path": source,
+        "expected_fingerprint": candidate["fingerprint"],
+        "expected_hash": candidate["source_content_hash"],
+        "requested_relation": None,
+        "instructions": (
+            "Record a reuse or propose-new decision for this paired item, then set "
+            "requested_relation before invoking this route."
+        ),
+        "vocabulary_ref": item["ref"],
+        "vocabulary_fingerprint": item["fingerprint"],
+    }
+    assert item["projection"]["currency"] == {
+        "candidate_ref": candidate["ref"],
+        "candidate_fingerprint": candidate["fingerprint"],
+        "candidate_source_path": source,
+        "candidate_target_path": target,
+    }
+    decision = {
+        "item_ref": item["ref"],
+        "fingerprint": item["fingerprint"],
+        "family": item["family"],
+        "registry_hashes": item["registry_hashes"],
+        "target_versions": item["target_versions"],
+        "outcome": "reuse",
+        "choice": {"canonical": "venue.hosts"},
+        "rationale": "The reviewed directed candidate keeps the existing link meaning.",
+    }
+    with library_scope():
+        vocabulary_review.decide(tmp_path, ref=item["ref"], decision=decision)
+    route = result["application_route"]
+    arguments = {
+        key: route[key]
+        for key in (
+            "operation",
+            "ref",
+            "path",
+            "expected_fingerprint",
+            "expected_hash",
+            "vocabulary_ref",
+            "vocabulary_fingerprint",
+        )
+    } | {
+        "requested_relation": "venue.hosts",
+        "why": "Apply the reviewed directed link.",
+    }
+    command = next(entry for entry in commands.PRODUCT_COMMANDS if entry.name == "connect_memory")
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    with library_scope():
+        accepted = manager.invoke(
+            command,
+            (tmp_path,),
+            arguments,
+            idempotency_key="question-directed-link",
+            read_only=False,
+        )
+    assert accepted["state"] == "committed"
+    assert accepted["receipt_id"]
+    assert "- venue.hosts [[Knowledge Base/Notes/meaning-target]]" in (
+        tmp_path / source
+    ).read_text(encoding="utf-8")
+    with library_scope():
+        epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    graph = commands.op_graph_context(tmp_path, path=source, relation_types=["venue.hosts"])
+    assert graph["edges"]
+    assert graph["edges"][0]["relation_type"] == "venue.hosts"
+
+
+def test_relation_question_refuses_wrong_or_withheld_endpoint_without_state_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _anchor(
+        tmp_path,
+        "See [[Knowledge Base/Notes/meaning-target]].",
+        path="Knowledge Base/Notes/meaning-source.md",
+    )
+    target = _anchor(
+        tmp_path,
+        "A distinct target.",
+        path="Knowledge Base/Notes/meaning-target.md",
+        identity="00000000-0000-4000-8000-000000000002",
+    )
+    with library_scope():
+        epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    semantic_contract.build_corpus_context(tmp_path)
+    queue = commands.op_review_memory(tmp_path, mode="relation-queue")
+    candidate = next(
+        entry
+        for group in queue["groups"]
+        for entry in group["items"]
+        if entry["from"] == source and entry["to"] == target
+    )
+    state_path = VocabularyState(tmp_path).store.path
+
+    with pytest.raises(ValueError, match="REVIEW_REFRESH_REQUIRED"):
+        vocabulary_questions.submit(
+            tmp_path,
+            path=target,
+            query="Should this reverse relation be reviewed?",
+            family="relation-type/v1",
+            relation_ref=candidate["ref"],
+        )
+    assert not state_path.exists()
+
+    original_release = vocabulary_review.egress.release_level_for
+    monkeypatch.setattr(
+        vocabulary_review.egress,
+        "release_level_for",
+        lambda vault, path: 0 if path == target else original_release(vault, path),
+    )
+    with pytest.raises(ValueError, match="VOCABULARY_ITEM_NOT_FOUND"):
+        vocabulary_questions.submit(
+            tmp_path,
+            path=source,
+            query="Should this relation remain generic?",
+            family="relation-type/v1",
+            relation_ref=candidate["ref"],
+        )
+    assert not state_path.exists()
+    monkeypatch.undo()
+
+    with library_scope():
+        commands.op_triage_memory(
+            tmp_path,
+            ref=candidate["ref"],
+            action="dismiss",
+            why="handled: the relation queue candidate was reviewed already.",
+            expected_fingerprint=candidate["fingerprint"],
+            source_path=source,
+        )
+    with pytest.raises(ValueError, match="relation candidate is no longer eligible"):
+        vocabulary_questions.submit(
+            tmp_path,
+            path=source,
+            query="Should this relation remain generic?",
+            family="relation-type/v1",
+            relation_ref=candidate["ref"],
+        )
+    assert b"exomem://review/vocabulary/" not in state_path.read_bytes()
+
+
+def test_relation_question_refuses_an_endpoint_changed_after_its_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _anchor(
+        tmp_path,
+        "See [[Knowledge Base/Notes/meaning-target]].",
+        path="Knowledge Base/Notes/meaning-source.md",
+    )
+    target = _anchor(
+        tmp_path,
+        "A distinct target.",
+        path="Knowledge Base/Notes/meaning-target.md",
+        identity="00000000-0000-4000-8000-000000000002",
+    )
+    with library_scope():
+        relation_registry.save_registry(
+            tmp_path,
+            {
+                "schema_version": 1,
+                "extensions": {
+                    "venue.hosts": {
+                        "parent": "relates_to",
+                        "description": "A venue hosts a recurring event.",
+                        "direction": "directed",
+                        "origins": ["markdown_relation", "semantic_relation"],
+                    }
+                },
+            },
+        )
+        epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    semantic_contract.build_corpus_context(tmp_path)
+    queue = commands.op_review_memory(tmp_path, mode="relation-queue")
+    candidate = next(
+        entry
+        for group in queue["groups"]
+        for entry in group["items"]
+        if entry["from"] == source and entry["to"] == target
+    )
+    result = vocabulary_questions.submit(
+        tmp_path,
+        path=source,
+        query="Should this relation remain generic?",
+        family="relation-type/v1",
+        relation_ref=candidate["ref"],
+    )
+    item = result["item"]
+    with library_scope():
+        vocabulary_review.decide(
+            tmp_path,
+            ref=item["ref"],
+            decision={
+                "item_ref": item["ref"],
+                "fingerprint": item["fingerprint"],
+                "family": item["family"],
+                "registry_hashes": item["registry_hashes"],
+                "target_versions": item["target_versions"],
+                "outcome": "reuse",
+                "choice": {"canonical": "venue.hosts"},
+                "rationale": "The reviewed directed candidate keeps this meaning.",
+            },
+        )
+    _anchor(
+        tmp_path,
+        "The target changed after the reviewed decision.",
+        path=target,
+        identity="00000000-0000-4000-8000-000000000002",
+    )
+    route = result["application_route"]
+    arguments = {
+        key: route[key]
+        for key in (
+            "operation",
+            "ref",
+            "path",
+            "expected_fingerprint",
+            "expected_hash",
+            "vocabulary_ref",
+            "vocabulary_fingerprint",
+        )
+    } | {
+        "requested_relation": "venue.hosts",
+        "why": "Apply the reviewed directed link.",
+    }
+    command = next(entry for entry in commands.PRODUCT_COMMANDS if entry.name == "connect_memory")
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    with library_scope(), pytest.raises(ValueError, match="VOCABULARY_DECISION_STALE"):
+        manager.invoke(
+            command,
+            (tmp_path,),
+            arguments,
+            idempotency_key="changed-question-directed-link",
+            read_only=False,
+        )
+    assert "## Relations" not in (tmp_path / source).read_text(encoding="utf-8")
 
 def test_question_submission_refuses_unknown_family_and_unreadable_anchor_without_state_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

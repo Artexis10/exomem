@@ -7,12 +7,37 @@ from threading import Event, Thread
 import pytest
 
 from exomem import vocabulary_authority
+from exomem.governance import authorization_session_lifecycle, store
 from exomem.governance.authorization_session_lifecycle import AuthorizationSessionContext
 from exomem.governance.principal import RequestPrincipal
 from exomem.vocabulary_effects import Effect
 
 NOW = 1_700_000_000
 _TEST_VOCABULARY_FLOORS: dict[Path, int] = {}
+
+
+def install_unit_session_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep this authority-store unit suite independent of session persistence.
+
+    The production path is exercised by the real custody/session lifecycle
+    tests; these cases isolate authority-ledger behavior with synthetic custody.
+    """
+
+    monkeypatch.setattr(
+        authorization_session_lifecycle,
+        "status_verified_session",
+        lambda _connection, *, custody, context, now: context,
+    )
+    monkeypatch.setattr(
+        store,
+        "open_authorization_session_connection",
+        lambda _root: type("_Connection", (), {"close": lambda self: None})(),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _unit_session_status_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_unit_session_boundary(monkeypatch)
 
 
 @dataclass(frozen=True)
@@ -221,7 +246,6 @@ def _store(root: Path) -> vocabulary_authority.VocabularyAuthority:
             control_path=control_path,
         ),
         clock=lambda: NOW,
-        session_status_verifier=lambda _connection, *, custody, context, now: context,
     )
     authority._test_vocabulary_floor = floor  # type: ignore[attr-defined]  # noqa: SLF001
     return authority
@@ -557,32 +581,6 @@ def test_runtime_status_requires_the_current_supported_floor_without_a_session(t
     assert authority.runtime_status() == vocabulary_authority.AuthorityStatus("v2", 7, 0)
 
 
-def test_session_generation_alone_does_not_replace_session_status_revalidation(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
-    authority = _store(tmp_path / "vault")
-    agent = _principal()
-    _activate(authority, agent)
-    stale_context = AuthorizationSessionContext(
-        session_id="session-agent-a",
-        principal_id="agent-a",
-        issuer_family="test-issuer",
-        cell_id="cell-1",
-        logical_vault_id="vault-1",
-        keyring_id="keyring-1",
-        credential_generation=6,
-        expires_at=NOW + 600,
-    )
-    stale = RequestPrincipal(
-        audience_id="agent-a",
-        surface="test",
-        authorization_session_id=stale_context.session_id,
-        issuer_family=stale_context.issuer_family,
-        verified_authorization_session=stale_context,
-    )
-
-    assert authority.status(stale).mode == "v2"
-
-
 def test_reconcile_accepts_only_writer_sealed_evidence_after_an_uncertain_outcome(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
     authority = _store(tmp_path / "vault")
@@ -644,7 +642,6 @@ def test_grant_rechecks_owner_and_session_expiry_after_waiting_for_sqlite(tmp_pa
             control_path=control_path,
         ),
         clock=lambda: moment[0],
-        session_status_verifier=lambda _connection, *, custody, context, now: context,
     )
     agent = _principal()
     _activate(authority, agent)

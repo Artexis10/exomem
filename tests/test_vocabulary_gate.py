@@ -87,11 +87,18 @@ def test_legacy_nonterminal_output_is_unchanged(value):
 
 @pytest.mark.parametrize("failure", [None, "evidence-close", "postcommit-log"])
 def test_real_registry_batch_waits_for_exact_approval_and_publishes_receipt(tmp_path, monkeypatch, failure):
-    from test_vocabulary_authority import _activate, _approve_request, _principal, _store
+    from test_vocabulary_authority import (
+        _activate,
+        _approve_request,
+        _principal,
+        _store,
+        install_unit_session_boundary,
+    )
 
     from exomem import reserved_paths
     from exomem.governance.principal import request_scope
 
+    install_unit_session_boundary(monkeypatch)
     root = tmp_path / "vault"
     target = root / "Knowledge Base/_Schema/entity-types.yaml"
     target.parent.mkdir(parents=True)
@@ -159,10 +166,18 @@ def test_v2_link_creation_with_connection_requires_and_uses_each_effect_authorit
     import datetime as dt
     import uuid
 
-    from test_vocabulary_authority import _activate, _approve_request, _grant, _principal, _store
+    from test_vocabulary_authority import (
+        _activate,
+        _approve_request,
+        _grant,
+        _principal,
+        _store,
+        install_unit_session_boundary,
+    )
 
     from exomem import activation_manifest, epistemic_graph, find, freshness, link, memory_refs
 
+    install_unit_session_boundary(monkeypatch)
     target = vault / "Knowledge Base/Entities/Decisions/Established.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
@@ -224,10 +239,16 @@ def test_v2_existing_entity_edit_reaches_existing_owner_after_derived_outputs(
     import datetime as dt
     import uuid
 
-    from test_vocabulary_authority import _activate, _principal, _store
+    from test_vocabulary_authority import (
+        _activate,
+        _principal,
+        _store,
+        install_unit_session_boundary,
+    )
 
     from exomem import activation_manifest, edit, epistemic_graph, find, freshness
 
+    install_unit_session_boundary(monkeypatch)
     path = vault / "Knowledge Base/Entities/People/Hydrated.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -265,8 +286,15 @@ def test_v2_existing_entity_edit_reaches_existing_owner_after_derived_outputs(
 def test_v2_mixed_registry_addition_and_existing_definition_change_refuses_atomically(
     tmp_path, monkeypatch,
 ):
-    from test_vocabulary_authority import _activate, _grant, _principal, _store
+    from test_vocabulary_authority import (
+        _activate,
+        _grant,
+        _principal,
+        _store,
+        install_unit_session_boundary,
+    )
 
+    install_unit_session_boundary(monkeypatch)
     root = tmp_path / "vault"
     target = root / "Knowledge Base/_Schema/entity-types.yaml"
     target.parent.mkdir(parents=True)

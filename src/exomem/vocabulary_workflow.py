@@ -366,6 +366,37 @@ def validation_feedback(findings: list[dict[str, str]]) -> str:
     )
 
 
+def _requires_live_registry(
+    family: str,
+    definition: dict,
+    finding: dict[str, str],
+) -> bool:
+    # A definition can refer to an existing extension outside this one-entry
+    # shape check. Public decision persistence validates the merged live registry
+    # in vocabulary_review._validate_live_choice. Defer only missing-reference
+    # findings; status constraints, malformed fields and cycles still fail here.
+    code, detail = finding.get("code"), finding.get("detail")
+    reference = definition.get(str(finding.get("path", "")).rsplit(".", 1)[-1])
+    if not isinstance(reference, str) or not reference.strip():
+        return False
+    if family == "relation-type/v1":
+        from . import relation_registry
+
+        return (
+            code in {"invalid_inverse", "invalid_replacement"}
+            and (detail == "must resolve to a canonical relation")
+            and bool(relation_registry._KEY_RE.fullmatch(reference))
+        )
+    from . import entity_types
+
+    return (
+        family == "entity-type/v1"
+        and code == "invalid_replacement"
+        and (detail == "must name a registered entity type")
+        and bool(entity_types._ID_RE.fullmatch(reference))
+    )
+
+
 def _choice(family: str, outcome: str, value: Any) -> str | None:
     if outcome in {"generic", "no-edge", "defer"}:
         if value is not None:
@@ -430,10 +461,13 @@ def _choice(family: str, outcome: str, value: Any) -> str | None:
                     "VOCABULARY_DECISION_INVALID: canonical choice must equal entity proposal name"
                 )
             findings = link._validate(**definition, decision_status=None)
+        findings = [
+            finding
+            for finding in (findings or [])
+            if not _requires_live_registry(family, definition, finding)
+        ]
         if findings:
-            raise ValueError(
-                "VOCABULARY_DECISION_INVALID: " + validation_feedback(findings)
-            )
+            raise ValueError("VOCABULARY_DECISION_INVALID: " + validation_feedback(findings))
     try:
         return json.dumps(
             value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False

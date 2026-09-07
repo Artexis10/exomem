@@ -77,8 +77,10 @@ def resolve_entity_type(
             "schema_version": 1,
             "entity_types": {
                 "<canonical-type>": {
-                    "folder": "<PluralFolder>", "label": "<Readable label>",
-                    "aliases": [], "cue_nouns": [],
+                    "folder": "<PluralFolder>",
+                    "label": "<Readable label>",
+                    "aliases": [],
+                    "cue_nouns": [],
                     "capture_guidance": "<Which durable identities belong here>",
                 },
             },
@@ -151,6 +153,49 @@ def relation_evidence(
             projection_generation=projection_generation,
         ),
         "continuations": continuations,
+        "registration": {
+            "propose": {
+                "tool": "schema_memory",
+                "subject": "relations",
+                "operation": "propose-relation",
+                "proposal": {
+                    "requested_label": "<name portion of the chosen namespace.name>",
+                    "namespace": "<namespace portion of the chosen namespace.name>",
+                    "parent": "<one core_vocabulary key>",
+                    "description": "<the reviewed relationship meaning>",
+                    "direction": "<directed or symmetric>",
+                },
+                "optional_proposal_fields": [
+                    "aliases",
+                    "inverse",
+                    "origins",
+                    "source_kinds",
+                    "target_kinds",
+                    "projects",
+                    "page_types",
+                    "query",
+                ],
+            },
+            "save": {
+                "tool": "schema_memory",
+                "subject": "relations",
+                "operation": "save-relations",
+                "proposal_from": "delta",
+                "expected_hash_from": "expected_hash",
+                "why": "<audit rationale>",
+                "vocabulary_ref": "<reviewed work item ref>",
+                "vocabulary_fingerprint": "<reviewed work item fingerprint>",
+                "idempotency_key": "<stable transport key for this application>",
+            },
+            "next_step": (
+                "Submit the reviewed meaning through propose-relation. Its proposal is the "
+                "requested_label/namespace mapping above, without a registry wrapper. Review "
+                "the returned findings and delta. Record your typed choice.definition as the "
+                "exact returned delta.upsert[choice.canonical] entry, including any aliases "
+                "added by the proposal route. Then save the valid delta with the returned "
+                "expected_hash and your recorded vocabulary decision."
+            ),
+        },
     }
 
 

@@ -55,10 +55,16 @@ def _validate_live_choice(vault_root: Path, item: WorkItem, decision: Mapping[st
                 raise ValueError(
                     "VOCABULARY_DECISION_INVALID: this canonical meaning already exists"
                 )
-            proposal = relation_registry.merge_extension_delta(
-                memory_schema.relation_registry_proposal(registry),
-                {"upsert": {canonical: choice["definition"]}},
-            )
+            try:
+                proposal = relation_registry.merge_extension_delta(
+                    memory_schema.relation_registry_proposal(registry),
+                    {"upsert": {canonical: choice["definition"]}},
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "VOCABULARY_DECISION_INVALID: proposal conflicts with the current registry; "
+                    + str(exc)[:1024]
+                ) from None
             findings = relation_registry.validate_proposal(proposal)
         else:
             definition = registry.definition(canonical)
@@ -108,11 +114,10 @@ def _validate_live_choice(vault_root: Path, item: WorkItem, decision: Mapping[st
             or frontmatter.get("status") in {"deprecated", "archived", "deleted"}
             or entity_types.load_entity_types(vault_root).resolve(
                 frontmatter.get("entity_type", "")
-            ) is None
-        ):
-            raise ValueError(
-                "VOCABULARY_DECISION_INVALID: choose a current canonical entity page"
             )
+            is None
+        ):
+            raise ValueError("VOCABULARY_DECISION_INVALID: choose a current canonical entity page")
     if findings:
         raise ValueError(
             "VOCABULARY_DECISION_INVALID: proposal conflicts with the current registry; "

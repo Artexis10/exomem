@@ -24,6 +24,7 @@ module versions inside a running server. Embeddings were disabled.
 | Confirmation-enabled organization task | Proposed Concept entries, then proposed and saved a Programme type after domain feedback distinguished real activities from abstract concepts; created the school and two programmes, enriched the existing cooperative, and saved a summary note | Assisted custom-type adoption, canonical validation, authored use, reuse, and enrichment succeeded; formal vocabulary review/decision correlation was not used |
 | Explicit compact workflow cadence | Saved a sourced insight; supplier and administrator queries retrieved it | The agent admitted substituting resolver results for the required review/decision cadence and ignoring the returned recovery route; this is an adoption failure, not a successful workflow trial |
 | Profile and navigation task with operating instructions first | Independently proposed Programme and grounded relations, then created the profiles and verified all supplied-goods, administration and narrowly defined hosting traversals after confirmation | The review and relation-decision paths were used; opaque entity-decision validation led to unbound entity creation, so this remains partial workflow acceptance |
+| Public decision-and-application workflow | Independently selected Programme, recorded decisions, registered the type and relations, created the school and programmes, and enriched existing profiles with canonical receipts; edge application exposed a missing paired-question route | Public application recovered from actionable validation feedback; the original edge attempt correctly remained uncommitted pending a decision covering both endpoints |
 
 The third trial's Programme definition initially failed an alias collision and
 was corrected before saving. The programme records preserved their distinct
@@ -48,6 +49,17 @@ fields or the relationship between the canonical choice and entity name;
 those creations used the existing unbound writer. A locally labelled
 “validation” request was actually a type-save request and committed as requested;
 it was not a server-side dry-run failure.
+
+The sixth trial exposed three public-contract gaps: incomplete type and relation
+proposal shapes, an opaque mismatch when a recorded relation definition omitted
+an alias added by the proposal, and a single-page question that could not bind
+application to a directed pair. The first two were repaired with exact entry
+shapes and bounded field-level feedback. The agent corrected its own definitions
+and anchored enrichment questions to the existing entities. These corrections did
+not relax canonical validation or supply domain choices. The edge gap requires a
+current relation-candidate question that reviews both visible endpoint versions
+and returns the canonical application route. Intermediate refusals and server
+restarts remain part of the trial's evidence.
 
 ## Retrieval limits observed
 

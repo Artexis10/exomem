@@ -910,8 +910,9 @@ def op_bootstrap(
         "cadence": (
             "At a durable capture boundary, use the available review route and inspect "
             "relevant items with context. If a useful identity or meaning question is "
-            "missing, use the question route with a source-page anchor. Record its "
-            "typed decision before the corresponding structural write."
+            "missing, use a source-page or existing-entity anchor. For a selected edge, "
+            "use relation_question with the current relation-queue candidate so both "
+            "endpoints are reviewed. Record the typed decision before its structural write."
         ),
         "review_route": {"default_limit": 4, **vocabulary_operation("review_memory", {"mode": "vocabulary"})},
         "context": vocabulary_operation(
@@ -922,6 +923,15 @@ def op_bootstrap(
             {
                 "mode": "vocabulary", "path": "<canonical-page-path>",
                 "query": "<meaning-question>", "family": "<supported-family>",
+            },
+        ),
+        "relation_question": vocabulary_operation(
+            "review_memory",
+            {
+                "mode": "vocabulary", "path": "<candidate source_path>",
+                "ref": "<current relation-queue candidate ref>",
+                "query": "<meaning of this exact directed pair>",
+                "family": "relation-type/v1",
             },
         ),
         "decision": {
@@ -6545,7 +6555,8 @@ def op_review_memory(
         continuation: Opaque continuation for ordinary vocabulary review pagination.
         query: Topic for evolution review when `path` is absent. On the topic route,
             `topic_anchor` is the retrieval hit that surfaced the chain; `chain_id`
-            is always the active head.
+            is always the active head. In vocabulary mode, the explicit meaning
+            question to record against the selected page or relation candidate.
         sources: Source paths for compilation mode.
         suggested_title: Optional compilation title hint.
         tag: Provenance tag shorthand.
@@ -6554,16 +6565,24 @@ def op_review_memory(
         path: Restrict provenance scan to one path. For evolution, selects the path
             route and `query` is not used: `topic_anchor` is the requested page and
             `chain_id` is always the active head. An unresolvable path raises an
-            explicit error.
+            explicit error. Vocabulary questions use a source page for a new meaning
+            or the existing entity page for reuse/enrichment. A relation candidate
+            question uses the candidate's source_path alongside its ref.
         state: For attention/activation, open (default), all, snoozed, or dismissed.
             Vocabulary review uses open for actionable work or all for decision history;
             each response is a non-exhaustive bounded pass.
         ref: Stable `exomem://review/<id>` reference for item mode, or the
             opaque `exomem://write-advisory-result/<id>` reference for
-            write-advisory-result mode. Required by both.
+            write-advisory-result mode. Required by both. For a vocabulary
+            relation-type question, optionally provide a current relation-queue
+            candidate ref alongside its source path and your meaning question.
+            This reviews both endpoints and returns the exact application route.
         family: Supported vocabulary family for an explicit meaning question. With
             `mode="vocabulary"`, it requires `path` and `query` and creates only a
-            review consideration; it grants no mutation authority.
+            review consideration; it grants no mutation authority. A selected edge
+            requires `relation-type/v1` and the relation-queue candidate `ref` so
+            the decision covers both endpoints. Read its context, record the typed
+            decision, then use the returned application_route with that choice.
         detail: Audit output detail: actionable (default) or full.
         legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
 
@@ -6578,8 +6597,10 @@ def op_review_memory(
         question_submission = path is not None or bool(query) or family is not None
         unrelated = any(
             item is not None
-            for item in (categories, sources, suggested_title, tag, key, value, ref)
-        ) or state not in {"open", "all"} or detail != "actionable"
+            for item in (categories, sources, suggested_title, tag, key, value)
+        ) or state not in {"open", "all"} or detail != "actionable" or (
+            ref is not None and not question_submission
+        )
         if question_submission:
             if (
                 not isinstance(path, str)
@@ -6591,10 +6612,19 @@ def op_review_memory(
                 or limit is not None
                 or unrelated
                 or state != "open"
+                or (
+                    ref is not None
+                    and (
+                        family != "relation-type/v1"
+                        or not isinstance(ref, str)
+                        or not ref.startswith("exomem://review/relation/")
+                    )
+                )
             ):
                 raise ValueError(
                     "INVALID_VOCABULARY_REVIEW_ARGUMENTS: a meaning question requires "
-                    "only path, query, and family"
+                    "path, query, and family, with an optional current relation-queue "
+                    "ref only for relation-type/v1"
                 )
             from . import vocabulary_questions as vocabulary_questions_module
 
@@ -6603,6 +6633,7 @@ def op_review_memory(
                 path=path,
                 query=query,
                 family=family,
+                **({"relation_ref": ref} if ref is not None else {}),
             )
         if limit is None:
             limit = 4
@@ -8295,6 +8326,12 @@ def op_schema_memory(
         compare_to: In diff mode, compare to this saved contract instead of corpus reality.
         proposal: Reviewed relation definition for propose-relation, reviewed delta
             for save-relations, or workflow proposal for workflow modes.
+            propose-relation requires requested_label (the name portion), parent
+            (one core relation key), description, and direction (directed or symmetric);
+            namespace supplies the prefix and defaults to vault. Optional fields are
+            aliases, inverse, origins, source_kinds, target_kinds, projects, page_types,
+            and query. Pass this mapping directly without an extensions wrapper.
+            save-relations takes the returned delta and expected_hash.
         why: Required audit reason for relation delta save, workflow save/refresh,
             and entity-type saves.
         include_model_suggestions: Request response-only optional relation suggestions.
@@ -8480,7 +8517,8 @@ def op_schema_memory(
             relation_vocabulary_module.validate_candidate_limit(limit)
             if proposal is None or not isinstance(proposal, dict):
                 raise ValueError(
-                    "INCOMPLETE_RELATION_PROPOSAL: propose-relation requires a reviewed proposal"
+                    "INCOMPLETE_RELATION_PROPOSAL: proposal must contain requested_label, "
+                    "parent, description, and direction; namespace defaults to vault"
                 )
             allowed_proposal_fields = {
                 "requested_label",
@@ -8499,7 +8537,10 @@ def op_schema_memory(
             }
             if set(proposal) - allowed_proposal_fields:
                 raise ValueError(
-                    "INVALID_RELATION_ARGUMENT: proposal has unknown fields"
+                    "INVALID_RELATION_ARGUMENT: proposal has unknown fields: "
+                    + ", ".join(sorted(set(proposal) - allowed_proposal_fields))
+                    + "; use requested_label, parent, description, direction and optional "
+                    "namespace without an extensions wrapper"
                 )
             required_semantics = (
                 "requested_label",

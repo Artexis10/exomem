@@ -84,7 +84,11 @@ def _matches(
         from . import relation_queue
 
         try:
-            resolved = relation_queue.resolve_candidate(vault_root, str(kwargs.get("ref") or ""))
+            resolved = relation_queue.resolve_candidate(
+                vault_root,
+                str(kwargs.get("ref") or ""),
+                source_path=kwargs.get("path") if isinstance(kwargs.get("path"), str) else None,
+            )
             selected = relation_queue.selected_relation(
                 vault_root,
                 resolved.candidate,
@@ -94,6 +98,23 @@ def _matches(
         except (OSError, ValueError):
             return False
         candidate = selected
+        currency = dict(item.projection_currency)
+        exact_candidate = {
+            "candidate_ref",
+            "candidate_fingerprint",
+            "candidate_source_path",
+            "candidate_target_path",
+        }
+        if exact_candidate & set(currency) and (
+            not exact_candidate <= set(currency)
+            or kwargs.get("ref") != currency["candidate_ref"]
+            or kwargs.get("path") != currency["candidate_source_path"]
+            or kwargs.get("expected_fingerprint") != currency["candidate_fingerprint"]
+            or resolved.fingerprint != currency["candidate_fingerprint"]
+            or candidate.get("from") != currency["candidate_source_path"]
+            or candidate.get("to") != currency["candidate_target_path"]
+        ):
+            return False
         paths = set(item.paths)
         path_hints = dict(item.paths)
         reviewed = {path_hints.get(ref, ref) for ref, _version in item.target_versions}
@@ -129,6 +150,50 @@ def _matches(
             and proposal["upsert"].get(canonical) == definition
         )
     return False
+
+
+def _registry_definition_mismatch(
+    command: str, kwargs: Mapping[str, Any], item: WorkItem, choice: Mapping[str, Any]
+) -> str | None:
+    if command == "schema_memory" and kwargs.get("operation") == "save-entity-types":
+        registry_key = "entity_types"
+        returned = "entity_types"
+        family = "entity-type/v1"
+    elif command == "schema_memory" and kwargs.get("operation") == "save-relations":
+        registry_key = "upsert"
+        returned = "delta.upsert"
+        family = "relation-type/v1"
+    else:
+        return None
+    canonical = choice.get("canonical")
+    definition = choice.get("definition")
+    proposal = kwargs.get("proposal")
+    if (
+        item.family != family
+        or not isinstance(canonical, str)
+        or not canonical
+        or not isinstance(definition, Mapping)
+        or not isinstance(proposal, Mapping)
+        or not isinstance(proposal.get(registry_key), Mapping)
+    ):
+        return None
+    supplied = proposal[registry_key].get(canonical)
+    if not isinstance(supplied, Mapping) or supplied == definition:
+        return None
+    fields = sorted(
+        {
+            key[:80] if isinstance(key, str) else "<non-string-field>"
+            for key in set(supplied) | set(definition)
+            if supplied.get(key) != definition.get(key)
+        }
+    )[:8]
+    if not fields:
+        return None
+    return (
+        "VOCABULARY_APPLICATION_INVALID: registry definition differs in fields "
+        + ", ".join(fields)
+        + f"; record the exact returned {returned}[{canonical}] definition including aliases, then retry"
+    )
 
 
 def _curation_binding(vault_root, kwargs: Mapping[str, Any], item: WorkItem, choice: Mapping[str, Any]):
@@ -307,6 +372,9 @@ def bind(
     if curation is None and not _matches(
         vault_root, command, kwargs, item, choice, str(decision.get("outcome"))
     ):
+        mismatch = _registry_definition_mismatch(command, kwargs, item, choice)
+        if mismatch is not None:
+            raise ValueError(mismatch)
         raise ValueError("VOCABULARY_APPLICATION_INVALID: command does not implement the reviewed choice")
     request = request_id or operation_id
     if decision.get("state") == "applied":

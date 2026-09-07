@@ -52,6 +52,14 @@ Each item SHALL carry a stable reference, family, target identities, evidence re
 - **AND** it does not scan the full ledger or silently treat a partial projection as complete
 - **AND** reconciliation rebuilds from canonical decisions without granting mutation authority or discarding history
 
+#### Scenario: An explicit edge question reviews both current endpoints
+
+- **WHEN** an agent submits a relationship meaning question with a current relation-queue candidate reference and its source-page hint
+- **THEN** the system resolves that exact candidate and reads both endpoints through the existing governed point-read boundary
+- **AND** the work item binds both endpoint versions and returns the canonical application route without choosing a relation or granting authority
+- **AND** a stale candidate, mismatched source, or withheld endpoint refuses before recording a consideration
+- **AND** applying a selected relation still requires the exact reviewed pair, current candidate fingerprint, and a successful canonical writer receipt
+
 ### Requirement: Meaning is decided by the active agent
 
 The workflow SHALL present existing definitions, aliases, direction, applicable parent families and available overlap evidence before a new type is committed. The active agent SHALL choose reuse, enrich, propose-new, generic, no-edge or defer with a concise rationale appropriate to the family. New meanings SHALL require a definition, justification and the family's existing registry validation. Exact identity or alias collisions SHALL be rejected; semantic proximity alone SHALL NOT veto a distinct meaning or select an equivalent meaning automatically.

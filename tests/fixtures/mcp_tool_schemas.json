@@ -6132,7 +6132,7 @@
             }
           ],
           "default": null,
-          "description": "Reviewed relation definition for propose-relation, reviewed delta\nfor save-relations, or workflow proposal for workflow modes."
+          "description": "Reviewed relation definition for propose-relation, reviewed delta\nfor save-relations, or workflow proposal for workflow modes.\npropose-relation requires requested_label (the name portion), parent\n(one core relation key), description, and direction (directed or symmetric);\nnamespace supplies the prefix and defaults to vault. Optional fields are\naliases, inverse, origins, source_kinds, target_kinds, projects, page_types,\nand query. Pass this mapping directly without an extensions wrapper.\nsave-relations takes the returned delta and expected_hash."
         },
         "why": {
           "anyOf": [

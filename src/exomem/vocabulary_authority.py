@@ -450,12 +450,10 @@ class VocabularyAuthority:
         *,
         custody_loader: Callable[..., object] = authorization_custody.load_authorization_custody,
         clock: Callable[[], int] | None = None,
-        session_status_verifier: Callable[..., object] | None = None,
     ) -> None:
         self.vault_root = Path(vault_root)
         self._custody_loader = custody_loader
         self._clock = clock or __import__("time").time
-        self._session_status_verifier = session_status_verifier
 
     @staticmethod
     def _custody_leaf(custody: object, suffix: str) -> Path:
@@ -759,18 +757,15 @@ class VocabularyAuthority:
                 or context.keyring_id != keyring.keyring_id
             ):
                 raise VocabularyAuthorityUnavailable
-            if self._session_status_verifier is not None:
-                self._session_status_verifier(None, custody=custody, context=context, now=now)
-            else:
-                from .governance import authorization_session_lifecycle, store
+            from .governance import authorization_session_lifecycle, store
 
-                connection = store.open_authorization_session_connection(self.vault_root)
-                try:
-                    authorization_session_lifecycle.status_verified_session(
-                        connection, custody=custody, context=context, now=now
-                    )
-                finally:
-                    connection.close()
+            connection = store.open_authorization_session_connection(self.vault_root)
+            try:
+                authorization_session_lifecycle.status_verified_session(
+                    connection, custody=custody, context=context, now=now
+                )
+            finally:
+                connection.close()
             return custody
         except VocabularyAuthorityUnavailable:
             raise
