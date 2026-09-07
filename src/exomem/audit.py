@@ -690,8 +690,10 @@ class _SemanticIsolationRow:
     missing: bool = False
     dependency_source: object | None = None
     dependency_source_present: bool = False
-    dependency_lookup_key: str | None = None
-    dependency_raw_target: str | None = None
+    dependency_lookup_key: object | None = None
+    dependency_lookup_key_present: bool = False
+    dependency_raw_target: object | None = None
+    dependency_raw_target_present: bool = False
 
     def as_dict(self) -> dict[str, str]:
         if self.path is not None:
@@ -1490,8 +1492,10 @@ def semantic_recall_isolation_census(
                     "dependency_record",
                     dependency_source=source_path,
                     dependency_source_present=True,
-                    dependency_lookup_key=lookup_key if isinstance(lookup_key, str) else None,
-                    dependency_raw_target=raw_target if isinstance(raw_target, str) else None,
+                    dependency_lookup_key=lookup_key,
+                    dependency_lookup_key_present=True,
+                    dependency_raw_target=raw_target,
+                    dependency_raw_target_present=True,
                 )
             )
     unique = {
@@ -1504,7 +1508,9 @@ def semantic_recall_isolation_census(
             row.dependency_source,
             row.dependency_source_present,
             row.dependency_lookup_key,
+            row.dependency_lookup_key_present,
             row.dependency_raw_target,
+            row.dependency_raw_target_present,
         ): row
         for row in rows
     }
@@ -1529,6 +1535,7 @@ def purge_corrupt_semantic_recall_isolation_rows(
 
     grouped: dict[str, set[str]] = {}
     graph_edges: dict[str, set[str]] = {}
+    dependency_rows: list[tuple[object, object, object]] = []
     dependency_source_paths: list[object] = []
     for row in rows:
         if row.path is not None:
@@ -1537,7 +1544,23 @@ def purge_corrupt_semantic_recall_isolation_rows(
             if row.edge_column in {"source_path", "src_key", "dst_key"}:
                 graph_edges.setdefault(row.edge_column, set()).add(row.raw)
             continue
-        if row.component in {"graph_dependencies", "graph_dependency_coverage"}:
+        if row.component == "graph_dependencies":
+            if (
+                row.dependency_source_present
+                and row.dependency_lookup_key_present
+                and row.dependency_raw_target_present
+            ):
+                dependency_rows.append(
+                    (
+                        row.dependency_source,
+                        row.dependency_lookup_key,
+                        row.dependency_raw_target,
+                    )
+                )
+            elif row.dependency_source_present:
+                dependency_source_paths.append(row.dependency_source)
+            continue
+        if row.component == "graph_dependency_coverage":
             if row.dependency_source_present:
                 dependency_source_paths.append(row.dependency_source)
             continue
@@ -1611,6 +1634,7 @@ def purge_corrupt_semantic_recall_isolation_rows(
         ).purge_exact_persisted_rows(
             sorted(grouped.get("graph", set())),
             graph_values,
+            dependency_rows=dependency_rows,
             dependency_source_paths=dependency_source_paths,
             connection_path=connection_path,
         ),

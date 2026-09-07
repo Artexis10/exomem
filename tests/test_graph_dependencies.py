@@ -192,6 +192,75 @@ def test_isolation_repair_quarantines_invalid_dependency_key_and_coverage(vault:
         conn.close()
 
 
+@pytest.mark.parametrize(
+    ("lookup_key", "raw_target"),
+    [
+        ("not-the-authored-target", "future"),
+        (sqlite3.Binary(b"corrupt-key"), sqlite3.Binary(b"corrupt-target")),
+    ],
+)
+def test_isolation_repair_leaves_reindexed_dependency_after_stale_census(
+    vault: Path, lookup_key: object, raw_target: object
+) -> None:
+    """A stale corrupt-row finding cannot invalidate a newer source projection."""
+    index = EpistemicGraphIndex(vault)
+    conn = index._connect()
+    try:
+        conn.execute(
+            "INSERT INTO graph_dependencies(source_path, lookup_key, raw_target) VALUES (?, ?, ?)",
+            (SOURCE, lookup_key, raw_target),
+        )
+        conn.execute(
+            "UPDATE graph_dependency_coverage SET expected_count = expected_count + 1 "
+            "WHERE source_path = ?",
+            (SOURCE,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    stale = tuple(
+        row
+        for row in audit.semantic_recall_isolation_census(vault).corrupt_rows
+        if row.component == "graph_dependencies"
+    )
+    assert stale
+    source = vault / SOURCE
+    source.write_text(_page("Source", "[[future]]"), encoding="utf-8")
+    index.refresh_paths([source])
+
+    conn = sqlite3.connect(index.path)
+    try:
+        expected = conn.execute(
+            "SELECT lookup_key, raw_target FROM graph_dependencies WHERE source_path = ? "
+            "ORDER BY lookup_key",
+            (SOURCE,),
+        ).fetchall()
+        assert expected == [("future", "future"), ("knowledge base/future", "future")]
+        assert conn.execute(
+            "SELECT expected_count FROM graph_dependency_coverage WHERE source_path = ?",
+            (SOURCE,),
+        ).fetchone() == (2,)
+    finally:
+        conn.close()
+
+    assert audit.purge_corrupt_semantic_recall_isolation_rows(vault, stale) == {}
+
+    conn = sqlite3.connect(index.path)
+    try:
+        assert conn.execute(
+            "SELECT lookup_key, raw_target FROM graph_dependencies WHERE source_path = ? "
+            "ORDER BY lookup_key",
+            (SOURCE,),
+        ).fetchall() == expected
+        assert conn.execute(
+            "SELECT expected_count FROM graph_dependency_coverage WHERE source_path = ?",
+            (SOURCE,),
+        ).fetchone() == (2,)
+    finally:
+        conn.close()
+
+
 def test_dependency_census_continues_across_rows_for_one_source(vault: Path) -> None:
     """The dependency cursor uses the unique persisted row identity, not its source."""
     index = EpistemicGraphIndex(vault)
@@ -366,6 +435,59 @@ def test_isolation_repair_removes_corrupt_coverage_without_dependency_rows(vault
         if row.component == "graph_dependency_coverage"
     ]
     assert reconcile.reconcile(vault, dry_run=True).semantic_suppressed_corrupt == []
+
+
+def test_isolation_repair_leaves_replaced_coverage_after_stale_census(vault: Path) -> None:
+    """A stale coverage finding cannot delete the valid row that replaced it."""
+    index = EpistemicGraphIndex(vault)
+    corrupt_source = "../../coverage-only.md"
+    conn = index._connect()
+    try:
+        expected = conn.execute(
+            "SELECT source_hash, dependency_format, expected_count "
+            "FROM graph_dependency_coverage WHERE source_path = ?",
+            (SOURCE,),
+        ).fetchone()
+        assert expected is not None
+        conn.execute(
+            "INSERT INTO graph_dependency_coverage("
+            "source_path, source_hash, dependency_format, expected_count"
+            ") VALUES (?, ?, ?, ?)",
+            (corrupt_source, "corrupt", 1, 0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    stale = tuple(
+        row
+        for row in audit.semantic_recall_isolation_census(vault).corrupt_rows
+        if row.component == "graph_dependency_coverage"
+    )
+    assert stale
+    conn = index._connect()
+    try:
+        conn.execute("DELETE FROM graph_dependency_coverage WHERE source_path = ?", (SOURCE,))
+        conn.execute(
+            "UPDATE graph_dependency_coverage "
+            "SET source_path = ?, source_hash = ?, dependency_format = ?, expected_count = ? "
+            "WHERE source_path = ?",
+            (SOURCE, *expected, corrupt_source),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert audit.purge_corrupt_semantic_recall_isolation_rows(vault, stale) == {}
+    conn = sqlite3.connect(index.path)
+    try:
+        assert conn.execute(
+            "SELECT source_hash, dependency_format, expected_count "
+            "FROM graph_dependency_coverage WHERE source_path = ?",
+            (SOURCE,),
+        ).fetchone() == expected
+    finally:
+        conn.close()
 
 
 def test_isolation_repair_enumerates_legacy_null_coverage_source(vault: Path) -> None:
