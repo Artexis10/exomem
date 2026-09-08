@@ -80,11 +80,19 @@
     "routes": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "controlHostname"],
+      "required": ["enabled", "controlHostname", "transferProfile", "transferServersTransport"],
       "properties": {
         "enabled": {"type": "boolean"},
-        "controlHostname": {"type": "string"}
-      }
+        "controlHostname": {"type": "string"},
+        "transferProfile": {"enum": ["legacy", "private-transfer"]},
+        "transferServersTransport": {"type": "string"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"transferProfile": {"const": "private-transfer"}}},
+          "then": {"properties": {"transferServersTransport": {"pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?@file$"}}}
+        }
+      ]
     },
     "runtimeUpgrade": {
       "type": "object",

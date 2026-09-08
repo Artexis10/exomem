@@ -66,3 +66,7 @@ initOperationId: ""
 routes:
   enabled: false
   controlHostname: ""
+  # The legacy route remains on web. A signed platform profile may select the
+  # private transfer listener and its exact per-cell @file transport.
+  transferProfile: legacy
+  transferServersTransport: ""

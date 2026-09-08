@@ -1,0 +1,42 @@
+directEdge:
+  enabled: true
+  hostname: transfer.example.test
+  admittedCellNamespaces: []
+  privateTransferBackends: []
+
+# This overlay is deliberately separate from values.yaml so the legacy chart's
+# rendered resources remain unchanged until a signed direct profile selects it.
+traefik:
+  ports:
+    private-transfer:
+      port: 8444
+      exposedPort: 8444
+      expose:
+        default: false
+      http:
+        tls:
+          enabled: true
+          options: private-transfer@file
+  providers:
+    kubernetesCRD:
+      crossProviderNamespaces: []
+  volumes:
+    - name: exomem-private-transfer-config
+      mountPath: /etc/traefik/dynamic
+      type: configMap
+      nameOverride: exomem-private-transfer-config
+    - name: exomem-private-transfer-tls
+      mountPath: /var/run/exomem-private-transfer/tls
+      type: secret
+      nameOverride: exomem-private-transfer-tls
+    - name: exomem-private-transfer-ca
+      mountPath: /var/run/exomem-private-transfer/ca
+      type: secret
+      nameOverride: exomem-private-transfer-ca
+    - name: exomem-private-transfer-client
+      mountPath: /var/run/exomem-private-transfer/client
+      type: secret
+      nameOverride: exomem-private-transfer-client-tls
+  additionalArguments:
+    - --providers.file.directory=/etc/traefik/dynamic
+    - --providers.file.watch=true

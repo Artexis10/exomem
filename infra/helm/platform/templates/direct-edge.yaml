@@ -1,0 +1,298 @@
+{{- if .Values.directEdge.enabled }}
+{{- if ne .Values.directEdge.hostname .Values.provisioner.transferHostname }}
+{{- fail "directEdge.hostname must equal provisioner.transferHostname so the private transfer route receives its configured host" }}
+{{- end }}
+{{- if ne (toJson .Values.directEdge.admittedCellNamespaces) (toJson .Values.traefik.providers.kubernetesCRD.crossProviderNamespaces) }}
+{{- fail "directEdge admittedCellNamespaces must exactly match traefik.providers.kubernetesCRD.crossProviderNamespaces" }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exomem-direct-edge
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exomem-direct-edge-config
+data:
+  static.yaml: |
+    global:
+      checkNewVersion: false
+      sendAnonymousUsage: false
+    log:
+      level: ERROR
+    entryPoints:
+      direct:
+        address: ":8443"
+        http:
+          sanitizePath: false
+          maxHeaderBytes: 32768
+          encodedCharacters:
+            allowEncodedSlash: false
+            allowEncodedBackSlash: false
+            allowEncodedNullCharacter: false
+            allowEncodedSemicolon: false
+            allowEncodedPercent: false
+            allowEncodedQuestionMark: false
+            allowEncodedHash: false
+    providers:
+      file:
+        filename: /etc/traefik/dynamic/dynamic.yaml
+        watch: true
+  dynamic.yaml: |
+    tls:
+      certificates:
+        - certFile: /var/run/exomem-direct-edge/public/tls.crt
+          keyFile: /var/run/exomem-direct-edge/public/tls.key
+      options:
+        default:
+          minVersion: VersionTLS12
+          sniStrict: true
+    http:
+      middlewares:
+        gateway-boundary:
+          headers:
+            customRequestHeaders:
+              Forwarded: ""
+              X-Forwarded-For: ""
+              X-Forwarded-Host: ""
+              X-Forwarded-Port: ""
+              X-Forwarded-Proto: ""
+              X-Real-Ip: ""
+              CF-Connecting-IP: ""
+              CF-IPCountry: ""
+              CF-Pseudo-IPv4: ""
+              CF-Ray: ""
+              CF-Visitor: ""
+              X-Exomem-Gateway-Ingress: direct-edge-v1
+        transfer-boundary:
+          headers:
+            customRequestHeaders:
+              Forwarded: ""
+              X-Forwarded-For: ""
+              X-Forwarded-Host: ""
+              X-Forwarded-Port: ""
+              X-Forwarded-Proto: ""
+              X-Real-Ip: ""
+              CF-Connecting-IP: ""
+              CF-IPCountry: ""
+              CF-Pseudo-IPv4: ""
+              CF-Ray: ""
+              CF-Visitor: ""
+              X-Exomem-Gateway-Ingress: ""
+        direct-inflight:
+          inFlightReq:
+            amount: 16
+        direct-rate:
+          rateLimit:
+            average: 30
+            burst: 30
+      routers:
+        mcp:
+          entryPoints: [direct]
+          rule: Host(`{{ .Values.directEdge.hostname }}`) && Path(`/api/exomem/mcp/v1`) && (Method(`GET`) || Method(`POST`) || Method(`DELETE`))
+          middlewares: [gateway-boundary, direct-inflight, direct-rate]
+          service: gateway
+          tls: {}
+        metadata:
+          entryPoints: [direct]
+          rule: Host(`{{ .Values.directEdge.hostname }}`) && Path(`/.well-known/oauth-protected-resource/api/exomem/mcp/v1`) && (Method(`GET`) || Method(`HEAD`))
+          middlewares: [gateway-boundary, direct-inflight, direct-rate]
+          service: gateway
+          tls: {}
+        transfer-upload:
+          entryPoints: [direct]
+          rule: Host(`{{ .Values.directEdge.hostname }}`) && PathRegexp(`^/cells/[A-Za-z0-9][A-Za-z0-9_-]{0,127}/public/exomem/v2/transfers/upload$`) && (Method(`PUT`) || Method(`OPTIONS`))
+          middlewares: [transfer-boundary, direct-inflight, direct-rate]
+          service: transfer
+          tls: {}
+        transfer-download:
+          entryPoints: [direct]
+          rule: Host(`{{ .Values.directEdge.hostname }}`) && PathRegexp(`^/cells/[A-Za-z0-9][A-Za-z0-9_-]{0,127}/public/exomem/v2/transfers/download$`) && (Method(`GET`) || Method(`OPTIONS`))
+          middlewares: [transfer-boundary, direct-inflight, direct-rate]
+          service: transfer
+          tls: {}
+      services:
+        gateway:
+          loadBalancer:
+            passHostHeader: true
+            serversTransport: gateway
+            servers:
+              - url: https://exomem-gateway.{{ .Release.Namespace }}.svc.cluster.local:8443
+        transfer:
+          loadBalancer:
+            passHostHeader: true
+            serversTransport: transfer
+            servers:
+              - url: https://{{ .Release.Name }}-traefik.{{ .Release.Namespace }}.svc.cluster.local:8444
+      serversTransports:
+        gateway:
+          serverName: exomem-gateway.{{ .Release.Namespace }}.svc.cluster.local
+          rootCAs: [/var/run/exomem-direct-edge/ca/ca.crt]
+          certificates:
+            - certFile: /var/run/exomem-direct-edge/client/tls.crt
+              keyFile: /var/run/exomem-direct-edge/client/tls.key
+        transfer:
+          serverName: {{ .Release.Name }}-traefik.{{ .Release.Namespace }}.svc.cluster.local
+          rootCAs: [/var/run/exomem-direct-edge/ca/ca.crt]
+          certificates:
+            - certFile: /var/run/exomem-direct-edge/client/tls.crt
+              keyFile: /var/run/exomem-direct-edge/client/tls.key
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exomem-private-transfer-config
+data:
+  private-transfer.yaml: |
+    tls:
+      certificates:
+        - certFile: /var/run/exomem-private-transfer/tls/tls.crt
+          keyFile: /var/run/exomem-private-transfer/tls/tls.key
+      options:
+        private-transfer:
+          minVersion: VersionTLS12
+          clientAuth:
+            caFiles: [/var/run/exomem-private-transfer/ca/ca.crt]
+            clientAuthType: RequireAndVerifyClientCert
+    http:
+      serversTransports:
+        {{- range .Values.directEdge.privateTransferBackends }}
+        {{ .transportName }}:
+          serverName: {{ .serverName }}
+          rootCAs: [/var/run/exomem-private-transfer/ca/ca.crt]
+          certificates:
+            - certFile: /var/run/exomem-private-transfer/client/tls.crt
+              keyFile: /var/run/exomem-private-transfer/client/tls.key
+        {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exomem-direct-edge
+  labels:
+    app.kubernetes.io/name: exomem-direct-edge
+    app.kubernetes.io/part-of: exomem-hosted
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-direct-edge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: exomem-direct-edge
+        app.kubernetes.io/part-of: exomem-hosted
+    spec:
+      serviceAccountName: exomem-direct-edge
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: traefik
+          image: {{ .Values.directEdge.image | quote }}
+          imagePullPolicy: IfNotPresent
+          args: [--configFile=/etc/traefik/static/static.yaml]
+          ports:
+            - name: https
+              containerPort: 8443
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/traefik/static
+              readOnly: true
+            - name: public-tls
+              mountPath: /var/run/exomem-direct-edge/public
+              readOnly: true
+            - name: backend-ca
+              mountPath: /var/run/exomem-direct-edge/ca
+              readOnly: true
+            - name: backend-client
+              mountPath: /var/run/exomem-direct-edge/client
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap: {name: exomem-direct-edge-config}
+        - name: public-tls
+          secret: {secretName: {{ .Values.directEdge.publicTlsSecretName }}}
+        - name: backend-ca
+          secret: {secretName: {{ .Values.directEdge.backendCaSecretName }}}
+        - name: backend-client
+          secret: {secretName: {{ .Values.directEdge.backendClientSecretName }}}
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 16Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: exomem-direct-edge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: exomem-direct-edge
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: exomem-direct-edge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-direct-edge
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - port: 8443
+          protocol: TCP
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-gateway
+      ports:
+        - port: 8443
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              exomem.io/ingress: traefik
+      ports:
+        - port: 8444
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+{{- end }}
