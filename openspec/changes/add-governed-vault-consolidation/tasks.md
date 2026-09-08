@@ -944,8 +944,17 @@ binds that reference and observed digest; no caller field selects K.
   `nonterminal-contingency|terminal-plan`, and retire clearance/finalize branches,
   bounded UUID/ref/SHA-256/int/string types, shared envelope/errors, conservative
   write-capable annotation, and `invocation_is_read_only == true` only for `status`.
-  Generated JSON Schema and runtime must implement the same closed tagged
-  `oneOf`; omitted/unknown/null/duplicate/cross-action fields fail closed. All ten
+  Generated structural JSON Schema and mandatory runtime validation must derive
+  from the same closed tagged `oneOf`; omitted/unknown/null/cross-action fields
+  fail structural validation and raw decoders refuse duplicate keys before
+  object construction. Add separate semantic-negative fixtures for invalid
+  UTF-8, non-NFC strings, multibyte byte-limit overflow, booleans/integral floats
+  in integer fields, and missing/mismatched trusted run-state conditions. Prove
+  every surface calls the same mandatory semantic validator after owner admission
+  and before coercion or action-specific work; schema-only/shape-only validation
+  never permits dispatch, and adapters never normalize invalid input into validity.
+  Generated descriptions document this structural/semantic split without claiming
+  stock-schema enforcement of the semantic rules. All ten
   other actions require explicit operation id (CLI persists/prints any generated
   id before request), expected run revision, writer/control admission,
   idempotency, and the action-tagged stable `exomem.consolidation-terminal/v1`
@@ -957,7 +966,8 @@ binds that reference and observed digest; no caller field selects K.
   `trusted_outputs` keys/types. Status uses `outcome=observed`; every mutation's
   durable logical terminal uses `outcome=committed`. Required missing keys,
   extras, wrong branch, forbidden nulls, unknown next action, or wrong count/ref
-  types fail generated and runtime validation. Test
+  structural types fail generated and runtime validation; exact integer and
+  Unicode/byte constraints also pass the mandatory semantic fixture gate. Test
   status cursor; the exact successor-context ref/digest required together on
   every shared-table product terminal (including both rollback-complete modes,
   repair targets, retirement finalize, and status-only pending-forward),

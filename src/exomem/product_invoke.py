@@ -116,6 +116,19 @@ def invoke_prepared(
     from .governance import principal as principal_module
     from .writer_lease import invoke_command
 
+    if cmd.name == "consolidate_memory":
+        import time
+
+        from .governance import consolidation_owner
+
+        consolidation_owner.require_injected_owner(principal, now=int(time.time()))
+        selected = vault_root if vault_root is not None else os.environ.get("EXOMEM_VAULT_PATH")
+        if not selected:
+            raise consolidation_owner.ConsolidationOwnerUnavailable
+        consolidation_owner.require_bound_request(
+            Path(selected), principal=principal, arguments=kwargs, now=int(time.time()),
+        )
+
     # Domain-invalid mixed selectors must reach their stable public error
     # before the lease/egress coverage classifier. This is input validation,
     # not a branch registration.
@@ -180,7 +193,7 @@ def prepare_local_authorization(
         authorization_session_fd=authorization_session_fd,
         authorization_carrier=authorization_carrier,
     )
-    principal = enforce_local_authorization_route(cmd, raw, admission)
+    principal = enforce_local_authorization_route(cmd, raw, admission, vault_root=root)
     return root, principal
 
 
@@ -203,12 +216,6 @@ def verify_local_authorization_transport(
     )
     from .governance import principal as principal_module
 
-    root = resolve_vault_for(cmd.name, raw_for_vault, vault_root)
-    if surface == "cli":
-        try:
-            consolidation_enrollment.ensure_cli_runtime_presence(root)
-        except consolidation_enrollment.ConsolidationEnrollmentUnavailable:
-            raise cli_ops.OpError("VAULT_UNAVAILABLE", "vault is unavailable") from None
     carrier = authorization_carrier
     if carrier is None:
         carrier = (
@@ -218,6 +225,38 @@ def verify_local_authorization_transport(
                 authorization_session_fd
             )
         )
+    if cmd.name == "consolidate_memory":
+        from .governance import consolidation_owner
+
+        if surface != "cli" or carrier.is_absent or carrier.is_invalid:
+            carrier.discard()
+            raise consolidation_owner.ConsolidationOwnerUnavailable
+        # The destination comes from trusted host configuration, never action
+        # fields. Do not validate vault existence or register runtime presence
+        # before the protected session has established owner authority.
+        selected_root = vault_root if vault_root is not None else os.environ.get(
+            "EXOMEM_VAULT_PATH"
+        )
+        if not selected_root:
+            carrier.discard()
+            raise consolidation_owner.ConsolidationOwnerUnavailable
+        root = Path(selected_root)
+        now = int(time.time())
+        try:
+            admission = authorization_request.verify_authorization_context(
+                root, principal=principal_module.owner_principal(surface=surface),
+                credential=carrier.consume(), now=now,
+            )
+            consolidation_owner.require_local_owner_session(admission.principal, now=now)
+        except authorization_request.AuthorizationContextUnavailable:
+            raise consolidation_owner.ConsolidationOwnerUnavailable from None
+        return root, admission
+    root = resolve_vault_for(cmd.name, raw_for_vault, vault_root)
+    if surface == "cli":
+        try:
+            consolidation_enrollment.ensure_cli_runtime_presence(root)
+        except consolidation_enrollment.ConsolidationEnrollmentUnavailable:
+            raise cli_ops.OpError("VAULT_UNAVAILABLE", "vault is unavailable") from None
     admission = authorization_request.verify_authorization_context(
         root,
         principal=principal_module.owner_principal(surface=surface),
@@ -227,9 +266,22 @@ def verify_local_authorization_transport(
     return root, admission
 
 
-def enforce_local_authorization_route(cmd, raw: dict[str, Any], admission):
+def enforce_local_authorization_route(
+    cmd, raw: dict[str, Any], admission, *, vault_root: Path | None = None,
+):
     """Apply the closed route rule after argument parsing identifies the variant."""
     from .governance import authorization_request
+
+    if cmd.name == "consolidate_memory":
+        import time
+
+        from .governance import consolidation_owner
+
+        if vault_root is None or not admission.credential_present:
+            raise consolidation_owner.ConsolidationOwnerUnavailable
+        return consolidation_owner.bind_local_owner(
+            vault_root, principal=admission.principal, arguments=raw, now=int(time.time()),
+        )
 
     rule = authorization_request.credential_rule(cmd.name, raw)
     return authorization_request.enforce_credential_rule(admission, rule)

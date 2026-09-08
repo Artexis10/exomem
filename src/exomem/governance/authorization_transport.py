@@ -240,6 +240,15 @@ def _pair_values(pairs: _ObjectPairs, key: str) -> list[object]:
     return [value for candidate, value in pairs if candidate == key]
 
 
+def _has_duplicate_keys(value: object) -> bool:
+    if isinstance(value, _ObjectPairs):
+        keys = [key for key, _item in value]
+        return len(keys) != len(set(keys)) or any(_has_duplicate_keys(item) for _key, item in value)
+    if isinstance(value, list):
+        return any(_has_duplicate_keys(item) for item in value)
+    return False
+
+
 def _sanitize_call(value: _ObjectPairs) -> tuple[object, CredentialCarrier, str | None, dict[str, object]]:
     method_values = _pair_values(value, "method")
     if "tools/call" not in method_values:
@@ -273,7 +282,12 @@ def _sanitize_call(value: _ObjectPairs) -> tuple[object, CredentialCarrier, str 
         or len(params_values) != 1
         or len(arguments_values) != 1
     )
-    if ambiguous_envelope or len(carrier_values) > 1:
+    consolidation_call = any(
+        "consolidate_memory" in _pair_values(item, "name")
+        for item in params_values if isinstance(item, _ObjectPairs)
+    )
+    if (ambiguous_envelope or len(carrier_values) > 1
+            or (consolidation_call and _has_duplicate_keys(value))):
         carrier = CredentialCarrier.invalid()
     elif len(carrier_values) == 1:
         carrier = CredentialCarrier.from_value(carrier_values[0])
@@ -314,7 +328,7 @@ def sanitize_mcp_http_body(raw: bytes) -> SanitizedMcpRequest:
     if not isinstance(raw, bytes) or len(raw) > _MAX_MCP_JSON_BYTES:
         raise AuthorizationEnvelopeUnavailable
     try:
-        parsed = json.loads(raw, object_pairs_hook=_ObjectPairs)
+        parsed = json.loads(raw.decode("utf-8"), object_pairs_hook=_ObjectPairs)
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         raise AuthorizationEnvelopeUnavailable from None
 
@@ -332,13 +346,13 @@ def sanitize_mcp_http_body(raw: bytes) -> SanitizedMcpRequest:
                 sanitized_items.append(_pairs_to_value(item))
         if has_tool_call:
             raise AtomicMcpBatchRefusal
-        body = json.dumps(sanitized_items, separators=(",", ":"), ensure_ascii=False).encode()
+        body = json.dumps(sanitized_items, separators=(",", ":"), ensure_ascii=True).encode()
         return SanitizedMcpRequest(body, CredentialCarrier.absent(), None, {})
 
     if not isinstance(parsed, _ObjectPairs):
         raise AuthorizationEnvelopeUnavailable
     sanitized, carrier, tool_name, arguments = _sanitize_call(parsed)
-    body = json.dumps(sanitized, separators=(",", ":"), ensure_ascii=False).encode()
+    body = json.dumps(sanitized, separators=(",", ":"), ensure_ascii=True).encode()
     return SanitizedMcpRequest(body, carrier, tool_name, arguments)
 
 
@@ -471,7 +485,7 @@ async def sanitized_stdio_server(
 
     if stdin is None:
         stdin = anyio.wrap_file(
-            TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
+            TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="surrogateescape")
         )
     if stdout is None:
         stdout = anyio.wrap_file(TextIOWrapper(sys.stdout.buffer, encoding="utf-8"))
@@ -702,7 +716,9 @@ class AuthorizationSessionMiddleware(Middleware):
         context: MiddlewareContext[mcp.types.CallToolRequestParams],
         call_next,
     ):
-        arguments = dict(context.message.arguments or {})
+        from . import consolidation_owner, consolidation_request
+
+        arguments = context.message.arguments or {}
         request_context = context.fastmcp_context.request_context
         protected_carrier = None
         if request_context is not None:
@@ -712,7 +728,7 @@ class AuthorizationSessionMiddleware(Middleware):
                 protected_carrier = candidate
         if MCP_CREDENTIAL_PARAMETER in arguments:
             carrier = CredentialCarrier.from_value(
-                arguments.pop(MCP_CREDENTIAL_PARAMETER)
+                arguments[MCP_CREDENTIAL_PARAMETER]
             )
         elif protected_carrier is not None:
             carrier = protected_carrier
@@ -729,15 +745,27 @@ class AuthorizationSessionMiddleware(Middleware):
                     now=int(time.time()),
                 )
             )
-            rule = credential_rule(context.message.name, arguments)
-            bound = enforce_credential_rule(admission, rule)
+            sanitized_arguments = dict(arguments)
+            sanitized_arguments.pop(MCP_CREDENTIAL_PARAMETER, None)
+            if context.message.name == "consolidate_memory":
+                bound = await anyio.to_thread.run_sync(
+                    partial(
+                        consolidation_owner.bind_local_owner,
+                        self.vault_root, principal=admission.principal,
+                        arguments=sanitized_arguments, now=int(time.time()),
+                    )
+                )
+            else:
+                rule = credential_rule(context.message.name, sanitized_arguments)
+                bound = enforce_credential_rule(admission, rule)
+        except (consolidation_owner.ConsolidationOwnerUnavailable,
+                consolidation_request.ConsolidationRequestUnavailable) as error:
+            raise McpError(ErrorData(code=-32000, message=str(error))) from None
         except AuthorizationContextUnavailable as error:
             raise McpError(ErrorData(code=-32000, message=str(error))) from None
         except AuthorizationRouteUnclassified as error:
             raise McpError(ErrorData(code=-32000, message=str(error))) from None
 
-        sanitized_message = context.message.model_copy(
-            update={"arguments": arguments}
-        )
+        sanitized_message = context.message.model_copy(update={"arguments": sanitized_arguments})
         with principal_module.request_scope(bound):
             return await call_next(context.copy(message=sanitized_message))

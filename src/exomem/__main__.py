@@ -3607,7 +3607,9 @@ def _core_op_main(argv: list[str]) -> int:
 
     preverified_root = None
     preverified_admission = None
-    if not authorization_carrier.is_absent and argv and argv[0] in cmds:
+    if argv and argv[0] in cmds and (
+        not authorization_carrier.is_absent or argv[0] == "consolidate_memory"
+    ):
         try:
             preverified_root, preverified_admission = (
                 product_invoke.verify_local_authorization_transport(
@@ -3674,6 +3676,7 @@ def _core_op_main(argv: list[str]) -> int:
                 cmd,
                 raw,
                 preverified_admission,
+                vault_root=root,
             )
         if cmd.name == "edit_memory":
             kwargs = _normalize_cli_edit(cmd, raw, cli_ops)
