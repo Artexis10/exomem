@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -18,7 +20,7 @@ from test_hosted_governance_migration import (
     _offline_state as _offline_state,
 )
 
-from exomem import hosted_restore, hosted_runtime
+from exomem import hosted_runtime
 from exomem.governance import authorization_custody, schema_migration, store
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="Hosted Job uses Linux root ownership")
@@ -311,7 +313,7 @@ def test_job_mutation_refuses_live_lifetime_lock(cell, monkeypatch, phase):
     monkeypatch.setattr(
         store, "authorization_session_schema_version", lambda *_: pytest.fail("store opened")
     )
-    with hosted_restore.acquire_hosted_lifetime_lock(binding.state_root, binding=binding):
+    with job.hosted_restore.acquire_hosted_lifetime_lock(binding.state_root, binding=binding):
         with pytest.raises(job.HostedGovernanceJobError):
             job.execute(_canonical(request), now=now)
     assert not (binding.state_root / "governance-migration-backups").exists()
@@ -463,3 +465,31 @@ def test_job_entrypoint_never_logs_unexpected_exception(cell, monkeypatch, capsy
     assert job.main() == 1
     assert json.loads(terminal.read_bytes()) == {"code": "HOSTED_GOVERNANCE_JOB_FAILED"}
     assert capsys.readouterr() == ("", "")
+
+
+def test_job_tests_collect_without_linux_lock_module():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import importlib.abc
+import sys
+import test_hosted_governance_migration
+
+class NoFcntl(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == 'fcntl':
+            raise ModuleNotFoundError("No module named 'fcntl'")
+
+sys.modules.pop('fcntl', None)
+sys.meta_path.insert(0, NoFcntl())
+import test_hosted_governance_job
+""",
+        ],
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).parent)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
