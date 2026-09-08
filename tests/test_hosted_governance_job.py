@@ -202,6 +202,211 @@ def test_job_prepares_then_commits_only_after_external_enrollment(cell, monkeypa
     ).keyring.active_key.key not in _canonical(result)
 
 
+@pytest.mark.parametrize("interrupted_after_commit", [False, True])
+def test_enrolled_job_recovers_after_expiry_without_restoring_serving_authority(
+    cell, monkeypatch, interrupted_after_commit
+):
+    binding, now, request = cell
+    job = _job(monkeypatch, binding)
+    prepare_request, prepared = _prepare(job, request, now)
+    backup_root = binding.state_root / "governance-migration-backups"
+    backup = schema_migration.verify_forward_migration_backup(
+        binding.vault_root,
+        expected_plan_digest=prepared["planDigest"],
+        backup_root=backup_root,
+    )
+    _write_hosted_custody(binding.vault_root, now=now, enrolled_target=backup.target)
+    request = {
+        **prepare_request,
+        "phase": "commit",
+        "planDigest": prepared["planDigest"],
+        "custodyRevision": _revision(),
+    }
+    before = _custody_bytes()
+    if interrupted_after_commit:
+
+        def crash(point):
+            if point == "after_store_commit":
+                raise schema_migration._ForwardMigrationCrash("lost acknowledgement")
+
+        with monkeypatch.context() as crash_patch:
+            crash_patch.setattr(store, "_schema_migration_barrier", crash)
+            with pytest.raises(job.HostedGovernanceJobError):
+                job.execute(_canonical(request), now=now)
+        assert store.authorization_session_schema_version(binding.vault_root) == 4
+
+    expired = now + 3601
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.load_authorization_custody(binding.vault_root, now=expired)
+    with pytest.raises(schema_migration.ForwardMigrationUnavailable):
+        schema_migration.commit_enrolled_forward_migration(
+            binding.vault_root,
+            expected_plan_digest=prepared["planDigest"],
+            now=expired,
+            backup_root=backup_root,
+        )
+
+    result = job.execute(_canonical(request), now=expired)
+    assert result["actualSchema"] == 4
+    assert result["replayed"] is interrupted_after_commit
+    assert result["activationStateDigest"] == backup.target.activation_state_digest
+    assert _custody_bytes() == before
+    database = store.sidecar_path(binding.vault_root).read_bytes()
+    assert job.execute(_canonical(request), now=expired)["replayed"] is True
+    assert store.sidecar_path(binding.vault_root).read_bytes() == database
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.load_authorization_custody(binding.vault_root, now=expired)
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "unenrolled",
+        "serving",
+        "in-flight",
+        "schema-claim",
+        "target",
+        "revision",
+        "source",
+        "plan",
+        "backup",
+        "missing-backup",
+        "workspace",
+        "key-expiry",
+    ],
+)
+def test_expired_commit_still_refuses_unproven_recovery(cell, monkeypatch, drift):
+    binding, now, request = cell
+    job = _job(monkeypatch, binding)
+    prepare_request, prepared = _prepare(job, request, now)
+    backup_root = binding.state_root / "governance-migration-backups"
+    backup = schema_migration.verify_forward_migration_backup(
+        binding.vault_root, expected_plan_digest=prepared["planDigest"], backup_root=backup_root
+    )
+    if drift != "unenrolled":
+        target = backup.target
+        if drift == "target":
+            target = replace(target, activation_state_digest="f" * 64)
+        _write_hosted_custody(binding.vault_root, now=now, enrolled_target=target)
+    if drift == "serving":
+        _replace_membership(
+            binding, now, state="SERVING", issuance_stopped=False, no_in_flight=False
+        )
+    elif drift == "in-flight":
+        _replace_membership(binding, now, no_in_flight=False)
+    elif drift == "schema-claim":
+        _replace_membership(binding, now, schema_version=4)
+    elif drift == "backup":
+        schema_migration.forward_migration_backup_path(
+            binding.vault_root, plan_digest=prepared["planDigest"], backup_root=backup_root
+        ).write_bytes(b"corrupt-backup")
+    elif drift == "missing-backup":
+        schema_migration.forward_migration_backup_path(
+            binding.vault_root, plan_digest=prepared["planDigest"], backup_root=backup_root
+        ).unlink()
+    elif drift == "workspace":
+        policy_path = binding.vault_root / "Knowledge Base/_Governance/scopes/migration.yaml"
+        policy_path.write_bytes(policy_path.read_bytes() + b"# changed after preparation\n")
+    request = {
+        **prepare_request,
+        "phase": "commit",
+        "planDigest": prepared["planDigest"],
+        "custodyRevision": _revision(),
+    }
+    if drift in {"revision", "source", "plan"}:
+        request[
+            {"revision": "custodyRevision", "source": "sourceStoreDigest", "plan": "planDigest"}[
+                drift
+            ]
+        ] = "f" * 64
+    expired = now + 3601
+    if drift == "key-expiry":
+        expired = authorization_custody.parse_keyring(_custody_bytes()[0]).active_key.not_after
+    before = store.sidecar_path(binding.vault_root).read_bytes(), _custody_bytes()
+    with pytest.raises(job.HostedGovernanceJobError):
+        job.execute(_canonical(request), now=expired)
+    assert store.authorization_session_schema_version(binding.vault_root) == 3
+    assert (store.sidecar_path(binding.vault_root).read_bytes(), _custody_bytes()) == before
+
+
+@pytest.mark.parametrize("phase", ["inspect", "prepare"])
+def test_expiry_cannot_start_a_new_migration(cell, monkeypatch, phase):
+    binding, now, request = cell
+    job = _job(monkeypatch, binding)
+    if phase == "prepare":
+        inspected = job.execute(_canonical(request), now=now)
+        request.update(phase="prepare", sourceStoreDigest=inspected["sourceStoreDigest"])
+    before = store.sidecar_path(binding.vault_root).read_bytes(), _custody_bytes()
+    with pytest.raises(job.HostedGovernanceJobError):
+        job.execute(_canonical(request), now=now + 3601)
+    assert (store.sidecar_path(binding.vault_root).read_bytes(), _custody_bytes()) == before
+    assert not (binding.state_root / "governance-migration-backups").exists()
+
+
+@pytest.mark.parametrize("successor", ["exact", "renewed", "wrong-predecessor", "skipped"])
+def test_expired_v4_replay_binds_the_prepared_window_and_membership_lineage(
+    cell, monkeypatch, successor
+):
+    binding, now, request = cell
+    job = _job(monkeypatch, binding)
+    prepare_request, prepared = _prepare(job, request, now)
+    backup_root = binding.state_root / "governance-migration-backups"
+    backup = schema_migration.verify_forward_migration_backup(
+        binding.vault_root, expected_plan_digest=prepared["planDigest"], backup_root=backup_root
+    )
+    _write_hosted_custody(binding.vault_root, now=now, enrolled_target=backup.target)
+    request = {
+        **prepare_request,
+        "phase": "commit",
+        "planDigest": prepared["planDigest"],
+        "custodyRevision": _revision(),
+    }
+    job.execute(_canonical(request), now=now)
+    custody = authorization_custody.load_authorization_custody(binding.vault_root, now=now)
+    control = replace(
+        custody.control,
+        serving_membership_epoch=custody.control.serving_membership_epoch
+        + (2 if successor == "skipped" else 1),
+        issued_at=custody.control.issued_at + (1 if successor == "renewed" else 0),
+        expires_at=custody.control.expires_at + (1 if successor == "renewed" else 0),
+    )
+    membership = authorization_custody._standalone_membership_bytes(
+        keyring=custody.keyring,
+        control=control,
+        replica_id=custody.local_replica_id,
+        state="DRAINING",
+        schema_version=4,
+        issuance_stopped=True,
+        no_in_flight=True,
+        previous_epoch_digest="f" * 64
+        if successor == "wrong-predecessor"
+        else custody.control.serving_membership_digest,
+    )
+    control = replace(control, serving_membership_digest=hashlib.sha256(membership).hexdigest())
+    custody.membership_path.write_bytes(membership)
+    custody.control_path.write_bytes(
+        authorization_custody._signed_control_bytes(
+            control, signing_key=custody.keyring.active_key.key
+        )
+    )
+    request["custodyRevision"] = _revision()
+    if successor == "renewed":
+        # Normal fresh replay retains its existing coherent-renewal contract.
+        assert schema_migration.commit_enrolled_forward_migration(
+            binding.vault_root,
+            expected_plan_digest=prepared["planDigest"],
+            now=now + 5,
+            backup_root=backup_root,
+        ).replayed
+    before = store.sidecar_path(binding.vault_root).read_bytes(), _custody_bytes()
+    if successor == "exact":
+        assert job.execute(_canonical(request), now=now + 7200)["replayed"]
+    else:
+        with pytest.raises(job.HostedGovernanceJobError):
+            job.execute(_canonical(request), now=now + 7200)
+    assert (store.sidecar_path(binding.vault_root).read_bytes(), _custody_bytes()) == before
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
