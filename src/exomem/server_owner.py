@@ -6,6 +6,8 @@ import html
 import json
 import shlex
 import time
+from contextlib import ExitStack
+from copy import deepcopy
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
@@ -14,8 +16,12 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 
+from . import mutation_lock
+from .governance import egress, policy
+from .governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
 from .native_owner_control import NativeOwnerControl
 from .vocabulary_control import _detach
+from .vocabulary_effects import _MAX_IMAGE_BYTES
 
 _LABELS = {
     "entity.create": "Create entity pages",
@@ -107,8 +113,81 @@ def _maintenance_command(review) -> str:
     return shlex.join(command)
 
 
-def _review_content(review, csrf: str) -> str:
-    display = _detach(review.display)
+def _current_image(root: Path, relative: str) -> bytes | None:
+    """Read bounded current bytes through retained, non-aliasing parents."""
+    path = Path(relative)
+    if not relative or path.is_absolute() or path.as_posix() != relative or ".." in path.parts:
+        raise ValueError("Invalid review path")
+    with ExitStack() as stack:
+        parent = mutation_lock.retain_secure_directory(root)
+        stack.callback(parent.close)
+        parents = [parent]
+        try:
+            for part in path.parts[:-1]:
+                parent = mutation_lock.retain_child_directory(parent, part)
+                stack.callback(parent.close)
+                parents.append(parent)
+            current = mutation_lock.retained_read_file(parent, path.name, limit=_MAX_IMAGE_BYTES)
+        except FileNotFoundError:
+            current = None
+        if any(not mutation_lock._same_directory_path(item) for item in parents):
+            raise ValueError("Review parent changed")
+        return current
+
+
+def _owner_release(root: Path, payload: dict, *, images=()) -> dict:
+    """Release a complete projection only after browser owner authentication."""
+    original = deepcopy(_detach(payload))
+    principal = RequestPrincipal(
+        audience_id=OWNER_AUDIENCE,
+        surface="native-owner-control",
+        issuer_family="native-owner-github",
+        resolved=True,
+    )
+    with request_scope(principal), egress.disclosure_boundary(root, "native_owner_review") as collector:
+        try:
+            if policy.load(root).blocked:
+                raise ValueError("Owner disclosure policy is unavailable")
+            for image in images:
+                before = image["before"]
+                expected = None if before is None else before.encode("utf-8")
+                if _current_image(root, image["path"]) != expected:
+                    raise ValueError("Review image changed")
+                if before is None or Path(image["path"]).suffix.lower() != ".md":
+                    # New files and non-Markdown registries need a complete
+                    # path-only decision; unresolved semantic membership refuses.
+                    fully_released = egress.release_level_for_path_only(
+                        root, image["path"], receipt_decision="released", allow_companions=False
+                    ) == egress.LEVEL_FULL
+                else:
+                    # Classify the sealed bytes, even if the live path changes
+                    # between the freshness check and the release decision.
+                    released = egress.annotate_page(
+                        root, {"path": image["path"]}, snapshot_content=expected, include_raw=True
+                    )
+                    fully_released = released is not None and released.get("content") == before
+                if not fully_released:
+                    raise ValueError("Review image cannot be fully disclosed")
+            filtered = egress.postfilter("native_owner_review", deepcopy(original), root)
+            if filtered != original:
+                raise ValueError("Review cannot be fully disclosed")
+        finally:
+            egress.emit_boundary_receipt(collector)
+    return original
+
+
+def _released_review(root: Path, review) -> dict:
+    projection = {"display": _detach(review.display)}
+    if review.action in {"migration", "activation"} and (
+        review.state == "applying"
+        or (review.state == "accepted" and not getattr(review, "expired", False))
+    ):
+        projection["maintenance_command"] = _maintenance_command(review)
+    return _owner_release(root, projection, images=projection["display"].get("write_images", ()))
+
+
+def _review_content(review, csrf: str, projection: dict) -> str:
+    display = projection["display"]
     content = '<p><a href="/owner">Memory permissions</a></p>'
     content += f"<p>Action: <strong>{_escape(review.action)}</strong></p>"
     if review.action in _SETUP:
@@ -154,14 +233,14 @@ def _review_content(review, csrf: str) -> str:
         content += '<p class="notice">The accepted action needs completion or recovery. It will not be submitted again automatically.</p>'
         if maintenance:
             content += "<p>Run this recovery command on the installation. It verifies the stopped service and allows a brief service pause before restarting safely.</p>"
-            content += f"<pre>{_escape(_maintenance_command(review))}</pre>"
+            content += f"<pre>{_escape(projection['maintenance_command'])}</pre>"
     elif getattr(review, "expired", False):
         content += (
             '<p class="notice">This review has expired. Prepare a fresh review to continue.</p>'
         )
     elif review.state == "accepted" and maintenance:
         content += '<p class="notice success">Approved. Run this command on the installation to apply the reviewed change with a brief service pause. The browser has not stopped the service.</p>'
-        content += f"<pre>{_escape(_maintenance_command(review))}</pre>"
+        content += f"<pre>{_escape(projection['maintenance_command'])}</pre>"
     elif review.state in {"prepared", "accepted"}:
         content += '<p class="notice">Approval applies only to the action and scope shown here. Exomem checks the current state again before applying it.</p>'
         content += (
@@ -242,8 +321,7 @@ def register_owner_routes(mcp_app, *, vault_root: Path, owner_auth, control_fact
                 return _failure(unavailable=True)
             after = request.query_params.get("after", "")
             page = await run_in_threadpool(control.sessions, now=now, after=after)
-            if not page["items"]:
-                content += '<p class="notice">No current agent authorization sessions are available. Connect your agent and open an authorization session to review its permissions.</p>'
+            details = []
             for session in page["items"]:
                 session_id = session["session_id"]
                 selected = request.query_params.get("session") == session_id
@@ -259,6 +337,16 @@ def register_owner_routes(mcp_app, *, vault_root: Path, owner_auth, control_fact
                     now=now,
                     after=request.query_params.get("grants_after", "") if selected else "",
                 )
+                details.append({"pending": pending, "grants": grants})
+            released = await run_in_threadpool(
+                _owner_release, vault_root, {"page": page, "details": details, "after": after}
+            )
+            page, details, after = released["page"], released["details"], released["after"]
+            if not page["items"]:
+                content += '<p class="notice">No current agent authorization sessions are available. Connect your agent and open an authorization session to review its permissions.</p>'
+            for session, detail in zip(page["items"], details, strict=True):
+                session_id = session["session_id"]
+                pending, grants = detail["pending"], detail["grants"]
                 content += f"<section><h2>Agent audience</h2><p><code>{_escape(session['audience_id'])}</code></p>"
                 content += f"<p>Connected through {_escape(session['issuer_family'])}.</p>"
                 content += "<h3>Pending requests</h3>"
@@ -370,7 +458,10 @@ def register_owner_routes(mcp_app, *, vault_root: Path, owner_auth, control_fact
                 owner_id=owner.owner_id,
                 now=int(time.time()),
             )
-            return _page("Review memory permissions", _review_content(prepared, owner.csrf_token))
+            projection = await run_in_threadpool(_released_review, vault_root, prepared)
+            return _page(
+                "Review memory permissions", _review_content(prepared, owner.csrf_token, projection)
+            )
         except OSError:
             return _failure(unavailable=True)
         except (RuntimeError, ValueError):
@@ -384,8 +475,13 @@ def register_owner_routes(mcp_app, *, vault_root: Path, owner_auth, control_fact
         _validate_form(form, {"csrf"})
         review_id = request.path_params["review_id"]
         try:
+            control = factory()
+            prepared = await run_in_threadpool(
+                control.reviews.get, review_id, owner_id=owner.owner_id, now=int(time.time())
+            )
+            await run_in_threadpool(_released_review, vault_root, prepared)
             await run_in_threadpool(
-                factory().accept, review_id, owner_id=owner.owner_id, now=int(time.time())
+                control.accept, review_id, owner_id=owner.owner_id, now=int(time.time())
             )
         except OSError:
             return _failure(unavailable=True)

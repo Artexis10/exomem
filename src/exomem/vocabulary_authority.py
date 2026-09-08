@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from . import mutation_lock
+from . import held_fs, mutation_lock
 from .cli_ops import OpError
 from .governance import authorization_custody
 from .governance.principal import RequestPrincipal
@@ -48,6 +48,63 @@ _OWNER_SEAL = object()
 _FLOOR_SEAL = object()
 _RECEIPT_SEAL = object()
 _MARKER_VERSION = 2
+
+
+def _publish_new_private_file(path: Path, data: bytes) -> bool:
+    """Publish one protected file without replacing an existing entry."""
+
+    try:
+        acquired = held_fs.acquire(path.parent.parent)
+        if not acquired.ok:
+            raise VocabularyAuthorityUnavailable
+        with acquired.require() as filesystem:
+            parent_result = filesystem.parent(path.parent.name, access="flush")
+            if not parent_result.ok:
+                raise VocabularyAuthorityUnavailable
+            with parent_result.require() as parent:
+                def prepare(staged: held_fs.HeldFile) -> None:
+                    try:
+                        authorization_custody._prepare_private_stage(  # noqa: SLF001
+                            path, staged
+                        )
+                    except Exception:
+                        name = getattr(staged, "name", None)
+                        if isinstance(name, str) and name:
+                            mutable = filesystem.file(parent, name, access="mutate")
+                            if mutable.ok:
+                                with mutable.require() as residue:
+                                    if residue.identity == staged.identity:
+                                        filesystem.unlink(residue)
+                        raise
+
+                published = held_fs.publish_bytes(
+                    filesystem,
+                    parent,
+                    path.name,
+                    data,
+                    prepare=prepare,
+                )
+                if not published.ok:
+                    if (
+                        published.error is not None
+                        and published.error.code == "DESTINATION_EXISTS"
+                    ):
+                        return False
+                    raise VocabularyAuthorityUnavailable
+                if not filesystem.flush_directory(parent).ok:
+                    raise VocabularyAuthorityUnavailable
+        return True
+    except VocabularyAuthorityUnavailable:
+        raise
+    except (
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        held_fs.HeldFsError,
+        authorization_custody.AuthorizationCustodyUnavailable,
+    ):
+        raise VocabularyAuthorityUnavailable from None
 
 
 def authority_artifact_paths(
@@ -533,9 +590,8 @@ class VocabularyAuthority:
                     not stat.S_ISREG(info.st_mode)
                     or info.st_nlink != 1
                     or not 1 <= info.st_size <= 2048
-                    or (
-                        os.name != "nt"
-                        and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) not in {0o400, 0o600})
+                    or not authorization_custody._file_is_owner_protected(  # noqa: SLF001
+                        descriptor, info
                     )
                 ):
                     raise ValueError
@@ -588,25 +644,11 @@ class VocabularyAuthority:
             "authorizer": owner.owner_id,
         }
         encoded = json.dumps(marker, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-            try:
-                if os.write(descriptor, encoded) != len(encoded):
-                    raise OSError("short marker write")
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            if os.name != "nt":
-                parent = os.open(path.parent, os.O_RDONLY)
-                try:
-                    os.fsync(parent)
-                finally:
-                    os.close(parent)
+        if _publish_new_private_file(path, encoded):
             return marker
-        except FileExistsError:
-            return self._marker(custody) or (_ for _ in ()).throw(VocabularyAuthorityUnavailable())
-        except OSError:
-            raise VocabularyAuthorityUnavailable from None
+        return self._marker(custody) or (_ for _ in ()).throw(
+            VocabularyAuthorityUnavailable()
+        )
 
     def _connect(self, custody: object, *, create: bool, marker: Mapping[str, Any] | None = None) -> sqlite3.Connection | None:
         current_marker = dict(marker) if marker is not None else self._marker(custody)
@@ -621,15 +663,7 @@ class VocabularyAuthority:
             raise VocabularyAuthorityUnavailable
         try:
             if create and not path.exists():
-                descriptor = os.open(
-                    path,
-                    os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                    0o600,
-                )
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
+                _publish_new_private_file(path, b"")
             self._validate_sqlite_sidecars(path)
             retained = mutation_lock.retain_regular_file(path)
             try:

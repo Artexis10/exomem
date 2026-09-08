@@ -181,7 +181,11 @@ class OwnerCustodyRenewal:
             thread.start()
 
     def stop(self) -> None:
-        """Stop and join the renewal worker."""
+        """Join custody publication before service-lifespan teardown continues.
+
+        This process-shutdown handshake is never a request-path wait. Returning
+        while renewal still writes custody would let runtime teardown race it.
+        """
 
         self._shutdown.set()
         with self._lock:

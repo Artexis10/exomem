@@ -95,6 +95,94 @@ def test_configured_durable_directory_is_stable_across_runtime_restart(
     assert restarted.runtime_status().mode == "v2"
     assert restarted._marker_path(custody).parent == durable  # noqa: SLF001
     assert restarted._database_path(custody).parent == durable  # noqa: SLF001
+    for path in (
+        restarted._marker_path(custody),  # noqa: SLF001
+        restarted._database_path(custody),  # noqa: SLF001
+    ):
+        retained = mutation_lock.retain_regular_file(path)
+        try:
+            assert authorization_custody._file_is_owner_protected(  # noqa: SLF001
+                retained.fd, os.fstat(retained.fd)
+            )
+        finally:
+            retained.close()
+
+
+def test_fresh_authority_artifacts_are_protected_before_create_only_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    control_parent = _private_directory(tmp_path / "custody")
+    control = control_parent / "control.json"
+    control.write_text("control")
+    durable = _private_directory(tmp_path / "durable-authority")
+    monkeypatch.setenv("EXOMEM_VOCABULARY_AUTHORITY_DIR", str(durable))
+    custody = _Custody(control)
+    authority = vocabulary_authority.VocabularyAuthority(vault)
+    protected: list[Path] = []
+    original = authorization_custody._prepare_private_stage  # noqa: SLF001
+
+    def prepare(path, staged) -> None:
+        assert not os.path.lexists(path)
+        original(path, staged)
+        protected.append(path)
+
+    monkeypatch.setattr(authorization_custody, "_prepare_private_stage", prepare)
+    marker = authority._create_marker(  # noqa: SLF001
+        custody,
+        floor=vocabulary_authority._deployment_floor_for_adapter(  # noqa: SLF001
+            runtime="vocabulary-authority/v2", generation=7
+        ),
+        owner=vocabulary_authority._trusted_owner_decision_for_adapter(  # noqa: SLF001
+            owner_id="owner-1", ceremony_id="ceremony-1"
+        ),
+        now=1_700_000_000,
+    )
+    connection = authority._connect(custody, create=True, marker=marker)  # noqa: SLF001
+    assert connection is not None
+    connection.close()
+
+    paths = vocabulary_authority.authority_artifact_paths(
+        control, "vault-1", vault_root=vault
+    )
+    assert protected == [paths.marker_path, paths.database_path]
+
+
+def test_private_stage_refusal_leaves_no_published_authority_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    control = _private_directory(tmp_path / "custody") / "control.json"
+    control.write_text("control")
+    durable = _private_directory(tmp_path / "durable-authority")
+    monkeypatch.setenv("EXOMEM_VOCABULARY_AUTHORITY_DIR", str(durable))
+    custody = _Custody(control)
+    authority = vocabulary_authority.VocabularyAuthority(vault)
+    monkeypatch.setattr(
+        authorization_custody,
+        "_prepare_private_stage",
+        lambda *_args: (_ for _ in ()).throw(
+            authorization_custody.AuthorizationCustodyUnavailable()
+        ),
+    )
+
+    with pytest.raises(vocabulary_authority.VocabularyAuthorityUnavailable):
+        authority._create_marker(  # noqa: SLF001
+            custody,
+            floor=vocabulary_authority._deployment_floor_for_adapter(  # noqa: SLF001
+                runtime="vocabulary-authority/v2", generation=7
+            ),
+            owner=vocabulary_authority._trusted_owner_decision_for_adapter(  # noqa: SLF001
+                owner_id="owner-1", ceremony_id="ceremony-1"
+            ),
+            now=1_700_000_000,
+        )
+
+    paths = vocabulary_authority.authority_artifact_paths(
+        control, "vault-1", vault_root=vault
+    )
+    assert not any(os.path.lexists(path) for path in vocabulary_placement.artifact_family(paths))
+    assert not any(entry.name.startswith(".exomem-held-publish-") for entry in durable.iterdir())
 
 
 @pytest.mark.skipif(os.name == "nt", reason="requires POSIX directory write bits")

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Thread
 
 import pytest
 
-from exomem import vocabulary_authority
+from exomem import mutation_lock, vocabulary_authority
 from exomem.governance import authorization_session_lifecycle, store
 from exomem.governance.authorization_session_lifecycle import AuthorizationSessionContext
 from exomem.governance.principal import RequestPrincipal
@@ -246,7 +247,12 @@ def _revoke(
 def _store(root: Path) -> vocabulary_authority.VocabularyAuthority:
     control_path = root.parent / "custody" / "control.json"
     control_path.parent.mkdir(parents=True, exist_ok=True)
-    control_path.parent.chmod(0o700)
+    if os.name == "nt":
+        mutation_lock._windows_apply_private_dacl(
+            control_path.parent, mutation_lock._windows_current_user_sid()
+        )
+    else:
+        control_path.parent.chmod(0o700)
     control_path.write_text("control")
     floor = {
         "value": _TEST_VOCABULARY_FLOORS.setdefault(control_path, 1),

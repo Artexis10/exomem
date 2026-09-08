@@ -70,6 +70,11 @@ result. All action boxes start unchecked. Permissions bind the displayed
 audience and issuer; they do not automatically isolate individual models or
 clients that share that identity.
 
+Owner reviews also respect disclosure policy and credential filtering. If a
+complete preview cannot be shown, or its original content has changed, the page
+refuses the review. It never offers approval for a partially hidden change.
+Acceptance checks those conditions again.
+
 Revocation prevents subsequent covered writes. It does not undo an already
 committed change. A request whose content or authority has changed must be
 prepared and reviewed again. Legacy requests without complete write previews

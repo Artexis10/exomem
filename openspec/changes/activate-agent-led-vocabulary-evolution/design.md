@@ -125,6 +125,12 @@ execution rereads current facts. Pending exact requests retain the complete
 canonical before/after write images captured before staging cleanup. Decoding
 must reproduce the classifier's existing digest, including paths, hashes,
 roles and effects. Human review displays actual definitions and page changes.
+The authenticated owner has a separate release principal. Full write images
+require full disclosure, and all rendered control data crosses the existing
+terminal filter. If filtering changes any reviewed value, policy is blocked,
+or the before-image no longer matches current bytes, refuse both display and
+acceptance. Never approve a redacted or stale view. Recheck on acceptance even
+when the browser previously retrieved the review successfully.
 Legacy hash-only requests remain inspectable, but exact approval requires a
 fresh complete proposal. Preview resource bounds refuse oversized proposals
 without truncation; they impose no limit on retained knowledge.

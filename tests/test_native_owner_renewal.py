@@ -357,6 +357,36 @@ def test_worker_uses_wall_clock_due_time_and_bounded_event_waits(
     assert all(0 < timeout <= 60 for timeout in event.waits)
 
 
+def test_stop_waits_for_in_flight_publication(tmp_path: Path) -> None:
+    module = _renewal_module()
+    entered = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+    worker = module.OwnerCustodyRenewal(tmp_path / "vault")
+
+    def publish() -> None:
+        entered.set()
+        assert release.wait(timeout=5)
+
+    publisher = threading.Thread(target=publish)
+    worker._thread = publisher  # noqa: SLF001
+    stopper = threading.Thread(target=lambda: (worker.stop(), returned.set()))
+    publisher.start()
+    try:
+        assert entered.wait(timeout=1)
+        stopper.start()
+        assert worker._shutdown.wait(timeout=1)  # noqa: SLF001
+        assert not returned.is_set()
+    finally:
+        release.set()
+        publisher.join(timeout=2)
+        if stopper.ident is not None:
+            stopper.join(timeout=2)
+    assert not publisher.is_alive()
+    assert not stopper.is_alive()
+    assert returned.is_set()
+
+
 def test_local_lifespan_starts_and_joins_renewal_before_ordinary_workers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

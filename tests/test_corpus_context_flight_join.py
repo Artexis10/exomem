@@ -414,6 +414,11 @@ class _UnboundedJoinVisitor(ast.NodeVisitor):
 # test-local because the worker allowlist excludes the unrelated implementations.
 _DECLARED_UNBOUNDED_JOINS = {
     (
+        "native_owner_renewal.py",
+        "OwnerCustodyRenewal.stop",
+        "thread.join",
+    ): "service-lifespan shutdown waits for custody publication before runtime teardown; no request path calls it",
+    (
         "media_worker.py",
         "MediaWorker.join",
         "self._q.join",

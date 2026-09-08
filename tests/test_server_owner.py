@@ -8,6 +8,8 @@ from starlette.exceptions import HTTPException
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from exomem.governance import egress
+from exomem.governance.principal import effective_principal
 from exomem.server_owner import register_owner_routes
 
 
@@ -95,6 +97,38 @@ def client(tmp_path):
         app, vault_root=tmp_path, owner_auth=Auth(), control_factory=lambda: control
     )
     return TestClient(Starlette(routes=app.routes)), control
+
+
+def _owner_policy(vault, *, ceiling: int) -> None:
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    (governance / "scopes" / "notes.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+        'name: Notes\npaths: ["Notes/**"]\ndefault_deny: true\n',
+        encoding="utf-8",
+    )
+    (governance / "rules" / "owner.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: owner\n'
+        f"ceiling: {ceiling}\n",
+        encoding="utf-8",
+    )
+
+
+def _write_review(control, *, path: str, before, after="proposed") -> None:
+    control.current_review = SimpleNamespace(
+        review_id="review-1",
+        state="prepared",
+        action="approve",
+        expired=False,
+        result=None,
+        body={},
+        display={
+            "audience_id": "agent",
+            "write_images": [{"path": path, "before": before, "after": after}],
+        },
+    )
 
 
 def test_owner_page_requires_browser_identity_not_an_agent_bearer(tmp_path):
@@ -382,3 +416,272 @@ def test_owner_lists_use_bounded_continuation_for_the_selected_session(tmp_path)
     assert seen == [("s", "current")]
     assert "More pending requests" in response.text
     assert "requests_after=next%3C%26" in response.text
+
+
+@pytest.mark.parametrize("ceiling", [0, 5])
+def test_review_requires_full_owner_release_for_existing_bytes(tmp_path, ceiling):
+    browser, control = client(tmp_path)
+    target = tmp_path / "Knowledge Base" / "Notes" / "current.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("withheld original bytes", encoding="utf-8")
+    _owner_policy(tmp_path, ceiling=ceiling)
+    _write_review(control, path="Knowledge Base/Notes/current.md", before="withheld original bytes")
+
+    response = browser.get("/owner/review/review-1", headers={"x-test-owner": "yes"})
+
+    assert response.status_code == 409
+    assert "withheld original bytes" not in response.text
+    response = browser.post(
+        "/owner/review/review-1/accept", headers={"x-test-owner": "yes"}, data={"csrf": "csrf"}
+    )
+    assert response.status_code == 409
+    assert control.accepted == []
+
+
+def test_review_allows_full_path_only_release_for_a_still_absent_file(tmp_path, monkeypatch):
+    seen = []
+    original = egress.postfilter
+
+    def check_principal(*args):
+        principal = effective_principal()
+        seen.append((principal.audience_id, principal.issuer_family, principal.resolved))
+        return original(*args)
+
+    monkeypatch.setattr(egress, "postfilter", check_principal)
+    browser, control = client(tmp_path)
+    _owner_policy(tmp_path, ceiling=6)
+    _write_review(control, path="Knowledge Base/Notes/new.md", before=None)
+
+    response = browser.get("/owner/review/review-1", headers={"x-test-owner": "yes"})
+
+    assert response.status_code == 200
+    assert "Knowledge Base/Notes/new.md" in response.text
+    assert seen == [("owner", "native-owner-github", True)]
+    assert browser.post(
+        "/owner/review/review-1/accept", headers={"x-test-owner": "yes"},
+        data={"csrf": "csrf"}, follow_redirects=False,
+    ).status_code == 303
+    assert control.accepted == ["review-1"]
+
+
+def test_accept_refetches_and_rechecks_policy_after_successful_get(tmp_path):
+    browser, control = client(tmp_path)
+    target = tmp_path / "Knowledge Base" / "Notes" / "current.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("current", encoding="utf-8")
+    _owner_policy(tmp_path, ceiling=6)
+    _write_review(control, path="Knowledge Base/Notes/current.md", before="current")
+    assert browser.get(
+        "/owner/review/review-1", headers={"x-test-owner": "yes"}
+    ).status_code == 200
+
+    _owner_policy(tmp_path, ceiling=0)
+    response = browser.post(
+        "/owner/review/review-1/accept",
+        headers={"x-test-owner": "yes"},
+        data={"csrf": "csrf"},
+    )
+
+    assert response.status_code == 409
+    assert control.accepted == []
+
+
+def test_nested_review_secret_or_receipt_failure_never_exposes_or_accepts(
+    tmp_path, monkeypatch
+):
+    browser, control = client(tmp_path)
+    secret = "ghp_" + "a" * 36
+    control.current_review = SimpleNamespace(
+        review_id="review-1",
+        state="prepared",
+        action="approve",
+        expired=False,
+        result=None,
+        body={},
+        display={"consequences": {"nested": secret}},
+    )
+    response = browser.get("/owner/review/review-1", headers={"x-test-owner": "yes"})
+    assert response.status_code == 409
+    assert secret not in response.text
+
+    control.current_review.display = {"consequences": {"safe": "value"}}
+    monkeypatch.setattr(
+        egress, "emit_boundary_receipt", lambda _collector: (_ for _ in ()).throw(OSError())
+    )
+    response = browser.post(
+        "/owner/review/review-1/accept",
+        headers={"x-test-owner": "yes"},
+        data={"csrf": "csrf"},
+    )
+    assert response.status_code in {409, 503}
+    assert control.accepted == []
+    assert not effective_principal().resolved
+
+
+def test_home_metadata_is_postfiltered_before_interpolation(tmp_path):
+    browser, control = client(tmp_path)
+    secret = "ghp_" + "a" * 36
+    control.session_items = [
+        {"session_id": "session-1", "audience_id": secret, "issuer_family": "oauth"}
+    ]
+
+    response = browser.get("/owner", headers={"x-test-owner": "yes"})
+
+    assert response.status_code == 503
+    assert secret not in response.text
+    assert not effective_principal().resolved
+
+
+@pytest.mark.parametrize("location", ["before", "after", "canonical_operation", "canonical_yaml", "command"])
+def test_all_rendered_review_content_is_filtered_on_get_and_direct_post(tmp_path, location):
+    browser, control = client(tmp_path)
+    secret = "ghp_" + "a" * 36
+    _write_review(control, path="note.md", before=None)
+    review = control.current_review
+    if location in {"before", "after"}:
+        review.display["write_images"][0][location] = secret
+        if location == "before":
+            (tmp_path / "note.md").write_text(secret, encoding="utf-8")
+    elif location == "command":
+        review.action, review.state = "migration", "accepted"
+        review.body = {"service_unit": str(tmp_path / secret), "service_interpreter": "/usr/bin/python"}
+    else:
+        review.display[location] = {"nested": {"value": secret}}
+    for response in (
+        browser.get("/owner/review/review-1", headers={"x-test-owner": "yes"}),
+        browser.post("/owner/review/review-1/accept", headers={"x-test-owner": "yes"}, data={"csrf": "csrf"}),
+    ):
+        assert response.status_code == 409
+        assert secret not in response.text
+        assert '<form ' not in response.text
+    assert control.accepted == []
+
+
+@pytest.mark.parametrize("change", ["changed", "missing", "appeared", "symlink", "large"])
+def test_stale_or_unsafe_file_images_refuse_display_and_acceptance(tmp_path, change):
+    from exomem.vocabulary_effects import _MAX_IMAGE_BYTES
+
+    browser, control = client(tmp_path)
+    target = tmp_path / "note.md"
+    before = None if change == "appeared" else "original bytes"
+    _write_review(control, path="note.md", before=before)
+    if change == "symlink":
+        elsewhere = tmp_path / "elsewhere.md"
+        elsewhere.write_text(before, encoding="utf-8")
+        target.symlink_to(elsewhere)
+    elif change != "missing":
+        target.write_text("x" * (_MAX_IMAGE_BYTES + 1) if change == "large" else "different", encoding="utf-8")
+    for response in (
+        browser.get("/owner/review/review-1", headers={"x-test-owner": "yes"}),
+        browser.post("/owner/review/review-1/accept", headers={"x-test-owner": "yes"}, data={"csrf": "csrf"}),
+    ):
+        assert response.status_code in {409, 503}
+        assert "original bytes" not in response.text
+        assert '<form ' not in response.text
+    assert control.accepted == []
+
+
+def test_blocked_policy_refuses_even_a_pathless_review(tmp_path):
+    from exomem.governance import policy
+
+    browser, control = client(tmp_path)
+    _owner_policy(tmp_path, ceiling=6)
+    (tmp_path / "Knowledge Base/_Governance/rules/owner.yaml").write_text("invalid: [", encoding="utf-8")
+    assert policy.load(tmp_path).blocked
+    _write_review(control, path="note.md", before=None)
+    control.current_review.display = {"audience_id": "agent"}
+    assert browser.get("/owner/review/review-1", headers={"x-test-owner": "yes"}).status_code == 409
+    assert browser.post(
+        "/owner/review/review-1/accept", headers={"x-test-owner": "yes"}, data={"csrf": "csrf"},
+    ).status_code == 409
+    assert control.accepted == []
+
+
+def test_mutating_filter_cannot_modify_sealed_review_and_principal_is_restored(tmp_path, monkeypatch):
+    from exomem.governance.principal import RequestPrincipal, request_scope
+    from exomem.server_owner import _released_review
+    from exomem.vocabulary_control import _freeze
+
+    _, control = client(tmp_path)
+    _write_review(control, path="note.md", before=None)
+    review = control.current_review
+    review.display = _freeze({"canonical_operation": {"body": {"value": "original"}}})
+
+    def mutate(_command, value, _root):
+        assert effective_principal().audience_id == "owner"
+        value["display"]["canonical_operation"]["body"]["value"] = "changed"
+        return value
+
+    agent = RequestPrincipal(audience_id="agent", surface="mcp")
+    with request_scope(agent):
+        assert _released_review(tmp_path, review)["display"]["canonical_operation"]["body"]["value"] == "original"
+        assert effective_principal() == agent
+        monkeypatch.setattr(egress, "postfilter", mutate)
+        with pytest.raises(ValueError, match="fully disclosed"):
+            _released_review(tmp_path, review)
+        assert effective_principal() == agent
+    assert review.display["canonical_operation"]["body"]["value"] == "original"
+
+
+def test_concurrent_retag_cannot_authorize_the_old_restricted_snapshot(tmp_path, monkeypatch):
+    from exomem import server_owner
+
+    browser, control = client(tmp_path)
+    _owner_policy(tmp_path, ceiling=0)
+    (tmp_path / "Knowledge Base/_Governance/scopes/notes.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+        'name: Confidential\ntags: ["confidential"]\ndefault_deny: true\n',
+        encoding="utf-8",
+    )
+    target = tmp_path / "note.md"
+    private = "---\ntags: [confidential]\n---\nRestricted original bytes"
+    _write_review(control, path="note.md", before=private)
+    original_read = server_owner._current_image
+
+    def race(root, relative):
+        result = original_read(root, relative)
+        target.write_text("Public replacement", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(server_owner, "_current_image", race)
+    for method, path, kwargs in (
+        (browser.get, "/owner/review/review-1", {}),
+        (browser.post, "/owner/review/review-1/accept", {"data": {"csrf": "csrf"}}),
+    ):
+        target.write_text(private, encoding="utf-8")
+        response = method(path, headers={"x-test-owner": "yes"}, **kwargs)
+        assert response.status_code == 409
+        assert "Restricted original bytes" not in response.text
+    assert control.accepted == []
+
+
+def test_existing_yaml_image_allows_complete_path_based_release(tmp_path):
+    browser, control = client(tmp_path)
+    _owner_policy(tmp_path, ceiling=6)
+    target = tmp_path / "Knowledge Base/Notes/registry.yaml"
+    target.parent.mkdir(parents=True)
+    target.write_text("version: 1\n", encoding="utf-8")
+    _write_review(control, path="Knowledge Base/Notes/registry.yaml", before="version: 1\n")
+    response = browser.get("/owner/review/review-1", headers={"x-test-owner": "yes"})
+    assert response.status_code == 200
+    assert "version: 1" in response.text
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_non_markdown_review_refuses_unresolved_semantic_membership(tmp_path, existing):
+    browser, control = client(tmp_path)
+    _owner_policy(tmp_path, ceiling=6)
+    (tmp_path / "Knowledge Base/_Governance/scopes/notes.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+        'name: Confidential\ntags: ["confidential"]\ndefault_deny: true\n',
+        encoding="utf-8",
+    )
+    before = "version: 1\n" if existing else None
+    if existing:
+        (tmp_path / "registry.yaml").write_text(before, encoding="utf-8")
+    _write_review(control, path="registry.yaml", before=before)
+    assert browser.get("/owner/review/review-1", headers={"x-test-owner": "yes"}).status_code == 409
+    assert browser.post(
+        "/owner/review/review-1/accept", headers={"x-test-owner": "yes"}, data={"csrf": "csrf"},
+    ).status_code == 409
+    assert control.accepted == []

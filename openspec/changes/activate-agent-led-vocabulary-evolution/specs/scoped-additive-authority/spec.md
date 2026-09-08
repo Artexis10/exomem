@@ -143,6 +143,13 @@ A standalone installation SHALL authenticate the configured owner in a separate 
 - **THEN** both native maintenance command entrypoints refuse with the canonical reason before service inspection, managed re-execution or service-manager actions
 - **AND** parsing an available service-unit format does not bypass that capability check
 
+#### Scenario: Owner cannot approve an incomplete or stale disclosed preview
+
+- **WHEN** an authenticated owner retrieves or accepts an exact review
+- **THEN** full write images require full disclosure under the owner principal, and rendered control data crosses the existing terminal filter
+- **AND** changed filtering output, blocked policy or stale before-images refuse the entire review without an approval form or authority mutation
+- **AND** acceptance repeats the disclosure check even if an earlier retrieval succeeded; proposed absent paths use the existing conservative path-only release decision
+
 #### Scenario: Preparing migration does not alter serving admission
 
 - **WHEN** an owner prepares initial migration after committing the reviewed baseline policy
