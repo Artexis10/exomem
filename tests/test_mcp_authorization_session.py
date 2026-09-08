@@ -43,7 +43,7 @@ def test_generated_mcp_schema_exposes_only_optional_consumed_placeholder(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tools = {
-        tool.name: tool.to_mcp_tool().model_dump(mode="json")
+        tool.name: tool.to_mcp_tool().model_dump(mode="json", by_alias=True)
         for tool in asyncio.run(_server(vault, monkeypatch).list_tools())
     }
 
@@ -285,8 +285,9 @@ def test_mcp_duplicate_arguments_objects_cannot_hide_a_bearer(
     assert presented not in response.text
 
 
+@pytest.mark.parametrize("connect", ["legacy", "auto"])
 def test_actual_stdio_refuses_before_validation_without_logging_bearer(
-    vault, tmp_path: Path
+    vault, tmp_path: Path, connect: str
 ) -> None:
     from fastmcp import Client
     from fastmcp.client.transports import StdioTransport
@@ -334,7 +335,8 @@ def test_actual_stdio_refuses_before_validation_without_logging_bearer(
             keep_alive=False,
             log_file=transport_log,
         )
-        async with Client(transport, timeout=30, init_timeout=30) as client:
+        async with Client(transport, timeout=30, init_timeout=30, mode=connect) as client:
+            assert (client.protocol_version == "2026-07-28") == (connect == "auto")
             return await client.call_tool(
                 "ask_memory",
                 {

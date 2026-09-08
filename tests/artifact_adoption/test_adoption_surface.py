@@ -404,7 +404,7 @@ def test_registry_mcp_rest_openapi_and_cli_share_closed_adoption_contract(
     registry_schema = next(item for item in command.params if item.name == "adoption").schema
     assert registry_schema is not None
     tools = {item.name: item for item in asyncio.run(mcp.list_tools())}
-    mcp_schema = tools["preserve_artifacts"].to_mcp_tool().model_dump(mode="json")[
+    mcp_schema = tools["preserve_artifacts"].to_mcp_tool().model_dump(mode="json", by_alias=True)[
         "inputSchema"
     ]["properties"]["adoption"]
     rest = TestClient(mcp.http_app())
@@ -493,7 +493,7 @@ def test_delivery_registry_mcp_and_openapi_close_nested_platform_proof(
         "content"
     ]["application/json"]["schema"]["properties"]["delivery"]["anyOf"][0]
     tools = {item.name: item for item in asyncio.run(mcp.list_tools())}
-    mcp_delivery = tools["record_memory"].to_mcp_tool().model_dump(mode="json")[
+    mcp_delivery = tools["record_memory"].to_mcp_tool().model_dump(mode="json", by_alias=True)[
         "inputSchema"
     ]["properties"]["delivery"]["anyOf"][0]
     command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "record_memory")

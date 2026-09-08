@@ -253,11 +253,14 @@ def test_the_request_size_is_recorded_so_a_slow_call_is_interpretable(
 def _fake_mcp_client(monkeypatch, *, name: str, version: str) -> None:
     """Stand in for the MCP initialize handshake's `clientInfo`."""
     import fastmcp.server.dependencies as dependencies
+    from mcp.types import ClientCapabilities, Implementation, InitializeRequestParams
 
     context = SimpleNamespace(
         session=SimpleNamespace(
-            client_params=SimpleNamespace(
-                clientInfo=SimpleNamespace(name=name, version=version)
+            client_params=InitializeRequestParams(
+                protocol_version="2025-11-25",
+                capabilities=ClientCapabilities(),
+                client_info=Implementation(name=name, version=version),
             )
         ),
         session_id="sess-1234",

@@ -63,7 +63,7 @@ def _build_server(
 
 def _mcp_tools(mcp) -> dict[str, dict]:
     return {
-        tool.name: tool.to_mcp_tool().model_dump(mode="json")
+        tool.name: tool.to_mcp_tool().model_dump(mode="json", by_alias=True)
         for tool in asyncio.run(mcp.list_tools())
     }
 

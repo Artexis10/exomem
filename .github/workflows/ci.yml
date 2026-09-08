@@ -86,6 +86,7 @@ jobs:
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
           PYTHONDONTWRITEBYTECODE: "1"
           EXOMEM_TEST_TIER: core
+          FASTMCP_MCP_CAMELCASE_COMPAT: "false"
         # --store-durations only on nightly/dispatch full runs: each shard
         # merges its measured timings into the checked-in durations file and
         # the step below uploads the result as an artifact. Refreshing the
@@ -164,6 +165,7 @@ jobs:
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
           PYTHONDONTWRITEBYTECODE: "1"
           EXOMEM_TEST_TIER: harness
+          FASTMCP_MCP_CAMELCASE_COMPAT: "false"
         run: >-
           uv run --frozen --group benchmark-judge --python ${{ matrix.python-version }} python -m pytest -q
           --splits=4

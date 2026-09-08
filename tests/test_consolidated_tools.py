@@ -94,7 +94,7 @@ def test_edit_memory_discovery_is_one_discriminated_operation(
     vault: Path, monkeypatch
 ) -> None:
     tools = {
-        tool.name: tool.to_mcp_tool().model_dump(mode="json")
+        tool.name: tool.to_mcp_tool().model_dump(mode="json", by_alias=True)
         for tool in asyncio.run(_build(monkeypatch).list_tools())
     }
     schema = tools["edit_memory"]["inputSchema"]
@@ -186,7 +186,7 @@ def test_edit_batch_mode_accepts_connector_encoded_object_strings(
     mcp = _build(monkeypatch)
     rel = _make_page(vault, "# S\n\nalpha\nbeta\n")
     tools = {
-        tool.name: tool.to_mcp_tool().model_dump(mode="json")
+        tool.name: tool.to_mcp_tool().model_dump(mode="json", by_alias=True)
         for tool in asyncio.run(mcp.list_tools())
     }
     operation_schema = tools["edit_memory"]["inputSchema"]["properties"]["operation"]

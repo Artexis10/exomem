@@ -401,7 +401,7 @@ async def test_restore_rejects_expired_user_export_before_provider_read(
         source = await session.scalar(select(RecoveryObject))
         assert source is not None
         source.kind = RunKind.USER_EXPORT
-        source.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        source.expires_at = datetime(2000, 1, 1, tzinfo=UTC)
     claimed = await _claimed_restore(repository)
     workflow = RestoreWorkflow(
         repository=repository,

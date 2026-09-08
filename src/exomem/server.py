@@ -63,6 +63,9 @@ class ExomemFastMCP(FastMCP):
         parse_mcp_authorization: bool = True,
         **kwargs,
     ) -> None:
+        # SDK v2's explicit lax default overrides field-level StrictInt, etc.
+        # Keep MCP inputs faithful to the published JSON types before dispatch.
+        kwargs["strict_input_validation"] = True
         super().__init__(*args, **kwargs)
         self._parse_mcp_authorization = parse_mcp_authorization
 
@@ -148,7 +151,6 @@ class ExomemFastMCP(FastMCP):
                                     tools_changed=True
                                 ),
                             ),
-                            stateless=stateless,
                         )
         finally:
             reset_transport(token)

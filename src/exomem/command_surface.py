@@ -649,7 +649,7 @@ def mcp_caller_identity() -> dict[str, str | None]:
         return identity
     try:
         params = getattr(context.session, "client_params", None)
-        info = getattr(params, "clientInfo", None)
+        info = getattr(params, "client_info", None)
         if info is not None:
             identity["client_name"] = str(getattr(info, "name", "") or "") or None
             identity["client_version"] = str(getattr(info, "version", "") or "") or None

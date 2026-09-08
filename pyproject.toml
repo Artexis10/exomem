@@ -36,8 +36,9 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastmcp==3.4.4",
+    "fastmcp==4.0.3",
     "httpx>=0.27",
+    "httpx2>=2.12,<3",         # FastMCP provider clients use a distinct exception family
     "pyyaml>=6.0",
     "python-slugify>=8.0",
     "python-dotenv>=1.0",

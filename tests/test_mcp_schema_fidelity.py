@@ -77,7 +77,7 @@ def _live_schemas(mcp) -> dict[str, dict]:
     tools = asyncio.run(mcp.list_tools())
     out: dict[str, dict] = {}
     for t in tools:
-        mt = t.to_mcp_tool().model_dump(mode="json")
+        mt = t.to_mcp_tool().model_dump(mode="json", by_alias=True)
         out[t.name] = {"description": mt["description"], "inputSchema": mt["inputSchema"]}
     return out
 
@@ -92,8 +92,10 @@ def _tool_surface_sha256(mcp) -> tuple[str, int]:
     tools = asyncio.run(mcp.list_tools())
     surface = []
     for tool in sorted(tools, key=lambda item: item.name):
-        wire = tool.to_mcp_tool().model_dump(mode="json")
-        assert tuple(wire) == DISCOVERY_FIELDS, (
+        wire = tool.to_mcp_tool().model_dump(mode="json", by_alias=True)
+        # Preserve the published v1 encoding independently of SDK field order.
+        wire["meta"] = wire.pop("_meta")
+        assert set(wire) == set(DISCOVERY_FIELDS), (
             "FastMCP discovery fields changed; deliberately review and fingerprint "
             f"the new wire surface: {tuple(wire)}"
         )
@@ -190,7 +192,7 @@ def test_remember_discovery_schema_is_vault_invariant(
 ) -> None:
     mcp_before = _build_server(monkeypatch, tmp_path)
     before = {
-        tool.name: tool.to_mcp_tool().model_dump(mode="json")
+        tool.name: tool.to_mcp_tool().model_dump(mode="json", by_alias=True)
         for tool in asyncio.run(mcp_before.list_tools())
     }["remember"]
 
@@ -198,7 +200,7 @@ def test_remember_discovery_schema_is_vault_invariant(
     project_keys_module.register_project_key(vault_root, "new-project-key")
     mcp_after = server_module.build_server(require_auth=False)
     after = {
-        tool.name: tool.to_mcp_tool().model_dump(mode="json")
+        tool.name: tool.to_mcp_tool().model_dump(mode="json", by_alias=True)
         for tool in asyncio.run(mcp_after.list_tools())
     }["remember"]
 
@@ -267,7 +269,7 @@ def test_process_media_mcp_schema_annotations_and_leaf_result(
     mcp = _build_server(monkeypatch, tmp_path)
     vault = tmp_path / "schema_vault"
     tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
-    tool = tools["process_media"].to_mcp_tool().model_dump(mode="json")
+    tool = tools["process_media"].to_mcp_tool().model_dump(mode="json", by_alias=True)
     schema = tool["inputSchema"]
     [command] = [cmd for cmd in commands_module.PRODUCT_COMMANDS if cmd.name == "process_media"]
     operation_param = next(param for param in command.params if param.name == "operation")

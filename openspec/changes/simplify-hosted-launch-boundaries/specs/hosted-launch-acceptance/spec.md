@@ -62,6 +62,15 @@ Service acceptance SHALL require the actual governance schema, authenticated pro
 - **THEN** the cell remains fenced for explicit verified abort or recovery
 - **AND** automatic retry cannot renew the prepared source, replace its plan or treat the elapsed window as enrollment authority
 
+#### Scenario: Recovery custody publication succeeds without acknowledgement
+
+- **WHEN** a target-start recovery Secret CAS has an uncertain acknowledgement, including across worker restart
+- **THEN** its exact successor revision and chosen issuance time were durably committed before the first CAS in the same migration checkpoint
+- **AND** retry accepts only that exact successor or a predecessor whose deterministic successor reproduces the commitment
+- **AND** key validity and physical authority are checked at the actual current time, not the committed issuance time
+- **AND** an elapsed DRAINING window does not replace the uncertain commitment or authorize serving; an expired signing key still fences recovery
+- **AND** the checkpoint retains the migration denial prefix, prior completion/confirmation phase, fingerprint, operation/PVC/image binding, source and plan within the existing storage bound
+
 #### Scenario: Destruction or another cell worker precedes migration entry
 
 - **WHEN** the first migration checkpoint would overlap non-final tenant destruction or another claimed operation on the same cell
