@@ -166,7 +166,10 @@ def test_native_tool_call_round_trip_preserves_messages_and_fixed_route(
         assert isinstance(body, dict)
         assert body["tools"] == TOOLS
         assert body["tool_choice"] == "auto"
-        assert body["parallel_tool_calls"] is False
+        if transport == "openai":
+            assert body["parallel_tool_calls"] is False
+        else:
+            assert "parallel_tool_calls" not in body
         assert body["max_tokens"] == 64
         assert body["temperature"] == 0
         assert body["n"] == 1
@@ -186,6 +189,45 @@ def test_native_tool_call_round_trip_preserves_messages_and_fixed_route(
     assert requests[1]["request"]["messages"] == messages
     assert results[0]["message"] == tool_message
     assert results[1]["message"] == final_message
+
+
+def test_native_openrouter_keeps_its_only_provider_eligible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lme import metered
+
+    # The pinned model's OpenRouter OpenAI endpoint advertises tools and
+    # tool_choice, but not parallel_tool_calls. With require_parameters=true,
+    # requesting that optional control excludes the sole permitted provider.
+    # https://openrouter.ai/docs/guides/routing/provider-selection
+    supported_tool_parameters = {"tools", "tool_choice"}
+    message = {"role": "assistant", "content": "Ready."}
+
+    class EndpointFilteringClient(FakeAsyncClient):
+        async def post(self, url: str, **kwargs: object) -> FakeResponse:
+            body = kwargs["json"]
+            assert isinstance(body, dict)
+            requested = {"tools", "tool_choice", "parallel_tool_calls"} & body.keys()
+            assert body["provider"]["require_parameters"] is True
+            if not requested <= supported_tool_parameters:
+                self.requests.append({"url": url, **kwargs})
+                return FakeResponse({"error": {"code": 404}}, status_code=404)
+            return await super().post(url, **kwargs)
+
+    client = EndpointFilteringClient([
+        FakeResponse(_payload(message, finish_reason="stop", transport="openrouter")),
+    ])
+    monkeypatch.setattr(metered.httpx, "AsyncClient", lambda **kwargs: client)
+    backend = _backend(tmp_path, monkeypatch, transport="openrouter")
+    completion = asyncio.run(backend.complete_messages(
+        [{"role": "user", "content": "Ready?"}], tools=TOOLS, max_tokens=64,
+    ))
+
+    assert completion.message == message
+    assert len(client.requests) == 1
+    assert client.requests[0]["json"]["provider"]["only"] == ["openai"]
+    assert client.requests[0]["json"]["provider"]["allow_fallbacks"] is False
+    assert not (tmp_path / "metered" / "STOP").exists()
 
 
 @pytest.mark.parametrize("transport", ["openai", "openrouter"])

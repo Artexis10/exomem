@@ -492,9 +492,13 @@ class MeteredOpenAIBackend:
                 {
                     "tools": tools,
                     "tool_choice": "auto",
-                    "parallel_tool_calls": False,
                 }
             )
+            if self.transport == "openai":
+                body["parallel_tool_calls"] = False
+            # OpenRouter does not advertise this optional control for the
+            # pinned endpoint; require_parameters would exclude our only
+            # provider. The native broker executes each returned tool in order.
         if self.transport == "openrouter":
             body.update(
                 {
