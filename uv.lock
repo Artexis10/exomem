@@ -652,6 +652,10 @@ dependencies = [
 diarization = [
     { name = "speechbrain" },
 ]
+documents = [
+    { name = "markitdown", extra = ["docx", "pptx", "xlsx"] },
+    { name = "pymupdf" },
+]
 embeddings = [
     { name = "pillow" },
     { name = "sentence-transformers" },
@@ -684,6 +688,10 @@ nli = [
     { name = "torch", version = "2.12.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.12.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
+ocr = [
+    { name = "pillow" },
+    { name = "pytesseract" },
+]
 tui = [
     { name = "textual" },
 ]
@@ -708,6 +716,7 @@ requires-dist = [
     { name = "fastmcp", specifier = "==3.4.4" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "huggingface-hub", marker = "extra == 'embeddings-onnx'", specifier = ">=0.24" },
+    { name = "markitdown", extras = ["docx", "xlsx", "pptx"], marker = "extra == 'documents'", specifier = ">=0.1.1" },
     { name = "markitdown", extras = ["docx", "xlsx", "pptx"], marker = "extra == 'media'", specifier = ">=0.1.1" },
     { name = "mlx-whisper", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'media-mlx'", specifier = ">=0.4" },
     { name = "numpy", specifier = ">=1.26" },
@@ -717,9 +726,12 @@ requires-dist = [
     { name = "onnxruntime", marker = "extra == 'embeddings-onnx'", specifier = ">=1.20" },
     { name = "pillow", marker = "extra == 'embeddings'", specifier = ">=10.0" },
     { name = "pillow", marker = "extra == 'media'", specifier = ">=10.0" },
+    { name = "pillow", marker = "extra == 'ocr'", specifier = ">=10.0" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
+    { name = "pymupdf", marker = "extra == 'documents'", specifier = ">=1.24" },
     { name = "pymupdf", marker = "extra == 'media'", specifier = ">=1.24" },
     { name = "pytesseract", marker = "extra == 'media'", specifier = ">=0.3.10" },
+    { name = "pytesseract", marker = "extra == 'ocr'", specifier = ">=0.3.10" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "python-slugify", specifier = ">=8.0" },
@@ -740,7 +752,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'vision'", specifier = ">=4.40" },
     { name = "watchdog", specifier = ">=4.0" },
 ]
-provides-extras = ["embeddings", "embeddings-onnx", "nli", "media", "media-mlx", "diarization", "vision", "tui"]
+provides-extras = ["embeddings", "embeddings-onnx", "nli", "documents", "ocr", "media", "media-mlx", "diarization", "vision", "tui"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -101,6 +101,18 @@ nli = [
     "sentence-transformers>=3.0",
     "torch>=2.12",
 ]
+# CPU-only document conversion. This extra intentionally excludes ASR and CUDA
+# runtime packages so a hosted document worker has only the local parsers it uses.
+documents = [
+    "pymupdf>=1.24",
+    "markitdown[docx,xlsx,pptx]>=0.1.1",
+]
+# OCR support for images and scanned PDF pages. Tesseract itself remains a
+# system package because it is not pip-installable.
+ocr = [
+    "pytesseract>=0.3.10",
+    "pillow>=10.0",
+]
 # Server-side media extraction (transduction, not a brain): ASR for audio/video,
 # OCR for images, text for PDFs, MarkItDown for office/html docs. Optional so a lean box
 # runs without it — the code

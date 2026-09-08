@@ -1159,6 +1159,8 @@ def _extract_pdf(path: Path) -> ExtractResult:
     parts: list[str] = []
     ocr_pages = 0
     with fitz.open(path) as doc:
+        if doc.needs_pass:
+            raise ExtractionUnavailable(f"PDF is password-protected: {path.name!r}")
         for page in doc:
             page_text = page.get_text().strip()
             if len(page_text) < _PDF_OCR_MIN_CHARS:
@@ -1186,7 +1188,7 @@ def _extract_document(path: Path, media_type: str) -> ExtractResult:
     except ImportError as e:
         raise ExtractionUnavailable(f"markitdown not installed: {e}") from e
     try:
-        result = MarkItDown(enable_plugins=False).convert(str(path))
+        result = MarkItDown(enable_plugins=False).convert_local(path)
     except Exception as e:  # noqa: BLE001 — a malformed doc must not crash the worker
         raise ExtractionUnavailable(f"markitdown could not convert {path.name!r}: {e}") from e
     text = (getattr(result, "text_content", "") or "").strip()
