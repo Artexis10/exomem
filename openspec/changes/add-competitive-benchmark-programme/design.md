@@ -716,6 +716,10 @@ or replace the external LongMemEval dataset and judge.
   Retain the 128k accounting envelope and 4096 output limit, including reasoning.
   Freeze the upstream tokenizer name and its immutable source identity with the
   model profiles; estimate serialized context in tokens with chat framing.
+  Treat memory file creation/update timestamps as replay ingestion metadata.
+  Preserve historical conversation timestamps as provenance for time-sensitive
+  writes and use evidence dates for temporal answers without exposing future
+  question dates to writers.
   Freeze promotional OpenRouter rates verified on 2026-09-08: Sol input $2/M,
   cache read $0.20/M, cache write $2.50/M, output $10/M. Reserve input at the
   maximum cache-write rate; price-limit routing refuses a later price increase.

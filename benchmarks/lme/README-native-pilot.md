@@ -17,6 +17,9 @@ may leave a conversation unwritten when nothing qualifies under its live policy.
 This is an Exomem-only diagnostic, not a competitive ranking. Original
 source-only scores remain separate and unchanged. Offline scripted tests prove
 the wiring; they do not establish model accuracy or improved benchmark scores.
+Replay instructions distinguish historical conversation/event dates from memory
+file creation and update times, which record ingestion. Writers preserve temporal
+provenance without seeing future questions; readers use the historical evidence.
 
 Prepare without API calls using the pinned project-local uv writer. The product
 interpreter must already have the CPU embedding dependencies. `MODEL_CACHE`

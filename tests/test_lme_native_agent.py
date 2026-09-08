@@ -99,10 +99,17 @@ def test_model_budget_survives_fresh_worker_sessions(tmp_path):
 def test_worker_context_does_not_carry_previous_phase(tmp_path):
     backend = Backend([{"role": "assistant", "content": "Done."}] * 2)
     b = broker(backend)
-    asyncio.run(run_agent_phase(b, phase="writer", turn="HISTORY-SENTINEL", out=tmp_path / "write"))
-    asyncio.run(run_agent_phase(b, phase="answer", turn="QUESTION-SENTINEL", out=tmp_path / "read"))
+    history = "Conversation timestamp: 2024-02-02. HISTORY-SENTINEL"
+    question = "Question date: 2025-03-03. QUESTION-SENTINEL"
+    asyncio.run(run_agent_phase(b, phase="writer", turn=history, out=tmp_path / "write"))
+    asyncio.run(run_agent_phase(b, phase="answer", turn=question, out=tmp_path / "read"))
     assert "HISTORY-SENTINEL" not in str(backend.requests[1])
     assert "QUESTION-SENTINEL" not in str(backend.requests[0])
+    assert backend.requests[0]["messages"][1]["content"] == history
+    assert backend.requests[1]["messages"][1]["content"] == question
+    assert "2025-03-03" not in str(backend.requests[0])
+    for request in backend.requests:
+        assert "replay ingestion, not historical event dates" in request["messages"][0]["content"]
 
 
 def test_hookless_contract_reaches_both_fresh_agents_without_forced_writes(tmp_path):
