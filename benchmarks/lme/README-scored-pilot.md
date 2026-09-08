@@ -101,7 +101,8 @@ evidence or relax comparative publication gates. The older
 `lme.cli run --reader openai` path does not yet enforce its displayed budget cap;
 use this bounded command for these small paid diagnostics.
 
-The write-and-recall loop needs a separate native-lifecycle evaluation under
+The [native diagnostic runner](README-native-pilot.md) implements a separate
+write-and-recall evaluation under
 [the programme's contract](../../openspec/changes/add-competitive-benchmark-programme/specs/native-lifecycle-bench/spec.md).
 Replay timestamped history to a writing agent using the shipped product skill
 and documented interfaces, then let a fresh answering agent recall the resulting

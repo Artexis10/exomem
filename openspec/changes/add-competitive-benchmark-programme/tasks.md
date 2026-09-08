@@ -482,6 +482,15 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       and lifecycle cleanup; run one justified diagnostic only after the
       consolidated correction, preserving the source-only baseline.
 
+      Implementation evidence for 6.4–6.4b: `benchmarks/lme/native_pilot.py`,
+      `native_agent.py`, `native_cell.py` and the structured metered transport;
+      `tests/test_lme_native_workflow.py` exercises actual public-MCP compiled
+      creation, a superseding correction and fresh-agent recall. The native
+      agent, cell, preparation and metered-chat suites cover isolation, resource
+      envelopes, no-write outcomes, cancellation and credential redaction.
+      Keep these tasks open until delivery is merged; 6.4c additionally needs
+      a justified metered diagnostic, and offline proof supplies no new score.
+
 ## 7. Runs (W9) — every metered step ⛳-gated
 
 - [ ] 7.0 Ship and exercise a bounded scored diagnostic replay: seven questions

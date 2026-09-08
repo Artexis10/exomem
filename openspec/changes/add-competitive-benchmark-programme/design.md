@@ -665,11 +665,17 @@ or replace the external LongMemEval dataset and judge.
   The hookless OpenAI surface uses its documented product engagement default;
   record actual bootstrap policy and semantic readiness. Fixture mode explicitly
   disables embeddings; paid product mode requires verified semantic readiness.
+  Create a new cell for each question's haystack; persistence is only across
+  that case's sessions. Launch from a newly owned empty working directory so
+  `.env` discovery cannot override isolation, and attest effective runtime roots.
 - `lme/native_agent.py` drives real model tool calls through public MCP schemas
   and results. Supply the shipped skill verbatim; a constrained file-read tool
   exposes only its frozen reference files. Standard harness tool discovery loads
   public schemas as needed, without inventing product instructions. The agent
   has no shell, arbitrary filesystem, network tool or route to evaluator files.
+  Declare the text-only tool profile and reject remote-file ingestion arguments
+  before dispatch, since public capture tools otherwise accept download URLs.
+  The answer broker permits recall operations only and rejects content writes.
 - Each history session starts a fresh agent context with the current timestamped
   conversation and normal memory guidance; the same isolated memory survives
   across sessions. The agent decides what to capture, compile, link, correct or
@@ -686,6 +692,10 @@ or replace the external LongMemEval dataset and judge.
   frozen output-token limit, model-call/tool-call/elapsed-time/context budgets,
   and reserve before every request. Tool failures return truthful structured
   outcomes; ambiguous billing halts the run. No silent retries or truncation.
+  Enforce run-wide totals in the parent as well as per-phase allowances, counting
+  discovery, guidance reads and every individual tool call. Bound IPC, responses
+  and stored bytes. Cancellation stops pending broker work and owned children;
+  uncertain mutations retain their identity and are never replayed as new writes.
 - Preserve each model request, tool call/result, phase boundary, committed-write
   receipt, vault snapshot digest and measured spend. Report observed captures,
   compiled writes, updates and connections separately from requested behavior.
@@ -698,3 +708,26 @@ or replace the external LongMemEval dataset and judge.
   boundary, and denied file/tool access cannot reach personal or evaluator state.
   These tests prove workflow wiring, not model accuracy. A paid diagnostic follows
   only after this coherent correction is reviewed and verified.
+  Assert compiled-memory changes and their receipts, not only raw-source search
+  hits. Verify per-case isolation, recall-only answer access, no-write/refusal
+  outcomes, budget exhaustion across sessions and cancellation. Recheck semantic
+  readiness at the answer boundary and record actual fallback in recall results.
+
+This diagnostic schedules maintenance at session end, with fresh agent contexts;
+report that scheduling choice explicitly. Provenance-aware leakage checks reject
+evaluator fields or probe text injected by the harness. Legitimate overlap between
+source dialogue and a later question is retained and reported for inspection,
+never removed to satisfy an n-gram check.
+
+The prepared plan also binds both Python runtimes and installed distribution
+metadata. Embedding assets are copied from an explicitly supplied local model
+cache, limited to its selected BGE and CLIP snapshots, and stream-hashed into the plan.
+Each cell receives its own copy under an offline Hugging Face cache; it cannot
+inherit credentials or silently depend on an empty per-cell cache. Model assets
+are measured separately from the stored-memory envelope. Semantic evidence
+includes post-write serving-index freshness and observed recall fallback.
+Keep the canonical capability-complete retrieval profile: missing cached model
+assets are a setup failure, not a reason to disable a product retrieval lane.
+The run-wide token envelope reserves the configured context/output ceiling and
+settles reported usage; uncertainty retains the reservation. Judge requests use
+the same cancellable metered transport with the unchanged upstream text body.

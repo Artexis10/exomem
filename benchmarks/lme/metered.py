@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -12,7 +13,7 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard, cast
 
 import httpx
 from membench.judge.backends import PhaseOutcome
@@ -31,6 +32,10 @@ OUTPUT_PER_MILLION_USD = 10.00
 TIMEOUT_SECONDS = 60.0
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _SAFE_DIAGNOSTIC = re.compile(r"[A-Za-z0-9_.:-]{1,80}\Z")
+_FUNCTION_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+_TOOL_CALL_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+_CHAT_FRAMING_BASE_TOKENS = 64
+_CHAT_FRAMING_ITEM_TOKENS = 16
 
 
 class MeteredConfigurationError(ValueError):
@@ -63,6 +68,35 @@ class MeteredCompletion:
     output_tokens: int
     cost_usd: float
     model_id: str
+
+
+@dataclass(frozen=True)
+class MeteredChatCompletion:
+    message: dict
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+    model_id: str
+
+
+@dataclass(frozen=True)
+class _PreparedCall:
+    api_key: str
+    artifact_root: Path
+    kind: str
+    max_tokens: int
+    operation_id: str
+    operation_seq: int
+    request_id: str | None
+    reservation: float
+
+
+@dataclass(frozen=True)
+class _ProcessedCompletion:
+    message: dict[str, object]
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
 
 
 @dataclass(frozen=True)
@@ -179,6 +213,92 @@ class MeteredOpenAIBackend:
             kind="complete",
         )
 
+    async def complete_messages(
+        self,
+        messages: list[dict],
+        *,
+        tools: list[dict],
+        max_tokens: int = 4096,
+    ) -> MeteredChatCompletion:
+        """Complete one bounded native-agent turn with standard function tools."""
+
+        self._validate_max_tokens(max_tokens, maximum=4096)
+        tool_definitions, tool_names = self._validate_tools(tools)
+        message_history = self._validate_messages(messages, tool_names=tool_names)
+        input_tokens = _serialized_chat_tokens(message_history, tool_definitions)
+        if input_tokens + max_tokens > CONTEXT_TOKENS:
+            raise MeteredConfigurationError(
+                "serialized messages and tools exceed the verified model context window"
+            )
+        body = self._request_body(
+            message_history,
+            max_tokens=max_tokens,
+            tools=tool_definitions or None,
+        )
+        prepared = self._prepare_call(
+            body,
+            max_tokens=max_tokens,
+            artifact_root=self.run_dir,
+            request_id=None,
+            kind="native_chat",
+        )
+
+        try:
+            client = httpx.AsyncClient(timeout=TIMEOUT_SECONDS)
+            try:
+                reply = await client.post(
+                    self.endpoint,
+                    json=body,
+                    headers={"Authorization": f"Bearer {prepared.api_key}"},
+                )
+            finally:
+                await asyncio.shield(client.aclose())
+        except asyncio.CancelledError:
+            self._uncertain_failure(
+                prepared.artifact_root,
+                operation_id=prepared.operation_id,
+                operation_seq=prepared.operation_seq,
+                request_id=prepared.request_id,
+                kind=prepared.kind,
+                reason="transport cancelled with ambiguous spend; no retry attempted",
+            )
+            raise
+        except KeyboardInterrupt:
+            self._uncertain_failure(
+                prepared.artifact_root,
+                operation_id=prepared.operation_id,
+                operation_seq=prepared.operation_seq,
+                request_id=prepared.request_id,
+                kind=prepared.kind,
+                reason="transport interrupted with ambiguous spend; no retry attempted",
+            )
+            raise
+        except (httpx.HTTPError, OSError):
+            self._uncertain_failure(
+                prepared.artifact_root,
+                operation_id=prepared.operation_id,
+                operation_seq=prepared.operation_seq,
+                request_id=prepared.request_id,
+                kind=prepared.kind,
+                reason="transport failure with ambiguous spend; no retry attempted",
+            )
+            raise MeteredCallError("OpenAI transport failed; reservation retained") from None
+
+        data = self._decode_reply(reply, prepared)
+        processed = self._process_response(
+            data,
+            prepared,
+            native=True,
+            tool_names=tool_names,
+        )
+        return MeteredChatCompletion(
+            message=processed.message,
+            input_tokens=processed.input_tokens,
+            output_tokens=processed.output_tokens,
+            cost_usd=processed.cost_usd,
+            model_id=self.model,
+        )
+
     def run_phase(
         self,
         run_dir: Path,
@@ -285,12 +405,124 @@ class MeteredOpenAIBackend:
     ) -> MeteredCompletion:
         if not isinstance(prompt, str) or not prompt:
             raise MeteredConfigurationError("prompt must be a nonblank string")
+        self._validate_max_tokens(max_tokens, maximum=512)
+        body = self._request_body(
+            [{"role": "user", "content": prompt}], max_tokens=max_tokens
+        )
+        prepared = self._prepare_call(
+            body,
+            max_tokens=max_tokens,
+            artifact_root=artifact_root,
+            request_id=request_id,
+            kind=kind,
+        )
+
+        try:
+            reply = httpx.post(
+                self.endpoint,
+                json=body,
+                headers={"Authorization": f"Bearer {prepared.api_key}"},
+                timeout=TIMEOUT_SECONDS,
+            )
+        except KeyboardInterrupt:
+            self._uncertain_failure(
+                artifact_root,
+                operation_id=prepared.operation_id,
+                operation_seq=prepared.operation_seq,
+                request_id=prepared.request_id,
+                kind=kind,
+                reason="transport interrupted with ambiguous spend; no retry attempted",
+            )
+            raise
+        except (httpx.HTTPError, OSError):
+            self._uncertain_failure(
+                artifact_root,
+                operation_id=prepared.operation_id,
+                operation_seq=prepared.operation_seq,
+                request_id=prepared.request_id,
+                kind=kind,
+                reason="transport failure with ambiguous spend; no retry attempted",
+            )
+            raise MeteredCallError("OpenAI transport failed; reservation retained") from None
+
+        data = self._decode_reply(reply, prepared)
+        processed = self._process_response(
+            data,
+            prepared,
+            native=False,
+            tool_names=frozenset(),
+        )
+        content = processed.message["content"]
+        assert isinstance(content, str)
+        return MeteredCompletion(
+            response=content,
+            input_tokens=processed.input_tokens,
+            output_tokens=processed.output_tokens,
+            cost_usd=processed.cost_usd,
+            model_id=self.model,
+        )
+
+    @staticmethod
+    def _validate_max_tokens(max_tokens: object, *, maximum: int) -> None:
         if (
             isinstance(max_tokens, bool)
             or not isinstance(max_tokens, int)
-            or not 1 <= max_tokens <= 512
+            or not 1 <= max_tokens <= maximum
         ):
-            raise MeteredConfigurationError("max_tokens must be an integer from 1 to 512")
+            raise MeteredConfigurationError(
+                f"max_tokens must be an integer from 1 to {maximum}"
+            )
+
+    def _request_body(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        max_tokens: int,
+        tools: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        body: dict[str, object] = {
+            "model": self.wire_model,
+            "messages": messages,
+            "temperature": 0,
+            "n": 1,
+            "max_tokens": max_tokens,
+        }
+        if tools is not None:
+            body.update(
+                {
+                    "tools": tools,
+                    "tool_choice": "auto",
+                    "parallel_tool_calls": False,
+                }
+            )
+        if self.transport == "openrouter":
+            body.update(
+                {
+                    "provider": {
+                        "only": ["openai"],
+                        "order": ["openai"],
+                        "allow_fallbacks": False,
+                        "require_parameters": True,
+                        "max_price": {
+                            "prompt": INPUT_PER_MILLION_USD,
+                            "completion": OUTPUT_PER_MILLION_USD,
+                            "request": 0,
+                        },
+                    },
+                    "transforms": [],
+                }
+            )
+        return body
+
+    def _prepare_call(
+        self,
+        body: dict[str, object],
+        *,
+        max_tokens: int,
+        artifact_root: Path,
+        request_id: str | None,
+        kind: str,
+    ) -> _PreparedCall:
         api_key = os.environ.get(self.api_key_env)
         if not api_key:
             raise MeteredConfigurationError(
@@ -316,31 +548,6 @@ class MeteredOpenAIBackend:
                 )
             finally:
                 self._privatize(self.run_dir)
-
-        body = {
-            "model": self.wire_model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0,
-            "n": 1,
-            "max_tokens": max_tokens,
-        }
-        if self.transport == "openrouter":
-            body.update(
-                {
-                    "provider": {
-                        "only": ["openai"],
-                        "order": ["openai"],
-                        "allow_fallbacks": False,
-                        "require_parameters": True,
-                        "max_price": {
-                            "prompt": INPUT_PER_MILLION_USD,
-                            "completion": OUTPUT_PER_MILLION_USD,
-                            "request": 0,
-                        },
-                    },
-                    "transforms": [],
-                }
-            )
         request_record = {
             "kind": kind,
             "max_reserved_cost_usd": reservation,
@@ -351,72 +558,65 @@ class MeteredOpenAIBackend:
             "ts": _now(),
         }
         self._append_jsonl(artifact_root / "requests.jsonl", request_record)
+        return _PreparedCall(
+            api_key=api_key,
+            artifact_root=artifact_root,
+            kind=kind,
+            max_tokens=max_tokens,
+            operation_id=operation_id,
+            operation_seq=operation_seq,
+            request_id=artifact_request_id,
+            reservation=reservation,
+        )
 
-        try:
-            reply = httpx.post(
-                self.endpoint,
-                json=body,
-                headers={"Authorization": f"Bearer {api_key}"},
-                timeout=TIMEOUT_SECONDS,
-            )
-        except KeyboardInterrupt:
+    def _decode_reply(self, reply: object, prepared: _PreparedCall) -> object:
+        status_code = getattr(reply, "status_code", None)
+        if status_code != 200:
+            api_error = self._api_error(reply, prepared.api_key)
             self._uncertain_failure(
-                artifact_root,
-                operation_id=operation_id,
-                operation_seq=operation_seq,
-                request_id=artifact_request_id,
-                kind=kind,
-                reason="transport interrupted with ambiguous spend; no retry attempted",
-            )
-            raise
-        except (httpx.HTTPError, OSError):
-            self._uncertain_failure(
-                artifact_root,
-                operation_id=operation_id,
-                operation_seq=operation_seq,
-                request_id=artifact_request_id,
-                kind=kind,
-                reason="transport failure with ambiguous spend; no retry attempted",
-            )
-            raise MeteredCallError("OpenAI transport failed; reservation retained") from None
-        if reply.status_code != 200:
-            api_error = self._api_error(reply, api_key)
-            self._uncertain_failure(
-                artifact_root,
-                operation_id=operation_id,
-                operation_seq=operation_seq,
-                request_id=artifact_request_id,
-                kind=kind,
-                reason=f"HTTP {reply.status_code} with unknown usage; no retry attempted",
+                prepared.artifact_root,
+                operation_id=prepared.operation_id,
+                operation_seq=prepared.operation_seq,
+                request_id=prepared.request_id,
+                kind=prepared.kind,
+                reason=f"HTTP {status_code} with unknown usage; no retry attempted",
                 api_error=api_error,
             )
             raise MeteredCallError("transport response had unknown usage; reservation retained")
         try:
-            data = reply.json()
+            return reply.json()  # type: ignore[attr-defined]
         except (ValueError, TypeError):
             self._uncertain_failure(
-                artifact_root,
-                operation_id=operation_id,
-                operation_seq=operation_seq,
-                request_id=artifact_request_id,
-                kind=kind,
+                prepared.artifact_root,
+                operation_id=prepared.operation_id,
+                operation_seq=prepared.operation_seq,
+                request_id=prepared.request_id,
+                kind=prepared.kind,
                 reason="response was not JSON and usage is unknown",
             )
             raise MeteredCallError(
                 "OpenAI response usage was unavailable; reservation retained"
             ) from None
 
+    def _process_response(
+        self,
+        data: object,
+        prepared: _PreparedCall,
+        *,
+        native: bool,
+        tool_names: frozenset[str],
+    ) -> _ProcessedCompletion:
         try:
             usage, input_tokens, output_tokens, cached_tokens, cached_rate_applied = (
-                self._usage(data, max_tokens=max_tokens)
+                self._usage(data, max_tokens=prepared.max_tokens)
             )
         except MeteredCallError as exc:
             self._uncertain_failure(
-                artifact_root,
-                operation_id=operation_id,
-                operation_seq=operation_seq,
-                request_id=artifact_request_id,
-                kind=kind,
+                prepared.artifact_root,
+                operation_id=prepared.operation_id,
+                operation_seq=prepared.operation_seq,
+                request_id=prepared.request_id,
+                kind=prepared.kind,
                 reason=str(exc),
             )
             raise
@@ -432,15 +632,15 @@ class MeteredOpenAIBackend:
         if self.transport == "openrouter":
             try:
                 account_charge_cost, is_byok, upstream_cost = (
-                    self._openrouter_accounting(usage, reservation=reservation)
+                    self._openrouter_accounting(usage, reservation=prepared.reservation)
                 )
             except MeteredCallError as exc:
                 self._uncertain_failure(
-                    artifact_root,
-                    operation_id=operation_id,
-                    operation_seq=operation_seq,
-                    request_id=artifact_request_id,
-                    kind=kind,
+                    prepared.artifact_root,
+                    operation_id=prepared.operation_id,
+                    operation_seq=prepared.operation_seq,
+                    request_id=prepared.request_id,
+                    kind=prepared.kind,
                     reason=str(exc),
                 )
                 raise
@@ -457,18 +657,20 @@ class MeteredOpenAIBackend:
         total_liability_cost: float | None = account_charge_cost
         if unknown_external_liability:
             total_liability_cost = None
-            self._commit_known(operation_id, actual=account_charge_cost)
+            self._commit_known(prepared.operation_id, actual=account_charge_cost)
         elif known_external_cost is not None and known_external_cost > 0:
             total_liability_cost = account_charge_cost + known_external_cost
             self._settle_split(
-                operation_id,
-                reservation=reservation,
+                prepared.operation_id,
+                reservation=prepared.reservation,
                 account_charge=account_charge_cost,
                 upstream_charge=known_external_cost,
             )
         else:
             self._settle(
-                operation_id, reservation=reservation, actual=account_charge_cost
+                prepared.operation_id,
+                reservation=prepared.reservation,
+                actual=account_charge_cost,
             )
 
         actual_model = data.get("model") if isinstance(data, dict) else None
@@ -482,8 +684,9 @@ class MeteredOpenAIBackend:
         message = choice.get("message") if isinstance(choice, dict) else None
         content = message.get("content") if isinstance(message, dict) else None
         failure: str | None = None
-        if any(
-            isinstance(value, str) and api_key in value
+        accepted_message: dict[str, object] | None = None
+        credential_reflected = any(
+            isinstance(value, str) and prepared.api_key in value
             for value in (
                 actual_model,
                 actual_provider,
@@ -491,12 +694,33 @@ class MeteredOpenAIBackend:
                 finish_reason,
                 content,
             )
-        ):
+        ) or (
+            native
+            and (
+                _tree_contains_secret(message, prepared.api_key)
+                or _decoded_tool_arguments_contain_secret(message, prepared.api_key)
+            )
+        )
+        if credential_reflected:
             failure = "completion contained the configured credential"
         elif actual_model != self.wire_model:
             failure = "response model differs from the verified model"
         elif self.transport == "openrouter" and actual_provider != self.provider:
             failure = "response provider differs from the required provider"
+        elif native:
+            if is_byok is True:
+                failure = "OpenRouter returned BYOK billing for the diagnostic"
+            elif unknown_external_liability:
+                failure = "OpenRouter upstream inference cost has ambiguous BYOK semantics"
+            else:
+                try:
+                    accepted_message = self._native_message(
+                        message,
+                        finish_reason=finish_reason,
+                        tool_names=tool_names,
+                    )
+                except MeteredCallError as exc:
+                    failure = str(exc)
         elif not isinstance(content, str):
             failure = "response must contain exactly one string completion"
         elif finish_reason == "length":
@@ -507,6 +731,8 @@ class MeteredOpenAIBackend:
             failure = "OpenRouter returned BYOK billing for the diagnostic"
         elif unknown_external_liability:
             failure = "OpenRouter upstream inference cost has ambiguous BYOK semantics"
+        else:
+            accepted_message = {"role": "assistant", "content": content}
 
         result_record = {
             "account_charge_cost_usd": account_charge_cost,
@@ -526,33 +752,42 @@ class MeteredOpenAIBackend:
             "finish_reason": finish_reason,
             "generation_id": generation_id,
             "is_byok": is_byok,
-            "kind": kind,
-            "operation_id": operation_id,
+            "kind": prepared.kind,
+            "operation_id": prepared.operation_id,
             "provider": actual_provider,
             "reported_upstream_inference_cost_usd": upstream_cost,
-            "request_id": artifact_request_id,
-            "response": _redact(content, api_key) if isinstance(content, str) else None,
-            "seq": operation_seq,
+            "request_id": prepared.request_id,
+            "response": (
+                _redact(content, prepared.api_key) if isinstance(content, str) else None
+            ),
+            "seq": prepared.operation_seq,
             "status": "error" if failure else "ok",
             "token_derived_cost_usd": token_derived_cost,
             "total_liability_cost_usd": total_liability_cost,
             "ts": _now(),
             "usage": usage,
         }
+        if native:
+            result_record["message"] = _redact_native_message(
+                message, prepared.api_key
+            )
+        redacted_record = _redact_tree(result_record, prepared.api_key)
+        assert isinstance(redacted_record, dict)
         self._append_jsonl(
-            artifact_root / "results.jsonl", _redact_tree(result_record, api_key)
+            prepared.artifact_root / "results.jsonl",
+            redacted_record,
         )
         if failure:
             self._record_failure(
-                artifact_root,
-                operation_id=operation_id,
-                operation_seq=operation_seq,
-                request_id=artifact_request_id,
-                kind=kind,
+                prepared.artifact_root,
+                operation_id=prepared.operation_id,
+                operation_seq=prepared.operation_seq,
+                request_id=prepared.request_id,
+                kind=prepared.kind,
                 reason=failure,
                 charged="measured",
                 finish_reason=(
-                    _redact(finish_reason, api_key)
+                    _redact(finish_reason, prepared.api_key)
                     if isinstance(finish_reason, str)
                     else None
                 ),
@@ -561,7 +796,7 @@ class MeteredOpenAIBackend:
             raise MeteredCallError(
                 failure,
                 model_id=(
-                    _redact(actual_model, api_key)
+                    _redact(actual_model, prepared.api_key)
                     if isinstance(actual_model, str)
                     else None
                 ),
@@ -570,16 +805,169 @@ class MeteredOpenAIBackend:
                 cost_usd=(
                     total_liability_cost
                     if total_liability_cost is not None
-                    else reservation
+                    else prepared.reservation
                 ),
             )
-        return MeteredCompletion(
-            response=content,
+        assert accepted_message is not None
+        return _ProcessedCompletion(
+            message=accepted_message,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_usd=account_charge_cost,
-            model_id=self.model,
         )
+
+    @staticmethod
+    def _validate_tools(
+        tools: object,
+    ) -> tuple[list[dict[str, object]], frozenset[str]]:
+        copied = _json_copy(tools, label="tools")
+        if not isinstance(copied, list):
+            raise MeteredConfigurationError("tools must be a list of function definitions")
+        names: set[str] = set()
+        for tool in copied:
+            function = tool.get("function") if isinstance(tool, dict) else None
+            name = function.get("name") if isinstance(function, dict) else None
+            if (
+                not isinstance(tool, dict)
+                or tool.get("type") != "function"
+                or not isinstance(function, dict)
+                or not isinstance(name, str)
+                or not _FUNCTION_NAME.fullmatch(name)
+            ):
+                raise MeteredConfigurationError(
+                    "tools must contain valid OpenAI function definitions"
+                )
+            if name in names:
+                raise MeteredConfigurationError("tool function names must be unique")
+            names.add(name)
+        return copied, frozenset(names)
+
+    @classmethod
+    def _validate_messages(
+        cls,
+        messages: object,
+        *,
+        tool_names: frozenset[str],
+    ) -> list[dict[str, object]]:
+        copied = _json_copy(messages, label="messages")
+        if not isinstance(copied, list) or not copied:
+            raise MeteredConfigurationError("messages must be a nonempty list")
+        for message in copied:
+            if not isinstance(message, dict):
+                raise MeteredConfigurationError("each message must be an object")
+            role = message.get("role")
+            content = message.get("content")
+            if role in {"system", "user"}:
+                if not isinstance(content, str):
+                    raise MeteredConfigurationError(
+                        f"{role} message content must be a string"
+                    )
+            elif role == "assistant":
+                if content is not None and not isinstance(content, str):
+                    raise MeteredConfigurationError(
+                        "assistant message content must be a string or null"
+                    )
+                tool_calls = message.get("tool_calls")
+                if tool_calls is not None:
+                    try:
+                        cls._tool_calls(tool_calls, tool_names=tool_names)
+                    except MeteredCallError as exc:
+                        raise MeteredConfigurationError(str(exc)) from None
+                elif content is None:
+                    raise MeteredConfigurationError(
+                        "assistant messages require content or tool_calls"
+                    )
+            elif role == "tool":
+                call_id = message.get("tool_call_id")
+                if (
+                    not isinstance(content, str)
+                    or not isinstance(call_id, str)
+                    or not _TOOL_CALL_ID.fullmatch(call_id)
+                ):
+                    raise MeteredConfigurationError(
+                        "tool messages require string content and a valid tool_call_id"
+                    )
+            else:
+                raise MeteredConfigurationError("message role is outside the chat contract")
+        return copied
+
+    @classmethod
+    def _native_message(
+        cls,
+        message: object,
+        *,
+        finish_reason: object,
+        tool_names: frozenset[str],
+    ) -> dict[str, object]:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            raise MeteredCallError("response must contain one assistant message")
+        content = message.get("content")
+        if finish_reason == "length":
+            raise MeteredCallError("completion was truncated at max_tokens")
+        if finish_reason == "stop":
+            if not isinstance(content, str):
+                raise MeteredCallError("final assistant content must be a string")
+            if message.get("tool_calls") not in (None, []):
+                raise MeteredCallError("final assistant response cannot contain tool_calls")
+            return {"role": "assistant", "content": content}
+        if finish_reason == "tool_calls":
+            if content is not None and not isinstance(content, str):
+                raise MeteredCallError("tool-call assistant content must be a string or null")
+            calls = cls._tool_calls(message.get("tool_calls"), tool_names=tool_names)
+            return {"role": "assistant", "content": content, "tool_calls": calls}
+        raise MeteredCallError(
+            "completion finish_reason is outside the native response contract"
+        )
+
+    @staticmethod
+    def _tool_calls(
+        tool_calls: object,
+        *,
+        tool_names: frozenset[str],
+    ) -> list[dict[str, object]]:
+        if not isinstance(tool_calls, list) or not tool_calls:
+            raise MeteredCallError("response tool_calls must be a nonempty list")
+        accepted: list[dict[str, object]] = []
+        call_ids: set[str] = set()
+        for tool_call in tool_calls:
+            function = tool_call.get("function") if isinstance(tool_call, dict) else None
+            call_id = tool_call.get("id") if isinstance(tool_call, dict) else None
+            name = function.get("name") if isinstance(function, dict) else None
+            arguments = function.get("arguments") if isinstance(function, dict) else None
+            if (
+                not isinstance(tool_call, dict)
+                or tool_call.get("type") != "function"
+                or not isinstance(call_id, str)
+                or not _TOOL_CALL_ID.fullmatch(call_id)
+            ):
+                raise MeteredCallError("response tool_calls have a malformed id or type")
+            if call_id in call_ids:
+                raise MeteredCallError("response contains duplicate tool-call ids")
+            call_ids.add(call_id)
+            if (
+                not isinstance(name, str)
+                or not _FUNCTION_NAME.fullmatch(name)
+                or name not in tool_names
+            ):
+                raise MeteredCallError("response tool-call name is not declared")
+            if not isinstance(arguments, str):
+                raise MeteredCallError("response tool-call arguments must be a JSON object")
+            try:
+                decoded_arguments = _decode_json_arguments(arguments)
+            except (ValueError, RecursionError):
+                raise MeteredCallError(
+                    "response tool-call arguments must be a JSON object"
+                ) from None
+            if not isinstance(decoded_arguments, dict):
+                raise MeteredCallError("response tool-call arguments must be a JSON object")
+            accepted.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                }
+            )
+        return accepted
 
     def _usage(
         self, data: object, *, max_tokens: int
@@ -587,11 +975,12 @@ class MeteredOpenAIBackend:
         usage = data.get("usage") if isinstance(data, dict) else None
         if not isinstance(usage, dict):
             raise MeteredCallError("response usage is absent or malformed")
+        usage = cast(dict[str, Any], usage)
         input_tokens = usage.get("prompt_tokens")
         output_tokens = usage.get("completion_tokens")
         if not _token_count(input_tokens) or not _token_count(output_tokens):
             raise MeteredCallError("response usage is absent or malformed")
-        if input_tokens > CONTEXT_TOKENS or output_tokens > max_tokens:
+        if input_tokens + output_tokens > CONTEXT_TOKENS or output_tokens > max_tokens:
             raise MeteredCallError("response usage exceeds the reserved token bounds")
         details = usage.get("prompt_tokens_details")
         cached_tokens = 0
@@ -826,17 +1215,122 @@ class MeteredOpenAIBackend:
             os.chmod(path, 0o700 if path.is_dir() else 0o600)
 
 
-def _token_count(value: object) -> bool:
+def _token_count(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-def _finite_nonnegative_number(value: object) -> bool:
+def _finite_nonnegative_number(value: object) -> TypeGuard[int | float]:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return False
     try:
         return math.isfinite(value) and value >= 0
     except OverflowError:
         return False
+
+
+def _json_copy(value: object, *, label: str) -> Any:
+    try:
+        return json.loads(
+            json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        )
+    except (TypeError, ValueError, RecursionError):
+        raise MeteredConfigurationError(f"{label} must contain valid JSON values") from None
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant {value!r}")
+
+
+def _decode_json_arguments(arguments: str) -> object:
+    return json.loads(arguments, parse_constant=_reject_json_constant)
+
+
+def _decoded_tool_arguments_contain_secret(message: object, secret: str) -> bool:
+    tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+    if not isinstance(tool_calls, list):
+        return False
+    for tool_call in tool_calls:
+        function = tool_call.get("function") if isinstance(tool_call, dict) else None
+        arguments = function.get("arguments") if isinstance(function, dict) else None
+        if not isinstance(arguments, str):
+            continue
+        try:
+            decoded = _decode_json_arguments(arguments)
+        except (ValueError, RecursionError):
+            continue
+        if _tree_contains_secret(decoded, secret):
+            return True
+    return False
+
+
+def _redact_native_message(message: object, secret: str) -> object:
+    redacted = _redact_tree(message, secret)
+    source_calls = message.get("tool_calls") if isinstance(message, dict) else None
+    redacted_calls = redacted.get("tool_calls") if isinstance(redacted, dict) else None
+    if not isinstance(source_calls, list) or not isinstance(redacted_calls, list):
+        return redacted
+    for source_call, redacted_call in zip(source_calls, redacted_calls, strict=True):
+        source_function = (
+            source_call.get("function") if isinstance(source_call, dict) else None
+        )
+        redacted_function = (
+            redacted_call.get("function") if isinstance(redacted_call, dict) else None
+        )
+        arguments = (
+            source_function.get("arguments")
+            if isinstance(source_function, dict)
+            else None
+        )
+        if not isinstance(arguments, str) or not isinstance(redacted_function, dict):
+            continue
+        try:
+            decoded = _decode_json_arguments(arguments)
+        except (ValueError, RecursionError):
+            continue
+        if _tree_contains_secret(decoded, secret):
+            redacted_function["arguments"] = json.dumps(
+                _redact_tree(decoded, secret),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+    return redacted
+
+
+def _serialized_chat_tokens(
+    messages: list[dict[str, object]], tools: list[dict[str, object]]
+) -> int:
+    import tiktoken
+
+    serialized = json.dumps(
+        {"messages": messages, "tools": tools},
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    encoder = tiktoken.get_encoding("o200k_base")
+    framing = _CHAT_FRAMING_BASE_TOKENS + _CHAT_FRAMING_ITEM_TOKENS * (
+        len(messages) + len(tools)
+    )
+    return len(encoder.encode_ordinary(serialized)) + framing
+
+
+def _tree_contains_secret(value: object, secret: str) -> bool:
+    if not secret:
+        return False
+    if isinstance(value, str):
+        return secret in value
+    if isinstance(value, list):
+        return any(_tree_contains_secret(item, secret) for item in value)
+    if isinstance(value, dict):
+        return any(
+            (isinstance(key, str) and secret in key)
+            or _tree_contains_secret(item, secret)
+            for key, item in value.items()
+        )
+    return False
 
 
 def _redact(value: str, secret: str) -> str:
