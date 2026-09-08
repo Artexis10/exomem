@@ -474,7 +474,9 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       chronologically, and answer through fresh-agent iterative recall.
 - [ ] 6.4a Extend capped transport for structured tool completions without
       changing the existing text-reader/judge contract; exercise failures and
-      accounting offline.
+      accounting offline. Freeze optional Sol-low native agent and fixed GPT-4o
+      judge roles separately, preserve reasoning through tools, and enforce one
+      currency ledger across both models including unknown-charge stops.
 - [ ] 6.4b Verify real public-MCP writing, correction and fresh recall using a
       scripted offline agent; bind actual operation receipts and phase evidence.
       Keep no-write and budget-exhausted outcomes visible.

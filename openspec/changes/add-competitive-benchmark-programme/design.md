@@ -703,6 +703,20 @@ or replace the external LongMemEval dataset and judge.
   discovery, guidance reads and every individual tool call. Bound IPC, responses
   and stored bytes. Cancellation stops pending broker work and owned children;
   uncertain mutations retain their identity and are never replayed as new writes.
+- Freeze writer/answer and judge model roles separately. The native agent may
+  select the explicit OpenRouter GPT-5.6 Sol profile with low reasoning; the
+  official judge stays on `gpt-4o-2024-08-06`. The source-only default is unchanged.
+  Both profiles reserve and settle against the same immutable ledger, including
+  uncertain calls. Reject unpriced profiles, direct-OpenAI Sol requests, changed
+  prepared model settings, response model/provider drift and unsupported request
+  parameters. Preserve returned reasoning blocks unchanged across tool rounds.
+  Retain the 128k accounting envelope and 4096 output limit, including reasoning.
+  Freeze promotional OpenRouter rates verified on 2026-09-08: Sol input $2/M,
+  cache read $0.20/M, cache write $2.50/M, output $10/M. Reserve input at the
+  maximum cache-write rate; price-limit routing refuses a later price increase.
+  Account cache-write tokens explicitly when reported; account charges remain
+  authoritative. A profile change requires a fresh preparation and is reported
+  as a changed agent configuration, never relabeled as a rerun of the old model.
 - Preserve each model request, tool call/result, phase boundary, committed-write
   receipt, vault snapshot digest and measured spend. Report observed captures,
   compiled writes, updates and connections separately from requested behavior.

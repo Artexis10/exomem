@@ -20,6 +20,8 @@ from membench.judge.backends import PhaseOutcome
 from membench.judge.handshake import RequestItem
 from protocol.budget import BudgetExceeded, BudgetLedger
 
+from lme.metered_profiles import JUDGE_MODEL, ModelProfile, model_profile
+
 VERIFIED_MODEL = "gpt-4o-2024-08-06"
 OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
@@ -89,6 +91,7 @@ class _PreparedCall:
     operation_seq: int
     request_id: str | None
     reservation: float
+    profile: ModelProfile
 
 
 @dataclass(frozen=True)
@@ -130,10 +133,10 @@ class MeteredOpenAIBackend:
     ) -> None:
         if transport not in {"openai", "openrouter"}:
             raise MeteredConfigurationError("transport must be 'openai' or 'openrouter'")
-        if model != VERIFIED_MODEL:
-            raise MeteredConfigurationError(
-                f"verified model must be exactly {VERIFIED_MODEL!r}"
-            )
+        try:
+            profile = model_profile(model, transport)
+        except ValueError as exc:
+            raise MeteredConfigurationError(str(exc)) from None
         if isinstance(cap_usd, bool) or not isinstance(cap_usd, (int, float)):
             raise MeteredConfigurationError("cap_usd must be finite and positive")
         cap = float(cap_usd)
@@ -154,11 +157,13 @@ class MeteredOpenAIBackend:
             raise MeteredConfigurationError("run_dir must identify a directory")
         os.chmod(self.run_dir, 0o700)
         self.model = model
+        self.profile = profile
+        self.profiles = {name: model_profile(name, transport) for name in {model, JUDGE_MODEL}}
         self.transport = transport
         self.endpoint = (
             OPENROUTER_ENDPOINT if transport == "openrouter" else OPENAI_ENDPOINT
         )
-        self.wire_model = OPENROUTER_MODEL if transport == "openrouter" else model
+        self.wire_model = profile.wire_model(transport)
         self.provider = OPENAI_PROVIDER
         self.api_key_env = api_key_env
         self.cap_usd = cap
@@ -167,12 +172,12 @@ class MeteredOpenAIBackend:
         pricing_path = self.run_dir / "pricing.yaml"
         self._write_once(
             pricing_path,
-            (
-                "models:\n"
-                f"  {VERIFIED_MODEL}:\n"
-                f"    input_per_million_usd: {INPUT_PER_MILLION_USD:.2f}\n"
-                f"    cached_input_per_million_usd: {CACHED_INPUT_PER_MILLION_USD:.2f}\n"
-                f"    output_per_million_usd: {OUTPUT_PER_MILLION_USD:.2f}\n"
+            "models:\n" + "".join(
+                f"  {name}:\n"
+                f"    input_per_million_usd: {item.input_rate:.2f}\n"
+                f"    cached_input_per_million_usd: {item.cached_rate:.2f}\n"
+                f"    output_per_million_usd: {item.output_rate:.2f}\n"
+                for name, item in sorted(self.profiles.items())
             ),
         )
         self.ledger = BudgetLedger(
@@ -182,15 +187,19 @@ class MeteredOpenAIBackend:
 
         config = {
             "api_key_env": api_key_env,
-            "cached_input_per_million_usd": CACHED_INPUT_PER_MILLION_USD,
+            "cached_input_per_million_usd": profile.cached_rate,
             "cap_usd": cap,
             "endpoint": self.endpoint,
-            "input_per_million_usd": INPUT_PER_MILLION_USD,
+            "input_per_million_usd": profile.input_rate,
             "model": model,
-            "output_per_million_usd": OUTPUT_PER_MILLION_USD,
+            "output_per_million_usd": profile.output_rate,
             "provider": self.provider,
-            "pricing_source": "https://developers.openai.com/api/docs/models/gpt-4o",
-            "pricing_verified_on": "2026-09-08",
+            "pricing_source": profile.pricing_source,
+            "pricing_verified_on": profile.pricing_verified_on,
+            "cache_write_per_million_usd": profile.cache_write_rate,
+            "reasoning_effort": profile.reasoning_effort,
+            "allowed_models": sorted(self.profiles),
+            "context_preflight": "utf8-upper-bound" if profile.reasoning_effort else "o200k_base-estimate",
             "reservation_input_tokens": CONTEXT_TOKENS,
             "transport": transport,
             "wire_model": self.wire_model,
@@ -219,13 +228,18 @@ class MeteredOpenAIBackend:
         *,
         tools: list[dict],
         max_tokens: int = 4096,
+        model: str | None = None,
     ) -> MeteredChatCompletion:
         """Complete one bounded native-agent turn with standard function tools."""
 
+        selected = self.model if model is None else model
+        if selected not in self.profiles:
+            raise MeteredConfigurationError("model is outside the frozen ledger profiles")
+        profile = self.profiles[selected]
         self._validate_max_tokens(max_tokens, maximum=4096)
         tool_definitions, tool_names = self._validate_tools(tools)
         message_history = self._validate_messages(messages, tool_names=tool_names)
-        input_tokens = _serialized_chat_tokens(message_history, tool_definitions)
+        input_tokens = _serialized_chat_tokens(message_history, tool_definitions, byte_bound=profile.reasoning_effort is not None)
         if input_tokens + max_tokens > CONTEXT_TOKENS:
             raise MeteredConfigurationError(
                 "serialized messages and tools exceed the verified model context window"
@@ -234,6 +248,7 @@ class MeteredOpenAIBackend:
             message_history,
             max_tokens=max_tokens,
             tools=tool_definitions or None,
+            profile=profile,
         )
         prepared = self._prepare_call(
             body,
@@ -296,7 +311,7 @@ class MeteredOpenAIBackend:
             input_tokens=processed.input_tokens,
             output_tokens=processed.output_tokens,
             cost_usd=processed.cost_usd,
-            model_id=self.model,
+            model_id=prepared.profile.model,
         )
 
     def run_phase(
@@ -406,6 +421,10 @@ class MeteredOpenAIBackend:
         if not isinstance(prompt, str) or not prompt:
             raise MeteredConfigurationError("prompt must be a nonblank string")
         self._validate_max_tokens(max_tokens, maximum=512)
+        if self.profile.reasoning_effort and _serialized_chat_tokens(
+            [{"role": "user", "content": prompt}], [], byte_bound=True
+        ) + max_tokens > CONTEXT_TOKENS:
+            raise MeteredConfigurationError("prompt exceeds the reserved context envelope")
         body = self._request_body(
             [{"role": "user", "content": prompt}], max_tokens=max_tokens
         )
@@ -459,7 +478,7 @@ class MeteredOpenAIBackend:
             input_tokens=processed.input_tokens,
             output_tokens=processed.output_tokens,
             cost_usd=processed.cost_usd,
-            model_id=self.model,
+            model_id=prepared.profile.model,
         )
 
     @staticmethod
@@ -479,14 +498,18 @@ class MeteredOpenAIBackend:
         *,
         max_tokens: int,
         tools: list[dict[str, object]] | None = None,
+        profile: ModelProfile | None = None,
     ) -> dict[str, object]:
+        profile = profile or self.profile
         body: dict[str, object] = {
-            "model": self.wire_model,
+            "model": profile.wire_model(self.transport),
             "messages": messages,
-            "temperature": 0,
-            "n": 1,
             "max_tokens": max_tokens,
         }
+        if profile.reasoning_effort:
+            body["reasoning"] = {"effort": profile.reasoning_effort}
+        else:
+            body.update(temperature=0, n=1)
         if tools is not None:
             body.update(
                 {
@@ -508,8 +531,8 @@ class MeteredOpenAIBackend:
                         "allow_fallbacks": False,
                         "require_parameters": True,
                         "max_price": {
-                            "prompt": INPUT_PER_MILLION_USD,
-                            "completion": OUTPUT_PER_MILLION_USD,
+                            "prompt": profile.input_rate,
+                            "completion": profile.output_rate,
                             "request": 0,
                         },
                     },
@@ -534,10 +557,14 @@ class MeteredOpenAIBackend:
             )
         artifact_request_id = _redact(request_id, api_key) if request_id is not None else None
 
+        profile = next((p for p in self.profiles.values()
+                        if p.wire_model(self.transport) == body["model"]), None)
+        if profile is None:
+            raise MeteredConfigurationError("unpriced request model")
         operation_id = secrets.token_hex(16)
         reservation = (
-            CONTEXT_TOKENS * INPUT_PER_MILLION_USD / 1_000_000
-            + max_tokens * OUTPUT_PER_MILLION_USD / 1_000_000
+            CONTEXT_TOKENS * max(profile.input_rate, profile.cache_write_rate) / 1_000_000
+            + max_tokens * profile.output_rate / 1_000_000
         )
         with self._lock:
             operation_seq = self._next_seq()
@@ -548,7 +575,7 @@ class MeteredOpenAIBackend:
                     actor=self.name,
                     op=operation_id,
                     units=reservation,
-                    model_id=self.model,
+                    model_id=profile.model,
                 )
             finally:
                 self._privatize(self.run_dir)
@@ -571,6 +598,7 @@ class MeteredOpenAIBackend:
             operation_seq=operation_seq,
             request_id=artifact_request_id,
             reservation=reservation,
+            profile=profile,
         )
 
     def _decode_reply(self, reply: object, prepared: _PreparedCall) -> object:
@@ -611,7 +639,7 @@ class MeteredOpenAIBackend:
         tool_names: frozenset[str],
     ) -> _ProcessedCompletion:
         try:
-            usage, input_tokens, output_tokens, cached_tokens, cached_rate_applied = (
+            usage, input_tokens, output_tokens, cached_tokens, cached_rate_applied, cache_write_tokens = (
                 self._usage(data, max_tokens=prepared.max_tokens)
             )
         except MeteredCallError as exc:
@@ -624,11 +652,13 @@ class MeteredOpenAIBackend:
                 reason=str(exc),
             )
             raise
-        uncached_tokens = input_tokens - cached_tokens
-        uncached_input_cost = uncached_tokens * INPUT_PER_MILLION_USD / 1_000_000
-        cached_input_cost = cached_tokens * CACHED_INPUT_PER_MILLION_USD / 1_000_000
-        input_cost = uncached_input_cost + cached_input_cost
-        output_cost = output_tokens * OUTPUT_PER_MILLION_USD / 1_000_000
+        profile = prepared.profile
+        uncached_tokens = input_tokens - cached_tokens - cache_write_tokens
+        uncached_input_cost = uncached_tokens * profile.input_rate / 1_000_000
+        cached_input_cost = cached_tokens * profile.cached_rate / 1_000_000
+        cache_write_cost = cache_write_tokens * profile.cache_write_rate / 1_000_000
+        input_cost = uncached_input_cost + cached_input_cost + cache_write_cost
+        output_cost = output_tokens * profile.output_rate / 1_000_000
         token_derived_cost = input_cost + output_cost
         account_charge_cost = token_derived_cost
         is_byok: bool | None = None
@@ -707,7 +737,7 @@ class MeteredOpenAIBackend:
         )
         if credential_reflected:
             failure = "completion contained the configured credential"
-        elif actual_model != self.wire_model:
+        elif actual_model != prepared.profile.wire_model(self.transport):
             failure = "response model differs from the verified model"
         elif self.transport == "openrouter" and actual_provider != self.provider:
             failure = "response provider differs from the required provider"
@@ -742,6 +772,8 @@ class MeteredOpenAIBackend:
             "account_charge_cost_usd": account_charge_cost,
             "actual_model": actual_model,
             "cost_breakdown": {
+                "cache_write_tokens": cache_write_tokens,
+                "cache_write_cost_usd": cache_write_cost,
                 "cached_input_cost_usd": cached_input_cost,
                 "cached_input_tokens": cached_tokens,
                 "cached_rate_applied": cached_rate_applied,
@@ -918,7 +950,19 @@ class MeteredOpenAIBackend:
             if content is not None and not isinstance(content, str):
                 raise MeteredCallError("tool-call assistant content must be a string or null")
             calls = cls._tool_calls(message.get("tool_calls"), tool_names=tool_names)
-            return {"role": "assistant", "content": content, "tool_calls": calls}
+            accepted = {"role": "assistant", "content": content, "tool_calls": calls}
+            # OpenRouter requires opaque reasoning blocks to survive tool rounds
+            # unchanged. They remain private transcript data, never tool input.
+            for key in ("reasoning", "reasoning_details"):
+                value = message.get(key)
+                if value is not None:
+                    if (key == "reasoning" and not isinstance(value, str)) or (
+                        key == "reasoning_details" and
+                        (not isinstance(value, list) or any(not isinstance(v, dict) for v in value))
+                    ):
+                        raise MeteredCallError("response reasoning state is malformed")
+                    accepted[key] = _json_copy(value, label="reasoning state")
+            return accepted
         raise MeteredCallError(
             "completion finish_reason is outside the native response contract"
         )
@@ -975,7 +1019,7 @@ class MeteredOpenAIBackend:
 
     def _usage(
         self, data: object, *, max_tokens: int
-    ) -> tuple[dict[str, Any], int, int, int, bool]:
+    ) -> tuple[dict[str, Any], int, int, int, bool, int]:
         usage = data.get("usage") if isinstance(data, dict) else None
         if not isinstance(usage, dict):
             raise MeteredCallError("response usage is absent or malformed")
@@ -998,7 +1042,10 @@ class MeteredOpenAIBackend:
             if cached is not None:
                 cached_tokens = cached
                 cached_rate_applied = True
-        return usage, input_tokens, output_tokens, cached_tokens, cached_rate_applied
+        writes = details.get("cache_write_tokens", 0) if details is not None else 0
+        if not _token_count(writes) or writes + cached_tokens > input_tokens:
+            raise MeteredCallError("response cache-write token usage is malformed")
+        return usage, input_tokens, output_tokens, cached_tokens, cached_rate_applied, writes
 
     def _openrouter_accounting(
         self, usage: dict[str, Any], *, reservation: float
@@ -1303,7 +1350,7 @@ def _redact_native_message(message: object, secret: str) -> object:
 
 
 def _serialized_chat_tokens(
-    messages: list[dict[str, object]], tools: list[dict[str, object]]
+    messages: list[dict[str, object]], tools: list[dict[str, object]], *, byte_bound: bool = False
 ) -> int:
     import tiktoken
 
@@ -1318,7 +1365,10 @@ def _serialized_chat_tokens(
     framing = _CHAT_FRAMING_BASE_TOKENS + _CHAT_FRAMING_ITEM_TOKENS * (
         len(messages) + len(tools)
     )
-    return len(encoder.encode_ordinary(serialized)) + framing
+    # Installed tiktoken does not identify Sol's tokenizer. UTF-8 bytes give
+    # a conservative text-token upper bound instead of claiming a GPT-4o count.
+    tokens = len(serialized.encode("utf-8")) if byte_bound else len(encoder.encode_ordinary(serialized))
+    return tokens + framing
 
 
 def _tree_contains_secret(value: object, secret: str) -> bool:

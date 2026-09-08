@@ -207,7 +207,8 @@ def test_native_no_write_and_exhausted_outcomes_are_honest(inputs, tmp_path, bud
         assert "hypothesis" not in row
 
 
-def test_native_execution_uses_capped_async_judge_and_reports_complete_denominator(inputs, tmp_path, monkeypatch):
+@pytest.mark.parametrize("agent_model", ["gpt-4o-2024-08-06", "gpt-5.6-sol"])
+def test_native_execution_uses_capped_async_judge_and_reports_complete_denominator(inputs, tmp_path, monkeypatch, agent_model):
     from types import SimpleNamespace
 
     from lme.dataset import load_dataset_bytes
@@ -219,13 +220,15 @@ def test_native_execution_uses_capped_async_judge_and_reports_complete_denominat
     # The execution seam is isolated here; fixture paid-refusal and full semantic
     # preparation validation are exercised separately.
     plan["profile"] = "semantic"
+    plan["model"] = agent_model
+    plan["models"] = pilot.model_contract(agent_model, "openrouter")
     monkeypatch.setattr(pilot, "validate_native_run", lambda *a, **k: plan)
     monkeypatch.setenv("OPENROUTER_API_KEY", "offline-synthetic-key")
     requests = []
 
     class Backend:
-        async def complete_messages(self, messages, *, tools, max_tokens):
-            requests.append((messages, tools, max_tokens))
+        async def complete_messages(self, messages, *, tools, max_tokens, model):
+            requests.append((messages, tools, max_tokens, model))
             return SimpleNamespace(message={"role": "assistant", "content": "yes"}, input_tokens=30, output_tokens=1)
 
     monkeypatch.setattr(pilot, "_make_backend", lambda *a, **k: Backend())
@@ -248,7 +251,7 @@ def test_native_execution_uses_capped_async_judge_and_reports_complete_denominat
     assert result["accuracy"] == 1
     assert result["publishable"] is False
     assert result["envelope"]["tokens"] == 31
-    assert requests == [([{"role": "user", "content": "Unmodified official judge prompt"}], [], 10)]
+    assert requests == [([{"role": "user", "content": "Unmodified official judge prompt"}], [], 10, "gpt-4o-2024-08-06")]
 
 
 def test_model_asset_tamper_refuses_prepared_run_before_spend(inputs, tmp_path, monkeypatch):
@@ -270,3 +273,18 @@ def test_model_asset_tamper_refuses_prepared_run_before_spend(inputs, tmp_path, 
     with pytest.raises(ValueError, match="model assets changed"):
         pilot.execute_native(out, expected_plan_sha256=info["plan_sha256"], approval_token="offline test")
     assert not (out / "execution").exists()
+
+
+def test_native_freezes_role_models_and_rejects_pricing_drift(inputs, tmp_path):
+    dataset, product = inputs
+    out = tmp_path / "run"
+    info = pilot.prepare_native(dataset, Path("fixture-judge"), out, product_root=product,
+        profile="fixture", budget_cap_usd=2, agent_model="gpt-5.6-sol")
+    plan = pilot.validate_native_run(out, expected_plan_sha256=info["plan_sha256"])
+    assert plan["models"]["agent"]["model"] == "gpt-5.6-sol"
+    assert plan["models"]["judge"]["model"] == "gpt-4o-2024-08-06"
+    plan["models"]["agent"]["input_rate"] = 0
+    raw = pilot._json(plan)
+    (out / "native-plan.json").write_bytes(raw)
+    with pytest.raises(ValueError, match="model contract differs"):
+        pilot.validate_native_run(out, expected_plan_sha256=pilot._sha(raw))

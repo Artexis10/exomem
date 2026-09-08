@@ -152,6 +152,8 @@ def test_complete_reserves_before_call_then_commits_measured_usage_and_releases(
         "prompt_tokens_details": {"cached_tokens": 20},
     }
     assert result_row["cost_breakdown"] == {
+        "cache_write_tokens": 0,
+        "cache_write_cost_usd": 0.0,
         "cached_input_cost_usd": pytest.approx(0.000025),
         "cached_input_tokens": 20,
         "cached_rate_applied": True,

@@ -638,3 +638,103 @@ def test_existing_text_completion_rejects_tool_calls(
 
     with pytest.raises(MeteredCallError, match="completion"):
         backend.complete("question")
+
+
+def test_sol_native_and_fixed_judge_share_budget_and_preserve_reasoning(tmp_path, monkeypatch):
+    from lme import metered
+    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
+    backend = metered.MeteredOpenAIBackend(tmp_path / 'run', cap_usd=0.7,
+        approval_token='test', transport='openrouter', model='gpt-5.6-sol')
+    message = _tool_message()
+    message['reasoning_details'] = [{'type': 'reasoning.encrypted', 'data': 'opaque',
+                                      'id': 'rs_1', 'format': 'openai-responses-v1'}]
+    response = _payload(message, finish_reason='tool_calls', transport='openrouter', cost=0.35)
+    response['model'] = 'openai/gpt-5.6-sol'
+    response['usage']['prompt_tokens_details']['cache_write_tokens'] = 30
+    client = FakeAsyncClient([FakeResponse(response), FakeResponse(_payload(
+        {'role': 'assistant', 'content': 'yes'}, finish_reason='stop', transport='openrouter', cost=0.01))])
+    monkeypatch.setattr(metered.httpx, 'AsyncClient', lambda **kwargs: client)
+    history = [{'role': 'user', 'content': 'Recall this.'}]
+    first = asyncio.run(backend.complete_messages(history, tools=TOOLS, max_tokens=4096))
+    assert first.message == message
+    assert first.model_id == 'gpt-5.6-sol'
+    body = client.requests[0]['json']
+    assert body['reasoning'] == {'effort': 'low'}
+    assert not {'temperature', 'n', 'parallel_tool_calls'} & body.keys()
+    assert body['provider']['max_price']['prompt'] == 2.0
+    assert body['max_tokens'] == 4096
+    assert body['tool_choice'] == 'auto'
+    result = _jsonl(tmp_path / 'run/results.jsonl')[0]
+    assert result['token_derived_cost_usd'] == pytest.approx((50*2 + 20*.2 + 30*2.5 + 10*10)/1e6)
+    judged = asyncio.run(backend.complete_messages([{'role': 'user', 'content': 'Judge'}],
+        tools=[], max_tokens=10, model=MODEL))
+    assert judged.model_id == MODEL
+    assert client.requests[1]['json']['model'] == OPENROUTER_MODEL
+    assert client.requests[1]['json']['temperature'] == 0
+    assert 'reasoning' not in client.requests[1]['json']
+    with pytest.raises(metered.BudgetExceeded):
+        asyncio.run(backend.complete_messages(history + [first.message,
+            {'role': 'tool', 'tool_call_id': 'call_1', 'content': 'found'}], tools=TOOLS))
+    assert len(client.requests) == 2
+
+
+def test_sol_profile_requires_explicit_openrouter_selection(tmp_path):
+    from lme import metered
+    with pytest.raises(metered.MeteredConfigurationError):
+        metered.MeteredOpenAIBackend(tmp_path/'direct', cap_usd=1, approval_token='test', model='gpt-5.6-sol')
+    default = metered.MeteredOpenAIBackend(tmp_path/'default', cap_usd=1, approval_token='test')
+    with pytest.raises(metered.MeteredConfigurationError):
+        asyncio.run(default.complete_messages([{'role':'user','content':'Hi'}], tools=[], model='gpt-5.6-sol'))
+    assert not (tmp_path/'default/requests.jsonl').exists()
+
+
+def test_sol_reasoning_is_replayed_verbatim_and_unknown_charge_stops_judge(tmp_path, monkeypatch):
+    from lme import metered
+    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
+    backend = metered.MeteredOpenAIBackend(tmp_path/'run', cap_usd=2,
+        approval_token='test', model='gpt-5.6-sol', transport='openrouter')
+    message = _tool_message()
+    message['reasoning_details'] = [{'type':'reasoning.encrypted', 'data':'opaque-state'}]
+    first = _payload(message, finish_reason='tool_calls', transport='openrouter')
+    first['model'] = 'openai/gpt-5.6-sol'
+    client = FakeAsyncClient([FakeResponse(first), FakeResponse({}, status_code=503)])
+    monkeypatch.setattr(metered.httpx, 'AsyncClient', lambda **kwargs: client)
+    history = [{'role':'user','content':'Recall'}]
+    result = asyncio.run(backend.complete_messages(history, tools=TOOLS))
+    history.extend([result.message, {'role':'tool','tool_call_id':'call_1','content':'found'}])
+    with pytest.raises(metered.MeteredCallError):
+        asyncio.run(backend.complete_messages(history, tools=TOOLS))
+    assert client.requests[1]['json']['messages'][1] == message
+    held = _jsonl(tmp_path/'run/ledger.jsonl')[-1]
+    assert held['kind'] == 'reserve' and held['units'] == pytest.approx(.36096)
+    with pytest.raises(metered.BudgetExceeded):
+        asyncio.run(backend.complete_messages([{'role':'user','content':'Judge'}],
+            tools=[], max_tokens=10, model=MODEL))
+    assert len(client.requests) == 2
+
+
+@pytest.mark.parametrize('writes', [-1, True, 81, '20'])
+def test_sol_malformed_cache_writes_retain_reservation(tmp_path, monkeypatch, writes):
+    from lme import metered
+    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
+    backend = metered.MeteredOpenAIBackend(tmp_path/'run', cap_usd=1,
+        approval_token='test', model='gpt-5.6-sol', transport='openrouter')
+    reply = _payload({'role':'assistant','content':'Done'}, finish_reason='stop', transport='openrouter')
+    reply['model'] = 'openai/gpt-5.6-sol'
+    reply['usage']['prompt_tokens_details']['cache_write_tokens'] = writes
+    client = FakeAsyncClient([FakeResponse(reply)])
+    monkeypatch.setattr(metered.httpx, 'AsyncClient', lambda **kwargs: client)
+    with pytest.raises(metered.MeteredCallError, match='cache-write'):
+        asyncio.run(backend.complete_messages([{'role':'user','content':'Hi'}], tools=[]))
+    assert (tmp_path/'run/STOP').exists()
+    assert not any(x['kind']=='commit' for x in _jsonl(tmp_path/'run/ledger.jsonl'))
+
+
+def test_sol_context_uses_byte_bound_before_spending(tmp_path, monkeypatch):
+    from lme import metered
+    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
+    backend = metered.MeteredOpenAIBackend(tmp_path/'run', cap_usd=1,
+        approval_token='test', model='gpt-5.6-sol', transport='openrouter')
+    with pytest.raises(metered.MeteredConfigurationError, match='context'):
+        asyncio.run(backend.complete_messages([{'role':'user','content':'a'*128000}], tools=[]))
+    assert not (tmp_path/'run/requests.jsonl').exists()

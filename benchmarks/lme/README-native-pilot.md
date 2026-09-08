@@ -52,9 +52,24 @@ manager, then execute the prepared plan:
   --api-key-env EXOMEM_BENCHMARK_OPENROUTER_API_KEY
 ```
 
-The dated GPT-4o model, provider routing and accounting match the
-[scored replay](README-scored-pilot.md). Tool arguments and results remain real
-public MCP payloads. The answer phase has recall-only access; writers cannot
+The default writer/answer model remains the dated GPT-4o model used by the
+[scored replay](README-scored-pilot.md). To prepare a distinct native-agent
+configuration, add `--agent-model gpt-5.6-sol --transport openrouter`.
+This selects Sol with low reasoning for writing and answering; the official
+judge remains `gpt-4o-2024-08-06`. Preparation records both roles and their
+rates. All requests share one immutable ledger and spending cap.
+
+The Sol profile preserves returned reasoning blocks across tool calls and uses
+only parameters advertised by OpenRouter's standard OpenAI endpoint. Its frozen
+promotional rates, verified on 2026-09-08, are $2/M input, $0.20/M cached input,
+$2.50/M cache writes and $10/M output. Routing rejects higher input/output
+prices. Reservations cover the more expensive cache-write rate. The diagnostic
+keeps a 128k accounting envelope; its Sol context preflight uses a conservative
+UTF-8 byte bound because the installed tokenizer lacks a verified Sol mapping.
+The 4096-token output limit includes reasoning. A model change requires a new
+preparation and must be disclosed when comparing results.
+
+Tool arguments and results remain real public MCP payloads. The answer phase has recall-only access; writers cannot
 see future questions, gold answers or answer-session labels. Every question
 gets a separate vault, configuration, state root, lease, logs and model cache.
 No personal Exomem service is used. Text-only ingestion excludes remote files,
