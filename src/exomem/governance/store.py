@@ -311,6 +311,7 @@ def _commit_enrolled_v3_store(
     now: int,
     source_recheck: Callable[[], None] | None = None,
     expected_custody: AuthorizationCustody | None = None,
+    hosted_recovery: bool = False,
 ) -> tuple[VerifiedActiveGovernanceState, AuthorizationCustody]:
     """Commit one pre-enrolled exact-v3 store to its exact v4 target.
 
@@ -373,7 +374,12 @@ def _commit_enrolled_v3_store(
                         )
 
                     target = schema_v4.migration_target(seed)
-                    custody = authorization_custody.load_authorization_custody(
+                    load_custody = (
+                        authorization_custody.load_hosted_migration_custody
+                        if hosted_recovery
+                        else authorization_custody.load_authorization_custody
+                    )
+                    custody = load_custody(
                         root,
                         now=now,
                     )
@@ -504,6 +510,28 @@ def commit_enrolled_v3_store(
         now=now,
         source_recheck=source_recheck,
         expected_custody=expected_custody,
+    )
+    return active
+
+
+def commit_hosted_enrolled_v3_store(
+    vault_root: Path,
+    *,
+    seed: MigrationSeed,
+    expected_source_store_digest: str,
+    now: int,
+    expected_custody: AuthorizationCustody,
+    source_recheck: Callable[[], None] | None = None,
+) -> VerifiedActiveGovernanceState:
+    """Recheck fixed drained hosted custody at the recovery transaction boundary."""
+    active, _custody = _commit_enrolled_v3_store(
+        vault_root,
+        seed=seed,
+        expected_source_store_digest=expected_source_store_digest,
+        now=now,
+        source_recheck=source_recheck,
+        expected_custody=expected_custody,
+        hosted_recovery=True,
     )
     return active
 
