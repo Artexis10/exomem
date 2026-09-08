@@ -6,6 +6,11 @@ New evidence uploads retain the original bytes and create a searchable source
 card. This applies to direct preservation, streaming uploads and client evidence
 attachments that use the shared preservation operation.
 
+Uploaded CSV/JSON are immutable source snapshots for recall, exact read-only
+queries, citations and connected findings. Ongoing editable state belongs in
+Records. This upload path does not add a CSV/JSON editor or turn an imported
+snapshot into a mutable collection.
+
 | Format | Automatic discovery | Exact content |
 | --- | --- | --- |
 | CSV, TSV, JSON | Dataset source card with structural counts; bounded field names for JSON | `query_dataset` reads rows, filters, nested JSON fields and aggregates from the original |
