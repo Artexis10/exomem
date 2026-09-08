@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .crypto import EnvelopeCodec
+from .governance_migration_checkpoint import CHECKPOINT_VERSION as GOVERNANCE_CHECKPOINT_VERSION
 from .models import (
     BackupRecord,
     CapacityDestructiveFence,
@@ -57,6 +58,44 @@ class ImmutableMetadataConflict(RepositoryConflict):
 
 class ClaimConflict(RepositoryConflict):
     pass
+
+
+def _holds_governance_checkpoint(operation: Operation, checkpoint: str) -> bool:
+    return (
+        operation.action in {OperationAction.PROVISION, OperationAction.ROLLFORWARD}
+        and operation.wire_protocol == WireProtocol.V2
+        and checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":")
+    )
+
+
+def _foreign_governance_barrier(operation: Any):
+    # This is a denial marker, not effect authority. Even malformed progress
+    # must keep successors fenced until explicit verified recovery resolves it.
+    barrier = Operation.__table__.alias("governance_barrier").c
+    return (
+        select(barrier.id)
+        .where(
+            barrier.id != operation.id,
+            barrier.tenant_id == operation.tenant_id,
+            or_(barrier.cell_id == operation.cell_id, operation.action == OperationAction.DESTROY),
+            barrier.action.in_({OperationAction.PROVISION, OperationAction.ROLLFORWARD}),
+            barrier.wire_protocol == WireProtocol.V2,
+            barrier.checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":"),
+            barrier.state.in_({OperationState.PENDING, OperationState.CLAIMED, OperationState.ERROR}),
+        )
+        .exists()
+    )
+
+
+def _terminal_failure_checkpoint(operation: Operation) -> str:
+    # Failure state and recovery progress are distinct. An irreversible
+    # governance enrollment must not lose its plan/PVC/target binding merely
+    # because retries ran out or foreign evidence requires operator review.
+    # Preserve even a malformed migration hint for inspection; no recovery
+    # path may trust it without decoding and rechecking live authority.
+    if _holds_governance_checkpoint(operation, operation.checkpoint):
+        return operation.checkpoint
+    return "failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +193,7 @@ def _claim_condition(
         action_scope = Operation.action.in_(allowed_actions)
     if excluded_actions:
         action_scope = action_scope & Operation.action.not_in(excluded_actions)
-    return claimable & cell_available & action_scope
+    return claimable & cell_available & action_scope & ~_foreign_governance_barrier(Operation)
 
 
 def _claim_candidate_statement(
@@ -348,6 +387,8 @@ async def _acquire_cell_operation_lock(
     checked_at: datetime,
     lease_expires_at: datetime,
 ) -> bool:
+    if await session.scalar(select(_foreign_governance_barrier(operation))):
+        return False
     if operation.cell_id is None:
         return True
     lock = await session.get(CellOperationLock, operation.cell_id, with_for_update=True)
@@ -429,6 +470,8 @@ async def _lock_active_claim(
         now=checked_at,
     )
     await _require_cell_operation_lock(session, active, checked_at=checked_at)
+    if await session.scalar(select(_foreign_governance_barrier(active))):
+        raise ClaimConflict("operation overlaps unfinished governance migration")
     return active, checked_at
 
 
@@ -1067,7 +1110,10 @@ class OperationRepository:
                 claim_generation=claim_generation,
                 now=now,
             )
-            operation.checkpoint = "effect-applied"
+            # Keep the replay identity and denial barrier through resource/
+            # result recording. Only complete() clears it atomically with FINAL.
+            if not _holds_governance_checkpoint(operation, operation.checkpoint):
+                operation.checkpoint = "effect-applied"
 
     async def mark_pending(
         self,
@@ -1089,6 +1135,32 @@ class OperationRepository:
                 claim_generation=claim_generation,
                 now=now,
             )
+            if _holds_governance_checkpoint(operation, checkpoint) and not (
+                _holds_governance_checkpoint(operation, operation.checkpoint)
+            ):
+                # The tenant-fence row remains locked through this commit and
+                # serializes with claim acquisition. No migration Job may run
+                # until this initial durable barrier has actually committed.
+                overlapping = await session.scalar(
+                    select(Operation.id)
+                    .where(
+                        Operation.id != operation.id,
+                        Operation.tenant_id == operation.tenant_id,
+                        or_(
+                            and_(
+                                Operation.action == OperationAction.DESTROY,
+                                Operation.state != OperationState.FINAL,
+                            ),
+                            and_(
+                                Operation.cell_id == operation.cell_id,
+                                Operation.state == OperationState.CLAIMED,
+                            ),
+                        ),
+                    )
+                    .limit(1)
+                )
+                if overlapping is not None:
+                    raise ClaimConflict("governance migration overlaps an existing operation")
             operation.state = OperationState.PENDING
             operation.checkpoint = checkpoint
             operation.progress = {
@@ -1124,7 +1196,7 @@ class OperationRepository:
                 now=now,
             )
             operation.state = OperationState.ERROR
-            operation.checkpoint = "failed"
+            operation.checkpoint = _terminal_failure_checkpoint(operation)
             operation.error_code = code
             operation.claim_owner = None
             operation.claim_token = None
@@ -1160,7 +1232,7 @@ class OperationRepository:
             operation.claim_expires_at = None
             if attempts >= self.max_failure_attempts:
                 operation.state = OperationState.ERROR
-                operation.checkpoint = "failed"
+                operation.checkpoint = _terminal_failure_checkpoint(operation)
                 operation.error_code = "PROVISIONER_RETRY_EXHAUSTED"
                 operation.finalized_at = failed_at
             else:

@@ -30,7 +30,8 @@ from .authorization_membership import (
 )
 from .capacity import CapacityError
 from .conflict_reason import ConflictReason
-from .driver import EffectContext
+from .driver import DriverPending, EffectContext
+from .governance_migration_checkpoint import CHECKPOINT_VERSION, MigrationCheckpoint
 from .lifecycle import (
     HealthObservation,
     LifecycleConfig,
@@ -49,7 +50,7 @@ from .provider_identity import (
     provider_operation_resource_name,
 )
 from .repository import OperationRepository, canonical_request_sha256
-from .wire_protocol import runtime_identity
+from .wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +65,7 @@ class KubernetesProviderSnapshot:
     routes: tuple[bool, bool]
     runtime_desired_replicas: int = 0
     runtime_pods: int = 0
+    governance_migration_job: Literal["absent", "current", "foreign"] = "absent"
 
 
 class KubernetesProviderRegistry:
@@ -145,6 +147,54 @@ class KubernetesProviderRegistry:
                     "Kubernetes cell identity annotations differ",
                     reason=ConflictReason.KUBERNETES_CELL_IDENTITY_ANNOTATIONS_DIFFER,
                 )
+
+    def _governance_job_identity(
+        self, job: Any, current: OpaqueProviderMetadata
+    ) -> Literal["absent", "current", "foreign"]:
+        metadata = getattr(job, "metadata", None)
+        labels = dict(getattr(metadata, "labels", None) or {})
+        annotations = dict(getattr(metadata, "annotations", None) or {})
+        marker = "exomem.io/governance-migration"
+        if (
+            marker not in labels
+            and labels.get("app.kubernetes.io/name") != "exomem-governance-migration"
+            and not any(key.startswith(marker + "-") for key in annotations)
+        ):
+            return "absent"
+        if (
+            labels.get(marker) != "true"
+            or labels.get("app.kubernetes.io/name") != "exomem-governance-migration"
+            or labels.get("exomem.io/cell") != current.resource_name
+            or getattr(metadata, "name", None) != current.resource_name + "-init"
+            or getattr(metadata, "namespace", None) != current.resource_name
+        ):
+            raise MetadataConflict(
+                "migration Job identity is unavailable",
+                reason=ConflictReason.KUBERNETES_RECOVERY_IDENTITY_UNAUTHENTICATED,
+            )
+        try:
+            recovered = OpaqueProviderMetadata.from_kubernetes_annotations(annotations)
+        except (AttributeError, TypeError, ValueError):
+            raise MetadataConflict(
+                "migration Job identity is unavailable",
+                reason=ConflictReason.KUBERNETES_RECOVERY_IDENTITY_UNAUTHENTICATED,
+            ) from None
+        self._cell_identity(annotations, current)
+        self._authenticate_annotations(
+            annotations,
+            recovered,
+            provider="kubernetes",
+            provider_reference=ProviderReference.kubernetes(
+                provider="kubernetes",
+                api_version="batch/v1",
+                kind="Job",
+                namespace=current.resource_name,
+                name=current.resource_name + "-init",
+            ),
+        )
+        # Classification is not adoption. Only the owning coordinator may
+        # validate/reconcile the exact body, UID, resource version and result.
+        return "current" if recovered == current else "foreign"
 
     @staticmethod
     def _recovery_digest(*resources: Any) -> str:
@@ -344,14 +394,15 @@ class KubernetesProviderRegistry:
             current.resource_name + "-init",
             current.resource_name,
         )
-        if init_job is not None:
+        migration_job = self._governance_job_identity(init_job, current)
+        if init_job is not None and migration_job == "absent":
             self._require_not_terminating(init_job)
         conditions = getattr(getattr(init_job, "status", None), "conditions", ()) or ()
-        init_complete = any(
+        init_complete = migration_job == "absent" and any(
             getattr(item, "type", None) == "Complete" and getattr(item, "status", None) == "True"
             for item in conditions
         )
-        init_failed = not init_complete and (
+        init_failed = migration_job == "absent" and not init_complete and (
             any(
                 getattr(item, "type", None) == "Failed" and getattr(item, "status", None) == "True"
                 for item in conditions
@@ -422,6 +473,7 @@ class KubernetesProviderRegistry:
             (routes[0], routes[1]),
             desired_replicas,
             runtime_pods,
+            migration_job,
         )
 
     async def ensure_namespace(
@@ -929,7 +981,9 @@ class LiveLifecyclePlane:
     async def observed_fence(self, tenant_id: str) -> int:
         return await self._registry.observed_fence(tenant_id)
 
-    async def observe_operation(self, context: EffectContext, request: dict[str, Any]) -> None:
+    async def observe_operation(
+        self, context: EffectContext, request: dict[str, Any]
+    ) -> DriverPending | None:
         if context.cell_id is None:
             return
         current = OpaqueProviderMetadata(
@@ -975,6 +1029,16 @@ class LiveLifecyclePlane:
         self._owned[self._key(current)] = owned
         self._helm_requests[self._key(current)] = dict(helm_request)
         snapshot = await self._refresh(current)
+        migration_job = snapshot.governance_migration_job
+        if migration_job != "absent":
+            if (
+                migration_job != "current"
+                or self._config.migration_mode != "governance-v3-to-v4"
+                or context.wire_protocol != WIRE_PROTOCOL_V2
+                or not context.checkpoint.startswith(CHECKPOINT_VERSION + ":")
+            ):
+                return DriverPending(context.checkpoint, 30)
+            MigrationCheckpoint.decode(context.checkpoint)
         if snapshot.namespace:
             await self._registry.record_operation(
                 current, recovery_envelopes["providerOperationConfigMap"]
