@@ -62,3 +62,6 @@ initOperationId: provision-alpha-1
 routes:
   enabled: false
   controlHostname: control.example.test
+  transferProfile: legacy
+  transferServersTransport: ""
+  privatePeerHostname: ""
