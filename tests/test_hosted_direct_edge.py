@@ -513,3 +513,105 @@ def test_rendered_direct_edge_config_runs_on_pinned_traefik_with_verified_backen
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+
+def test_private_transfer_listener_routes_two_cells_and_rejects_control(tmp_path: Path) -> None:
+    if TRAEFIK is None or not TRAEFIK.is_file():
+        pytest.skip("set TRAEFIK_BIN to the pinned Traefik 3.7.6 binary")
+    ca, listener, client = (tmp_path / part for part in ("ca", "listener", "client"))
+    for directory in (ca, listener, client):
+        directory.mkdir()
+    issuer = _certificate(ca, "private-test-ca")
+    shutil.copy(ca / "private-test-ca.crt", ca / "ca.crt")
+    _certificate(listener, "private.internal.test", issuer)
+    (listener / "tls.crt").write_bytes((listener / "private.internal.test.crt").read_bytes())
+    (listener / "tls.key").write_bytes((listener / "private.internal.test.key").read_bytes())
+    _certificate(client, "private-edge-client", issuer, client=True)
+    (client / "tls.crt").write_bytes((client / "private-edge-client.crt").read_bytes())
+    (client / "tls.key").write_bytes((client / "private-edge-client.key").read_bytes())
+    alpha, alpha_thread, alpha_seen = _backend(tmp_path, ca, "cell-alpha.internal.test", issuer)
+    beta, beta_thread, beta_seen = _backend(tmp_path, ca, "cell-beta.internal.test", issuer)
+    with socket.socket() as available:
+        available.bind(("127.0.0.1", 0))
+        port = available.getsockname()[1]
+    dynamic = f"""
+tls:
+  certificates:
+    - certFile: {listener}/tls.crt
+      keyFile: {listener}/tls.key
+  options:
+    default:
+      minVersion: VersionTLS12
+      sniStrict: true
+      clientAuth:
+        caFiles: [{ca}/ca.crt]
+        clientAuthType: RequireAndVerifyClientCert
+http:
+  routers:
+    alpha:
+      entryPoints: [private-transfer]
+      rule: Host(`transfer.example.test`) && Path(`/cells/cell-alpha/public/exomem/v2/transfers/upload`) && Method(`PUT`)
+      service: alpha
+      tls: {{}}
+    beta:
+      entryPoints: [private-transfer]
+      rule: Host(`transfer.example.test`) && Path(`/cells/cell-beta/public/exomem/v2/transfers/download`) && Method(`GET`)
+      service: beta
+      tls: {{}}
+  services:
+    alpha:
+      loadBalancer:
+        serversTransport: cell-alpha-private-transfer
+        servers: [{{url: https://127.0.0.1:{alpha.server_port}}}]
+    beta:
+      loadBalancer:
+        serversTransport: cell-beta-private-transfer
+        servers: [{{url: https://127.0.0.1:{beta.server_port}}}]
+  serversTransports:
+    cell-alpha-private-transfer:
+      serverName: cell-alpha.internal.test
+      rootCAs: [{ca}/ca.crt]
+      certificates: [{{certFile: {client}/tls.crt, keyFile: {client}/tls.key}}]
+    cell-beta-private-transfer:
+      serverName: cell-beta.internal.test
+      rootCAs: [{ca}/ca.crt]
+      certificates: [{{certFile: {client}/tls.crt, keyFile: {client}/tls.key}}]
+"""
+    static = f"entryPoints:\n  private-transfer:\n    address: 127.0.0.1:{port}\nproviders:\n  file:\n    filename: {tmp_path}/dynamic.yaml\n"
+    (tmp_path / "dynamic.yaml").write_text(dynamic, encoding="utf-8")
+    (tmp_path / "static.yaml").write_text(static, encoding="utf-8")
+    process = subprocess.Popen([str(TRAEFIK), f"--configFile={tmp_path / 'static.yaml'}"])
+    context = ssl.create_default_context(cafile=str(ca / "ca.crt"))
+    context.check_hostname = False
+    context.load_cert_chain(client / "tls.crt", client / "tls.key")
+
+    def request(path: str, method: str) -> bytes:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as raw:
+            with context.wrap_socket(raw, server_hostname="private.internal.test") as stream:
+                stream.sendall(
+                    f"{method} {path} HTTP/1.1\r\nHost: transfer.example.test\r\nConnection: close\r\n\r\n".encode()
+                )
+                return b"".join(iter(lambda: stream.recv(4096), b""))
+
+    try:
+        for _ in range(30):
+            try:
+                if b"200" in request("/cells/cell-beta/public/exomem/v2/transfers/download", "GET")[:32]:
+                    break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            raise AssertionError("private listener did not start")
+        alpha_seen.clear()
+        beta_seen.clear()
+        assert b"200" in request("/cells/cell-alpha/public/exomem/v2/transfers/upload", "PUT")[:32]
+        assert b"200" in request("/cells/cell-beta/public/exomem/v2/transfers/download", "GET")[:32]
+        assert b"200" not in request("/cells/cell-alpha/private/exomem/v1", "POST")[:32]
+        assert alpha_seen and beta_seen
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+        for server, thread in ((alpha, alpha_thread), (beta, beta_thread)):
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
