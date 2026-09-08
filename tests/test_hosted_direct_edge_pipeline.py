@@ -379,13 +379,15 @@ def _free_port() -> int:
         return int(candidate.getsockname()[1])
 
 
-def _wait_for(predicate: Callable[[], bool], *, timeout: float = 5.0) -> None:
+def _wait_for(
+    predicate: Callable[[], bool], *, timeout: float = 5.0, interval: float = 0.02
+) -> None:
     deadline = time.monotonic() + timeout
     event = threading.Event()
     while time.monotonic() < deadline:
         if predicate():
             return
-        event.wait(0.02)
+        event.wait(interval)
     raise AssertionError("condition did not become true before deadline")
 
 
@@ -406,6 +408,7 @@ def _request(
     certificate: tuple[Path, Path] | None = None,
     headers: dict[str, str] | None = None,
     body: bytes = b"",
+    timeout: float = 3,
 ) -> bytes:
     context = (
         ssl.create_default_context(cafile=str(ca_file))
@@ -422,9 +425,9 @@ def _request(
         + "".join(f"{name}: {value}\r\n" for name, value in request_headers.items())
         + "\r\n"
     )
-    with socket.create_connection(("127.0.0.1", port), timeout=3) as raw:
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as raw:
         with context.wrap_socket(raw, server_hostname=sni or host) as stream:
-            stream.settimeout(3)
+            stream.settimeout(timeout)
             stream.sendall(wire.encode() + body)
             chunks: list[bytes] = []
             while chunk := stream.recv(65536):
@@ -736,22 +739,41 @@ def _stream_until(port: int, path: str, ca_file: Path) -> tuple[ssl.SSLSocket, b
 
 def _await_request(*args: Any, **kwargs: Any) -> bytes:
     responses: list[bytes] = []
+    attempts = 0
+    last_error: OSError | None = None
 
     def ready() -> bool:
+        nonlocal attempts, last_error
+        attempts += 1
         try:
             responses.append(_request(*args, **kwargs))
             return True
-        except OSError:
+        except OSError as error:
+            last_error = error
             return False
 
-    _wait_for(ready)
+    try:
+        _wait_for(ready)
+    except AssertionError as error:
+        raise AssertionError(
+            f"request did not complete after {attempts} attempts; last error: {last_error!r}"
+        ) from error
     return responses[-1]
 
 
-def _await_alpha_denial(port: int, ca_file: Path) -> None:
-    responses: list[bytes] = []
+def _await_alpha_denial(
+    port: int,
+    ca_file: Path,
+    *processes: RunningTraefik,
+) -> None:
+    attempts = 0
+    last_observation = "no attempt"
 
     def ready() -> bool:
+        nonlocal attempts, last_observation
+        attempts += 1
+        for process in processes:
+            _assert_process_alive(process)
         try:
             response = _request(
                 port,
@@ -760,31 +782,48 @@ def _await_alpha_denial(port: int, ca_file: Path) -> None:
                 ca_file=ca_file,
                 headers={"Origin": transfer_v2.ORIGIN, "Content-Type": "text/plain"},
                 body=b"alpha",
+                timeout=0.75,
             )
-        except OSError:
+        except OSError as error:
+            last_observation = repr(error)
             return False
-        responses.append(response)
-        return _status(response) == 401 and b"TRANSFER_GRANT_REJECTED" in response
+        status = _status(response)
+        last_observation = f"HTTP {status}: {response[:200]!r}"
+        return status == 401 and b"TRANSFER_GRANT_REJECTED" in response
 
-    _wait_for(ready)
-
-
-def _port_accepting(port: int) -> bool:
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-            return True
-    except OSError:
-        return False
+        _wait_for(ready, interval=0.1)
+    except AssertionError as error:
+        raise AssertionError(
+            f"alpha route did not become ready after {attempts} attempts; "
+            f"last observation: {last_observation}"
+        ) from error
 
 
-def _tls_accepting(port: int, ca_file: Path) -> bool:
+def _await_tls_accepting(port: int, ca_file: Path, process: RunningTraefik) -> None:
+    attempts = 0
+    last_error: OSError | None = None
+
+    def ready() -> bool:
+        nonlocal attempts, last_error
+        attempts += 1
+        _assert_process_alive(process)
+        try:
+            context = ssl.create_default_context(cafile=str(ca_file))
+            with socket.create_connection(("127.0.0.1", port), timeout=0.75) as raw:
+                with context.wrap_socket(raw, server_hostname=TRANSFER_HOST):
+                    return True
+        except OSError as error:
+            last_error = error
+            return False
+
     try:
-        context = ssl.create_default_context(cafile=str(ca_file))
-        with socket.create_connection(("127.0.0.1", port), timeout=0.2) as raw:
-            with context.wrap_socket(raw, server_hostname=TRANSFER_HOST):
-                return True
-    except OSError:
-        return False
+        _wait_for(ready, interval=0.1)
+    except AssertionError as error:
+        raise AssertionError(
+            f"TLS listener did not become ready after {attempts} attempts; "
+            f"last error: {last_error!r}"
+        ) from error
 
 
 def _start_edge_variant(
@@ -1366,21 +1405,14 @@ def _assert_private_client_auth_failures(
             mutate=mutate,
         )
         try:
-            _wait_for(
-                lambda proxy=proxy, port=port: (
-                    _assert_process_alive(proxy) and _port_accepting(port)
-                )
+            response = _await_request(
+                port,
+                "/cells/cell-beta/public/exomem/v2/transfers/download",
+                ca_file=pki.public_ca_file,
+                timeout=0.75,
             )
-            try:
-                response = _request(
-                    port,
-                    "/cells/cell-beta/public/exomem/v2/transfers/download",
-                    ca_file=pki.public_ca_file,
-                )
-            except OSError:
-                response = b""
-            if response:
-                assert _status(response) >= 500, (label, response[:200])
+            assert _status(response) >= 500, (label, response[:200])
+            assert _assert_process_alive(proxy)
             assert len(beta.seen) == before
         finally:
             proxy.close()
@@ -1422,7 +1454,12 @@ def _assert_wrong_backend_name(
     )
     before = len(beta.seen)
     try:
-        _await_alpha_denial(edge_port, pki.public_ca_file)
+        _await_alpha_denial(
+            edge_port,
+            pki.public_ca_file,
+            edge_proxy,
+            private_proxy,
+        )
         response = _await_request(
             edge_port,
             "/cells/cell-beta/public/exomem/v2/transfers/download",
@@ -1496,7 +1533,12 @@ def _assert_backend_server_certificate_failures(
             private_port=private_port,
         )
         try:
-            _await_alpha_denial(edge_port, pki.public_ca_file)
+            _await_alpha_denial(
+                edge_port,
+                pki.public_ca_file,
+                edge_proxy,
+                private_proxy,
+            )
             response = _await_request(
                 edge_port,
                 "/cells/cell-beta/public/exomem/v2/transfers/download",
@@ -1540,7 +1582,7 @@ def _assert_rendered_limits_use_socket_source(
         ),
     )
     try:
-        _wait_for(lambda: _tls_accepting(rate_port, pki.public_ca_file))
+        _await_tls_accepting(rate_port, pki.public_ca_file, rate_proxy)
         context = ssl.create_default_context(cafile=str(pki.public_ca_file))
         with socket.create_connection(("127.0.0.1", rate_port), timeout=3) as raw:
             with context.wrap_socket(raw, server_hostname=TRANSFER_HOST) as stream:
@@ -1592,7 +1634,7 @@ def _assert_rendered_limits_use_socket_source(
         blocked_statuses.append(_status(response))
 
     try:
-        _wait_for(lambda: _tls_accepting(inflight_port, pki.public_ca_file))
+        _await_tls_accepting(inflight_port, pki.public_ca_file, inflight_proxy)
         blocked_threads = [
             threading.Thread(target=blocked, args=(index,), daemon=True) for index in range(16)
         ]
