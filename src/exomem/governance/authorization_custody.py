@@ -733,6 +733,16 @@ def parse_control_record(
 ) -> AuthorizationControlRecord:
     """Authenticate the exact external control-plane record for one cell."""
 
+    return _parse_control_record(raw, keyring=keyring, now=now)
+
+
+def _parse_control_record(
+    raw: bytes,
+    *,
+    keyring: AuthorizationKeyring,
+    now: int,
+    allow_expired: bool = False,
+) -> AuthorizationControlRecord:
     if (
         not isinstance(raw, bytes)
         or not isinstance(keyring, AuthorizationKeyring)
@@ -773,7 +783,11 @@ def parse_control_record(
     serving_membership_digest = _sha256_hex(value["serving_membership_digest"])
     issued_at = _bounded_time(value["issued_at"])
     expires_at = _bounded_time(value["expires_at"])
-    if not issued_at <= current_time < expires_at:
+    if (
+        issued_at > current_time
+        or issued_at >= expires_at
+        or (not allow_expired and current_time >= expires_at)
+    ):
         raise AuthorizationCustodyUnavailable
 
     enrolled = value["governance_enrolled"]
@@ -812,6 +826,7 @@ def parse_control_record(
         signing_key is None
         or issued_at < signing_key.not_before
         or expires_at > signing_key.not_after
+        or (allow_expired and not signing_key.not_before <= current_time < signing_key.not_after)
     ):
         raise AuthorizationCustodyUnavailable
     supplied_mac = _decode_key(value["mac"])
@@ -871,10 +886,15 @@ def _load_authorization_custody_once(
     vault_root: Path,
     *,
     now: int,
+    hosted_migration_recovery: bool = False,
 ) -> AuthorizationCustody:
     external = load_external_custody(Path(vault_root))
     keyring = parse_keyring(external.keyring)
-    control = parse_control_record(external.control, keyring=keyring, now=now)
+    control = (
+        _parse_control_record(external.control, keyring=keyring, now=now, allow_expired=True)
+        if hosted_migration_recovery
+        else parse_control_record(external.control, keyring=keyring, now=now)
+    )
     _verify_registered_attachment(
         Path(vault_root), control.registry_attachment_id
     )
@@ -885,6 +905,7 @@ def _load_authorization_custody_once(
             keyring=keyring,
             control=control,
             now=now,
+            hosted_migration_recovery=hosted_migration_recovery,
         )
     )
     custody = AuthorizationCustody(
@@ -904,6 +925,50 @@ def _load_authorization_custody_once(
     return custody
 
 
+def load_hosted_migration_custody(vault_root: Path, *, now: int) -> AuthorizationCustody:
+    """Authenticate drained enrollment for offline recovery, never serving use.
+
+    Only the signed authorization window may have elapsed. Callers must still
+    verify the prepared backup/target and their operation, PVC and stop proof.
+    Ordinary custody loading deliberately has no expiry override.
+    """
+    fixed = {
+        KEYRING_FILE_ENV: HOSTED_KEYRING_FILE,
+        CONTROL_FILE_ENV: HOSTED_CONTROL_FILE,
+        MEMBERSHIP_FILE_ENV: HOSTED_MEMBERSHIP_FILE,
+    }
+    if any(os.environ.get(name) != str(path) for name, path in fixed.items()):
+        raise AuthorizationCustodyUnavailable
+    custody = _load_authorization_custody_once(
+        Path(vault_root), now=now, hosted_migration_recovery=True
+    )
+    control = custody.control
+    record = custody.serving_membership
+    if (
+        re.fullmatch(r"hosted-attachment-v1-[0-9a-f]{64}", control.registry_attachment_id) is None
+        or now < control.expires_at
+        or not control.governance_enrolled
+        or custody.keyring_path != HOSTED_KEYRING_FILE
+        or custody.control_path != HOSTED_CONTROL_FILE
+        or custody.membership_path != HOSTED_MEMBERSHIP_FILE
+        or record is None
+        or len(record.replicas) != 1
+        or record.replicas[0].replica_id != custody.local_replica_id
+        or record.replicas[0].state != "DRAINING"
+        or record.replicas[0].schema_version not in {3, 4}
+        or not record.replicas[0].issuance_stopped
+        or not record.replicas[0].no_in_flight
+        or record.issued_at != control.issued_at
+        or record.expires_at != control.expires_at
+        or control.signing_key_id != custody.keyring.active_key_id
+        or record.signing_key_id != custody.keyring.active_key_id
+        or record.replicas[0].signing_key_id != custody.keyring.active_key_id
+        or len(custody.keyring.accepted_keys) != 1
+    ):
+        raise AuthorizationCustodyUnavailable
+    return custody
+
+
 def _load_optional_serving_membership(
     vault_root: Path,
     *,
@@ -911,6 +976,7 @@ def _load_optional_serving_membership(
     keyring: AuthorizationKeyring,
     control: AuthorizationControlRecord,
     now: int,
+    hosted_migration_recovery: bool = False,
 ) -> tuple[ServingMembershipEpoch | None, str | None, Path | None]:
     """Load session-only fleet state without blocking standing-policy content.
 
@@ -929,7 +995,12 @@ def _load_optional_serving_membership(
         if membership_path in {external.keyring_path, external.control_path}:
             raise AuthorizationCustodyUnavailable
         loaded = _load_file(membership_path)
-        record = authorization_serving_membership.parse_serving_membership(
+        parser = (
+            authorization_serving_membership._parse_serving_membership
+            if hosted_migration_recovery
+            else authorization_serving_membership.parse_serving_membership
+        )
+        record = parser(
             loaded.data,
             verifier_keys={item.key_id: item.key for item in keyring.accepted_keys},
             now=now,
@@ -937,6 +1008,7 @@ def _load_optional_serving_membership(
             expected_logical_vault_id=control.logical_vault_id,
             expected_epoch=control.serving_membership_epoch,
             expected_digest=control.serving_membership_digest,
+            **({"allow_expired": True} if hosted_migration_recovery else {}),
         )
         replica_id = _bounded_identifier(configured_replica)
         if not any(item.replica_id == replica_id for item in record.replicas):

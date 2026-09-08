@@ -153,7 +153,12 @@ def _custody_revision() -> str:
 def _custody(request: dict[str, Any], *, now: int) -> authorization_custody.AuthorizationCustody:
     if _custody_revision() != request["custodyRevision"]:
         raise HostedGovernanceJobError
-    custody = authorization_custody.load_authorization_custody(VAULT_ROOT, now=now)
+    try:
+        custody = authorization_custody.load_authorization_custody(VAULT_ROOT, now=now)
+    except authorization_custody.AuthorizationCustodyUnavailable:
+        if request["phase"] != "commit":
+            raise
+        custody = authorization_custody.load_hosted_migration_custody(VAULT_ROOT, now=now)
     record = custody.serving_membership
     if (
         custody.control.cell_id != request["cellId"]
@@ -249,7 +254,12 @@ def _run(request: dict[str, Any], *, now: int) -> dict[str, Any]:
         if phase == "prepare":
             result["backupDigest"] = backup.backup_digest
         else:
-            committed = schema_migration.commit_enrolled_forward_migration(
+            commit = (
+                schema_migration.commit_hosted_forward_migration
+                if now >= custody.control.expires_at
+                else schema_migration.commit_enrolled_forward_migration
+            )
+            committed = commit(
                 VAULT_ROOT,
                 expected_plan_digest=backup.plan_digest,
                 now=now,
