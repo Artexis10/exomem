@@ -39,6 +39,7 @@ from typing import IO, BinaryIO
 
 from . import indexes, memory_refs, privacy_log, semantic_contract, temporal
 from .kbdir import kb_prefix
+from .source_inspection import Inspection, inspect_source
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
@@ -378,6 +379,16 @@ def preserve(
         # the sidecar belongs alongside, not as a double-ext twin of the artifact.
         desc_clean = description.strip() if description and description.strip() else None
         text_clean = text.strip() if text and text.strip() else None
+        inspection = inspect_source(
+            artifact_stage, filename=filename_safe, size=artifact_size
+        )
+        if inspection is not None and inspection.dataset_format:
+            if text_clean:
+                warnings.append("dataset extracted text omitted; use exact queries for row values")
+            text_clean = None
+        elif text_clean:
+            # An explicit uploader extraction keeps its existing behavior.
+            inspection = None
         # A media binary (audio/video/image/pdf) with no provided text gets a STUB
         # sidecar — pointer + media_type + `extracted_by: pending` — so it's a
         # first-class find() result immediately and the extraction worker fills the
@@ -447,6 +458,7 @@ def preserve(
                 governance_artifact_size=artifact_size,
                 tree="Evidence",
                 adoption_receipt=adoption_receipt,
+                inspection=inspection,
             )
             sidecar_ref = memory_refs.ref_from_markdown(sidecar_md)
             writes.append(
@@ -777,6 +789,7 @@ def _render_sidecar(
     governance_frame_timestamp_ms: int | None = None,
     tree: str = "Evidence",
     adoption_receipt: Mapping[str, object] | None = None,
+    inspection: Inspection | None = None,
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
@@ -801,20 +814,33 @@ def _render_sidecar(
     vectors own visual search).
     """
     lines = ["---"]
+    dataset_format = inspection.dataset_format if inspection is not None else None
+    if dataset_format and governance_artifact_path is None:
+        raise ValueError("dataset card requires an exact artifact binding")
     lines.append("type: source")
     lines.append(f"exomem_id: {memory_refs.new_id()}")
     label = _ARTIFACT_TREE_LABELS.get(tree, "Evidence")
     display_title = f"{label}: {artifact_name}"
     lines.append(f"title: {yaml_scalar(display_title)}")
-    lines.append("source_type: other")
+    lines.append("source_type: dataset-export" if dataset_format else "source_type: other")
     lines.append(f"captured: {date_iso}")
+    if inspection is not None:
+        lines.append(f"inspection_status: {inspection.status}")
+    if dataset_format:
+        lines.append(f"data_file: {yaml_scalar(governance_artifact_path)}")
+        lines.append(f"format: {dataset_format}")
+        if inspection.rows is not None:
+            lines.append(f"rows: {inspection.rows}")
     if media_type:
         lines.append(f"media_type: {media_type}")
     if evidence_file:
         lines.append(f"evidence_file: {evidence_file}")
     if extracted_by:
         lines.append(f"extracted_by: {extracted_by}")
-    if governance_artifact_path is not None:
+    # Upload supplies byte identity, not a reviewed semantic classification.
+    # Dataset backfill can add the descriptor after an owner review. Retaining
+    # unresolved semantics prevents new raw releases under semantic policies.
+    if governance_artifact_path is not None and not dataset_format:
         if governance_artifact_sha256 is None or governance_artifact_size is None:
             raise ValueError("governance companion requires an exact artifact identity")
         scene_binding = any(
@@ -900,6 +926,11 @@ def _render_sidecar(
         lines.append("")
         lines.append(description)
         lines.append("")
+    if inspection is not None:
+        lines.extend([
+            "## Dataset" if dataset_format else "## Text preview",
+            "", inspection.body, "",
+        ])
     # Emit the section when there's extracted text, or as an empty anchor for a
     # media stub the worker will fill. A pure-description (non-media) sidecar omits it.
     if text or media_type:
