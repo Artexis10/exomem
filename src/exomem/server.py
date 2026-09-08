@@ -23,6 +23,7 @@ from starlette.middleware import Middleware as ASGIMiddleware
 from . import capabilities, edit_operations, guards, multi_edit
 from . import commands as commands_module
 from .access_log import AccessLogMiddleware
+from .command_surface import register_mcp_tool
 from .edge_ingress import EdgeIngressMiddleware
 from .server_assets import (
     register_asset_routes,
@@ -557,7 +558,8 @@ def build_server(*, require_auth: bool) -> FastMCP:
                     else {}
                 ),
             }
-            mcp.tool(
+            register_mcp_tool(
+                mcp,
                 commands_module.bind_vault(
                     cmd.leaf,
                     *injected,
@@ -736,7 +738,8 @@ def _register_legacy_mcp_tools(
     for cmd in legacy_commands:
         injected = (vault_root, source_schema) if cmd.needs_schema else (vault_root,)
         description = cmd.doc
-        mcp.tool(
+        register_mcp_tool(
+            mcp,
             commands_module.bind_vault(
                 cmd.leaf,
                 *injected,

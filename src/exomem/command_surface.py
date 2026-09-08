@@ -14,10 +14,15 @@ import uuid
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass, field
 
 from mcp.types import ToolAnnotations
 from pydantic import Field, WithJsonSchema
+
+if typing.TYPE_CHECKING:
+    from fastmcp import FastMCP
+    from fastmcp.tools import Tool
 
 from . import call_spans, capabilities, reserved_paths
 from .call_spans import (  # noqa: F401 - re-exported for existing importers
@@ -567,6 +572,46 @@ def bind_vault(
         ann["return"] = resolved["return"]
     wrapper.__annotations__ = ann
     return wrapper
+
+
+def register_mcp_tool(
+    mcp: FastMCP, bound: Callable[..., typing.Any], **kwargs: typing.Any
+) -> Tool:
+    """Advertise deliberate failure content without changing result serialization."""
+    from fastmcp.tools import FunctionTool
+
+    tool = FunctionTool.from_function(bound, run_in_thread=True, **kwargs)
+    if tool.output_schema is not None:
+        schema = deepcopy(tool.output_schema)
+        failure = {
+            "type": "object",
+            "properties": {
+                "success": {"const": False},
+                "error": {
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string"},
+                        "message": {"type": "string"},
+                        "remediation": {"type": ["string", "null"]},
+                    },
+                    "required": ["code", "message", "remediation"],
+                    "additionalProperties": True,
+                },
+            },
+            "required": ["success", "error"],
+            "additionalProperties": True,
+        }
+        if schema.get("x-fastmcp-wrap-result") is True:
+            payload = schema["properties"]["result"]
+            schema["properties"]["result"] = {"anyOf": [payload, failure]}
+        else:
+            # References in a success schema remain rooted at the document.
+            definitions = schema.pop("$defs", None)
+            schema = {"type": "object", "anyOf": [schema, failure]}
+            if definitions is not None:
+                schema["$defs"] = definitions
+        tool.output_schema = schema
+    return mcp.add_tool(tool)
 
 
 def mcp_retry_scope() -> str | None:
