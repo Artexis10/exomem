@@ -16,11 +16,18 @@ cases. Repository-pinned OpenSpec 1.10.0 strict validation passed all 187 record
 
 The remaining product integration is tracked by 4.3, 5.5 and 6.6:
 
+- Deliver ordinary intent, preference changes and on-demand permission control
+  through agents. Dashboards provide visibility, history and transparency; the
+  standalone browser adapter is a fallback, not completion of the conversational
+  experience. Integrate the existing prominence and delegation policy rather
+  than create another settings system.
+
 - Prepare the exact canonical owner intent for review, connect an authenticated
   owner decision to the existing finite control callbacks, and wire them through
   server startup. Agent request/status and private transport credentials cannot
-  supply the owner decision. The standalone server currently exposes no
-  vocabulary control route.
+  supply the owner decision. Native routes and setup are implemented in
+  [PR #1124](https://github.com/Artexis10/exomem/pull/1124), pending delivery and
+  live acceptance; they do not yet supply the conversational adapter.
 - Supply durable external writable authority storage for hosted deployments.
   The current pod-lifetime read-only custody mount cannot persist authority
   records. Custody transitions, recovery and identity-substitution guards must
@@ -73,6 +80,8 @@ require reimplementing the behavior already exercised by the shipped tests.
 - [ ] 4.3d Compose explicitly reviewed initial policy, supported migration, planned deployment successor and no-grants activation in resumable native setup; preserve quiescence and recovery invariants.
 - [ ] 4.3e Exercise the owner workflow in a disposable running installation with Chrome DevTools, verify denial/replay/staleness cases, and document the live owner acceptance procedure.
 - [ ] 4.3f Extend the existing Substrate Exomem Home and account session for Hosted owner review; bind displayed cell previews to owner acceptance, wire the private decision verifier, and publish floor 2 through the existing Hosted deployment lifecycle. Never expose the native owner login in a Hosted cell.
+- [ ] 4.3g Add conversation-first finite request, permission-inspection and revocation flows over the shared owner-control core. Establish a supported client owner-confirmation adapter and a direct request-bound fallback where the deployment supports one; verify exact disclosure, authorizer/audience binding, denial, stale approval, replay, unavailable owner control and truthful capability discovery without dashboard navigation. A browser adapter alone does not close this task.
+- [ ] 4.3h Extend the owning prominence/delegation OpenSpec contracts and implementations with portable profile ownership, agent-accessible updates, narration overrides, policy revisions and bounded refresh before integrating vocabulary control. Specify approval-presentation preferences there if exposed; do not create a vocabulary-only setting. Verify maximal participation with quiet narration, unchanged authority ceilings, a preference change observed by a second client of the same configured profile, and explicit limits for clients without refresh or authenticated confirmation support. Shared preference persistence remains owned by those existing capabilities.
 
 ## 5. Enforcement and recovery gates
 

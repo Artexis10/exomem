@@ -64,6 +64,44 @@ Authority records name contract version, issuer, authorizing user, agent/princip
 
 Requesting permission through MCP is not granting permission. Reuse the existing authorization request and owner-control machinery, but add an explicit user-approval ceremony: the trusted control surface shows the exact payload/effects and accepts the user's authenticated decision through a control capability not possessed by the ordinary agent principal. Ordinary tool credentials can create pending requests and inspect non-secret status only. Personal installations without that distinction offer advice and pending requests, not a fictional machine-verified approval. The exact surface must pass the existing principal/session/custody contract; do not implement an independent bearer grammar or let `why`/`confirmed=true` serve as consent.
 
+#### Conversation is the ordinary control surface
+
+Users express intent, change preferences, request exact actions, inspect current
+permissions and ask to revoke them through the active agent. The agent resolves
+that language into existing finite operations and shows their actual outcome.
+Dashboards serve visibility, history and transparent inspection, with optional
+management controls; discovering or navigating one is not a routine workflow
+step. Reuse Substrate's existing Exomem Home for Hosted visibility.
+
+Approval presentation is an adapter choice. A supported client can present the
+exact review and return an authenticated owner decision in the conversation.
+That adapter must establish the same owner binding and exact-intent checks as
+the browser adapter; advertising a confirmation UI alone does not prove that
+binding. Where that integration is unavailable, expose its limitation and any
+deployment-advertised, direct request-bound owner confirmation fallback rather
+than sending the user to find a pending item in a dashboard. Without a supported
+owner channel, keep the request pending and report confirmation unavailable.
+Neither natural-language intent nor an
+agent-reported yes substitutes for the activated v2 consent contract. A browser
+adapter alone does not complete conversational control acceptance.
+
+Vocabulary behavior consumes the shared prominence and delegation policy.
+Preference persistence and resolution belong to those existing capabilities,
+not a second vocabulary-only profile. They currently supply shared per-machine
+configuration and bootstrap projection. Portable user-profile ownership,
+separate narration overrides, policy revisions and cross-client refresh remain
+extensions to their owning OpenSpec contracts and implementations before this
+integration can be complete. Clients sharing the same configured profile must
+observe its effective policy; different users or deployments do not acquire a
+shared preference scope implicitly. An approval-presentation preference also
+requires an explicitly owned shared-policy extension; adapter discovery alone
+can prefer conversational confirmation and expose a configured fallback.
+Neither can create a grant or lower an authority ceiling. The intended result
+permits active maintenance with quiet conversation. Bootstrap and supported
+skills/hooks consume the effective policy and its bounded refresh contract.
+Thin custom instructions trigger contract loading; they do not become another
+copy of preference or authorization policy.
+
 Use exact-action approvals for ask-each and bounded expiring grants for delegation. Exact approval binds the full canonical payload and reviewed versions. Standing grants authorize only currently resolved matching effects, not stale previews. Resolve project membership from canonical target state and check both edge endpoints; cross-scope or unresolved objects need separate approval. Recheck under the leaf's mutation boundary. Serialize revoke versus commit with a generation check; committed-before-revoke is history, uncommitted-after-revoke is refused. Reads of existing receipts retain current disclosure checks without reexecuting or requiring a replacement grant.
 
 An exact approval is one-shot, not a payload-shaped standing grant. Bind and durably reserve it to one canonical operation identity before writing effects. Its first committed receipt spends and links that authorization; same-identity receipt replay is not a second execution. Proven pre-commit failure permits the same unchanged retry while approval is valid; uncertainty keeps the reservation until recovery. A new identity always needs a new exact approval, including recreation of a later-deleted object. Reuse the existing receipt/journal protocol for this ordering rather than claim atomicity across a filesystem write and an independent database.
@@ -99,8 +137,9 @@ Run a small, reviewed ordinary-domain acceptance cohort without vocabulary hints
 
 This delivery completes the standalone installation first. Substrate already
 owns Hosted Exomem Home, public accounts, browser sessions and cell routing.
-Hosted owner approval must extend that existing surface and reuse its account
-session; it must not register the native GitHub ceremony or a second dashboard.
+Hosted visibility and browser fallback must extend that existing surface and
+reuse its account session; they must not register the native GitHub ceremony or
+a second dashboard. Conversational control must use the same Hosted owner binding.
 Shared exact previews, authority records and enforcement stay in Exomem. Hosted
 decision attestation and floor publication remain explicit integration work.
 
@@ -110,8 +149,8 @@ side effect. Parsing a LaunchAgent does not establish macOS runtime support:
 Darwin has no held-filesystem backend. Windows has that backend but no native
 owner maintenance runner yet.
 
-The standalone installation reuses its pinned GitHub identity verifier for a
-separate browser owner ceremony. A verified provider callback establishes
+The standalone browser fallback reuses its pinned GitHub identity verifier for
+a separate browser owner ceremony. A verified provider callback establishes
 identity; only a subsequent CSRF-protected submission accepts the displayed
 intent. MCP clients, client registration, ordinary scopes and agent sessions
 cannot request owner purpose. Server-held transactions distinguish the owner
