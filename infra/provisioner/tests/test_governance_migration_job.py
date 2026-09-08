@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from kubernetes.client import ApiClient
 
+from exomem_provisioner.driver import DriverRetryable
 from exomem_provisioner.lifecycle import MetadataConflict, OpaqueProviderMetadata
 
 
@@ -178,6 +179,10 @@ class Cluster:
         self.job_pods = []
 
 
+async def _allow():
+    return None
+
+
 def _adapter(cluster):
     return _module().KubernetesGovernanceMigrationAdapter(
         core_v1=cluster,
@@ -324,7 +329,9 @@ async def test_adapter_proves_job_and_pod_then_deletes_exact_observed_uid(sdk_mo
     request = _request()
     cluster = Cluster(request)
     cluster.model_job = sdk_model
-    evidence = await _adapter(cluster).run(request, recovery_envelope="signed-envelope")
+    evidence = await _adapter(cluster).run(
+        request, recovery_envelope="signed-envelope", effect_guard=_allow
+    )
     assert evidence.job_uid == "job-alpha"
     assert evidence.pod_uid == "pod-alpha"
     assert evidence.terminal == _terminal(request)
@@ -343,7 +350,9 @@ async def test_adapter_refuses_unproven_stop_or_pvc_before_submission(kind):
     else:
         cluster.pvc_uid = "foreign-pvc"
     with pytest.raises(MetadataConflict):
-        await _adapter(cluster).run(request, recovery_envelope="signed-envelope")
+        await _adapter(cluster).run(
+            request, recovery_envelope="signed-envelope", effect_guard=_allow
+        )
     assert cluster.created == cluster.deleted == []
 
 
@@ -373,7 +382,9 @@ async def test_adapter_refuses_drifted_result_without_cleanup(kind):
 
     cluster.create_hook = corrupt
     with pytest.raises(MetadataConflict):
-        await _adapter(cluster).run(request, recovery_envelope="signed-envelope")
+        await _adapter(cluster).run(
+            request, recovery_envelope="signed-envelope", effect_guard=_allow
+        )
     assert cluster.deleted == []
 
 
@@ -385,7 +396,9 @@ async def test_adapter_preserves_foreign_terminal_job_in_fixed_slot():
     cluster.create_namespaced_job(request.metadata.resource_name, body)
     cluster.created.clear()
     with pytest.raises(MetadataConflict):
-        await _adapter(cluster).run(request, recovery_envelope="signed-envelope")
+        await _adapter(cluster).run(
+            request, recovery_envelope="signed-envelope", effect_guard=_allow
+        )
     assert cluster.created == cluster.deleted == []
 
 
@@ -396,7 +409,9 @@ async def test_adapter_resumes_exact_existing_request_without_duplicate_submissi
     body = _module().build_governance_migration_job(request, recovery_envelope="signed-envelope")
     cluster.create_namespaced_job(request.metadata.resource_name, body)
     cluster.created.clear()
-    evidence = await _adapter(cluster).run(request, recovery_envelope="signed-envelope")
+    evidence = await _adapter(cluster).run(
+        request, recovery_envelope="signed-envelope", effect_guard=_allow
+    )
     assert evidence.job_uid == "job-alpha"
     assert cluster.created == []
     assert len(cluster.deleted) == 1
@@ -479,10 +494,18 @@ async def test_adapter_refuses_ambiguous_or_failed_job_without_adopting_replacem
         cluster.create_namespaced_job = error
     elif kind == "delete-conflict":
         cluster.delete_namespaced_job = error
+    retryable = kind in {"running", "api", "create-conflict", "delete-conflict"}
     with pytest.raises(
-        MetadataConflict, match="^governance migration Job is unavailable$"
+        DriverRetryable if retryable else MetadataConflict,
+        match=(
+            "^governance migration Job is temporarily unavailable$"
+            if retryable
+            else "^governance migration Job is unavailable$"
+        ),
     ) as caught:
-        await _adapter(cluster).run(request, recovery_envelope="signed-envelope")
+        await _adapter(cluster).run(
+            request, recovery_envelope="signed-envelope", effect_guard=_allow
+        )
     assert caught.value.__suppress_context__
     assert cluster.deleted == []
 
@@ -514,5 +537,7 @@ async def test_adapter_refuses_extra_execution_or_custody_authority(kind):
 
     cluster.create_hook = corrupt
     with pytest.raises(MetadataConflict):
-        await _adapter(cluster).run(request, recovery_envelope="signed-envelope")
+        await _adapter(cluster).run(
+            request, recovery_envelope="signed-envelope", effect_guard=_allow
+        )
     assert cluster.deleted == []

@@ -12,14 +12,17 @@ import hashlib
 import inspect
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from kubernetes.client import ApiClient
 
+from .adapters import _retryable_kubernetes_error
 from .conflict_reason import ConflictReason
+from .driver import DriverRetryable, DriverTerminal
 from .lifecycle import MetadataConflict, OpaqueProviderMetadata
+from .repository import ClaimConflict, StaleFence
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,511}\Z")
@@ -35,6 +38,10 @@ def _refuse() -> MetadataConflict:
         "governance migration Job is unavailable",
         reason=ConflictReason.GOVERNANCE_MIGRATION_JOB_UNAVAILABLE,
     )
+
+
+def _retry() -> DriverRetryable:
+    return DriverRetryable("governance migration Job is temporarily unavailable")
 
 
 def _canonical(value: object) -> bytes:
@@ -580,14 +587,22 @@ class KubernetesGovernanceMigrationAdapter:
         return MigrationJobEvidence(uid, meta["uid"], _canonical(terminal))
 
     async def run(
-        self, request: MigrationJobRequest, *, recovery_envelope: str
+        self,
+        request: MigrationJobRequest,
+        *,
+        recovery_envelope: str,
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> MigrationJobEvidence:
         """Resume the exact request; never replace or delete a foreign fixed slot."""
         try:
+            if not callable(effect_guard):
+                raise DriverTerminal("PROVISIONER_EFFECT_AUTHORITY_UNAVAILABLE")
+            await effect_guard()
             body = build_governance_migration_job(request, recovery_envelope=recovery_envelope)
             await self._stopped(request)
             uid: str | None = None
             for _ in range(self._poll_attempts):
+                await effect_guard()
                 job = await self._read(request)
                 if job is None:
                     if uid is not None:
@@ -595,6 +610,7 @@ class KubernetesGovernanceMigrationAdapter:
                     await self._stopped(request)
                     # A create conflict is ambiguous; the caller can resume a
                     # later observation, but this attempt adopts no winner.
+                    await effect_guard()
                     job = self._wire(
                         await asyncio.to_thread(
                             self._batch.create_namespaced_job, request.metadata.resource_name, body
@@ -608,6 +624,7 @@ class KubernetesGovernanceMigrationAdapter:
                     if latest is None:
                         raise _refuse()
                     self._job(latest, body, uid)
+                    await effect_guard()
                     await asyncio.to_thread(
                         self._batch.delete_namespaced_job,
                         body["metadata"]["name"],
@@ -629,12 +646,17 @@ class KubernetesGovernanceMigrationAdapter:
                                 label_selector="job-name=" + body["metadata"]["name"],
                             )
                             if not pods.items:
+                                await effect_guard()
                                 return evidence
                         elif remaining["metadata"].get("uid") != uid:
                             raise _refuse()
                         await self._pause()
-                    raise _refuse()
+                    raise _retry() from None
                 await self._pause()
-            raise _refuse()
-        except Exception:  # noqa: BLE001 - provider payloads must not escape this boundary
+            raise _retry() from None
+        except (ClaimConflict, StaleFence, DriverTerminal, DriverRetryable):
+            raise
+        except Exception as error:  # noqa: BLE001 - provider payloads must not escape
+            if _retryable_kubernetes_error(error):
+                raise _retry() from None
             raise _refuse() from None

@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .crypto import EnvelopeCodec
+from .governance_migration_checkpoint import CHECKPOINT_VERSION as GOVERNANCE_CHECKPOINT_VERSION
 from .models import (
     BackupRecord,
     CapacityDestructiveFence,
@@ -57,6 +58,21 @@ class ImmutableMetadataConflict(RepositoryConflict):
 
 class ClaimConflict(RepositoryConflict):
     pass
+
+
+def _terminal_failure_checkpoint(operation: Operation) -> str:
+    # Failure state and recovery progress are distinct. An irreversible
+    # governance enrollment must not lose its plan/PVC/target binding merely
+    # because retries ran out or foreign evidence requires operator review.
+    # Preserve even a malformed migration hint for inspection; no recovery
+    # path may trust it without decoding and rechecking live authority.
+    if (
+        operation.action in {OperationAction.PROVISION, OperationAction.ROLLFORWARD}
+        and operation.wire_protocol == WireProtocol.V2
+        and operation.checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":")
+    ):
+        return operation.checkpoint
+    return "failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1124,7 +1140,7 @@ class OperationRepository:
                 now=now,
             )
             operation.state = OperationState.ERROR
-            operation.checkpoint = "failed"
+            operation.checkpoint = _terminal_failure_checkpoint(operation)
             operation.error_code = code
             operation.claim_owner = None
             operation.claim_token = None
@@ -1160,7 +1176,7 @@ class OperationRepository:
             operation.claim_expires_at = None
             if attempts >= self.max_failure_attempts:
                 operation.state = OperationState.ERROR
-                operation.checkpoint = "failed"
+                operation.checkpoint = _terminal_failure_checkpoint(operation)
                 operation.error_code = "PROVISIONER_RETRY_EXHAUSTED"
                 operation.finalized_at = failed_at
             else:
