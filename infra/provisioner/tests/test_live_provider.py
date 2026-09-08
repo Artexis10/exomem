@@ -1599,6 +1599,7 @@ def _init_snapshot(
         serving=serving,
         runtime_admitted=False,
         routes=(False, False),
+        governance_migration_job="absent",
     )
 
 

@@ -37,6 +37,28 @@ Service acceptance SHALL require the actual governance schema, authenticated pro
 - **AND** enrollment remains monotonic even when an explicit offline recovery restores the predecessor schema
 - **AND** recovery does not restore v3 over acknowledged v4 writes
 
+#### Scenario: Worker lease expires before migration Job completion
+
+- **WHEN** a migration has committed its initial durable checkpoint and its worker loses authority while a Job is running or its submission acknowledgement is uncertain
+- **THEN** a different operation cannot perform overlapping cell effects or tenant destruction, even after the worker lease expires or a newer fence is submitted
+- **AND** claim selection leaves unrelated cells eligible and permits only the same internal operation to retry under current authority
+- **AND** terminal failure preserves the migration denial barrier until explicit verified recovery resolves it
+- **AND** successful completion clears the barrier only in the atomic commit that stores the final result and final operation state
+
+#### Scenario: Destruction or another cell worker precedes migration entry
+
+- **WHEN** the first migration checkpoint would overlap non-final tenant destruction or another claimed operation on the same cell
+- **THEN** the checkpoint transition is refused atomically before any migration Job is submitted
+- **AND** reused provider operation IDs do not erase the distinction between internal operations
+
+#### Scenario: Fixed migration Job is observed during recovery
+
+- **WHEN** a fixed-slot migration Job is present, including a failed or terminating Job
+- **THEN** its own operation identity and exact provider recovery envelope are authenticated before classification
+- **AND** only the current governance migration with durable progress may reach its coordinator for exact reconciliation
+- **AND** an authenticated foreign Job blocks effects while malformed or unauthenticated evidence is refused
+- **AND** expected Job contention preserves the checkpoint without consuming the worker failure budget
+
 ### Requirement: Acceptance is resumable and normally agent operated
 
 The acceptance workflow SHALL execute independent checks without continuous operator attendance and persist a content-safe run report with immutable release/contract identity, stage outcomes, rerunnable commands and exact blocked actions. It MUST distinguish passed, failed, pending and blocked stages. It MUST use the ordinary customer security boundary, not a production authorization bypass.
