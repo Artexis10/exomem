@@ -17,6 +17,10 @@ def inputs(tmp_path, monkeypatch):
     scaffold = product / "src/exomem/_scaffold/_Schema"
     scaffold.mkdir(parents=True)
     (scaffold / "SKILL.md").write_text("Use the memory system's normal guidance.")
+    (product / "docs").mkdir()
+    (product / "docs/prominence.md").write_text(
+        "### Maximal — web\n\n```\nUse durable memory. CAPTURE-POLICY-SENTINEL\n```\n"
+    )
     (product / "src/exomem/__init__.py").write_text("__version__ = 'fixture'\n")
     monkeypatch.setattr(pilot, "_judge_source", lambda _: (b"# offline fixture judge\n", {"commit_sha": "b" * 40}))
     return dataset, product
@@ -41,6 +45,25 @@ def test_native_preparation_blinds_writer_and_preserves_every_session(inputs, tm
     assert not (out / "execution").exists()
     with pytest.raises(FileExistsError):
         prepare(inputs, out)
+
+
+def test_native_freezes_documented_hookless_instructions(inputs, tmp_path):
+    out = tmp_path / "run"
+    info = prepare(inputs, out)
+    assert (out / "custom-instructions.md").read_text() == "Use durable memory. CAPTURE-POLICY-SENTINEL\n"
+    _, product = inputs
+    (product / "docs/prominence.md").write_text("Changed after preparation")
+    plan = pilot.validate_native_run(out, expected_plan_sha256=info["plan_sha256"])
+    assert "custom-instructions.md" in plan["artifacts"]
+    assert "product/docs/prominence.md" in plan["artifacts"]
+
+
+def test_native_missing_hookless_contract_refuses_preparation(inputs, tmp_path):
+    _, product = inputs
+    (product / "docs/prominence.md").write_text("No published instruction block")
+    with pytest.raises(ValueError, match="Maximal"):
+        prepare(inputs, tmp_path / "run")
+    assert not (tmp_path / "run").exists()
 
 
 def test_changed_evaluator_fields_cannot_change_writer_inputs(inputs, tmp_path):

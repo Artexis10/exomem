@@ -111,6 +111,27 @@ def _model_identity(root: Path) -> dict:
     return {"files": files, "stored_bytes": size}
 
 
+def _hookless_instructions(document: bytes) -> str:
+    """Read the published Maximal block, without maintaining a benchmark copy."""
+    lines = document.decode("utf-8").splitlines(keepends=True)
+    in_section = False
+    start = None
+    for index, line in enumerate(lines):
+        if line.startswith("### "):
+            if in_section:
+                break
+            in_section = line.startswith("### Maximal")
+        elif in_section and line.startswith("```"):
+            if start is None:
+                start = index + 1
+            else:
+                block = "".join(lines[start:index])
+                if block.strip():
+                    return block
+                break
+    raise ValueError("product docs/prominence.md has no Maximal instruction block")
+
+
 def prepare_native(dataset_path: Path, judge_home: Path, out: Path, *, product_root: Path = _ROOT,
                    profile: str = "semantic", size: int = 1, budget_cap_usd: float,
                    seed: str = "native-lme-v1", limits: AgentLimits | None = None,
@@ -143,6 +164,8 @@ def prepare_native(dataset_path: Path, judge_home: Path, out: Path, *, product_r
     source_root = product_root / "src"
     if not (source_root / "exomem/_scaffold/_Schema/SKILL.md").is_file():
         raise ValueError("product source must include its shipped skill")
+    prominence = stable_dataset_bytes(product_root / "docs/prominence.md")
+    custom_instructions = _hookless_instructions(prominence)
     runtimes = {"product": _runtime_identity(python), "harness": _runtime_identity(Path(sys.executable))}
     if out.is_symlink():
         raise ValueError("native output may not be a symlink")
@@ -163,6 +186,8 @@ def prepare_native(dataset_path: Path, judge_home: Path, out: Path, *, product_r
         _write(out / relative, data)
         artifacts[relative] = _sha(data)
 
+    save("product/docs/prominence.md", prominence)
+    save("custom-instructions.md", custom_instructions.encode("utf-8"))
     for path in sorted(source_root.rglob("*")):
         if path.is_symlink():
             raise ValueError("product snapshot refuses symlinks")
@@ -194,6 +219,8 @@ def prepare_native(dataset_path: Path, judge_home: Path, out: Path, *, product_r
         "scheduling": "chronological session-end maintenance; fresh context per session and answer",
         "cost_basis": "capped actual usage; agent-chosen step count is unknown before execution",
         "text_only": True, "answer_access": "recall-only",
+        "custom_instructions_source": "product/docs/prominence.md#maximal",
+        "client_hooks": False,
     }
     plan_bytes = _json(plan)
     _write(out / "native-plan.json", plan_bytes)
@@ -321,7 +348,10 @@ async def run_native_cases(plan: dict, execution: Path, snapshots: dict[str, byt
                 if plan["profile"] == "semantic" and row["initial_readiness"].get("semantic_verified") is not True:
                     raise RuntimeError("native semantic readiness unavailable before writing")
                 row["before"] = cell.snapshot()
-                broker = NativeBroker(cell=cell, backend=backend, envelope=envelope, guidance=guidance)
+                broker = NativeBroker(
+                    cell=cell, backend=backend, envelope=envelope, guidance=guidance,
+                    custom_instructions=snapshots["custom-instructions.md"].decode("utf-8"),
+                )
                 writer = json.loads(snapshots[case["writer_path"]])
                 for index, session in enumerate(writer["sessions"], 1):
                     phase_path = case_root / f"write-{index:04d}"

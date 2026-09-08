@@ -9,7 +9,12 @@ memory cell. A fresh answering agent searches and reads that memory. The pinned
 official LongMemEval judge scores its final answer.
 
 The scheduling is **session-end maintenance**, not a continuously participating
-assistant. This is an Exomem-only diagnostic, not a competitive ranking. Original
+assistant. Each fresh agent receives the shipped skill and the documented
+Maximal custom-instructions block from `docs/prominence.md`, both frozen before
+execution. The current assignment asks it to perform memory maintenance;
+archived conversation turns remain evidence. Client hooks do not run. The agent
+may leave a conversation unwritten when nothing qualifies under its live policy.
+This is an Exomem-only diagnostic, not a competitive ranking. Original
 source-only scores remain separate and unchanged. Offline scripted tests prove
 the wiring; they do not establish model accuracy or improved benchmark scores.
 

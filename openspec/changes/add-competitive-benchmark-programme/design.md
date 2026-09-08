@@ -676,6 +676,13 @@ or replace the external LongMemEval dataset and judge.
   Declare the text-only tool profile and reject remote-file ingestion arguments
   before dispatch, since public capture tools otherwise accept download URLs.
   The answer broker permits recall operations only and rejects content writes.
+  Freeze the documented Maximal custom-instructions block from the product's
+  `docs/prominence.md` and supply it verbatim alongside the skill in each fresh
+  context. This is the documented hookless installation, not a benchmark-authored
+  capture policy. The current assignment explicitly requests session-end memory
+  maintenance and reports its outcome; historical dialogue remains evidence,
+  not the active turn to answer. No client hook runs, no write count is required,
+  and the agent still decides what qualifies under the live engagement envelope.
 - Each history session starts a fresh agent context with the current timestamped
   conversation and normal memory guidance; the same isolated memory survives
   across sessions. The agent decides what to capture, compile, link, correct or

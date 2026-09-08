@@ -101,6 +101,25 @@ def test_worker_context_does_not_carry_previous_phase(tmp_path):
     assert "QUESTION-SENTINEL" not in str(backend.requests[0])
 
 
+def test_hookless_contract_reaches_both_fresh_agents_without_forced_writes(tmp_path):
+    backend = Backend([{"role": "assistant", "content": "Nothing qualified."}] * 2)
+    b = NativeBroker(
+        cell=Cell(), backend=backend, envelope=RunEnvelope(AgentLimits()),
+        guidance={"SKILL.md": "SKILL-SENTINEL"},
+        custom_instructions="DOCUMENTED-CAPTURE-POLICY-SENTINEL",
+    )
+    for phase in ("writer", "answer"):
+        result = asyncio.run(run_agent_phase(b, phase=phase, turn="Source or question.", out=tmp_path / phase))
+        assert result["status"] == "completed"
+        assert result["tool_calls"] == 0
+    for request in backend.requests:
+        system = request["messages"][0]["content"]
+        assert "DOCUMENTED-CAPTURE-POLICY-SENTINEL" in system
+        assert "SKILL-SENTINEL" in system
+    assert "session-end memory maintenance" in backend.requests[0]["messages"][0]["content"]
+    assert b.cell.calls == []
+
+
 def test_token_budget_settles_usage_and_persists_across_workers(tmp_path):
     backend = Backend([{"role": "assistant", "content": "Done."}])
     b = broker(backend, limits=replace(AgentLimits(), max_context_tokens=2000, run_tokens=6096))
