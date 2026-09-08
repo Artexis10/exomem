@@ -333,6 +333,16 @@ class ProvisionerWorker:
                     **claim,
                 )
                 return True
+
+        async def assert_effect_authority() -> None:
+            if claim_lost.is_set():
+                raise ClaimConflict("worker lost its operation claim")
+            if await self._driver.observed_fence(operation.tenant_id) > operation.fence_generation:
+                raise StaleFence("provider fence advanced before effect")
+            await self._repository.assert_active_claim(operation.id, self._worker_id, **claim)
+            if claim_lost.is_set():
+                raise ClaimConflict("worker lost its operation claim")
+
         context = EffectContext(
             operation_id=operation.id,
             provider_operation_id=operation.external_operation_id,
@@ -342,6 +352,7 @@ class ProvisionerWorker:
             checkpoint=operation.checkpoint,
             operation_created_at=operation.created_at.isoformat().replace("+00:00", "Z"),
             wire_protocol=operation.wire_protocol,
+            effect_guard=assert_effect_authority,
         )
         try:
             outcome = await self._driver.execute(operation.action.value, request, context)

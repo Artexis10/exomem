@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -22,6 +23,21 @@ class EffectContext:
     checkpoint: str = "effect-prepared"
     operation_created_at: str = "1970-01-01T00:00:00Z"
     wire_protocol: str = "exomem-cell-provisioner.v1"
+    effect_guard: Callable[[], Awaitable[None]] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    async def assert_effect_authority(self) -> None:
+        """Recheck this worker's current claim before an explicitly guarded effect.
+
+        This is not provider-side fencing: the effect must still bind its exact
+        operation, fence, object UID and revision against concurrent replacement.
+        """
+        if self.effect_guard is None:
+            raise DriverTerminal("PROVISIONER_EFFECT_AUTHORITY_UNAVAILABLE")
+        await self.effect_guard()
 
     @property
     def provider_identity(self) -> tuple[str, str, str, str | None, int]:
