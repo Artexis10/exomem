@@ -1271,7 +1271,8 @@ def register_hosted_routes(
         except gateway.HostedGatewayError as exc:
             return _error_response(exc.code, config=config, operation="ready", started=started)
         readiness = lifecycle.readiness()
-        control_plane = lifecycle.control_plane_readiness()
+        session_readiness = lifecycle.authorization_session_readiness()
+        control_plane = lifecycle.control_plane_readiness(session_readiness)
         if private_authenticator is not None:
             assert config.vault_id is not None
             assert config.worker_policy_digest is not None
@@ -1292,6 +1293,9 @@ def register_hosted_routes(
                 "write_admission": readiness.write_admitted,
                 "worker_policy_digest": config.worker_policy_digest,
             }
+            governance = session_readiness.governance
+            if governance is not None:
+                data["governance"] = governance.as_private_dict()
         else:
             data = {**readiness.as_dict(), **control_plane}
         return _success_response(
