@@ -1052,17 +1052,62 @@ class KubernetesVaultFingerprintAdapter:
                 return None
             raise
 
-    async def _delete(self, metadata: OpaqueProviderMetadata) -> None:
+    @staticmethod
+    def _job_revision(job: Any) -> tuple[str, str]:
+        meta = getattr(job, "metadata", None)
+        uid = getattr(meta, "uid", None)
+        revision = getattr(meta, "resource_version", None)
+        if (
+            not isinstance(uid, str)
+            or not 1 <= len(uid) <= 512
+            or not isinstance(revision, str)
+            or not 1 <= len(revision) <= 512
+            or getattr(meta, "deletion_timestamp", None)
+        ):
+            raise MetadataConflict(
+                "vault fingerprint Job identity differs",
+                reason=ConflictReason.VAULT_FINGERPRINT_JOB_IDENTITY_DIFFERS,
+            )
+        return uid, revision
+
+    async def _delete(self, metadata: OpaqueProviderMetadata, job: Any) -> None:
+        uid, revision = self._job_revision(job)
         try:
             await asyncio.to_thread(
                 self._batch.delete_namespaced_job,
                 self._name(metadata),
                 metadata.resource_name,
-                body={"propagationPolicy": "Foreground"},
+                body={
+                    "propagationPolicy": "Foreground",
+                    "preconditions": {"uid": uid, "resourceVersion": revision},
+                },
             )
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - content-free provider cleanup boundary
             if _api_status(error) != 404:
-                raise
+                raise MetadataConflict(
+                    "vault fingerprint Job identity differs",
+                    reason=ConflictReason.VAULT_FINGERPRINT_JOB_IDENTITY_DIFFERS,
+                ) from None
+        for _ in range(self._poll_attempts):
+            remaining = await self._read(metadata)
+            if remaining is None:
+                pods = await asyncio.to_thread(
+                    self._core.list_namespaced_pod,
+                    metadata.resource_name,
+                    label_selector=f"job-name={self._name(metadata)}",
+                )
+                if not list(getattr(pods, "items", None) or ()):
+                    return
+            elif getattr(remaining.metadata, "uid", None) != uid:
+                raise MetadataConflict(
+                    "vault fingerprint Job identity differs",
+                    reason=ConflictReason.VAULT_FINGERPRINT_JOB_IDENTITY_DIFFERS,
+                )
+            await self._pause()
+        raise MetadataConflict(
+            "vault fingerprint Job did not complete within its bound",
+            reason=ConflictReason.VAULT_FINGERPRINT_JOB_DID_NOT_COMPLETE_WITHIN_ITS_BOUND,
+        )
 
     async def _result(self, metadata: OpaqueProviderMetadata, job: Any) -> str | None:
         status = getattr(job, "status", None)
@@ -1084,6 +1129,21 @@ class KubernetesVaultFingerprintAdapter:
                 "vault fingerprint result is unavailable",
                 reason=ConflictReason.VAULT_FINGERPRINT_RESULT_IS_UNAVAILABLE,
             )
+        owners = list(getattr(getattr(items[0], "metadata", None), "owner_references", None) or ())
+        if len(owners) != 1 or any(
+            getattr(owners[0], key, None) != value
+            for key, value in {
+                "api_version": "batch/v1",
+                "kind": "Job",
+                "name": self._name(metadata),
+                "uid": self._job_revision(job)[0],
+                "controller": True,
+            }.items()
+        ):
+            raise MetadataConflict(
+                "vault fingerprint result is invalid",
+                reason=ConflictReason.VAULT_FINGERPRINT_RESULT_IS_INVALID,
+            )
         statuses = list(getattr(items[0].status, "container_statuses", None) or ())
         terminated = (
             getattr(getattr(statuses[0], "state", None), "terminated", None)
@@ -1091,7 +1151,12 @@ class KubernetesVaultFingerprintAdapter:
             else None
         )
         message = getattr(terminated, "message", None)
-        if getattr(terminated, "exit_code", None) != 0 or not isinstance(message, str):
+        if (
+            getattr(terminated, "exit_code", None) != 0
+            or not isinstance(message, str)
+            or len(message.encode("utf-8")) > 4096
+            or getattr(statuses[0], "name", None) != "exomem"
+        ):
             raise MetadataConflict(
                 "vault fingerprint result is invalid",
                 reason=ConflictReason.VAULT_FINGERPRINT_RESULT_IS_INVALID,
@@ -1131,9 +1196,15 @@ class KubernetesVaultFingerprintAdapter:
             phase=phase,
             recovery_envelope=recovery_envelope,
         )["metadata"]["annotations"]
+        observed_uid = None
         for _ in range(self._poll_attempts):
             job = await self._read(metadata)
             if job is None:
+                if observed_uid is not None:
+                    raise MetadataConflict(
+                        "vault fingerprint Job identity differs",
+                        reason=ConflictReason.VAULT_FINGERPRINT_JOB_IDENTITY_DIFFERS,
+                    )
                 try:
                     await asyncio.to_thread(
                         self._batch.create_namespaced_job,
@@ -1152,10 +1223,6 @@ class KubernetesVaultFingerprintAdapter:
                 continue
             annotations = dict(getattr(job.metadata, "annotations", None) or {})
             if any(annotations.get(key) != value for key, value in expected_annotations.items()):
-                if int(getattr(getattr(job, "status", None), "succeeded", 0) or 0) == 1:
-                    await self._delete(metadata)
-                    await self._pause()
-                    continue
                 raise MetadataConflict(
                     "another cell lifecycle Job owns the fixed slot",
                     reason=ConflictReason.ANOTHER_CELL_LIFECYCLE_JOB_OWNS_THE_FIXED_SLOT,
@@ -1167,9 +1234,29 @@ class KubernetesVaultFingerprintAdapter:
                 phase=phase,
                 recovery_envelope=recovery_envelope,
             )
+            uid, _revision = self._job_revision(job)
+            if observed_uid is not None and uid != observed_uid:
+                raise MetadataConflict(
+                    "vault fingerprint Job identity differs",
+                    reason=ConflictReason.VAULT_FINGERPRINT_JOB_IDENTITY_DIFFERS,
+                )
+            observed_uid = uid
             digest = await self._result(metadata, job)
             if digest is not None:
-                await self._delete(metadata)
+                latest = await self._read(metadata)
+                if self._job_revision(latest)[0] != observed_uid:
+                    raise MetadataConflict(
+                        "vault fingerprint Job identity differs",
+                        reason=ConflictReason.VAULT_FINGERPRINT_JOB_IDENTITY_DIFFERS,
+                    )
+                self._require_job(
+                    latest,
+                    metadata,
+                    operation_id=operation_id,
+                    phase=phase,
+                    recovery_envelope=recovery_envelope,
+                )
+                await self._delete(metadata, latest)
                 return digest
             await self._pause()
         raise MetadataConflict(

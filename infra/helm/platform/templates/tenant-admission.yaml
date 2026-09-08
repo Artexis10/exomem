@@ -21,8 +21,11 @@ spec:
         has(object.metadata.labels) &&
         'exomem.io/vault-fingerprint' in object.metadata.labels &&
         object.metadata.labels['exomem.io/vault-fingerprint'] == 'true'
+    - name: governanceMigration
+      expression: >-
+        has(object.metadata.labels) && 'exomem.io/governance-migration' in object.metadata.labels
     - name: lifecycleJob
-      expression: variables.storageInit || variables.vaultFingerprint
+      expression: variables.storageInit || variables.vaultFingerprint || variables.governanceMigration
     - name: tenantNamespace
       expression: >-
         has(namespaceObject.metadata.labels) &&
@@ -55,7 +58,29 @@ spec:
       expression: >-
         variables.controllerUpdate &&
         variables.controllerJobFinalizerRemoval
+    - name: migrationSpec
+      expression: object.spec
+    - name: migrationMeta
+      expression: object.metadata
   validations:
+    - expression: >-
+        !variables.governanceMigration ||
+        (variables.tenantNamespace && !variables.storageInit && !variables.vaultFingerprint &&
+          !variables.restoreCandidate &&
+          request.userInfo.username == 'system:serviceaccount:kube-system:job-controller' &&
+          (request.operation == 'CREATE' || variables.controllerJobFinalizerTransition ||
+            (request.operation == 'UPDATE' && !has(object.spec.nodeName) &&
+              object.spec == oldObject.spec && variables.controllerJobFinalizerRemoval)) &&
+          object.metadata.labels['job-name'] == request.namespace + '-init' &&
+          object.metadata.name.startsWith(request.namespace + '-init-') &&
+          size(object.metadata.ownerReferences) == 1 &&
+          object.metadata.ownerReferences[0].apiVersion == 'batch/v1' &&
+          object.metadata.ownerReferences[0].kind == 'Job' &&
+          object.metadata.ownerReferences[0].name == request.namespace + '-init' &&
+          object.metadata.ownerReferences[0].uid.size() > 0 &&
+          object.metadata.ownerReferences[0].controller == true)
+      message: Migration pods must belong to the fixed singleton Job and be created only by its controller.
+    {{- include "exomem.governanceMigrationAdmission" . | nindent 4 }}
     - expression: >-
         !variables.inScope ||
         (
@@ -107,7 +132,7 @@ spec:
     - expression: >-
         !variables.inScope ||
         (
-        (variables.lifecycleJob
+        (variables.governanceMigration ? size(object.spec.initContainers) == 1 : variables.lifecycleJob
           ? (!has(object.spec.initContainers) || size(object.spec.initContainers) == 0)
           : (size(object.spec.initContainers) == 2 &&
             object.spec.initContainers[0].name == 'authorization-session-custody' &&

@@ -39,7 +39,36 @@ spec:
         request.resource.resource == 'configmaps' &&
         variables.name.matches('^sh\\.helm\\.release\\.v1\\.' +
           request.namespace + '\\.v[1-9][0-9]*$')
+    - name: governanceMigration
+      expression: >-
+        request.resource.resource == 'jobs' && request.operation != 'DELETE' &&
+        'exomem.io/governance-migration' in variables.labels
+    - name: migrationSpec
+      expression: variables.target.spec.template.spec
+    - name: migrationMeta
+      expression: variables.target.spec.template.metadata
   validations:
+    - expression: >-
+        !variables.governanceMigration ||
+        (variables.labels['app.kubernetes.io/name'] == 'exomem-governance-migration' &&
+          variables.labels['exomem.io/governance-migration'] == 'true' &&
+          !('exomem.io/vault-fingerprint' in variables.labels) &&
+          !('exomem.io/storage-init' in variables.labels) &&
+          !('exomem.io/restore-candidate' in variables.labels) &&
+          !has(variables.migrationSpec.nodeName) &&
+          variables.target.spec.parallelism == 1 && variables.target.spec.completions == 1 &&
+          variables.target.spec.backoffLimit == 0 && variables.target.spec.activeDeadlineSeconds == 600 &&
+          !has(variables.target.spec.ttlSecondsAfterFinished) &&
+          (!has(variables.target.spec.completionMode) || variables.target.spec.completionMode == 'NonIndexed') &&
+          (!has(variables.target.spec.manualSelector) || variables.target.spec.manualSelector == false) &&
+          (!has(variables.target.spec.suspend) || variables.target.spec.suspend == false) &&
+          (!has(variables.target.spec.managedBy) || variables.target.spec.managedBy == 'kubernetes.io/job-controller') &&
+          variables.target.spec.podReplacementPolicy == 'Failed' &&
+          !has(variables.target.spec.podFailurePolicy) && !has(variables.target.spec.successPolicy) &&
+          !has(variables.target.spec.backoffLimitPerIndex) && !has(variables.target.spec.maxFailedIndexes) &&
+          variables.annotations.all(key, variables.migrationMeta.annotations[key] == variables.annotations[key]))
+      message: Migration Jobs must retain the exact single-execution fixed-slot contract.
+    {{- include "exomem.governanceMigrationAdmission" . | nindent 4 }}
     - expression: >-
         request.resource.resource == 'namespaces'
           ? (request.operation == 'DELETE'
