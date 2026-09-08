@@ -3123,6 +3123,244 @@ print(json.dumps({
         _run(["docker", "image", "rm", "--force", image], check=False)
 
 
+@pytest.mark.timeout(1200)
+def test_exact_k3s_governance_migration_admission(k3s: str) -> None:
+    # Import only in this opt-in test: the runtime distribution does not depend
+    # on the separately packaged provisioner or its Kubernetes SDK.
+    from exomem_provisioner.governance_migration_job import (
+        KubernetesGovernanceMigrationAdapter,
+        MigrationJobRequest,
+        build_governance_migration_job,
+    )
+    from exomem_provisioner.lifecycle import OpaqueProviderMetadata
+
+    metadata = OpaqueProviderMetadata(
+        "tenant-migration-gate", "cell-migration-gate", "operation-migration-gate", 7
+    )
+    namespace = metadata.resource_name
+    platform = _render(PLATFORM, PLATFORM / "values.validation.yaml", "exomem-platform")
+    policies = [
+        item
+        for item in platform
+        if item.get("kind") in {"ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}
+        and item["metadata"]["name"] in {"exomem-tenant-boundary", "exomem-provisioner-scope"}
+    ]
+    access = [
+        item
+        for item in platform
+        if item.get("kind") in {"ServiceAccount", "ClusterRole", "ClusterRoleBinding"}
+        and item["metadata"]["name"] == "exomem-cell-provisioner"
+    ]
+    _kubectl(
+        k3s,
+        ["apply", "--filename=-"],
+        documents=[
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "exomem-platform"}},
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {
+                    "name": namespace,
+                    "labels": {
+                        "exomem.io/tenant-cell": "true",
+                        "exomem.io/cell-resource": namespace,
+                        **{
+                            f"pod-security.kubernetes.io/{mode}": "restricted"
+                            for mode in ("enforce", "audit", "warn")
+                        },
+                        **{
+                            f"pod-security.kubernetes.io/{mode}-version": "v1.35"
+                            for mode in ("enforce", "audit", "warn")
+                        },
+                    },
+                    "annotations": {
+                        **metadata.kubernetes_annotations,
+                        "helm.sh/resource-policy": "keep",
+                        "exomem.io/vault-id": metadata.tenant_id,
+                        "exomem.io/expected-release": "0.74.0",
+                        "exomem.io/worker-policy-digest": "f" * 64,
+                        "exomem.io/browser-origin": "https://app.example.invalid",
+                        "exomem.io/transfer-hostname": "transfer.example.invalid",
+                        "exomem.io/resource-name": namespace,
+                        "exomem.io/pvc-name": namespace + "-data",
+                        "exomem.io/credentials-secret-name": "exomem-cell-credentials",
+                        "exomem.io/authorization-session-secret-name": "exomem-authorization-session",
+                        "exomem.io/init-request-configmap-name": namespace + "-init-request",
+                        "exomem.io/records-reader-version": "2",
+                        "exomem.io/lifecycle-actions-enabled": "false",
+                    },
+                },
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "ServiceAccount",
+                "metadata": {"name": namespace, "namespace": namespace},
+                "automountServiceAccountToken": False,
+            },
+            *access,
+            *policies,
+        ],
+    )
+    for name in ("exomem-tenant-boundary", "exomem-provisioner-scope"):
+        _wait_for_policy_typecheck(k3s, name)
+
+    def admit(document, principal):
+        return _kubectl(
+            k3s,
+            [
+                "create",
+                "--dry-run=server",
+                "--filename=-",
+                "--output=json",
+                *([] if principal is None else [f"--as={principal}"]),
+            ],
+            documents=[document],
+            check=False,
+        )
+
+    provisioner = "system:serviceaccount:exomem-platform:exomem-cell-provisioner"
+    controller = "system:serviceaccount:kube-system:job-controller"
+    for phase in ("inspect", "prepare", "commit"):
+        request = MigrationJobRequest(
+            metadata,
+            metadata.tenant_id,
+            "pvc-migration-gate",
+            "ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+            "b" * 64,
+            phase,
+            None if phase == "inspect" else "c" * 64,
+            "d" * 64 if phase == "commit" else None,
+        )
+        job = build_governance_migration_job(request, recovery_envelope="signed-migration-envelope")
+        accepted = admit(job, provisioner)
+        assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+        pod = {"apiVersion": "v1", "kind": "Pod", **copy.deepcopy(job["spec"]["template"])}
+        pod["metadata"].update(
+            name=namespace + "-init-test",
+            namespace=namespace,
+            ownerReferences=[
+                {
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "name": namespace + "-init",
+                    "uid": "11111111-1111-4111-8111-111111111111",
+                    "controller": True,
+                }
+            ],
+        )
+        pod["metadata"]["labels"]["job-name"] = namespace + "-init"
+        accepted_pod = admit(pod, controller)
+        assert accepted_pod.returncode == 0, accepted_pod.stdout + accepted_pod.stderr
+        actual_spec = json.loads(accepted.stdout)["spec"]["template"]["spec"]
+        KubernetesGovernanceMigrationAdapter._pod_spec(actual_spec, job["spec"]["template"]["spec"])
+        KubernetesGovernanceMigrationAdapter._pod_spec(
+            json.loads(accepted_pod.stdout)["spec"], pod["spec"], scheduled=True
+        )
+        # Client-supplied owner references are not controller authority.
+        forged = admit(pod, None)
+        assert forged.returncode != 0 and "Migration pods must belong" in forged.stderr
+        for kind in (
+            "image",
+            "command",
+            "custody-write",
+            "secret-env",
+            "mixed-label",
+            "extra-init",
+            "inspect-write",
+        ):
+            if kind == "inspect-write" and phase != "inspect":
+                continue
+            mutated = copy.deepcopy(pod)
+            spec = mutated["spec"]
+            if kind == "image":
+                spec["containers"][0]["image"] = "arbitrary:latest"
+            elif kind == "command":
+                spec["initContainers"][0]["args"] += ["--watch"]
+            elif kind == "custody-write":
+                spec["containers"][0]["volumeMounts"][3]["readOnly"] = False
+            elif kind == "secret-env":
+                spec["containers"][0]["envFrom"] = [
+                    {"secretRef": {"name": "exomem-cell-credentials"}}
+                ]
+            elif kind == "mixed-label":
+                mutated["metadata"]["labels"]["exomem.io/restore-candidate"] = "true"
+            elif kind == "extra-init":
+                spec["initContainers"].append(copy.deepcopy(spec["initContainers"][0]))
+                spec["initContainers"][1]["name"] = "additional-execution"
+            else:
+                spec["containers"][0]["volumeMounts"][0]["readOnly"] = False
+            denied = admit(mutated, controller)
+            assert denied.returncode != 0, kind
+            assert "denied request" in denied.stderr, denied.stderr
+        for kind in ("parallelism", "completions", "ttl", "replacement", "env", "template-label"):
+            mutated = copy.deepcopy(job)
+            if kind in ("parallelism", "completions"):
+                mutated["spec"][kind] = 2
+            elif kind == "ttl":
+                mutated["spec"]["ttlSecondsAfterFinished"] = 300
+            elif kind == "replacement":
+                mutated["spec"]["podReplacementPolicy"] = "TerminatingOrFailed"
+            elif kind == "env":
+                mutated["spec"]["template"]["spec"]["containers"][0]["env"].append(
+                    {"name": "EXTRA", "value": "injected"}
+                )
+            else:
+                mutated["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/name"] = (
+                    "exomem-cell"
+                )
+            denied = admit(mutated, provisioner)
+            assert denied.returncode != 0, kind
+            assert "denied request" in denied.stderr, denied.stderr
+
+    # Exercise actual Job-controller creation and cleanup, even when an
+    # unavailable PVC leaves the pod unscheduled. No runtime image executes.
+    _kubectl(k3s, ["create", "--filename=-", f"--as={provisioner}"], documents=[job])
+    observed_job = json.loads(
+        _kubectl(k3s, ["get", "job", namespace + "-init", "-n", namespace, "-o", "json"]).stdout
+    )
+    adapter = KubernetesGovernanceMigrationAdapter(core_v1=None, apps_v1=None, batch_v1=None)
+    adapter._job(observed_job, job, None)
+    for _ in range(20):
+        pods = json.loads(
+            _kubectl(
+                k3s,
+                [
+                    "get",
+                    "pods",
+                    "-n",
+                    namespace,
+                    "-l",
+                    "job-name=" + namespace + "-init",
+                    "-o",
+                    "json",
+                ],
+            ).stdout
+        )["items"]
+        if len(pods) == 1:
+            break
+        time.sleep(0.5)
+    assert len(pods) == 1
+    assert not pods[0]["spec"].get("nodeName")
+    adapter._pod_spec(pods[0]["spec"], job["spec"]["template"]["spec"], scheduled=True)
+    _kubectl(
+        k3s,
+        [
+            "delete",
+            "job",
+            namespace + "-init",
+            "-n",
+            namespace,
+            "--cascade=foreground",
+            "--wait=true",
+            "--timeout=15s",
+            f"--as={provisioner}",
+        ],
+    )
+    assert not json.loads(_kubectl(k3s, ["get", "pods", "-n", namespace, "-o", "json"]).stdout)[
+        "items"
+    ]
+
+
 @pytest.mark.skipif(
     not RUN_RUNTIME,
     reason="set RUN_K3S_RUNTIME_TEST=1 to run the same-cell runtime rollforward gate",

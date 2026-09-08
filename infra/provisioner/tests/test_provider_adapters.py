@@ -1064,6 +1064,35 @@ async def test_kubernetes_fingerprint_job_is_read_only_bounded_and_content_free(
 
 
 @pytest.mark.asyncio
+async def test_fingerprint_preserves_foreign_succeeded_fixed_slot() -> None:
+    class Batch:
+        def read_namespaced_job(self, name, namespace):
+            return SimpleNamespace(
+                metadata=SimpleNamespace(
+                    annotations={"exomem.io/governance-migration-phase": "commit"}
+                ),
+                status=SimpleNamespace(succeeded=1),
+            )
+
+        def delete_namespaced_job(self, *args, **kwargs):
+            pytest.fail("foreign terminal evidence must survive")
+
+    adapter = KubernetesVaultFingerprintAdapter(
+        core_v1=object(),
+        batch_v1=Batch(),
+        image="unused",
+        sleep=lambda _: None,
+    )
+    with pytest.raises(MetadataConflict, match="another cell lifecycle Job"):
+        await adapter.fingerprint(
+            _metadata(),
+            operation_id="operation-alpha",
+            phase="before",
+            recovery_envelope="signed",
+        )
+
+
+@pytest.mark.asyncio
 async def test_kubernetes_fingerprint_rejects_untrusted_or_leaky_result() -> None:
     metadata = _metadata()
     image = "registry.example/exomem-provisioner@sha256:" + "a" * 64

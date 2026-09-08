@@ -1152,10 +1152,6 @@ class KubernetesVaultFingerprintAdapter:
                 continue
             annotations = dict(getattr(job.metadata, "annotations", None) or {})
             if any(annotations.get(key) != value for key, value in expected_annotations.items()):
-                if int(getattr(getattr(job, "status", None), "succeeded", 0) or 0) == 1:
-                    await self._delete(metadata)
-                    await self._pause()
-                    continue
                 raise MetadataConflict(
                     "another cell lifecycle Job owns the fixed slot",
                     reason=ConflictReason.ANOTHER_CELL_LIFECYCLE_JOB_OWNS_THE_FIXED_SLOT,
