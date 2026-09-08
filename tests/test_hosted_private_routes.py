@@ -38,6 +38,10 @@ from exomem import commands as commands_module
 from exomem import hosted_gateway as gateway
 from exomem.access_log import AccessLogMiddleware
 from exomem.governance import authorization_session_lifecycle
+from exomem.governance.authorization_serving_membership import (
+    GovernanceReadinessProof,
+    ServingMembershipReadiness,
+)
 from exomem.governance.authorization_transport import AuthorizationCarrierMiddleware
 from exomem.hosted_runtime import (
     HostedCellConfig,
@@ -1317,6 +1321,74 @@ def test_private_readiness_is_a_complete_control_plane_binding_proof(tmp_path: P
         },
         "code": "CELL_READY",
     }
+
+
+def test_authenticated_private_readiness_exposes_only_the_governance_proof(
+    tmp_path: Path,
+) -> None:
+    class DynamicAuthority:
+        def authenticate(self, presented: str | None) -> object | None:
+            if presented == "private-governance-readiness-secret":
+                return SimpleNamespace(
+                    credential_version="active-v1",
+                    security_revision=1,
+                    preferred=True,
+                )
+            return None
+
+    client, config, lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-governance",
+        credential="legacy-private-service-credential",
+        private_authenticator=DynamicAuthority(),
+    )
+    lifecycle._authorization_session_readiness_provider = lambda: ServingMembershipReadiness(
+        ready=True,
+        code="AUTHORIZATION_MEMBERSHIP_READY",
+        epoch=7,
+        serving_replicas=1,
+        draining_replicas=0,
+        governance=GovernanceReadinessProof(
+            schema_version=1,
+            actual_schema=4,
+            cell_id="cell-governance",
+            vault_id="vault-cell-governance",
+            replica_id="cell-governance-0",
+            software_version="0.1.0",
+            governance_enrolled=True,
+            activation_store_id="activation-store-governance",
+            activation_epoch=7,
+            activation_state_digest="a" * 64,
+            custody_revision="b" * 64,
+            membership_epoch=7,
+            membership_digest="c" * 64,
+            store_agreement=True,
+        ),
+    )
+
+    response = client.get(
+        "/private/exomem/v1/ready",
+        headers=_headers(config, credential="private-governance-readiness-secret"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["governance"] == {
+        "schemaVersion": 1,
+        "actualSchema": 4,
+        "cellId": "cell-governance",
+        "vaultId": "vault-cell-governance",
+        "replicaId": "cell-governance-0",
+        "softwareVersion": "0.1.0",
+        "governanceEnrolled": True,
+        "activationStoreId": "activation-store-governance",
+        "activationEpoch": 7,
+        "activationStateDigest": "a" * 64,
+        "custodyRevision": "b" * 64,
+        "membershipEpoch": 7,
+        "membershipDigest": "c" * 64,
+        "storeAgreement": True,
+    }
+    assert "activationStoreId" not in response.json()["data"]["authorization_session"]
 
 
 def test_authenticated_reader_status_reports_the_active_runtime_configuration(tmp_path: Path) -> None:

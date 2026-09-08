@@ -45,6 +45,23 @@ Service acceptance SHALL require the actual governance schema, authenticated pro
 - **AND** terminal failure preserves the migration denial barrier until explicit verified recovery resolves it
 - **AND** successful completion clears the barrier only in the atomic commit that stores the final result and final operation state
 
+#### Scenario: Target start or route publication outlasts serving custody
+
+- **WHEN** the same migration retains its completion or confirmation checkpoint after a lost acknowledgement and its exact enrolled schema-4 SERVING successor has expired
+- **THEN** automatic recovery requires current operation, claim, fence, bound PVC/image and maintenance authority, closed routes with external rejection proof, and no remaining PVC-using pods
+- **AND** guarded revision-checked custody reissuance preserves the signing key, attachment, activation tuple, schema, software and membership lineage
+- **AND** expired signing keys and future or malformed authorization windows remain invalid
+- **AND** the reissued and subsequent serving windows end within the signing key's validity, with insufficient remaining lifetime kept fenced
+- **AND** confirmation progress is retained until the exact fully DRAINING successor is published or reconciled; an uncertain acknowledgement cannot authorize target start
+- **AND** the selected runtime must prove fresh private governance readiness against the authoritative Secret before admission or routes reopen
+- **AND** recovery neither resets enrollment nor restores old data, repeats cutover or relaxes ordinary serving renewal
+
+#### Scenario: A prepared but unenrolled migration outlasts custody
+
+- **WHEN** retained preparation progress is still unenrolled and its custody expires
+- **THEN** the cell remains fenced for explicit verified abort or recovery
+- **AND** automatic retry cannot renew the prepared source, replace its plan or treat the elapsed window as enrollment authority
+
 #### Scenario: Destruction or another cell worker precedes migration entry
 
 - **WHEN** the first migration checkpoint would overlap non-final tenant destruction or another claimed operation on the same cell
