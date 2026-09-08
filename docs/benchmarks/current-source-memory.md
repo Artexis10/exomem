@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Current-source memory observations
 
 The **Mixed-load observations** workflow collects two independent cohorts on
