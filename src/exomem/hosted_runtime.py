@@ -749,7 +749,10 @@ class HostedCellLifecycle:
                 degraded=degraded,
             )
 
-    def control_plane_readiness(self) -> dict[str, Any]:
+    def control_plane_readiness(
+        self,
+        session_readiness: ServingMembershipReadiness | None = None,
+    ) -> dict[str, Any]:
         """Return the provider-neutral readiness proof used before cell binding.
 
         The existing snake-case readiness fields remain the cell-local diagnostic
@@ -758,15 +761,8 @@ class HostedCellLifecycle:
         single coarse ``ready`` boolean.
         """
 
-        session_readiness = unavailable_readiness()
-        provider = self._authorization_session_readiness_provider
-        if provider is not None:
-            try:
-                candidate = provider()
-                if isinstance(candidate, ServingMembershipReadiness):
-                    session_readiness = candidate
-            except Exception:  # noqa: BLE001 - readiness must remain content-free
-                session_readiness = unavailable_readiness()
+        if session_readiness is None:
+            session_readiness = self.authorization_session_readiness()
         with self._condition:
             readiness = self.readiness()
             workers_enabled = self.config.resource_limits.worker_count > 0
@@ -788,6 +784,20 @@ class HostedCellLifecycle:
                 "authorizationSession": session_readiness.as_public_dict(),
                 "code": "CELL_READY" if readiness.ready else readiness.reason_code,
             }
+
+    def authorization_session_readiness(self) -> ServingMembershipReadiness:
+        """Recheck the content-free authorization-session serving state."""
+
+        session_readiness = unavailable_readiness()
+        provider = self._authorization_session_readiness_provider
+        if provider is not None:
+            try:
+                candidate = provider()
+                if isinstance(candidate, ServingMembershipReadiness):
+                    session_readiness = candidate
+            except Exception:  # noqa: BLE001 - readiness must remain content-free
+                session_readiness = unavailable_readiness()
+        return session_readiness
 
     def attest_authorization_membership(
         self,

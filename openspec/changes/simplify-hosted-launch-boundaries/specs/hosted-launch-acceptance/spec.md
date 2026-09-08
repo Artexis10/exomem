@@ -37,6 +37,59 @@ Service acceptance SHALL require the actual governance schema, authenticated pro
 - **AND** enrollment remains monotonic even when an explicit offline recovery restores the predecessor schema
 - **AND** recovery does not restore v3 over acknowledged v4 writes
 
+#### Scenario: Worker lease expires before migration Job completion
+
+- **WHEN** a migration has committed its initial durable checkpoint and its worker loses authority while a Job is running or its submission acknowledgement is uncertain
+- **THEN** a different operation cannot perform overlapping cell effects or tenant destruction, even after the worker lease expires or a newer fence is submitted
+- **AND** claim selection leaves unrelated cells eligible and permits only the same internal operation to retry under current authority
+- **AND** terminal failure preserves the migration denial barrier until explicit verified recovery resolves it
+- **AND** successful completion clears the barrier only in the atomic commit that stores the final result and final operation state
+
+#### Scenario: Target start or route publication outlasts serving custody
+
+- **WHEN** the same migration retains its completion or confirmation checkpoint after a lost acknowledgement and its exact enrolled schema-4 SERVING successor has expired
+- **THEN** automatic recovery requires current operation, claim, fence, bound PVC/image and maintenance authority, closed routes with external rejection proof, and no remaining PVC-using pods
+- **AND** guarded revision-checked custody reissuance preserves the signing key, attachment, activation tuple, schema, software and membership lineage
+- **AND** expired signing keys and future or malformed authorization windows remain invalid
+- **AND** the reissued and subsequent serving windows end within the signing key's validity, with insufficient remaining lifetime kept fenced
+- **AND** confirmation progress is retained until the exact fully DRAINING successor is published or reconciled; an uncertain acknowledgement cannot authorize target start
+- **AND** the selected runtime must prove fresh private governance readiness against the authoritative Secret before admission or routes reopen
+- **AND** recovery neither resets enrollment nor restores old data, repeats cutover or relaxes ordinary serving renewal
+
+#### Scenario: A prepared but unenrolled migration outlasts custody
+
+- **WHEN** retained preparation progress is still unenrolled and its custody expires
+- **THEN** the cell remains fenced for explicit verified abort or recovery
+- **AND** automatic retry cannot renew the prepared source, replace its plan or treat the elapsed window as enrollment authority
+
+#### Scenario: Destruction or another cell worker precedes migration entry
+
+- **WHEN** the first migration checkpoint would overlap non-final tenant destruction or another claimed operation on the same cell
+- **THEN** the checkpoint transition is refused atomically before any migration Job is submitted
+- **AND** reused provider operation IDs do not erase the distinction between internal operations
+
+#### Scenario: Fixed migration Job is observed during recovery
+
+- **WHEN** a fixed-slot migration Job is present, including a failed or terminating Job
+- **THEN** its own operation identity and exact provider recovery envelope are authenticated before classification
+- **AND** only the current governance migration with durable progress may reach its coordinator for exact reconciliation
+- **AND** an authenticated foreign Job blocks effects while malformed or unauthenticated evidence is refused
+- **AND** expected Job contention preserves the checkpoint without consuming the worker failure budget
+
+#### Scenario: Exact migration Job fails after database commit
+
+- **WHEN** the exact request-bound migration Job has terminal Failed status with no active or terminating pods, potentially after a committed database transaction
+- **THEN** recovery authenticates all namespace-observed pods using the bound PVC or fixed slot before UID/resource-version-bound cleanup
+- **AND** foreign or malformed execution metadata remains untouched and nonterminal pods keep recovery pending
+- **AND** cleanup permits only the same-phase request replay and never synthesizes success, restores a predecessor database or advances the durable phase
+
+#### Scenario: Migration Job deletion acknowledgement is lost
+
+- **WHEN** the exact migration Job is already terminating or absent after an uncertain deletion acknowledgement
+- **THEN** recovery waits without deleting a replacement or issuing another delete for the terminating Job
+- **AND** Job absence is insufficient until a namespace-wide observation proves no remaining bound-PVC or fixed-slot pods, including pods with missing labels
+- **AND** the same absence proof precedes any replacement submission, while failed API observations never count as absence
+
 ### Requirement: Acceptance is resumable and normally agent operated
 
 The acceptance workflow SHALL execute independent checks without continuous operator attendance and persist a content-safe run report with immutable release/contract identity, stage outcomes, rerunnable commands and exact blocked actions. It MUST distinguish passed, failed, pending and blocked stages. It MUST use the ordinary customer security boundary, not a production authorization bypass.

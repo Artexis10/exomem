@@ -46,7 +46,7 @@ def _revision() -> str:
 
 
 @pytest.fixture
-def cell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def cell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
     logs = tmp_path / "logs"
@@ -55,7 +55,49 @@ def cell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     vault = _vault(tmp_path)
     vault.chmod(0o700)
     now = int(time.time())
-    _write_hosted_custody(vault, now=now)
+    if getattr(request, "param", None) == "provider":
+        # Lean runtime shards may see provisioner source via another test's
+        # path setup without its dependencies. The hosted infrastructure job
+        # installs both packages and executes these cross-package drills.
+        pytest.importorskip("sqlalchemy", reason="requires provisioner dependencies")
+        pytest.importorskip("exomem_provisioner")
+        from exomem_provisioner import authorization_membership
+        from exomem_provisioner.lifecycle import OpaqueProviderMetadata
+
+        metadata = OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "migration-alpha", 7)
+        replica = metadata.resource_name + "-0"
+        bundle = authorization_membership.build_initial_hosted_authorization_bundle(
+            cell_id=metadata.subject_id,
+            logical_vault_id=metadata.tenant_id,
+            replica_id=replica,
+            software_version="0.48.0",
+            schema_version=3,
+            recovery_envelope="signed-envelope",
+            now=now,
+            entropy=lambda length: bytes(range(length)),
+        )
+        bundle = authorization_membership.transition_hosted_authorization_bundle(
+            bundle.files,
+            expected_cell_id=metadata.subject_id,
+            expected_logical_vault_id=metadata.tenant_id,
+            expected_replica_id=replica,
+            expected_software_version="0.48.0",
+            expected_schema_version=3,
+            expected_recovery_envelope="signed-envelope",
+            target_state="DRAINING",
+            target_no_in_flight=True,
+            now=now,
+        )
+        for variable, payload in (
+            (authorization_custody.KEYRING_FILE_ENV, bundle.keyring),
+            (authorization_custody.CONTROL_FILE_ENV, bundle.control),
+            (authorization_custody.MEMBERSHIP_FILE_ENV, bundle.membership),
+        ):
+            Path(os.environ[variable]).write_bytes(payload)
+            Path(os.environ[variable]).chmod(0o600)
+        monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, replica)
+    else:
+        _write_hosted_custody(vault, now=now)
     _configure_fixed_hosted_paths(monkeypatch)
     _open_v3(vault)
     custody = authorization_custody.load_authorization_custody(vault, now=now)
@@ -200,6 +242,92 @@ def test_job_prepares_then_commits_only_after_external_enrollment(cell, monkeypa
     assert authorization_custody.load_authorization_custody(
         binding.vault_root, now=now
     ).keyring.active_key.key not in _canonical(result)
+
+
+@pytest.mark.parametrize("cell", ["provider"], indirect=True)
+def test_provider_cleanup_replays_a_failed_job_after_real_database_commit(cell, monkeypatch):
+    import asyncio
+
+    pytest.importorskip("exomem_provisioner")
+    from exomem_provisioner.driver import DriverRetryable
+    from exomem_provisioner.governance_migration_job import MigrationJobRequest
+    from exomem_provisioner.lifecycle import OpaqueProviderMetadata
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
+    from infra.provisioner.tests.test_governance_migration_job import Cluster, _adapter, _allow
+
+    binding, now, request = cell
+    metadata = OpaqueProviderMetadata(
+        request["vaultId"], request["cellId"], request["operationId"], request["fenceGeneration"]
+    )
+    runner = _job(monkeypatch, binding)
+    _, prepared = _prepare(runner, request, now)
+    backup = schema_migration.verify_forward_migration_backup(
+        binding.vault_root,
+        expected_plan_digest=prepared["planDigest"],
+        backup_root=binding.state_root / "governance-migration-backups",
+    )
+    _write_hosted_custody(binding.vault_root, now=now, enrolled_target=backup.target)
+    commit = MigrationJobRequest(
+        metadata=metadata,
+        vault_id=request["vaultId"],
+        pvc_uid=request["pvcUid"],
+        runtime_image=request["runtimeImage"],
+        custody_revision=_revision(),
+        phase="commit",
+        source_store_digest=prepared["sourceStoreDigest"],
+        plan_digest=prepared["planDigest"],
+    )
+    custody = _custody_bytes()
+    cutovers = []
+
+    def crash_after_first_commit(point):
+        if point == "after_store_commit":
+            cutovers.append(point)
+            if len(cutovers) == 1:
+                raise schema_migration._ForwardMigrationCrash("lost acknowledgement")
+
+    monkeypatch.setattr(store, "_schema_migration_barrier", crash_after_first_commit)
+
+    class RuntimeCluster(Cluster):
+        def create_namespaced_job(self, namespace, body):
+            super().create_namespaced_job(namespace, body)
+            terminated = self.job_pods[0]["status"]["containerStatuses"][0]["state"]["terminated"]
+            try:
+                terminal = runner.execute(_canonical(commit.as_dict()), now=now)
+            except runner.HostedGovernanceJobError:
+                self.job["status"] = {
+                    "failed": 1,
+                    "active": 0,
+                    "terminating": 0,
+                    "conditions": [{"type": "Failed", "status": "True"}],
+                }
+                self.job_pods[0]["status"]["phase"] = "Failed"
+                terminated.update(exitCode=1, message="")
+            else:
+                terminated["message"] = _canonical(terminal).decode()
+            return self.job
+
+    cluster = RuntimeCluster(commit)
+
+    async def run():
+        return await _adapter(cluster).run(
+            commit, recovery_envelope="signed-envelope", effect_guard=_allow
+        )
+
+    with pytest.raises(DriverRetryable):
+        asyncio.run(run())
+    assert store.authorization_session_schema_version(binding.vault_root) == 4
+    assert cluster.job is None and not cluster.job_pods
+    assert len(cluster.created) == len(cluster.deleted) == 1
+    committed = store.sidecar_path(binding.vault_root).read_bytes()
+    evidence = asyncio.run(run())
+    assert evidence.terminal["replayed"] is True
+    assert evidence.terminal["activationStateDigest"] == backup.target.activation_state_digest
+    assert len(cutovers) == 1
+    assert store.sidecar_path(binding.vault_root).read_bytes() == committed
+    assert _custody_bytes() == custody
+    assert len(cluster.created) == len(cluster.deleted) == 2
 
 
 @pytest.mark.parametrize("interrupted_after_commit", [False, True])
