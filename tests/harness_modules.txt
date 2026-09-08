@@ -44,6 +44,7 @@ tests/test_lme_dataset.py
 tests/test_lme_direct_lifecycle.py
 tests/test_lme_duplicate_session_ids.py
 tests/test_lme_exomem_capture.py
+tests/test_lme_glm_profile.py
 tests/test_lme_hybrid_rag.py
 tests/test_lme_metered.py
 tests/test_lme_metered_chat.py

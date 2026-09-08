@@ -42,8 +42,18 @@ source, shipped guidance, model assets, interpreter/distribution metadata,
 implementation hashes, selection and limits. It prints the digest, session
 count and minimum number of model calls. That count excludes additional tool
 rounds; actual cost depends on the agent's work. Sizes 1, 7 and 25 are supported.
-Selection uses a fixed seed and excludes the previously inspected 25-case pilot.
-It is not stratified; inspect the frozen selection before interpreting coverage.
+The default `--selection-mode fresh` uses a fixed seed and excludes the
+previously inspected 25-case pilot. It is not stratified; inspect the frozen
+selection before interpreting coverage.
+
+For a deliberately comparable run on the already inspected canonical cohort,
+use `--selection-mode canonical25 --size 25`. This mode is **not a fresh
+holdout**. It accepts only the pinned official LongMemEval-S source, rederives
+the cohort from the complete source census, and requires exact agreement with
+the frozen `lme-s-25.json` membership and order. The prepared plan records that
+prior-inspection label and freezes the artifact bytes, digest, selection
+algorithm, source identity, and source census. Execution validates those pins
+and the evaluator/case order before constructing the metered backend.
 
 Inject the dedicated benchmark credential through the environment or a secret
 manager, then execute the prepared plan:

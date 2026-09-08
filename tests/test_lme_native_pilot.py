@@ -31,6 +31,45 @@ def prepare(inputs, out):
     return pilot.prepare_native(dataset, Path("fixture-judge"), out, product_root=product, profile="fixture", size=1, budget_cap_usd=2)
 
 
+def canonical_inputs(inputs, tmp_path, monkeypatch):
+    dataset, product = inputs
+    template = json.loads(dataset.read_text())[0]
+    rows = []
+    for index in range(25):
+        row = dict(template)
+        row["question_id"] = f"canonical-{index:02d}"
+        rows.append(row)
+    dataset.write_bytes(pilot._json(rows))
+    source = {
+        "repository": "fixture/longmemeval",
+        "revision": "a" * 40,
+        "filename": "dataset.json",
+        "sha256": pilot._sha(dataset.read_bytes()),
+        "byte_count": len(dataset.read_bytes()),
+        "row_count": 25,
+        "type_census": {"single-session-user": 25},
+        "abstention_count": 0,
+    }
+    order = [f"canonical-{index:02d}" for index in reversed(range(25))]
+    artifact = {
+        "source_identity": source,
+        "selection_algorithm_version": "fixture-canonical-v1",
+        "selection_algorithm": "fixture reverse order",
+        "target_question_ids": order,
+    }
+    artifact_raw = pilot._json(artifact)
+    monkeypatch.setattr(pilot, "CANONICAL_LME_S_SOURCE", source)
+    monkeypatch.setattr(pilot, "load_frozen_lme_selection", lambda: (artifact, artifact_raw))
+
+    def select(census, *, source):
+        assert source == artifact["source_identity"]
+        assert [row["question_id"] for row in census] == [f"canonical-{index:02d}" for index in range(25)]
+        return artifact
+
+    monkeypatch.setattr(pilot, "select_lme_s_25", select)
+    return dataset, product, artifact, artifact_raw
+
+
 def test_native_preparation_blinds_writer_and_preserves_every_session(inputs, tmp_path):
     out = tmp_path / "run"
     info = prepare(inputs, out)
@@ -45,6 +84,92 @@ def test_native_preparation_blinds_writer_and_preserves_every_session(inputs, tm
     assert not (out / "execution").exists()
     with pytest.raises(FileExistsError):
         prepare(inputs, out)
+
+
+def test_native_fresh_selection_remains_the_default(inputs, tmp_path):
+    out = tmp_path / "run"
+    prepare(inputs, out)
+    plan = json.loads((out / "native-plan.json").read_text())
+    assert plan["selection"]["mode"] == "fresh"
+    assert plan["selection"]["cohort"] == "fresh holdout excluding the prior-inspected canonical cohort"
+
+
+@pytest.mark.parametrize("selection_mode", ["unknown", "canonical"])
+def test_native_preparation_refuses_unknown_selection_mode(inputs, tmp_path, selection_mode):
+    dataset, product = inputs
+    with pytest.raises(ValueError, match="selection mode"):
+        pilot.prepare_native(dataset, Path("fixture-judge"), tmp_path / "run",
+            product_root=product, profile="fixture", size=1, budget_cap_usd=2,
+            selection_mode=selection_mode)
+    assert not (tmp_path / "run").exists()
+
+
+def test_native_canonical_selection_requires_size_25(inputs, tmp_path):
+    dataset, product = inputs
+    with pytest.raises(ValueError, match="size 25"):
+        pilot.prepare_native(dataset, Path("fixture-judge"), tmp_path / "run",
+            product_root=product, profile="fixture", size=7, budget_cap_usd=2,
+            selection_mode="canonical25")
+    assert not (tmp_path / "run").exists()
+
+
+def test_native_canonical_selection_requires_exact_pinned_source(inputs, tmp_path):
+    dataset, product = inputs
+    with pytest.raises(ValueError, match="pinned official dataset"):
+        pilot.prepare_native(dataset, Path("fixture-judge"), tmp_path / "run",
+            product_root=product, profile="fixture", size=25, budget_cap_usd=2,
+            selection_mode="canonical25")
+    assert not (tmp_path / "run").exists()
+
+
+def test_native_canonical_selection_preserves_order_and_source_only_histories(
+    inputs, tmp_path, monkeypatch,
+):
+    dataset, product, artifact, artifact_raw = canonical_inputs(inputs, tmp_path, monkeypatch)
+    out = tmp_path / "run"
+    info = pilot.prepare_native(dataset, Path("fixture-judge"), out,
+        product_root=product, profile="fixture", size=25, budget_cap_usd=2,
+        selection_mode="canonical25")
+    plan = pilot.validate_native_run(out, expected_plan_sha256=info["plan_sha256"])
+    assert [case["question_id"] for case in plan["cases"]] == artifact["target_question_ids"]
+    stable_metadata = {key: value for key, value in plan["selection"].items()
+                       if not key.startswith("source_census_")}
+    assert stable_metadata == {
+        "mode": "canonical25",
+        "cohort": "prior-inspected canonical LongMemEval-S 25-case cohort",
+        "artifact_path": "benchmarks/equivalence/subsets/lme-s-25.json",
+        "artifact_sha256": pilot._sha(artifact_raw),
+        "algorithm_version": "fixture-canonical-v1",
+        "algorithm": "fixture reverse order",
+        "source_identity": artifact["source_identity"],
+    }
+    assert plan["selection"]["source_census_path"] == "selection/source-census.json"
+    assert plan["selection"]["source_census_sha256"] == pilot._sha(
+        (out / "selection/source-census.json").read_bytes()
+    )
+    assert (out / "selection/lme-s-25.json").read_bytes() == artifact_raw
+    for case in plan["cases"]:
+        writer = json.loads((out / case["writer_path"]).read_text())
+        assert len(writer["sessions"]) == 2
+        assert "question_type" not in json.dumps(writer)
+
+
+def test_native_canonical_tampered_cohort_refuses_before_backend(
+    inputs, tmp_path, monkeypatch,
+):
+    dataset, product, _, _ = canonical_inputs(inputs, tmp_path, monkeypatch)
+    out = tmp_path / "run"
+    pilot.prepare_native(dataset, Path("fixture-judge"), out,
+        product_root=product, profile="fixture", size=25, budget_cap_usd=2,
+        selection_mode="canonical25")
+    plan = json.loads((out / "native-plan.json").read_text())
+    plan["cases"] = list(reversed(plan["cases"]))
+    raw = pilot._json(plan)
+    (out / "native-plan.json").write_bytes(raw)
+    monkeypatch.setattr(pilot, "_make_backend", lambda *a, **k: pytest.fail("tampered cohort reached backend"))
+    with pytest.raises(ValueError, match="canonical.*order"):
+        pilot.execute_native(out, expected_plan_sha256=pilot._sha(raw), approval_token="offline test")
+    assert not (out / "execution").exists()
 
 
 def test_native_freezes_documented_hookless_instructions(inputs, tmp_path):

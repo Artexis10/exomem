@@ -20,6 +20,12 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT / "benchmarks") not in sys.path:
     sys.path.insert(0, str(_ROOT / "benchmarks"))
 
+from equivalence.selection import (  # noqa: E402
+    CANONICAL_LME_S_SOURCE,
+    load_frozen_lme_selection,
+    select_lme_s_25,
+)
+
 from lme.dataset import _question_dict, load_dataset_bytes, stable_dataset_bytes  # noqa: E402
 from lme.metered_profiles import (  # noqa: E402
     GLM_MODEL,
@@ -144,12 +150,17 @@ def prepare_native(dataset_path: Path, judge_home: Path, out: Path, *, product_r
                    seed: str = "native-lme-v1", limits: AgentLimits | None = None,
                    transport: str = "openrouter", python: Path = Path(sys.executable),
                    model_cache: Path | None = None, clip_model_cache: Path | None = None,
-                   agent_model: str = JUDGE_MODEL, agent_tokenizer: Path | None = None) -> dict:
+                   agent_model: str = JUDGE_MODEL, agent_tokenizer: Path | None = None,
+                   selection_mode: str = "fresh") -> dict:
     """Freeze source, guidance, cohort and limits without model or service calls."""
     if profile not in {"fixture", "semantic"} or transport not in {"openai", "openrouter"}:
         raise ValueError("unknown native profile or transport")
+    if selection_mode not in {"fresh", "canonical25"}:
+        raise ValueError("unknown native selection mode")
     if size not in {1, 7, 25}:
         raise ValueError("native diagnostic accepts only 1, 7 or 25 cases")
+    if selection_mode == "canonical25" and size != 25:
+        raise ValueError("canonical25 selection requires size 25")
     if isinstance(budget_cap_usd, bool) or not math.isfinite(budget_cap_usd) or budget_cap_usd <= 0:
         raise ValueError("budget cap must be finite and positive")
     models = model_contract(agent_model, transport)
@@ -158,18 +169,49 @@ def prepare_native(dataset_path: Path, judge_home: Path, out: Path, *, product_r
     limits = limits or AgentLimits()
     dataset_bytes = stable_dataset_bytes(dataset_path)
     pin = json.loads(_PIN.read_bytes())
-    if profile == "semantic" and _sha(dataset_bytes) != pin["source_identity"]["sha256"]:
+    expected_dataset_sha256 = (CANONICAL_LME_S_SOURCE["sha256"]
+                               if selection_mode == "canonical25" else pin["source_identity"]["sha256"])
+    if (profile == "semantic" or selection_mode == "canonical25") and _sha(dataset_bytes) != expected_dataset_sha256:
         raise ValueError("native product runs require the pinned official dataset")
     if profile == "semantic" and (model_cache is None or clip_model_cache is None):
         raise ValueError("native semantic preparation requires explicit local BGE and CLIP model caches")
     dataset = load_dataset_bytes(dataset_bytes)
-    # Previously inspected pilot cases are held out of the new diagnostic.
-    prior_ids = set(pin["target_question_ids"])
-    candidates = [question for question in dataset.questions if question.question_id not in prior_ids]
-    candidates.sort(key=lambda q: (_sha((seed + "\0" + q.question_id).encode()), q.question_id))
-    if len(candidates) < size:
-        raise ValueError("not enough fresh questions for the selected native diagnostic")
-    selected = candidates[:size]
+    selection_artifact_bytes = None
+    selection_census_bytes = None
+    if selection_mode == "canonical25":
+        artifact, selection_artifact_bytes = load_frozen_lme_selection()
+        census = [{"question_id": identity, "question_type": kind} for identity, kind in dataset.census]
+        regenerated = select_lme_s_25(census, source=CANONICAL_LME_S_SOURCE)
+        if artifact != regenerated:
+            raise ValueError("native canonical selection artifact differs from source census")
+        selected = [dataset.require(question_id) for question_id in artifact["target_question_ids"]]
+        selection_census_bytes = _json(census)
+        selection = {
+            "mode": "canonical25",
+            "cohort": "prior-inspected canonical LongMemEval-S 25-case cohort",
+            "artifact_path": "benchmarks/equivalence/subsets/lme-s-25.json",
+            "artifact_sha256": _sha(selection_artifact_bytes),
+            "algorithm_version": artifact["selection_algorithm_version"],
+            "algorithm": artifact["selection_algorithm"],
+            "source_identity": artifact["source_identity"],
+            "source_census_path": "selection/source-census.json",
+            "source_census_sha256": _sha(selection_census_bytes),
+        }
+    else:
+        # Previously inspected pilot cases are held out of the new diagnostic.
+        prior_ids = set(pin["target_question_ids"])
+        candidates = [question for question in dataset.questions if question.question_id not in prior_ids]
+        candidates.sort(key=lambda q: (_sha((seed + "\0" + q.question_id).encode()), q.question_id))
+        if len(candidates) < size:
+            raise ValueError("not enough fresh questions for the selected native diagnostic")
+        selected = candidates[:size]
+        selection = {
+            "mode": "fresh",
+            "cohort": "fresh holdout excluding the prior-inspected canonical cohort",
+            "seed": seed,
+            "algorithm": "sha256(seed + NUL + question_id)",
+            "excluded_prior_question_ids": sorted(prior_ids),
+        }
     judge_bytes, judge_identity = _judge_source(judge_home)
     product_root = product_root.resolve()
     source_root = product_root / "src"
@@ -199,6 +241,9 @@ def prepare_native(dataset_path: Path, judge_home: Path, out: Path, *, product_r
 
     if agent_tokenizer_bytes is not None:
         save("agent-tokenizer.json", agent_tokenizer_bytes)
+    if selection_artifact_bytes is not None and selection_census_bytes is not None:
+        save("selection/lme-s-25.json", selection_artifact_bytes)
+        save("selection/source-census.json", selection_census_bytes)
 
     save("product/docs/prominence.md", prominence)
     save("custom-instructions.md", custom_instructions.encode("utf-8"))
@@ -228,8 +273,7 @@ def prepare_native(dataset_path: Path, judge_home: Path, out: Path, *, product_r
         "clip_model_cache": clip_identity,
         "dataset_sha256": _sha(dataset_bytes), "product_revision": _revision(product_root),
         "implementation_sha256": _implementation_identity(), "artifacts": artifacts, "cases": cases,
-        "selection": {"seed": seed, "algorithm": "sha256(seed + NUL + question_id)",
-                      "excluded_prior_question_ids": sorted(prior_ids)},
+        "selection": selection,
         "scheduling": "chronological session-end maintenance; fresh context per session and answer",
         "cost_basis": "capped actual usage; agent-chosen step count is unknown before execution",
         "text_only": True, "answer_access": "recall-only",
@@ -290,6 +334,43 @@ def validate_native_run(out: Path, *, expected_plan_sha256: str) -> dict:
     if tokenizer_sha is not None and _sha(snapshots.get("agent-tokenizer.json", b"")) != tokenizer_sha:
         raise ValueError("native agent tokenizer differs from the model profile")
     evaluator = load_dataset_bytes(snapshots["evaluator.json"])
+    selection = plan.get("selection", {})
+    if selection.get("mode") not in {"fresh", "canonical25"}:
+        raise ValueError("unknown native selection mode")
+    if selection["mode"] == "canonical25":
+        if plan["dataset_sha256"] != CANONICAL_LME_S_SOURCE["sha256"]:
+            raise ValueError("native canonical dataset identity differs")
+        artifact, raw = load_frozen_lme_selection()
+        if snapshots.get("selection/lme-s-25.json") != raw:
+            raise ValueError("native canonical selection artifact differs")
+        census_raw = snapshots.get("selection/source-census.json")
+        if census_raw is None or _sha(census_raw) != selection.get("source_census_sha256"):
+            raise ValueError("native canonical source census differs")
+        try:
+            census = json.loads(census_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("native canonical source census is invalid") from exc
+        regenerated = select_lme_s_25(census, source=CANONICAL_LME_S_SOURCE)
+        if artifact != regenerated:
+            raise ValueError("native canonical selection artifact differs from source census")
+        expected_ids = artifact["target_question_ids"]
+        if [case["question_id"] for case in plan["cases"]] != expected_ids:
+            raise ValueError("native canonical case order differs")
+        if [question.question_id for question in evaluator.questions] != expected_ids:
+            raise ValueError("native canonical evaluator order differs")
+        expected_metadata = {
+            "mode": "canonical25",
+            "cohort": "prior-inspected canonical LongMemEval-S 25-case cohort",
+            "artifact_path": "benchmarks/equivalence/subsets/lme-s-25.json",
+            "artifact_sha256": _sha(raw),
+            "algorithm_version": artifact["selection_algorithm_version"],
+            "algorithm": artifact["selection_algorithm"],
+            "source_identity": artifact["source_identity"],
+            "source_census_path": "selection/source-census.json",
+            "source_census_sha256": _sha(census_raw),
+        }
+        if selection != expected_metadata:
+            raise ValueError("native canonical selection metadata differs")
     for case in plan["cases"]:
         question = evaluator.require(case["question_id"])
         if json.loads(snapshots[case["writer_path"]]) != _writer_input(question.sessions):
@@ -492,6 +573,7 @@ def main():
     prepare.add_argument("--out", type=Path, required=True)
     prepare.add_argument("--product-root", type=Path, default=_ROOT)
     prepare.add_argument("--size", type=int, choices=[1, 7, 25], default=1)
+    prepare.add_argument("--selection-mode", choices=["fresh", "canonical25"], default="fresh")
     prepare.add_argument("--budget-cap-usd", type=float, required=True)
     prepare.add_argument("--seed", default="native-lme-v1")
     prepare.add_argument("--transport", choices=["openai", "openrouter"], default="openrouter")
@@ -509,7 +591,7 @@ def main():
     args = parser.parse_args()
     if args.command == "prepare":
         result = prepare_native(args.dataset, args.judge_home, args.out, product_root=args.product_root,
-                                size=args.size, budget_cap_usd=args.budget_cap_usd, seed=args.seed, transport=args.transport, python=args.python, model_cache=args.model_cache, clip_model_cache=args.clip_model_cache, agent_model=args.agent_model, agent_tokenizer=args.agent_tokenizer)
+                                size=args.size, budget_cap_usd=args.budget_cap_usd, seed=args.seed, transport=args.transport, python=args.python, model_cache=args.model_cache, clip_model_cache=args.clip_model_cache, agent_model=args.agent_model, agent_tokenizer=args.agent_tokenizer, selection_mode=args.selection_mode)
     else:
         result = execute_native(args.out, expected_plan_sha256=args.expected_plan_sha256,
                                 approval_token=args.metered_approval, python=args.python, api_key_env=args.api_key_env)

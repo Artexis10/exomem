@@ -738,6 +738,15 @@ or replace the external LongMemEval dataset and judge.
   the OpenAI judge's own provider and tokenizer in the same ledger. A model
   change needs a fresh preparation and independent workflow acceptance, with
   the same agent configuration across any compared products.
+- Keep native cohort choice explicit. `fresh` remains the default and excludes
+  the previously inspected comparative 25. `canonical25` is permitted only at
+  size 25 against the exact pinned LongMemEval-S source and is labelled as the
+  prior-inspected canonical cohort, never as a fresh holdout. Preparation reads
+  the frozen canonical artifact, rederives it from the complete source census,
+  preserves its exact order and full question histories, and freezes the
+  artifact bytes, digest, algorithm/version, source identity, and census in the
+  private plan. Execution reopens those frozen inputs and checks the dataset,
+  artifact, case order, and evaluator order before constructing a backend.
 - Preserve each model request, tool call/result, phase boundary, committed-write
   receipt, vault snapshot digest and measured spend. Report observed captures,
   compiled writes, updates and connections separately from requested behavior.

@@ -73,6 +73,23 @@ response alias SHALL be explicitly frozen; other model identities are refused.
 - **AND** a mismatched response provider stops subsequent calls after accounting
   for any known charge
 
+### Requirement: Native Canonical Cohort Selection Is Explicit And Frozen
+The native LongMemEval diagnostic SHALL default to a fresh seeded selection
+that excludes the prior-inspected canonical 25-case cohort. An explicit
+`canonical25` mode SHALL require size 25 and the exact pinned official
+LongMemEval-S source, regenerate the canonical selection from the complete
+source census with the shared selector, and preserve the frozen artifact's
+exact membership, order, and full source histories. Its plan SHALL label the
+cohort as prior-inspected rather than a fresh holdout and freeze the selection
+artifact bytes and digest, algorithm and version, source identity, and census.
+Execution SHALL validate those values against the evaluator and ordered case
+plan before constructing a metered backend.
+
+#### Scenario: Canonical plan drift refuses before spend
+- **WHEN** a canonical native plan names the wrong source, changes cohort
+  membership or order, or carries altered selection bytes or metadata
+- **THEN** execution refuses before backend construction or provider spend
+
 ### Requirement: Competitor Extraction Cost Is Metered Symmetrically
 Where a product performs server-side model work during ingestion or
 maintenance, its model endpoint SHALL be routed through a metering proxy so

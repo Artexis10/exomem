@@ -483,6 +483,12 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       retain the fixed official judge and one shared ledger. Verify routing,
       tokenizer drift, preparation integrity and fail-closed accounting offline,
       then run a capped synthetic acceptance before a full-history diagnostic.
+- [ ] 6.4e Add explicit native `canonical25` cohort selection for the approved
+      fixed-25 run while retaining `fresh` as the default. Require the exact
+      pinned source and size 25; rederive against the full source census;
+      freeze and validate artifact bytes, digest, algorithm, metadata and exact
+      case/evaluator order before backend construction. Label this cohort as
+      prior-inspected, never a fresh holdout. Keep open until delivery is merged.
 - [ ] 6.4b Verify real public-MCP writing, correction and fresh recall using a
       scripted offline agent; bind actual operation receipts and phase evidence.
       Keep no-write and budget-exhausted outcomes visible.
