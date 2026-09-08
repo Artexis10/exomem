@@ -173,6 +173,14 @@ tui = [
 ]
 
 [dependency-groups]
+# Optional local benchmark judging tools, excluded from the wheel.
+benchmark-judge = [
+    "backoff>=2.2",
+    "openai>=1",
+    "tiktoken>=0.7",
+    "tokenizers>=0.20",
+    "tqdm>=4",
+]
 dev = [
     "pytest>=8.0",
     "pytest-split>=0.11,<1",

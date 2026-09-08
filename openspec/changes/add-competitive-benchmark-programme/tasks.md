@@ -468,9 +468,69 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 - [ ] 6.3 `opsq/` measurement modules + manifests; fault-injection
       transparency (incl. exomem's own 4b.30 soft-degrade); heuristics
       labeled; no-aggregate/no-dashboard tests
+- [ ] 6.4 Wire an Exomem-only native LongMemEval diagnostic with the shipped
+      skill, isolated public MCP cell and genuine budgeted agent tool loop.
+      Split future-blind writer inputs from evaluator data, replay sessions
+      chronologically, and answer through fresh-agent iterative recall.
+- [ ] 6.4a Extend capped transport for structured tool completions without
+      changing the existing text-reader/judge contract; exercise failures and
+      accounting offline. Freeze optional Sol-low native agent and fixed GPT-4o
+      judge roles separately, preserve reasoning through tools, and enforce one
+      currency ledger across both models including unknown-charge stops.
+- [ ] 6.4d Add the explicitly selected economical GLM-5.3-Flash agent profile
+      with pinned provider, regular-price reservations and an immutable local
+      tokenizer. Use the same tokenizer for the broker and transport bounds;
+      retain the fixed official judge and one shared ledger. Verify routing,
+      tokenizer drift, preparation integrity and fail-closed accounting offline,
+      then run a capped synthetic acceptance before a full-history diagnostic.
+- [ ] 6.4e Add explicit native `canonical25` cohort selection for the approved
+      fixed-25 run while retaining `fresh` as the default. Require the exact
+      pinned source and size 25; rederive against the full source census;
+      freeze and validate artifact bytes, digest, algorithm, metadata and exact
+      case/evaluator order before backend construction. Label this cohort as
+      prior-inspected, never a fresh holdout. Keep open until delivery is merged.
+- [ ] 6.4b Verify real public-MCP writing, correction and fresh recall using a
+      scripted offline agent; bind actual operation receipts and phase evidence.
+      Keep no-write and budget-exhausted outcomes visible.
+- [ ] 6.4c Independently review input isolation, product authenticity, metering
+      and lifecycle cleanup; run one justified diagnostic only after the
+      consolidated correction, preserving the source-only baseline.
+
+      Implementation evidence for 6.4–6.4b: `benchmarks/lme/native_pilot.py`,
+      `native_agent.py`, `native_cell.py` and the structured metered transport;
+      `tests/test_lme_native_workflow.py` exercises actual public-MCP compiled
+      creation, a superseding correction and fresh-agent recall. The native
+      agent, cell, preparation and metered-chat suites cover isolation, resource
+      envelopes, no-write outcomes, cancellation and credential redaction.
+      Keep these tasks open until delivery is merged; 6.4c additionally needs
+      a justified metered diagnostic, and offline proof supplies no new score.
 
 ## 7. Runs (W9) — every metered step ⛳-gated
 
+- [ ] 7.0 Ship and exercise a bounded scored diagnostic replay: seven questions
+      spanning six answerable types plus abstention from a verified guest
+      export, the common reader, and unchanged pinned official judge under one
+      reserved budget. Preserve source artifacts; diagnostics remain
+      non-publishable and cannot authorize a full run.
+- [ ] 7.0a Support the explicitly selected OpenRouter route for small scored
+      diagnostics, binding the dated model and OpenAI provider, recording
+      reported charges and retaining uncertainty across failed attempts.
+- [ ] 7.0b Validate reader question placement and first-person attribution
+      before a full scored run: the diagnostic reader abstained on explicit
+      answer evidence, while separate single-question prompt probes recovered
+      the answer. Freeze any corrected common prompt and validate it on a
+      fresh diagnostic cohort; preserve the original scores and receipts.
+      Align archived-user attribution and question-last placement with the
+      pinned reference reader, keeping context content/order and all controls
+      consistent. Cover framing, gold-label exclusion and stale prepared-plan
+      refusal with offline tests. Paid validation follows a material correction
+      or a specific unresolved measurement, not each small edit; this task
+      remains open until fresh-cohort validation supplies score evidence.
+      Reader validation does not close the native lifecycle work in §6: the
+      next product evaluation must also exercise future-blind writing,
+      maintenance and fresh-agent recall under shipped product guidance.
+      Preserve the source-only result as a separate baseline; report actual
+      writes and compilation/relations performed, alongside their cost.
 - [ ] 7.1 Fixture tier across all lanes, zero spend
 - [ ] 7.2 LongMemEval-S fetched + sha pinned; canonical selection artifact
       committed (direct stub pilot remains open)

@@ -167,7 +167,7 @@ jobs:
           EXOMEM_TEST_TIER: harness
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
         run: >-
-          uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
+          uv run --frozen --group benchmark-judge --python ${{ matrix.python-version }} python -m pytest -q
           --splits=4
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
