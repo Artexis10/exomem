@@ -253,7 +253,9 @@ async def run_agent_phase(broker: NativeBroker, *, phase: str, turn: str, out: P
                     names = request.get("tool_names")
                     if not isinstance(names, list) or any(n not in available for n in names):
                         raise RuntimeError("worker requested an unavailable tool schema")
-                    tools = [{"type": "function", "function": {"name": name, "description": available[name]["description"], "parameters": available[name]["inputSchema"]}} for name in names]
+                    # Preserve public MCP omission semantics across providers;
+                    # Responses otherwise may normalize optional fields to required.
+                    tools = [{"type": "function", "function": {"name": name, "description": available[name]["description"], "parameters": available[name]["inputSchema"], "strict": False}} for name in names]
                     messages = request["messages"]
                     # Count serialized payload plus conservative chat/schema framing.
                     if len(encoding.encode_ordinary(_json({"messages": messages, "tools": tools}))) + 1024 > limits.max_context_tokens:

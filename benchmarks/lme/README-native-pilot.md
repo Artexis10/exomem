@@ -69,7 +69,9 @@ UTF-8 byte bound because the installed tokenizer lacks a verified Sol mapping.
 The 4096-token output limit includes reasoning. A model change requires a new
 preparation and must be disclosed when comparing results.
 
-Tool arguments and results remain real public MCP payloads. The answer phase has recall-only access; writers cannot
+Tool arguments and results remain real public MCP payloads. Function definitions
+set `strict: false` to preserve optional-field omission across provider APIs;
+public MCP validation still enforces the supplied arguments. The answer phase has recall-only access; writers cannot
 see future questions, gold answers or answer-session labels. Every question
 gets a separate vault, configuration, state root, lease, logs and model cache.
 No personal Exomem service is used. Text-only ingestion excludes remote files,

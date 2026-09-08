@@ -671,7 +671,10 @@ or replace the external LongMemEval dataset and judge.
 - `lme/native_agent.py` drives real model tool calls through public MCP schemas
   and results. Supply the shipped skill verbatim; a constrained file-read tool
   exposes only its frozen reference files. Standard harness tool discovery loads
-  public schemas as needed, without inventing product instructions. The agent
+  public schemas as needed, without inventing product instructions. Function
+  definitions explicitly set `strict: false` so provider normalization cannot
+  silently make the product's optional fields mandatory; MCP still validates
+  every actual argument. The agent
   has no shell, arbitrary filesystem, network tool or route to evaluator files.
   Declare the text-only tool profile and reject remote-file ingestion arguments
   before dispatch, since public capture tools otherwise accept download URLs.

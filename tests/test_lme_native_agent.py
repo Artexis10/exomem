@@ -57,6 +57,10 @@ def test_fresh_answer_worker_obtains_evidence_through_public_tool(tmp_path):
     assert result["status"] == "completed"
     assert result["answer"] == "Cedar."
     assert b.cell.calls == [("ask_memory", {"query": "current choice"})]
+    for definition in backend.requests[0]["tools"]:
+        assert definition["function"]["strict"] is False
+        name = definition["function"]["name"]
+        assert definition["function"]["parameters"] == b.available("answer")[name]["inputSchema"]
     assert "Current choice: Cedar." in str(backend.requests[1]["messages"])
     assert result["worker_pid"] != __import__("os").getpid()
 
