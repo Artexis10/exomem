@@ -830,4 +830,4 @@ def test_graph_commands_are_registry_exposed_on_all_surfaces() -> None:
         assert cmd.surfaces == frozenset({"mcp", "rest", "cli"})
         assert cmd.read_only is True
         assert cmd.cli_writes is False
-        assert cmd.mcp_annotations.readOnlyHint is True
+        assert cmd.mcp_annotations.read_only_hint is True

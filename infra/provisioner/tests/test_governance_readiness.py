@@ -51,27 +51,30 @@ def _identity(schema: int) -> dict[str, object]:
     }
 
 
-def _serving_bundle(target: dict[str, object] = TARGET):
+def _serving_bundle(target: dict[str, object] = TARGET, *, recovery_envelope: str = ENVELOPE):
+    def identity(schema: int) -> dict[str, object]:
+        return _identity(schema) | {"expected_recovery_envelope": recovery_envelope}
+
     initial = authorization_membership.build_initial_hosted_authorization_bundle(
         cell_id=CELL_ID,
         logical_vault_id=VAULT_ID,
         replica_id=REPLICA_ID,
         software_version=SOFTWARE_VERSION,
         schema_version=3,
-        recovery_envelope=ENVELOPE,
+        recovery_envelope=recovery_envelope,
         now=NOW,
         entropy=lambda length: bytes(range(length)),
     )
     drained = authorization_membership.transition_hosted_authorization_bundle(
         initial.files,
-        **_identity(3),
+        **identity(3),
         target_state="DRAINING",
         target_no_in_flight=True,
         now=NOW + 1,
     )
     enrolled = authorization_membership.enroll_hosted_governance_bundle(
         drained.files,
-        **_identity(3),
+        **identity(3),
         **target,
         now=NOW + 2,
     )
@@ -110,12 +113,12 @@ def _serving_bundle(target: dict[str, object] = TARGET):
             "pod-alpha",
             json.dumps(terminal, sort_keys=True, separators=(",", ":")).encode(),
         ),
-        recovery_envelope=ENVELOPE,
+        recovery_envelope=recovery_envelope,
         now=NOW + 3,
     )
     return authorization_membership.transition_hosted_authorization_bundle(
         migrated.files,
-        **_identity(4),
+        **identity(4),
         target_state="SERVING",
         target_no_in_flight=False,
         now=NOW + 4,

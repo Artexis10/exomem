@@ -394,7 +394,7 @@ def test_product_and_canonical_mcp_schemas_are_strict_bounded_integers(
     tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools(run_middleware=False))}
 
     for name in ("ask_memory", "find"):
-        schema = tools[name].to_mcp_tool().model_dump(mode="json")["inputSchema"]
+        schema = tools[name].to_mcp_tool().model_dump(mode="json", by_alias=True)["inputSchema"]
         cap = _integer_branch(schema["properties"]["rerank_max_candidates"])
         assert cap["minimum"] == 1
         assert cap["maximum"] == find_module.MAX_RERANK_CANDIDATES

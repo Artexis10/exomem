@@ -69,7 +69,7 @@ def _live_schemas(mcp) -> dict[str, dict]:
     tools = asyncio.run(mcp.list_tools())
     out: dict[str, dict] = {}
     for t in tools:
-        mt = t.to_mcp_tool().model_dump(mode="json")
+        mt = t.to_mcp_tool().model_dump(mode="json", by_alias=True)
         out[t.name] = {"description": mt["description"], "inputSchema": mt["inputSchema"]}
     return out
 
@@ -77,7 +77,7 @@ def _live_schemas(mcp) -> dict[str, dict]:
 def _discovery_contract(mcp) -> dict[str, object]:
     """Hash every client-visible field that can affect connector routing/policy."""
     tools = asyncio.run(mcp.list_tools())
-    wires = [tool.to_mcp_tool().model_dump(mode="json") for tool in tools]
+    wires = [tool.to_mcp_tool().model_dump(mode="json", by_alias=True) for tool in tools]
     return tool_surface.discovery_contract(wires)
 
 

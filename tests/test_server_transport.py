@@ -154,6 +154,28 @@ def test_stateless_http_keeps_get_sse_compatibility() -> None:
     assert endpoint.methods == {"GET", "POST", "DELETE"}
 
 
+@pytest.mark.parametrize("value", [True, False, "1", 1.0])
+def test_mcp_preserves_declared_strict_integer_validation(value: object) -> None:
+    from pydantic import StrictInt
+
+    mcp = server.ExomemFastMCP("strict-input-test")
+    calls: list[int] = []
+
+    def bounded(limit: StrictInt) -> int:
+        calls.append(limit)
+        return limit
+
+    # Resolve the local annotation for the same callable reflection used by
+    # public command registration.
+    bounded.__annotations__["limit"] = StrictInt
+    mcp.tool(bounded)
+    with pytest.raises(Exception, match="limit"):
+        asyncio.run(mcp.call_tool("bounded", {"limit": value}))
+    assert calls == []
+    asyncio.run(mcp.call_tool("bounded", {"limit": 1}))
+    assert calls == [1]
+
+
 def test_openid_discovery_alias_returns_oauth_metadata() -> None:
     mcp = server.ExomemFastMCP("discovery-test")
     register_oauth_metadata_route(

@@ -455,7 +455,7 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "BAD_JSON"
 
     mcp_schema = next(
-        tool.to_mcp_tool().model_dump(mode="json")["inputSchema"]["properties"]["context"]
+        tool.to_mcp_tool().model_dump(mode="json", by_alias=True)["inputSchema"]["properties"]["context"]
         for tool in asyncio.run(mcp.list_tools())
         if tool.name == "schema_memory"
     )
