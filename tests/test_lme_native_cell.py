@@ -21,6 +21,76 @@ def _product_result(result: dict) -> dict:
     return structured
 
 
+@pytest.mark.parametrize("with_aliases", [False, True])
+def test_snapshot_ignores_transient_root_filesystem_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_aliases: bool
+) -> None:
+    from benchmarks.lme import native_cell
+
+    cell = NativeCell(tmp_path / "cell", python=PYTHON, product_root=ROOT)
+    cell.vault.mkdir(parents=True)
+    (cell.vault / "memory.md").write_text("durable memory")
+    before = cell.snapshot()
+    prefix = ".exomem-held-probe-" + "a" * 32
+    for suffix in ("", "-renamed", "-link", "-replacement-source", "-replacement-target"):
+        (cell.vault / (prefix + suffix)).write_text("probe")
+    directory = cell.vault / (prefix + "-directory")
+    directory.mkdir()
+    if with_aliases:
+        (cell.vault / (prefix + "-alias")).symlink_to(prefix)
+        (cell.vault / (prefix + "-directory-alias")).symlink_to(directory)
+    inventory = native_cell._regular_files_no_follow
+
+    def inventory_then_cleanup(root: Path) -> list[Path]:
+        paths = inventory(root)
+        # The product can remove its capability probes after enumeration.
+        for path in paths:
+            if path.name.startswith(prefix):
+                path.unlink()
+        return paths
+
+    monkeypatch.setattr(native_cell, "_regular_files_no_follow", inventory_then_cleanup)
+    assert cell.snapshot() == before
+
+
+@pytest.mark.parametrize("relative", [
+    ".exomem-held-probe-invalid",
+    ".exomem-held-probe-" + "a" * 32 + "-memory.md",
+    "Knowledge Base/.exomem-held-probe-" + "a" * 32,
+])
+def test_snapshot_still_refuses_symlinks_outside_exact_root_probe_namespace(
+    tmp_path: Path, relative: str
+) -> None:
+    cell = NativeCell(tmp_path / "cell", python=PYTHON, product_root=ROOT)
+    target = tmp_path / "outside"
+    target.write_text("not memory")
+    link = cell.vault / relative
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+    with pytest.raises(RuntimeError, match="symlink"):
+        cell.snapshot()
+
+
+def test_snapshot_still_fails_when_an_ordinary_memory_disappears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from benchmarks.lme import native_cell
+
+    cell = NativeCell(tmp_path / "cell", python=PYTHON, product_root=ROOT)
+    cell.vault.mkdir(parents=True)
+    memory = cell.vault / "memory.md"
+    memory.write_text("must not silently disappear")
+    read = native_cell._read_no_follow
+
+    def remove_then_read(path: Path) -> bytes:
+        path.unlink()
+        return read(path)
+
+    monkeypatch.setattr(native_cell, "_read_no_follow", remove_then_read)
+    with pytest.raises(FileNotFoundError):
+        cell.snapshot()
+
+
 def test_native_cell_uses_real_public_mcp_and_keeps_the_vault(tmp_path: Path) -> None:
     cell_root = tmp_path / "cell"
 

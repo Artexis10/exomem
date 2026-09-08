@@ -8,6 +8,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 from collections.abc import Mapping, Sequence
@@ -39,6 +40,10 @@ _REMOTE_INGEST_ARGUMENTS = frozenset(
     {"url", "files", "adoption", "delivery", "download_url", "authorization_session_credential"}
 )
 _PROFILES = frozenset({"fixture", "semantic"})
+_ROOT_CAPABILITY_PROBE = re.compile(
+    r"\.exomem-held-probe-[0-9a-f]{32}"
+    r"(?:-renamed|-link|-alias|-directory(?:-alias)?|-replacement-(?:source|target))?"
+)
 
 
 def _json_value(value: Any) -> Any:
@@ -492,6 +497,11 @@ def _regular_files_no_follow(root: Path) -> list[Path]:
         directory = pending.pop()
         with os.scandir(directory) as entries:
             for entry in entries:
+                # The product probes root filesystem capabilities with temporary
+                # files, directories and aliases, including during health reads.
+                # They are runtime activity, not stored memory; never follow them.
+                if directory == root and _ROOT_CAPABILITY_PROBE.fullmatch(entry.name):
+                    continue
                 if entry.is_symlink():
                     raise RuntimeError(f"native cell vault contains a symlink: {entry.name}")
                 if entry.is_dir(follow_symlinks=False):
