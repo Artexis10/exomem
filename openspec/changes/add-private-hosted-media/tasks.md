@@ -3,6 +3,8 @@
 - [ ] 1.1 Reconcile the final `simplify-hosted-launch-boundaries` gateway, binding, transfer and custody contracts before implementation; verify a written dependency map in this design names the owning interfaces and preserves their release/migration fences.
 - [ ] 1.2 Add synthetic two-tenant fixtures for privacy, encrypted recovery and media jobs before wiring services; verify cross-tenant failures and inspectable content-free evidence without using live tenant data.
 - [ ] 1.3 Record baseline CPU, memory, storage and launch latency acceptance on the chosen synthetic deployment; verify the receipt distinguishes measured results, provider prices and unverified assumptions.
+- [ ] 1.4 Reproduce the four-user contract versus six-user reservation mismatch with signed synthetic receipts through `LiveCapacityAdmission`, add red-first observed-plus-reserved and concurrent last-slot tests, then restore consistent enforcement of the existing approved policy; verify recovery/orphan accounting and existing reservation integrity without raising limits or deleting cells.
+- [ ] 1.5 Evaluate five synthetic user cells with platform/direct-edge demand, admitted recovery and one heavy-job contender; record whole-node memory, OOM/eviction, latency, provider attachment and cost evidence. Keep fifth-cell admission blocked unless a separate reviewed capacity revision is justified; do not run load against the launch session or buy resources for this evaluation implicitly.
 
 ## 2. Encrypt transport and isolate platform services
 
@@ -11,6 +13,9 @@
 - [ ] 2.3 Enforce verified database server identity in the control-plane database client; verify missing CA/hostname checks fail before credentials are transmitted and valid production-form connections succeed against a synthetic endpoint.
 - [ ] 2.4 Add platform default-deny policies and separate privileged CSI admission/service accounts; verify an allowed-peer matrix with positive and negative network probes and no loss of required DNS, durability or provisioning behavior.
 - [ ] 2.5 Bind the transport profile and peer identities to signed deployment admission evidence; verify all old/new gateway, routing-layer and cell combinations and rollback fail closed when they cannot preserve the activated TLS requirement.
+- [ ] 2.6 After independent design critique, add a disabled direct edge with an explicit public route allowlist, separate private transfer listener and no Kubernetes discovery/token; prove SNI/Host, encoded/private paths, forwarding identity, method, grant and network isolation with the pinned Traefik binary and synthetic backends before any public exposure.
+- [ ] 2.7 Separate the direct resource identity from the existing OAuth issuer in the control plane and gateway; verify direct metadata/challenges, exact code/access/refresh-token audiences, explicit reconnect/revocation, transfer host migration and unchanged legacy behavior without credential-bearing redirects or audience aliases.
+- [ ] 2.8 Add automatic TLS-ALPN certificate lifecycle, encrypted platform certificate state and signed direct-profile admission; verify content-disabled bootstrap, renewal, expiry, state loss, restored issuance, rate/body/connection limits and compatible rollback. Keep public activation blocked on actual private-TLS, encrypted-storage, client, resource and deployment-owner evidence.
 
 ## 3. Close persistent storage and key-custody gaps
 

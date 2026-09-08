@@ -20,6 +20,12 @@ Hosted deployment evidence SHALL identify every processor that receives tenant p
 - **THEN** its job remains visibly queued, blocked or failed
 - **AND** no other provider receives content without the required owner selection
 
+#### Scenario: Content routes directly but authorization remains externally hosted
+
+- **WHEN** MCP and media bypass content proxies while the authorization issuer or browser application remains externally hosted
+- **THEN** the processor inventory retains those services' authentication-material and code-delivery trust
+- **AND** direct content routing is not described as cryptographic protection against those services or the compute operator
+
 ### Requirement: Persistent plaintext cannot escape encrypted storage
 
 Hosted canonical data, derived state, credentials, logs, processing scratch, recovery staging and sensitive platform state SHALL persist only on verified encrypted storage. Memory-backed scratch SHALL be bounded and MUST NOT spill through unencrypted swap or dumps. Failure to establish protection SHALL block the affected operation before plaintext is written.

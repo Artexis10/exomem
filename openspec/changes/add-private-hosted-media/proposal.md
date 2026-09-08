@@ -12,7 +12,8 @@ Hosted Exomem must preserve documents, images, and audio and make their contents
 - Keep original upload/download available independently of extraction, subject to existing transfer, governance, and storage limits.
 - Prepare a 10 GB logical storage tier with explicit physical headroom and a tenant-scoped incremental backup design before considering 100 GB or 1 TB tiers. Do not change current limits or provision those capacities in this proposal.
 - Evaluate the owner-accepted EUR 5–10 friends-tier range for three expected paying users and a possible fourth, plus the operator's cell. Keep the current four-user-cell gate and actual price changes separate from that demand forecast.
-- Compare direct HTTPS with the existing Tunnel as a later privacy improvement, without treating an ingress replacement as part of launch activation.
+- Design a disabled-by-default direct HTTPS content endpoint on the existing node, with a restricted public edge, automatic certificates and explicit OAuth resource migration. Keep its implementation and activation behind the bounded readiness stages in this design, separate from launch activation.
+- Reconcile the four-user signed capacity policy with provisioner reservations before evaluating a fifth cell. A permissive code path is not capacity evidence and must not silently raise the supported cohort.
 - Stage implementation after the launch-owned gateway and custody changes settle. This proposal changes specifications only and does not authorize a deployment, key rotation, purchase, or launch cutover.
 
 ## Capabilities

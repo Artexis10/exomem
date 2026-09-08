@@ -116,6 +116,20 @@ The hosted media offering SHALL include document extraction and OCR, with separa
 
 Heavy jobs SHALL obey both tenant and global concurrency, memory and runtime admission limits. Initial admission SHALL permit at most one heavy job globally and one per tenant, with bounded fair scheduling. Exhausted capacity SHALL queue work rather than borrow reserved interactive/recovery resources or bypass the existing user-cell cap.
 
+User-cell and recovery admission SHALL enforce the same approved policy across signed contracts, upstream gates and provisioner reservations, including the union of observed resources and outstanding reservations. A permissive implementation MUST NOT establish a larger supported cohort. Evaluating five cells SHALL require distinct five-cell resource and recovery evidence before a separately reviewed policy increase.
+
+#### Scenario: Outstanding reservations exceed the observed cell count
+
+- **WHEN** concurrent requests would exceed the approved user, recovery or attachment limit after combining observations with retained reservations
+- **THEN** admission rejects the excess before provisioning resources
+- **AND** a fresh signed observation with fewer materialized cells does not reset reserved capacity
+
+#### Scenario: A five-client benchmark uses only two cells
+
+- **WHEN** latency acceptance exercises five clients across two synthetic cells
+- **THEN** the receipt identifies that scope and does not establish five-cell capacity
+- **AND** admitting a fifth cell requires whole-node demand, recovery and attachment evidence under the revised policy
+
 #### Scenario: One tenant submits a large backlog
 
 - **WHEN** another tenant has an eligible queued job
