@@ -336,6 +336,15 @@ class Command:
         return mcp_tool_annotations(self.name, read_only=self.read_only)
 
 
+def _authorization_credential_schema(schema: dict) -> None:
+    """Advertise omission, not null, for the raw boundary's optional bearer."""
+    # Python needs an optional default for omission. The protected raw carrier
+    # deliberately rejects presented non-strings before Pydantic sees them.
+    schema.pop("anyOf", None)
+    schema.pop("default", None)
+    schema["type"] = "string"
+
+
 def bind_vault(
     leaf: Callable,
     *injected: object,
@@ -425,8 +434,9 @@ def bind_vault(
                 Field(
                     description=(
                         "Optional authorization-session bearer. Consumed by the raw "
-                        "MCP boundary before tool validation."
-                    )
+                        "MCP boundary before tool validation. Omit when unused; "
+                        "never send null or an empty string."
+                    ),
                 ),
             ],
         )
@@ -577,10 +587,15 @@ def bind_vault(
 def register_mcp_tool(
     mcp: FastMCP, bound: Callable[..., typing.Any], **kwargs: typing.Any
 ) -> Tool:
-    """Advertise deliberate failure content without changing result serialization."""
+    """Advertise raw carrier and failure contracts without changing serialization."""
     from fastmcp.tools import FunctionTool
 
     tool = FunctionTool.from_function(bound, run_in_thread=True, **kwargs)
+    credential = tool.parameters.get("properties", {}).get("authorization_session_credential")
+    if credential is not None:
+        # FastMCP adds the Python default after field-level schema transforms;
+        # normalize the final advertised carrier without changing validation.
+        _authorization_credential_schema(credential)
     if tool.output_schema is not None:
         schema = deepcopy(tool.output_schema)
         failure = {
