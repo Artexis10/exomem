@@ -11,7 +11,7 @@ import re
 import sqlite3
 import struct
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .. import find_corpus, mutation_lock, reserved_paths, state_migration, writer_lease
@@ -306,6 +306,7 @@ def _migration_identity(
     vault_root: Path,
     *,
     now: int,
+    hosted_recovery: bool = False,
 ) -> tuple[
     _MigrationIdentity,
     authorization_custody.AuthorizationControlRecord | None,
@@ -326,7 +327,12 @@ def _migration_identity(
         if any(configured[variable] != str(path) for variable, path in fixed_paths.items()):
             raise authorization_custody.AuthorizationCustodyUnavailable
         replica_id = os.environ.get(authorization_custody.REPLICA_ID_ENV, "")
-        custody = authorization_custody.load_authorization_custody(
+        load_custody = (
+            authorization_custody.load_hosted_migration_custody
+            if hosted_recovery
+            else authorization_custody.load_authorization_custody
+        )
+        custody = load_custody(
             vault_root,
             now=now,
         )
@@ -373,6 +379,8 @@ def _migration_identity(
             control if control.governance_enrolled else None,
         )
 
+    if hosted_recovery:
+        raise authorization_custody.AuthorizationCustodyUnavailable
     try:
         staged = authorization_custody.stage_standalone_v3_custody(vault_root, now=now)
         return (
@@ -591,9 +599,20 @@ def prepare_forward_migration(
 ) -> ForwardMigrationPlan:
     """Stage an immutable v4 target without enrolling or changing schema v3."""
 
+    return _prepare_forward_migration(vault_root, now=now)
+
+
+def _prepare_forward_migration(
+    vault_root: Path,
+    *,
+    now: int,
+    hosted_recovery: bool = False,
+) -> ForwardMigrationPlan:
     root = Path(vault_root)
     try:
-        staged, enrolled_control = _migration_identity(root, now=now)
+        staged, enrolled_control = _migration_identity(
+            root, now=now, hosted_recovery=hosted_recovery
+        )
         before = policy.observe_authoring_snapshot(root)
         if before is None:
             raise ForwardMigrationUnavailable
@@ -667,7 +686,7 @@ def prepare_forward_migration(
             hosted_membership_epoch=staged.hosted_membership_epoch,
             hosted_membership_digest=staged.hosted_membership_digest,
         )
-        if _migration_identity(root, now=now)[0] != staged:
+        if _migration_identity(root, now=now, hosted_recovery=hosted_recovery)[0] != staged:
             raise ForwardMigrationPlanMismatch
         plan_digest = _framed_digest(
             b"exomem.governance-schema-migration-plan.v1",
@@ -2701,8 +2720,43 @@ def commit_enrolled_forward_migration(
 ) -> ForwardMigrationResult:
     """Commit/replay a backed-up, externally enrolled target without custody writes."""
 
+    return _commit_enrolled_forward_migration(
+        vault_root, expected_plan_digest=expected_plan_digest, now=now, backup_root=backup_root
+    )
+
+
+def commit_hosted_forward_migration(
+    vault_root: Path,
+    *,
+    expected_plan_digest: str,
+    now: int,
+    backup_root: Path,
+) -> ForwardMigrationResult:
+    """Recover one backed-up hosted enrollment while keeping serving fenced."""
+    return _commit_enrolled_forward_migration(
+        vault_root,
+        expected_plan_digest=expected_plan_digest,
+        now=now,
+        backup_root=backup_root,
+        hosted_recovery=True,
+    )
+
+
+def _commit_enrolled_forward_migration(
+    vault_root: Path,
+    *,
+    expected_plan_digest: str,
+    now: int,
+    backup_root: Path | None,
+    hosted_recovery: bool = False,
+) -> ForwardMigrationResult:
     expected = _require_digest(expected_plan_digest)
     root = Path(vault_root)
+    load_custody = (
+        authorization_custody.load_hosted_migration_custody
+        if hosted_recovery
+        else authorization_custody.load_authorization_custody
+    )
     try:
         with reserved_paths._identity_coordination_scope(root, identity_may_change=False):
             backup = verify_forward_migration_backup(
@@ -2710,7 +2764,7 @@ def commit_enrolled_forward_migration(
                 expected_plan_digest=expected,
                 backup_root=backup_root,
             )
-            custody = authorization_custody.load_authorization_custody(root, now=now)
+            custody = load_custody(root, now=now)
             control = custody.control
             version = store.authorization_session_schema_version(root)
             if (
@@ -2752,6 +2806,17 @@ def commit_enrolled_forward_migration(
                         or any(replica.schema_version != 4 for replica in record.replicas)
                     ):
                         raise ForwardMigrationPlanMismatch
+                    if hosted_recovery:
+                        source_control = replace(
+                            control,
+                            serving_membership_epoch=backup.hosted_membership_epoch,
+                            serving_membership_digest=backup.hosted_membership_digest,
+                        )
+                        if (
+                            _hosted_custody_digests(replace(custody, control=source_control))[0]
+                            != backup.hosted_custody_digest
+                        ):
+                            raise ForwardMigrationPlanMismatch
             elif backup.hosted_identity_digest is not None:
                 raise ForwardMigrationPlanMismatch
             _verify_live_source_material(root, backup)
@@ -2775,7 +2840,11 @@ def commit_enrolled_forward_migration(
                 _verify_active_target(root, backup)
                 active = backup.target
             elif version == store.SCHEMA_USER_VERSION:
-                plan = prepare_forward_migration(root, now=now)
+                plan = (
+                    _prepare_forward_migration(root, now=now, hosted_recovery=True)
+                    if hosted_recovery
+                    else prepare_forward_migration(root, now=now)
+                )
                 if plan.plan_digest != expected or plan.target != backup.target:
                     raise ForwardMigrationPlanMismatch
                 key, _items, manifest = _stage_material(root, plan)
@@ -2788,7 +2857,12 @@ def commit_enrolled_forward_migration(
                     != manifest
                 ):
                     raise ForwardMigrationPlanMismatch
-                active = store.commit_enrolled_v3_store(
+                commit_store = (
+                    store.commit_hosted_enrolled_v3_store
+                    if hosted_recovery
+                    else store.commit_enrolled_v3_store
+                )
+                active = commit_store(
                     root,
                     seed=plan.seed,
                     expected_source_store_digest=backup.source_store_digest,
@@ -2800,7 +2874,7 @@ def commit_enrolled_forward_migration(
                 raise ForwardMigrationUnavailable
             if (
                 active != backup.target
-                or authorization_custody.load_authorization_custody(root, now=now) != custody
+                or load_custody(root, now=now) != custody
             ):
                 raise ForwardMigrationUnavailable
     except (ForwardMigrationPlanMismatch, _ForwardMigrationCrash):
