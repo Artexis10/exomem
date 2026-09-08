@@ -735,6 +735,10 @@ class VolumeRegistrationDriver:
 
 
 class LifecyclePlane(Protocol):
+    async def governance_rollforward(
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any], context: EffectContext
+    ) -> DriverPending | DriverFinal: ...
+
     """Provider composition required by the cell lifecycle reconciler."""
 
     async def observed_fence(self, tenant_id: str) -> int: ...
@@ -1966,12 +1970,20 @@ class CellLifecycleDriver:
             if isinstance(observation, DriverPending):
                 return observation
             if action == "provision":
+                if self._config.migration_mode == "governance-v3-to-v4":
+                    # Fresh-cell enrollment must use the same guarded sequence;
+                    # the legacy initializer is not governance admission.
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_PROVISION_UNAVAILABLE")
                 return await self._provision(request, context)
             if action == "health":
                 return DriverFinal(
                     await self._exact_health(_metadata_from_context(context), request, context)
                 )
             if action == "rollforward":
+                if self._config.migration_mode == "governance-v3-to-v4":
+                    return await self._plane.governance_rollforward(
+                        _metadata_from_context(context), request, context
+                    )
                 return await self._rollforward(request, context)
             if action == "rollback-rollforward":
                 await self._plane.rollback_committed_runtime(
