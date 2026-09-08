@@ -110,7 +110,7 @@ def test_generated_mcp_rest_openapi_and_cli_expose_the_same_curation_selector(
     mcp = server.build_server(require_auth=False)
 
     tool = next(tool for tool in asyncio.run(mcp.list_tools()) if tool.name == "maintain_memory")
-    mcp_property = tool.to_mcp_tool().model_dump(mode="json")["inputSchema"]["properties"][
+    mcp_property = tool.to_mcp_tool().model_dump(mode="json", by_alias=True)["inputSchema"]["properties"][
         "curation_action"
     ]
     openapi_property = (

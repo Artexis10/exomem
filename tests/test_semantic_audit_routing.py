@@ -426,7 +426,7 @@ def test_mcp_audit_routes_reject_boolean_sample_limits_before_leaf_execution(
     monkeypatch.setenv("EXOMEM_MCP_LEGACY_COMPAT", "1")
     mcp = server_module.build_server(require_auth=False)
     schemas = {
-        tool.name: tool.to_mcp_tool().model_dump(mode="json")["inputSchema"]
+        tool.name: tool.to_mcp_tool().model_dump(mode="json", by_alias=True)["inputSchema"]
         for tool in asyncio.run(mcp.list_tools(run_middleware=False))
     }
     routes = (

@@ -231,8 +231,13 @@ async def test_discovery_and_real_http_dcr_match_legacy_fastmcp() -> None:
     )
     assert durable_metadata_without_local_revocation == legacy_metadata.json()
 
-    assert durable_auth_code_only.status_code == legacy_auth_code_only.status_code
-    assert durable_auth_code_only.json() == legacy_auth_code_only.json()
+    assert durable_auth_code_only.status_code == legacy_auth_code_only.status_code == 201
+    assert _stable_registration_fields(durable_auth_code_only.json()) == (
+        _stable_registration_fields(legacy_auth_code_only.json())
+    )
+    assert durable_auth_code_only.json()["client_id"]
+    assert legacy_auth_code_only.json()["client_id"]
+    assert durable_auth_code_only.json()["grant_types"] == ["authorization_code"]
 
     assert durable_both.status_code == legacy_both.status_code == 201
     durable_registration = durable_both.json()

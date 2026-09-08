@@ -18,10 +18,10 @@ from urllib.parse import quote_plus, unquote_plus
 
 import anyio
 import mcp.types
+from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
-from mcp.shared.exceptions import McpError
 from mcp.shared.message import ServerMessageMetadata, SessionMessage
-from mcp.types import ErrorData
+from mcp.types import jsonrpc_message_adapter
 
 from . import authorization_sessions
 from . import principal as principal_module
@@ -353,7 +353,7 @@ def sanitize_mcp_stdio_line(line: str) -> SessionMessage:
         raise AuthorizationEnvelopeUnavailable from None
     sanitized = sanitize_mcp_http_body(raw)
     try:
-        message = mcp.types.JSONRPCMessage.model_validate_json(sanitized.body)
+        message = jsonrpc_message_adapter.validate_json(sanitized.body)
     except (ValueError, TypeError):
         sanitized.carrier.discard()
         raise AuthorizationEnvelopeUnavailable from None
@@ -732,9 +732,9 @@ class AuthorizationSessionMiddleware(Middleware):
             rule = credential_rule(context.message.name, arguments)
             bound = enforce_credential_rule(admission, rule)
         except AuthorizationContextUnavailable as error:
-            raise McpError(ErrorData(code=-32000, message=str(error))) from None
+            raise ToolError(str(error)) from None
         except AuthorizationRouteUnclassified as error:
-            raise McpError(ErrorData(code=-32000, message=str(error))) from None
+            raise ToolError(str(error)) from None
 
         sanitized_message = context.message.model_copy(
             update={"arguments": arguments}

@@ -438,7 +438,7 @@ def test_mcp_openapi_and_hosted_contracts_share_relation_parameter_schemas(
     monkeypatch.setenv("EXOMEM_DISABLE_FILE_WATCHER", "1")
     mcp = server.build_server(require_auth=False)
     live_tools = {
-        item.name: item.to_mcp_tool().model_dump(mode="json")
+        item.name: item.to_mcp_tool().model_dump(mode="json", by_alias=True)
         for item in asyncio.run(mcp.list_tools())
     }
     openapi = TestClient(mcp.http_app()).get("/api/openapi.json").json()
