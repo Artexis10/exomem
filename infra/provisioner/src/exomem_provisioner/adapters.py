@@ -621,6 +621,7 @@ class KubernetesCellAdapter:
         credentials: dict[str, str],
         *,
         lifecycle_annotations: dict[str, str] | None = None,
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         try:
             valid_credentials = all(
@@ -661,6 +662,47 @@ class KubernetesCellAdapter:
             "immutable": False,
             "stringData": {"credentials.json": bundle},
         }
+        if effect_guard is not None:
+            # Bootstrap is create-or-verify, never an unversioned credential reset.
+            try:
+                current = await asyncio.to_thread(
+                    self._core.read_namespaced_secret,
+                    "exomem-cell-credentials",
+                    metadata.resource_name,
+                )
+            except Exception as error:
+                if _api_status(error) != 404:
+                    if _retryable_kubernetes_error(error):
+                        raise _governance_retryable() from None
+                    raise
+            else:
+                identity = getattr(current, "metadata", None)
+                actual_annotations = getattr(identity, "annotations", None) or {}
+                data = getattr(current, "data", None)
+                if (
+                    getattr(identity, "deletion_timestamp", None) is not None
+                    or getattr(identity, "name", None) != "exomem-cell-credentials"
+                    or getattr(identity, "namespace", None) != metadata.resource_name
+                    or not isinstance(actual_annotations, dict)
+                    or any(actual_annotations.get(k) != v for k, v in annotations.items())
+                    or data != {"credentials.json": base64.b64encode(bundle.encode()).decode()}
+                ):
+                    raise MetadataConflict(
+                        "cell credential bundle differs",
+                        reason=ConflictReason.CELL_CREDENTIAL_BUNDLE_IS_INVALID,
+                    )
+                await effect_guard()
+                return
+            await effect_guard()
+            try:
+                await asyncio.to_thread(
+                    self._core.create_namespaced_secret, metadata.resource_name, body
+                )
+            except Exception as error:
+                if _retryable_kubernetes_error(error):
+                    raise _governance_retryable() from None
+                raise
+            return
         try:
             await asyncio.to_thread(
                 self._core.patch_namespaced_secret,
@@ -754,6 +796,7 @@ class KubernetesCellAdapter:
         membership_digest: str,
         revision: str,
         expected_revision: str | None = None,
+        create_only: bool = False,
         effect_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if (
@@ -775,8 +818,10 @@ class KubernetesCellAdapter:
             or not recovery_envelope
             or (
                 effect_guard is not None
-                and (not callable(effect_guard) or expected_revision is None)
+                and (not callable(effect_guard) or (expected_revision is None and not create_only))
             )
+            or type(create_only) is not bool
+            or (create_only and (expected_revision is not None or effect_guard is None))
             or (
                 expected_revision is not None
                 and re.fullmatch(r"[0-9a-f]{64}", expected_revision) is None
@@ -816,6 +861,17 @@ class KubernetesCellAdapter:
             "immutable": False,
             "stringData": string_data,
         }
+        if create_only:
+            await effect_guard()
+            try:
+                await asyncio.to_thread(
+                    self._core.create_namespaced_secret, metadata.resource_name, body
+                )
+            except Exception as error:
+                if _retryable_kubernetes_error(error):
+                    raise _governance_retryable() from None
+                raise
+            return
         if expected_revision is not None:
             try:
                 current = await asyncio.to_thread(
@@ -1106,12 +1162,14 @@ class KubernetesVaultFingerprintAdapter:
         core_v1: Any,
         batch_v1: Any,
         image: str,
+        apps_v1: Any = None,
         sleep: Callable[[float], Any] = asyncio.sleep,
         poll_attempts: int = 150,
     ) -> None:
         self._core = core_v1
         self._batch = batch_v1
         self._image = image
+        self._apps = apps_v1
         self._sleep = sleep
         self._poll_attempts = poll_attempts
         self._serializer = ApiClient()
@@ -1425,11 +1483,7 @@ class KubernetesVaultFingerprintAdapter:
             reason=ConflictReason.VAULT_FINGERPRINT_RESULT_IS_INVALID,
         )
 
-    async def _candidate_pods(
-        self, metadata: OpaqueProviderMetadata, uid: str
-    ) -> list[dict[str, Any]]:
-        # The post-upgrade runtime intentionally shares this PVC. Inventory the
-        # namespace, but classify only fixed-slot Job evidence, not all PVC users.
+    async def _namespace_pods(self, metadata: OpaqueProviderMetadata) -> list[dict[str, Any]]:
         listed = await asyncio.to_thread(self._core.list_namespaced_pod, metadata.resource_name)
         page = self._wire(listed)
         page_meta = page.get("metadata", {})
@@ -1444,6 +1498,14 @@ class KubernetesVaultFingerprintAdapter:
         items = page.get("items")
         if not isinstance(items, list):
             raise self._invalid_result()
+        return items
+
+    async def _candidate_pods(
+        self, metadata: OpaqueProviderMetadata, uid: str
+    ) -> list[dict[str, Any]]:
+        # The post-upgrade runtime intentionally shares this PVC. Inventory the
+        # namespace, but classify only fixed-slot Job evidence, not all PVC users.
+        items = await self._namespace_pods(metadata)
         candidates = []
         name = self._name(metadata)
         for pod in items:
@@ -1470,6 +1532,117 @@ class KubernetesVaultFingerprintAdapter:
                 candidates.append(pod)
         return candidates
 
+    def _require_pod_execution(
+        self,
+        pod: dict[str, Any],
+        metadata: OpaqueProviderMetadata,
+        uid: str,
+        expected: dict[str, Any],
+        *,
+        allow_terminating: bool = False,
+    ) -> None:
+        meta, spec = pod["metadata"], pod.get("spec")
+        owners = meta.get("ownerReferences", [])
+        if (
+            not isinstance(spec, dict)
+            or meta.get("namespace") != metadata.resource_name
+            or not isinstance(meta.get("uid"), str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,511}", meta["uid"]) is None
+            or (meta.get("deletionTimestamp") and not allow_terminating)
+            or not meta["name"].startswith(self._name(metadata) + "-")
+            or not metadata_matches(meta, expected["metadata"])
+            or not pod_spec_matches(spec, expected["spec"], scheduled=True)
+            or len(owners) != 1
+        ):
+            raise self._invalid_result()
+        owner = owners[0]
+        if (
+            set(owner) - {"apiVersion", "kind", "name", "uid", "controller", "blockOwnerDeletion"}
+            or any(
+                owner.get(key) != value
+                for key, value in {
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "name": self._name(metadata),
+                    "uid": uid,
+                }.items()
+            )
+            or owner.get("controller") is not True
+            or ("blockOwnerDeletion" in owner and type(owner["blockOwnerDeletion"]) is not bool)
+        ):
+            raise self._invalid_result()
+        self._require_controller_labels(meta, name=self._name(metadata), uid=uid)
+
+    async def prove_stopped_before_fingerprint(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        owner: OpaqueProviderMetadata,
+        pvc_uid: str,
+        operation_id: str,
+        recovery_envelope: str,
+    ) -> None:
+        """Exclude only our exact read-only Job, so interrupted observation can resume."""
+        from .governance_stopped_cell import _pod_evidence, _pvc_is_bound, _runtime_is_stopped
+
+        try:
+            pvc = self._wire(
+                await asyncio.to_thread(
+                    self._core.read_namespaced_persistent_volume_claim,
+                    metadata.resource_name + "-data",
+                    metadata.resource_name,
+                )
+            )
+            _pvc_is_bound(pvc, metadata=owner, pvc_uid=pvc_uid)
+            try:
+                runtime = self._wire(
+                    await asyncio.to_thread(
+                        self._apps.read_namespaced_stateful_set,
+                        metadata.resource_name,
+                        metadata.resource_name,
+                    )
+                )
+            except Exception as error:
+                if _api_status(error) != 404:
+                    raise
+            else:
+                _runtime_is_stopped(runtime, resource=metadata.resource_name)
+            job = await self._read(metadata)
+            uid = None
+            template = self._body(
+                metadata,
+                operation_id=operation_id,
+                phase="before",
+                recovery_envelope=recovery_envelope,
+            )["spec"]["template"]
+            if job is not None:
+                self._require_job(
+                    job,
+                    metadata,
+                    operation_id=operation_id,
+                    phase="before",
+                    recovery_envelope=recovery_envelope,
+                )
+                uid = self._job_revision(job, allow_terminating=True)[0]
+            count = 0
+            for pod in await self._namespace_pods(metadata):
+                forbidden, _ = _pod_evidence(pod, metadata=owner, runtime_uid=None)
+                if forbidden:
+                    if uid is None:
+                        raise self._invalid_result()
+                    self._require_pod_execution(
+                        pod, metadata, uid, template, allow_terminating=True
+                    )
+                    count += 1
+            if count > 1:
+                raise self._invalid_result()
+        except (ClaimConflict, StaleFence, DriverRetryable, MetadataConflict):
+            raise
+        except Exception as error:  # noqa: BLE001 - content-free provider observation boundary
+            if _retryable_kubernetes_error(error):
+                raise _governance_retryable() from None
+            raise self._invalid_result() from None
+
     async def _result(
         self, metadata: OpaqueProviderMetadata, job: dict[str, Any], expected: dict[str, Any]
     ) -> str | None:
@@ -1493,39 +1666,10 @@ class KubernetesVaultFingerprintAdapter:
         if len(candidates) != 1:
             raise self._invalid_result()
         pod = candidates[0]
-        meta, spec, pod_status = pod["metadata"], pod.get("spec"), pod.get("status")
-        owners = meta.get("ownerReferences", [])
-        if (
-            not isinstance(spec, dict)
-            or not isinstance(pod_status, dict)
-            or meta.get("namespace") != metadata.resource_name
-            or not isinstance(meta.get("uid"), str)
-            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,511}", meta["uid"]) is None
-            or meta.get("deletionTimestamp")
-            or not meta["name"].startswith(self._name(metadata) + "-")
-            or not metadata_matches(meta, expected["metadata"])
-            or not pod_spec_matches(spec, expected["spec"], scheduled=True)
-            or len(owners) != 1
-        ):
+        self._require_pod_execution(pod, metadata, uid, expected)
+        pod_status = pod.get("status")
+        if not isinstance(pod_status, dict) or pod_status.get("phase") != "Succeeded":
             raise self._invalid_result()
-        owner = owners[0]
-        if (
-            set(owner) - {"apiVersion", "kind", "name", "uid", "controller", "blockOwnerDeletion"}
-            or any(
-                owner.get(key) != value
-                for key, value in {
-                    "apiVersion": "batch/v1",
-                    "kind": "Job",
-                    "name": self._name(metadata),
-                    "uid": uid,
-                }.items()
-            )
-            or owner.get("controller") is not True
-            or ("blockOwnerDeletion" in owner and type(owner["blockOwnerDeletion"]) is not bool)
-            or pod_status.get("phase") != "Succeeded"
-        ):
-            raise self._invalid_result()
-        self._require_controller_labels(meta, name=self._name(metadata), uid=uid)
         statuses = pod_status.get("containerStatuses")
         if (
             not isinstance(statuses, list)
