@@ -55,6 +55,11 @@ class HostedAuthorizationBundle:
     software_version: str
     issuance_stopped: bool
     no_in_flight: bool
+    membership_schema_version: int
+    governance_enrolled: bool
+    activation_store_id: str | None
+    activation_epoch: int | None
+    activation_state_digest: str | None
 
     @property
     def files(self) -> dict[str, bytes]:
@@ -376,6 +381,11 @@ def build_initial_hosted_authorization_bundle(
         software_version=release,
         issuance_stopped=False,
         no_in_flight=False,
+        membership_schema_version=schema,
+        governance_enrolled=False,
+        activation_store_id=None,
+        activation_epoch=None,
+        activation_state_digest=None,
     )
 
 
@@ -674,6 +684,93 @@ def inspect_hosted_authorization_bundle(
         software_version=str(attestation["software_version"]),
         issuance_stopped=bool(attestation["issuance_stopped"]),
         no_in_flight=bool(attestation["no_in_flight"]),
+        membership_schema_version=schema,
+        governance_enrolled=control["governance_enrolled"],
+        activation_store_id=control["activation_store_id"],
+        activation_epoch=control["activation_epoch"],
+        activation_state_digest=control["activation_state_digest"],
+    )
+
+
+def enroll_hosted_governance_bundle(
+    files: Mapping[str, bytes],
+    *,
+    expected_cell_id: str,
+    expected_logical_vault_id: str,
+    expected_replica_id: str,
+    expected_software_version: str | None,
+    expected_schema_version: int,
+    expected_recovery_envelope: str,
+    activation_store_id: str,
+    activation_epoch: int,
+    activation_state_digest: str,
+    now: int,
+) -> HostedAuthorizationBundle:
+    """Enroll one drained v3 generation without publishing or changing membership.
+
+    The caller must prove the stopped, fenced migration preparation and publish
+    this successor through the existing expected-revision Secret CAS. This pure
+    transformation cannot mint that authority or reverse prior enrollment.
+    """
+
+    target_store = _required_identifier(activation_store_id)
+    target_epoch = _required_time(activation_epoch)
+    if (
+        _required_time(expected_schema_version) != 3
+        or not isinstance(activation_state_digest, str)
+        or _SHA256.fullmatch(activation_state_digest) is None
+    ):
+        raise MetadataConflict(
+            "authorization governance enrollment target is invalid",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
+        )
+    identity = {
+        "expected_cell_id": expected_cell_id,
+        "expected_logical_vault_id": expected_logical_vault_id,
+        "expected_replica_id": expected_replica_id,
+        "expected_software_version": expected_software_version,
+        "expected_schema_version": expected_schema_version,
+        "expected_recovery_envelope": expected_recovery_envelope,
+        "now": now,
+    }
+    source = inspect_hosted_authorization_bundle(files, **identity)
+    if source.replica_state != "DRAINING" or not source.issuance_stopped or not source.no_in_flight:
+        raise MetadataConflict(
+            "authorization membership is not fully drained",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_IS_NOT_FULLY_DRAINED,
+        )
+    target = (target_store, target_epoch, activation_state_digest)
+    if source.governance_enrolled:
+        if (
+            source.activation_store_id,
+            source.activation_epoch,
+            source.activation_state_digest,
+        ) != target:
+            raise MetadataConflict(
+                "authorization governance enrollment target differs",
+                reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
+            )
+        return source
+
+    # Parse only the exact bytes already authenticated above. Never reread a
+    # caller-owned mutable mapping between verification and transformation.
+    keyring = json.loads(source.keyring)
+    control = json.loads(source.control)
+    key = base64.b64decode(
+        keyring["accepted_keys"][0]["key"].encode("ascii") + b"=",
+        altchars=b"-_",
+        validate=True,
+    )
+    control.update(
+        governance_enrolled=True,
+        activation_store_id=target_store,
+        activation_epoch=target_epoch,
+        activation_state_digest=activation_state_digest,
+    )
+    control["mac"] = _mac(key, _control_mac_input(control))
+    return inspect_hosted_authorization_bundle(
+        {**source.files, "control.json": _canonical(control)},
+        **identity,
     )
 
 
@@ -972,4 +1069,9 @@ def transition_hosted_authorization_bundle(
         software_version=target_release,
         issuance_stopped=target_state == "DRAINING",
         no_in_flight=target_no_in_flight,
+        membership_schema_version=source.membership_schema_version,
+        governance_enrolled=source.governance_enrolled,
+        activation_store_id=source.activation_store_id,
+        activation_epoch=source.activation_epoch,
+        activation_state_digest=source.activation_state_digest,
     )

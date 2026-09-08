@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pytest
 from exomem.governance import authorization_custody, authorization_serving_membership
 
+from exomem_provisioner import authorization_membership
 from exomem_provisioner.authorization_membership import (
     build_initial_hosted_authorization_bundle,
     inspect_hosted_authorization_bundle,
@@ -450,3 +452,296 @@ def test_renewal_of_an_in_date_serving_cell_still_moves_the_window() -> None:
 
     assert [replica.state for replica in renewed_record.replicas] == ["SERVING"]
     assert renewed_record.expires_at > before_record.expires_at
+
+
+def test_enrollment_rewrites_only_the_authenticated_control_tuple() -> None:
+    now = 1_900_000_000
+    initial = build_initial_hosted_authorization_bundle(
+        cell_id="cell-alpha",
+        logical_vault_id="tenant-alpha",
+        replica_id="exo-0123456789abcdef0123-0",
+        software_version="0.48.0",
+        schema_version=3,
+        recovery_envelope="signed-authorization-session-secret",
+        now=now,
+        entropy=_entropy,
+    )
+    common = {
+        "expected_cell_id": "cell-alpha",
+        "expected_logical_vault_id": "tenant-alpha",
+        "expected_replica_id": "exo-0123456789abcdef0123-0",
+        "expected_software_version": "0.48.0",
+        "expected_schema_version": 3,
+        "expected_recovery_envelope": "signed-authorization-session-secret",
+    }
+    drained = transition_hosted_authorization_bundle(
+        initial.files,
+        **common,
+        target_state="DRAINING",
+        target_no_in_flight=True,
+        now=now + 30,
+    )
+
+    enrolled = authorization_membership.enroll_hosted_governance_bundle(
+        drained.files,
+        **common,
+        activation_store_id="activation-store-alpha",
+        activation_epoch=9,
+        activation_state_digest="a" * 64,
+        now=now + 31,
+    )
+
+    control, membership = _runtime_membership(enrolled, now=now + 31)
+    assert (
+        enrolled.membership_schema_version,
+        enrolled.governance_enrolled,
+        enrolled.activation_store_id,
+        enrolled.activation_epoch,
+        enrolled.activation_state_digest,
+    ) == (3, True, "activation-store-alpha", 9, "a" * 64)
+    assert (
+        control.governance_enrolled,
+        control.activation_store_id,
+        control.activation_epoch,
+        control.activation_state_digest,
+    ) == (True, "activation-store-alpha", 9, "a" * 64)
+    assert membership.replicas[0].schema_version == 3
+    assert enrolled.keyring == drained.keyring
+    assert enrolled.membership == drained.membership
+    assert (enrolled.epoch, enrolled.membership_digest) == (
+        drained.epoch,
+        drained.membership_digest,
+    )
+
+    before = json.loads(drained.control)
+    after = json.loads(enrolled.control)
+    assert {name for name in after if after[name] != before[name]} == {
+        "governance_enrolled",
+        "activation_store_id",
+        "activation_epoch",
+        "activation_state_digest",
+        "mac",
+    }
+
+
+@pytest.fixture
+def enrollment_source():
+    now = 1_900_000_000
+    initial = build_initial_hosted_authorization_bundle(
+        cell_id="cell-alpha",
+        logical_vault_id="tenant-alpha",
+        replica_id="exo-0123456789abcdef0123-0",
+        software_version="0.48.0",
+        schema_version=3,
+        recovery_envelope="signed-authorization-session-secret",
+        now=now,
+        entropy=_entropy,
+    )
+    identity = {
+        "expected_cell_id": "cell-alpha",
+        "expected_logical_vault_id": "tenant-alpha",
+        "expected_replica_id": "exo-0123456789abcdef0123-0",
+        "expected_software_version": "0.48.0",
+        "expected_schema_version": 3,
+        "expected_recovery_envelope": "signed-authorization-session-secret",
+    }
+    drained = transition_hosted_authorization_bundle(
+        initial.files,
+        **identity,
+        target_state="DRAINING",
+        target_no_in_flight=True,
+        now=now + 30,
+    )
+    target = {
+        "activation_store_id": "activation-store-alpha",
+        "activation_epoch": 9,
+        "activation_state_digest": "a" * 64,
+        "now": now + 31,
+    }
+    return initial, drained, identity, target
+
+
+def test_enrollment_exact_replay_preserves_every_byte(enrollment_source) -> None:
+    _, drained, identity, target = enrollment_source
+    assert drained.epoch > 1
+    enrolled = authorization_membership.enroll_hosted_governance_bundle(
+        drained.files,
+        **identity,
+        **target,
+    )
+    replay = authorization_membership.enroll_hosted_governance_bundle(
+        enrolled.files,
+        **identity,
+        **{**target, "now": target["now"] + 1},
+    )
+    assert replay == enrolled
+    assert replay.files == enrolled.files
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("activation_store_id", "another-store"),
+        ("activation_epoch", 10),
+        ("activation_state_digest", "b" * 64),
+    ],
+)
+def test_enrollment_never_replaces_an_enrolled_target(enrollment_source, field, value) -> None:
+    _, drained, identity, target = enrollment_source
+    enrolled = authorization_membership.enroll_hosted_governance_bundle(
+        drained.files,
+        **identity,
+        **target,
+    )
+    with pytest.raises(MetadataConflict):
+        authorization_membership.enroll_hosted_governance_bundle(
+            enrolled.files,
+            **identity,
+            **{**target, field: value},
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("activation_store_id", ""),
+        ("activation_store_id", "space forbidden"),
+        ("activation_store_id", "x" * 513),
+        ("activation_store_id", None),
+        ("activation_epoch", 0),
+        ("activation_epoch", -1),
+        ("activation_epoch", True),
+        ("activation_epoch", "1"),
+        ("activation_epoch", 1.0),
+        ("activation_epoch", 1 << 63),
+        ("activation_state_digest", "A" * 64),
+        ("activation_state_digest", "a" * 63),
+        ("activation_state_digest", None),
+    ],
+)
+def test_enrollment_rejects_invalid_targets(enrollment_source, field, value) -> None:
+    _, drained, identity, target = enrollment_source
+    with pytest.raises(MetadataConflict):
+        authorization_membership.enroll_hosted_governance_bundle(
+            drained.files,
+            **identity,
+            **{**target, field: value},
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("expected_cell_id", "foreign-cell"),
+        ("expected_logical_vault_id", "foreign-vault"),
+        ("expected_replica_id", "foreign-replica"),
+        ("expected_software_version", "other-release"),
+        ("expected_recovery_envelope", "foreign-envelope"),
+        ("expected_schema_version", 4),
+        ("expected_schema_version", True),
+    ],
+)
+def test_enrollment_rejects_foreign_or_non_v3_authority(enrollment_source, field, value) -> None:
+    _, drained, identity, target = enrollment_source
+    with pytest.raises(MetadataConflict):
+        authorization_membership.enroll_hosted_governance_bundle(
+            drained.files,
+            **{**identity, field: value},
+            **target,
+        )
+
+
+@pytest.mark.parametrize("file", ["keyring.json", "control.json", "serving-membership.json"])
+def test_enrollment_rejects_missing_or_tampered_custody(enrollment_source, file) -> None:
+    _, drained, identity, target = enrollment_source
+    missing = {name: raw for name, raw in drained.files.items() if name != file}
+    for files in (missing, {**drained.files, file: b"{}"}):
+        with pytest.raises(MetadataConflict):
+            authorization_membership.enroll_hosted_governance_bundle(
+                files,
+                **identity,
+                **target,
+            )
+
+
+def test_enrollment_refuses_serving_and_expired_generations(enrollment_source) -> None:
+    initial, drained, identity, target = enrollment_source
+    for files, now in ((initial.files, target["now"]), (drained.files, drained.expires_at)):
+        with pytest.raises(MetadataConflict):
+            authorization_membership.enroll_hosted_governance_bundle(
+                files,
+                **identity,
+                **{**target, "now": now},
+            )
+
+
+def test_enrollment_refuses_authenticated_drain_without_no_in_flight(enrollment_source) -> None:
+    _, drained, identity, target = enrollment_source
+    keyring = authorization_custody.parse_keyring(drained.keyring)
+    key = keyring.active_key.key
+    membership = json.loads(drained.membership)
+    replica = membership["replicas"][0]
+    replica["no_in_flight"] = False
+    replica["mac"] = authorization_membership._mac(
+        key,
+        authorization_membership._attestation_mac_input(replica),
+    )
+    membership["mac"] = authorization_membership._mac(
+        key,
+        authorization_membership._membership_mac_input(membership),
+    )
+    membership_raw = authorization_membership._canonical(membership)
+    control = json.loads(drained.control)
+    control["serving_membership_digest"] = hashlib.sha256(membership_raw).hexdigest()
+    control["mac"] = authorization_membership._mac(
+        key,
+        authorization_membership._control_mac_input(control),
+    )
+    files = {
+        **drained.files,
+        "control.json": authorization_membership._canonical(control),
+        "serving-membership.json": membership_raw,
+    }
+    assert (
+        inspect_hosted_authorization_bundle(files, **identity, now=target["now"]).no_in_flight
+        is False
+    )
+    with pytest.raises(MetadataConflict):
+        authorization_membership.enroll_hosted_governance_bundle(files, **identity, **target)
+
+
+def test_ordinary_transitions_preserve_schema_and_enrollment(enrollment_source) -> None:
+    _, drained, identity, target = enrollment_source
+    enrolled = authorization_membership.enroll_hosted_governance_bundle(
+        drained.files,
+        **identity,
+        **target,
+    )
+    for before in (drained, enrolled):
+        renewed = transition_hosted_authorization_bundle(
+            before.files,
+            **identity,
+            target_state="DRAINING",
+            target_no_in_flight=True,
+            now=target["now"] + 1,
+            renew=True,
+        )
+        resumed = transition_hosted_authorization_bundle(
+            renewed.files,
+            **identity,
+            target_state="SERVING",
+            target_no_in_flight=False,
+            now=target["now"] + 2,
+        )
+        control, membership = _runtime_membership(resumed, now=target["now"] + 2)
+        assert resumed.membership_schema_version == membership.replicas[0].schema_version == 3
+        assert control.governance_enrolled is before.governance_enrolled
+        assert (
+            control.activation_store_id,
+            control.activation_epoch,
+            control.activation_state_digest,
+        ) == (
+            before.activation_store_id,
+            before.activation_epoch,
+            before.activation_state_digest,
+        )

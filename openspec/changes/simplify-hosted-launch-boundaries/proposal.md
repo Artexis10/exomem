@@ -8,6 +8,7 @@ The hosted alpha needs a stable, fast service path whose runtime safety does not
 - Place the shared Substrate MCP gateway in the existing cluster, reuse the current tunnel and private ingress, and preserve the public MCP URL and OAuth audience.
 - Separate runtime activation evidence from client artifact certification in the launch workflow; retain signed candidates, deployment pins, strict runtime compatibility, lifecycle fences and per-tenant storage.
 - Replace disposable authorization canaries as the normal acceptance workflow with a durable test tenant and real capture, semantic recall, refresh, revocation, isolation and recovery checks.
+- Complete the missing hosted integration for the existing fenced governance schema migration, retaining provisioner-owned custody; require actual schema, enrollment and authorization-session readiness before service acceptance.
 
 ## Capabilities
 
@@ -22,6 +23,6 @@ The hosted alpha needs a stable, fast service path whose runtime safety does not
 
 ## Impact
 
-Touches the hosted server and contract publisher, hosted tests, infrastructure charts and foundation edge routing, acceptance scripts and runbooks. The companion Substrate change with this same name owns service authorization, runtime activation, client certification and the shared gateway executable. No runtime implementation or deployment occurs in this planning PR.
+Touches the hosted server and contract publisher, hosted tests, infrastructure charts and foundation edge routing, acceptance scripts and runbooks. The governance migration engine and authenticated provisioner also need the hosted custody-aware coordinator already required by the canonical authorization-session-binding and governance-authoring contracts. The companion Substrate change with this same name owns service authorization, runtime activation, client certification and the shared gateway executable. Planning artifacts do not authorize an unverified live migration.
 
 Existing private-alpha infrastructure, tenant isolation and signed-release work remain authoritative. This change does not replace billing, add a reasoning model, broaden generic client registration or make marketplace publication a prerequisite for invite-only access.
