@@ -29,6 +29,7 @@ directEdge:
   privateTransferTlsSecretName: exomem-private-transfer-tls
   privateTransferClientSecretName: exomem-private-transfer-client-tls
   privateTransferCaSecretName: exomem-private-transfer-ca
+  privateTransferEdgeClientCaSecretName: exomem-direct-edge-client-ca
   admittedCellNamespaces: []
   privateTransferBackends: []
 

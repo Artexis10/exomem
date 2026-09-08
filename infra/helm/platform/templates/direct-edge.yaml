@@ -11,6 +11,45 @@
 {{- if ne (len .Values.directEdge.admittedCellNamespaces) (len .Values.directEdge.privateTransferBackends) }}
 {{- fail "directEdge requires one privateTransferBackend for each admitted cell namespace" }}
 {{- end }}
+{{- $seenNamespaces := dict }}
+{{- $seenTransports := dict }}
+{{- range .Values.directEdge.privateTransferBackends }}
+{{- $namespace := index (splitList "." .serverName) 1 }}
+{{- if or (not (has $namespace $.Values.directEdge.admittedCellNamespaces)) (hasKey $seenNamespaces $namespace) (hasKey $seenTransports .transportName) }}
+{{- fail "directEdge privateTransferBackends must map each admitted namespace exactly once with unique transport names" }}
+{{- end }}
+{{- $_ := set $seenNamespaces $namespace true }}
+{{- $_ := set $seenTransports .transportName true }}
+{{- end }}
+{{- $privatePort := get .Values.traefik.ports "private-transfer" }}
+{{- if not (kindIs "map" $privatePort) }}
+{{- fail "directEdge requires the private-transfer TLS entrypoint overlay" }}
+{{- end }}
+{{- if or (ne (int $privatePort.port) 8444) (ne (int $privatePort.exposedPort) 8444) (not $privatePort.expose.default) (not $privatePort.http.tls.enabled) (ne $privatePort.http.tls.options "private-transfer@file") (ne .Values.traefik.service.spec.type "ClusterIP") }}
+{{- fail "directEdge requires private-transfer TLS on the internal ClusterIP port 8444" }}
+{{- end }}
+{{- $mounts := dict }}
+{{- range .Values.traefik.volumes }}
+{{- if hasKey $mounts .mountPath }}
+{{- fail "directEdge private-transfer volume mount paths must be unique" }}
+{{- end }}
+{{- $_ := set $mounts .mountPath (printf "%s:%s" .type .name) }}
+{{- end }}
+{{- $requiredMounts := dict
+      "/etc/traefik/dynamic" "configMap:exomem-private-transfer-config"
+      "/var/run/exomem-private-transfer/tls" (printf "secret:%s" .Values.directEdge.privateTransferTlsSecretName)
+      "/var/run/exomem-private-transfer/ca" (printf "secret:%s" .Values.directEdge.privateTransferCaSecretName)
+      "/var/run/exomem-private-transfer/client" (printf "secret:%s" .Values.directEdge.privateTransferClientSecretName)
+      "/var/run/exomem-private-transfer/edge-client-ca" (printf "secret:%s" .Values.directEdge.privateTransferEdgeClientCaSecretName)
+}}
+{{- range $path, $source := $requiredMounts }}
+{{- if ne (get $mounts $path) $source }}
+{{- fail "directEdge private-transfer mounts must bind the configured ConfigMap and Secret names" }}
+{{- end }}
+{{- end }}
+{{- if not (has "--providers.file.directory=/etc/traefik/dynamic" .Values.traefik.additionalArguments) }}
+{{- fail "directEdge requires the private-transfer file provider directory" }}
+{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -44,7 +83,7 @@ data:
             allowEncodedHash: false
     providers:
       file:
-        filename: /etc/traefik/dynamic/dynamic.yaml
+        filename: /etc/traefik/static/dynamic.yaml
         watch: true
   dynamic.yaml: |
     tls:
@@ -71,6 +110,9 @@ data:
               CF-Pseudo-IPv4: ""
               CF-Ray: ""
               CF-Visitor: ""
+              CF-Access-Authenticated-User-Email: ""
+              CF-Access-Jwt-Assertion: ""
+              True-Client-IP: ""
               X-Exomem-Gateway-Ingress: direct-edge-v1
         transfer-boundary:
           headers:
@@ -86,6 +128,9 @@ data:
               CF-Pseudo-IPv4: ""
               CF-Ray: ""
               CF-Visitor: ""
+              CF-Access-Authenticated-User-Email: ""
+              CF-Access-Jwt-Assertion: ""
+              True-Client-IP: ""
               X-Exomem-Gateway-Ingress: ""
         direct-inflight:
           inFlightReq:
@@ -160,7 +205,7 @@ data:
         private-transfer:
           minVersion: VersionTLS12
           clientAuth:
-            caFiles: [/var/run/exomem-private-transfer/ca/ca.crt]
+            caFiles: [/var/run/exomem-private-transfer/edge-client-ca/ca.crt]
             clientAuthType: RequireAndVerifyClientCert
     http:
       serversTransports:
