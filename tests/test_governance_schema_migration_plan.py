@@ -96,7 +96,16 @@ def _schema_version(vault: Path) -> int:
         connection.close()
 
 
-def test_forward_migration_plan_is_replayable_and_inert(tmp_path: Path) -> None:
+@pytest.mark.parametrize("hosted_flag", [None, "0", "false", "no", "off", " FALSE "])
+def test_forward_migration_plan_is_replayable_and_inert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hosted_flag: str | None,
+) -> None:
+    if hosted_flag is None:
+        monkeypatch.delenv("EXOMEM_HOSTED_CELL", raising=False)
+    else:
+        monkeypatch.setenv("EXOMEM_HOSTED_CELL", hosted_flag)
     vault = _vault(tmp_path)
     now = int(time.time())
 
@@ -114,6 +123,13 @@ def test_forward_migration_plan_is_replayable_and_inert(tmp_path: Path) -> None:
     assert _schema_version(vault) == 3
     assert not Path(os.environ[authorization_custody.CONTROL_FILE_ENV]).exists()
     assert not Path(os.environ[authorization_custody.MEMBERSHIP_FILE_ENV]).exists()
+    assert (
+        schema_migration.forward_migration_backup_path(
+            vault,
+            plan_digest=first.plan_digest,
+        ).parent
+        == Path(os.environ[authorization_custody.KEYRING_FILE_ENV]).parent
+    )
 
     key = projections.ProjectionNamespaceKey(
         policy_fingerprint=first.target.policy_fingerprint,
