@@ -1003,6 +1003,26 @@ class OperationRepository:
             )
             return _operation_snapshot(operation)
 
+    async def assert_active_claim(
+        self,
+        operation_id: str,
+        worker_id: str,
+        *,
+        claim_token: str,
+        claim_generation: int,
+        now: datetime | None = None,
+    ) -> None:
+        """Read-check claim, tenant fence and shared cell lease without renewing."""
+        async with self._sessions.begin() as session:
+            await _lock_active_claim(
+                session,
+                operation_id,
+                worker_id=worker_id,
+                claim_token=claim_token,
+                claim_generation=claim_generation,
+                now=now,
+            )
+
     async def renew_claim(
         self,
         operation_id: str,
@@ -1145,7 +1165,9 @@ class OperationRepository:
                 operation.finalized_at = failed_at
             else:
                 operation.state = OperationState.PENDING
-                operation.checkpoint = "retry-backoff"
+                # Backoff is scheduling state, not protocol progress. Replacing
+                # the checkpoint here loses a multi-phase operation's durable
+                # source/plan binding and can restart already-applied effects.
                 operation.retry_after_seconds = retry_after_seconds
                 operation.available_at = failed_at + timedelta(seconds=retry_after_seconds)
             await _release_cell_operation_lock(session, operation)

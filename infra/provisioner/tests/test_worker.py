@@ -30,7 +30,11 @@ from exomem_provisioner.models import (
     OperationState,
     ResourceKind,
 )
-from exomem_provisioner.repository import ImmutableMetadataConflict, OperationRepository
+from exomem_provisioner.repository import (
+    ClaimConflict,
+    ImmutableMetadataConflict,
+    OperationRepository,
+)
 from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2
 from exomem_provisioner.worker import ProvisionerWorker
 from exomem_provisioner.worker_ownership import DELETION_OPERATION_ACTIONS
@@ -518,6 +522,188 @@ async def test_retryable_driver_failures_consume_bounded_failure_attempts(
     assert failed.progress["failure_attempts"] == 3
     assert failed.error_code == "PROVISIONER_RETRY_EXHAUSTED"
     assert driver.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_pending_retry_retains_exact_durable_migration_checkpoint(worker_context):
+    _, repository, _ = worker_context
+    repository.max_failure_attempts = 3
+    operation = await repository.submit("resume", "checkpoint-retry", _request())
+    checkpoint = "gov1:prepared:" + ":".join(character * 64 for character in "abc")
+    seen = []
+
+    class Driver:
+        async def observed_fence(self, _tenant_id):
+            return 0
+
+        async def execute(self, _action, _request, context):
+            seen.append(context.checkpoint)
+            if len(seen) == 1:
+                return DriverPending(checkpoint, 1)
+            raise DriverRetryable("temporary failure")
+
+    worker = ProvisionerWorker(
+        repository,
+        Driver(),
+        worker_id="retry-worker",
+        allowed_actions=frozenset({OperationAction.RESUME}),
+    )
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    for index in range(3):
+        await worker.run_once(now=now + timedelta(seconds=index * 3))
+        pending = await repository.get_by_id(operation.id)
+        assert pending.checkpoint == checkpoint
+        assert pending.state is OperationState.PENDING
+        assert pending.progress.get("failure_attempts", 0) == index
+        assert pending.claim_token is pending.claim_expires_at is None
+    assert seen == ["effect-prepared", checkpoint, checkpoint]
+    await worker.run_once(now=now + timedelta(seconds=9))
+    failed = await repository.get_by_id(operation.id)
+    assert failed.state is OperationState.ERROR
+    assert failed.error_code == "PROVISIONER_RETRY_EXHAUSTED"
+
+
+@pytest.mark.asyncio
+async def test_required_effect_guard_refuses_an_unowned_context():
+    context = EffectContext("internal", "external", "tenant", "cell", 4)
+    with pytest.raises(DriverTerminal) as error:
+        await context.assert_effect_authority()
+    assert error.value.code == "PROVISIONER_EFFECT_AUTHORITY_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost_authority", ["claim", "provider-fence"])
+async def test_worker_supplies_a_fresh_guard_before_each_requested_effect(
+    worker_context, lost_authority
+):
+    _, repository, _ = worker_context
+    operation = await repository.submit("resume", "effect-guard", _request())
+    calls = []
+    provider_fence = 0
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    class Driver:
+        async def observed_fence(self, _tenant_id):
+            return provider_fence
+
+        async def execute(self, _action, _request, context):
+            nonlocal provider_fence
+            await context.assert_effect_authority()
+            calls.append("first-effect")
+            if lost_authority == "claim":
+                claim = await repository.get_by_id(operation.id)
+                await repository.mark_pending(
+                    operation.id,
+                    "effect-worker",
+                    claim_token=claim.claim_token,
+                    claim_generation=claim.claim_generation,
+                    checkpoint="external-pause",
+                    retry_after_seconds=1,
+                    now=now,
+                )
+            else:
+                provider_fence = context.fence_generation + 1
+            await context.assert_effect_authority()
+            calls.append("forbidden-second-effect")
+            return DriverFinal({})
+
+    worker = ProvisionerWorker(
+        repository,
+        Driver(),
+        worker_id="effect-worker",
+        allowed_actions=frozenset({OperationAction.RESUME}),
+    )
+    assert await worker.run_once(now=now)
+    assert calls == ["first-effect"]
+    pending = await repository.get_by_id(operation.id)
+    assert pending.state is not OperationState.FINAL
+
+
+@pytest.mark.asyncio
+async def test_effect_guard_propagates_a_fresh_repository_failure(worker_context, monkeypatch):
+    _, repository, _ = worker_context
+    await repository.submit("resume", "effect-guard-refusal", _request())
+    calls = []
+
+    async def refuse(*args, **kwargs):
+        calls.append("guard")
+        raise ClaimConflict("claim replaced")
+
+    monkeypatch.setattr(repository, "assert_active_claim", refuse)
+
+    class Driver:
+        async def observed_fence(self, _tenant_id):
+            return 0
+
+        async def execute(self, _action, _request, context):
+            await context.assert_effect_authority()
+            calls.append("forbidden-effect")
+
+    worker = ProvisionerWorker(
+        repository,
+        Driver(),
+        worker_id="effect-worker",
+        allowed_actions=frozenset({OperationAction.RESUME}),
+    )
+    assert await worker.run_once(now=datetime(2030, 1, 1, tzinfo=UTC))
+    assert calls == ["guard"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timing", ["before", "during"])
+async def test_effect_guard_honors_heartbeat_loss_around_repository_check(
+    worker_context, monkeypatch, timing
+):
+    _, repository, _ = worker_context
+    operation = await repository.submit("resume", "heartbeat-guard", _request())
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    claim = await repository.claim_next("effect-worker", now=now)
+    assert claim.id == operation.id
+    lost = asyncio.Event()
+    calls = []
+    actual_guard = repository.assert_active_claim
+
+    async def guarded(*args, **kwargs):
+        await actual_guard(*args, **kwargs)
+        calls.append("repository")
+        if timing == "during":
+            lost.set()
+
+    monkeypatch.setattr(repository, "assert_active_claim", guarded)
+
+    class Driver:
+        async def observed_fence(self, _tenant_id):
+            return 0
+
+        async def execute(self, _action, _request, context):
+            if timing == "before":
+                lost.set()
+            await context.assert_effect_authority()
+            calls.append("forbidden-effect")
+
+    worker = ProvisionerWorker(
+        repository,
+        Driver(),
+        worker_id="effect-worker",
+        allowed_actions=frozenset({OperationAction.RESUME}),
+    )
+    with pytest.raises(ClaimConflict):
+        await worker._run_claimed(claim, claim_lost=lost, now=now)
+    assert calls == ([] if timing == "before" else ["repository"])
+
+
+def test_effect_guard_is_not_part_of_context_repr_or_provider_identity():
+    class Guard:
+        def __repr__(self):
+            return "private-claim-callback-sentinel"
+
+        async def __call__(self):
+            pass
+
+    bare = EffectContext("internal", "external", "tenant", "cell", 4)
+    guarded = EffectContext("internal", "external", "tenant", "cell", 4, effect_guard=Guard())
+    assert guarded.provider_identity == bare.provider_identity
+    assert repr(guarded) == repr(bare)
 
 
 @pytest.mark.asyncio
