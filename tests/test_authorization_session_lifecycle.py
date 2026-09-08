@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -427,6 +428,16 @@ def test_hosted_readiness_binds_the_control_plane_cell_vault_and_replica(
         "open_authorization_session_connection",
         lambda _root: sqlite3.connect(database_path),
     )
+    monkeypatch.setattr(
+        authorization_session_lifecycle,
+        "_hosted_custody_generation",
+        lambda _root, _custody: (b"keyring", b"control", b"membership"),
+    )
+    monkeypatch.setattr(
+        authorization_session_lifecycle,
+        "_matches_hosted_custody_generation",
+        lambda _generation, _custody, *, now: True,
+    )
 
     ready = authorization_session_lifecycle.hosted_serving_membership_readiness(
         tmp_path,
@@ -454,6 +465,208 @@ def test_hosted_readiness_binds_the_control_plane_cell_vault_and_replica(
             **arguments,
         )
         assert refused == authorization_serving_membership.unavailable_readiness()
+
+
+def test_hosted_readiness_carries_a_frozen_private_governance_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "governance.sqlite"
+    connection, migration = _file_connection(database_path)
+    connection.close()
+    custody = _hosted_custody(migration.activation_state_digest)
+    monkeypatch.setenv(
+        authorization_custody.KEYRING_FILE_ENV,
+        str(authorization_custody.HOSTED_KEYRING_FILE),
+    )
+    monkeypatch.setenv(
+        authorization_custody.CONTROL_FILE_ENV,
+        str(authorization_custody.HOSTED_CONTROL_FILE),
+    )
+    monkeypatch.setenv(
+        authorization_custody.MEMBERSHIP_FILE_ENV,
+        str(authorization_custody.HOSTED_MEMBERSHIP_FILE),
+    )
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "replica-7")
+    monkeypatch.setattr(
+        authorization_custody,
+        "load_authorization_custody",
+        lambda _root, *, now: custody,
+    )
+    monkeypatch.setattr(
+        store,
+        "open_authorization_session_connection",
+        lambda _root: sqlite3.connect(database_path),
+    )
+    monkeypatch.setattr(
+        authorization_session_lifecycle,
+        "_hosted_custody_generation",
+        lambda _root, _custody: (b"keyring", b"control", b"membership"),
+    )
+    monkeypatch.setattr(
+        authorization_session_lifecycle,
+        "_matches_hosted_custody_generation",
+        lambda _generation, _custody, *, now: True,
+    )
+
+    readiness = authorization_session_lifecycle.hosted_serving_membership_readiness(
+        tmp_path,
+        expected_cell_id="cell-7",
+        expected_logical_vault_id="logical-vault-7",
+        expected_replica_id="replica-7",
+        now=NOW,
+    )
+
+    assert readiness.governance is not None
+    assert readiness.governance.actual_schema == 4
+    assert readiness.governance.cell_id == "cell-7"
+    assert readiness.governance.vault_id == "logical-vault-7"
+    assert readiness.governance.replica_id == "replica-7"
+    assert readiness.governance.activation_store_id == "activation-store-7"
+    assert readiness.governance.activation_epoch == 1
+    assert readiness.governance.activation_state_digest == migration.activation_state_digest
+    assert readiness.governance.custody_revision == hashlib.sha256(
+        b"keyringcontrolmembership"
+    ).hexdigest()
+    assert readiness.governance.membership_epoch == 1
+    assert readiness.governance.membership_digest == "a" * 64
+
+
+def test_hosted_readiness_refuses_a_changed_custody_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "governance.sqlite"
+    connection, migration = _file_connection(database_path)
+    connection.close()
+    custody = _hosted_custody(migration.activation_state_digest)
+    for variable, path in {
+        authorization_custody.KEYRING_FILE_ENV: authorization_custody.HOSTED_KEYRING_FILE,
+        authorization_custody.CONTROL_FILE_ENV: authorization_custody.HOSTED_CONTROL_FILE,
+        authorization_custody.MEMBERSHIP_FILE_ENV: authorization_custody.HOSTED_MEMBERSHIP_FILE,
+    }.items():
+        monkeypatch.setenv(variable, str(path))
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "replica-7")
+    monkeypatch.setattr(
+        authorization_custody,
+        "load_authorization_custody",
+        lambda _root, *, now: custody,
+    )
+    monkeypatch.setattr(
+        store,
+        "open_authorization_session_connection",
+        lambda _root: sqlite3.connect(database_path),
+    )
+    generations = iter(
+        (
+            (b"keyring-a", b"control-a", b"membership-a"),
+            (b"keyring-b", b"control-b", b"membership-b"),
+        )
+    )
+    monkeypatch.setattr(
+        authorization_session_lifecycle,
+        "_hosted_custody_generation",
+        lambda _root, _custody: next(generations),
+    )
+    monkeypatch.setattr(
+        authorization_session_lifecycle,
+        "_matches_hosted_custody_generation",
+        lambda _generation, _custody, *, now: True,
+    )
+
+    readiness = authorization_session_lifecycle.hosted_serving_membership_readiness(
+        tmp_path,
+        expected_cell_id="cell-7",
+        expected_logical_vault_id="logical-vault-7",
+        expected_replica_id="replica-7",
+        now=NOW,
+    )
+
+    assert readiness == authorization_serving_membership.unavailable_readiness()
+    assert readiness.as_public_dict() == {
+        "ready": False,
+        "code": "AUTHORIZATION_MEMBERSHIP_UNAVAILABLE",
+        "servingMembershipEpoch": None,
+        "servingReplicaCount": 0,
+        "drainingReplicaCount": 0,
+    }
+
+
+def test_hosted_readiness_refuses_a_custody_generation_that_changes_and_reverts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "governance.sqlite"
+    connection, migration = _file_connection(database_path)
+    connection.close()
+    custody = _hosted_custody(migration.activation_state_digest)
+    changed = replace(
+        custody,
+        control=replace(custody.control, activation_store_id="other-activation-store"),
+    )
+    for variable, path in {
+        authorization_custody.KEYRING_FILE_ENV: authorization_custody.HOSTED_KEYRING_FILE,
+        authorization_custody.CONTROL_FILE_ENV: authorization_custody.HOSTED_CONTROL_FILE,
+        authorization_custody.MEMBERSHIP_FILE_ENV: authorization_custody.HOSTED_MEMBERSHIP_FILE,
+    }.items():
+        monkeypatch.setenv(variable, str(path))
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "replica-7")
+    loaded = iter((custody, changed))
+    monkeypatch.setattr(
+        authorization_custody,
+        "load_authorization_custody",
+        lambda _root, *, now: next(loaded),
+    )
+    monkeypatch.setattr(
+        store,
+        "open_authorization_session_connection",
+        lambda _root: sqlite3.connect(database_path),
+    )
+    generation = (b"keyring-b", b"control-b", b"membership-b")
+    monkeypatch.setattr(
+        authorization_session_lifecycle,
+        "_hosted_custody_generation",
+        lambda _root, _custody: generation,
+    )
+    monkeypatch.setattr(
+        authorization_session_lifecycle,
+        "_matches_hosted_custody_generation",
+        lambda _generation, observed, *, now: observed is custody,
+    )
+
+    readiness = authorization_session_lifecycle.hosted_serving_membership_readiness(
+        tmp_path,
+        expected_cell_id="cell-7",
+        expected_logical_vault_id="logical-vault-7",
+        expected_replica_id="replica-7",
+        now=NOW,
+    )
+
+    assert readiness == authorization_serving_membership.unavailable_readiness()
+
+
+@pytest.mark.parametrize("field", ["schema_version", "actual_schema", "activation_epoch"])
+def test_governance_readiness_proof_refuses_booleans_for_integer_fields(field: str) -> None:
+    values = {
+        "schema_version": 1,
+        "actual_schema": 4,
+        "cell_id": "cell-7",
+        "vault_id": "logical-vault-7",
+        "replica_id": "replica-7",
+        "software_version": "0.1.0",
+        "governance_enrolled": True,
+        "activation_store_id": "activation-store-7",
+        "activation_epoch": 1,
+        "activation_state_digest": "a" * 64,
+        "custody_revision": "b" * 64,
+        "membership_epoch": 1,
+        "membership_digest": "c" * 64,
+        "store_agreement": True,
+    }
+    values[field] = True
+
+    with pytest.raises(authorization_serving_membership.ServingMembershipUnavailable):
+        authorization_serving_membership.GovernanceReadinessProof(**values)
 
 
 def test_hosted_readiness_rejects_a_standalone_attachment(

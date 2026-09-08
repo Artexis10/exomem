@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import secrets
@@ -258,6 +259,50 @@ def serving_membership_readiness(
             connection.close()
 
 
+def _hosted_custody_generation(
+    vault_root: Path,
+    custody: authorization_custody.AuthorizationCustody,
+) -> tuple[bytes, bytes, bytes]:
+    external = authorization_custody.load_external_custody(vault_root)
+    membership = authorization_custody._load_file(custody.membership_path)
+    if (
+        custody.keyring_path != external.keyring_path
+        or custody.control_path != external.control_path
+        or custody.membership_path != membership.path
+    ):
+        raise AuthorizationSessionUnavailable
+    return external.keyring, external.control, membership.data
+
+
+def _matches_hosted_custody_generation(
+    generation: tuple[bytes, bytes, bytes],
+    custody: authorization_custody.AuthorizationCustody,
+    *,
+    now: int,
+) -> bool:
+    keyring_raw, control_raw, membership_raw = generation
+    keyring = authorization_custody.parse_keyring(keyring_raw)
+    control = authorization_custody.parse_control_record(
+        control_raw,
+        keyring=keyring,
+        now=now,
+    )
+    membership = authorization_serving_membership.parse_serving_membership(
+        membership_raw,
+        verifier_keys={item.key_id: item.key for item in keyring.accepted_keys},
+        now=now,
+        expected_cell_id=control.cell_id,
+        expected_logical_vault_id=control.logical_vault_id,
+        expected_epoch=control.serving_membership_epoch,
+        expected_digest=control.serving_membership_digest,
+    )
+    return (
+        keyring == custody.keyring
+        and control == custody.control
+        and membership == custody.serving_membership
+    )
+
+
 def hosted_serving_membership_readiness(
     vault_root: Path,
     *,
@@ -302,20 +347,57 @@ def hosted_serving_membership_readiness(
         from . import store
 
         connection = store.open_authorization_session_connection(Path(vault_root))
-        _ready_custody(connection, custody, now=current)
-        membership = custody.serving_membership
-        if membership is None:
+        initial_generation = _hosted_custody_generation(Path(vault_root), custody)
+        refreshed = authorization_custody.load_authorization_custody(
+            Path(vault_root), now=current
+        )
+        if not _matches_hosted_custody_generation(
+            initial_generation, refreshed, now=current
+        ):
             raise AuthorizationSessionUnavailable
+        _ready_custody(connection, refreshed, now=current)
+        refreshed_membership = refreshed.serving_membership
+        if refreshed_membership is None:
+            raise AuthorizationSessionUnavailable
+        final_generation = _hosted_custody_generation(Path(vault_root), refreshed)
+        if initial_generation != final_generation:
+            raise AuthorizationSessionUnavailable
+        control = refreshed.control
+        membership_digest = (
+            refreshed_membership.record_digest or control.serving_membership_digest
+        )
+        if (
+            refreshed_membership.epoch != control.serving_membership_epoch
+            or membership_digest != control.serving_membership_digest
+        ):
+            raise AuthorizationSessionUnavailable
+        governance = authorization_serving_membership.GovernanceReadinessProof(
+            schema_version=1,
+            actual_schema=schema_v4.SCHEMA_USER_VERSION,
+            cell_id=control.cell_id,
+            vault_id=control.logical_vault_id,
+            replica_id=replica_id,
+            software_version=authorization_custody.runtime_software_version(),
+            governance_enrolled=control.governance_enrolled,
+            activation_store_id=control.activation_store_id,
+            activation_epoch=control.activation_epoch,
+            activation_state_digest=control.activation_state_digest,
+            custody_revision=hashlib.sha256(b"".join(initial_generation)).hexdigest(),
+            membership_epoch=refreshed_membership.epoch,
+            membership_digest=membership_digest,
+            store_agreement=True,
+        )
         return authorization_serving_membership.ServingMembershipReadiness(
             ready=True,
             code="AUTHORIZATION_MEMBERSHIP_READY",
-            epoch=membership.epoch,
+            epoch=refreshed_membership.epoch,
             serving_replicas=sum(
-                item.state == "SERVING" for item in membership.replicas
+                item.state == "SERVING" for item in refreshed_membership.replicas
             ),
             draining_replicas=sum(
-                item.state == "DRAINING" for item in membership.replicas
+                item.state == "DRAINING" for item in refreshed_membership.replicas
             ),
+            governance=governance,
         )
     except (
         OSError,
