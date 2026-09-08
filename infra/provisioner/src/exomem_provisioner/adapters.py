@@ -18,6 +18,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+from urllib3.exceptions import HTTPError
+
 from .authorization_membership import (
     AUTHORIZATION_SESSION_FILES,
     AUTHORIZATION_SESSION_SECRET_NAME,
@@ -26,6 +28,7 @@ from .authorization_membership import (
 )
 from .conflict_reason import ConflictReason
 from .credentials import validate_machine_credential
+from .driver import DriverRetryable
 from .lifecycle import (
     HealthObservation,
     LifecycleConfig,
@@ -54,6 +57,17 @@ class BoundVolumeRecoveryObservation:
 def _api_status(error: Exception) -> int | None:
     status = getattr(error, "status", None)
     return status if isinstance(status, int) else None
+
+
+def _retryable_kubernetes_error(error: Exception) -> bool:
+    if isinstance(error, (OSError, HTTPError)):
+        return True
+    status = _api_status(error)
+    return (
+        status is not None
+        and not isinstance(status, bool)
+        and (status in {0, 408, 409, 429} or 500 <= status <= 599)
+    )
 
 
 def _require_annotations(
@@ -641,6 +655,7 @@ class KubernetesCellAdapter:
         membership_digest: str,
         revision: str,
         expected_revision: str | None = None,
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if (
             set(files) != AUTHORIZATION_SESSION_FILES
@@ -659,6 +674,10 @@ class KubernetesCellAdapter:
             ).hexdigest()
             or not isinstance(recovery_envelope, str)
             or not recovery_envelope
+            or (
+                effect_guard is not None
+                and (not callable(effect_guard) or expected_revision is None)
+            )
             or (
                 expected_revision is not None
                 and re.fullmatch(r"[0-9a-f]{64}", expected_revision) is None
@@ -706,6 +725,10 @@ class KubernetesCellAdapter:
                     metadata.resource_name,
                 )
             except Exception as error:
+                if effect_guard is not None and _retryable_kubernetes_error(error):
+                    raise DriverRetryable(
+                        "authorization session publication is temporarily unavailable"
+                    ) from None
                 raise MetadataConflict(
                     "authorization session bundle predecessor is absent",
                     reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_PREDECESSOR_IS_ABSENT,
@@ -748,6 +771,23 @@ class KubernetesCellAdapter:
                     reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_PREDECESSOR_DIFFERS,
                 )
             body["metadata"]["resourceVersion"] = resource_version
+            if effect_guard is not None:
+                current_metadata = getattr(current, "metadata", None)
+                uid = getattr(current_metadata, "uid", None)
+                if (
+                    not isinstance(uid, str)
+                    or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,511}", uid) is None
+                    or getattr(current_metadata, "deletion_timestamp", None) is not None
+                ):
+                    raise MetadataConflict(
+                        "authorization session bundle predecessor differs",
+                        reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_PREDECESSOR_DIFFERS,
+                    )
+                body["metadata"]["uid"] = uid
+        # The predecessor read can outlive the worker's claim. Guard the write
+        # itself, retaining API-server UID/resource-version preconditions.
+        if effect_guard is not None:
+            await effect_guard()
         try:
             await asyncio.to_thread(
                 self._core.patch_namespaced_secret,
@@ -756,6 +796,10 @@ class KubernetesCellAdapter:
                 body,
             )
         except Exception as error:
+            if effect_guard is not None and _retryable_kubernetes_error(error):
+                raise DriverRetryable(
+                    "authorization session publication is temporarily unavailable"
+                ) from None
             if _api_status(error) == 409:
                 raise MetadataConflict(
                     "authorization session bundle changed concurrently",
