@@ -287,6 +287,7 @@ jobs:
           tests/test_vocabulary_owner_preview.py
           tests/test_vocabulary_placement.py
           tests/test_native_owner_reviews.py::test_windows_review_store_publishes_and_pins_a_private_sqlite_file
+          tests/test_native_owner_reviews.py::test_windows_sidecar_protection_never_mutates_hardlinks_or_nonjournals
           --session-timeout=300
 
   tui:

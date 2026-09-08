@@ -4,10 +4,11 @@ import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from exomem import mutation_lock
+from exomem import mutation_lock, vocabulary_authority
 from exomem.governance import authorization_custody
 from exomem.native_owner_reviews import (
     MAX_REVIEW_JSON_BYTES,
@@ -19,6 +20,49 @@ from exomem.native_owner_reviews import (
 
 NOW = 1_700_000_000
 BINDING = "a" * 64
+
+
+@pytest.mark.parametrize(
+    ("suffix", "hardlink"),
+    [("-journal", True), ("-wal", False), ("-shm", False)],
+)
+def test_windows_sidecar_protection_never_mutates_hardlinks_or_nonjournals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+    hardlink: bool,
+) -> None:
+    if os.name == "nt":
+        mutation_lock._windows_apply_private_dacl(
+            tmp_path, mutation_lock._windows_current_user_sid()
+        )
+    database = tmp_path / "owner-reviews.sqlite"
+    sidecar = database.with_name(f"{database.name}{suffix}")
+    sidecar.write_bytes(b"sidecar")
+    sidecar.chmod(0o600)
+    if hardlink:
+        os.link(sidecar, tmp_path / "shared-sidecar")
+
+    fake_os = SimpleNamespace(name="nt", lstat=os.lstat, fstat=os.fstat)
+    applied: list[Path] = []
+    monkeypatch.setattr(vocabulary_authority, "os", fake_os)
+    monkeypatch.setattr(
+        authorization_custody,
+        "_file_is_owner_protected",
+        lambda _descriptor, _info: False,
+    )
+    monkeypatch.setattr(
+        mutation_lock,
+        "_windows_apply_private_dacl",
+        lambda path, _sid: applied.append(path),
+    )
+
+    with pytest.raises(vocabulary_authority.VocabularyAuthorityUnavailable):
+        vocabulary_authority.VocabularyAuthority._validate_sqlite_sidecars(  # noqa: SLF001
+            database, protect_inherited_windows=True
+        )
+
+    assert applied == []
 
 
 @pytest.fixture
@@ -80,6 +124,44 @@ def test_windows_review_store_publishes_and_pins_a_private_sqlite_file(
     monkeypatch.setenv("EXOMEM_VOCABULARY_AUTHORITY_DIR", str(authority))
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
     store = OwnerReviewStore(vault)
+
+    connection = store._connect(create=True)  # noqa: SLF001
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("INSERT INTO settings VALUES ('probe', 'probe')")
+        journal = store.database_path.with_name(
+            f"{store.database_path.name}-journal"
+        )
+        inherited = mutation_lock.retain_regular_file(journal, delete_access=False)
+        try:
+            import msvcrt
+
+            inherited_sddl = mutation_lock._windows_dacl_sddl_for_handle(
+                msvcrt.get_osfhandle(inherited.fd)
+            )
+            assert mutation_lock._windows_private_dacl_is_valid(
+                inherited_sddl, sid, directory=False
+            ), inherited_sddl
+            assert not authorization_custody._file_is_owner_protected(  # noqa: SLF001
+                inherited.fd, os.fstat(inherited.fd)
+            ), inherited_sddl
+        finally:
+            inherited.close()
+        store._validate_sidecars(  # noqa: SLF001
+            store.database_path, protect_inherited_windows=True
+        )
+        protected_journal = mutation_lock.retain_regular_file(
+            journal, delete_access=False
+        )
+        try:
+            assert authorization_custody._file_is_owner_protected(  # noqa: SLF001
+                protected_journal.fd, os.fstat(protected_journal.fd)
+            )
+        finally:
+            protected_journal.close()
+    finally:
+        connection.rollback()
+        connection.close()
 
     _prepare(store)
 

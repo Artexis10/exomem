@@ -193,11 +193,16 @@ class OwnerReviewStore:
             raise NativeOwnerReviewUnavailable from None
 
     @staticmethod
-    def _validate_sidecars(path: Path) -> None:
+    def _validate_sidecars(
+        path: Path, *, protect_inherited_windows: bool = False
+    ) -> None:
         from .vocabulary_authority import VocabularyAuthority
 
         try:
-            VocabularyAuthority._validate_sqlite_sidecars(path)  # noqa: SLF001
+            VocabularyAuthority._validate_sqlite_sidecars(  # noqa: SLF001
+                path,
+                protect_inherited_windows=protect_inherited_windows,
+            )
         except Exception:  # noqa: BLE001 - translate the shared fail-closed guard
             raise NativeOwnerReviewUnavailable from None
 
@@ -440,7 +445,9 @@ class OwnerReviewStore:
                     expiry,
                 ),
             )
-            self._validate_sidecars(self.database_path)
+            self._validate_sidecars(
+                self.database_path, protect_inherited_windows=True
+            )
             connection.commit()
             return self._review(
                 self._row(connection, review_id), owner_id=owner, now=current
@@ -498,7 +505,9 @@ class OwnerReviewStore:
                 raise NativeOwnerReviewConflict
             if updated.rowcount != 1:
                 raise NativeOwnerReviewConflict
-            self._validate_sidecars(self.database_path)
+            self._validate_sidecars(
+                self.database_path, protect_inherited_windows=True
+            )
             connection.commit()
             return self._review(
                 self._row(connection, review.review_id), owner_id=owner_id, now=current
@@ -539,7 +548,9 @@ class OwnerReviewStore:
             )
             if updated.rowcount != 1:
                 raise NativeOwnerReviewConflict
-            self._validate_sidecars(self.database_path)
+            self._validate_sidecars(
+                self.database_path, protect_inherited_windows=True
+            )
             connection.commit()
             return self._review(
                 self._row(connection, review.review_id), owner_id=owner_id, now=current
@@ -608,7 +619,9 @@ class OwnerReviewStore:
                 and review.body.get("renewal") == "same-authority"
             ):
                 self._publish_renewal(connection, review.review_id)
-            self._validate_sidecars(self.database_path)
+            self._validate_sidecars(
+                self.database_path, protect_inherited_windows=True
+            )
             connection.commit()
             return self._review(
                 self._row(connection, review.review_id), owner_id=owner_id, now=current

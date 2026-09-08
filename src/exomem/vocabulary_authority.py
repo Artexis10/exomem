@@ -690,8 +690,10 @@ class VocabularyAuthority:
             raise VocabularyAuthorityUnavailable from None
 
     @staticmethod
-    def _validate_sqlite_sidecars(path: Path) -> None:
-        """Reject pre-existing SQLite journals outside the custody protection rule."""
+    def _validate_sqlite_sidecars(
+        path: Path, *, protect_inherited_windows: bool = False
+    ) -> None:
+        """Validate sidecars, optionally protecting SQLite's new Windows journal."""
 
         for suffix in ("-journal", "-wal", "-shm"):
             candidate = path.with_name(f"{path.name}{suffix}")
@@ -707,7 +709,40 @@ class VocabularyAuthority:
                 if (
                     not stat.S_ISREG(info.st_mode)
                     or info.st_nlink != 1
-                    or not authorization_custody._file_is_owner_protected(retained.fd, info)  # noqa: SLF001
+                    or not mutation_lock._same_file_entry(  # noqa: SLF001
+                        retained.directory, candidate.name, retained.fd
+                    )
+                ):
+                    raise VocabularyAuthorityUnavailable
+                protected = authorization_custody._file_is_owner_protected(  # noqa: SLF001
+                    retained.fd, info
+                )
+                if (
+                    not protected
+                    and protect_inherited_windows
+                    and os.name == "nt"
+                    and suffix == "-journal"
+                ):
+                    import msvcrt
+
+                    sid = mutation_lock._windows_current_user_sid()
+                    inherited = mutation_lock._windows_dacl_sddl_for_handle(
+                        msvcrt.get_osfhandle(retained.fd)
+                    )
+                    # The opt-in is used only after this connection created its
+                    # rollback journal. Tighten an inherited canonical trustee
+                    # set, then prove the retained entry is still the same one.
+                    if mutation_lock._windows_private_dacl_is_valid(
+                        inherited, sid, directory=False
+                    ):
+                        mutation_lock._windows_apply_private_dacl(candidate, sid)
+                final_info = os.fstat(retained.fd)
+                if (
+                    not stat.S_ISREG(final_info.st_mode)
+                    or final_info.st_nlink != 1
+                    or not authorization_custody._file_is_owner_protected(  # noqa: SLF001
+                        retained.fd, final_info
+                    )
                     or not mutation_lock._same_file_entry(  # noqa: SLF001
                         retained.directory, candidate.name, retained.fd
                     )
