@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from exomem import mutation_lock
+from exomem.governance import authorization_custody
 from exomem.native_owner_reviews import (
     MAX_REVIEW_JSON_BYTES,
     NativeOwnerReviewConflict,
@@ -44,6 +46,52 @@ def _prepare(store: OwnerReviewStore, *, expires_at: int = NOW + 60):
         expires_at=expires_at,
         now=NOW,
     )
+
+
+def test_review_store_sqlite_pin_does_not_request_delete_access(
+    store: OwnerReviewStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requested: list[bool] = []
+    original = mutation_lock.retain_regular_file
+
+    def retain(path, *, delete_access=True):
+        requested.append(delete_access)
+        return original(path, delete_access=delete_access)
+
+    monkeypatch.setattr(mutation_lock, "retain_regular_file", retain)
+
+    _prepare(store)
+
+    assert requested
+    assert set(requested) == {False}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL and sharing contract")
+def test_windows_review_store_publishes_and_pins_a_private_sqlite_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = mutation_lock._windows_current_user_sid()
+    vault = tmp_path / "vault"
+    authority = tmp_path / "authority"
+    vault.mkdir()
+    authority.mkdir()
+    mutation_lock._windows_apply_private_dacl(vault, sid)
+    mutation_lock._windows_apply_private_dacl(authority, sid)
+    monkeypatch.setenv("EXOMEM_VOCABULARY_AUTHORITY_DIR", str(authority))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    store = OwnerReviewStore(vault)
+
+    _prepare(store)
+
+    retained = mutation_lock.retain_regular_file(
+        store.database_path, delete_access=False
+    )
+    try:
+        assert authorization_custody._file_is_owner_protected(  # noqa: SLF001
+            retained.fd, os.fstat(retained.fd)
+        )
+    finally:
+        retained.close()
 
 
 def test_review_values_are_deeply_immutable_and_as_dict_is_detached(

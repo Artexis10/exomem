@@ -119,6 +119,27 @@ def test_retained_regular_file_rename_moves_the_pinned_entry(tmp_path: Path) -> 
     assert destination.read_bytes() == b"graph"
 
 
+def test_retained_regular_file_can_pin_without_delete_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "live.sqlite"
+    target.write_bytes(b"sqlite")
+    requested: list[bool] = []
+    original = mutation_lock_module._open_secure_file_at
+
+    def open_file(directory, name, flags, *, delete_access=True):
+        requested.append(delete_access)
+        return original(directory, name, flags, delete_access=delete_access)
+
+    monkeypatch.setattr(mutation_lock_module, "_open_secure_file_at", open_file)
+    default = mutation_lock_module.retain_regular_file(target)
+    default.close()
+    sqlite_pin = mutation_lock_module.retain_regular_file(target, delete_access=False)
+    sqlite_pin.close()
+
+    assert requested == [True, False]
+
+
 def test_windows_retained_rename_uses_file_rename_info_filename_offset() -> None:
     source = inspect.getsource(mutation_lock_module._windows_rename_handle)
 

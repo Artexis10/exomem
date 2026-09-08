@@ -229,15 +229,17 @@ class RetainedRegularFile:
                 self.directory.close()
 
 
-def retain_regular_file(path: Path) -> RetainedRegularFile:
-    """Pin one regular child without following aliases or replacement races."""
+def retain_regular_file(
+    path: Path, *, delete_access: bool = True
+) -> RetainedRegularFile:
+    """Pin one regular child without aliases, optionally omitting delete rights."""
     target = Path(path)
     if target.name != target.as_posix().split("/")[-1]:
         raise OSError("retained file target must be one child basename")
     directory = _acquire_secure_directory(target.parent, create=False)
     try:
         fd = _open_secure_file_at(
-            directory, target.name, os.O_RDONLY, delete_access=True
+            directory, target.name, os.O_RDONLY, delete_access=delete_access
         )
         try:
             info = os.fstat(fd)

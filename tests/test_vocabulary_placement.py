@@ -120,14 +120,21 @@ def test_fresh_authority_artifacts_are_protected_before_create_only_publication(
     custody = _Custody(control)
     authority = vocabulary_authority.VocabularyAuthority(vault)
     protected: list[Path] = []
+    pinned: list[tuple[Path, bool]] = []
     original = authorization_custody._prepare_private_stage  # noqa: SLF001
+    original_retain = mutation_lock.retain_regular_file
 
     def prepare(path, staged) -> None:
         assert not os.path.lexists(path)
         original(path, staged)
         protected.append(path)
 
+    def retain(path, *, delete_access=True):
+        pinned.append((Path(path), delete_access))
+        return original_retain(path, delete_access=delete_access)
+
     monkeypatch.setattr(authorization_custody, "_prepare_private_stage", prepare)
+    monkeypatch.setattr(mutation_lock, "retain_regular_file", retain)
     marker = authority._create_marker(  # noqa: SLF001
         custody,
         floor=vocabulary_authority._deployment_floor_for_adapter(  # noqa: SLF001
@@ -146,6 +153,7 @@ def test_fresh_authority_artifacts_are_protected_before_create_only_publication(
         control, "vault-1", vault_root=vault
     )
     assert protected == [paths.marker_path, paths.database_path]
+    assert pinned == [(paths.database_path, False)]
 
 
 def test_private_stage_refusal_leaves_no_published_authority_artifact(

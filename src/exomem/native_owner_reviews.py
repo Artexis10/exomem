@@ -212,24 +212,17 @@ class OwnerReviewStore:
             if not exists and not create:
                 raise NativeOwnerReviewUnavailable
             if not exists:
+                from .vocabulary_authority import (
+                    VocabularyAuthorityUnavailable,
+                    _publish_new_private_file,
+                )
+
                 try:
-                    descriptor = os.open(
-                        path,
-                        os.O_RDWR
-                        | os.O_CREAT
-                        | os.O_EXCL
-                        | getattr(os, "O_NOFOLLOW", 0),
-                        0o600,
-                    )
-                except FileExistsError:
-                    pass
-                else:
-                    try:
-                        os.fsync(descriptor)
-                    finally:
-                        os.close(descriptor)
+                    _publish_new_private_file(path, b"")
+                except VocabularyAuthorityUnavailable:
+                    raise NativeOwnerReviewUnavailable from None
             self._validate_sidecars(path)
-            retained = mutation_lock.retain_regular_file(path)
+            retained = mutation_lock.retain_regular_file(path, delete_access=False)
             try:
                 info = os.fstat(retained.fd)
                 if (

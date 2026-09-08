@@ -665,7 +665,7 @@ class VocabularyAuthority:
             if create and not path.exists():
                 _publish_new_private_file(path, b"")
             self._validate_sqlite_sidecars(path)
-            retained = mutation_lock.retain_regular_file(path)
+            retained = mutation_lock.retain_regular_file(path, delete_access=False)
             try:
                 info = os.fstat(retained.fd)
                 if not authorization_custody._file_is_owner_protected(retained.fd, info):  # noqa: SLF001
@@ -699,7 +699,9 @@ class VocabularyAuthority:
                 os.lstat(candidate)
             except FileNotFoundError:
                 continue
-            retained = mutation_lock.retain_regular_file(candidate)
+            retained = mutation_lock.retain_regular_file(
+                candidate, delete_access=False
+            )
             try:
                 info = os.fstat(retained.fd)
                 if (
