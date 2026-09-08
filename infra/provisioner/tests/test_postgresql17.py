@@ -1726,7 +1726,7 @@ async def test_postgresql17_claim_uses_database_clock_without_explicit_test_time
 
 
 @ASYNCIO_POSTGRESQL17
-async def test_postgresql17_capacity_ledger_serializes_two_sixth_slot_attempts(
+async def test_postgresql17_capacity_ledger_serializes_two_fourth_slot_attempts(
     postgresql17: PostgreSQL17,
 ) -> None:
     target = _new_database(postgresql17, "capacity")
@@ -1786,9 +1786,9 @@ async def test_postgresql17_capacity_ledger_serializes_two_sixth_slot_attempts(
         )
 
     try:
-        for index in range(5):
+        for index in range(3):
             await reserve(await claim(index))
-        contenders = [await claim(5), await claim(6)]
+        contenders = [await claim(3), await claim(4)]
         results = await asyncio.gather(
             *(reserve(item) for item in contenders),
             return_exceptions=True,
@@ -1799,7 +1799,7 @@ async def test_postgresql17_capacity_ledger_serializes_two_sixth_slot_attempts(
         assert len(blocked) == 1
         assert blocked[0].reason == "capacity-user-exhausted"
 
-        expiring_operation, expiring_request, expiring_worker = await claim(7)
+        expiring_operation, expiring_request, expiring_worker = await claim(5)
         expiring_receipt = replace(
             receipt,
             expires_at=datetime.now(UTC) + timedelta(seconds=1),
@@ -1835,8 +1835,8 @@ async def test_postgresql17_capacity_ledger_serializes_two_sixth_slot_attempts(
             revision = await session.scalar(
                 select(CapacityLedger.revision).where(CapacityLedger.id == 1)
             )
-        assert active == 6
-        assert revision == 6
+        assert active == 4
+        assert revision == 4
     finally:
         await database.dispose()
 
