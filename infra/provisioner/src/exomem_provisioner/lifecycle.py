@@ -27,6 +27,7 @@ from .driver import (
     EffectContext,
     LostAcknowledgement,
 )
+from .governance_migration_checkpoint import CHECKPOINT_VERSION
 from .models import ResourceKind
 from .provider_identity import (
     ProviderIdentityConflict,
@@ -737,7 +738,9 @@ class LifecyclePlane(Protocol):
     """Provider composition required by the cell lifecycle reconciler."""
 
     async def observed_fence(self, tenant_id: str) -> int: ...
-    async def observe_operation(self, context: EffectContext, request: dict[str, Any]) -> None: ...
+    async def observe_operation(
+        self, context: EffectContext, request: dict[str, Any]
+    ) -> DriverPending | None: ...
     def has_namespace(self, metadata: OpaqueProviderMetadata) -> bool: ...
     async def ensure_namespace(
         self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
@@ -1942,6 +1945,11 @@ class CellLifecycleDriver:
         context: EffectContext,
     ) -> DriverPending | DriverFinal:
         try:
+            if context.checkpoint.startswith(CHECKPOINT_VERSION + ":") and (
+                action not in {"provision", "rollforward"}
+                or context.wire_protocol != WIRE_PROTOCOL_V2
+            ):
+                raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
             if action in {
                 "rollforward",
                 "rollback-rollforward",
@@ -1954,7 +1962,9 @@ class CellLifecycleDriver:
                 raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
             if await self.observed_fence(context.tenant_id) > context.fence_generation:
                 raise DriverTerminal("PROVISIONER_STALE_FENCE")
-            await self._plane.observe_operation(context, request)
+            observation = await self._plane.observe_operation(context, request)
+            if isinstance(observation, DriverPending):
+                return observation
             if action == "provision":
                 return await self._provision(request, context)
             if action == "health":
