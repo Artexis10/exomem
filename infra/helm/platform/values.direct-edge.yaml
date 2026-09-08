@@ -1,8 +1,12 @@
 directEdge:
   enabled: true
   hostname: transfer.example.test
-  admittedCellNamespaces: []
-  privateTransferBackends: []
+  admittedCellNamespaces: [cell-alpha, cell-beta]
+  privateTransferBackends:
+    - transportName: cell-alpha-private-transfer
+      serverName: cell-alpha.cell-alpha.svc.cluster.local
+    - transportName: cell-beta-private-transfer
+      serverName: cell-beta.cell-beta.svc.cluster.local
 
 # This overlay is deliberately separate from values.yaml so the legacy chart's
 # rendered resources remain unchanged until a signed direct profile selects it.
@@ -12,14 +16,14 @@ traefik:
       port: 8444
       exposedPort: 8444
       expose:
-        default: false
+        default: true
       http:
         tls:
           enabled: true
           options: private-transfer@file
   providers:
     kubernetesCRD:
-      crossProviderNamespaces: []
+      crossProviderNamespaces: [cell-alpha, cell-beta]
   volumes:
     - name: exomem-private-transfer-config
       mountPath: /etc/traefik/dynamic

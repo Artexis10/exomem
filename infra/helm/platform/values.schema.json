@@ -59,7 +59,14 @@
             }
           }
         }
-      }
+      },
+      "allOf": [{
+        "if": {"properties": {"enabled": {"const": true}}},
+        "then": {"properties": {
+          "admittedCellNamespaces": {"minItems": 1},
+          "privateTransferBackends": {"minItems": 1}
+        }}
+      }]
     },
     "provisioner": {
       "type": "object",

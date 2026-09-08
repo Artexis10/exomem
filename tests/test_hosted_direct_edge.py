@@ -101,6 +101,7 @@ def test_direct_edge_is_disabled_by_default_and_enabled_overlay_is_private() -> 
     deployment = _find(enabled, "Deployment", "exomem-direct-edge")
     service = _find(enabled, "Service", "exomem-direct-edge")
     config = _find(enabled, "ConfigMap", "exomem-direct-edge-config")
+    private_config = _find(enabled, "ConfigMap", "exomem-private-transfer-config")
     policy = _find(enabled, "NetworkPolicy", "exomem-direct-edge")
 
     assert deployment["spec"]["strategy"] == {"type": "Recreate"}
@@ -137,6 +138,19 @@ def test_direct_edge_is_disabled_by_default_and_enabled_overlay_is_private() -> 
     assert "Method(`PUT`) || Method(`OPTIONS`)" in rendered
     assert "Method(`GET`) || Method(`OPTIONS`)" in rendered
     assert policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
+    private_traefik = _find(enabled, "Deployment", "exomem-platform-traefik")
+    private_args = private_traefik["spec"]["template"]["spec"]["containers"][0]["args"]
+    assert "--providers.kubernetescrd.crossProviderNamespaces=cell-alpha,cell-beta" in private_args
+    private_service = _find(enabled, "Service", "exomem-platform-traefik")
+    assert {
+        "name": "private-transfe",
+        "port": 8444,
+        "protocol": "TCP",
+        "targetPort": "private-transfe",
+    } in private_service["spec"]["ports"]
+    private_rendered = yaml.safe_dump(private_config)
+    assert "cell-alpha-private-transfer:" in private_rendered
+    assert "cell-beta-private-transfer:" in private_rendered
 
 
 def test_private_transfer_profile_keeps_control_on_web_and_uses_file_transport() -> None:

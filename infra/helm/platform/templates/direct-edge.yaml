@@ -5,6 +5,12 @@
 {{- if ne (toJson .Values.directEdge.admittedCellNamespaces) (toJson .Values.traefik.providers.kubernetesCRD.crossProviderNamespaces) }}
 {{- fail "directEdge admittedCellNamespaces must exactly match traefik.providers.kubernetesCRD.crossProviderNamespaces" }}
 {{- end }}
+{{- if eq (len .Values.directEdge.admittedCellNamespaces) 0 }}
+{{- fail "directEdge requires an explicit nonempty admittedCellNamespaces allowlist" }}
+{{- end }}
+{{- if ne (len .Values.directEdge.admittedCellNamespaces) (len .Values.directEdge.privateTransferBackends) }}
+{{- fail "directEdge requires one privateTransferBackend for each admitted cell namespace" }}
+{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
