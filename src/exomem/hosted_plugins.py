@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from . import commands, hosted_gateway
@@ -39,6 +40,8 @@ BASELINE_CANDIDATE = "hosted-alpha-agent-v5"
 #: the v4 tool profile unchanged, so the additive transport feature does not
 #: mutate any published profile identity.
 COMMAND_BINDING_CANDIDATE = "hosted-alpha-agent-v4-command-binding-v1"
+DIRECT_CANDIDATE = "hosted-alpha-agent-v4-direct-v1"
+LEGACY_ENDPOINT = "https://substratesystems.io/api/exomem/mcp/v1"
 #: Every distributable candidate and the surface profile it pins. A third
 #: candidate is what retired the old pairwise `== LIFECYCLE_CANDIDATE`
 #: branching: membership questions now ask the registry, not a constant.
@@ -50,6 +53,7 @@ CANDIDATE_PROFILES: Mapping[str, str] = MappingProxyType(
         PARITY_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V4_PROFILE,
         BASELINE_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V5_PROFILE,
         COMMAND_BINDING_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V4_PROFILE,
+        DIRECT_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V4_PROFILE,
     }
 )
 #: Candidates whose profile exposes `record_memory`. These pin the Records
@@ -62,6 +66,7 @@ RECORDS_CANDIDATES: frozenset[str] = frozenset(
         PARITY_CANDIDATE,
         BASELINE_CANDIDATE,
         COMMAND_BINDING_CANDIDATE,
+        DIRECT_CANDIDATE,
     }
 )
 #: Candidates that own every skill they ship rather than resolving the shared
@@ -69,7 +74,7 @@ RECORDS_CANDIDATES: frozenset[str] = frozenset(
 #: shared skill would move their `skills_sha256` -- which is precisely why the
 #: doctrine v5 carries could not be written into those shared files.
 SELF_CONTAINED_CANDIDATES: frozenset[str] = frozenset(
-    {BASELINE_CANDIDATE, COMMAND_BINDING_CANDIDATE}
+    {BASELINE_CANDIDATE, COMMAND_BINDING_CANDIDATE, DIRECT_CANDIDATE}
 )
 #: Candidates that bind one combined candidate-scoped behavior fixture digest
 #: through compatibility, package, lock, archive and promotion evidence.
@@ -114,6 +119,16 @@ CANDIDATE_SKILL_NAMES: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "exomem-supersede",
         ),
         COMMAND_BINDING_CANDIDATE: (
+            "exomem",
+            "exomem-capture",
+            "exomem-continue",
+            "exomem-reflect",
+            "exomem-research",
+            "exomem-review",
+            "exomem-records",
+            "exomem-supersede",
+        ),
+        DIRECT_CANDIDATE: (
             "exomem",
             "exomem-capture",
             "exomem-continue",
@@ -326,8 +341,43 @@ def _candidate_root(root: Path, candidate: str) -> Path:
     return root / PLUGIN_ROOT / "candidates" / candidate
 
 
+def _validate_direct_endpoint(endpoint: str) -> None:
+    """Refuse an ambiguous direct resource before it reaches a signed artifact."""
+
+    try:
+        parsed = urlsplit(endpoint)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("direct Hosted endpoint must be a canonical HTTPS DNS resource") from exc
+    host = parsed.hostname
+    canonical = f"https://{host}/api/exomem/mcp/v1" if host else ""
+    if (
+        any(ord(character) <= 0x20 or ord(character) > 0x7E for character in endpoint)
+        or parsed.scheme != "https"
+        or not host
+        or len(host) > 253
+        or parsed.netloc != host
+        or port is not None
+        or parsed.path != "/api/exomem/mcp/v1"
+        or parsed.query
+        or parsed.fragment
+        or host == "localhost"
+        or host.endswith(".localhost")
+        or endpoint != canonical
+        or not re.fullmatch(
+            r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+            r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?",
+            host,
+        )
+    ):
+        raise ValueError("direct Hosted endpoint must be a canonical HTTPS DNS resource")
+
+
 def _validate_definition(
-    raw: dict[str, Any], *, expected_profile: str = commands.HOSTED_ALPHA_AGENT_PROFILE
+    raw: dict[str, Any],
+    *,
+    expected_profile: str = commands.HOSTED_ALPHA_AGENT_PROFILE,
+    direct_candidate: bool = False,
 ) -> HostedDefinition:
     allowed = {
         "plugin_id",
@@ -356,11 +406,13 @@ def _validate_definition(
     if not SEMVER.fullmatch(str(raw["version"])):
         raise ValueError("plugin version must be a strict semantic version")
     endpoint = str(raw["endpoint"])
-    if not endpoint.startswith("https://") or not endpoint.endswith("/mcp/v1"):
+    if direct_candidate:
+        _validate_direct_endpoint(endpoint)
+    elif not endpoint.startswith("https://") or not endpoint.endswith("/mcp/v1"):
         raise ValueError("Hosted endpoint must be a fixed HTTPS versioned /mcp/v1 resource")
     if raw["channel"] != "production":
         raise ValueError("only the production channel is distributable")
-    if endpoint != "https://substratesystems.io/api/exomem/mcp/v1":
+    if not direct_candidate and endpoint != LEGACY_ENDPOINT:
         raise ValueError("production endpoint must be the canonical Hosted resource")
     if raw["profile"] != expected_profile:
         raise ValueError("Hosted definition must use the exact alpha profile")
@@ -372,8 +424,11 @@ def _validate_definition(
     return HostedDefinition(**{key: str(value) for key, value in raw.items()})
 
 
-def load_definition_file(
-    path: Path, *, expected_profile: str = commands.HOSTED_ALPHA_AGENT_PROFILE
+def _load_definition_file(
+    path: Path,
+    *,
+    expected_profile: str = commands.HOSTED_ALPHA_AGENT_PROFILE,
+    direct_candidate: bool = False,
 ) -> HostedDefinition:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -381,16 +436,27 @@ def load_definition_file(
         raise ValueError("Hosted definition must be valid JSON") from exc
     if not isinstance(raw, dict):
         raise ValueError("Hosted definition must be an object")
-    return _validate_definition(raw, expected_profile=expected_profile)
+    return _validate_definition(
+        raw, expected_profile=expected_profile, direct_candidate=direct_candidate
+    )
+
+
+def load_definition_file(
+    path: Path, *, expected_profile: str = commands.HOSTED_ALPHA_AGENT_PROFILE
+) -> HostedDefinition:
+    """Load an ordinary definition, which is always bound to the legacy resource."""
+
+    return _load_definition_file(path, expected_profile=expected_profile)
 
 
 def load_definition(
     repo_root: Path | None = None, *, candidate: str = DEFAULT_CANDIDATE
 ) -> HostedDefinition:
     root = _repo_root(repo_root)
-    return load_definition_file(
+    return _load_definition_file(
         _candidate_root(root, candidate) / "definition.json",
         expected_profile=_candidate_profile(candidate),
+        direct_candidate=candidate == DIRECT_CANDIDATE,
     )
 
 
@@ -1854,14 +1920,17 @@ def _skills_digest(root: Path, candidate: str = DEFAULT_CANDIDATE) -> str:
     return _sha256(_canonical_json(payload))
 
 
-def oauth_discovery_overlay(contract: dict[str, Any]) -> dict[str, Any]:
+def oauth_discovery_overlay(
+    contract: dict[str, Any], *, resource: str = LEGACY_ENDPOINT
+) -> dict[str, Any]:
     """Gateway-owned OAuth discovery metadata, separate from raw cell schemas."""
 
+    origin = resource.removesuffix("/api/exomem/mcp/v1")
     return {
         "schema_version": 1,
-        "resource": "https://substratesystems.io/api/exomem/mcp/v1",
+        "resource": resource,
         "protected_resource_metadata": (
-            "https://substratesystems.io/.well-known/oauth-protected-resource/api/exomem/mcp/v1"
+            f"{origin}/.well-known/oauth-protected-resource/api/exomem/mcp/v1"
         ),
         "issuer": "https://substratesystems.io/api/exomem/oauth",
         "authorization_server_metadata": (
@@ -1904,7 +1973,7 @@ def compatibility_manifest(
     definition = load_definition(root, candidate=candidate)
     dependencies = skill_dependencies(root, candidate=candidate)
     contract = hosted_gateway.build_agent_gateway_contract(profile=definition.profile)
-    oauth_overlay = oauth_discovery_overlay(contract)
+    oauth_overlay = oauth_discovery_overlay(contract, resource=definition.endpoint)
     # The descriptor identifies the contract surface, not the build that emitted
     # it. `exomem_release` belongs to the running server's contract, and keeping
     # it here made `compatibility_sha256` move on every version bump -- which
@@ -1953,7 +2022,7 @@ def compatibility_manifest(
         base["minimum_records_reader_version"] = 2
     if candidate in FIXTURE_BOUND_CANDIDATES:
         base["behavior_fixture_sha256"] = behavior_fixture_sha256(root, candidate=candidate)
-    if candidate == COMMAND_BINDING_CANDIDATE:
+    if candidate in {COMMAND_BINDING_CANDIDATE, DIRECT_CANDIDATE}:
         base["features"] = ["agent-command-binding-v1"]
     return {**base, "compatibility_sha256": _sha256(_canonical_json(base))}
 
@@ -2274,7 +2343,9 @@ def _generated_openai_app_id(generated: Path) -> str:
     return _validate_openai_app_id(app_id)
 
 
-def _validate_openai_lock_identity(generated: Path, app_id: str) -> None:
+def _validate_openai_lock_identity(
+    generated: Path, app_id: str, *, expected_endpoint: str = LEGACY_ENDPOINT
+) -> None:
     expected = _registered_app_id_sha256(app_id)
     for name in ("openai.lock.json", "openai.zip.lock.json"):
         try:
@@ -2283,9 +2354,13 @@ def _validate_openai_lock_identity(generated: Path, app_id: str) -> None:
             raise ValueError("OpenAI candidate is registration-pending or invalid") from exc
         if lock.get("registered_app_id_sha256") != expected:
             raise ValueError("OpenAI lock does not bind the registered app identity")
+        if name == "openai.lock.json" and lock.get("endpoint") != expected_endpoint:
+            raise ValueError("OpenAI lock does not bind the expected endpoint")
 
 
-def validate_openai_candidate(package: Path) -> None:
+def validate_openai_candidate(
+    package: Path, *, expected_endpoint: str = LEGACY_ENDPOINT
+) -> None:
     """Repository-owned equivalent of the current universal-plugin ingestion gate."""
 
     try:
@@ -2313,10 +2388,10 @@ def validate_openai_candidate(package: Path) -> None:
         raise ValueError("OpenAI app manifest must contain a registered app ID") from exc
     if mcp != {
         "mcp_servers": {
-            "exomem": {"type": "http", "url": "https://substratesystems.io/api/exomem/mcp/v1"}
+            "exomem": {"type": "http", "url": expected_endpoint}
         }
     }:
-        raise ValueError("OpenAI MCP connection must use the universal plugin shape")
+        raise ValueError("OpenAI MCP connection must use the expected endpoint")
     plugins = marketplace.get("plugins")
     if (
         set(marketplace) != {"name", "interface", "plugins"}
@@ -2332,7 +2407,9 @@ def validate_openai_candidate(package: Path) -> None:
     }
     if not isinstance(plugins, list) or len(plugins) != 1 or plugins[0] != expected_marketplace:
         raise ValueError("OpenAI marketplace metadata must own ON_INSTALL authentication")
-    _validate_openai_lock_identity(package.parent, app_id)
+    _validate_openai_lock_identity(
+        package.parent, app_id, expected_endpoint=expected_endpoint
+    )
 
 
 def _interface_metadata(definition: HostedDefinition) -> dict[str, Any]:
@@ -2558,7 +2635,10 @@ def render(
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(contents)
             if "openai" in selected:
-                validate_openai_candidate(temporary / "openai")
+                validate_openai_candidate(
+                    temporary / "openai",
+                    expected_endpoint=load_definition(root, candidate=candidate).endpoint,
+                )
 
             if destination.exists():
                 backup = destination.with_name(f".{destination.name}.previous-{nonce}")
@@ -2604,7 +2684,11 @@ def check(
             openai_app_id = generated_app_id
         elif _validate_openai_app_id(openai_app_id) != generated_app_id:
             raise ValueError("OpenAI candidate app identity does not match the requested release")
-        _validate_openai_lock_identity(expected, generated_app_id)
+        _validate_openai_lock_identity(
+            expected,
+            generated_app_id,
+            expected_endpoint=load_definition(root, candidate=candidate).endpoint,
+        )
     expected_files = {
         path.relative_to(expected).as_posix(): path.read_bytes()
         for path in expected.rglob("*")
