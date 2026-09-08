@@ -3454,6 +3454,7 @@ def test_exact_k3s_runs_the_provisioner_owned_vault_fingerprint_job(
                     "exomem.io/resource-name": namespace,
                     "exomem.io/pvc-name": pvc_name,
                     "exomem.io/credentials-secret-name": "exomem-cell-credentials",
+                    "exomem.io/authorization-session-secret-name": "exomem-authorization-session",
                     "exomem.io/init-request-configmap-name": namespace + "-init-request",
                     "exomem.io/records-reader-version": "2",
                     "exomem.io/lifecycle-actions-enabled": "false",
