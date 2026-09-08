@@ -8,6 +8,14 @@
 {{- if eq (len .Values.directEdge.admittedCellNamespaces) 0 }}
 {{- fail "directEdge requires an explicit nonempty admittedCellNamespaces allowlist" }}
 {{- end }}
+{{- $watchedNamespaces := .Values.traefik.providers.kubernetesCRD.namespaces | default list }}
+{{- $requiredNamespaces := append (deepCopy .Values.directEdge.admittedCellNamespaces) .Release.Namespace | uniq | sortAlpha }}
+{{- if ne (toJson (sortAlpha (deepCopy $watchedNamespaces))) (toJson $requiredNamespaces) }}
+{{- fail "directEdge requires kubernetesCRD.namespaces to contain exactly the platform namespace and admitted cell namespaces" }}
+{{- end }}
+{{- if eq .Values.directEdge.privateTransferEdgeClientCaSecretName .Values.directEdge.privateTransferCaSecretName }}
+{{- fail "directEdge requires separate edge-client and cell-server CA Secrets" }}
+{{- end }}
 {{- if ne (len .Values.directEdge.admittedCellNamespaces) (len .Values.directEdge.privateTransferBackends) }}
 {{- fail "directEdge requires one privateTransferBackend for each admitted cell namespace" }}
 {{- end }}

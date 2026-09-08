@@ -23,6 +23,7 @@ traefik:
           options: private-transfer@file
   providers:
     kubernetesCRD:
+      namespaces: [exomem-platform, cell-alpha, cell-beta]
       crossProviderNamespaces: [cell-alpha, cell-beta]
   volumes:
     - name: exomem-private-transfer-config
