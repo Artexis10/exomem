@@ -22,7 +22,7 @@ def _build_server(monkeypatch: pytest.MonkeyPatch, vault: Path):
 
 def _mcp_tools(mcp) -> dict[str, dict]:
     tools = asyncio.run(mcp.list_tools())
-    return {t.name: t.to_mcp_tool().model_dump(mode="json") for t in tools}
+    return {t.name: t.to_mcp_tool().model_dump(mode="json", by_alias=True) for t in tools}
 
 
 def test_find_compact_is_metadata_only(vault: Path) -> None:

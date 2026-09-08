@@ -10,7 +10,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import httpx
+import httpx2
 from cryptography.fernet import Fernet
 from fastmcp.server.auth import TokenVerifier
 from fastmcp.server.auth.auth import AccessToken
@@ -115,7 +115,7 @@ class SingleUserGitHubVerifier(GitHubTokenVerifier):
             async with (
                 nullcontext(self._http_client)
                 if self._http_client is not None
-                else httpx.AsyncClient(timeout=self.timeout_seconds)
+                else httpx2.AsyncClient(timeout=self.timeout_seconds)
             ) as client:
                 response = await client.get(
                     "https://api.github.com/user",
@@ -134,7 +134,7 @@ class SingleUserGitHubVerifier(GitHubTokenVerifier):
             user_data = response.json()
             if not isinstance(user_data, dict):
                 raise ValueError("GitHub user response must be an object")
-        except (httpx.HTTPError, TypeError, ValueError) as error:
+        except (httpx2.HTTPError, TypeError, ValueError) as error:
             log.warning(
                 "GitHub identity proof failed due to %s",
                 type(error).__name__,

@@ -68,7 +68,7 @@ def test_stdio_session_message_is_sanitized_before_low_level_logging() -> None:
     message = sanitize_mcp_stdio_line(line)
 
     assert BEARER not in repr(message)
-    request = message.message.root
+    request = message.message
     assert request.params["arguments"] == {"query": "governance"}
     request_context = message.metadata.request_context
     assert request_context.headers == {}

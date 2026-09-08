@@ -432,7 +432,7 @@ def test_entity_type_resolution_schema_and_dispatch_match_across_surfaces(
     assert json.loads(capsys.readouterr().out) == {"success": True, "data": direct}
 
     triage_schema = next(
-        tool.to_mcp_tool().model_dump(mode="json")["inputSchema"]
+        tool.to_mcp_tool().model_dump(mode="json", by_alias=True)["inputSchema"]
         for tool in asyncio.run(mcp.list_tools())
         if tool.name == "triage_memory"
     )

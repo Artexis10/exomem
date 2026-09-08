@@ -48,7 +48,7 @@ def _live_annotations(mcp) -> dict[str, dict | None]:
     tools = asyncio.run(mcp.list_tools())
     out: dict[str, dict | None] = {}
     for t in tools:
-        mt = t.to_mcp_tool().model_dump(mode="json")
+        mt = t.to_mcp_tool().model_dump(mode="json", by_alias=True)
         out[t.name] = mt.get("annotations")
     return out
 

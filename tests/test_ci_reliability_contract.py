@@ -68,6 +68,13 @@ def _harness_modules_from_file() -> list[str]:
     return [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
 
 
+@pytest.mark.parametrize("job_id", [row[0] for row in PR_TIER_JOBS])
+def test_pr_tiers_exercise_native_mcp_sdk_fields(job_id: str) -> None:
+    assert _run_step(_workflow()["jobs"][job_id])["env"].get(
+        "FASTMCP_MCP_CAMELCASE_COMPAT"
+    ) == "false"
+
+
 @pytest.mark.parametrize("job_id,shards,tier", PR_TIER_JOBS)
 def test_pr_tier_lanes_have_time_bounds_and_versioned_timing_evidence(
     job_id: str, shards: int, tier: str

@@ -89,10 +89,10 @@ def test_preserve_artifacts_has_openai_file_parameter_contract(
         tool
         for tool in asyncio.run(server.build_server(require_auth=False).list_tools())
         if tool.name == "preserve_artifacts"
-    ).to_mcp_tool().model_dump(mode="json")
+    ).to_mcp_tool().model_dump(mode="json", by_alias=True)
 
     files = tool["inputSchema"]["properties"]["files"]
-    assert tool["meta"]["openai/fileParams"] == ["files"]
+    assert tool["_meta"]["openai/fileParams"] == ["files"]
     assert files["minItems"] == 1
     assert files["maxItems"] == 8
     assert list(files["items"]["properties"]) == [

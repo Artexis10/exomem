@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 import pytest
 
 from exomem.server_auth import SingleUserGitHubVerifier
@@ -144,3 +144,27 @@ async def test_github_failure_alert_is_secret_safe(
 def test_verifier_refuses_non_positive_immutable_id(user_id: object) -> None:
     with pytest.raises(ValueError, match="positive numeric"):
         SingleUserGitHubVerifier(allowed_login=ALLOWED_LOGIN, allowed_user_id=user_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ReadTimeout])
+async def test_provider_transport_failure_is_refused_without_logging_bearer(
+    error_type: type[httpx.HTTPError], caplog: pytest.LogCaptureFixture
+) -> None:
+    bearer = "temporary-provider-secret-never-log"
+
+    def github(request: httpx.Request) -> httpx.Response:
+        raise error_type(f"provider echoed {bearer}", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(github)) as client:
+        verifier = SingleUserGitHubVerifier(
+            allowed_login=ALLOWED_LOGIN,
+            allowed_user_id=ALLOWED_ID,
+            http_client=client,
+        )
+        assert await verifier.verify_token(bearer) is None
+        assert not client.is_closed
+
+    assert error_type.__name__ in caplog.text
+    assert bearer not in caplog.text
+    assert verifier._cache._entries == {}

@@ -43,7 +43,13 @@ def discovery_contract(wire_tools: Iterable[Mapping[str, Any]]) -> dict[str, Any
     """Fingerprint complete MCP Tool objects in deterministic name order."""
     surface: list[dict[str, Any]] = []
     for wire in sorted(wire_tools, key=lambda item: str(item["name"])):
-        if tuple(wire) != DISCOVERY_FIELDS:
+        wire = dict(wire)
+        # Contract v1 predates SDK v2: its canonical spelling is `meta`.
+        # Normalize that wire alias and top-level declaration order only;
+        # preserve every value and nested schema order in the published hash.
+        if "_meta" in wire and "meta" not in wire:
+            wire["meta"] = wire.pop("_meta")
+        if set(wire) != set(DISCOVERY_FIELDS):
             raise RuntimeError(
                 "FastMCP discovery fields changed; review the new wire surface before "
                 "updating exomem.tool_surface.DISCOVERY_FIELDS"
@@ -66,5 +72,5 @@ def discovery_contract(wire_tools: Iterable[Mapping[str, Any]]) -> dict[str, Any
 async def live_contract(mcp: Any) -> dict[str, Any]:
     """Fingerprint the tools actually registered on one running FastMCP app."""
     tools = await mcp.list_tools()
-    wires = [tool.to_mcp_tool().model_dump(mode="json") for tool in tools]
+    wires = [tool.to_mcp_tool().model_dump(mode="json", by_alias=True) for tool in tools]
     return discovery_contract(wires)

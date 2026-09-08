@@ -319,7 +319,7 @@ def test_mcp_tool_returns_metadata_then_images(video_vault, monkeypatch) -> None
     blocks = result.content
     assert json.loads(blocks[0].text) == meta
     images = blocks[1:]
-    assert [b.mimeType for b in images] == ["image/jpeg", "image/jpeg"]
+    assert [b.mime_type for b in images] == ["image/jpeg", "image/jpeg"]
     assert base64.b64decode(images[0].data) == b"\xff\xd8AA"
     assert base64.b64decode(images[1].data) == b"\xff\xd8BB"
 

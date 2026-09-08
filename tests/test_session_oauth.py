@@ -38,7 +38,7 @@ from exomem.session_oauth import ExomemSessionOAuthProxy
 
 
 def test_fastmcp_private_adapter_contract_is_pinned() -> None:
-    assert version("fastmcp") == "3.4.4"
+    assert version("fastmcp") == "4.0.3"
     assert list(inspect.signature(OAuthProxy._handle_idp_callback).parameters) == [
         "self",
         "request",
@@ -62,8 +62,7 @@ def test_fastmcp_private_adapter_contract_is_pinned() -> None:
         "refresh_token",
         "scopes",
     ]
-    # The CIMD /token route is rebuilt in get_routes to correct the assertion
-    # audience, so both constructors it calls are part of the pinned surface.
+    # The upstream route owns assertion authentication and grant dispatch.
     assert list(
         inspect.signature(PrivateKeyJWTClientAuthenticator.__init__).parameters
     ) == ["self", "provider", "cimd_manager", "token_endpoint_url"]
@@ -71,6 +70,7 @@ def test_fastmcp_private_adapter_contract_is_pinned() -> None:
         "self",
         "provider",
         "client_authenticator",
+        "identity_assertion_enabled",
     ]
     for seam in (
         "load_refresh_token",
@@ -108,6 +108,7 @@ def test_fastmcp_private_adapter_contract_is_pinned() -> None:
         "expires_at",
         "resource",
         "claims",
+        "subject",
     }
     assert set(OAuthToken.model_fields) == {
         "access_token",
@@ -1021,14 +1022,7 @@ class _RecordingCIMDManager:
 
 @pytest.mark.anyio
 async def test_cimd_assertion_audience_matches_advertised_token_endpoint() -> None:
-    """A private_key_jwt client is checked against the endpoint we advertise.
-
-    FastMCP 3.4.4 derives the expected audience from ``f"{base_url}/token"``.
-    Pydantic renders a bare-authority URL with a trailing slash, so the check
-    demanded ``https://memory.example//token`` while our own authorization
-    server metadata advertised ``https://memory.example/token``. ChatGPT signs
-    its assertion against the advertised value, so every exchange 401'd.
-    """
+    """Upstream validates assertions against the advertised token endpoint."""
     proxy = _proxy()
     recorder = _RecordingCIMDManager()
     proxy._cimd_manager = recorder
@@ -1063,6 +1057,123 @@ async def test_cimd_assertion_audience_matches_advertised_token_endpoint() -> No
         )
 
     assert recorder.token_endpoints == ["https://memory.example/token"]
-    # Tripwire: this is the upstream derivation the override exists to correct.
-    # When it stops producing a double slash, the override can go.
-    assert f"{proxy.base_url}/token" == "https://memory.example//token"
+    assert proxy.token_endpoint_url == "https://memory.example/token"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("assertion_case", ["valid", "wrong-audience", "wrong-key"])
+async def test_real_cimd_assertion_authenticates_token_endpoint(
+    monkeypatch: pytest.MonkeyPatch, assertion_case: str
+) -> None:
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from fastmcp.server.auth.cimd import CIMDDocument
+
+    proxy = _proxy()
+    client_id = "https://client.example/oauth/client.json"
+    redirect_uri = "http://127.0.0.1:8765/callback"
+    signing_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_key = jwt.algorithms.RSAAlgorithm.to_jwk(signing_key.public_key(), as_dict=True)
+    document = CIMDDocument(
+        client_id=client_id,
+        redirect_uris=[redirect_uri],
+        token_endpoint_auth_method="private_key_jwt",
+        jwks={"keys": [{**public_key, "kid": "test-key", "alg": "RS256"}]},
+        scope="exomem:read",
+    )
+
+    async def fetch_document(url: str) -> CIMDDocument:
+        assert url == client_id
+        return document
+
+    monkeypatch.setattr(proxy._cimd_manager._fetcher, "fetch", fetch_document)
+    verifier = "test-pkce-verifier"
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+    await proxy._code_store.put(
+        key="assertion-code",
+        value=ClientCode(
+            code="assertion-code",
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            code_challenge=challenge.decode().rstrip("="),
+            code_challenge_method="S256",
+            scopes=["exomem:read"],
+            idp_tokens={
+                "exomem_identity": {"github_user_id": 123456, "github_login": "person"}
+            },
+            created_at=time.time(),
+            expires_at=time.time() + 300,
+        ),
+    )
+    now = int(time.time())
+    if assertion_case == "wrong-key":
+        signing_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    assertion = jwt.encode(
+        {
+            "iss": client_id,
+            "sub": client_id,
+            "aud": (
+                "https://memory.example/wrong"
+                if assertion_case == "wrong-audience"
+                else "https://memory.example/token"
+            ),
+            "iat": now,
+            "exp": now + 120,
+            "jti": "test-unique-assertion",
+        },
+        signing_key,
+        algorithm="RS256",
+        headers={"kid": "test-key"},
+    )
+    data = {
+        "grant_type": "authorization_code",
+        "client_id": client_id,
+        "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        "client_assertion": assertion,
+        "code": "assertion-code",
+        "redirect_uri": redirect_uri,
+        "code_verifier": verifier,
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=Starlette(routes=proxy.get_routes("/mcp"))),
+        base_url="https://memory.example",
+    ) as client:
+        response = await client.post("/token", data=data)
+        if assertion_case == "valid":
+            assert response.status_code == 200, response.text
+            assert await proxy.load_access_token(response.json()["access_token"]) is not None
+            replay = await client.post("/token", data=data)
+            assert replay.status_code == 401
+            assert replay.json()["error"] == "invalid_client"
+        else:
+            assert response.status_code == 401
+            assert await proxy._code_store.get(key="assertion-code") is not None
+
+
+@pytest.mark.anyio
+async def test_actual_revocation_route_invalidates_only_the_clients_token() -> None:
+    authority = FakeAuthority()
+    proxy = _proxy(authority=authority)
+    await proxy.register_client(
+        OAuthClientInformationFull(
+            client_id="codex-client",
+            redirect_uris=[AnyUrl("http://127.0.0.1:8765/callback")],
+        )
+    )
+    for token, owner in (("owned-token", "codex-client"), ("other-token", "other-client")):
+        authority.sessions[token] = FakeRecord(
+            session_id=token, client_id=owner, scopes=("exomem:read",)
+        )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=Starlette(routes=proxy.get_routes("/mcp"))),
+        base_url="https://memory.example",
+    ) as client:
+        for token in ("other-token", "owned-token", "unknown-token"):
+            response = await client.post(
+                "/revoke",
+                data={"client_id": "codex-client", "client_secret": "", "token": token},
+            )
+            assert response.status_code == 200, response.text
+    assert await proxy.load_access_token("owned-token") is None
+    assert await proxy.load_access_token("other-token") is not None
+    assert authority.revoked_bearers == [("owned-token", "oauth-client-revocation")]
