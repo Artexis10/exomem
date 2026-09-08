@@ -129,6 +129,36 @@ def test_openai_validation_refuses_a_self_consistent_package_for_another_resourc
         )
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [LEGACY_ENDPOINT, "https://direct.example.test/api/exomem/mcp/v1"],
+)
+def test_openai_validation_refuses_a_lock_for_another_resource(
+    tmp_path: Path, endpoint: str
+) -> None:
+    root = _direct_candidate_root(tmp_path)
+    files = hosted_plugins.candidate_files(
+        root,
+        candidate=hosted_plugins.DIRECT_CANDIDATE,
+        platform="openai",
+        openai_app_id=FIXTURE_OPENAI_APP_ID,
+    )
+    generated = tmp_path / "generated"
+    for relative, contents in files.items():
+        target = generated / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)
+    lock_path = generated / "openai.lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock["endpoint"] = endpoint
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="lock does not bind the expected endpoint"):
+        hosted_plugins.validate_openai_candidate(
+            generated / "openai", expected_endpoint=DIRECT_ENDPOINT
+        )
+
+
 def test_direct_definition_drift_does_not_change_existing_candidate_bytes(tmp_path: Path) -> None:
     root = _direct_candidate_root(tmp_path)
     before = {
@@ -200,5 +230,5 @@ def test_direct_candidate_accepts_a_canonical_selected_resource_and_moves_identi
     assert after["oauth_discovery"]["protected_resource_metadata"] == (
         "https://direct.example.test/.well-known/oauth-protected-resource/api/exomem/mcp/v1"
     )
-    with pytest.raises(ValueError, match="generated artifacts are stale"):
+    with pytest.raises(ValueError, match="expected endpoint|generated artifacts are stale"):
         hosted_plugins.check(root, candidate=hosted_plugins.DIRECT_CANDIDATE, platform="all")

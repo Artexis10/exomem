@@ -2343,7 +2343,9 @@ def _generated_openai_app_id(generated: Path) -> str:
     return _validate_openai_app_id(app_id)
 
 
-def _validate_openai_lock_identity(generated: Path, app_id: str) -> None:
+def _validate_openai_lock_identity(
+    generated: Path, app_id: str, *, expected_endpoint: str = LEGACY_ENDPOINT
+) -> None:
     expected = _registered_app_id_sha256(app_id)
     for name in ("openai.lock.json", "openai.zip.lock.json"):
         try:
@@ -2352,6 +2354,8 @@ def _validate_openai_lock_identity(generated: Path, app_id: str) -> None:
             raise ValueError("OpenAI candidate is registration-pending or invalid") from exc
         if lock.get("registered_app_id_sha256") != expected:
             raise ValueError("OpenAI lock does not bind the registered app identity")
+        if name == "openai.lock.json" and lock.get("endpoint") != expected_endpoint:
+            raise ValueError("OpenAI lock does not bind the expected endpoint")
 
 
 def validate_openai_candidate(
@@ -2403,7 +2407,9 @@ def validate_openai_candidate(
     }
     if not isinstance(plugins, list) or len(plugins) != 1 or plugins[0] != expected_marketplace:
         raise ValueError("OpenAI marketplace metadata must own ON_INSTALL authentication")
-    _validate_openai_lock_identity(package.parent, app_id)
+    _validate_openai_lock_identity(
+        package.parent, app_id, expected_endpoint=expected_endpoint
+    )
 
 
 def _interface_metadata(definition: HostedDefinition) -> dict[str, Any]:
@@ -2678,7 +2684,11 @@ def check(
             openai_app_id = generated_app_id
         elif _validate_openai_app_id(openai_app_id) != generated_app_id:
             raise ValueError("OpenAI candidate app identity does not match the requested release")
-        _validate_openai_lock_identity(expected, generated_app_id)
+        _validate_openai_lock_identity(
+            expected,
+            generated_app_id,
+            expected_endpoint=load_definition(root, candidate=candidate).endpoint,
+        )
     expected_files = {
         path.relative_to(expected).as_posix(): path.read_bytes()
         for path in expected.rglob("*")
