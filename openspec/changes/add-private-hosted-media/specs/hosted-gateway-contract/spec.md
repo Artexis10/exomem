@@ -53,6 +53,8 @@ An activated direct profile SHALL terminate content TLS at the controlled public
 
 The direct MCP resource SHALL have an explicit identity distinct from the separately configured authorization issuer. Discovery and challenges SHALL advertise the actual resource and issuer. Codes, access tokens, refresh tokens and transfer grants MUST NOT gain authority for another resource or host through aliases, redirects or fallback. Legacy compatibility SHALL be bounded to legacy connections pending explicit migration and revocation.
 
+The trusted server-selected resource SHALL agree with the immutable signed agent candidate and client package/archive/OAuth-configuration evidence admitted through the existing publication and enrollment authority. The test-only deployment SHALL switch endpoints by revoking legacy test authorization and issuing fresh direct grants, preserving one live candidate per hosted profile. It MUST NOT introduce ordinary dual-live resource selection or rewrite legacy signed artifacts.
+
 #### Scenario: A legacy token reaches the direct resource
 
 - **WHEN** a client presents a token bound only to the legacy resource at the direct endpoint
@@ -64,6 +66,18 @@ The direct MCP resource SHALL have an explicit identity distinct from the separa
 - **WHEN** the user's content profile changes to the direct hostname
 - **THEN** old transfers drain or expire and newly issued grants bind the direct host under the existing lifecycle and tenant checks
 - **AND** the migration does not leave permanent dual-host grant acceptance or redirect grant-bearing URLs
+
+#### Scenario: Token and signed client contract disagree about the endpoint
+
+- **WHEN** token resource, selected candidate endpoint, compatibility/package-lock endpoint or signed client evidence do not identify the same admitted resource
+- **THEN** direct admission fails before content routing
+- **AND** caller-controlled Host or authorization parameters cannot select a different candidate or rewrite an old signed endpoint
+
+#### Scenario: The operator's test connection switches endpoints
+
+- **WHEN** the test-only deployment promotes the signed direct candidate through its existing release authority
+- **THEN** legacy test OAuth/transfer grants are revoked, in-flight test transfers are canceled or expired and reconnect issues direct-bound grants
+- **AND** vault data and custody remain intact; a failed direct check leaves the test route unavailable without an automatic proxy/HTTP fallback
 
 ### Requirement: Direct exposure requires bounded operation and certificate evidence
 
@@ -80,3 +94,19 @@ The direct profile SHALL remain disabled until actual connections prove its TLS 
 - **WHEN** renewal, identity verification, encrypted state or the activated private transport profile cannot be established
 - **THEN** the affected content route becomes unavailable without weakening verification
 - **AND** recovery uses a compatible direct profile rather than an undisclosed Tunnel, rewrite or HTTP fallback
+
+### Requirement: Direct latency acceptance compares equivalent authenticated work
+
+Direct-profile latency evidence SHALL measure authenticated operations and streaming with the same release, synthetic workload, backend regions, private transport protection and resource/model state as its legacy comparison. It SHALL distinguish warm requests, cold transport and cold service initialization, retain the launch latency targets, and report errors/timeouts as well as successful durations. Live services MUST NOT be restarted or loaded for an isolated comparison without the deployment owner's coordinated activation procedure.
+
+#### Scenario: A faster response used a different workload
+
+- **WHEN** a comparison uses an unauthenticated rejection, different model warmth, database region or weaker transport protection
+- **THEN** it cannot establish a direct-ingress speedup
+- **AND** evidence identifies the changed conditions and separately measured outcomes
+
+#### Scenario: Streaming or connector routing differs from browser traffic
+
+- **WHEN** the direct profile is evaluated for real connectors and browser transfers
+- **THEN** evidence separately reports their network paths, first-event and inter-event timing, completion, cancellation and reconnect behavior
+- **AND** a fast local HTTP test alone does not establish the connector latency claim
