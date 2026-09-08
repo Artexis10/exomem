@@ -22,7 +22,7 @@ from .adapters import (
     mint_maintenance_transfer_grant,
 )
 from .authorization_membership import (
-    AUTHORIZATION_SESSION_SCHEMA_VERSION,
+    AUTHORIZATION_BOOTSTRAP_SCHEMA_VERSION,
     DEFAULT_ATTESTATION_TTL_SECONDS,
     build_initial_hosted_authorization_bundle,
     inspect_hosted_authorization_bundle,
@@ -680,7 +680,7 @@ class LiveLifecyclePlane:
                 logical_vault_id=owned.tenant_id,
                 replica_id=replica_id,
                 software_version=str(target["releaseVersion"]),
-                schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+                schema_version=AUTHORIZATION_BOOTSTRAP_SCHEMA_VERSION,
                 recovery_envelope=recovery_envelope,
                 now=current,
             )
@@ -712,7 +712,7 @@ class LiveLifecyclePlane:
                 expected_logical_vault_id=owned.tenant_id,
                 expected_replica_id=replica_id,
                 expected_software_version=None,
-                expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+                expected_schema_version=None,
                 expected_recovery_envelope=recovery_envelope,
                 now=current,
                 _require_fresh=False,
@@ -725,7 +725,7 @@ class LiveLifecyclePlane:
                         expected_logical_vault_id=owned.tenant_id,
                         expected_replica_id=replica_id,
                         expected_software_version=None,
-                        expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+                        expected_schema_version=bundle.membership_schema_version,
                         expected_recovery_envelope=recovery_envelope,
                         now=current,
                         _require_fresh=True,
@@ -743,6 +743,14 @@ class LiveLifecyclePlane:
                     # anything still in date.
                     if bundle.expires_at > current:
                         raise
+                    # Enrollment is irreversible, including while a cell is
+                    # stopped and unrouted. Expiry permits renewal, never a new
+                    # unenrolled genesis that discards the activation tuple.
+                    if bundle.governance_enrolled:
+                        raise MetadataConflict(
+                            "enrolled authorization custody cannot be reset",
+                            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
+                        ) from error
                     # The bundle is sound and merely expired. A cell that has never
                     # served -- not admitted, not serving, no routes open -- has
                     # never answered a request under it, so nothing depends on the
@@ -830,7 +838,7 @@ class LiveLifecyclePlane:
             expected_logical_vault_id=owned.tenant_id,
             expected_replica_id=owned.resource_name + "-0",
             expected_software_version=None,
-            expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+            expected_schema_version=None,
             expected_recovery_envelope=recovery_envelope,
             now=current,
             _require_fresh=False,
@@ -856,7 +864,7 @@ class LiveLifecyclePlane:
             expected_logical_vault_id=owned.tenant_id,
             expected_replica_id=owned.resource_name + "-0",
             expected_software_version=None,
-            expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+            expected_schema_version=source.membership_schema_version,
             expected_recovery_envelope=recovery_envelope,
             target_state=target_state,
             target_no_in_flight=target_no_in_flight,

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 from .. import index_paths, reserved_paths, sidecar_store
 
 if TYPE_CHECKING:
+    from .authorization_custody import AuthorizationCustody
     from .schema_v4 import MigrationSeed, VerifiedActiveGovernanceState
 
 SCHEMA_USER_VERSION = 3
@@ -302,23 +303,22 @@ def canonical_uncommitted_v3_digest(connection: sqlite3.Connection) -> str:
     ).hexdigest()
 
 
-def migrate_enrolled_v3_store(
+def _commit_enrolled_v3_store(
     vault_root: Path,
     *,
     seed: MigrationSeed,
     expected_source_store_digest: str,
     now: int,
     source_recheck: Callable[[], None] | None = None,
-) -> VerifiedActiveGovernanceState:
+    expected_custody: AuthorizationCustody | None = None,
+) -> tuple[VerifiedActiveGovernanceState, AuthorizationCustody]:
     """Commit one pre-enrolled exact-v3 store to its exact v4 target.
 
-    This is the filesystem-backed offline migration coordinator.  It verifies
-    the authenticated serving membership is wholly drained at schema v3 before
-    the first database effect, then advances the external membership to serving
-    v4 only after the exact store target commits.  The cooperative identity guard
-    keeps current Exomem writers out while the exact policy workspace is
-    rechecked; external direct OS mutation remains outside that guarantee and is
-    detected by the post-commit observation.
+    This is the filesystem-backed offline database transaction. It verifies the
+    authenticated serving membership is wholly drained at schema v3 before the
+    first database effect. External membership publication remains the custody
+    owner's separate responsibility after this transaction has verified its v4
+    target.
     """
 
     from .. import writer_lease
@@ -377,6 +377,8 @@ def migrate_enrolled_v3_store(
                         root,
                         now=now,
                     )
+                    if expected_custody is not None and custody != expected_custody:
+                        raise authorization_custody.AuthorizationCustodyUnavailable
                     control = custody.control
                     if (
                         not control.governance_enrolled
@@ -481,21 +483,73 @@ def migrate_enrolled_v3_store(
                 finally:
                     connection.close()
 
-            verified = authorization_custody.complete_standalone_v4_migration(
-                root,
-                target=target,
-                now=now,
-            )
-            if (
-                verified.keyring != custody.keyring
-                or verified.control.logical_vault_id != target.logical_vault_id
-                or verified.control.activation_store_id != target.activation_store_id
-                or verified.control.activation_epoch != target.activation_epoch
-                or verified.control.activation_state_digest
-                != target.activation_state_digest
-                or verified.control.serving_membership_epoch != 2
-            ):
-                raise authorization_custody.AuthorizationCustodyUnavailable
+    return active, custody
+
+
+def commit_enrolled_v3_store(
+    vault_root: Path,
+    *,
+    seed: MigrationSeed,
+    expected_source_store_digest: str,
+    now: int,
+    expected_custody: AuthorizationCustody,
+    source_recheck: Callable[[], None] | None = None,
+) -> VerifiedActiveGovernanceState:
+    """Commit an enrolled target without any external custody publication."""
+
+    active, _custody = _commit_enrolled_v3_store(
+        vault_root,
+        seed=seed,
+        expected_source_store_digest=expected_source_store_digest,
+        now=now,
+        source_recheck=source_recheck,
+        expected_custody=expected_custody,
+    )
+    return active
+
+
+def migrate_enrolled_v3_store(
+    vault_root: Path,
+    *,
+    seed: MigrationSeed,
+    expected_source_store_digest: str,
+    now: int,
+    source_recheck: Callable[[], None] | None = None,
+) -> VerifiedActiveGovernanceState:
+    """Commit and complete the existing standalone v3-to-v4 migration."""
+
+    from . import authorization_custody
+
+    root = Path(vault_root)
+    with (
+        reserved_paths._subsystem_authority_scope("governance.store"),
+        reserved_paths._identity_coordination_scope(
+            root,
+            descriptor_ids=("governance-store",),
+            identity_may_change=False,
+        ),
+    ):
+        active, custody = _commit_enrolled_v3_store(
+            root,
+            seed=seed,
+            expected_source_store_digest=expected_source_store_digest,
+            now=now,
+            source_recheck=source_recheck,
+        )
+        verified = authorization_custody.complete_standalone_v4_migration(
+            root,
+            target=active,
+            now=now,
+        )
+        if (
+            verified.keyring != custody.keyring
+            or verified.control.logical_vault_id != active.logical_vault_id
+            or verified.control.activation_store_id != active.activation_store_id
+            or verified.control.activation_epoch != active.activation_epoch
+            or verified.control.activation_state_digest != active.activation_state_digest
+            or verified.control.serving_membership_epoch != 2
+        ):
+            raise authorization_custody.AuthorizationCustodyUnavailable
     return active
 
 

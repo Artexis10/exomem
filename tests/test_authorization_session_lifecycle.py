@@ -512,6 +512,9 @@ def test_hosted_readiness_rejects_a_standalone_attachment(
         ("quiesced", 0, "DRAINING", True, True),
     ],
 )
+@pytest.mark.parametrize(
+    "actual_schema_version", [store.SCHEMA_USER_VERSION, schema_v4.SCHEMA_USER_VERSION]
+)
 def test_hosted_runtime_mints_only_state_derived_replica_attestations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -520,6 +523,7 @@ def test_hosted_runtime_mints_only_state_derived_replica_attestations(
     expected_state: str,
     issuance_stopped: bool,
     no_in_flight: bool,
+    actual_schema_version: int,
 ) -> None:
     custody = _hosted_custody("1" * 64)
     monkeypatch.setenv(
@@ -539,6 +543,11 @@ def test_hosted_runtime_mints_only_state_derived_replica_attestations(
         authorization_custody,
         "load_authorization_custody",
         lambda _root, *, now: custody,
+    )
+    monkeypatch.setattr(
+        store,
+        "authorization_session_schema_version",
+        lambda _root: actual_schema_version,
     )
 
     raw = authorization_session_lifecycle.mint_hosted_replica_readiness_attestation(
@@ -566,7 +575,7 @@ def test_hosted_runtime_mints_only_state_derived_replica_attestations(
     assert parsed.replica_id == "replica-7"
     assert parsed.state == expected_state
     assert parsed.software_version == authorization_custody.runtime_software_version()
-    assert parsed.schema_version == schema_v4.SCHEMA_USER_VERSION
+    assert parsed.schema_version == actual_schema_version
     assert parsed.issuance_stopped is issuance_stopped
     assert parsed.no_in_flight is no_in_flight
     assert parsed.attested_at == NOW
@@ -663,6 +672,11 @@ def test_hosted_runtime_attestation_can_extend_the_next_control_epoch(
         "load_authorization_custody",
         lambda _root, *, now: custody,
     )
+    monkeypatch.setattr(
+        store,
+        "authorization_session_schema_version",
+        lambda _root: schema_v4.SCHEMA_USER_VERSION,
+    )
 
     raw = authorization_session_lifecycle.mint_hosted_replica_readiness_attestation(
         tmp_path,
@@ -687,6 +701,104 @@ def test_hosted_runtime_attestation_can_extend_the_next_control_epoch(
     )
 
     assert parsed.expires_at == NOW + 500
+
+
+@pytest.mark.parametrize(
+    "actual_schema_version", [store.SCHEMA_USER_VERSION, schema_v4.SCHEMA_USER_VERSION]
+)
+def test_hosted_runtime_attestation_reads_existing_store_without_migrating_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    actual_schema_version: int,
+) -> None:
+    connection = store.open_connection(tmp_path)
+    try:
+        if actual_schema_version == schema_v4.SCHEMA_USER_VERSION:
+            schema_v4.migrate_v3_connection(connection, _seed())
+    finally:
+        connection.close()
+    database = store.sidecar_path(tmp_path)
+    before = database.read_bytes()
+    custody = _hosted_custody("1" * 64)
+    for variable, path in {
+        authorization_custody.KEYRING_FILE_ENV: authorization_custody.HOSTED_KEYRING_FILE,
+        authorization_custody.CONTROL_FILE_ENV: authorization_custody.HOSTED_CONTROL_FILE,
+        authorization_custody.MEMBERSHIP_FILE_ENV: authorization_custody.HOSTED_MEMBERSHIP_FILE,
+    }.items():
+        monkeypatch.setenv(variable, str(path))
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "replica-7")
+    monkeypatch.setattr(
+        authorization_custody,
+        "load_authorization_custody",
+        lambda _root, *, now: custody,
+    )
+
+    raw = authorization_session_lifecycle.mint_hosted_replica_readiness_attestation(
+        tmp_path,
+        expected_cell_id="cell-7",
+        expected_logical_vault_id="logical-vault-7",
+        expected_replica_id="replica-7",
+        lifecycle_phase="quiesced",
+        active_reads=0,
+        active_mutations=0,
+        active_transfers=0,
+        target_epoch=2,
+        previous_epoch_digest="a" * 64,
+        ttl_seconds=300,
+        now=NOW,
+    )
+    parsed = authorization_serving_membership.parse_replica_readiness_attestation(
+        raw,
+        verifier_keys={item.key_id: item.key for item in custody.keyring.accepted_keys},
+        now=NOW,
+        expected_epoch=2,
+        expected_cell_id="cell-7",
+    )
+
+    assert parsed.schema_version == actual_schema_version
+    assert database.read_bytes() == before
+
+
+@pytest.mark.parametrize("actual_schema_version", [None, 0, 2, 5, True, "4"])
+def test_hosted_runtime_attestation_refuses_unavailable_or_unknown_store_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    actual_schema_version: object,
+) -> None:
+    custody = _hosted_custody("1" * 64)
+    for variable, path in {
+        authorization_custody.KEYRING_FILE_ENV: authorization_custody.HOSTED_KEYRING_FILE,
+        authorization_custody.CONTROL_FILE_ENV: authorization_custody.HOSTED_CONTROL_FILE,
+        authorization_custody.MEMBERSHIP_FILE_ENV: authorization_custody.HOSTED_MEMBERSHIP_FILE,
+    }.items():
+        monkeypatch.setenv(variable, str(path))
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "replica-7")
+    monkeypatch.setattr(
+        authorization_custody,
+        "load_authorization_custody",
+        lambda _root, *, now: custody,
+    )
+    monkeypatch.setattr(
+        store,
+        "authorization_session_schema_version",
+        lambda _root: actual_schema_version,
+    )
+
+    with pytest.raises(authorization_session_lifecycle.AuthorizationSessionUnavailable):
+        authorization_session_lifecycle.mint_hosted_replica_readiness_attestation(
+            tmp_path,
+            expected_cell_id="cell-7",
+            expected_logical_vault_id="logical-vault-7",
+            expected_replica_id="replica-7",
+            lifecycle_phase="active",
+            active_reads=0,
+            active_mutations=0,
+            active_transfers=0,
+            target_epoch=2,
+            previous_epoch_digest="a" * 64,
+            ttl_seconds=300,
+            now=NOW,
+        )
 
 
 def test_resume_fails_when_a_live_row_key_drops_from_the_serving_intersection() -> None:

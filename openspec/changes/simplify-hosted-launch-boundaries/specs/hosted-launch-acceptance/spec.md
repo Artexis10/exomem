@@ -13,6 +13,30 @@ The launch workflow SHALL record runtime activation, customer service acceptance
 - **WHEN** runtime safety and supported custom-client service acceptance pass while marketplace artifacts remain uncertified
 - **THEN** the invite-only service can be accepted without claiming marketplace approval or certifying an untested host
 
+### Requirement: Hosted governance activation is verified independently of runtime release
+
+Service acceptance SHALL require the actual governance schema, authenticated provisioner-owned enrollment and activation tuple, serving membership and canonical authorization-session readiness to agree. Runtime-release activation, process health and a claimed schema constant MUST NOT substitute for this evidence. The hosted integration MUST reuse the canonical fenced migration and retain provisioner ownership of custody rather than invoking standalone custody initialization or enrollment.
+
+#### Scenario: Healthy runtime still has unactivated governance
+
+- **WHEN** authenticated core health passes but the actual store is schema v3 or authenticated control is unenrolled or lacks the matching activation tuple
+- **THEN** the governance activation stage fails or remains explicitly pending
+- **AND** the cell is not reported as ready for customer service acceptance
+
+#### Scenario: Hosted migration completes under its existing custody
+
+- **WHEN** the provisioner coordinates a verified backup, replica fencing, irreversible enrollment and the existing migration against the exact cell and vault
+- **THEN** successful activation proves schema v4 and a matching authenticated enrollment, activation tuple and serving membership
+- **AND** the runtime passes canonical authorization-session readiness without replacing hosted custody with standalone custody
+
+#### Scenario: Hosted migration is interrupted or its acknowledgement is lost
+
+- **WHEN** migration, enrollment publication or serving restoration is interrupted
+- **THEN** retry reconciles the same durable operation and preserves fencing until its actual phase and custody state are verified
+- **AND** stale membership or control cannot reopen admission or authorize a second cutover
+- **AND** enrollment remains monotonic even when an explicit offline recovery restores the predecessor schema
+- **AND** recovery does not restore v3 over acknowledged v4 writes
+
 ### Requirement: Acceptance is resumable and normally agent operated
 
 The acceptance workflow SHALL execute independent checks without continuous operator attendance and persist a content-safe run report with immutable release/contract identity, stage outcomes, rerunnable commands and exact blocked actions. It MUST distinguish passed, failed, pending and blocked stages. It MUST use the ordinary customer security boundary, not a production authorization bypass.

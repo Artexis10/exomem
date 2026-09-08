@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import base64
+import builtins
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from exomem.governance import authorization_custody, authorization_serving_membership
+from exomem.governance import store as governance_store
 from pydantic import ValidationError
 
 from exomem_provisioner.authorization_membership import (
@@ -777,7 +780,11 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
 
 
 @pytest.mark.asyncio
-async def test_membership_drain_requires_zero_runtime_snapshot_and_rejoin_precedes_scale() -> None:
+@pytest.mark.parametrize("schema_version,attested_schema", [(3, 3), (4, 4), (3, 4), (4, 3)])
+async def test_membership_drain_requires_zero_runtime_snapshot_and_rejoin_precedes_scale(
+    schema_version: int,
+    attested_schema: int,
+) -> None:
     metadata = _metadata()
     now = 1_900_000_000
     envelopes = cell_provider_recovery_envelopes(
@@ -806,7 +813,7 @@ async def test_membership_drain_requires_zero_runtime_snapshot_and_rejoin_preced
         logical_vault_id=metadata.tenant_id,
         replica_id=metadata.resource_name + "-0",
         software_version="0.48.0",
-        schema_version=4,
+        schema_version=schema_version,
         recovery_envelope=envelopes["authorizationSessionSecret"],
         now=now,
         entropy=lambda length: bytes(range(length)),
@@ -849,7 +856,7 @@ async def test_membership_drain_requires_zero_runtime_snapshot_and_rejoin_preced
                 replica_id=metadata.resource_name + "-0",
                 state="DRAINING",
                 software_version="0.48.0",
-                schema_version=4,
+                schema_version=attested_schema,
                 cell_id=metadata.subject_id,
                 active_key_id=keyring.active_key_id,
                 accepted_key_ids=tuple(item.key_id for item in keyring.accepted_keys),
@@ -912,6 +919,12 @@ async def test_membership_drain_requires_zero_runtime_snapshot_and_rejoin_preced
     assert cell.files == initial.files
 
     runtime.active_reads = 0
+    if schema_version != attested_schema:
+        with pytest.raises(MetadataConflict):
+            await plane.quiesce(metadata, request, "quiesce-alpha")
+        assert cell.files == initial.files
+        assert [event[0] for event in events] == ["attest"]
+        return
     await plane.quiesce(metadata, request, "quiesce-alpha")
     drained = inspect_hosted_authorization_bundle(
         cell.files,
@@ -919,7 +932,7 @@ async def test_membership_drain_requires_zero_runtime_snapshot_and_rejoin_preced
         expected_logical_vault_id=metadata.tenant_id,
         expected_replica_id=metadata.resource_name + "-0",
         expected_software_version="0.48.0",
-        expected_schema_version=4,
+        expected_schema_version=schema_version,
         expected_recovery_envelope=envelopes["authorizationSessionSecret"],
         now=now + 30,
     )
@@ -936,7 +949,7 @@ async def test_membership_drain_requires_zero_runtime_snapshot_and_rejoin_preced
         expected_logical_vault_id=metadata.tenant_id,
         expected_replica_id=metadata.resource_name + "-0",
         expected_software_version="0.48.0",
-        expected_schema_version=4,
+        expected_schema_version=schema_version,
         expected_recovery_envelope=envelopes["authorizationSessionSecret"],
         now=now + 30,
     )
@@ -1914,7 +1927,9 @@ async def test_live_plane_requires_exact_reservation_before_namespace_or_release
 
 
 @pytest.mark.asyncio
-async def test_live_plane_publishes_authorization_custody_before_helm_and_reuses_it() -> None:
+async def test_live_plane_publishes_authorization_custody_before_helm_and_reuses_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     metadata = _metadata()
     envelopes = cell_provider_recovery_envelopes(
         IDENTITY_CODEC,
@@ -1997,6 +2012,14 @@ async def test_live_plane_publishes_authorization_custody_before_helm_and_reuses
     plane._helm_requests[key] = request
     plane._recovery_envelopes[key] = envelopes
 
+    original_import = builtins.__import__
+
+    def without_runtime_package(name, *args, **kwargs):
+        if name == "exomem" or name.startswith("exomem."):
+            raise ModuleNotFoundError("the provisioner image does not install the runtime")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_runtime_package)
     await plane.install_release(metadata, request, {"workloadMode": "initialize"})
     await plane.install_release(metadata, request, {"workloadMode": "initialize"})
 
@@ -2010,6 +2033,17 @@ async def test_live_plane_publishes_authorization_custody_before_helm_and_reuses
         "helm",
     ]
     assert len(set(helm.revisions)) == 1
+    observed = inspect_hosted_authorization_bundle(
+        cell.files,
+        expected_cell_id=metadata.subject_id,
+        expected_logical_vault_id=metadata.tenant_id,
+        expected_replica_id=metadata.resource_name + "-0",
+        expected_software_version=None,
+        expected_schema_version=governance_store.SCHEMA_USER_VERSION,
+        expected_recovery_envelope=envelopes["authorizationSessionSecret"],
+        now=1_900_000_000,
+    )
+    assert observed.membership_schema_version == governance_store.SCHEMA_USER_VERSION
 
 
 def _retarget_config(target: dict[str, object], **overrides: object) -> LifecycleConfig:
@@ -2166,6 +2200,8 @@ def _expiring_bundle_plane(
     serving: bool = False,
     runtime_admitted: bool = False,
     routes: tuple[bool, bool] = (False, False),
+    schema_version: int = AUTHORIZATION_SESSION_SCHEMA_VERSION,
+    enrolled: bool = False,
 ):
     """A live plane whose cell already holds a bundle minted at `minted_at`.
 
@@ -2207,10 +2243,39 @@ def _expiring_bundle_plane(
         logical_vault_id=metadata.tenant_id,
         replica_id=metadata.resource_name + "-0",
         software_version="0.68.3",
-        schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+        schema_version=schema_version,
         recovery_envelope=envelopes["authorizationSessionSecret"],
         now=minted_at,
     )
+    if enrolled:
+        keyring = authorization_custody.parse_keyring(original.keyring)
+        control = authorization_custody.parse_control_record(
+            original.control, keyring=keyring, now=minted_at
+        )
+        control = replace(
+            control,
+            governance_enrolled=True,
+            activation_store_id="activation-alpha",
+            activation_epoch=1,
+            activation_state_digest="a" * 64,
+        )
+        files = {
+            **original.files,
+            "control.json": authorization_custody._signed_control_bytes(
+                control,
+                signing_key=keyring.active_key.key,
+            ),
+        }
+        original = inspect_hosted_authorization_bundle(
+            files,
+            expected_cell_id=metadata.subject_id,
+            expected_logical_vault_id=metadata.tenant_id,
+            expected_replica_id=metadata.resource_name + "-0",
+            expected_software_version=None,
+            expected_schema_version=schema_version,
+            expected_recovery_envelope=envelopes["authorizationSessionSecret"],
+            now=minted_at,
+        )
     snapshot = KubernetesProviderSnapshot(
         namespace=True,
         release=True,
@@ -2384,7 +2449,10 @@ async def test_a_fresh_authorization_bundle_is_reused_rather_than_reminted() -> 
 
 
 @pytest.mark.asyncio
-async def test_renewing_a_healthy_session_moves_the_window_without_rolling_the_pod() -> None:
+@pytest.mark.parametrize("schema_version", [3, 4])
+async def test_renewing_a_healthy_session_moves_the_window_without_rolling_the_pod(
+    schema_version: int,
+) -> None:
     """Renewal must be invisible: a fresh window, and no Helm transition.
 
     The bundle carries a one-hour TTL and nothing renewed it, so a cell stopped
@@ -2403,6 +2471,7 @@ async def test_renewing_a_healthy_session_moves_the_window_without_rolling_the_p
         serving=True,
         runtime_admitted=True,
         routes=(True, True),
+        schema_version=schema_version,
     )
     plane._runtime = SimpleNamespace(
         attest_authorization_session_membership=_no_runtime_attestation
@@ -2429,7 +2498,7 @@ async def test_renewing_a_healthy_session_moves_the_window_without_rolling_the_p
         expected_logical_vault_id=metadata.tenant_id,
         expected_replica_id=metadata.resource_name + "-0",
         expected_software_version=None,
-        expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+        expected_schema_version=schema_version,
         expected_recovery_envelope=request["_providerRecoveryEnvelopes"][
             "authorizationSessionSecret"
         ],
@@ -2437,6 +2506,27 @@ async def test_renewing_a_healthy_session_moves_the_window_without_rolling_the_p
     )
     assert renewed.replica_state == "SERVING"
     assert renewed.expires_at > original.expires_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("schema_version", [3, 4])
+async def test_expired_enrolled_custody_is_never_reset_even_with_stopped_unadmitted_cell(
+    schema_version: int,
+) -> None:
+    metadata = _metadata()
+    now = 1_900_000_000
+    plane, request, config, original, written, applied = _expiring_bundle_plane(
+        metadata,
+        minted_at=now,
+        now=now + 3700,
+        schema_version=schema_version,
+        enrolled=True,
+    )
+    with pytest.raises(MetadataConflict):
+        await plane.initialize(metadata, request, config)
+    assert written == []
+    assert applied == []
+    assert plane._cell.files == original.files
 
 
 async def _no_runtime_attestation(*_args, **_kwargs):
