@@ -49,6 +49,18 @@ An activated direct profile SHALL terminate content TLS at the controlled public
 - **THEN** direct-profile readiness fails
 - **AND** that processor remains disclosed until the path is corrected and verified
 
+#### Scenario: A route is created outside the admitted namespaces
+
+- **WHEN** a Kubernetes route exists outside the platform namespace and the explicitly admitted cell namespaces
+- **THEN** the private routing provider does not discover that route
+- **AND** references to platform file-provider transports remain restricted to the admitted cell namespaces
+
+#### Scenario: Private TLS identity and preserved request Host differ
+
+- **WHEN** the private routing layer receives the public transfer Host over a connection verified against its internal Service identity
+- **THEN** both identities select the same TLS option and remain constrained to the exact transfer paths
+- **AND** the default TLS-option fallback still requires a valid edge-client certificate from an issuer separate from cell-server trust
+
 ### Requirement: Resource migration preserves exact OAuth and transfer authority
 
 The direct MCP resource SHALL have an explicit identity distinct from the separately configured authorization issuer. Discovery and challenges SHALL advertise the actual resource and issuer. Codes, access tokens, refresh tokens and transfer grants MUST NOT gain authority for another resource or host through aliases, redirects or fallback. Legacy compatibility SHALL be bounded to legacy connections pending explicit migration and revocation.
