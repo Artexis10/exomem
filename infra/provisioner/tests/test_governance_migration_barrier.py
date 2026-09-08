@@ -1,22 +1,80 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from test_repository import repository as repository
+import test_postgresql17 as pg17
+import test_repository as sqlite_tests
+from sqlalchemy import text
 from test_worker import _v2_request
 
+from exomem_provisioner.crypto import AesGcmEnvelopeCodec
+from exomem_provisioner.database import ProvisionerDatabase
 from exomem_provisioner.driver import DriverPending, FakeDriver
 from exomem_provisioner.governance_migration_checkpoint import MigrationCheckpoint
 from exomem_provisioner.lifecycle import CellLifecycleDriver
 from exomem_provisioner.models import Operation, OperationAction, OperationState
-from exomem_provisioner.repository import ClaimConflict, _acquire_cell_operation_lock
+from exomem_provisioner.repository import (
+    ClaimConflict,
+    OperationRepository,
+    _acquire_cell_operation_lock,
+)
 from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2
 from exomem_provisioner.worker import ProvisionerWorker
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 CHECKPOINT = MigrationCheckpoint("inspect", "a" * 64, "A" * 43).encode()
+sqlite_repository = sqlite_tests.repository
+postgresql17 = pg17.postgresql17
+
+
+@pytest.fixture(
+    params=[
+        "sqlite",
+        pytest.param(
+            "postgresql",
+            marks=pytest.mark.skipif(
+                not pg17.RUN_POSTGRESQL17 or pg17.PROVISIONER_TEST_IMAGE is not None,
+                reason="set RUN_POSTGRESQL17_TEST=1 in the provisioner checkout environment",
+            ),
+        ),
+    ]
+)
+def repository(request: pytest.FixtureRequest) -> OperationRepository:
+    return request.getfixturevalue(f"{request.param}_repository")
+
+
+@pytest.fixture
+async def postgresql_repository(
+    postgresql17: pg17.PostgreSQL17,
+) -> AsyncIterator[OperationRepository]:
+    target = pg17._new_database(postgresql17, "migration_barrier")
+    migrated = pg17._migrate(postgresql17, target)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+    assert target.settings is not None
+    database = ProvisionerDatabase(target.settings)
+    try:
+        assert database.engine.dialect.name == "postgresql"
+        async with database.session_factory() as session:
+            role, schema, version = (
+                await session.execute(
+                    text(
+                        "SELECT current_user, current_schema(), current_setting('server_version_num')"
+                    )
+                )
+            ).one()
+        assert role == target.role
+        assert schema == target.schema
+        assert version.startswith("17")
+        yield OperationRepository(
+            database.session_factory,
+            codec=AesGcmEnvelopeCodec.from_secret(target.settings.envelope_key.get_secret_value()),
+            claim_seconds=target.settings.claim_seconds,
+        )
+    finally:
+        await database.dispose()
 
 
 async def _submit(repository, action="rollforward", **changes):
