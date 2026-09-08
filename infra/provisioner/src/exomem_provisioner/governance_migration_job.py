@@ -441,12 +441,9 @@ class KubernetesGovernanceMigrationAdapter:
         ):
             raise _refuse()
         if any(
-            key in actual.get("labels", {})
-            for key in (
-                "exomem.io/storage-init",
-                "exomem.io/vault-fingerprint",
-                "exomem.io/restore-candidate",
-            )
+            key.startswith("exomem.io/") and key not in expected[field]
+            for field in ("labels", "annotations")
+            for key in actual.get(field, {})
         ):
             raise _refuse()
 
@@ -499,7 +496,14 @@ class KubernetesGovernanceMigrationAdapter:
         if value != expected_value:
             raise _refuse()
 
-    def _job(self, job: dict[str, Any], body: dict[str, Any], uid: str | None) -> str:
+    def _job(
+        self,
+        job: dict[str, Any],
+        body: dict[str, Any],
+        uid: str | None,
+        *,
+        allow_deleting: bool = False,
+    ) -> str:
         meta = job["metadata"]
         self._metadata(meta, body["metadata"])
         observed = meta.get("uid")
@@ -507,7 +511,7 @@ class KubernetesGovernanceMigrationAdapter:
             not _matches(_IDENTITY, observed)
             or (uid is not None and uid != observed)
             or not _matches(_IDENTITY, meta.get("resourceVersion"))
-            or meta.get("deletionTimestamp")
+            or (meta.get("deletionTimestamp") and not allow_deleting)
             or meta.get("name") != body["metadata"]["name"]
             or meta.get("namespace") != body["metadata"]["namespace"]
         ):
@@ -529,29 +533,64 @@ class KubernetesGovernanceMigrationAdapter:
         self._pod_spec(spec["template"]["spec"], body["spec"]["template"]["spec"])
         return observed
 
-    async def _result(
-        self, request: MigrationJobRequest, body: dict[str, Any], job: dict[str, Any], uid: str
-    ) -> MigrationJobEvidence | None:
-        status = job.get("status", {})
-        if status.get("failed", 0) != 0 or status.get("succeeded", 0) not in (0, 1):
-            raise _refuse()
-        if status.get("succeeded", 0) != 1:
-            return None
-        if status.get("active", 0) != 0:
-            raise _refuse()
-        pods = await asyncio.to_thread(
+    async def _candidate_pods(
+        self,
+        request: MigrationJobRequest,
+        uid: str | None,
+    ) -> list[dict[str, Any]]:
+        # Labels are mutable. Inventory the namespace so a stripped label
+        # cannot hide an old runner or another pod using the same PVC.
+        observed = await asyncio.to_thread(
             self._core.list_namespaced_pod,
             request.metadata.resource_name,
-            label_selector="job-name=" + body["metadata"]["name"],
         )
-        if len(pods.items) != 1:
-            raise _refuse()
-        pod = self._wire(pods.items[0])
+        if getattr(getattr(observed, "metadata", None), "_continue", None):
+            raise _retry() from None
+        name = request.metadata.resource_name + "-init"
+        candidates = []
+        for item in observed.items:
+            pod = self._wire(item)
+            meta = pod["metadata"]
+            labels = meta.get("labels", {})
+            if (
+                meta.get("name", "").startswith(name + "-")
+                or any(
+                    labels.get(key) == name for key in ("job-name", "batch.kubernetes.io/job-name")
+                )
+                or any(
+                    owner.get("name") == name or (uid is not None and owner.get("uid") == uid)
+                    for owner in meta.get("ownerReferences", [])
+                )
+                or any(
+                    volume.get("persistentVolumeClaim", {}).get("claimName")
+                    == request.metadata.resource_name + "-data"
+                    for volume in pod["spec"].get("volumes", [])
+                )
+            ):
+                candidates.append(pod)
+        return candidates
+
+    def _pod(
+        self,
+        request: MigrationJobRequest,
+        body: dict[str, Any],
+        pod: dict[str, Any],
+        uid: str,
+        *,
+        allow_deleting: bool = False,
+    ) -> None:
         meta = pod["metadata"]
         self._metadata(meta, body["spec"]["template"]["metadata"])
         owners = meta.get("ownerReferences", [])
         if (
             len(owners) != 1
+            or set(owners[0])
+            - {"apiVersion", "kind", "name", "uid", "controller", "blockOwnerDeletion"}
+            or owners[0].get("controller") is not True
+            or (
+                "blockOwnerDeletion" in owners[0]
+                and type(owners[0]["blockOwnerDeletion"]) is not bool
+            )
             or any(
                 owners[0].get(key) != value
                 for key, value in {
@@ -563,12 +602,47 @@ class KubernetesGovernanceMigrationAdapter:
                 }.items()
             )
             or not _matches(_IDENTITY, meta.get("uid"))
-            or meta.get("deletionTimestamp")
+            or (meta.get("deletionTimestamp") and not allow_deleting)
             or meta.get("namespace") != request.metadata.resource_name
             or not meta.get("name", "").startswith(body["metadata"]["name"] + "-")
         ):
             raise _refuse()
         self._pod_spec(pod["spec"], body["spec"]["template"]["spec"], scheduled=True)
+
+    @staticmethod
+    def _failed_terminal(job: dict[str, Any]) -> bool:
+        status = job.get("status", {})
+        for key in ("failed", "succeeded", "active", "terminating"):
+            value = status.get(key, 0)
+            if type(value) is not int or value < 0:
+                raise _refuse()
+        conditions = {}
+        for condition in status.get("conditions", []):
+            kind = condition["type"]
+            if kind in ("Failed", "Complete"):
+                if kind in conditions or condition["status"] not in ("True", "False", "Unknown"):
+                    raise _refuse()
+                conditions[kind] = condition["status"]
+        failed = conditions.get("Failed") == "True"
+        if failed and (conditions.get("Complete") == "True" or status.get("succeeded", 0)):
+            raise _refuse()
+        return failed and status.get("active", 0) == status.get("terminating", 0) == 0
+
+    async def _result(
+        self, request: MigrationJobRequest, body: dict[str, Any], job: dict[str, Any], uid: str
+    ) -> MigrationJobEvidence | None:
+        status = job.get("status", {})
+        if status.get("succeeded", 0) not in (0, 1):
+            raise _refuse()
+        if status.get("failed", 0) or status.get("succeeded", 0) != 1:
+            return None
+        if status.get("active", 0) != 0 or status.get("terminating", 0) != 0:
+            raise _refuse()
+        pods = await self._candidate_pods(request, uid)
+        if len(pods) != 1:
+            raise _refuse()
+        pod = pods[0]
+        self._pod(request, body, pod, uid)
         containers = pod.get("status", {}).get("containerStatuses", [])
         if (
             pod.get("status", {}).get("phase") != "Succeeded"
@@ -584,7 +658,76 @@ class KubernetesGovernanceMigrationAdapter:
         ):
             raise _refuse()
         terminal = parse_migration_terminal(request, terminated["message"].encode())
-        return MigrationJobEvidence(uid, meta["uid"], _canonical(terminal))
+        return MigrationJobEvidence(uid, pod["metadata"]["uid"], _canonical(terminal))
+
+    async def _wait_removed(
+        self,
+        request: MigrationJobRequest,
+        body: dict[str, Any],
+        uid: str,
+        effect_guard: Callable[[], Awaitable[None]],
+    ) -> None:
+        for _ in range(self._poll_attempts):
+            await effect_guard()
+            remaining = await self._read(request)
+            if remaining is not None:
+                self._job(remaining, body, uid, allow_deleting=True)
+            pods = await self._candidate_pods(request, uid)
+            for pod in pods:
+                self._pod(request, body, pod, uid, allow_deleting=True)
+            if remaining is None and not pods:
+                await self._stopped(request)
+                await effect_guard()
+                return
+            await self._pause()
+        raise _retry() from None
+
+    async def _cleanup(
+        self,
+        request: MigrationJobRequest,
+        body: dict[str, Any],
+        uid: str,
+        effect_guard: Callable[[], Awaitable[None]],
+        evidence: MigrationJobEvidence | None = None,
+    ) -> None:
+        await effect_guard()
+        await self._stopped(request)
+        latest = await self._read(request)
+        if latest is not None:
+            self._job(latest, body, uid, allow_deleting=True)
+            if not latest["metadata"].get("deletionTimestamp"):
+                if evidence is None:
+                    if not self._failed_terminal(latest):
+                        raise _retry() from None
+                    pods = await self._candidate_pods(request, uid)
+                    for pod in pods:
+                        self._pod(request, body, pod, uid, allow_deleting=True)
+                    if any(
+                        pod.get("status", {}).get("phase") not in ("Failed", "Succeeded")
+                        for pod in pods
+                    ):
+                        raise _retry() from None
+                elif await self._result(request, body, latest, uid) != evidence:
+                    raise _refuse()
+                await effect_guard()
+                try:
+                    await asyncio.to_thread(
+                        self._batch.delete_namespaced_job,
+                        body["metadata"]["name"],
+                        request.metadata.resource_name,
+                        body={
+                            "propagationPolicy": "Foreground",
+                            "preconditions": {
+                                "uid": uid,
+                                "resourceVersion": latest["metadata"]["resourceVersion"],
+                            },
+                        },
+                    )
+                except Exception as error:
+                    if getattr(error, "status", None) != 404:
+                        raise
+                    # Already absent is not proof that its pods are gone.
+        await self._wait_removed(request, body, uid, effect_guard)
 
     async def run(
         self,
@@ -611,47 +754,25 @@ class KubernetesGovernanceMigrationAdapter:
                     # A create conflict is ambiguous; the caller can resume a
                     # later observation, but this attempt adopts no winner.
                     await effect_guard()
+                    if await self._candidate_pods(request, None):
+                        raise _retry() from None
+                    await effect_guard()
                     job = self._wire(
                         await asyncio.to_thread(
                             self._batch.create_namespaced_job, request.metadata.resource_name, body
                         )
                     )
-                uid = self._job(job, body, uid)
+                uid = self._job(job, body, uid, allow_deleting=True)
+                if job["metadata"].get("deletionTimestamp"):
+                    await self._wait_removed(request, body, uid, effect_guard)
+                    raise _retry() from None
+                if self._failed_terminal(job):
+                    await self._cleanup(request, body, uid, effect_guard)
+                    raise _retry() from None
                 evidence = await self._result(request, body, job, uid)
                 if evidence is not None:
-                    await self._stopped(request)
-                    latest = await self._read(request)
-                    if latest is None:
-                        raise _refuse()
-                    self._job(latest, body, uid)
-                    await effect_guard()
-                    await asyncio.to_thread(
-                        self._batch.delete_namespaced_job,
-                        body["metadata"]["name"],
-                        request.metadata.resource_name,
-                        body={
-                            "propagationPolicy": "Foreground",
-                            "preconditions": {
-                                "uid": uid,
-                                "resourceVersion": latest["metadata"]["resourceVersion"],
-                            },
-                        },
-                    )
-                    for _ in range(self._poll_attempts):
-                        remaining = await self._read(request)
-                        if remaining is None:
-                            pods = await asyncio.to_thread(
-                                self._core.list_namespaced_pod,
-                                request.metadata.resource_name,
-                                label_selector="job-name=" + body["metadata"]["name"],
-                            )
-                            if not pods.items:
-                                await effect_guard()
-                                return evidence
-                        elif remaining["metadata"].get("uid") != uid:
-                            raise _refuse()
-                        await self._pause()
-                    raise _retry() from None
+                    await self._cleanup(request, body, uid, effect_guard, evidence)
+                    return evidence
                 await self._pause()
             raise _retry() from None
         except (ClaimConflict, StaleFence, DriverTerminal, DriverRetryable):
