@@ -1,6 +1,7 @@
 """Current-source Basic Memory public arguments and read-only comparison proofs."""
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from collections import Counter
@@ -154,6 +155,7 @@ def inspect_index(state: Path, fixture: dict) -> dict[str, Any]:
         if not _schema(conn):
             proof["reason"] = "indexed store is not initialized yet"
             return proof
+        common._require_columns(conn, "project", {"last_indexed_at"})
         common._require_columns(conn, "search_index", {"id", "file_path", "project_id", "entity_id", "type"})
         common._require_fts5_virtual_table(conn, "search_index")
         proof["schema_identity"] = common._schema_identity(conn, ("alembic_version", "project", "entity", "search_index"))
@@ -161,19 +163,33 @@ def inspect_index(state: Path, fixture: dict) -> dict[str, Any]:
         if project is None:
             proof["reason"] = "configured main project does not bind to the disposable fixture root"
             return proof
+        last_indexed_at = conn.execute("SELECT last_indexed_at FROM project WHERE id=?", (project,)).fetchone()[0]
         entities = [(int(identity), str(path), int(project_id)) for identity, path, project_id in
                     conn.execute("SELECT id,file_path,project_id FROM entity WHERE project_id=?", (project,))]
         search = [(int(identity), str(path), int(project_id), int(entity_id))
                   for identity, path, project_id, entity_id in conn.execute(
                       "SELECT id,file_path,project_id,entity_id FROM search_index WHERE type='entity' AND project_id=?", (project,))]
         observed = [row[1] for row in entities]
+        entity_counts, search_counts = Counter(entities), Counter(row[:3] for row in search)
+        missing, extra = entity_counts - search_counts, search_counts - entity_counts
+        misbound = sum(row[0] != row[3] for row in search)
         proof.update({"observed_path_count": len(observed), "observed_path_digest": common._membership_digest(observed),
+                      "search_entity_row_count": len(search),
+                      "search_entity_path_digest": common._membership_digest([row[1] for row in search]),
+                      "missing_search_identity_count": missing.total(),
+                      "missing_search_identity_digest": common._membership_digest([
+                          json.dumps(row, separators=(",", ":")) for row in missing.elements()]),
+                      "extra_search_identity_count": extra.total(),
+                      "extra_search_identity_digest": common._membership_digest([
+                          json.dumps(row, separators=(",", ":")) for row in extra.elements()]),
+                      "misbound_search_entity_id_count": misbound, "last_indexed_at": last_indexed_at,
                       "proof_method": "entity/search_index identity multiset join",
                       "product_binding": {"project": "main", "project_id": project}})
-        proof["ready"] = (bool(expected) and Counter(observed) == Counter(expected)
-                          and Counter(entities) == Counter(row[:3] for row in search)
-                          and all(row[0] == row[3] for row in search))
-        proof["reason"] = None if proof["ready"] else "entity/search identity or fixture membership mismatch"
+        membership_matches = (bool(expected) and Counter(observed) == Counter(expected)
+                              and entity_counts == search_counts and misbound == 0)
+        proof["ready"] = membership_matches and last_indexed_at is not None
+        proof["reason"] = ("entity/search identity or fixture membership mismatch" if not membership_matches
+                           else None if proof["ready"] else "native project indexing has not completed")
     return proof
 
 

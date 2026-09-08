@@ -7,10 +7,20 @@ in fresh disposable state. It SHALL verify immediate accepted-body reads, text
 visibility, typed graph edge replacement including old-edge removal, and every
 acknowledged token from concurrent writes. After an acknowledged write it SHALL
 kill only its owned server process, restart against the same state, and verify
-accepted content and derived recovery. Process-crash evidence SHALL NOT imply
+accepted content and derived recovery. It SHALL separately observe whether the
+accepted Markdown file exists after process exit, then prove eventual exact file
+materialization after restart without delaying the crash signal for a file probe.
+Public database-backed reads SHALL NOT substitute for that filesystem proof.
+Process-crash evidence SHALL NOT imply
 power-loss durability. Reports SHALL retain refusals and unknown outcomes and
 distinguish immediate consistency from eventual catch-up. Latency comparisons
 SHALL NOT present correctness-failing operations as performance wins.
+
+Foreground measurement SHALL begin only after exact indexed fixture membership
+and the product's initial indexing completion are proven. Reports SHALL retain
+diagnostics for mismatched search membership and failed immediate search results
+without dumping returned note text. Missing historical evidence SHALL remain
+unknown rather than being inferred as a successful proof.
 
 #### Scenario: Latest main differs from the released wheel
 - **WHEN** either current remote main is newer than the historical measured build
@@ -25,6 +35,15 @@ SHALL NOT present correctness-failing operations as performance wins.
 #### Scenario: Search refuses while accepted writes remain readable
 - **WHEN** an immediate search refuses or omits an accepted marker
 - **THEN** the immediate consistency check fails even if later retrieval succeeds
+
+#### Scenario: Accepted database content awaits a Markdown file
+- **WHEN** public content survives the crash but the accepted Markdown file is missing or stale
+- **THEN** the report records that distinction and waits separately for exact file
+  materialization after restart; a bounded failure remains failed recovery evidence
+
+#### Scenario: Search membership appears before initial indexing completes
+- **WHEN** exact fixture search rows are visible but native initial indexing has not completed
+- **THEN** the driver retains the incomplete admission observation and starts no foreground or setup mutation until completion is proven within the declared startup bound
 
 ### Requirement: Mixed-load observations distinguish foreground latency from catch-up
 The opt-in mixed-load diagnostic SHALL run a fixed public edit/read/text-search

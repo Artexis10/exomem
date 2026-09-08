@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -23,13 +24,14 @@ def adapter():
     return module
 
 
-def database(state: Path, *, version: str = "y8f9a0b1c2d3") -> Path:
+def database(state: Path, *, version: str = "y8f9a0b1c2d3",
+             last_indexed_at: str | None = "2026-01-01T00:00:00+00:00") -> Path:
     store = state / "config/memory.db"
     store.parent.mkdir(parents=True)
     with sqlite3.connect(store) as conn:
         conn.executescript("""
             CREATE TABLE alembic_version (version_num TEXT);
-            CREATE TABLE project (id INTEGER, name TEXT, path TEXT);
+            CREATE TABLE project (id INTEGER, name TEXT, path TEXT, last_indexed_at TEXT);
             CREATE TABLE entity (id INTEGER, file_path TEXT, project_id INTEGER);
             CREATE VIRTUAL TABLE search_index USING fts5(id UNINDEXED, file_path UNINDEXED,
                 project_id UNINDEXED, entity_id UNINDEXED, type UNINDEXED, content);
@@ -39,7 +41,7 @@ def database(state: Path, *, version: str = "y8f9a0b1c2d3") -> Path:
                 relation_type TEXT, project_id INTEGER, generation INTEGER);
         """)
         conn.execute("INSERT INTO alembic_version VALUES (?)", (version,))
-        conn.execute("INSERT INTO project VALUES (1,'main',?)", (str(state / "home"),))
+        conn.execute("INSERT INTO project VALUES (1,'main',?,?)", (str(state / "home"), last_indexed_at))
         for identity, path in enumerate(("active-tracker.md", "archived-runbook.md", "background.md"), 1):
             conn.execute("INSERT INTO entity VALUES (?,?,1)", (identity, path))
             conn.execute("INSERT INTO search_index VALUES (?,?,1,?,'entity','body')", (identity, path, identity))
@@ -300,3 +302,79 @@ def test_relation_readiness_waits_only_for_this_sources_refresh_work(tmp_path):
     with sqlite3.connect(store) as conn:
         conn.execute("DELETE FROM relation_search_refresh WHERE id=3")
     assert bm.inspect_relation(tmp_path, bm.TRACKER, bm.NEW_TARGET, bm.OLD_TARGET)["ready"]
+
+
+def test_initial_index_waits_for_native_completion_despite_exact_membership(tmp_path):
+    bm = adapter()
+    store = database(tmp_path, last_indexed_at=None)
+    proof = bm.inspect_index(tmp_path, FIXTURE)
+    assert not proof["ready"]
+    assert proof["last_indexed_at"] is None
+    assert proof["observed_path_count"] == proof["search_entity_row_count"] == 3
+    assert "project indexing" in proof["reason"]
+    with sqlite3.connect(store) as conn:
+        conn.execute("UPDATE project SET last_indexed_at='2026-01-01T00:00:00+00:00' WHERE id=1")
+    proof = bm.inspect_index(tmp_path, FIXTURE)
+    assert proof["ready"] and proof["last_indexed_at"] == "2026-01-01T00:00:00+00:00"
+    assert proof["observed_path_digest"] == proof["search_entity_path_digest"]
+    assert proof["missing_search_identity_count"] == proof["extra_search_identity_count"] == 0
+    assert proof["misbound_search_entity_id_count"] == 0
+
+
+@pytest.mark.parametrize("mutation,missing,extra,misbound,search_count", [
+    ("DELETE FROM search_index WHERE id=2", [(2,"archived-runbook.md",1)], [], 0, 2),
+    ("INSERT INTO search_index VALUES (99,'extra.md',1,99,'entity','body')", [], [(99,"extra.md",1)], 0, 4),
+    ("UPDATE search_index SET id=99 WHERE id=1", [(1,"active-tracker.md",1)], [(99,"active-tracker.md",1)], 1, 3),
+    ("UPDATE search_index SET entity_id=99 WHERE id=1", [], [], 1, 3),
+    ("INSERT INTO search_index SELECT * FROM search_index WHERE id=1", [], [(1,"active-tracker.md",1)], 0, 4),
+])
+def test_initial_index_retains_exact_search_identity_mismatch_diagnostics(tmp_path, mutation, missing, extra, misbound, search_count):
+    bm = adapter()
+    store = database(tmp_path)
+    with sqlite3.connect(store) as conn:
+        conn.execute(mutation)
+        paths = [row[0] for row in conn.execute("SELECT file_path FROM search_index WHERE type='entity' AND project_id=1")]
+    proof = bm.inspect_index(tmp_path, FIXTURE)
+    assert not proof["ready"]
+    assert proof["observed_path_count"] == 3
+    assert proof["search_entity_row_count"] == search_count
+    assert proof["search_entity_path_digest"] == bm.common._membership_digest(paths)
+    assert proof["missing_search_identity_count"] == len(missing)
+    assert proof["extra_search_identity_count"] == len(extra)
+    assert proof["missing_search_identity_digest"] == bm.common._membership_digest(
+        [json.dumps(row, separators=(",", ":")) for row in missing])
+    assert proof["extra_search_identity_digest"] == bm.common._membership_digest(
+        [json.dumps(row, separators=(",", ":")) for row in extra])
+    assert proof["misbound_search_entity_id_count"] == misbound
+
+
+def test_initial_index_rejects_missing_native_completion_column(tmp_path):
+    bm = adapter()
+    store = database(tmp_path)
+    with sqlite3.connect(store) as conn:
+        conn.execute("ALTER TABLE project DROP COLUMN last_indexed_at")
+    with pytest.raises(bm.common.AdapterFault, match="schema"):
+        bm.inspect_index(tmp_path, FIXTURE)
+
+
+def test_initial_index_stamp_and_membership_share_the_read_snapshot(tmp_path, monkeypatch):
+    bm = adapter()
+    store = database(tmp_path, last_indexed_at=None)
+    with sqlite3.connect(store) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+    original_project = bm._project
+
+    def publish_after_binding(conn, state):
+        project = original_project(conn, state)
+        with sqlite3.connect(store) as writer:
+            writer.execute("UPDATE project SET last_indexed_at='2026-01-01T00:00:00+00:00' WHERE id=1")
+            writer.execute("DELETE FROM entity WHERE id=3")
+        return project
+
+    monkeypatch.setattr(bm, "_project", publish_after_binding)
+    proof = bm.inspect_index(tmp_path, FIXTURE)
+    assert not proof["ready"]
+    assert proof["last_indexed_at"] is None and proof["observed_path_count"] == 3
+    with sqlite3.connect(store) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM entity").fetchone()[0] == 2
+        assert conn.execute("SELECT last_indexed_at FROM project").fetchone()[0] is not None

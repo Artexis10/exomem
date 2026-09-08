@@ -17,6 +17,7 @@ import os
 import re
 import select
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -54,6 +55,52 @@ def verdict(checks: list[dict], calls: list[dict]) -> str:
 def token_proof(body: str, acknowledged: list[str]) -> bool:
     return bool(acknowledged) and all(len(re.findall(r"(?<!\w)" + re.escape(token) + r"(?!\w)", body)) == 1
                                       for token in acknowledged)
+
+
+def inspect_materialized_file(corpus: Path, expected: str) -> dict:
+    """Prove accepted body bytes in the exact generated file, without mutation."""
+    candidate = corpus / fixture_module.TRACKER
+    path = common._contained_path(corpus, candidate)
+    proof = {"ready": False, "reason": None, "file_sha256": None, "body_sha256": None,
+             "expected_body_sha256": hashlib.sha256(expected.removesuffix("\n").encode()).hexdigest()}
+    try:
+        def signature(value):
+            return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+        named_before = candidate.lstat()
+        if not stat.S_ISREG(named_before.st_mode):
+            proof["reason"] = "file_not_regular"
+            return proof
+        descriptor = os.open(candidate, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_NONBLOCK", 0))
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode) or signature(before) != signature(named_before):
+                proof["reason"] = "file_changed_during_proof"
+                return proof
+            chunks = []
+            while chunk := os.read(descriptor, 65536):
+                chunks.append(chunk)
+            raw = b"".join(chunks)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        named_after = candidate.lstat()
+        proof["file_sha256"] = hashlib.sha256(raw).hexdigest()
+        if (signature(before) != signature(after) or signature(after) != signature(named_after)
+                or not stat.S_ISREG(named_after.st_mode) or len(raw) != after.st_size
+                or common._contained_path(corpus, candidate) != path):
+            proof["reason"] = "file_changed_during_proof"
+            return proof
+        body = fixture_module.normalized_body(raw.decode("utf-8")).removesuffix("\n")
+        proof["body_sha256"] = hashlib.sha256(body.encode()).hexdigest()
+        proof["ready"] = body == expected.removesuffix("\n")
+        proof["reason"] = None if proof["ready"] else "accepted_body_not_materialized"
+    except FileNotFoundError:
+        proof["reason"] = "file_missing"
+    except (OSError, UnicodeDecodeError) as error:
+        proof["reason"] = f"file_unreadable:{type(error).__name__}"
+    return proof
 
 
 def process_environment(pid: int) -> dict[str, str]:
@@ -134,6 +181,33 @@ def check(report: dict, name: str, ok: bool, **evidence) -> None:
     report["checks"].append({"name": name, "ok": bool(ok), **evidence})
 
 
+def check_search(report: dict, adapter, payload: dict, marker: str, name: str) -> None:
+    matched = adapter.verify_search(payload, marker)
+    if matched:
+        check(report, name, True)
+        return
+    pattern = re.compile(r"(?<!\w)" + re.escape(marker) + r"(?!\w)")
+    lists = {}
+    for key in ("hits", "results", "items", "result"):
+        rows = payload.get(key)
+        if not isinstance(rows, list):
+            continue
+        tracker_rows = [row for row in rows if isinstance(row, dict)
+                        and (row.get("path") == adapter.TRACKER or row.get("file_path") == adapter.TRACKER)]
+        hashes = []
+        marker_hits = 0
+        for index, row in enumerate(tracker_rows):
+            texts = [(field, row[field]) for field in ("snippet", "excerpt", "content", "body", "text")
+                     if isinstance(row.get(field), str)]
+            marker_hits += any(pattern.search(value) for _field, value in texts)
+            hashes.extend({"tracker_row": index, "field": field, "sha256": hashlib.sha256(value.encode()).hexdigest()}
+                          for field, value in texts)
+        lists[key] = {"hit_count": len(rows), "tracker_path_hit_count": len(tracker_rows),
+                      "tracker_marker_hit_count": marker_hits, "tracker_text_sha256": hashes}
+    check(report, name, False, miss_proof={"response_present": bool(payload),
+                                         "result_lists": lists})
+
+
 async def wait_for_proof(inspect, timeout: float) -> dict:
     started = time.perf_counter()
     observations = []
@@ -194,7 +268,7 @@ async def run(args) -> dict:
     runtime = provenance(args.source, args.python, args.product, env)
     if args.product == "basic_memory" and runtime["source_identity"]["revision"] != adapter.REVISION:
         raise RuntimeError("Basic Memory imported source differs from the adapter's pinned revision")
-    report = {"schema": "current-source-parity-v1", "product": args.product, "status": "invalid",
+    report = {"schema": "current-source-parity-v2", "product": args.product, "status": "invalid",
               "started_utc": dt.datetime.now(dt.UTC).isoformat(), "runtime": runtime, "corpus": fixture,
               "configuration": {"pages": args.pages, "cycles": args.cycles, "concurrency": args.concurrency,
                                 "timeout_s": args.timeout, "startup_timeout_s": args.startup_timeout},
@@ -270,7 +344,7 @@ async def run(args) -> dict:
                 check(report, f"read-{number}", adapter.verify_read(read, expected_body),
                       expected_sha256=hashlib.sha256(expected_body.encode()).hexdigest())
                 search = await observe(recorder, adapter.search_arguments(last_marker), "search")
-                check(report, f"search-{number}", adapter.verify_search(search, last_marker))
+                check_search(report, adapter, search, last_marker, f"search-{number}")
 
             report["eventual_search"] = await wait_search(recorder, adapter, last_marker, args.timeout, "eventual_search")
             check(report, "eventual-search", report["eventual_search"]["ready"])
@@ -289,7 +363,7 @@ async def run(args) -> dict:
             acknowledged = [token for token, result in zip(tokens, results, strict=True) if result]
             direct = await observe(recorder, adapter.read_arguments(), "concurrent_read")
             actual_body = common._read_body(direct)
-            normalized = common._normalized_body(actual_body) if actual_body is not None else ""
+            normalized = fixture_module.normalized_body(actual_body) if actual_body is not None else ""
             check(report, "concurrent-accepted-tokens", token_proof(normalized, acknowledged),
                   acknowledged=acknowledged, refused=[token for token in tokens if token not in acknowledged])
             check(report, "concurrent-all-accepted", len(acknowledged) == len(tokens))
@@ -306,6 +380,7 @@ async def run(args) -> dict:
             crash_started = time.perf_counter()
             report["crash"] = kill_owned_server(pid_file, env["PARITY_RUN_TOKEN"])
             crash_recorded = True
+            report["crash_file"] = await asyncio.to_thread(inspect_materialized_file, corpus, crash_expected)
         restarted, restart_pid = client_for("restart")
         async with restarted:
             await restarted.list_tools()
@@ -315,12 +390,15 @@ async def run(args) -> dict:
             check(report, "crash-accepted-body", adapter.verify_read(direct, crash_expected),
                   expected_sha256=hashlib.sha256(crash_expected.encode()).hexdigest())
             search = await observe(recorder, adapter.search_arguments(crash_marker), "restart_search")
-            check(report, "restart-immediate-search", adapter.verify_search(search, crash_marker))
+            check_search(report, adapter, search, crash_marker, "restart-immediate-search")
             report["restart_eventual_search"] = await wait_search(recorder, adapter, crash_marker, args.timeout, "restart_eventual_search")
             check(report, "restart-eventual-search", report["restart_eventual_search"]["ready"])
             report["restart_graph"] = await graph_check(recorder, adapter, relation_inspect(target, absent),
                 target, absent, args.timeout, "restart_graph")
             check(report, "restart-graph", report["restart_graph"]["ready"])
+            report["restart_file"] = await wait_for_proof(
+                lambda: inspect_materialized_file(corpus, crash_expected), args.timeout)
+            check(report, "restart-materialized-file", report["restart_file"]["ready"])
             report["recovery_observed_ms"] = (time.perf_counter() - crash_started) * 1000
         report["status"] = verdict(report["checks"], report["calls"])
     except ObservedPrerequisiteFailure as error:
@@ -337,6 +415,7 @@ async def run(args) -> dict:
     report["limitations"] = ["Public client timings include local MCP transport.",
         "Body comparison removes metadata YAML and one terminal LF only; product serializers differ on final LF.",
         "Graph recovery bounds include polling and proof costs.", "SIGKILL tests process-crash recovery, not power loss.",
+        "File materialization is checked after process exit and separately after public recovery checks; it is not measured at ACK.",
         "Embeddings disabled; the common workload is Markdown. PDF/OCR observations are separate.",
         "Concurrent token proof covers acknowledged appends; it does not prove every possible concurrent mutation."]
     return report
@@ -354,7 +433,7 @@ def main(argv=None) -> int:
     parser.add_argument("--cycles", type=int, default=40)
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--timeout", type=float, default=300)
-    parser.add_argument("--startup-timeout", type=float, default=600)
+    parser.add_argument("--startup-timeout", type=float, default=900)
     args = parser.parse_args(argv)
     if not sys.platform.startswith("linux"):
         parser.error("process-crash proof requires Linux pidfd support")

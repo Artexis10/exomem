@@ -51,6 +51,17 @@ relaxation to obtain faster latency. Live deployment is outside this change.
   cross-product latency winner is declared for an operation whose correctness
   or recovery proof failed. A broad parity claim requires all declared contracts
   and performance comparisons to pass; unresolved gaps remain explicit work.
+- Initial common-workload admission requires exact indexed membership and native
+  initial completion. For the pinned Basic Memory revision, prove a non-null
+  `project.last_indexed_at` in the same read snapshot as the entity/search joins;
+  the fresh generated state cannot carry an earlier stamp. Retain separate search
+  counts, identity mismatch counts/digests and the stamp. Use a 900-second startup
+  bound for both products: the initial 600-second bound truncated a measured
+  approximately 619-second native Basic Memory import. Keep the old invalid run.
+- Retain content-free miss diagnostics for immediate and immediate restart
+  searches: result-list lengths, tracker-path and current-marker counts and
+  returned tracker text hashes. Keep the existing adapter verdict authoritative;
+  diagnostics must not rewrite a failed outcome or invent missing historical hits.
 
 - Add scripts/mixed_load_benchmark.py and scripts/mixed_load_graph.py. Reuse the
   existing common Markdown corpus under Knowledge Base/Reference and public setup
@@ -102,3 +113,18 @@ relaxation to obtain faster latency. Live deployment is outside this change.
 - Concurrent media publication changes source state → reject unstable snapshots
   and retry within a fixed deadline after writers finish.
 - Embeddings are disabled → no claim about GPU contention or embedding catch-up.
+
+## Markdown materialization evidence
+
+Basic Memory's current accepted-note path commits SQLite before its background
+Markdown materializer runs. Retain public accepted-body recovery as one check and
+add an independent read-only file check after the owned process has exited. The
+file probe must not delay the kill signal. After public restart read/search/graph
+checks, poll the exact generated tracker file until its body matches the accepted
+body or the declared recovery bound expires. Use the adapter's generated corpus
+root, require a regular non-symlink file with stable descriptor and path identity,
+reject a path escaping it, preserve newlines when decoding, and retain file
+hashes plus missing/stale/unreadable reasons. Missing or stale files after the kill
+are observations; failure to materialize after restart fails that recovery check.
+Neither outcome proves power-loss durability. Earlier driver revisions retain
+their narrower public-read coverage and cannot be retrospectively given this proof.

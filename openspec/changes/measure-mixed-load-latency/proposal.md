@@ -16,6 +16,8 @@ that comparison with explicit outcome checks before choosing runtime changes.
   dependencies. Keep prior released-wheel measurements historical.
 - Compare the same public Markdown edits, exact reads, keyword visibility,
   relation replacement, concurrent accepted writes, and restart durability.
+- Observe accepted Markdown file contents separately after the process exits
+  and after restart; retain database-to-file lag without delaying the crash.
 - Track repeated observations and failures; compare measured source behavior.
   Basic Memory's byte/count batch helper currently has no production callers.
 - Keep production behavior unchanged. The diagnostic uses existing deterministic

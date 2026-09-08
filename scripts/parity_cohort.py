@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cycles", type=int, default=40)
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--timeout", type=float, default=300)
-    parser.add_argument("--startup-timeout", type=float, default=600)
+    parser.add_argument("--startup-timeout", type=float, default=900)
     args = parser.parse_args(argv)
     if os.name != "posix":
         parser.error("the parity cohort requires POSIX process-group cleanup")

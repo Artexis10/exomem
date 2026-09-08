@@ -14,10 +14,19 @@ NEW_LINK = "[[Background]]"
 SUFFIX = "\n## Concurrent\n\n## Relations\n\n- supports [[Archived Runbook]]"
 
 
+def normalized_body(body: str) -> str:
+    """Remove opening metadata and its separator without trimming body bytes."""
+    if body.startswith("---\n"):
+        _metadata, separator, remainder = body[4:].partition("\n---\n")
+        if separator:
+            return remainder.removeprefix("\n")
+    return body
+
+
 def read_body_equals(payload: dict, expected: str) -> bool:
     """Compare body bytes except the products' single final-LF convention."""
     body = common._read_body(payload)
-    return body is not None and common._normalized_body(body).removesuffix("\n") == expected.removesuffix("\n")
+    return body is not None and normalized_body(body).removesuffix("\n") == expected.removesuffix("\n")
 
 
 def tracker_body(pages: int) -> str:
