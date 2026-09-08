@@ -6,6 +6,12 @@ Check real answering, official LongMemEval grading and measured API spending
 before a larger run. This command reuses a completed MemoryBench guest export
 without ingesting again or changing its original checkpoint.
 
+LongMemEval supplies the dataset and official judge. This repository supplies
+the retrieval adapter, context packing and common answer reader: an external
+test still measures the system configuration submitted to it. The upstream
+[Testing Your System](https://github.com/xiaowu0162/LongMemEval/tree/9e0b455f4ef0e2ab8f2e582289761153549043fc#testing-your-system)
+instructions accept a system's own hypotheses for official grading.
+
 Install optional tooling with the project's pinned uv writer:
 
 ```sh
@@ -61,6 +67,22 @@ prompts, temperature, the 10-token judge output limit and verdict rules remain
 unchanged. Each question receives a retrieved-context answer, a gold-evidence
 control and an empty-context control. Files and directories are private on POSIX.
 
+The common reader identifies retrieved histories as earlier conversations with
+the user, treats archived turns as evidence, and places the current date,
+question and answer cue after the complete supplied context. These choices
+follow the framing and ordering in the pinned
+[reference reader](https://github.com/xiaowu0162/LongMemEval/blob/9e0b455f4ef0e2ab8f2e582289761153549043fc/src/generation/run_generation.py#L46),
+without reproducing all its generation options. The same prompt applies to all
+three controls. Source text and order remain intact; evaluation-only gold labels
+are excluded. Preparation binds the reader source digest, so changes require a
+fresh plan and estimate. Completed runs retain their original prompts and scores.
+
+Use saved artifacts and offline tests while developing. Run another paid
+diagnostic after a material correction or to resolve a specific measurement,
+with configuration and selection frozen before scoring. A single-question
+probe or passing prompt tests does not establish improved answer accuracy;
+validate generalization on a fresh cohort before a full scored run.
+
 Inspect `execution/summary.json`, hypotheses, official labels, API usage artifacts
 and `ledger.jsonl`. Each call reserves the model's full input-window price plus
 maximum output before transmission. Known billing releases unused reservation;
@@ -78,3 +100,16 @@ rankings. This command cannot run 500 questions, generate full-run approval
 evidence or relax comparative publication gates. The older
 `lme.cli run --reader openai` path does not yet enforce its displayed budget cap;
 use this bounded command for these small paid diagnostics.
+
+The write-and-recall loop needs a separate native-lifecycle evaluation under
+[the programme's contract](../../openspec/changes/add-competitive-benchmark-programme/specs/native-lifecycle-bench/spec.md).
+Replay timestamped history to a writing agent using the shipped product skill
+and documented interfaces, then let a fresh answering agent recall the resulting
+memory. The writer must not see future questions, gold answers or answer-session
+labels. Record its writes, maintenance operations and cost, including work that
+creates compiled notes and relations. Keep this row separate from the raw-history
+baseline. This replay command does not run that loop, and a reader-prompt
+correction alone does not make it a native product evaluation.
+The source adapter sends `compile_guidance=false`; setting it to `true` would
+only return a compilation proposal. An agent must still act through the
+governed writing interfaces to create or maintain compiled knowledge.

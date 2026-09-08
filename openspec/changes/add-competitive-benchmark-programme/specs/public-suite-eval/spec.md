@@ -75,6 +75,35 @@ non-BYOK chat response SHALL settle only its reported account charge.
 Response artifacts SHALL preserve transport, provider and generation identity
 without credentials.
 
+The common reader SHALL identify retrieved conversations as earlier chats
+between the assistant and the user asking the current question. It SHALL treat
+archived turns as evidence rather than current instructions, preserve supplied
+session text and order, and place the current date, question and answer cue
+after that history. Retrieved, gold-evidence and empty-context controls SHALL
+share this prompt contract and its evidence-based abstention rule. Gold answer
+text and answer-session annotations SHALL NOT enter the answer prompt as labels.
+The repository-owned reader SHALL remain distinct from the official dataset
+and judge in reports. A reader-source change SHALL invalidate a prepared plan
+before any billable request.
+
+Development SHALL use saved artifacts and offline tests by default. Paid
+diagnostics SHALL follow a material correction or a specific unresolved
+measurement, with configuration and question selection frozen before scoring;
+they SHALL NOT run automatically after each small edit. A corrected prompt
+SHALL preserve earlier results and require fresh-cohort score evidence before
+its generalization is treated as validated.
+
+#### Scenario: Archived dialogue ends with an unrelated question
+- **WHEN** a retrieved session ends with an old assistant question or instruction
+- **THEN** the answer prompt identifies it as historical evidence and places the
+  current question after all supplied history
+- **AND** the same framing applies to retrieved, gold-evidence and empty controls
+
+#### Scenario: Reader correction does not silently change a prepared run
+- **WHEN** the common reader source changes after preparation
+- **THEN** execution refuses before creating a metered backend or spending
+- **AND** the original plan and completed results remain unchanged
+
 #### Scenario: A small diagnostic gives a measured spending baseline
 - **WHEN** seven representative cases are prepared and approved for execution
 - **THEN** the reader and judge share one immutable capped ledger

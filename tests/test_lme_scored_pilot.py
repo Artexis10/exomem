@@ -10,7 +10,8 @@ from lme.dataset import QUESTION_TYPES, LmeDataset, load_dataset
 
 
 def cohort():
-    question = load_dataset("benchmarks/lme/fixtures/mini.json").questions[0]
+    # Evidence-marked upstream IDs must never reach a reader as gold labels.
+    question = load_dataset("benchmarks/lme/fixtures/leaky.json").questions[0]
     questions = [
         dataclasses.replace(question, question_id=f"q-{index}", question_type=kind)
         for index, kind in enumerate(QUESTION_TYPES)
@@ -126,6 +127,28 @@ def test_changed_source_refuses_even_if_prepared_files_are_intact(prepared, monk
     assert not (run / "execution").exists()
 
 
+def test_changed_reader_refuses_before_backend_or_spend(prepared, monkeypatch):
+    import sys
+
+    pilot, run, info, _ = prepared
+    reader_module = sys.modules[pilot.ApiReader.__module__]
+    changed_source = run.parent / "changed_reader.py"
+    changed_source.write_bytes(Path(reader_module.__file__).read_bytes() + b"\n# revised prompt\n")
+    monkeypatch.setattr(reader_module, "__file__", str(changed_source))
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-key-not-for-output")
+    from lme import metered
+
+    def unexpected_backend(*args, **kwargs):
+        pytest.fail("changed reader must refuse before backend construction")
+
+    monkeypatch.setattr(metered, "MeteredOpenAIBackend", unexpected_backend)
+    original_plan = (run / "replay-plan.json").read_bytes()
+    with pytest.raises(ValueError, match="common reader source changed"):
+        pilot.execute_replay(run, expected_plan_sha256=info["plan_sha256"], approval_token="test approval")
+    assert not (run / "execution").exists()
+    assert (run / "replay-plan.json").read_bytes() == original_plan
+
+
 def test_missing_key_keeps_prepared_run_reusable(prepared, monkeypatch):
     pilot, run, info, _ = prepared
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -204,6 +227,9 @@ def test_full_offline_execution_uses_common_reader_and_official_script(prepared,
         assert url == ("https://openrouter.ai/api/v1/chat/completions" if transport == "openrouter" else "https://api.openai.com/v1/chat/completions")
         prompt = json["messages"][0]["content"]
         prompts.append(prompt)
+        if json["max_tokens"] == 512:
+            assert "answer_3b7c9" not in prompt
+            assert "Session ID:" not in prompt
         if len(prompts) == 1 and mutation == "dataset":
             import json as json_module
             path = run / "dataset.json"

@@ -109,6 +109,32 @@ artifacts at the repaired provider pin; old evidence is retained unchanged.
    identity remain visible in artifacts. External BYOK charges, unknown billing
    or identity drift stop the diagnostic. Fresh route selection creates a new
    prepared run; it never resets another run's retained reservation.
+   LongMemEval owns the pinned dataset and official judge; this repository
+   owns the common answer reader and context packing. Its reference reader
+   (`src/generation/run_generation.py` at the suite lockfile revision)
+   identifies earlier assistant/user conversations and places the current
+   date, question and answer cue after the history. The common reader adopts
+   that framing and placement without claiming to reproduce every upstream
+   generation setting. Archived turns remain evidence, not active instructions;
+   first-person question references identify the archived user. Retrieved
+   session text and order remain intact, with the same supported-answer and
+   abstention instructions for retrieved, gold-evidence and empty controls.
+   Preparation already binds the reader source digest, so a prompt change
+   requires a fresh plan and estimate before any paid execution.
+   Single-question prompt probes motivate this correction but do not establish
+   improved cohort accuracy. Preserve the original scores and receipts. Use
+   saved artifacts and offline tests during development; rerun paid diagnostics
+   at a material correction boundary or for a specific unresolved measurement,
+   not after each small edit. Freeze the reader and selection before scoring,
+   and validate generalization on a fresh cohort before a full scored run.
+   The source-only diagnostic does not exercise the agent's write-maintain-recall
+   loop. The next product evaluation also needs the separate native-lifecycle
+   row defined in §6 and `native-lifecycle-bench`: expose timestamped history
+   incrementally to a future-blind writer using shipped product guidance, then
+   probe a fresh agent through the documented recall interface. Record actual
+   writes, maintenance, compiled notes and relations with their costs. Do not
+   infer that these operations occurred merely because guidance was installed,
+   or treat a reader correction as completion of this native evaluation.
 4. **Equivalence gates.** A committed 25-case LongMemEval-S subset
    (3 answerable × 6 types + 7 abstention, hash-ordered selection, recorded
    dataset sha; changes require an OpenSpec task). Twelve diff keys with
@@ -620,3 +646,55 @@ implementation lane (observed failing before the normalizer exists).
   strictly more auditable.
 - **Author competitor adapters directly** (the pre-audit approach): the
   defect class that voided every prior result; excluded by requirement.
+
+## Native LongMemEval diagnostic wiring
+
+The native diagnostic implements the already-approved write-maintain-recall
+loop as a separate Exomem-only row. It does not rewrite the source-only adapter
+or replace the external LongMemEval dataset and judge.
+
+- `lme/native_pilot.py` prepares a private, immutable run from the pinned dataset,
+  a preselected small cohort and the pinned official judge. It records dataset,
+  product, implementation, model, shipped guidance and budget identities. Split
+  writer-visible timestamped sessions from evaluator-only questions, labels and
+  answers before execution. Neither upstream IDs nor question types are writer
+  input. A changed input requires preparation of a fresh run.
+- `lme/native_cell.py` owns an isolated public-MCP stdio child with a fresh vault,
+  copied shipped scaffold and separate configuration, logs, leases and indexes.
+  It uses a scrubbed environment and never attaches to the personal service.
+  The hookless OpenAI surface uses its documented product engagement default;
+  record actual bootstrap policy and semantic readiness. Fixture mode explicitly
+  disables embeddings; paid product mode requires verified semantic readiness.
+- `lme/native_agent.py` drives real model tool calls through public MCP schemas
+  and results. Supply the shipped skill verbatim; a constrained file-read tool
+  exposes only its frozen reference files. Standard harness tool discovery loads
+  public schemas as needed, without inventing product instructions. The agent
+  has no shell, arbitrary filesystem, network tool or route to evaluator files.
+- Each history session starts a fresh agent context with the current timestamped
+  conversation and normal memory guidance; the same isolated memory survives
+  across sessions. The agent decides what to capture, compile, link, correct or
+  leave unwritten. No oracle-generated conclusions or harness-authored answers
+  enter the store. Session order is chronological with a stable ordinal tie-break.
+- After ingestion and maintenance, a fresh answering context receives only the
+  current date/question, shipped guidance and public recall access. It performs
+  its own searches and reads. A separate worker process handles each agent phase;
+  writer transcripts and gold labels never enter the answer context. The pinned
+  official judge scores the agent's final answer without rewriting it.
+- Extend `MeteredOpenAIBackend` with structured chat/tool completions while
+  retaining the existing fixed snapshot/provider and immutable ledger. Existing
+  text reader/judge defaults remain unchanged. Native steps have a separately
+  frozen output-token limit, model-call/tool-call/elapsed-time/context budgets,
+  and reserve before every request. Tool failures return truthful structured
+  outcomes; ambiguous billing halts the run. No silent retries or truncation.
+- Preserve each model request, tool call/result, phase boundary, committed-write
+  receipt, vault snapshot digest and measured spend. Report observed captures,
+  compiled writes, updates and connections separately from requested behavior.
+  An agent that writes nothing remains a visible result, never a fabricated
+  success. Budget exhaustion and broken wiring are named incomplete outcomes.
+- Offline acceptance combines scripted model responses with the real isolated
+  MCP product: create memory from one session, revise it from a later correction,
+  and recall the updated fact from a fresh agent. Assert no future question or
+  gold metadata crosses the writer boundary, no transcript crosses the answer
+  boundary, and denied file/tool access cannot reach personal or evaluator state.
+  These tests prove workflow wiring, not model accuracy. A paid diagnostic follows
+  only after this coherent correction is reviewed and verified.

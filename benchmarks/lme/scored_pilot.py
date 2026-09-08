@@ -32,10 +32,9 @@ from lme.dataset import (  # noqa: E402
     LmeDataset,
     dump_dataset,
     load_dataset_bytes,
-    render_session,
     stable_dataset_bytes,
 )
-from lme.reader import ApiReader, _require_approval  # noqa: E402
+from lme.reader import ApiReader, _require_approval, gold_evidence_context  # noqa: E402
 
 _LOCKFILE = _BENCHMARKS_ROOT / "suites/lme_v1/LOCKFILE.json"
 _SCHEMA = "lme-scored-pilot.v1"
@@ -178,7 +177,7 @@ def estimate_cost(dataset: LmeDataset, contexts: dict[str, list[str]], judge_sou
     exec(compile(ast.Module(body=[formatter], type_ignores=[]), "official-judge-prompt", "exec"), namespace)
     reader_tokens, judge_tokens, max_prompt = 0, 0, 0
     for question in dataset.questions:
-        for context in (contexts[question.question_id], [render_session(s) for s in question.gold_sessions()], []):
+        for context in (contexts[question.question_id], gold_evidence_context(question), []):
             tokens = count(ApiReader._prompt(question, context))
             reader_tokens += tokens
             max_prompt = max(max_prompt, tokens)
@@ -334,7 +333,7 @@ def execute_replay(out: Path, *, expected_plan_sha256: str, approval_token: str,
         contexts = json.loads(snapshots["contexts.json"])
         lanes = {"main": [], "ceiling": [], "floor": []}
         for question in dataset.questions:
-            for lane, context in (("main", contexts[question.question_id]), ("ceiling", [render_session(s) for s in question.gold_sessions()]), ("floor", [])):
+            for lane, context in (("main", contexts[question.question_id]), ("ceiling", gold_evidence_context(question)), ("floor", [])):
                 answer = reader.answer(question, context)
                 lanes[lane].append({"question_id": question.question_id, "hypothesis": answer})
                 # Flush every completed answer before another potentially billable call.

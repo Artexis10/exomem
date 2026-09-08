@@ -468,6 +468,19 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 - [ ] 6.3 `opsq/` measurement modules + manifests; fault-injection
       transparency (incl. exomem's own 4b.30 soft-degrade); heuristics
       labeled; no-aggregate/no-dashboard tests
+- [ ] 6.4 Wire an Exomem-only native LongMemEval diagnostic with the shipped
+      skill, isolated public MCP cell and genuine budgeted agent tool loop.
+      Split future-blind writer inputs from evaluator data, replay sessions
+      chronologically, and answer through fresh-agent iterative recall.
+- [ ] 6.4a Extend capped transport for structured tool completions without
+      changing the existing text-reader/judge contract; exercise failures and
+      accounting offline.
+- [ ] 6.4b Verify real public-MCP writing, correction and fresh recall using a
+      scripted offline agent; bind actual operation receipts and phase evidence.
+      Keep no-write and budget-exhausted outcomes visible.
+- [ ] 6.4c Independently review input isolation, product authenticity, metering
+      and lifecycle cleanup; run one justified diagnostic only after the
+      consolidated correction, preserving the source-only baseline.
 
 ## 7. Runs (W9) — every metered step ⛳-gated
 
@@ -484,6 +497,17 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       answer evidence, while separate single-question prompt probes recovered
       the answer. Freeze any corrected common prompt and validate it on a
       fresh diagnostic cohort; preserve the original scores and receipts.
+      Align archived-user attribution and question-last placement with the
+      pinned reference reader, keeping context content/order and all controls
+      consistent. Cover framing, gold-label exclusion and stale prepared-plan
+      refusal with offline tests. Paid validation follows a material correction
+      or a specific unresolved measurement, not each small edit; this task
+      remains open until fresh-cohort validation supplies score evidence.
+      Reader validation does not close the native lifecycle work in §6: the
+      next product evaluation must also exercise future-blind writing,
+      maintenance and fresh-agent recall under shipped product guidance.
+      Preserve the source-only result as a separate baseline; report actual
+      writes and compilation/relations performed, alongside their cost.
 - [ ] 7.1 Fixture tier across all lanes, zero spend
 - [ ] 7.2 LongMemEval-S fetched + sha pinned; canonical selection artifact
       committed (direct stub pilot remains open)
