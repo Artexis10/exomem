@@ -115,6 +115,57 @@ def test_existing_hosted_bundle_is_exactly_bound_and_never_regenerated_on_retry(
     assert inspected == bundle
 
 
+@pytest.mark.parametrize("schema_version", [3, 4])
+def test_schema_discovery_authenticates_supported_membership(schema_version: int) -> None:
+    now = 1_900_000_000
+    bundle = build_initial_hosted_authorization_bundle(
+        cell_id="cell-alpha",
+        logical_vault_id="tenant-alpha",
+        replica_id="replica-alpha",
+        software_version="0.48.0",
+        schema_version=schema_version,
+        recovery_envelope="signed-authorization-session-secret",
+        now=now,
+    )
+    observed = inspect_hosted_authorization_bundle(
+        bundle.files,
+        expected_cell_id="cell-alpha",
+        expected_logical_vault_id="tenant-alpha",
+        expected_replica_id="replica-alpha",
+        expected_software_version=None,
+        expected_schema_version=None,
+        expected_recovery_envelope="signed-authorization-session-secret",
+        now=now + 1,
+    )
+    assert observed == bundle
+    assert observed.membership_schema_version == schema_version
+
+
+@pytest.mark.parametrize("schema_version", [2, 5])
+def test_schema_discovery_rejects_authenticated_unsupported_membership(schema_version: int) -> None:
+    now = 1_900_000_000
+    bundle = build_initial_hosted_authorization_bundle(
+        cell_id="cell-alpha",
+        logical_vault_id="tenant-alpha",
+        replica_id="replica-alpha",
+        software_version="0.48.0",
+        schema_version=schema_version,
+        recovery_envelope="signed-authorization-session-secret",
+        now=now,
+    )
+    with pytest.raises(MetadataConflict):
+        inspect_hosted_authorization_bundle(
+            bundle.files,
+            expected_cell_id="cell-alpha",
+            expected_logical_vault_id="tenant-alpha",
+            expected_replica_id="replica-alpha",
+            expected_software_version=None,
+            expected_schema_version=None,
+            expected_recovery_envelope="signed-authorization-session-secret",
+            now=now + 1,
+        )
+
+
 def test_drain_and_current_epoch_rejoin_are_authenticated_runtime_successors() -> None:
     now = 1_900_000_000
     initial = build_initial_hosted_authorization_bundle(

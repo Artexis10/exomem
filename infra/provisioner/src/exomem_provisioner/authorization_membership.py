@@ -25,6 +25,9 @@ AUTHORIZATION_SESSION_FILES: Final = frozenset(
     {"keyring.json", "control.json", "serving-membership.json"}
 )
 AUTHORIZATION_SESSION_SCHEMA_VERSION: Final = 4
+# The provisioner ships without the runtime package. Cross-package tests pin
+# this predecessor wire value to the runtime store initializer's canonical version.
+AUTHORIZATION_BOOTSTRAP_SCHEMA_VERSION: Final = 3
 MAX_BUNDLE_FILE_BYTES: Final = 64 * 1024
 MAX_ATTESTATION_TTL_SECONDS: Final = 3_630
 DEFAULT_ATTESTATION_TTL_SECONDS: Final = 3_600
@@ -396,12 +399,17 @@ def inspect_hosted_authorization_bundle(
     expected_logical_vault_id: str,
     expected_replica_id: str,
     expected_software_version: str | None,
-    expected_schema_version: int,
+    expected_schema_version: int | None,
     expected_recovery_envelope: str,
     now: int,
     _require_fresh: bool = True,
 ) -> HostedAuthorizationBundle:
-    """Authenticate one exact singleton Hosted authorization generation."""
+    """Authenticate one exact singleton Hosted authorization generation.
+
+    A ``None`` schema expectation discovers only a supported signed predecessor
+    or target version. It does not prove the database version or authorize a
+    schema transition.
+    """
 
     if set(files) != AUTHORIZATION_SESSION_FILES:
         raise MetadataConflict(
@@ -459,7 +467,9 @@ def inspect_hosted_authorization_bundle(
         if expected_software_version is None
         else _required_identifier(expected_software_version)
     )
-    schema = _required_time(expected_schema_version)
+    expected_schema = (
+        None if expected_schema_version is None else _required_time(expected_schema_version)
+    )
     if not isinstance(expected_recovery_envelope, str) or not expected_recovery_envelope:
         raise MetadataConflict(
             "authorization Secret provider authority is absent",
@@ -607,6 +617,7 @@ def inspect_hosted_authorization_bundle(
             "authorization membership is invalid",
             reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_IS_INVALID,
         )
+    schema = _required_time(attestation.get("schema_version"))
     supplied_attestation_mac = attestation.get("mac")
     supplied_membership_mac = membership.pop("mac")
     expected_membership_mac = _mac(key, _membership_mac_input(membership))
@@ -644,7 +655,12 @@ def inspect_hosted_authorization_bundle(
         or attestation.get("epoch") != membership["epoch"]
         or attestation.get("state") not in {"SERVING", "DRAINING"}
         or (release is not None and attestation.get("software_version") != release)
-        or attestation.get("schema_version") != schema
+        or (
+            schema
+            not in {AUTHORIZATION_BOOTSTRAP_SCHEMA_VERSION, AUTHORIZATION_SESSION_SCHEMA_VERSION}
+            if expected_schema is None
+            else schema != expected_schema
+        )
         or attestation.get("cell_id") != cell
         or attestation.get("active_key_id") != key_id
         or attestation.get("accepted_key_ids") != [key_id]

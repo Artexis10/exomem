@@ -359,6 +359,8 @@ def mint_hosted_replica_readiness_attestation(
 ) -> bytes:
     """Sign one runtime-derived Hosted readiness statement for the next epoch."""
 
+    from . import store
+
     try:
         current = int(time.time()) if now is None else _bounded_time(now)
         cell_id = _bounded_identity(expected_cell_id)
@@ -431,13 +433,19 @@ def mint_hosted_replica_readiness_attestation(
         )
         if expires_at <= current:
             raise AuthorizationSessionUnavailable
+        actual_schema_version = store.authorization_session_schema_version(Path(vault_root))
+        if type(actual_schema_version) is not int or actual_schema_version not in {
+            store.SCHEMA_USER_VERSION,
+            schema_v4.SCHEMA_USER_VERSION,
+        }:
+            raise AuthorizationSessionUnavailable
         attestation = authorization_serving_membership.ReplicaReadinessAttestation(
             version=1,
             epoch=epoch,
             replica_id=replica_id,
             state=state,
             software_version=authorization_custody.runtime_software_version(),
-            schema_version=schema_v4.SCHEMA_USER_VERSION,
+            schema_version=actual_schema_version,
             cell_id=cell_id,
             active_key_id=keyring.active_key_id,
             accepted_key_ids=tuple(

@@ -69,3 +69,13 @@ Implement the pure bundle transformation independently of the engine. Ownership 
 - Add red-first tests for the accepted transition, non-epoch-1 custody, exact replay, all refusal classes, byte preservation, and verification by the real runtime custody parser. Existing bootstrap/renew/drain/resume tests stay green, including schema-3 preservation.
 
 Run the focused provisioner authorization-membership suite and applicable lint; at completion run the provisioner suite and privacy gate using the repository's existing dependency environment. Record scope and actual results. Do not synchronize unrelated environments while another agent is testing the engine. This slice alone does not complete task 4.0a or authorize publication/deployment.
+
+### Task 3: Schema-aware runtime/provisioner bridge (part of 4.0a–4.0b)
+
+Keep actual runtime attestation and its provisioner consumer coordinated. Ownership is `authorization_session_lifecycle.py`, `authorization_membership.py`, `live.py`, and their existing test suites. Do not add migration Jobs, new public health fields or live deployment in this slice.
+
+- Runtime attestations report the read-only observed governance-store schema, admitting only actual supported schema 3 or 4 and refusing unknown/malformed observations without migrating the store.
+- Let the authenticated provisioner bundle inspector discover signed membership schema when no exact schema is requested; this discovery admits only supported schemas 3 and 4 and keeps all identity, signature, custody and freshness checks. Exact-schema callers, including enrollment, retain their existing strict expectation.
+- Ordinary renewal/drain/resume uses that authenticated source schema and preserves it, rather than imposing the target schema-4 constant. A runtime attestation with a different schema refuses; discovery is not permission to repair or downgrade membership.
+- New-cell bootstrap uses the predecessor schema pinned by a compatibility test to the runtime store initializer's canonical version; the separately shipped provisioner must not import or depend on the runtime package. Expired enrolled custody is never reset to a new unenrolled genesis, even when routes are closed and no pod is serving. Preserve the existing retry for genuinely unenrolled, never-served bootstrap.
+- Add red-first source-schema discovery/refusal, truthful schema-3 runtime renewal, schema preservation through transitions and enrolled-expiry no-remint tests. Existing schema-4 renewal, bootstrap/CAS and runtime-attestation tests remain green. Run the affected runtime suite and full provisioner suite before delivery; hold live activation until the migration coordinator and legacy schema-claim reconciliation are verified.
