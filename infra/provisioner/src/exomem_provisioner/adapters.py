@@ -25,10 +25,12 @@ from .authorization_membership import (
     AUTHORIZATION_SESSION_SECRET_NAME,
     MAX_ATTESTATION_TTL_SECONDS,
     MAX_BUNDLE_FILE_BYTES,
+    HostedAuthorizationBundle,
 )
 from .conflict_reason import ConflictReason
 from .credentials import validate_machine_credential
 from .driver import DriverRetryable
+from .governance_readiness import verify_governance_readiness
 from .lifecycle import (
     HealthObservation,
     LifecycleConfig,
@@ -1527,6 +1529,7 @@ class PrivateCellApiAdapter:
         expected_worker_policy: dict[str, Any],
         require_runtime_identity: bool = False,
         expected_contract_digest: str | None = None,
+        expected_governance: HostedAuthorizationBundle | None = None,
     ) -> HealthObservation:
         live = await self._call(
             "GET",
@@ -1542,6 +1545,17 @@ class PrivateCellApiAdapter:
             credential=credential,
             protocol_version=protocol_version,
         )
+        if expected_governance is not None or (
+            require_runtime_identity and config.migration_mode == "governance-v3-to-v4"
+        ):
+            verify_governance_readiness(
+                ready.get("governance"),
+                bundle=expected_governance,
+                cell_id=metadata.subject_id,
+                vault_id=metadata.tenant_id,
+                replica_id=metadata.resource_name + "-0",
+                software_version=expected_release,
+            )
         contract_response = await self._request(
             "GET",
             self._url(metadata, "contract"),

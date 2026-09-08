@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from .driver import DriverTerminal, EffectContext
 
 CHECKPOINT_VERSION = "gm1"
+_RECOVERY_PHASES = {"recover-complete": "r1d", "recover-confirmed": "r1t"}
 _PHASES = {
     "inspect": "i",
     "prepare": "p",
@@ -18,6 +19,7 @@ _PHASES = {
     "commit": "c",
     "complete": "d",
     "confirmed": "t",
+    **_RECOVERY_PHASES,
 }
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,511}\Z")
@@ -76,8 +78,11 @@ class MigrationCheckpoint:
     binding: str
     source_store_digest: str | None = None
     plan_digest: str | None = None
+    recovery_revision: str | None = None
+    recovery_issued_at: int | None = None
 
     def __post_init__(self) -> None:
+        recovery = isinstance(self.phase, str) and self.phase in _RECOVERY_PHASES
         if (
             not isinstance(self.phase, str)
             or self.phase not in _PHASES
@@ -93,10 +98,38 @@ class MigrationCheckpoint:
                 if self.phase not in {"inspect", "prepare"}
                 else self.plan_digest is not None
             )
+            or (
+                (
+                    not _digest(self.recovery_revision)
+                    or type(self.recovery_issued_at) is not int
+                    or not 1 <= self.recovery_issued_at <= (1 << 63) - 1
+                )
+                if recovery
+                else self.recovery_revision is not None or self.recovery_issued_at is not None
+            )
         ):
             raise _refuse()
 
     def encode(self) -> str:
+        if self.phase in _RECOVERY_PHASES:
+
+            def compact(value: str) -> str:
+                return base64.urlsafe_b64encode(bytes.fromhex(value)).rstrip(b"=").decode()
+
+            # Keep the gm1 denial prefix even for binaries that cannot decode
+            # this extension. Five digests plus the timestamp need at most 247.
+            return ":".join(
+                (
+                    CHECKPOINT_VERSION,
+                    _PHASES[self.phase],
+                    compact(self.vault_fingerprint),
+                    self.binding,
+                    compact(self.source_store_digest),
+                    compact(self.plan_digest),
+                    compact(self.recovery_revision),
+                    str(self.recovery_issued_at),
+                )
+            )
         # One phase code and three hex digests plus a 43-byte binding fit
         # the existing 256-character column without truncation or new storage.
         return ":".join(
@@ -115,10 +148,32 @@ class MigrationCheckpoint:
         if not isinstance(raw, str) or not 1 <= len(raw) <= 256:
             raise _refuse()
         fields = raw.split(":")
-        if len(fields) != 6 or fields[0] != CHECKPOINT_VERSION:
+        if len(fields) not in {6, 8} or fields[0] != CHECKPOINT_VERSION:
             raise _refuse()
         phase = next((name for name, code in _PHASES.items() if code == fields[1]), None)
         if phase is None:
+            raise _refuse()
+        if phase in _RECOVERY_PHASES:
+            if (
+                len(fields) != 8
+                or not all(_binding(value) for value in fields[2:7])
+                or re.fullmatch(r"[1-9][0-9]{0,18}", fields[7]) is None
+            ):
+                raise _refuse()
+
+            def expand(value: str) -> str:
+                return base64.urlsafe_b64decode(value + "=").hex()
+
+            return cls(
+                phase,
+                expand(fields[2]),
+                fields[3],
+                expand(fields[4]),
+                expand(fields[5]),
+                expand(fields[6]),
+                int(fields[7]),
+            )
+        if len(fields) != 6:
             raise _refuse()
         return cls(
             phase,
