@@ -558,6 +558,16 @@ def test_production_factory_wires_the_live_plane_without_a_fake_selection_path(
     assert components.driver._volumes is None
     assert components.capacity is components.plane._capacity
     assert components.plane._fingerprint._image == components.lock.components.provisioner.image
+    from exomem_provisioner.governance_migration_coordinator import (
+        HostedGovernanceMigrationCoordinator,
+    )
+    from exomem_provisioner.governance_migration_job import KubernetesGovernanceMigrationAdapter
+
+    assert isinstance(components.plane._governance_migration, HostedGovernanceMigrationCoordinator)
+    assert components.plane._governance_migration._cell is components.plane._cell
+    assert isinstance(
+        components.plane._governance_migration._jobs, KubernetesGovernanceMigrationAdapter
+    )
 
 
 @pytest.mark.asyncio

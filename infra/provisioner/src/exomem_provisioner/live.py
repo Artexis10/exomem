@@ -7,7 +7,7 @@ import hashlib
 import json
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from .adapters import (
@@ -19,6 +19,7 @@ from .adapters import (
     TraefikRoutingAdapter,
     _api_status,
     _require_annotations,
+    _retryable_kubernetes_error,
     mint_maintenance_transfer_grant,
 )
 from .authorization_membership import (
@@ -31,8 +32,15 @@ from .authorization_membership import (
 )
 from .capacity import CapacityError
 from .conflict_reason import ConflictReason
-from .driver import DriverPending, EffectContext
+from .driver import (
+    DriverPending,
+    DriverRetryable,
+    DriverTerminal,
+    EffectContext,
+    LostAcknowledgement,
+)
 from .governance_migration_checkpoint import CHECKPOINT_VERSION, MigrationCheckpoint
+from .governance_migration_coordinator import HostedGovernanceMigrationCoordinator
 from .lifecycle import (
     HealthObservation,
     LifecycleConfig,
@@ -50,7 +58,7 @@ from .provider_identity import (
     authenticate_cell_provider_recovery_envelopes,
     provider_operation_resource_name,
 )
-from .repository import OperationRepository, canonical_request_sha256
+from .repository import ClaimConflict, OperationRepository, StaleFence, canonical_request_sha256
 from .wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
 
 
@@ -403,12 +411,17 @@ class KubernetesProviderRegistry:
             getattr(item, "type", None) == "Complete" and getattr(item, "status", None) == "True"
             for item in conditions
         )
-        init_failed = migration_job == "absent" and not init_complete and (
-            any(
-                getattr(item, "type", None) == "Failed" and getattr(item, "status", None) == "True"
-                for item in conditions
+        init_failed = (
+            migration_job == "absent"
+            and not init_complete
+            and (
+                any(
+                    getattr(item, "type", None) == "Failed"
+                    and getattr(item, "status", None) == "True"
+                    for item in conditions
+                )
+                or bool(getattr(getattr(init_job, "status", None), "failed", 0))
             )
-            or bool(getattr(getattr(init_job, "status", None), "failed", 0))
         )
         stateful_set = await exists(
             self._apps.read_namespaced_stateful_set,
@@ -654,6 +667,7 @@ class LiveLifecyclePlane:
         identity_verifier: ProviderRecoveryIdentityVerifier,
         config: LifecycleConfig,
         fingerprint: KubernetesVaultFingerprintAdapter | None = None,
+        governance_migration: HostedGovernanceMigrationCoordinator | None = None,
         now: Any = time.time,
     ) -> None:
         self._repository = repository
@@ -667,6 +681,7 @@ class LiveLifecyclePlane:
         self._identity_verifier = identity_verifier
         self._config = config
         self._fingerprint = fingerprint
+        self._governance_migration = governance_migration
         self._now = now
         self._owned: dict[str, OpaqueProviderMetadata] = {}
         self._snapshots: dict[str, KubernetesProviderSnapshot] = {}
@@ -1344,7 +1359,9 @@ class LiveLifecyclePlane:
 
         original = self._helm_requests.get(self._key(metadata))
         envelopes = original.get("_providerRecoveryEnvelopes") if original else None
-        envelope = envelopes.get("authorizationSessionSecret") if isinstance(envelopes, dict) else None
+        envelope = (
+            envelopes.get("authorizationSessionSecret") if isinstance(envelopes, dict) else None
+        )
         if not isinstance(envelope, str) or not envelope:
             raise MetadataConflict(
                 "authorization Secret provider authority is absent",
@@ -1509,6 +1526,78 @@ class LiveLifecyclePlane:
     async def runtime_stopped(self, metadata: OpaqueProviderMetadata) -> bool:
         snapshot = await self._refresh(metadata)
         return snapshot.runtime_desired_replicas == 0 and snapshot.runtime_pods == 0
+
+    async def recover_governance_target(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        context: EffectContext,
+    ) -> DriverPending | None:
+        """Bind target recovery to live evidence, without stop/start or route effects.
+
+        The lifecycle must first close routes and stop the workload under its
+        current claim. This read-only guard re-proves that boundary at custody
+        publication, rather than trusting a cached stop or maintenance result.
+        """
+
+        def unavailable() -> MetadataConflict:
+            return MetadataConflict(
+                "governance target recovery is unavailable",
+                reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
+            )
+
+        if (
+            self._config.migration_mode != "governance-v3-to-v4"
+            or context.wire_protocol != WIRE_PROTOCOL_V2
+            or self._governance_migration is None
+            or runtime_identity(request) != self._config.runtime_target_for(request, v2=True)
+        ):
+            raise unavailable()
+        try:
+            await context.assert_effect_authority()
+            key = self._key(metadata)
+            # These records were authenticated by observe_operation, not supplied
+            # by the caller or inferred from the new operation's annotations.
+            owner = self._owned[key]
+            envelope = self._helm_requests[key]["_providerRecoveryEnvelopes"][
+                "authorizationSessionSecret"
+            ]
+            pvc_uid = await self._cell.authenticated_volume_uid(owner)
+
+            async def stopped_authority() -> None:
+                await context.assert_effect_authority()
+                await self._maintenance.assert_owned(metadata, context.provider_operation_id)
+                snapshot = await self._refresh(metadata)
+                if (
+                    not snapshot.namespace
+                    or snapshot.init_job_present
+                    or snapshot.routes != (False, False)
+                    or not await self.prove_external_rejection(metadata, request)
+                ):
+                    raise unavailable()
+                await self._cell.verify_governance_stopped(owner, pvc_uid=pvc_uid)
+                # Probes and Kubernetes reads can outlast either lease. Recheck
+                # both after those reads and immediately before the guarded CAS.
+                await self._maintenance.assert_owned(metadata, context.provider_operation_id)
+                await context.assert_effect_authority()
+
+            return await self._governance_migration.recover_target(
+                context=replace(context, effect_guard=stopped_authority),
+                metadata=metadata,
+                owner=owner,
+                pvc_uid=pvc_uid,
+                runtime_image=self._config.image,
+                custody_recovery_envelope=envelope,
+                software_version=runtime_identity(request)["releaseVersion"],
+            )
+        except (DriverRetryable, LostAcknowledgement):
+            return DriverPending(context.checkpoint, 30)
+        except (ClaimConflict, StaleFence, DriverTerminal, MetadataConflict):
+            raise
+        except Exception as error:  # noqa: BLE001 - no raw provider response in progress
+            if _retryable_kubernetes_error(error):
+                return DriverPending(context.checkpoint, 30)
+            raise unavailable() from None
 
     async def resume(
         self,

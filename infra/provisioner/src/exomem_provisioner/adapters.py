@@ -46,6 +46,7 @@ from .provider_identity import (
     chunk_hcloud_identity_envelope,
     decode_hcloud_identity_envelope,
 )
+from .repository import ClaimConflict, StaleFence
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +102,17 @@ def _require_cell_identity(
                 "Kubernetes cell identity annotations differ",
                 reason=ConflictReason.KUBERNETES_CELL_IDENTITY_ANNOTATIONS_DIFFER,
             )
+
+
+def _governance_unavailable() -> MetadataConflict:
+    return MetadataConflict(
+        "governance maintenance authority unavailable",
+        reason=ConflictReason.GOVERNANCE_MIGRATION_JOB_UNAVAILABLE,
+    )
+
+
+def _governance_retryable() -> DriverRetryable:
+    return DriverRetryable("governance maintenance authority is temporarily unavailable")
 
 
 class KubernetesVolumeAdapter:
@@ -507,6 +519,81 @@ class KubernetesCellAdapter:
                 ) from error
         volume_name = getattr(pvc.spec, "volume_name", None)
         return isinstance(volume_name, str) and bool(volume_name)
+
+    async def authenticated_volume_uid(self, metadata: OpaqueProviderMetadata) -> str:
+        """Return only a freshly authenticated fixed PVC UID for recovery guards."""
+        namespace = metadata.resource_name
+        name = namespace + "-data"
+        try:
+            pvc = await asyncio.to_thread(
+                self._core.read_namespaced_persistent_volume_claim,
+                name,
+                namespace,
+            )
+            identity = pvc.metadata
+            annotations = getattr(identity, "annotations", None)
+            if not isinstance(annotations, dict):
+                raise _governance_unavailable()
+            _require_annotations(annotations, metadata)
+            uid = getattr(identity, "uid", None)
+            volume_name = getattr(pvc.spec, "volume_name", None)
+            if (
+                getattr(identity, "name", None) != name
+                or getattr(identity, "namespace", None) != namespace
+                or getattr(identity, "deletion_timestamp", None) is not None
+                or not isinstance(uid, str)
+                or not uid
+                or getattr(pvc.status, "phase", None) != "Bound"
+                or not isinstance(volume_name, str)
+                or not volume_name
+            ):
+                raise _governance_unavailable()
+            if self._identity_verifier is None:
+                raise MetadataConflict(
+                    "PVC provider recovery identity did not authenticate",
+                    reason=ConflictReason.PVC_RECOVERY_IDENTITY_UNAUTHENTICATED,
+                )
+            try:
+                self._identity_verifier.authenticate(
+                    str(annotations.get("exomem.io/recovery-envelope", "")),
+                    provider="kubernetes",
+                    provider_reference=ProviderReference.kubernetes(
+                        provider="kubernetes",
+                        api_version="v1",
+                        kind="PersistentVolumeClaim",
+                        namespace=namespace,
+                        name=name,
+                    ),
+                    tenant_id=metadata.tenant_id,
+                    cell_id=metadata.subject_id,
+                    operation_id=metadata.operation_id,
+                    fence_generation=metadata.fence_generation,
+                )
+            except ProviderIdentityConflict as error:
+                raise MetadataConflict(
+                    "PVC provider recovery identity did not authenticate",
+                    reason=ConflictReason.PVC_RECOVERY_IDENTITY_UNAUTHENTICATED,
+                ) from error
+            return uid
+        except (ClaimConflict, StaleFence, MetadataConflict, DriverRetryable):
+            raise
+        except Exception as error:  # noqa: BLE001 - provider payloads must not escape
+            if _retryable_kubernetes_error(error):
+                raise _governance_retryable() from None
+            raise _governance_unavailable() from None
+
+    async def verify_governance_stopped(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        pvc_uid: str,
+    ) -> None:
+        """Reprove fixed-volume identity immediately before physical stop proof."""
+        if await self.authenticated_volume_uid(metadata) != pvc_uid:
+            raise _governance_unavailable()
+        from .governance_stopped_cell import verify_stopped_cell
+
+        await verify_stopped_cell(self._core, self._apps, metadata=metadata, pvc_uid=pvc_uid)
 
     def __repr__(self) -> str:
         return "KubernetesCellAdapter()"
@@ -1393,6 +1480,52 @@ class KubernetesMaintenanceLeaseAdapter:
             body,
         )
         return True
+
+    async def assert_owned(self, metadata: OpaqueProviderMetadata, operation_id: str) -> None:
+        """Read and prove current maintenance ownership without renewing the Lease."""
+        name = self._name(metadata)
+        namespace = metadata.resource_name
+        try:
+            lease = await asyncio.to_thread(
+                self._coordination.read_namespaced_lease, name, namespace
+            )
+            identity = lease.metadata
+            spec = lease.spec
+            _require_annotations(getattr(identity, "annotations", None), metadata)
+            uid = getattr(identity, "uid", None)
+            resource_version = getattr(identity, "resource_version", None)
+            renew = getattr(spec, "renew_time", None)
+            duration = getattr(spec, "lease_duration_seconds", None)
+            now = self._now()
+            if (
+                not isinstance(operation_id, str)
+                or not operation_id
+                or getattr(identity, "name", None) != name
+                or getattr(identity, "namespace", None) != namespace
+                or getattr(identity, "deletion_timestamp", None) is not None
+                or not isinstance(uid, str)
+                or not uid
+                or not isinstance(resource_version, str)
+                or not resource_version
+                or getattr(spec, "holder_identity", None) != operation_id
+                or type(duration) is not int
+                or duration <= 0
+                or not isinstance(renew, datetime)
+                or renew.tzinfo is None
+                or renew.utcoffset() is None
+                or not isinstance(now, datetime)
+                or now.tzinfo is None
+                or now.utcoffset() is None
+                or renew > now
+                or renew + timedelta(seconds=duration) <= now
+            ):
+                raise _governance_unavailable()
+        except (ClaimConflict, StaleFence, MetadataConflict, DriverRetryable):
+            raise
+        except Exception as error:  # noqa: BLE001 - provider payloads must not escape
+            if _retryable_kubernetes_error(error):
+                raise _governance_retryable() from None
+            raise _governance_unavailable() from None
 
     async def release(self, metadata: OpaqueProviderMetadata, operation_id: str) -> None:
         name = self._name(metadata)
@@ -2325,9 +2458,7 @@ class HelmCliAdapter:
                 "--version",
                 self._chart_version,
                 "--labels",
-                ",".join(
-                    f"{key}={value}" for key, value in sorted(metadata.hcloud_labels.items())
-                ),
+                ",".join(f"{key}={value}" for key, value in sorted(metadata.hcloud_labels.items())),
                 "--namespace",
                 metadata.resource_name,
                 "--create-namespace=false",

@@ -40,6 +40,7 @@ from .governance_migration_membership import (
     complete_governance_migration_membership,
     repair_governance_schema_claim,
 )
+from .governance_target_recovery import recover_expired_serving_bundle
 from .lifecycle import MetadataConflict, OpaqueProviderMetadata
 from .repository import ClaimConflict, StaleFence
 from .wire_protocol import WIRE_PROTOCOL_V2
@@ -61,6 +62,167 @@ class HostedGovernanceMigrationCoordinator:
         now: Callable[[], float] = time.time,
     ) -> None:
         self._cell, self._jobs, self._now = cell, jobs, now
+
+    async def recover_target(
+        self,
+        *,
+        context: EffectContext,
+        metadata: OpaqueProviderMetadata,
+        owner: OpaqueProviderMetadata,
+        pvc_uid: str,
+        runtime_image: str,
+        custody_recovery_envelope: str,
+        software_version: str,
+    ) -> DriverPending | None:
+        """Reconcile an exact stopped-target commitment; never start or admit.
+
+        The live caller composes claim authority with fresh maintenance, closed
+        routes and stopped-volume proof. ``None`` only means no expiry recovery
+        is needed; it is not a readiness or target-start authorization.
+        """
+        await context.assert_effect_authority()
+        if (
+            context.wire_protocol != WIRE_PROTOCOL_V2
+            or (
+                context.tenant_id,
+                context.cell_id,
+                context.provider_operation_id,
+                context.fence_generation,
+            )
+            != (
+                metadata.tenant_id,
+                metadata.subject_id,
+                metadata.operation_id,
+                metadata.fence_generation,
+            )
+            or (owner.tenant_id, owner.subject_id) != (metadata.tenant_id, metadata.subject_id)
+            or owner.fence_generation > metadata.fence_generation
+        ):
+            raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+        checkpoint = MigrationCheckpoint.decode(context.checkpoint)
+        if checkpoint.binding != migration_binding(
+            context, pvc_uid=pvc_uid, runtime_image=runtime_image
+        ) or checkpoint.phase not in {
+            "complete",
+            "confirmed",
+            "recover-complete",
+            "recover-confirmed",
+        }:
+            raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+        try:
+            files = await self._cell.read_authorization_session_bundle(owner)
+            if files is None:
+                raise _refuse()
+            current = int(self._now())
+            identity = {
+                "expected_cell_id": metadata.subject_id,
+                "expected_logical_vault_id": metadata.tenant_id,
+                "expected_replica_id": metadata.resource_name + "-0",
+                "expected_software_version": software_version,
+                "expected_recovery_envelope": custody_recovery_envelope,
+            }
+            source = inspect_hosted_authorization_bundle(
+                files,
+                **identity,
+                expected_schema_version=4,
+                now=current,
+                _require_fresh=False,
+            )
+            control = json.loads(source.control)
+            if source.governance_enrolled is not True or control["issued_at"] > current:
+                raise _refuse()
+            publication = source
+
+            async def target_authority() -> None:
+                await context.assert_effect_authority()
+                # Route/PVC/lease proofs involve I/O. Authenticate at the time
+                # they finish, not at the earlier predecessor observation.
+                effect_time = int(self._now())
+                authenticated = inspect_hosted_authorization_bundle(
+                    publication.files,
+                    **identity,
+                    expected_schema_version=4,
+                    now=effect_time,
+                    _require_fresh=False,
+                )
+                if json.loads(authenticated.control)["issued_at"] > effect_time:
+                    raise _refuse()
+
+            recovering = checkpoint.recovery_revision is not None
+            if not recovering and (
+                source.replica_state == "DRAINING" or source.expires_at > current
+            ):
+                await target_authority()
+                return None
+            if recovering and source.revision == checkpoint.recovery_revision:
+                if (
+                    source.replica_state != "DRAINING"
+                    or not source.no_in_flight
+                    or not source.issuance_stopped
+                    or control["issued_at"] != checkpoint.recovery_issued_at
+                ):
+                    raise _refuse()
+            else:
+                successor = recover_expired_serving_bundle(
+                    files,
+                    **identity,
+                    now=current,
+                    successor_issued_at=checkpoint.recovery_issued_at if recovering else current,
+                )
+                publication = successor
+                if not recovering:
+                    # A new window must outlast the bounded five-minute Helm
+                    # start. Retained commitments are reconciled even after
+                    # their window elapses, never replaced with a new revision.
+                    await target_authority()
+                    if successor.expires_at - int(self._now()) <= 300:
+                        raise _refuse()
+                    return DriverPending(
+                        replace(
+                            checkpoint,
+                            phase="recover-" + checkpoint.phase,
+                            recovery_revision=successor.revision,
+                            recovery_issued_at=current,
+                        ).encode(),
+                        1,
+                    )
+                if successor.revision != checkpoint.recovery_revision:
+                    raise _refuse()
+                await self._cell.write_authorization_session_bundle(
+                    owner,
+                    successor.files,
+                    recovery_envelope=custody_recovery_envelope,
+                    membership_epoch=successor.epoch,
+                    membership_digest=successor.membership_digest,
+                    revision=successor.revision,
+                    expected_revision=source.revision,
+                    effect_guard=target_authority,
+                )
+            await target_authority()
+            return DriverPending(
+                replace(
+                    checkpoint,
+                    phase="complete",
+                    recovery_revision=None,
+                    recovery_issued_at=None,
+                ).encode(),
+                1,
+            )
+        except (DriverRetryable, LostAcknowledgement):
+            return DriverPending(context.checkpoint, 30)
+        except MetadataConflict as error:
+            if error.reason == ConflictReason.AUTHORIZATION_SESSION_BUNDLE_PREDECESSOR_DIFFERS:
+                # A delayed identical CAS can win between our observation and
+                # the adapter's predecessor read. Reread under the same durable
+                # commitment before deciding whether the successor is foreign.
+                return DriverPending(context.checkpoint, 30)
+            raise
+        except (ClaimConflict, StaleFence, DriverTerminal):
+            raise
+        except Exception as error:  # noqa: BLE001 - provider errors remain content-free
+            if _retryable_kubernetes_error(error):
+                return DriverPending(context.checkpoint, 30)
+            raise _refuse() from None
 
     async def advance(
         self,
