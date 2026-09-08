@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from kubernetes.client import ApiClient, V1ListMeta, V1PodList
 
 from exomem_provisioner.adapters import (
     HCloudVolumeAdapter,
@@ -49,6 +50,76 @@ def _metadata(**overrides: object) -> OpaqueProviderMetadata:
 def _credential(offset: int = 0) -> str:
     raw = bytes((index + offset) % 256 for index in range(32))
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _kube(value: dict[str, object], kind: str):
+    return ApiClient().deserialize(SimpleNamespace(data=json.dumps(value)), kind)
+
+
+def _fingerprint_job(
+    adapter: KubernetesVaultFingerprintAdapter,
+    metadata: OpaqueProviderMetadata,
+    *,
+    operation_id: str,
+    phase: str,
+    envelope: str,
+    uid: str = "fingerprint-job",
+):
+    value = copy.deepcopy(
+        adapter._body(metadata, operation_id=operation_id, phase=phase, recovery_envelope=envelope)
+    )
+    value["metadata"].update({"uid": uid, "resourceVersion": "2"})  # type: ignore[index]
+    value["status"] = {"succeeded": 1, "failed": 0}
+    return _kube(value, "V1Job")
+
+
+def _fingerprint_pod(
+    adapter: KubernetesVaultFingerprintAdapter,
+    metadata: OpaqueProviderMetadata,
+    *,
+    operation_id: str,
+    phase: str,
+    envelope: str,
+    record: str,
+    uid: str = "fingerprint-job",
+):
+    body = adapter._body(
+        metadata, operation_id=operation_id, phase=phase, recovery_envelope=envelope
+    )
+    name = metadata.resource_name + "-init"
+    template = copy.deepcopy(body["spec"]["template"])
+    template["metadata"].update(
+        {
+            "name": name + "-abcde",
+            "namespace": metadata.resource_name,
+            "uid": "pod-fingerprint",
+            "labels": {
+                **template["metadata"]["labels"],
+                "job-name": name,
+                "batch.kubernetes.io/job-name": name,
+            },
+        }
+    )
+    template["metadata"]["ownerReferences"] = [
+        {"apiVersion": "batch/v1", "kind": "Job", "name": name, "uid": uid, "controller": True}
+    ]
+    template["status"] = {
+        "phase": "Succeeded",
+        "containerStatuses": [
+            {
+                "name": "exomem",
+                "image": adapter._image,
+                "imageID": "sha256:" + "a" * 64,
+                "ready": False,
+                "restartCount": 0,
+                "state": {"terminated": {"exitCode": 0, "message": record}},
+            }
+        ],
+    }
+    return _kube(
+        {"metadata": template["metadata"], "spec": template["spec"], "status": template["status"]},
+        "V1Pod",
+    )
 
 
 class _KubernetesCore:
@@ -710,8 +781,9 @@ async def test_traefik_adapter_closes_and_reopens_only_exact_routes() -> None:
     assert '"stripPrefix": {"prefixes": ["/cells/cell-alpha"]}' in rendered
     assert f"/cells/{_metadata().subject_id}/private/exomem/v1" in rendered
     control_route = next(
-        obj for obj in custom.applied if obj.get("kind") == "IngressRoute"
-        and obj["metadata"]["name"].endswith("-control")
+        obj
+        for obj in custom.applied
+        if obj.get("kind") == "IngressRoute" and obj["metadata"]["name"].endswith("-control")
     )
     assert control_route["spec"]["routes"][0]["match"] == (
         "Host(`control.example.invalid`) && "
@@ -961,26 +1033,12 @@ async def test_kubernetes_fingerprint_job_is_read_only_bounded_and_content_free(
         def read_namespaced_job(self, name: str, namespace: str):
             if not created or self.removed:
                 raise _ApiNotFound()
-            return SimpleNamespace(
-                metadata=SimpleNamespace(
-                    annotations=created[0]["metadata"]["annotations"],  # type: ignore[index]
-                    uid="fingerprint-job",
-                    resource_version="2",
-                    deletion_timestamp=None,
-                ),
-                spec=SimpleNamespace(
-                    template=SimpleNamespace(
-                        spec=SimpleNamespace(
-                            containers=[
-                                SimpleNamespace(
-                                    image=image,
-                                    args=["exomem-provisioner-vault-fingerprint"],
-                                )
-                            ]
-                        )
-                    )
-                ),
-                status=SimpleNamespace(succeeded=1, failed=0),
+            return _fingerprint_job(
+                adapter,
+                metadata,
+                operation_id="rollforward-alpha",
+                phase="before",
+                envelope="signed-init-job-envelope",
             )
 
         def create_namespaced_job(self, namespace: str, body: dict[str, object]) -> None:
@@ -1006,35 +1064,22 @@ async def test_kubernetes_fingerprint_job_is_read_only_bounded_and_content_free(
     )
 
     class Core:
-        def list_namespaced_pod(self, namespace: str, *, label_selector: str):
+        def list_namespaced_pod(self, namespace: str, **kwargs: object):
             assert namespace == metadata.resource_name
-            assert label_selector == f"job-name={metadata.resource_name}-init"
             if batch.removed:
-                return SimpleNamespace(items=[])
-            terminated = SimpleNamespace(exit_code=0, message=record)
-            return SimpleNamespace(
+                return V1PodList(items=[], metadata=V1ListMeta())
+            return V1PodList(
                 items=[
-                    SimpleNamespace(
-                        metadata=SimpleNamespace(
-                            owner_references=[
-                                SimpleNamespace(
-                                    api_version="batch/v1",
-                                    kind="Job",
-                                    name=metadata.resource_name + "-init",
-                                    controller=True,
-                                    uid="fingerprint-job",
-                                )
-                            ]
-                        ),
-                        status=SimpleNamespace(
-                            container_statuses=[
-                                SimpleNamespace(
-                                    name="exomem", state=SimpleNamespace(terminated=terminated)
-                                )
-                            ]
-                        ),
+                    _fingerprint_pod(
+                        adapter,
+                        metadata,
+                        operation_id="rollforward-alpha",
+                        phase="before",
+                        envelope="signed-init-job-envelope",
+                        record=record,
                     )
-                ]
+                ],
+                metadata=V1ListMeta(),
             )
 
     batch = Batch()
@@ -1108,14 +1153,7 @@ async def test_fingerprint_cleanup_pins_job_and_pod_identity(race):
 
         def list_namespaced_pod(self, *args, **kwargs):
             if self.job is None:
-                return SimpleNamespace(items=[])
-            owner = SimpleNamespace(
-                api_version="batch/v1",
-                kind="Job",
-                name=metadata.resource_name + "-init",
-                controller=True,
-                uid="foreign" if race == "foreign-pod" else "fingerprint-job",
-            )
+                return V1PodList(items=[], metadata=V1ListMeta())
             if race == "after-result":
                 self.job.metadata.uid = "replacement-migration"
             terminal = json.dumps(
@@ -1125,31 +1163,21 @@ async def test_fingerprint_cleanup_pins_job_and_pod_identity(race):
                     "sha256": "b" * 64,
                 }
             )
-            return SimpleNamespace(
-                items=[
-                    SimpleNamespace(
-                        metadata=SimpleNamespace(owner_references=[owner]),
-                        status=SimpleNamespace(
-                            container_statuses=[
-                                SimpleNamespace(
-                                    name="exomem",
-                                    state=SimpleNamespace(
-                                        terminated=SimpleNamespace(exit_code=0, message=terminal)
-                                    ),
-                                )
-                            ]
-                        ),
-                    )
-                ]
+            pod = _fingerprint_pod(
+                adapter,
+                metadata,
+                operation_id="upgrade",
+                phase="before",
+                envelope="signed",
+                record=terminal,
+                uid="foreign" if race == "foreign-pod" else "fingerprint-job",
             )
+            return V1PodList(items=[pod], metadata=V1ListMeta())
 
         def delete_namespaced_job(self, *args, body):
             if race == "at-delete":
                 self.job.metadata.uid = "replacement-migration"
-            if (
-                body.get("preconditions", {}).get("uid", self.job.metadata.uid)
-                != self.job.metadata.uid
-            ):
+            if body["preconditions"]["uid"] != self.job.metadata.uid:
                 raise Conflict("private-provider-payload")
             deleted.append((self.job.metadata.uid, body))
             self.job = None
@@ -1158,23 +1186,8 @@ async def test_fingerprint_cleanup_pins_job_and_pod_identity(race):
     adapter = KubernetesVaultFingerprintAdapter(
         core_v1=cluster, batch_v1=cluster, image=image, sleep=lambda _: None, poll_attempts=3
     )
-    annotations = adapter._body(
-        metadata, operation_id="upgrade", phase="before", recovery_envelope="signed"
-    )["metadata"]["annotations"]
-    cluster.job = SimpleNamespace(
-        metadata=SimpleNamespace(
-            uid="fingerprint-job", resource_version="2", annotations=annotations
-        ),
-        spec=SimpleNamespace(
-            template=SimpleNamespace(
-                spec=SimpleNamespace(
-                    containers=[
-                        SimpleNamespace(image=image, args=["exomem-provisioner-vault-fingerprint"])
-                    ]
-                )
-            )
-        ),
-        status=SimpleNamespace(succeeded=1, failed=0),
+    cluster.job = _fingerprint_job(
+        adapter, metadata, operation_id="upgrade", phase="before", envelope="signed"
     )
     if race == "none":
         assert (
@@ -1204,11 +1217,12 @@ async def test_fingerprint_cleanup_pins_job_and_pod_identity(race):
 async def test_fingerprint_preserves_foreign_succeeded_fixed_slot() -> None:
     class Batch:
         def read_namespaced_job(self, name, namespace):
-            return SimpleNamespace(
-                metadata=SimpleNamespace(
-                    annotations={"exomem.io/governance-migration-phase": "commit"}
-                ),
-                status=SimpleNamespace(succeeded=1),
+            return _kube(
+                {
+                    "metadata": {"annotations": {"exomem.io/governance-migration-phase": "commit"}},
+                    "status": {"succeeded": 1},
+                },
+                "V1Job",
             )
 
         def delete_namespaced_job(self, *args, **kwargs):
@@ -1236,40 +1250,19 @@ async def test_kubernetes_fingerprint_rejects_untrusted_or_leaky_result() -> Non
 
     class Batch:
         def read_namespaced_job(self, name: str, namespace: str):
-            return SimpleNamespace(
-                metadata=SimpleNamespace(
-                    uid="fingerprint-job",
-                    resource_version="2",
-                    annotations={
-                        **metadata.kubernetes_annotations,
-                        "exomem.io/recovery-envelope": "signed",
-                        "exomem.io/vault-fingerprint-phase": "before",
-                        "exomem.io/vault-fingerprint-operation": hashlib.sha256(
-                            b"rollforward-alpha"
-                        ).hexdigest(),
-                    },
-                    deletion_timestamp=None,
-                ),
-                spec=SimpleNamespace(
-                    template=SimpleNamespace(
-                        spec=SimpleNamespace(
-                            containers=[
-                                SimpleNamespace(
-                                    image=image,
-                                    args=["exomem-provisioner-vault-fingerprint"],
-                                )
-                            ]
-                        )
-                    )
-                ),
-                status=SimpleNamespace(succeeded=1, failed=0),
+            return _fingerprint_job(
+                adapter,
+                metadata,
+                operation_id="rollforward-alpha",
+                phase="before",
+                envelope="signed",
             )
 
-        def delete_namespaced_job(self, name: str, namespace: str, body: object) -> None:
+        def delete_namespaced_job(self, *args, **kwargs):
             raise AssertionError("invalid result must not be accepted or deleted")
 
     class Core:
-        def list_namespaced_pod(self, namespace: str, *, label_selector: str):
+        def list_namespaced_pod(self, namespace: str, **kwargs):
             leaked = json.dumps(
                 {
                     "artifact": "exomem-hosted-vault-fingerprint",
@@ -1278,41 +1271,22 @@ async def test_kubernetes_fingerprint_rejects_untrusted_or_leaky_result() -> Non
                     "path": "private.md",
                 }
             )
-            terminated = SimpleNamespace(exit_code=0, message=leaked)
-            return SimpleNamespace(
-                items=[
-                    SimpleNamespace(
-                        metadata=SimpleNamespace(
-                            owner_references=[
-                                SimpleNamespace(
-                                    api_version="batch/v1",
-                                    kind="Job",
-                                    name=metadata.resource_name + "-init",
-                                    controller=True,
-                                    uid="fingerprint-job",
-                                )
-                            ]
-                        ),
-                        status=SimpleNamespace(
-                            container_statuses=[
-                                SimpleNamespace(
-                                    name="exomem", state=SimpleNamespace(terminated=terminated)
-                                )
-                            ]
-                        ),
-                    )
-                ]
+            pod = _fingerprint_pod(
+                adapter,
+                metadata,
+                operation_id="rollforward-alpha",
+                phase="before",
+                envelope="signed",
+                record=leaked,
             )
+            return V1PodList(items=[pod], metadata=V1ListMeta())
 
     adapter = KubernetesVaultFingerprintAdapter(
         core_v1=Core(), batch_v1=Batch(), image=image, sleep=lambda _seconds: None
     )
     with pytest.raises(MetadataConflict, match="fingerprint result"):
         await adapter.fingerprint(
-            metadata,
-            operation_id="rollforward-alpha",
-            phase="before",
-            recovery_envelope="signed",
+            metadata, operation_id="rollforward-alpha", phase="before", recovery_envelope="signed"
         )
 
 
@@ -1379,9 +1353,7 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
                 200,
                 {
                     "version": 1,
-                    "attestation": base64.urlsafe_b64encode(
-                        b'{"signed":"runtime-attestation"}'
-                    )
+                    "attestation": base64.urlsafe_b64encode(b'{"signed":"runtime-attestation"}')
                     .rstrip(b"=")
                     .decode("ascii"),
                     "attestation_sha256": hashlib.sha256(

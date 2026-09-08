@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from kubernetes.client import V1Lease, V1LeaseSpec, V1ListMeta, V1ObjectMeta, V1PodList
 from test_governance_live_readiness import ReadinessHarness
@@ -342,3 +343,38 @@ async def test_guarded_api_conflict_retains_commitment_until_exact_reread(applie
     result = await h.recover()
     assert MigrationCheckpoint.decode(result.checkpoint).phase == "complete"
     assert len(h.patches) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("when", ["before-proof", "during-proof"])
+async def test_elapsed_owned_maintenance_preserves_recovery_commitment(when):
+    h = RecoveryHarness()
+    result = await h.recover()
+    h.context = replace(h.context, checkpoint=result.checkpoint)
+    if when == "before-proof":
+        h.now += 121
+    else:
+
+        async def slow_probe(*args):
+            h.now += 121
+            return 404
+
+        h.plane._routes._probe = slow_probe
+    assert await h.recover() == DriverPending(h.context.checkpoint, 30)
+    assert not h.patches
+
+
+@pytest.mark.asyncio
+async def test_external_probe_transport_outage_preserves_recovery_commitment():
+    h = RecoveryHarness()
+    result = await h.recover()
+    h.context = replace(h.context, checkpoint=result.checkpoint)
+
+    async def timeout(*args):
+        raise httpx.ReadTimeout("private probe destination")
+
+    h.plane._routes._probe = timeout
+    assert await h.recover() == DriverPending(h.context.checkpoint, 30)
+    assert not h.patches
+    with pytest.raises(httpx.ReadTimeout):
+        await h.plane.prove_external_rejection(h.current, h.request)

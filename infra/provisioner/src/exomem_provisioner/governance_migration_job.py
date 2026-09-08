@@ -21,6 +21,7 @@ from kubernetes.client import ApiClient
 from .adapters import _retryable_kubernetes_error
 from .conflict_reason import ConflictReason
 from .driver import DriverRetryable, DriverTerminal
+from .job_execution import metadata_matches, pod_spec_matches
 from .lifecycle import MetadataConflict, OpaqueProviderMetadata
 from .repository import ClaimConflict, StaleFence
 
@@ -434,66 +435,14 @@ class KubernetesGovernanceMigrationAdapter:
 
     @staticmethod
     def _metadata(actual: dict[str, Any], expected: dict[str, Any]) -> None:
-        if any(
-            actual.get(field, {}).get(key) != value
-            for field in ("labels", "annotations")
-            for key, value in expected[field].items()
-        ):
-            raise _refuse()
-        if any(
-            key.startswith("exomem.io/") and key not in expected[field]
-            for field in ("labels", "annotations")
-            for key in actual.get(field, {})
-        ):
+        if not metadata_matches(actual, expected):
             raise _refuse()
 
     @staticmethod
     def _pod_spec(
         actual: dict[str, Any], expected: dict[str, Any], *, scheduled: bool = False
     ) -> None:
-        # Only API-server/controller defaults may supplement the closed spec.
-        defaults: dict[str, Any] = {
-            "dnsPolicy": "ClusterFirst",
-            "schedulerName": "default-scheduler",
-            "terminationGracePeriodSeconds": 30,
-            "enableServiceLinks": True,
-            "serviceAccount": expected["serviceAccountName"],
-            "preemptionPolicy": "PreemptLowerPriority",
-            "priority": 0,
-        }
-        value = copy.deepcopy(actual)
-        expected_value = copy.deepcopy(expected)
-        # Go's omitempty drops readOnly:false from writable mounts/PVC
-        # sources. Normalize only that observed API default, never true.
-        for spec in (value, expected_value):
-            for container in spec.get("containers", []) + spec.get("initContainers", []):
-                for mount in container.get("volumeMounts", []):
-                    if mount.get("readOnly") is False:
-                        mount.pop("readOnly")
-            for volume in spec.get("volumes", []):
-                claim = volume.get("persistentVolumeClaim", {})
-                if claim.get("readOnly") is False:
-                    claim.pop("readOnly")
-        for key, default in defaults.items():
-            if key in value:
-                if value.pop(key) != default:
-                    raise _refuse()
-        if scheduled:
-            if "nodeName" in value and not _matches(_IDENTITY, value.pop("nodeName")):
-                raise _refuse()
-            tolerations = value.pop("tolerations", [])
-            allowed = [
-                {
-                    "key": "node.kubernetes.io/" + key,
-                    "operator": "Exists",
-                    "effect": "NoExecute",
-                    "tolerationSeconds": 300,
-                }
-                for key in ("not-ready", "unreachable")
-            ]
-            if any(item not in allowed for item in tolerations) or len(tolerations) > 2:
-                raise _refuse()
-        if value != expected_value:
+        if not pod_spec_matches(actual, expected, scheduled=scheduled):
             raise _refuse()
 
     def _job(

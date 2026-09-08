@@ -65,7 +65,7 @@ def _pvc_is_bound(value: object, *, metadata: OpaqueProviderMetadata, pvc_uid: s
         raise _refuse()
 
 
-def _runtime_is_stopped(value: object, *, resource: str) -> None:
+def _runtime_is_stopped(value: object, *, resource: str, require_uid: bool = False) -> str | None:
     runtime = _mapping(value)
     identity = _mapping(runtime.get("metadata"))
     spec = _mapping(runtime.get("spec"))
@@ -77,15 +77,37 @@ def _runtime_is_stopped(value: object, *, resource: str) -> None:
         or replicas != 0
     ):
         raise _refuse()
+    uid = identity.get("uid")
+    if require_uid:
+        return _string(uid)
+    return None
 
 
-def _pod_uses_runtime_or_pvc(value: object, *, resource: str) -> bool:
+def _pod_evidence(
+    value: object,
+    *,
+    metadata: OpaqueProviderMetadata,
+    runtime_uid: str | None,
+) -> tuple[bool, bool]:
+    """Return whether a pod is forbidden or the sole retryable runtime remnant."""
+    resource = metadata.resource_name
     pod = _mapping(value)
     identity = _mapping(pod.get("metadata"))
     if identity.get("namespace") != resource:
         raise _refuse()
     name = _string(identity.get("name"))
     _string(identity.get("uid"))
+
+    annotations_value = identity.get("annotations")
+    if annotations_value is None:
+        annotations: dict[str, Any] = {}
+    else:
+        annotations = _mapping(annotations_value)
+        if any(
+            not isinstance(key, str) or not isinstance(item, str)
+            for key, item in annotations.items()
+        ):
+            raise _refuse()
 
     labels_value = identity.get("labels")
     if labels_value is None:
@@ -104,9 +126,13 @@ def _pod_uses_runtime_or_pvc(value: object, *, resource: str) -> bool:
         owners = owners_value
     else:
         raise _refuse()
+    owner_identities: list[dict[str, Any]] = []
     for owner in owners:
         owner_identity = _mapping(owner)
         _string(owner_identity.get("name"))
+        if "controller" in owner_identity and type(owner_identity["controller"]) is not bool:
+            raise _refuse()
+        owner_identities.append(owner_identity)
 
     spec = _mapping(pod.get("spec"))
     volumes_value = spec.get("volumes")
@@ -116,6 +142,7 @@ def _pod_uses_runtime_or_pvc(value: object, *, resource: str) -> bool:
         volumes = volumes_value
     else:
         raise _refuse()
+    uses_pvc = False
     for volume in volumes:
         source = _mapping(volume)
         claim = source.get("persistentVolumeClaim")
@@ -123,16 +150,33 @@ def _pod_uses_runtime_or_pvc(value: object, *, resource: str) -> bool:
             continue
         claim_identity = _mapping(claim)
         if _string(claim_identity.get("claimName")) == resource + "-data":
-            return True
+            uses_pvc = True
 
-    return (
+    runtime_signal = (
         name == resource + "-0"
-        or any(owner["name"] == resource for owner in owners if isinstance(owner, dict))
+        or any(owner["name"] == resource for owner in owner_identities)
         or (
             labels.get("app.kubernetes.io/name") == "exomem-cell"
             and labels.get("exomem.io/cell") == resource
         )
     )
+    exact_controller = (
+        len(owner_identities) == 1
+        and owner_identities[0].get("kind") == "StatefulSet"
+        and owner_identities[0].get("name") == resource
+        and owner_identities[0].get("uid") == runtime_uid
+        and owner_identities[0].get("controller") is True
+    )
+    retryable_runtime = (
+        runtime_uid is not None
+        and name == resource + "-0"
+        and exact_controller
+        and all(
+            annotations.get(key) == expected
+            for key, expected in metadata.kubernetes_annotations.items()
+        )
+    )
+    return uses_pvc or runtime_signal, retryable_runtime
 
 
 async def verify_stopped_cell(
@@ -141,6 +185,7 @@ async def verify_stopped_cell(
     *,
     metadata: OpaqueProviderMetadata,
     pvc_uid: str,
+    wait_for_runtime: bool = False,
 ) -> None:
     """Prove that a bound cell volume has no workload before target recovery."""
     try:
@@ -148,6 +193,7 @@ async def verify_stopped_cell(
             not isinstance(metadata, OpaqueProviderMetadata)
             or not isinstance(pvc_uid, str)
             or not pvc_uid
+            or type(wait_for_runtime) is not bool
         ):
             raise _refuse()
         resource = metadata.resource_name
@@ -160,6 +206,7 @@ async def verify_stopped_cell(
             )
         )
         _pvc_is_bound(pvc, metadata=metadata, pvc_uid=pvc_uid)
+        runtime_uid: str | None = None
         try:
             runtime = serializer.sanitize_for_serialization(
                 await asyncio.to_thread(apps_v1.read_namespaced_stateful_set, resource, resource)
@@ -168,7 +215,11 @@ async def verify_stopped_cell(
             if getattr(error, "status", None) != 404:
                 raise
         else:
-            _runtime_is_stopped(runtime, resource=resource)
+            runtime_uid = _runtime_is_stopped(
+                runtime,
+                resource=resource,
+                require_uid=wait_for_runtime,
+            )
 
         page = serializer.sanitize_for_serialization(
             await asyncio.to_thread(core_v1.list_namespaced_pod, resource)
@@ -186,8 +237,22 @@ async def verify_stopped_cell(
         items = page_value.get("items")
         if not isinstance(items, list):
             raise _refuse()
-        if any(_pod_uses_runtime_or_pvc(item, resource=resource) for item in items):
+        retryable_runtime = False
+        forbidden_runtime = False
+        for item in items:
+            forbidden, retryable = _pod_evidence(
+                item,
+                metadata=metadata,
+                runtime_uid=runtime_uid if wait_for_runtime else None,
+            )
+            if retryable and wait_for_runtime:
+                retryable_runtime = True
+            elif forbidden:
+                forbidden_runtime = True
+        if forbidden_runtime:
             raise _refuse()
+        if retryable_runtime:
+            raise _retry()
     except (ClaimConflict, StaleFence, MetadataConflict, DriverRetryable):
         raise
     except Exception as error:  # noqa: BLE001 - provider payloads must not escape
