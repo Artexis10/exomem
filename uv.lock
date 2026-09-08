@@ -714,6 +714,7 @@ benchmark-judge = [
     { name = "backoff" },
     { name = "openai" },
     { name = "tiktoken" },
+    { name = "tokenizers" },
     { name = "tqdm" },
 ]
 dev = [
@@ -771,6 +772,7 @@ benchmark-judge = [
     { name = "backoff", specifier = ">=2.2" },
     { name = "openai", specifier = ">=1" },
     { name = "tiktoken", specifier = ">=0.7" },
+    { name = "tokenizers", specifier = ">=0.20" },
     { name = "tqdm", specifier = ">=4" },
 ]
 dev = [

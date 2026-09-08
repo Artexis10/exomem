@@ -217,7 +217,8 @@ async def run_agent_phase(broker: NativeBroker, *, phase: str, turn: str, out: P
     inflight: dict | None = None
     process = None
     started = time.monotonic()
-    encoding = tiktoken.encoding_for_model("gpt-4o-2024-08-06")
+    encoding = (tiktoken.encoding_for_model("gpt-4o-2024-08-06")
+                if not hasattr(broker.backend, "count_chat_tokens") else None)
     env = {"PATH": os.defpath, "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
            "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUTF8": "1", "HOME": str(worker_cwd)}
     try:
@@ -263,7 +264,10 @@ async def run_agent_phase(broker: NativeBroker, *, phase: str, turn: str, out: P
                     tools = [{"type": "function", "function": {"name": name, "description": available[name]["description"], "parameters": available[name]["inputSchema"], "strict": False}} for name in names]
                     messages = request["messages"]
                     # Count serialized payload plus conservative chat/schema framing.
-                    if len(encoding.encode_ordinary(_json({"messages": messages, "tools": tools}))) + 1024 > limits.max_context_tokens:
+                    counter = getattr(broker.backend, "count_chat_tokens", None)
+                    context_tokens = (counter(messages, tools) if counter is not None else
+                        len(encoding.encode_ordinary(_json({"messages": messages, "tools": tools}))))
+                    if context_tokens + 1024 > limits.max_context_tokens:
                         raise EnvelopeExhausted("context-token budget exceeded; no truncation")
                     broker.envelope.take("model")
                     reserved_tokens = limits.max_context_tokens + limits.max_output_tokens

@@ -49,6 +49,30 @@ basis, never harvested from output prose by the harness.
   overlap rather than the agent's declared basis
 - **THEN** the result is marked unsupported rather than pass or fail
 
+### Requirement: Native Agent Profiles Are Economical And Reproducible
+Native diagnostics SHALL accept explicitly verified economical agent models,
+including GLM-5.3-Flash through OpenRouter, without changing the official judge.
+Each preparation SHALL bind model settings, provider routing, regular-price
+reservation rates and tokenizer identity. A non-OpenAI tokenizer SHALL be
+supplied locally, verified against an immutable official digest and frozen with
+the prepared inputs. The broker and transport SHALL use that model's tokenizer
+for context bounds. No tokenizer or price fallback may silently substitute an
+OpenAI profile. Compared products SHALL use the same chosen agent configuration;
+model selection SHALL use independent workflow acceptance rather than held-out
+evaluation answers. Existing historical results retain their original profiles.
+The request SHALL pin the permanent release where available. A verified gateway
+response alias SHALL be explicitly frozen; other model identities are refused.
+
+#### Scenario: Tokenizer substitution is refused before spending
+- **WHEN** an economical-model tokenizer is absent or differs from its frozen digest
+- **THEN** preparation or execution refuses before a model request
+
+#### Scenario: Agent and judge use distinct pinned providers
+- **WHEN** a GLM native agent is followed by the fixed OpenAI judge
+- **THEN** each call uses its own frozen provider and rates in one shared ledger
+- **AND** a mismatched response provider stops subsequent calls after accounting
+  for any known charge
+
 ### Requirement: Competitor Extraction Cost Is Metered Symmetrically
 Where a product performs server-side model work during ingestion or
 maintenance, its model endpoint SHALL be routed through a metering proxy so

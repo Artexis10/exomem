@@ -177,6 +177,7 @@ benchmark-judge = [
     "backoff>=2.2",
     "openai>=1",
     "tiktoken>=0.7",
+    "tokenizers>=0.20",
     "tqdm>=4",
 ]
 dev = [

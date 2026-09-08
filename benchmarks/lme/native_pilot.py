@@ -21,7 +21,13 @@ if str(_ROOT / "benchmarks") not in sys.path:
     sys.path.insert(0, str(_ROOT / "benchmarks"))
 
 from lme.dataset import _question_dict, load_dataset_bytes, stable_dataset_bytes  # noqa: E402
-from lme.metered_profiles import JUDGE_MODEL, SOL_MODEL, model_contract  # noqa: E402
+from lme.metered_profiles import (  # noqa: E402
+    GLM_MODEL,
+    JUDGE_MODEL,
+    SOL_MODEL,
+    model_contract,
+    model_profile,
+)
 from lme.native_agent import AgentLimits, NativeBroker, RunEnvelope, run_agent_phase  # noqa: E402
 from lme.scored_pilot import _judge_source, _run_judge  # noqa: E402
 
@@ -138,7 +144,7 @@ def prepare_native(dataset_path: Path, judge_home: Path, out: Path, *, product_r
                    seed: str = "native-lme-v1", limits: AgentLimits | None = None,
                    transport: str = "openrouter", python: Path = Path(sys.executable),
                    model_cache: Path | None = None, clip_model_cache: Path | None = None,
-                   agent_model: str = JUDGE_MODEL) -> dict:
+                   agent_model: str = JUDGE_MODEL, agent_tokenizer: Path | None = None) -> dict:
     """Freeze source, guidance, cohort and limits without model or service calls."""
     if profile not in {"fixture", "semantic"} or transport not in {"openai", "openrouter"}:
         raise ValueError("unknown native profile or transport")
@@ -147,6 +153,8 @@ def prepare_native(dataset_path: Path, judge_home: Path, out: Path, *, product_r
     if isinstance(budget_cap_usd, bool) or not math.isfinite(budget_cap_usd) or budget_cap_usd <= 0:
         raise ValueError("budget cap must be finite and positive")
     models = model_contract(agent_model, transport)
+    from lme.tokenization import tokenizer_bytes
+    agent_tokenizer_bytes = tokenizer_bytes(model_profile(agent_model, transport), agent_tokenizer)
     limits = limits or AgentLimits()
     dataset_bytes = stable_dataset_bytes(dataset_path)
     pin = json.loads(_PIN.read_bytes())
@@ -188,6 +196,9 @@ def prepare_native(dataset_path: Path, judge_home: Path, out: Path, *, product_r
     def save(relative: str, data: bytes):
         _write(out / relative, data)
         artifacts[relative] = _sha(data)
+
+    if agent_tokenizer_bytes is not None:
+        save("agent-tokenizer.json", agent_tokenizer_bytes)
 
     save("product/docs/prominence.md", prominence)
     save("custom-instructions.md", custom_instructions.encode("utf-8"))
@@ -275,6 +286,9 @@ def validate_native_run(out: Path, *, expected_plan_sha256: str) -> dict:
     if plan["profile"] == "semantic" and (plan.get("model_cache") is None or plan.get("clip_model_cache") is None):
         raise ValueError("native semantic plan needs frozen BGE and CLIP model caches")
     snapshots = _snapshots(out, plan)
+    tokenizer_sha = plan["models"]["agent"].get("tokenizer_sha256")
+    if tokenizer_sha is not None and _sha(snapshots.get("agent-tokenizer.json", b"")) != tokenizer_sha:
+        raise ValueError("native agent tokenizer differs from the model profile")
     evaluator = load_dataset_bytes(snapshots["evaluator.json"])
     for case in plan["cases"]:
         question = evaluator.require(case["question_id"])
@@ -286,7 +300,9 @@ def validate_native_run(out: Path, *, expected_plan_sha256: str) -> dict:
 def _make_backend(execution: Path, plan: dict, approval_token: str, api_key_env: str | None):
     from lme.metered import MeteredOpenAIBackend
     return MeteredOpenAIBackend(execution, cap_usd=plan["budget_cap_usd"], approval_token=approval_token,
-                                transport=plan["transport"], api_key_env=api_key_env, model=plan["model"])
+                                transport=plan["transport"], api_key_env=api_key_env, model=plan["model"],
+                                tokenizer_path=(execution.parent / "agent-tokenizer.json"
+                                    if plan["models"]["agent"].get("tokenizer_sha256") else None))
 
 
 def _structured(payload: dict):
@@ -479,7 +495,8 @@ def main():
     prepare.add_argument("--budget-cap-usd", type=float, required=True)
     prepare.add_argument("--seed", default="native-lme-v1")
     prepare.add_argument("--transport", choices=["openai", "openrouter"], default="openrouter")
-    prepare.add_argument("--agent-model", choices=[JUDGE_MODEL, SOL_MODEL], default=JUDGE_MODEL)
+    prepare.add_argument("--agent-model", choices=[JUDGE_MODEL, SOL_MODEL, GLM_MODEL], default=JUDGE_MODEL)
+    prepare.add_argument("--agent-tokenizer", type=Path, help="Pinned local tokenizer JSON required by GLM")
     prepare.add_argument("--python", type=Path, default=Path(sys.executable))
     prepare.add_argument("--model-cache", type=Path, required=True, help="Local HF models--BAAI--bge-base-en-v1.5 directory")
     prepare.add_argument("--clip-model-cache", type=Path, required=True, help="Local HF models--sentence-transformers--clip-ViT-B-32 directory")
@@ -492,7 +509,7 @@ def main():
     args = parser.parse_args()
     if args.command == "prepare":
         result = prepare_native(args.dataset, args.judge_home, args.out, product_root=args.product_root,
-                                size=args.size, budget_cap_usd=args.budget_cap_usd, seed=args.seed, transport=args.transport, python=args.python, model_cache=args.model_cache, clip_model_cache=args.clip_model_cache, agent_model=args.agent_model)
+                                size=args.size, budget_cap_usd=args.budget_cap_usd, seed=args.seed, transport=args.transport, python=args.python, model_cache=args.model_cache, clip_model_cache=args.clip_model_cache, agent_model=args.agent_model, agent_tokenizer=args.agent_tokenizer)
     else:
         result = execute_native(args.out, expected_plan_sha256=args.expected_plan_sha256,
                                 approval_token=args.metered_approval, python=args.python, api_key_env=args.api_key_env)

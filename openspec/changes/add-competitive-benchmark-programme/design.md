@@ -726,6 +726,18 @@ or replace the external LongMemEval dataset and judge.
   Account cache-write tokens explicitly when reported; account charges remain
   authoritative. A profile change requires a fresh preparation and is reported
   as a changed agent configuration, never relabeled as a rerun of the old model.
+  The economical alternative is GLM-5.3-Flash through the pinned Z.AI FP8
+  endpoint. Request the permanent dated release and freeze its exact public
+  response alias, which OpenRouter returns for that release; refuse other
+  response identities and verify the selected endpoint's model and provider.
+  Use regular input/cache/output rates of $0.15/$0.03/$0.50 per
+  million so temporary discounts reduce actual cost without becoming a runtime
+  dependency. Freeze the official tokenizer JSON at an immutable Hugging Face
+  revision and digest; load it through tokenizers without network access or
+  remote code, and share its counter between broker and transport. Preserve
+  the OpenAI judge's own provider and tokenizer in the same ledger. A model
+  change needs a fresh preparation and independent workflow acceptance, with
+  the same agent configuration across any compared products.
 - Preserve each model request, tool call/result, phase boundary, committed-write
   receipt, vault snapshot digest and measured spend. Report observed captures,
   compiled writes, updates and connections separately from requested behavior.

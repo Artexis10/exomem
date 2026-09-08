@@ -130,11 +130,14 @@ class MeteredOpenAIBackend:
         api_key_env: str | None = None,
         model: str = VERIFIED_MODEL,
         transport: str = "openai",
+        tokenizer_path: Path | None = None,
     ) -> None:
         if transport not in {"openai", "openrouter"}:
             raise MeteredConfigurationError("transport must be 'openai' or 'openrouter'")
         try:
             profile = model_profile(model, transport)
+            from lme.tokenization import load_tokenizer
+            encoder = load_tokenizer(profile, tokenizer_path)
         except ValueError as exc:
             raise MeteredConfigurationError(str(exc)) from None
         if isinstance(cap_usd, bool) or not isinstance(cap_usd, (int, float)):
@@ -158,13 +161,14 @@ class MeteredOpenAIBackend:
         os.chmod(self.run_dir, 0o700)
         self.model = model
         self.profile = profile
+        self._encoder = encoder
         self.profiles = {name: model_profile(name, transport) for name in {model, JUDGE_MODEL}}
         self.transport = transport
         self.endpoint = (
             OPENROUTER_ENDPOINT if transport == "openrouter" else OPENAI_ENDPOINT
         )
         self.wire_model = profile.wire_model(transport)
-        self.provider = OPENAI_PROVIDER
+        self.provider = profile.provider_name
         self.api_key_env = api_key_env
         self.cap_usd = cap
         self._lock = threading.Lock()
@@ -201,6 +205,7 @@ class MeteredOpenAIBackend:
             "allowed_models": sorted(self.profiles),
             "context_preflight": f"{profile.tokenizer}-estimate",
             "tokenizer_source": profile.tokenizer_source,
+            "tokenizer_sha256": profile.tokenizer_sha256,
             "reservation_input_tokens": CONTEXT_TOKENS,
             "transport": transport,
             "wire_model": self.wire_model,
@@ -240,7 +245,7 @@ class MeteredOpenAIBackend:
         self._validate_max_tokens(max_tokens, maximum=4096)
         tool_definitions, tool_names = self._validate_tools(tools)
         message_history = self._validate_messages(messages, tool_names=tool_names)
-        input_tokens = _serialized_chat_tokens(message_history, tool_definitions, encoding_name=profile.tokenizer)
+        input_tokens = self.count_chat_tokens(message_history, tool_definitions, model=selected)
         if input_tokens + max_tokens > CONTEXT_TOKENS:
             raise MeteredConfigurationError(
                 "serialized messages and tools exceed the verified model context window"
@@ -265,7 +270,9 @@ class MeteredOpenAIBackend:
                 reply = await client.post(
                     self.endpoint,
                     json=body,
-                    headers={"Authorization": f"Bearer {prepared.api_key}"},
+                    headers={"Authorization": f"Bearer {prepared.api_key}",
+                        **({"X-OpenRouter-Metadata": "enabled"}
+                           if profile.provider_metadata_required else {})},
                 )
             finally:
                 await asyncio.shield(client.aclose())
@@ -422,8 +429,8 @@ class MeteredOpenAIBackend:
         if not isinstance(prompt, str) or not prompt:
             raise MeteredConfigurationError("prompt must be a nonblank string")
         self._validate_max_tokens(max_tokens, maximum=512)
-        if self.profile.reasoning_effort and _serialized_chat_tokens(
-            [{"role": "user", "content": prompt}], [], encoding_name=self.profile.tokenizer
+        if self.profile.reasoning_effort and self.count_chat_tokens(
+            [{"role": "user", "content": prompt}], []
         ) + max_tokens > CONTEXT_TOKENS:
             raise MeteredConfigurationError("prompt exceeds the reserved context envelope")
         body = self._request_body(
@@ -441,7 +448,9 @@ class MeteredOpenAIBackend:
             reply = httpx.post(
                 self.endpoint,
                 json=body,
-                headers={"Authorization": f"Bearer {prepared.api_key}"},
+                headers={"Authorization": f"Bearer {prepared.api_key}",
+                    **({"X-OpenRouter-Metadata": "enabled"}
+                       if prepared.profile.provider_metadata_required else {})},
                 timeout=TIMEOUT_SECONDS,
             )
         except KeyboardInterrupt:
@@ -527,8 +536,8 @@ class MeteredOpenAIBackend:
             body.update(
                 {
                     "provider": {
-                        "only": ["openai"],
-                        "order": ["openai"],
+                        "only": [profile.provider_slug],
+                        "order": [profile.provider_slug],
                         "allow_fallbacks": False,
                         "require_parameters": True,
                         "max_price": {
@@ -541,6 +550,11 @@ class MeteredOpenAIBackend:
                 }
             )
         return body
+
+    def count_chat_tokens(self, messages: list[dict], tools: list[dict], *, model: str | None = None) -> int:
+        profile = self.profiles[self.model if model is None else model]
+        encoder = self._encoder if profile.tokenizer_sha256 is not None else None
+        return _serialized_chat_tokens(messages, tools, encoding_name=profile.tokenizer, encoder=encoder)
 
     def _prepare_call(
         self,
@@ -709,7 +723,26 @@ class MeteredOpenAIBackend:
             )
 
         actual_model = data.get("model") if isinstance(data, dict) else None
+        accepted_response_models = (prepared.profile.wire_model(self.transport),)
+        if prepared.profile.response_model_alias is not None:
+            accepted_response_models += (prepared.profile.response_model_alias,)
         actual_provider = data.get("provider") if isinstance(data, dict) else None
+        if prepared.profile.provider_metadata_required:
+            metadata = data.get("openrouter_metadata") if isinstance(data, dict) else None
+            endpoints = metadata.get("endpoints") if isinstance(metadata, dict) else None
+            available = endpoints.get("available") if isinstance(endpoints, dict) else None
+            selected = [entry for entry in available if isinstance(entry, dict) and entry.get("selected") is True] if isinstance(available, list) else []
+            selected_endpoint = selected[0] if len(selected) == 1 else {}
+            allowed_endpoint_models = (
+                prepared.profile.model,
+                prepared.profile.wire_model(self.transport),
+            )
+            declared_provider = (
+                selected_endpoint.get("provider")
+                if selected_endpoint.get("model") in allowed_endpoint_models
+                else None
+            )
+            actual_provider = declared_provider if actual_provider in (None, declared_provider) else None
         generation_id = data.get("id") if isinstance(data, dict) else None
         choice: object = None
         choices = data.get("choices") if isinstance(data, dict) else None
@@ -738,9 +771,9 @@ class MeteredOpenAIBackend:
         )
         if credential_reflected:
             failure = "completion contained the configured credential"
-        elif actual_model != prepared.profile.wire_model(self.transport):
+        elif actual_model not in accepted_response_models:
             failure = "response model differs from the verified model"
-        elif self.transport == "openrouter" and actual_provider != self.provider:
+        elif self.transport == "openrouter" and actual_provider != prepared.profile.provider_name:
             failure = "response provider differs from the required provider"
         elif native:
             if is_byok is True:
@@ -954,10 +987,10 @@ class MeteredOpenAIBackend:
             accepted = {"role": "assistant", "content": content, "tool_calls": calls}
             # OpenRouter requires opaque reasoning blocks to survive tool rounds
             # unchanged. They remain private transcript data, never tool input.
-            for key in ("reasoning", "reasoning_details"):
+            for key in ("reasoning", "reasoning_content", "reasoning_details"):
                 value = message.get(key)
                 if value is not None:
-                    if (key == "reasoning" and not isinstance(value, str)) or (
+                    if (key in {"reasoning", "reasoning_content"} and not isinstance(value, str)) or (
                         key == "reasoning_details" and
                         (not isinstance(value, list) or any(not isinstance(v, dict) for v in value))
                     ):
@@ -1351,9 +1384,8 @@ def _redact_native_message(message: object, secret: str) -> object:
 
 
 def _serialized_chat_tokens(
-    messages: list[dict[str, object]], tools: list[dict[str, object]], *, encoding_name: str = "o200k_base"
+    messages: list[dict[str, object]], tools: list[dict[str, object]], *, encoding_name: str = "o200k_base", encoder=None
 ) -> int:
-    import tiktoken
 
     serialized = json.dumps(
         {"messages": messages, "tools": tools},
@@ -1362,13 +1394,19 @@ def _serialized_chat_tokens(
         separators=(",", ":"),
         sort_keys=True,
     )
-    encoder = tiktoken.get_encoding(encoding_name)
     framing = _CHAT_FRAMING_BASE_TOKENS + _CHAT_FRAMING_ITEM_TOKENS * (
         len(messages) + len(tools)
     )
     # Resolve the frozen upstream encoding explicitly: older tiktoken model-name
     # dispatch misses GPT-5 point releases despite carrying this same encoding.
-    tokens = len(encoder.encode_ordinary(serialized))
+    if encoder is None:
+        import tiktoken
+        tokens = len(tiktoken.get_encoding(encoding_name).encode_ordinary(serialized))
+    else:
+        tokens = len(encoder.encode(serialized, add_special_tokens=False).ids)
+        # GLM's provider renders its own chat/tool template. Reserve fixed
+        # framing plus proportional headroom; this is not a billing counter.
+        tokens = math.ceil(tokens * 1.1) + 4096
     return tokens + framing
 
 

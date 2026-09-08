@@ -477,6 +477,12 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       accounting offline. Freeze optional Sol-low native agent and fixed GPT-4o
       judge roles separately, preserve reasoning through tools, and enforce one
       currency ledger across both models including unknown-charge stops.
+- [ ] 6.4d Add the explicitly selected economical GLM-5.3-Flash agent profile
+      with pinned provider, regular-price reservations and an immutable local
+      tokenizer. Use the same tokenizer for the broker and transport bounds;
+      retain the fixed official judge and one shared ledger. Verify routing,
+      tokenizer drift, preparation integrity and fail-closed accounting offline,
+      then run a capped synthetic acceptance before a full-history diagnostic.
 - [ ] 6.4b Verify real public-MCP writing, correction and fresh recall using a
       scripted offline agent; bind actual operation receipts and phase evidence.
       Keep no-write and budget-exhausted outcomes visible.
