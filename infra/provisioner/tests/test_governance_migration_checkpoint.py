@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import replace
 
 import pytest
@@ -108,3 +109,80 @@ def test_checkpoint_decoder_rejects_extra_fields_and_whitespace():
     for malformed in (raw + ":extra", raw + "\n", " " + raw, raw.replace(":i:", ":inspect:")):
         with pytest.raises(DriverTerminal, match="^PROVISIONER_CHECKPOINT_INVALID$"):
             module.MigrationCheckpoint.decode(malformed)
+
+
+def _recovery_raw(*, phase="r1t", issued_at=str((1 << 63) - 1)):
+    def compact(digest):
+        return base64.urlsafe_b64encode(bytes.fromhex(digest)).rstrip(b"=").decode()
+
+    return ":".join(
+        (
+            "gm1",
+            phase,
+            compact("a" * 64),
+            _binding(),
+            compact("b" * 64),
+            compact("c" * 64),
+            compact("d" * 64),
+            issued_at,
+        )
+    )
+
+
+@pytest.mark.parametrize("code,phase", [("r1d", "recover-complete"), ("r1t", "recover-confirmed")])
+def test_recovery_checkpoint_preserves_exact_intent_within_existing_bound(code, phase):
+    raw = _recovery_raw(phase=code)
+    checkpoint = _module().MigrationCheckpoint.decode(raw)
+    assert len(raw) == 247
+    assert checkpoint.phase == phase
+    assert checkpoint.vault_fingerprint == "a" * 64
+    assert checkpoint.binding == _binding()
+    assert checkpoint.source_store_digest == "b" * 64
+    assert checkpoint.plan_digest == "c" * 64
+    assert checkpoint.recovery_revision == "d" * 64
+    assert checkpoint.recovery_issued_at == (1 << 63) - 1
+    assert checkpoint.encode() == raw
+
+
+@pytest.mark.parametrize(
+    "issued_at", ["", "0", "-1", "01", "+1", "1.0", "1\n", "true", str(1 << 63)]
+)
+def test_recovery_checkpoint_rejects_noncanonical_or_unbounded_time(issued_at):
+    with pytest.raises(DriverTerminal, match="^PROVISIONER_CHECKPOINT_INVALID$"):
+        _module().MigrationCheckpoint.decode(_recovery_raw(issued_at=issued_at))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [(1, "r2t"), (2, "_" * 43), (3, "A" * 44), (4, "b" * 64), (5, "-"), (6, "?" * 43)],
+)
+def test_recovery_checkpoint_rejects_noncanonical_digests_and_foreign_phase(field, value):
+    fields = _recovery_raw().split(":")
+    fields[field] = value
+    with pytest.raises(DriverTerminal, match="^PROVISIONER_CHECKPOINT_INVALID$"):
+        _module().MigrationCheckpoint.decode(":".join(fields))
+
+
+def test_recovery_commitment_cannot_be_carried_into_an_ordinary_phase():
+    checkpoint = _module().MigrationCheckpoint.decode(_recovery_raw())
+    with pytest.raises(DriverTerminal, match="^PROVISIONER_CHECKPOINT_INVALID$"):
+        replace(checkpoint, phase="complete")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"recovery_revision": None},
+        {"recovery_revision": "D" * 64},
+        {"recovery_issued_at": None},
+        {"recovery_issued_at": True},
+        {"recovery_issued_at": 0},
+        {"recovery_issued_at": 1 << 63},
+        {"source_store_digest": None},
+        {"plan_digest": None},
+    ],
+)
+def test_recovery_constructor_requires_the_complete_bounded_commitment(changes):
+    checkpoint = _module().MigrationCheckpoint.decode(_recovery_raw())
+    with pytest.raises(DriverTerminal, match="^PROVISIONER_CHECKPOINT_INVALID$"):
+        replace(checkpoint, **changes)

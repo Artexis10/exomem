@@ -13,15 +13,27 @@ from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2
 
 @pytest.mark.parametrize("action", ["rollforward", "provision", "resume"])
 @pytest.mark.parametrize("failure", ["terminal", "exhausted"])
+@pytest.mark.parametrize("phase", ["enroll", "recover-complete", "recover-confirmed"])
 async def test_terminal_migration_keeps_recovery_identity_without_automatic_retry(
-    repository, action, failure
+    repository, action, failure, phase
 ):
     operation = await repository.submit(
         action, "migration-terminal", _v2_request(), wire_protocol=WIRE_PROTOCOL_V2
     )
     now = datetime(2030, 1, 1, tzinfo=UTC)
     claimed = await repository.claim_next("worker", now=now)
-    checkpoint = MigrationCheckpoint("enroll", "a" * 64, "A" * 43, "b" * 64, "c" * 64).encode()
+    checkpoint = MigrationCheckpoint(
+        phase,
+        "a" * 64,
+        "A" * 43,
+        "b" * 64,
+        "c" * 64,
+        **(
+            {"recovery_revision": "d" * 64, "recovery_issued_at": 1_900_000_000}
+            if phase.startswith("recover-")
+            else {}
+        ),
+    ).encode()
     await repository.mark_pending(
         operation.id,
         "worker",

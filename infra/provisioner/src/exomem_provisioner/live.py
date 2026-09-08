@@ -24,6 +24,7 @@ from .adapters import (
 from .authorization_membership import (
     AUTHORIZATION_BOOTSTRAP_SCHEMA_VERSION,
     DEFAULT_ATTESTATION_TTL_SECONDS,
+    HostedAuthorizationBundle,
     build_initial_hosted_authorization_bundle,
     inspect_hosted_authorization_bundle,
     transition_hosted_authorization_bundle,
@@ -1306,7 +1307,13 @@ class LiveLifecyclePlane:
         self, metadata: OpaqueProviderMetadata, request: dict[str, Any], *, v2: bool
     ) -> HealthObservation:
         target = self._config.runtime_target_for(request, v2=v2)
-        return await self._runtime.health(
+        governed = v2 and self._config.migration_mode == "governance-v3-to-v4"
+        bundle = (
+            await self._governance_health_bundle(metadata, target["releaseVersion"])
+            if governed
+            else None
+        )
+        health = await self._runtime.health(
             self._owner(metadata),
             credential=str(request["serviceCredential"]),
             protocol_version=target["protocolVersion"],
@@ -1315,6 +1322,50 @@ class LiveLifecyclePlane:
             expected_worker_policy=dict(request["workerPolicy"]),
             require_runtime_identity=v2,
             expected_contract_digest=target["gatewayContractDigest"],
+            **({"expected_governance": bundle} if governed else {}),
+        )
+        if governed:
+            current = await self._governance_health_bundle(metadata, target["releaseVersion"])
+            if current != bundle:
+                raise MetadataConflict(
+                    "governance readiness is unavailable",
+                    reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_IS_INVALID,
+                )
+        return health
+
+    async def _governance_health_bundle(
+        self, metadata: OpaqueProviderMetadata, release: str
+    ) -> HostedAuthorizationBundle:
+        """Authenticate fresh original-owner custody on each side of private health.
+
+        This is a read proof, not permission to publish routes. Effect boundaries
+        still need their current claim, binding and provider preconditions.
+        """
+
+        original = self._helm_requests.get(self._key(metadata))
+        envelopes = original.get("_providerRecoveryEnvelopes") if original else None
+        envelope = envelopes.get("authorizationSessionSecret") if isinstance(envelopes, dict) else None
+        if not isinstance(envelope, str) or not envelope:
+            raise MetadataConflict(
+                "authorization Secret provider authority is absent",
+                reason=ConflictReason.AUTHORIZATION_SECRET_ENVELOPE_ABSENT,
+            )
+        owner = self._owner(metadata)
+        files = await self._cell.read_authorization_session_bundle(owner)
+        if files is None:
+            raise MetadataConflict(
+                "authorization session bundle is absent",
+                reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_ABSENT,
+            )
+        return inspect_hosted_authorization_bundle(
+            files,
+            expected_cell_id=owner.subject_id,
+            expected_logical_vault_id=owner.tenant_id,
+            expected_replica_id=owner.resource_name + "-0",
+            expected_software_version=release,
+            expected_schema_version=4,
+            expected_recovery_envelope=envelope,
+            now=int(self._now()),
         )
 
     async def admit_runtime(self, metadata: OpaqueProviderMetadata) -> None:
