@@ -22,6 +22,7 @@ class ConflictReason(StrEnum):
     """One internal condition label per distinguishable provider conflict."""
 
     UNCLASSIFIED = "unclassified"
+    GOVERNANCE_MIGRATION_JOB_UNAVAILABLE = "governance-migration-job-unavailable"
 
     # Opaque provider identity and fence encoding (lifecycle).
     PROVIDER_IDENTITY_NOT_OPAQUE = "provider-identity-not-opaque"

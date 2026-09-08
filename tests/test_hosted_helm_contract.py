@@ -96,6 +96,23 @@ def _find(documents: list[dict], kind: str, name: str) -> dict:
     raise AssertionError(f"missing {kind}/{name}")
 
 
+def test_governance_migration_contract_is_shared_by_both_admission_layers() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    policies = [
+        _find(documents, "ValidatingAdmissionPolicy", name)
+        for name in ("exomem-tenant-boundary", "exomem-provisioner-scope")
+    ]
+    for policy in policies:
+        text = json.dumps(policy)
+        assert "exomem-governance-migration" in text
+        assert "exomem.hosted_governance_job" in text
+        assert "EXOMEM_GOVERNANCE_MIGRATION_REQUEST" in text
+        assert "variables.migrationSpec" in text
+        assert "exomem.io/governance-migration-request" in text
+    assert "parallelism == 1" in json.dumps(policies[1])
+    assert "completions == 1" in json.dumps(policies[1])
+
+
 def test_storage_init_env_contract_allows_only_the_two_exact_operator_forms() -> None:
     """Keep the offline migration exception narrower than the serving env contract."""
     text = (PLATFORM / "templates" / "tenant-admission.yaml").read_text(encoding="utf-8")
@@ -1928,7 +1945,8 @@ def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() 
     routine_scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-provisioner-scope")
     routine_scope_text = json.dumps(routine_scope)
     assert "restore-[a-f0-9]" not in routine_scope_text
-    assert "exomem.io/restore-candidate" not in routine_scope_text
+    assert "!('exomem.io/restore-candidate' in variables.labels)" in routine_scope_text
+    assert "labels['exomem.io/restore-candidate'] == 'true'" not in routine_scope_text
 
 
 def test_platform_pins_exact_durability_contracts() -> None:
@@ -2013,6 +2031,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     assert [variable["name"] for variable in variables] == [
         "storageInit",
         "vaultFingerprint",
+        "governanceMigration",
         "lifecycleJob",
         "tenantNamespace",
         "restoreCandidate",
@@ -2020,13 +2039,16 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "controllerUpdate",
         "controllerJobFinalizerRemoval",
         "controllerJobFinalizerTransition",
+        "migrationSpec",
+        "migrationMeta",
     ]
     assert "exomem-storage-init" in variables[0]["expression"]
     assert "exomem.io/vault-fingerprint" in variables[1]["expression"]
-    assert "storageInit" in variables[2]["expression"]
-    assert "exomem.io/tenant-cell" in variables[3]["expression"]
+    assert "storageInit" in variables[3]["expression"]
+    assert "exomem.io/tenant-cell" in variables[4]["expression"]
     assert all(
         "!variables.inScope" in validation["expression"]
+        or "!variables.governanceMigration" in validation["expression"]
         for validation in tenant_admission["spec"]["validations"]
     )
     admission_text = json.dumps(tenant_admission)
