@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # CPU document/OCR image
 
 Build the worker-base image with:
