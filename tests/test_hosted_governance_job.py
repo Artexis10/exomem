@@ -56,6 +56,10 @@ def cell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixtur
     vault.chmod(0o700)
     now = int(time.time())
     if getattr(request, "param", None) == "provider":
+        # Lean runtime shards may see provisioner source via another test's
+        # path setup without its dependencies. The hosted infrastructure job
+        # installs both packages and executes these cross-package drills.
+        pytest.importorskip("sqlalchemy", reason="requires provisioner dependencies")
         pytest.importorskip("exomem_provisioner")
         from exomem_provisioner import authorization_membership
         from exomem_provisioner.lifecycle import OpaqueProviderMetadata
