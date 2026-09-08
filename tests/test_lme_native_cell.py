@@ -22,6 +22,18 @@ def _product_result(result: dict) -> dict:
     return structured
 
 
+def test_native_cell_does_not_index_paths_from_an_mcp_error(tmp_path: Path) -> None:
+    from benchmarks.lme.native_cell import _committed_paths
+
+    (tmp_path / "Notes").mkdir()
+    (tmp_path / "Notes/example.md").write_text("Existing note")
+    result = SimpleNamespace(
+        is_error=True,
+        structured_content={"mutated": True, "status": "committed", "path": "Notes/example.md"},
+    )
+    assert _committed_paths(result, tmp_path) == set()
+
+
 @pytest.mark.parametrize("with_aliases", [False, True])
 def test_snapshot_ignores_transient_root_filesystem_probes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_aliases: bool
@@ -92,7 +104,10 @@ def test_snapshot_still_fails_when_an_ordinary_memory_disappears(
         cell.snapshot()
 
 
-def test_native_cell_uses_real_public_mcp_and_keeps_the_vault(tmp_path: Path) -> None:
+def test_native_cell_uses_real_public_mcp_and_keeps_the_vault(tmp_path: Path, monkeypatch) -> None:
+    import fastmcp
+
+    monkeypatch.setattr(fastmcp.settings, "mcp_camelcase_compat", False)
     cell_root = tmp_path / "cell"
 
     async def exercise() -> tuple[int, Path]:
@@ -212,10 +227,10 @@ def test_native_cell_preserves_result_lists_and_reads_their_diagnostics(tmp_path
             effective_mode = "hybrid" if self.calls == 1 else "vector_lexical_fallback"
             return SimpleNamespace(
                 content=[],
-                structuredContent={
+                structured_content={
                     "result": [{"path": "Notes/hit.md", "effective_mode": effective_mode}]
                 },
-                isError=False,
+                is_error=False,
             )
 
     cell._client = ListResultClient()

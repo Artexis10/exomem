@@ -189,7 +189,7 @@ class NativeCell:
             self._schemas = {
                 tool.name: {
                     "description": tool.description,
-                    "inputSchema": _json_value(tool.inputSchema),
+                    "inputSchema": _json_value(tool.input_schema),
                 }
                 for tool in tools
             }
@@ -236,8 +236,8 @@ class NativeCell:
         result = await self._client.call_tool_mcp(name, arguments)
         envelope = {
             "content": _json_value(result.content),
-            "structuredContent": _json_value(result.structuredContent),
-            "isError": bool(result.isError),
+            "structuredContent": _json_value(result.structured_content),
+            "isError": bool(result.is_error),
         }
         if name == "ask_memory" and not envelope["isError"]:
             observed = _fallback_observation(envelope)
@@ -256,8 +256,8 @@ class NativeCell:
         actual = await self._client.call_tool_mcp("coordination_status", {})
         actual_envelope = {
             "content": _json_value(actual.content),
-            "structuredContent": _json_value(actual.structuredContent),
-            "isError": bool(actual.isError),
+            "structuredContent": _json_value(actual.structured_content),
+            "isError": bool(actual.is_error),
         }
         service_readiness = json.loads(self._readiness_path.read_text(encoding="utf-8"))
         semantic_requested = self.profile == "semantic"
@@ -720,7 +720,9 @@ def _bindings_match_environment(receipt: Mapping[str, Any]) -> bool:
 
 
 def _committed_paths(result: Any, vault: Path) -> set[str]:
-    is_error = getattr(result, "isError", None)
+    is_error = getattr(result, "is_error", None)
+    if is_error is None:
+        is_error = getattr(result, "isError", None)
     if is_error is None and isinstance(result, Mapping):
         is_error = result.get("isError", result.get("is_error"))
     if is_error:
