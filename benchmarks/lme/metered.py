@@ -199,7 +199,8 @@ class MeteredOpenAIBackend:
             "cache_write_per_million_usd": profile.cache_write_rate,
             "reasoning_effort": profile.reasoning_effort,
             "allowed_models": sorted(self.profiles),
-            "context_preflight": "utf8-upper-bound" if profile.reasoning_effort else "o200k_base-estimate",
+            "context_preflight": f"{profile.tokenizer}-estimate",
+            "tokenizer_source": profile.tokenizer_source,
             "reservation_input_tokens": CONTEXT_TOKENS,
             "transport": transport,
             "wire_model": self.wire_model,
@@ -239,7 +240,7 @@ class MeteredOpenAIBackend:
         self._validate_max_tokens(max_tokens, maximum=4096)
         tool_definitions, tool_names = self._validate_tools(tools)
         message_history = self._validate_messages(messages, tool_names=tool_names)
-        input_tokens = _serialized_chat_tokens(message_history, tool_definitions, byte_bound=profile.reasoning_effort is not None)
+        input_tokens = _serialized_chat_tokens(message_history, tool_definitions, encoding_name=profile.tokenizer)
         if input_tokens + max_tokens > CONTEXT_TOKENS:
             raise MeteredConfigurationError(
                 "serialized messages and tools exceed the verified model context window"
@@ -422,7 +423,7 @@ class MeteredOpenAIBackend:
             raise MeteredConfigurationError("prompt must be a nonblank string")
         self._validate_max_tokens(max_tokens, maximum=512)
         if self.profile.reasoning_effort and _serialized_chat_tokens(
-            [{"role": "user", "content": prompt}], [], byte_bound=True
+            [{"role": "user", "content": prompt}], [], encoding_name=self.profile.tokenizer
         ) + max_tokens > CONTEXT_TOKENS:
             raise MeteredConfigurationError("prompt exceeds the reserved context envelope")
         body = self._request_body(
@@ -1350,7 +1351,7 @@ def _redact_native_message(message: object, secret: str) -> object:
 
 
 def _serialized_chat_tokens(
-    messages: list[dict[str, object]], tools: list[dict[str, object]], *, byte_bound: bool = False
+    messages: list[dict[str, object]], tools: list[dict[str, object]], *, encoding_name: str = "o200k_base"
 ) -> int:
     import tiktoken
 
@@ -1361,13 +1362,13 @@ def _serialized_chat_tokens(
         separators=(",", ":"),
         sort_keys=True,
     )
-    encoder = tiktoken.get_encoding("o200k_base")
+    encoder = tiktoken.get_encoding(encoding_name)
     framing = _CHAT_FRAMING_BASE_TOKENS + _CHAT_FRAMING_ITEM_TOKENS * (
         len(messages) + len(tools)
     )
-    # Installed tiktoken does not identify Sol's tokenizer. UTF-8 bytes give
-    # a conservative text-token upper bound instead of claiming a GPT-4o count.
-    tokens = len(serialized.encode("utf-8")) if byte_bound else len(encoder.encode_ordinary(serialized))
+    # Resolve the frozen upstream encoding explicitly: older tiktoken model-name
+    # dispatch misses GPT-5 point releases despite carrying this same encoding.
+    tokens = len(encoder.encode_ordinary(serialized))
     return tokens + framing
 
 

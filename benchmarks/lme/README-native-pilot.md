@@ -64,8 +64,10 @@ only parameters advertised by OpenRouter's standard OpenAI endpoint. Its frozen
 promotional rates, verified on 2026-09-08, are $2/M input, $0.20/M cached input,
 $2.50/M cache writes and $10/M output. Routing rejects higher input/output
 prices. Reservations cover the more expensive cache-write rate. The diagnostic
-keeps a 128k accounting envelope; its Sol context preflight uses a conservative
-UTF-8 byte bound because the installed tokenizer lacks a verified Sol mapping.
+keeps a 128k accounting envelope. Context preflight uses `o200k_base` with chat
+framing, pinned to OpenAI's tokenizer mapping at commit
+`212b893ba940cba53476851103d2e5c1d0020c6e`; the explicit encoding avoids older
+library versions' incomplete GPT-5 point-release name lookup.
 The 4096-token output limit includes reasoning. A model change requires a new
 preparation and must be disclosed when comparing results.
 

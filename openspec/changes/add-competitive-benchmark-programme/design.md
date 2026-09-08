@@ -714,6 +714,8 @@ or replace the external LongMemEval dataset and judge.
   prepared model settings, response model/provider drift and unsupported request
   parameters. Preserve returned reasoning blocks unchanged across tool rounds.
   Retain the 128k accounting envelope and 4096 output limit, including reasoning.
+  Freeze the upstream tokenizer name and its immutable source identity with the
+  model profiles; estimate serialized context in tokens with chat framing.
   Freeze promotional OpenRouter rates verified on 2026-09-08: Sol input $2/M,
   cache read $0.20/M, cache write $2.50/M, output $10/M. Reserve input at the
   maximum cache-write rate; price-limit routing refuses a later price increase.

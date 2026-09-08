@@ -730,11 +730,29 @@ def test_sol_malformed_cache_writes_retain_reservation(tmp_path, monkeypatch, wr
     assert not any(x['kind']=='commit' for x in _jsonl(tmp_path/'run/ledger.jsonl'))
 
 
-def test_sol_context_uses_byte_bound_before_spending(tmp_path, monkeypatch):
+def test_sol_accepts_guidance_within_token_window_despite_larger_byte_count(tmp_path, monkeypatch):
+    from lme import metered
+    monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
+    backend = metered.MeteredOpenAIBackend(tmp_path/'run', cap_usd=1,
+        approval_token='test', model='gpt-5.6-sol', transport='openrouter')
+    guidance = 'Read the source, preserve durable conclusions, then review the saved memory.\n' * 2000
+    assert len(guidance.encode()) > metered.CONTEXT_TOKENS
+    reply = _payload({'role':'assistant','content':'Ready'}, finish_reason='stop', transport='openrouter')
+    reply['model'] = 'openai/gpt-5.6-sol'
+    client = FakeAsyncClient([FakeResponse(reply)])
+    monkeypatch.setattr(metered.httpx, 'AsyncClient', lambda **kwargs: client)
+    result = asyncio.run(backend.complete_messages([{'role':'user','content':guidance}], tools=[]))
+    assert result.message['content'] == 'Ready'
+    assert client.requests[0]['json']['messages'][0]['content'] == guidance
+    reserve = next(x for x in _jsonl(tmp_path/'run/ledger.jsonl') if x['kind']=='reserve')
+    assert reserve['units'] == pytest.approx(.36096)
+
+
+def test_sol_refuses_oversized_token_context_before_spending(tmp_path, monkeypatch):
     from lme import metered
     monkeypatch.setenv('OPENROUTER_API_KEY', KEY)
     backend = metered.MeteredOpenAIBackend(tmp_path/'run', cap_usd=1,
         approval_token='test', model='gpt-5.6-sol', transport='openrouter')
     with pytest.raises(metered.MeteredConfigurationError, match='context'):
-        asyncio.run(backend.complete_messages([{'role':'user','content':'a'*128000}], tools=[]))
+        asyncio.run(backend.complete_messages([{'role':'user','content':'a '*128000}], tools=[]))
     assert not (tmp_path/'run/requests.jsonl').exists()

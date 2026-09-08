@@ -16,6 +16,11 @@ class ModelProfile:
     reasoning_effort: str | None
     pricing_source: str
     pricing_verified_on: str = "2026-09-08"
+    tokenizer: str = "o200k_base"
+    tokenizer_source: str = (
+        "https://github.com/openai/tiktoken/blob/"
+        "212b893ba940cba53476851103d2e5c1d0020c6e/tiktoken/model.py"
+    )
 
     def wire_model(self, transport: str) -> str:
         return f"openai/{self.model}" if transport == "openrouter" else self.model
