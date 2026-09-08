@@ -44,14 +44,22 @@ def _write_docx(path: Path) -> None:
         archive.writestr(
             "word/document.xml",
             """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>
   <w:p><w:r><w:t>DOCX TABLE HEADING</w:t></w:r></w:p>
+  <w:p><w:hyperlink r:id="rIdExternal"><w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>External Fixture Link</w:t></w:r></w:hyperlink></w:p>
   <w:tbl>
     <w:tr><w:tc><w:p><w:r><w:t>Item</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Quantity</w:t></w:r></w:p></w:tc></w:tr>
     <w:tr><w:tc><w:p><w:r><w:t>Widget</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>3</w:t></w:r></w:p></w:tc></w:tr>
   </w:tbl>
   <w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>
 </w:body></w:document>""",
+        )
+        archive.writestr(
+            "word/_rels/document.xml.rels",
+            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdExternal" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://external-link.invalid/synthetic?source=fixture" TargetMode="External"/>
+</Relationships>""",
         )
 
 

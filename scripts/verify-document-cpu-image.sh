@@ -93,7 +93,7 @@ hashes_before = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for pa
 
 expected = {
     "multi-sheet.xlsx": ("Summary", "Oranges", "Archive", "North"),
-    "table.docx": ("DOCX TABLE HEADING", "Item", "Widget", "Quantity"),
+    "table.docx": ("DOCX TABLE HEADING", "External Fixture Link", "Item", "Widget", "Quantity"),
     "multi-slide.pptx": ("Slide One Heading", "First slide detail", "Slide Two Heading"),
     "mixed-searchable-scanned.pdf": ("PDF SEARCHABLE ALPHA", "SCANNED PDF BRAVO 73"),
     "image-ocr.png": ("IMAGE OCR 42",),

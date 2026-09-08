@@ -6,6 +6,7 @@ import runpy
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
+from zipfile import ZipFile
 
 import pytest
 
@@ -78,6 +79,21 @@ def test_document_fixture_generator_is_checked_in_as_readable_source() -> None:
     assert "def generate" in text
     assert "ZipFile" in text
     assert "fitz" in text
+
+
+def test_document_fixture_has_a_referenced_external_link_without_fetching(
+    document_fixtures: Path,
+) -> None:
+    docx = document_fixtures / "table.docx"
+
+    with ZipFile(docx) as archive:
+        document = archive.read("word/document.xml").decode()
+        relationships = archive.read("word/_rels/document.xml.rels").decode()
+
+    assert 'r:id="rIdExternal"' in document
+    assert 'Target="https://external-link.invalid/synthetic?source=fixture"' in relationships
+    assert 'TargetMode="External"' in relationships
+    assert "External Fixture Link" in extract.extract_text(docx).text
 
 
 def test_document_converter_uses_markitdown_local_conversion(

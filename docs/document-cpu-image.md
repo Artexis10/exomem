@@ -36,3 +36,8 @@ Docker tag and default Buildx config, so concurrent acceptance runs do not share
 cleanup targets. It prints the exact image ID, image size, `--help` startup time
 and cgroup memory peak as local measurements only; they are not capacity or
 latency guarantees.
+
+The DOCX fixture includes a referenced external relationship to a synthetic
+`.invalid` URL. The acceptance check confirms its visible link text survives
+conversion while the egress trap records and rejects any attempted lookup or
+connection.
