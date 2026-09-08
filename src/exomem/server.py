@@ -508,6 +508,15 @@ def build_server(*, require_auth: bool) -> FastMCP:
         mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
         mcp.add_middleware(CallTraceMiddleware())
 
+        if auth is not None and os.environ.get("EXOMEM_VOCABULARY_AUTHORITY_DIR"):
+            from .server_owner import register_owner_routes
+
+            owner_auth = auth.enable_owner_auth(
+                runtime.vault_root,
+                allow_insecure_loopback=os.environ.get("EXOMEM_OWNER_ALLOW_LOOPBACK") == "1",
+            )
+            register_owner_routes(mcp, vault_root=runtime.vault_root, owner_auth=owner_auth)
+
         register_asset_routes(mcp, on_liveness=runtime_activation.start)
         mcp._exomem_local_runtime_activation = runtime_activation
         register_oauth_metadata_route(mcp, base_url=runtime.base_url, auth_enabled=auth is not None)

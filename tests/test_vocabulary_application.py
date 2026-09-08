@@ -601,13 +601,15 @@ def test_denied_entity_identity_is_exactly_approved_and_retried_with_the_same_ke
             return memory_refs.new_id()
 
     first = staged_identity()
+    from exomem.vocabulary_effects import CanonicalWriteImage, _result
+
+    images = (CanonicalWriteImage("Knowledge Base/Entities/Organizations/acme.md", None, b"# Example\n"),)
+    effects = (Effect("entity.create", images[0].path, f"memory:{first}"),)
     operation = vocabulary_authority.CanonicalOperation.from_effects(
         operation_id="entity-create-" + first,
         command_digest="a" * 64,
-        effects=(
-            Effect("entity.create", "Knowledge Base/Entities/Organizations/acme.md", f"memory:{first}"),
-        ),
-        image_digest="b" * 64,
+        effects=effects,
+        image_digest=_result("reviewed", effects, (), images).digest,
         registry_digests={"entity_types": "c" * 64},
         target_digests={f"memory:{first}": "d" * 64},
     )
@@ -615,7 +617,7 @@ def test_denied_entity_identity_is_exactly_approved_and_retried_with_the_same_ke
         authority.reserve(operation, principal=principal)
     assert not (tmp_path / "vault" / "Knowledge Base").exists()
 
-    request = authority.request(operation, principal=principal, expires_at=1_700_000_100)
+    request = authority.request(operation, principal=principal, expires_at=1_700_000_100, images=images)
     _approve_request(authority, principal, request.request_id)
     retried = staged_identity()
     assert retried == first

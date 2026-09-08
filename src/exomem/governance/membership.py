@@ -203,7 +203,7 @@ def _semantic_scope_matches(scope: Scope, companion: companions.BoundCompanion) 
 
 
 def evaluate_path_only(
-    vault_root: Path, rel_path: str, policy: Policy
+    vault_root: Path, rel_path: str, policy: Policy, *, allow_companions: bool = True
 ) -> MembershipOutcome:
     """Classify a non-Markdown item's path/ref membership without reading it.
 
@@ -220,6 +220,8 @@ def evaluate_path_only(
     membership. A still-undecided semantic selector is evaluated only from the
     closed, byte-bound companion registry. Missing, stale, ambiguous, or unsafe
     companion state remains unresolved instead of becoming an empty scope set.
+    Snapshot previews disable companions: a live descriptor may authorize
+    different bytes from the sealed preview.
     """
     if policy.empty or not policy.scopes:
         return MembershipOutcome("classified", frozenset())
@@ -235,6 +237,8 @@ def evaluate_path_only(
         if _needs_frontmatter(scope):
             undecided.append((scope_id, scope))
     if undecided:
+        if not allow_companions:
+            return MembershipOutcome("unresolved", frozenset(matched), "snapshot_requires_path_membership")
         try:
             companion = companions.classify(vault_root, rel_path)
         except companions.CompanionClassificationError as error:

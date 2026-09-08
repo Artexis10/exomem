@@ -305,6 +305,7 @@ def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifes
         except vocabulary_authority.VocabularyAuthorityDenied as exc:
             pending = authority.request(
                 operation, principal=context.principal, expires_at=current + 900,
+                images=images,
             )
             exc.details.update(
                 vocabulary_request_id=pending.request_id,

@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Thread
 
 import pytest
 
-from exomem import vocabulary_authority
+from exomem import mutation_lock, vocabulary_authority
 from exomem.governance import authorization_session_lifecycle, store
 from exomem.governance.authorization_session_lifecycle import AuthorizationSessionContext
 from exomem.governance.principal import RequestPrincipal
-from exomem.vocabulary_effects import Effect
+from exomem.vocabulary_effects import CanonicalWriteImage, Effect, _result
 
 NOW = 1_700_000_000
 _TEST_VOCABULARY_FLOORS: dict[Path, int] = {}
@@ -99,6 +100,19 @@ def _owner_decision() -> vocabulary_authority.TrustedOwnerDecision:
     return vocabulary_authority._trusted_owner_decision_for_adapter(  # noqa: SLF001
         owner_id="owner-1", ceremony_id="ceremony-1"
     )
+
+
+def _operation_with_preview(*, operation_id="operation-1"):
+    operation = _operation(operation_id=operation_id)
+    images = (CanonicalWriteImage(operation.effects[0].path, None, b"# Example\n"),)
+    return vocabulary_authority.CanonicalOperation.from_effects(
+        operation_id=operation.operation_id,
+        command_digest=operation.command_digest,
+        effects=operation.effects,
+        image_digest=_result("reviewed", operation.effects, (), images).digest,
+        registry_digests=dict(operation.registry_digests),
+        target_digests=dict(operation.target_digests),
+    ), images
 
 
 def _bound_owner_decision(
@@ -233,7 +247,12 @@ def _revoke(
 def _store(root: Path) -> vocabulary_authority.VocabularyAuthority:
     control_path = root.parent / "custody" / "control.json"
     control_path.parent.mkdir(parents=True, exist_ok=True)
-    control_path.parent.chmod(0o700)
+    if os.name == "nt":
+        mutation_lock._windows_apply_private_dacl(
+            control_path.parent, mutation_lock._windows_current_user_sid()
+        )
+    else:
+        control_path.parent.chmod(0o700)
     control_path.write_text("control")
     floor = {
         "value": _TEST_VOCABULARY_FLOORS.setdefault(control_path, 1),
@@ -518,11 +537,11 @@ def test_pending_request_binds_the_stored_full_operation_before_owner_approval(t
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
     authority = _store(tmp_path / "vault")
     agent = _principal()
-    operation = _operation()
+    operation, images = _operation_with_preview()
     _activate(authority, agent)
 
-    request = authority.request(operation, principal=agent, expires_at=NOW + 100)
-    repeated = authority.request(operation, principal=agent, expires_at=NOW + 100)
+    request = authority.request(operation, principal=agent, expires_at=NOW + 100, images=images)
+    repeated = authority.request(operation, principal=agent, expires_at=NOW + 100, images=images)
     assert repeated.request_id == request.request_id
     assert request.display_effects == (
         {
@@ -545,9 +564,11 @@ def test_owner_decision_cannot_approve_a_different_pending_operation(tmp_path: P
     authority = _store(tmp_path / "vault")
     agent = _principal()
     _activate(authority, agent)
-    first = authority.request(_operation(), principal=agent, expires_at=NOW + 100)
+    operation, images = _operation_with_preview()
+    first = authority.request(operation, principal=agent, expires_at=NOW + 100, images=images)
+    second_operation, second_images = _operation_with_preview(operation_id="operation-2")
     second = authority.request(
-        _operation(operation_id="operation-2"), principal=agent, expires_at=NOW + 100
+        second_operation, principal=agent, expires_at=NOW + 100, images=second_images
     )
     decision = _bound_owner_decision(
         "approve-request",

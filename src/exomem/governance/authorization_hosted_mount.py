@@ -304,6 +304,7 @@ def _refuse_authority_identity_change(destination: Path, payloads: dict[str, byt
     """
     try:
         from ..vocabulary_authority import authority_artifact_paths
+        from ..vocabulary_placement import artifact_family
         from . import authorization_custody
 
         old = {
@@ -345,16 +346,9 @@ def _refuse_authority_identity_change(destination: Path, payloads: dict[str, byt
         raise HostedCustodyMountUnavailable
     if (old_floor == 2 or new_floor == 2) and old_identity != new_identity:
         raise HostedCustodyMountUnavailable
-    old_marker, old_database = old_artifacts
-    new_marker, new_database = new_artifacts
-    authority_artifacts = (old_marker, old_database, new_marker, new_database)
-    authority_sidecars = tuple(
-        database.with_name(f"{database.name}{suffix}")
-        for database in (old_database, new_database)
-        for suffix in ("-journal", "-wal", "-shm")
-    )
     if old_identity != new_identity and any(
-        os.path.lexists(path) for path in (*authority_artifacts, *authority_sidecars)
+        os.path.lexists(path)
+        for path in (*artifact_family(old_artifacts), *artifact_family(new_artifacts))
     ):
         raise HostedCustodyMountUnavailable
 

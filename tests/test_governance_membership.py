@@ -550,6 +550,33 @@ def test_explicitly_empty_bound_companion_is_classified_empty(vault: Path) -> No
     assert outcome.scope_ids == frozenset()
 
 
+def test_snapshot_path_classification_never_borrows_a_live_companion(vault: Path, monkeypatch) -> None:
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+
+    pol = _write_four_semantic_scopes(vault)
+    relative = "Knowledge Base/Notes/asset.bin"
+    artifact = vault / relative
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"replacement bytes")
+    _write_binary_companion(
+        vault, semantics="projects: []\n    tags: []\n    types: []\n    classes: []"
+    )
+    # Warm the companion memo with a permissive live classification.
+    assert membership.evaluate_path_only(vault, relative, pol).state == "classified"
+    assert egress.release_level_for_path_only(vault, relative, principal=owner_principal()) == 6
+
+    def forbidden(*_args):
+        pytest.fail("snapshot classification read a live companion")
+
+    monkeypatch.setattr(membership.companions, "classify", forbidden)
+    outcome = membership.evaluate_path_only(vault, relative, pol, allow_companions=False)
+    assert outcome.state == "unresolved"
+    assert egress.release_level_for_path_only(
+        vault, relative, principal=owner_principal(), allow_companions=False
+    ) == egress.LEVEL_NONE
+
+
 @pytest.mark.parametrize(
     ("overrides", "expected_reason"),
     [

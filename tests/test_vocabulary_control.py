@@ -15,6 +15,7 @@ from exomem.vocabulary_authority import (
     _trusted_owner_decision_for_adapter,
 )
 from exomem.vocabulary_control import OwnerControlIntent, VocabularyControl
+from exomem.vocabulary_effects import CanonicalWriteImage
 
 
 @dataclass
@@ -83,6 +84,14 @@ class _Authority:
         assert request_id == "edge-request"
         return _EdgeOperation()
 
+    def inspect_request_preview_for_owner(self, request_id, *, principal):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            operation=self.inspect_request_for_owner(request_id, principal=principal),
+            images=(CanonicalWriteImage("Knowledge Base/Entities/a.md", None, b"# Exact proposal\n"),),
+        )
+
     def approve_request(self, request_id, *, principal, decision, binding):
         self.approved.append((request_id, decision))
         return "authority-1"
@@ -137,7 +146,8 @@ def test_trusted_callback_receives_complete_stored_operation_before_exact_approv
 
     assert control.approve_request(principal=_principal(), body={"request_id": "request-1"}) == "authority-1"
     assert authority.approved[0][0] == "request-1"
-    assert seen[0].canonical_operation == _Operation().as_dict()
+    assert seen[0].as_dict()["canonical_operation"] == _Operation().as_dict()
+    assert seen[0].write_images[0].after == b"# Exact proposal\n"
 
 
 def test_callback_cannot_reuse_a_sealed_decision_for_a_different_control_intent() -> None:
@@ -277,7 +287,7 @@ def test_project_edge_grant_derives_exact_scope_from_the_stored_request() -> Non
             "expires_at": 2_000_000_000,
         },
     ) == "grant-1"
-    assert seen[0].grant_manifest == {
+    assert seen[0].as_dict()["grant_manifest"] == {
         "actions": ["edge.add"],
         "scope": {
             "kind": "project-edge",
@@ -287,3 +297,36 @@ def test_project_edge_grant_derives_exact_scope_from_the_stored_request() -> Non
         },
         "expires_at": 2_000_000_000,
     }
+
+
+def test_preparation_is_read_only_and_nested_intent_is_immutable() -> None:
+    authority = _Authority()
+    control = VocabularyControl(
+        authority,
+        owner_decision_callback=lambda intent: pytest.fail("preview invoked consent"),
+        activation_guard_factory=lambda root: pytest.fail("preview acquired mutation guard"),
+    )
+    intent = control.prepare_approval(principal=_principal(), body={"request_id": "request-1"})
+    assert intent.display_effects[0]["action"] == "entity.create"
+    assert authority.approved == []
+    with pytest.raises(TypeError):
+        intent.canonical_operation["effects"][0]["action"] = "edge.add"
+    detached = intent.as_dict()
+    detached["canonical_operation"]["effects"].clear()
+    assert intent.canonical_operation["effects"]
+
+
+def test_prepared_grant_cannot_be_changed_through_caller_body() -> None:
+    control = VocabularyControl(_Authority(), activation_guard_factory=lambda root: nullcontext())
+    body = {"actions": ["entity_type.add"], "scope": "vault", "expires_at": 2_000_000_000}
+    intent = control.prepare_grant(principal=_principal(), body=body)
+    body["actions"].append("edge.add")
+    assert intent.as_dict()["grant_manifest"]["actions"] == ["entity_type.add"]
+
+
+def test_shared_binding_comes_from_authority_contract(monkeypatch) -> None:
+    from exomem import vocabulary_authority
+
+    monkeypatch.setattr(vocabulary_authority, "_owner_binding", lambda *args, **kwargs: "canonical-binding")
+    control = VocabularyControl(_Authority(), activation_guard_factory=lambda root: nullcontext())
+    assert control.prepare_denial(principal=_principal(), body={"request_id": "request-1"}).binding_digest == "canonical-binding"

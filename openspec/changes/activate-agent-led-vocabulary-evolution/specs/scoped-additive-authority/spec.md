@@ -49,6 +49,32 @@ An exact-action approval SHALL be one-shot and bind one canonical operation iden
 - **THEN** the same unchanged operation identity can retry under the still-valid approval
 - **AND** an uncertain result remains reserved pending reconciliation rather than becoming a transferable approval
 
+### Requirement: Conversation provides ordinary permission control
+
+The agent-facing workflow SHALL support expressing intent, requesting exact approval or scoped delegation, inspecting current permissions, and requesting revocation through finite canonical operations. It SHALL truthfully report the canonical request, owner-decision, authority and application states, including expiry and unavailability, without introducing a parallel state vocabulary. A request or accepted approval SHALL NOT be reported as an executed content change.
+
+Dashboards SHALL provide visibility, history and transparent inspection, and MAY expose management controls. Routine agent work SHALL NOT require navigating a dashboard to discover a pending action. Where a client supports an authenticated owner-confirmation adapter, the exact review and decision SHALL be available through that conversational surface. The adapter SHALL preserve the same authorizer, intended agent audience, vault, payload, currency and disclosure checks as other supported owner-control adapters. When that adapter is unavailable, the agent SHALL expose the limitation and a direct request-bound owner-confirmation fallback if the deployment advertises one. Without a supported owner channel, confirmation SHALL remain unavailable and the request pending; neither case SHALL be described as implemented in-conversation approval.
+
+Natural-language intent and approval-presentation preferences SHALL NOT mint authority, bypass the configured consent contract or imply that the agent can grant its own requests. Browser and conversational adapters SHALL share canonical intent preparation, authority state and execution checks rather than maintain independent permission systems.
+
+#### Scenario: An authenticated client keeps approval in the conversation
+
+- **WHEN** the user requests an additive action through a client with a supported owner-confirmation adapter
+- **THEN** the client presents the exact review and records the owner's decision without requiring dashboard navigation
+- **AND** subsequent execution still checks that exact approval at the canonical leaf
+
+#### Scenario: A client lacks authenticated owner confirmation
+
+- **WHEN** an ordinary agent session can request permission but cannot carry the required owner decision
+- **THEN** the response identifies the pending request and its deployment-advertised direct confirmation fallback, or reports owner confirmation unavailable when no supported channel exists
+- **AND** an agent-reported yes cannot complete the request or substitute for supported owner confirmation
+
+#### Scenario: On-demand control and dashboard visibility agree
+
+- **WHEN** a user inspects permission state through an agent and then through the dashboard under equivalent authorized access
+- **THEN** both surfaces resolve the same canonical requests, grants and history
+- **AND** a revocation requested through the agent uses the existing owner-control contract and becomes effective under the same revoke-versus-commit ordering
+
 ### Requirement: Scope is resolved from effects rather than asserted labels
 
 A grant SHALL name one logical vault, explicit supported actions, a bounded lifetime and an optional resolved project/target scope for actions with pre-existing canonical targets. The server SHALL derive affected objects and scope from current canonical state and the proposed effects. A request's `project` label alone SHALL NOT establish membership. Edge additions SHALL require all affected endpoints and destinations to fall within the grant; unresolved or cross-scope targets SHALL require separate approval.
@@ -132,3 +158,58 @@ The activation record SHALL bind a minimum authority-contract reader/writer vers
 
 - **WHEN** an external custody bundle is renewed or republished for a vault requiring vocabulary authority v2
 - **THEN** the authenticated floor cannot decrease and an identity substitution cannot erase the activated contract; a floor change requires matching current serving-membership evidence
+
+### Requirement: Native owner setup binds a separate durable consent ceremony
+
+Native initial policy, schema migration and vocabulary activation SHALL authenticate the configured owner in a separate browser-purpose transaction and require explicit CSRF-protected acceptance of each exact finite review. This browser adapter SHALL also remain available as the standalone fallback for subsequent permission control. Routine exact-action approval, grant and revocation MAY use a supported conversational adapter that proves the same owner binding and exact-review checks. Ordinary agent credentials SHALL NOT establish owner consent. Initial policy, schema migration and vocabulary activation SHALL be separately reviewed; activation SHALL create no grants. Migration and deployment publication SHALL run only after an external maintenance runner verifies the exact managed service has stopped.
+
+#### Scenario: Unsupported host refuses before maintenance
+
+- **WHEN** the canonical held-filesystem capability check reports an unsupported host
+- **THEN** both native maintenance command entrypoints refuse with the canonical reason before service inspection, managed re-execution or service-manager actions
+- **AND** parsing an available service-unit format does not bypass that capability check
+
+#### Scenario: Owner cannot approve an incomplete or stale disclosed preview
+
+- **WHEN** an authenticated owner retrieves or accepts an exact review
+- **THEN** full write images require full disclosure under the owner principal, and rendered control data crosses the existing terminal filter
+- **AND** changed filtering output, blocked policy or stale before-images refuse the entire review without an approval form or authority mutation
+- **AND** acceptance repeats the disclosure check even if an earlier retrieval succeeded; proposed absent paths use the existing conservative path-only release decision
+
+#### Scenario: Preparing migration does not alter serving admission
+
+- **WHEN** an owner prepares initial migration after committing the reviewed baseline policy
+- **THEN** a separate process prepares prospective custody settings without changing the serving process environment
+- **AND** the accepted review binds the service and environment source; only successful offline migration permits publication of those settings before restart
+
+#### Scenario: Expired review cannot begin new work
+
+- **WHEN** an accepted maintenance review expires before execution begins
+- **THEN** execution refuses without publishing custody or authority
+- **AND** an expired applying review can recover only an exact previously begun transition proven by retained publication evidence and its original timely start
+
+#### Scenario: Completed maintenance still finishes its approved environment publication
+
+- **WHEN** migration completes but the process exits before the approved custody settings reach the service environment
+- **THEN** exact-receipt recovery publishes only those settings and restarts the same service without repeating authority effects
+
+#### Scenario: Later activation needs current consent
+
+- **WHEN** a reviewed deployment publication finishes after the owner review expires and vocabulary authority is not yet active
+- **THEN** deployment recovery remains available but authority activation requires a fresh owner review
+
+### Requirement: Native custody renewal is deterministic and owner-authorized
+
+An owner MAY explicitly authorize ongoing renewal of the same installation's serving proof during activation. That permission SHALL be retained atomically with completed owner review and verified against the configured owner and current attachment on each renewal. Renewal SHALL preserve identity, accepted keys, authority floor and permissions, and SHALL NOT perform semantic memory work.
+
+#### Scenario: Overnight restart recovers freshness
+
+- **WHEN** an approved standalone installation restarts after its membership proof expires
+- **THEN** the lifecycle renews its verified same-authority custody before ordinary background work
+- **AND** current serving admission uses actual current time, not the historical signature verification time
+
+#### Scenario: Interrupted renewal retains the exact target
+
+- **WHEN** renewal publication is partially applied and its target expires before restart
+- **THEN** recovery completes that exact retained target before publishing a fresh successor
+- **AND** it cannot replace identity, keys, authority floor or grants while recovering

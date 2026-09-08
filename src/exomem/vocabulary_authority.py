@@ -20,11 +20,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from . import mutation_lock
+from . import held_fs, mutation_lock
 from .cli_ops import OpError
 from .governance import authorization_custody
 from .governance.principal import RequestPrincipal
-from .vocabulary_effects import Effect
+from .vocabulary_effects import CanonicalWriteImage, Effect
+from .vocabulary_placement import (
+    DATABASE_SUFFIX as _DATABASE_SUFFIX,
+)
+from .vocabulary_placement import (
+    ENV_VOCABULARY_AUTHORITY_DIR,
+    AuthorityArtifactPaths,
+    VocabularyAuthorityPlacementUnavailable,
+    contains_authority_artifacts,
+    resolve_authority_artifact_paths,
+    validated_authority_directory,
+)
+from .vocabulary_placement import (
+    MARKER_SUFFIX as _MARKER_SUFFIX,
+)
 
 _SCHEMA_VERSION = 3
 RUNTIME_SUPPORTED_CONTRACT = 2
@@ -33,32 +47,80 @@ _ACTIONS = frozenset({"entity.create", "entity_type.add", "relation_type.add", "
 _OWNER_SEAL = object()
 _FLOOR_SEAL = object()
 _RECEIPT_SEAL = object()
-_MARKER_SUFFIX = ".vocabulary-authority.activation.json"
-_DATABASE_SUFFIX = ".vocabulary-authority.sqlite"
 _MARKER_VERSION = 2
 
 
-@dataclass(frozen=True, slots=True)
-class AuthorityArtifactPaths:
-    marker_path: Path
-    database_path: Path
+def _publish_new_private_file(path: Path, data: bytes) -> bool:
+    """Publish one protected file without replacing an existing entry."""
 
-    def __iter__(self):
-        yield self.marker_path
-        yield self.database_path
+    try:
+        acquired = held_fs.acquire(path.parent.parent)
+        if not acquired.ok:
+            raise VocabularyAuthorityUnavailable
+        with acquired.require() as filesystem:
+            parent_result = filesystem.parent(path.parent.name, access="flush")
+            if not parent_result.ok:
+                raise VocabularyAuthorityUnavailable
+            with parent_result.require() as parent:
+                def prepare(staged: held_fs.HeldFile) -> None:
+                    try:
+                        authorization_custody._prepare_private_stage(  # noqa: SLF001
+                            path, staged
+                        )
+                    except Exception:
+                        name = getattr(staged, "name", None)
+                        if isinstance(name, str) and name:
+                            mutable = filesystem.file(parent, name, access="mutate")
+                            if mutable.ok:
+                                with mutable.require() as residue:
+                                    if residue.identity == staged.identity:
+                                        filesystem.unlink(residue)
+                        raise
+
+                published = held_fs.publish_bytes(
+                    filesystem,
+                    parent,
+                    path.name,
+                    data,
+                    prepare=prepare,
+                )
+                if not published.ok:
+                    if (
+                        published.error is not None
+                        and published.error.code == "DESTINATION_EXISTS"
+                    ):
+                        return False
+                    raise VocabularyAuthorityUnavailable
+                if not filesystem.flush_directory(parent).ok:
+                    raise VocabularyAuthorityUnavailable
+        return True
+    except VocabularyAuthorityUnavailable:
+        raise
+    except (
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        held_fs.HeldFsError,
+        authorization_custody.AuthorizationCustodyUnavailable,
+    ):
+        raise VocabularyAuthorityUnavailable from None
 
 
 def authority_artifact_paths(
-    control_path: Path, logical_vault_id: str
+    control_path: Path,
+    logical_vault_id: str,
+    *,
+    vault_root: Path | None = None,
 ) -> AuthorityArtifactPaths:
     """Return the immutable marker and SQLite paths for one custody identity."""
 
-    token = hashlib.sha256(_text(logical_vault_id).encode("utf-8")).hexdigest()
-    parent = Path(control_path).parent
-    return AuthorityArtifactPaths(
-        parent / f"{token}{_MARKER_SUFFIX}",
-        parent / f"{token}{_DATABASE_SUFFIX}",
-    )
+    try:
+        return resolve_authority_artifact_paths(
+            Path(control_path), _text(logical_vault_id), vault_root=vault_root
+        )
+    except VocabularyAuthorityPlacementUnavailable:
+        raise VocabularyAuthorityUnavailable from None
 
 
 def transition_status(
@@ -367,6 +429,12 @@ class AuthorityRequestStatus:
     display_effects: tuple[dict[str, str], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class OwnerRequestPreview:
+    operation: CanonicalOperation
+    images: tuple[CanonicalWriteImage, ...]
+
+
 class _CommitGuard(AbstractContextManager["_CommitGuard"]):
     def __init__(self, store: VocabularyAuthority, reservation: Reservation, principal: RequestPrincipal, now: int | None):
         self._store = store
@@ -455,10 +523,11 @@ class VocabularyAuthority:
         self._custody_loader = custody_loader
         self._clock = clock or __import__("time").time
 
-    @staticmethod
-    def _custody_leaf(custody: object, suffix: str) -> Path:
+    def _custody_leaf(self, custody: object, suffix: str) -> Path:
         paths = authority_artifact_paths(
-            Path(custody.control_path), custody.control.logical_vault_id
+            Path(custody.control_path),
+            custody.control.logical_vault_id,
+            vault_root=self.vault_root,
         )
         if suffix == _MARKER_SUFFIX:
             return paths.marker_path
@@ -521,9 +590,8 @@ class VocabularyAuthority:
                     not stat.S_ISREG(info.st_mode)
                     or info.st_nlink != 1
                     or not 1 <= info.st_size <= 2048
-                    or (
-                        os.name != "nt"
-                        and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) not in {0o400, 0o600})
+                    or not authorization_custody._file_is_owner_protected(  # noqa: SLF001
+                        descriptor, info
                     )
                 ):
                     raise ValueError
@@ -576,25 +644,11 @@ class VocabularyAuthority:
             "authorizer": owner.owner_id,
         }
         encoded = json.dumps(marker, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-            try:
-                if os.write(descriptor, encoded) != len(encoded):
-                    raise OSError("short marker write")
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            if os.name != "nt":
-                parent = os.open(path.parent, os.O_RDONLY)
-                try:
-                    os.fsync(parent)
-                finally:
-                    os.close(parent)
+        if _publish_new_private_file(path, encoded):
             return marker
-        except FileExistsError:
-            return self._marker(custody) or (_ for _ in ()).throw(VocabularyAuthorityUnavailable())
-        except OSError:
-            raise VocabularyAuthorityUnavailable from None
+        return self._marker(custody) or (_ for _ in ()).throw(
+            VocabularyAuthorityUnavailable()
+        )
 
     def _connect(self, custody: object, *, create: bool, marker: Mapping[str, Any] | None = None) -> sqlite3.Connection | None:
         current_marker = dict(marker) if marker is not None else self._marker(custody)
@@ -609,17 +663,9 @@ class VocabularyAuthority:
             raise VocabularyAuthorityUnavailable
         try:
             if create and not path.exists():
-                descriptor = os.open(
-                    path,
-                    os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                    0o600,
-                )
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
+                _publish_new_private_file(path, b"")
             self._validate_sqlite_sidecars(path)
-            retained = mutation_lock.retain_regular_file(path)
+            retained = mutation_lock.retain_regular_file(path, delete_access=False)
             try:
                 info = os.fstat(retained.fd)
                 if not authorization_custody._file_is_owner_protected(retained.fd, info):  # noqa: SLF001
@@ -644,8 +690,10 @@ class VocabularyAuthority:
             raise VocabularyAuthorityUnavailable from None
 
     @staticmethod
-    def _validate_sqlite_sidecars(path: Path) -> None:
-        """Reject pre-existing SQLite journals outside the custody protection rule."""
+    def _validate_sqlite_sidecars(
+        path: Path, *, protect_inherited_windows: bool = False
+    ) -> None:
+        """Validate sidecars, optionally protecting SQLite's new Windows journal."""
 
         for suffix in ("-journal", "-wal", "-shm"):
             candidate = path.with_name(f"{path.name}{suffix}")
@@ -653,13 +701,48 @@ class VocabularyAuthority:
                 os.lstat(candidate)
             except FileNotFoundError:
                 continue
-            retained = mutation_lock.retain_regular_file(candidate)
+            retained = mutation_lock.retain_regular_file(
+                candidate, delete_access=False
+            )
             try:
                 info = os.fstat(retained.fd)
                 if (
                     not stat.S_ISREG(info.st_mode)
                     or info.st_nlink != 1
-                    or not authorization_custody._file_is_owner_protected(retained.fd, info)  # noqa: SLF001
+                    or not mutation_lock._same_file_entry(  # noqa: SLF001
+                        retained.directory, candidate.name, retained.fd
+                    )
+                ):
+                    raise VocabularyAuthorityUnavailable
+                protected = authorization_custody._file_is_owner_protected(  # noqa: SLF001
+                    retained.fd, info
+                )
+                if (
+                    not protected
+                    and protect_inherited_windows
+                    and os.name == "nt"
+                    and suffix == "-journal"
+                ):
+                    import msvcrt
+
+                    sid = mutation_lock._windows_current_user_sid()
+                    inherited = mutation_lock._windows_dacl_sddl_for_handle(
+                        msvcrt.get_osfhandle(retained.fd)
+                    )
+                    # The opt-in is used only after this connection created its
+                    # rollback journal. Tighten an inherited canonical trustee
+                    # set, then prove the retained entry is still the same one.
+                    if mutation_lock._windows_private_dacl_is_valid(
+                        inherited, sid, directory=False
+                    ):
+                        mutation_lock._windows_apply_private_dacl(candidate, sid)
+                final_info = os.fstat(retained.fd)
+                if (
+                    not stat.S_ISREG(final_info.st_mode)
+                    or final_info.st_nlink != 1
+                    or not authorization_custody._file_is_owner_protected(  # noqa: SLF001
+                        retained.fd, final_info
+                    )
                     or not mutation_lock._same_file_entry(  # noqa: SLF001
                         retained.directory, candidate.name, retained.fd
                     )
@@ -862,6 +945,13 @@ class VocabularyAuthority:
             os.environ.get(authorization_custody.KEYRING_FILE_ENV) is None
             and os.environ.get(authorization_custody.CONTROL_FILE_ENV) is None
         ):
+            if os.environ.get(ENV_VOCABULARY_AUTHORITY_DIR) is not None:
+                try:
+                    directory = validated_authority_directory(self.vault_root)
+                    if contains_authority_artifacts(directory):
+                        return AuthorityStatus("unavailable", None, 0)
+                except VocabularyAuthorityPlacementUnavailable:
+                    return AuthorityStatus("unavailable", None, 0)
             return AuthorityStatus("v1", None, 0)
         try:
             current = self._now(now)
@@ -1121,10 +1211,18 @@ class VocabularyAuthority:
         *,
         principal: RequestPrincipal,
         expires_at: int,
+        images: Iterable[CanonicalWriteImage] | None = None,
         now: int | None = None,
     ) -> AuthorityRequestStatus:
         """Persist a pending exact request; it is never an authority grant."""
 
+        from .vocabulary_preview import encode_preview
+
+        # The existing operation record is extensible. Its optional preview is
+        # bound by image_digest, not part of the canonical operation identity.
+        record = operation.as_dict()
+        if images is not None:
+            record["write_preview"] = encode_preview(images, operation)
         current = self._now(now)
         custody = self._validate_custody(principal, now=current)
         if _timestamp(expires_at) <= current:
@@ -1146,16 +1244,19 @@ class VocabularyAuthority:
                 (operation.operation_id,),
             ).fetchone()
             if row is not None:
-                if row[1:4] != (
+                try:
+                    stored_operation = CanonicalOperation._from_record(json.loads(str(row[3])))
+                except (KeyError, TypeError, ValueError):
+                    raise VocabularyAuthorityUnavailable from None
+                if row[1:3] != (
                     principal.audience_id,
                     principal.issuer_family,
-                    json.dumps(operation.as_dict(), sort_keys=True),
-                ):
+                ) or stored_operation != operation:
                     raise VocabularyAuthorityConflict("operation identity is already requested")
                 connection.commit()
                 return self._request_status_row(row, principal, current)
             request_id = f"vocab-request-{uuid.uuid4()}"
-            operation_json = json.dumps(operation.as_dict(), sort_keys=True)
+            operation_json = json.dumps(record, sort_keys=True)
             connection.execute(
                 "INSERT INTO authority_requests VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL)",
                 (
@@ -1233,6 +1334,36 @@ class VocabularyAuthority:
     ) -> CanonicalOperation:
         """Return the complete stored request only to the current request audience."""
 
+        record = self._inspect_request_record(request_id, principal=principal, now=now)
+        try:
+            return CanonicalOperation._from_record(record)
+        except (KeyError, TypeError, ValueError):
+            raise VocabularyAuthorityUnavailable from None
+
+    @staticmethod
+    def _request_preview(record: Mapping[str, Any]) -> OwnerRequestPreview:
+        from .vocabulary_preview import decode_preview
+
+        try:
+            operation = CanonicalOperation._from_record(record)
+            images = decode_preview(record["write_preview"], operation)
+            return OwnerRequestPreview(operation, images)
+        except (KeyError, TypeError, ValueError):
+            raise VocabularyAuthorityUnavailable("exact request preview is unavailable") from None
+
+    def inspect_request_preview_for_owner(
+        self, request_id: str, *, principal: RequestPrincipal, now: int | None = None
+    ) -> OwnerRequestPreview:
+        """Read exact proposed bytes with the same audience and currency checks."""
+
+        return self._request_preview(
+            self._inspect_request_record(request_id, principal=principal, now=now)
+        )
+
+    def _inspect_request_record(
+        self, request_id: str, *, principal: RequestPrincipal, now: int | None = None
+    ) -> dict[str, Any]:
+
         current = self._now(now)
         custody = self._validate_custody(principal, now=current)
         connection = self._connect(custody, create=False)
@@ -1260,7 +1391,10 @@ class VocabularyAuthority:
             ):
                 raise VocabularyAuthorityDenied("authority request is unavailable")
             try:
-                return CanonicalOperation._from_record(json.loads(str(row[6])))
+                record = json.loads(str(row[6]))
+                if not isinstance(record, dict):
+                    raise ValueError
+                return record
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 raise VocabularyAuthorityUnavailable from None
         finally:
@@ -1353,6 +1487,8 @@ class VocabularyAuthority:
             ).fetchone()
             if row is None or row[8] not in {"pending", "approved"}:
                 raise VocabularyAuthorityDenied("authority request is not pending")
+            if row[0:2] != (principal.audience_id, principal.issuer_family):
+                raise VocabularyAuthorityDenied("authority request is unavailable")
             if int(row[7]) < current or tuple(row[2:6]) != (
                 custody.control.cell_id,
                 custody.control.logical_vault_id,
@@ -1360,11 +1496,8 @@ class VocabularyAuthority:
                 custody.control.activation_epoch,
             ):
                 raise VocabularyAuthorityDenied("authority request is stale")
-            if row[8] == "approved":
-                connection.commit()
-                return str(row[9])
             try:
-                operation = CanonicalOperation._from_record(json.loads(str(row[6])))
+                operation = self._request_preview(json.loads(str(row[6]))).operation
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 raise VocabularyAuthorityUnavailable from None
             binding = self._require_binding(
@@ -1377,6 +1510,9 @@ class VocabularyAuthority:
                 ),
             )
             owner = self._require_owner(decision, binding=binding, now=current)
+            if row[8] == "approved":
+                connection.commit()
+                return str(row[9])
             self._consume_owner_decision(connection, owner, binding=binding, action="approve-request")
             authority_id = self._insert_exact(
                 connection,

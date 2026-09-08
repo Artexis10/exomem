@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -207,6 +208,11 @@ def test_builds_and_unpacks_every_public_contract_distribution(
         path.write_bytes(b"synthetic ignored local runtime state")
     for name in ("pyproject.toml", "README.md", "LICENSE"):
         shutil.copy2(REPO_ROOT / name, build_source / name)
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    for source in project["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]:
+        destination = build_source / source
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / source, destination)
     dist = tmp_path / "dist"
     env = {"UV_CACHE_DIR": str(tmp_path / "uv-cache")}
     completed = subprocess.run(
