@@ -109,8 +109,10 @@ class Cluster:
             "spec": {"replicas": self.desired},
         }
 
-    def list_namespaced_pod(self, namespace, *, label_selector):
+    def list_namespaced_pod(self, namespace, *, label_selector=None):
         assert namespace == self.request.metadata.resource_name
+        if label_selector is None:
+            return SimpleNamespace(items=copy.deepcopy(self.job_pods + self.runtime_pods))
         if label_selector == f"job-name={namespace}-init":
             return SimpleNamespace(items=copy.deepcopy(self.job_pods))
         assert label_selector == (
@@ -494,7 +496,7 @@ async def test_adapter_refuses_ambiguous_or_failed_job_without_adopting_replacem
         cluster.create_namespaced_job = error
     elif kind == "delete-conflict":
         cluster.delete_namespaced_job = error
-    retryable = kind in {"running", "api", "create-conflict", "delete-conflict"}
+    retryable = kind in {"failed", "running", "api", "create-conflict", "delete-conflict"}
     with pytest.raises(
         DriverRetryable if retryable else MetadataConflict,
         match=(

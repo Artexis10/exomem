@@ -86,6 +86,16 @@ role, and schema before exercising the same barrier scenarios. They are skipped
 without the opt-in flag; `-k postgresql` selects only the PostgreSQL cases. Docker
 resources are uniquely named and removed by the fixture after the run.
 
+From the repository root, run the composed migration recovery drill:
+
+```bash
+uv run --frozen --with-editable ./infra/provisioner --with pytest-asyncio python -m pytest -q tests/test_hosted_governance_job.py -k provider_cleanup
+```
+
+This uses disposable signed custody and a real SQLite store with a controlled
+Kubernetes adapter. It crashes after the database commit, reconciles the failed
+Job, and proves exact replay without another cutover or changed custody bytes.
+
 The pinned production provider libraries are `kubernetes` 35.x for Kubernetes
 1.35 and the official Hetzner `hcloud` 2.x client. The shared provisioner image
 contains PostgreSQL 17.10 client tools (`pg_dump`, `pg_restore`, `psql`,

@@ -59,6 +59,20 @@ Service acceptance SHALL require the actual governance schema, authenticated pro
 - **AND** an authenticated foreign Job blocks effects while malformed or unauthenticated evidence is refused
 - **AND** expected Job contention preserves the checkpoint without consuming the worker failure budget
 
+#### Scenario: Exact migration Job fails after database commit
+
+- **WHEN** the exact request-bound migration Job has terminal Failed status with no active or terminating pods, potentially after a committed database transaction
+- **THEN** recovery authenticates all namespace-observed pods using the bound PVC or fixed slot before UID/resource-version-bound cleanup
+- **AND** foreign or malformed execution metadata remains untouched and nonterminal pods keep recovery pending
+- **AND** cleanup permits only the same-phase request replay and never synthesizes success, restores a predecessor database or advances the durable phase
+
+#### Scenario: Migration Job deletion acknowledgement is lost
+
+- **WHEN** the exact migration Job is already terminating or absent after an uncertain deletion acknowledgement
+- **THEN** recovery waits without deleting a replacement or issuing another delete for the terminating Job
+- **AND** Job absence is insufficient until a namespace-wide observation proves no remaining bound-PVC or fixed-slot pods, including pods with missing labels
+- **AND** the same absence proof precedes any replacement submission, while failed API observations never count as absence
+
 ### Requirement: Acceptance is resumable and normally agent operated
 
 The acceptance workflow SHALL execute independent checks without continuous operator attendance and persist a content-safe run report with immutable release/contract identity, stage outcomes, rerunnable commands and exact blocked actions. It MUST distinguish passed, failed, pending and blocked stages. It MUST use the ordinary customer security boundary, not a production authorization bypass.
