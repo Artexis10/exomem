@@ -107,12 +107,75 @@ class ServingMembershipEpoch:
 
 
 @dataclass(frozen=True, slots=True)
+class GovernanceReadinessProof:
+    """Private evidence that one hosted replica may serve governance traffic."""
+
+    schema_version: int
+    actual_schema: int
+    cell_id: str
+    vault_id: str
+    replica_id: str
+    software_version: str
+    governance_enrolled: bool
+    activation_store_id: str
+    activation_epoch: int
+    activation_state_digest: str
+    custody_revision: str
+    membership_epoch: int
+    membership_digest: str
+    store_agreement: bool
+
+    def __post_init__(self) -> None:
+        if (
+            _integer(self.schema_version) != 1
+            or _integer(self.actual_schema) != 4
+            or any(
+                _identifier(value) != value
+                for value in (
+                    self.cell_id,
+                    self.vault_id,
+                    self.replica_id,
+                    self.software_version,
+                    self.activation_store_id,
+                )
+            )
+            or self.governance_enrolled is not True
+            or self.store_agreement is not True
+            or _integer(self.activation_epoch) != self.activation_epoch
+            or _integer(self.membership_epoch) != self.membership_epoch
+            or _digest(self.activation_state_digest) != self.activation_state_digest
+            or _digest(self.custody_revision) != self.custody_revision
+            or _digest(self.membership_digest) != self.membership_digest
+        ):
+            raise ServingMembershipUnavailable
+
+    def as_private_dict(self) -> dict[str, object]:
+        return {
+            "schemaVersion": self.schema_version,
+            "actualSchema": self.actual_schema,
+            "cellId": self.cell_id,
+            "vaultId": self.vault_id,
+            "replicaId": self.replica_id,
+            "softwareVersion": self.software_version,
+            "governanceEnrolled": self.governance_enrolled,
+            "activationStoreId": self.activation_store_id,
+            "activationEpoch": self.activation_epoch,
+            "activationStateDigest": self.activation_state_digest,
+            "custodyRevision": self.custody_revision,
+            "membershipEpoch": self.membership_epoch,
+            "membershipDigest": self.membership_digest,
+            "storeAgreement": self.store_agreement,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ServingMembershipReadiness:
     ready: bool
     code: str
     epoch: int | None
     serving_replicas: int
     draining_replicas: int
+    governance: GovernanceReadinessProof | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -139,6 +202,11 @@ class ServingMembershipReadiness:
             or not isinstance(self.draining_replicas, int)
             or not 0 <= self.draining_replicas <= MAX_SERVING_REPLICAS
             or self.serving_replicas + self.draining_replicas > MAX_SERVING_REPLICAS
+            or (not self.ready and self.governance is not None)
+            or (
+                self.governance is not None
+                and not isinstance(self.governance, GovernanceReadinessProof)
+            )
         ):
             raise ServingMembershipUnavailable
 
