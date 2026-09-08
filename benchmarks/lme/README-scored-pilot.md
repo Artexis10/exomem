@@ -40,9 +40,23 @@ plans, command arguments or source files. Missing credentials leave preparation
 reusable. Execution creates an exclusive `execution/` directory; a failed or
 completed execution is retained, not overwritten or silently resumed.
 
+To use OpenRouter, prepare a fresh run with `--transport openrouter` and inject
+`OPENROUTER_API_KEY` at execution. The route is bound to the prepared plan;
+execution cannot change it. It requests `openai/gpt-4o-2024-08-06` from OpenAI
+through OpenRouter, with provider fallbacks and prompt transforms disabled.
+Maximum provider prices match the reservation. OpenRouter's reported usage
+cost settles the ledger; token-derived pricing remains an estimate. Model or
+provider drift, missing charge evidence and external BYOK charges stop the run.
+An upstream cost breakdown on an explicitly non-BYOK chat response is
+informational: it is not added to the reported account charge.
+Credit-purchase fees and taxes are outside reported inference charges. Preserve
+any held reservation from an earlier failed run when budgeting another attempt.
+See [OpenRouter usage accounting](https://openrouter.ai/docs/cookbook/administration/usage-accounting)
+and [provider selection](https://openrouter.ai/docs/guides/routing/provider-selection).
+
 The common `ApiReader` uses the fixed `gpt-4o-2024-08-06` snapshot and a 512-token
 answer limit. The judge executes the unchanged pinned upstream script using
-validated input byte snapshots and the same capped OpenAI transport. Upstream
+validated input byte snapshots and the same selected, capped transport. Upstream
 prompts, temperature, the 10-token judge output limit and verdict rules remain
 unchanged. Each question receives a retrieved-context answer, a gold-evidence
 control and an empty-context control. Files and directories are private on POSIX.

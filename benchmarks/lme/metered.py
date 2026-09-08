@@ -20,13 +20,17 @@ from membench.judge.handshake import RequestItem
 from protocol.budget import BudgetExceeded, BudgetLedger
 
 VERIFIED_MODEL = "gpt-4o-2024-08-06"
-ENDPOINT = "https://api.openai.com/v1/chat/completions"
+OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"
+OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODEL = "openai/gpt-4o-2024-08-06"
+OPENAI_PROVIDER = "OpenAI"
 CONTEXT_TOKENS = 128_000
 INPUT_PER_MILLION_USD = 2.50
 CACHED_INPUT_PER_MILLION_USD = 1.25
 OUTPUT_PER_MILLION_USD = 10.00
 TIMEOUT_SECONDS = 60.0
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_SAFE_DIAGNOSTIC = re.compile(r"[A-Za-z0-9_.:-]{1,80}\Z")
 
 
 class MeteredConfigurationError(ValueError):
@@ -86,9 +90,12 @@ class MeteredOpenAIBackend:
         *,
         cap_usd: float,
         approval_token: str,
-        api_key_env: str = "OPENAI_API_KEY",
+        api_key_env: str | None = None,
         model: str = VERIFIED_MODEL,
+        transport: str = "openai",
     ) -> None:
+        if transport not in {"openai", "openrouter"}:
+            raise MeteredConfigurationError("transport must be 'openai' or 'openrouter'")
         if model != VERIFIED_MODEL:
             raise MeteredConfigurationError(
                 f"verified model must be exactly {VERIFIED_MODEL!r}"
@@ -100,6 +107,10 @@ class MeteredOpenAIBackend:
             raise MeteredConfigurationError("cap_usd must be finite and positive")
         if not isinstance(approval_token, str) or not approval_token.strip():
             raise MeteredConfigurationError("approval_token must be nonblank")
+        if api_key_env is None:
+            api_key_env = (
+                "OPENROUTER_API_KEY" if transport == "openrouter" else "OPENAI_API_KEY"
+            )
         if not isinstance(api_key_env, str) or not _ENV_NAME.fullmatch(api_key_env):
             raise MeteredConfigurationError("api_key_env must be a valid environment name")
 
@@ -109,6 +120,12 @@ class MeteredOpenAIBackend:
             raise MeteredConfigurationError("run_dir must identify a directory")
         os.chmod(self.run_dir, 0o700)
         self.model = model
+        self.transport = transport
+        self.endpoint = (
+            OPENROUTER_ENDPOINT if transport == "openrouter" else OPENAI_ENDPOINT
+        )
+        self.wire_model = OPENROUTER_MODEL if transport == "openrouter" else model
+        self.provider = OPENAI_PROVIDER
         self.api_key_env = api_key_env
         self.cap_usd = cap
         self._lock = threading.Lock()
@@ -133,13 +150,16 @@ class MeteredOpenAIBackend:
             "api_key_env": api_key_env,
             "cached_input_per_million_usd": CACHED_INPUT_PER_MILLION_USD,
             "cap_usd": cap,
-            "endpoint": ENDPOINT,
+            "endpoint": self.endpoint,
             "input_per_million_usd": INPUT_PER_MILLION_USD,
             "model": model,
             "output_per_million_usd": OUTPUT_PER_MILLION_USD,
+            "provider": self.provider,
             "pricing_source": "https://developers.openai.com/api/docs/models/gpt-4o",
             "pricing_verified_on": "2026-09-08",
             "reservation_input_tokens": CONTEXT_TOKENS,
+            "transport": transport,
+            "wire_model": self.wire_model,
         }
         self._write_once(
             self.run_dir / "config.json",
@@ -298,12 +318,29 @@ class MeteredOpenAIBackend:
                 self._privatize(self.run_dir)
 
         body = {
-            "model": self.model,
+            "model": self.wire_model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
             "n": 1,
             "max_tokens": max_tokens,
         }
+        if self.transport == "openrouter":
+            body.update(
+                {
+                    "provider": {
+                        "only": ["openai"],
+                        "order": ["openai"],
+                        "allow_fallbacks": False,
+                        "require_parameters": True,
+                        "max_price": {
+                            "prompt": INPUT_PER_MILLION_USD,
+                            "completion": OUTPUT_PER_MILLION_USD,
+                            "request": 0,
+                        },
+                    },
+                    "transforms": [],
+                }
+            )
         request_record = {
             "kind": kind,
             "max_reserved_cost_usd": reservation,
@@ -317,7 +354,7 @@ class MeteredOpenAIBackend:
 
         try:
             reply = httpx.post(
-                ENDPOINT,
+                self.endpoint,
                 json=body,
                 headers={"Authorization": f"Bearer {api_key}"},
                 timeout=TIMEOUT_SECONDS,
@@ -343,6 +380,7 @@ class MeteredOpenAIBackend:
             )
             raise MeteredCallError("OpenAI transport failed; reservation retained") from None
         if reply.status_code != 200:
+            api_error = self._api_error(reply, api_key)
             self._uncertain_failure(
                 artifact_root,
                 operation_id=operation_id,
@@ -350,8 +388,9 @@ class MeteredOpenAIBackend:
                 request_id=artifact_request_id,
                 kind=kind,
                 reason=f"HTTP {reply.status_code} with unknown usage; no retry attempted",
+                api_error=api_error,
             )
-            raise MeteredCallError("OpenAI response had unknown usage; reservation retained")
+            raise MeteredCallError("transport response had unknown usage; reservation retained")
         try:
             data = reply.json()
         except (ValueError, TypeError):
@@ -386,10 +425,55 @@ class MeteredOpenAIBackend:
         cached_input_cost = cached_tokens * CACHED_INPUT_PER_MILLION_USD / 1_000_000
         input_cost = uncached_input_cost + cached_input_cost
         output_cost = output_tokens * OUTPUT_PER_MILLION_USD / 1_000_000
-        actual_cost = input_cost + output_cost
-        self._settle(operation_id, reservation=reservation, actual=actual_cost)
+        token_derived_cost = input_cost + output_cost
+        account_charge_cost = token_derived_cost
+        is_byok: bool | None = None
+        upstream_cost: float | None = None
+        if self.transport == "openrouter":
+            try:
+                account_charge_cost, is_byok, upstream_cost = (
+                    self._openrouter_accounting(usage, reservation=reservation)
+                )
+            except MeteredCallError as exc:
+                self._uncertain_failure(
+                    artifact_root,
+                    operation_id=operation_id,
+                    operation_seq=operation_seq,
+                    request_id=artifact_request_id,
+                    kind=kind,
+                    reason=str(exc),
+                )
+                raise
+        unknown_external_liability = (
+            is_byok is True and upstream_cost is None
+        ) or (
+            is_byok is None and upstream_cost is not None and upstream_cost > 0
+        )
+        known_external_cost = (
+            upstream_cost
+            if is_byok is True and upstream_cost is not None
+            else 0.0 if is_byok is False else None
+        )
+        total_liability_cost: float | None = account_charge_cost
+        if unknown_external_liability:
+            total_liability_cost = None
+            self._commit_known(operation_id, actual=account_charge_cost)
+        elif known_external_cost is not None and known_external_cost > 0:
+            total_liability_cost = account_charge_cost + known_external_cost
+            self._settle_split(
+                operation_id,
+                reservation=reservation,
+                account_charge=account_charge_cost,
+                upstream_charge=known_external_cost,
+            )
+        else:
+            self._settle(
+                operation_id, reservation=reservation, actual=account_charge_cost
+            )
 
         actual_model = data.get("model") if isinstance(data, dict) else None
+        actual_provider = data.get("provider") if isinstance(data, dict) else None
+        generation_id = data.get("id") if isinstance(data, dict) else None
         choice: object = None
         choices = data.get("choices") if isinstance(data, dict) else None
         if isinstance(choices, list) and len(choices) == 1:
@@ -400,19 +484,32 @@ class MeteredOpenAIBackend:
         failure: str | None = None
         if any(
             isinstance(value, str) and api_key in value
-            for value in (actual_model, finish_reason, content)
+            for value in (
+                actual_model,
+                actual_provider,
+                generation_id,
+                finish_reason,
+                content,
+            )
         ):
             failure = "completion contained the configured credential"
-        elif actual_model != self.model:
+        elif actual_model != self.wire_model:
             failure = "response model differs from the verified model"
+        elif self.transport == "openrouter" and actual_provider != self.provider:
+            failure = "response provider differs from the required provider"
         elif not isinstance(content, str):
             failure = "response must contain exactly one string completion"
         elif finish_reason == "length":
             failure = "completion was truncated at max_tokens"
         elif finish_reason != "stop":
             failure = "completion finish_reason is outside the approved response contract"
+        elif is_byok is True:
+            failure = "OpenRouter returned BYOK billing for the diagnostic"
+        elif unknown_external_liability:
+            failure = "OpenRouter upstream inference cost has ambiguous BYOK semantics"
 
         result_record = {
+            "account_charge_cost_usd": account_charge_cost,
             "actual_model": actual_model,
             "cost_breakdown": {
                 "cached_input_cost_usd": cached_input_cost,
@@ -420,18 +517,25 @@ class MeteredOpenAIBackend:
                 "cached_rate_applied": cached_rate_applied,
                 "input_cost_usd": input_cost,
                 "output_cost_usd": output_cost,
-                "total_cost_usd": actual_cost,
+                "total_cost_usd": token_derived_cost,
                 "uncached_input_cost_usd": uncached_input_cost,
                 "uncached_input_tokens": uncached_tokens,
             },
-            "cost_usd": actual_cost,
+            "cost_usd": account_charge_cost,
+            "external_upstream_cost_usd": known_external_cost,
             "finish_reason": finish_reason,
+            "generation_id": generation_id,
+            "is_byok": is_byok,
             "kind": kind,
             "operation_id": operation_id,
+            "provider": actual_provider,
+            "reported_upstream_inference_cost_usd": upstream_cost,
             "request_id": artifact_request_id,
             "response": _redact(content, api_key) if isinstance(content, str) else None,
             "seq": operation_seq,
             "status": "error" if failure else "ok",
+            "token_derived_cost_usd": token_derived_cost,
+            "total_liability_cost_usd": total_liability_cost,
             "ts": _now(),
             "usage": usage,
         }
@@ -463,14 +567,18 @@ class MeteredOpenAIBackend:
                 ),
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
-                cost_usd=actual_cost,
+                cost_usd=(
+                    total_liability_cost
+                    if total_liability_cost is not None
+                    else reservation
+                ),
             )
         return MeteredCompletion(
             response=content,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            cost_usd=actual_cost,
-            model_id=actual_model,
+            cost_usd=account_charge_cost,
+            model_id=self.model,
         )
 
     def _usage(
@@ -499,6 +607,47 @@ class MeteredOpenAIBackend:
                 cached_rate_applied = True
         return usage, input_tokens, output_tokens, cached_tokens, cached_rate_applied
 
+    def _openrouter_accounting(
+        self, usage: dict[str, Any], *, reservation: float
+    ) -> tuple[float, bool | None, float | None]:
+        cost = usage.get("cost")
+        if not _finite_nonnegative_number(cost) or cost > reservation:
+            raise MeteredCallError(
+                "OpenRouter usage cost is absent, malformed, or exceeds the reservation"
+            )
+        is_byok = usage.get("is_byok")
+        if is_byok is not None and not isinstance(is_byok, bool):
+            raise MeteredCallError("OpenRouter BYOK usage metadata is malformed")
+        details = usage.get("cost_details")
+        upstream_cost: float | None = None
+        if details is not None:
+            if not isinstance(details, dict):
+                raise MeteredCallError("OpenRouter upstream cost metadata is malformed")
+            upstream = details.get("upstream_inference_cost")
+            if upstream is not None:
+                if not _finite_nonnegative_number(upstream):
+                    raise MeteredCallError("OpenRouter upstream cost metadata is malformed")
+                upstream_cost = float(upstream)
+        return float(cost), is_byok, upstream_cost
+
+    @staticmethod
+    def _api_error(reply: object, api_key: str) -> dict[str, str] | None:
+        try:
+            payload = reply.json()  # type: ignore[attr-defined]
+        except (AttributeError, TypeError, ValueError):
+            return None
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if not isinstance(error, dict):
+            return None
+        diagnostic: dict[str, str] = {}
+        for field in ("code", "type"):
+            value = error.get(field)
+            if not isinstance(value, str) or api_key in value:
+                continue
+            if _SAFE_DIAGNOSTIC.fullmatch(value):
+                diagnostic[field] = value
+        return diagnostic or None
+
     def _settle(self, operation_id: str, *, reservation: float, actual: float) -> None:
         with self._lock:
             self.ledger.commit(
@@ -517,6 +666,51 @@ class MeteredOpenAIBackend:
             )
             self._privatize(self.run_dir)
 
+    def _commit_known(self, operation_id: str, *, actual: float) -> None:
+        with self._lock:
+            self.ledger.commit(
+                ts=_now(),
+                seq=self._next_seq(),
+                actor=self.name,
+                op=operation_id,
+                units=actual,
+            )
+            self._privatize(self.run_dir)
+
+    def _settle_split(
+        self,
+        operation_id: str,
+        *,
+        reservation: float,
+        account_charge: float,
+        upstream_charge: float,
+    ) -> None:
+        with self._lock:
+            self.ledger.commit(
+                ts=_now(),
+                seq=self._next_seq(),
+                actor=self.name,
+                op=operation_id,
+                units=account_charge,
+            )
+            self.ledger.commit(
+                ts=_now(),
+                seq=self._next_seq(),
+                actor=self.name,
+                op=f"{operation_id}-external",
+                units=upstream_charge,
+            )
+            total = account_charge + upstream_charge
+            if total < reservation:
+                self.ledger.release(
+                    ts=_now(),
+                    seq=self._next_seq(),
+                    actor=self.name,
+                    op=operation_id,
+                    units=reservation - total,
+                )
+            self._privatize(self.run_dir)
+
     def _uncertain_failure(
         self,
         artifact_root: Path,
@@ -526,6 +720,7 @@ class MeteredOpenAIBackend:
         request_id: str | None,
         kind: str,
         reason: str,
+        api_error: dict[str, str] | None = None,
     ) -> None:
         self._record_failure(
             artifact_root,
@@ -535,6 +730,7 @@ class MeteredOpenAIBackend:
             kind=kind,
             reason=reason,
             charged="reservation",
+            api_error=api_error,
         )
         self._write_stop(reason)
 
@@ -549,20 +745,21 @@ class MeteredOpenAIBackend:
         reason: str,
         charged: str,
         finish_reason: object = None,
+        api_error: dict[str, str] | None = None,
     ) -> None:
-        self._append_jsonl(
-            artifact_root / "failures.jsonl",
-            {
-                "charged": charged,
-                "finish_reason": finish_reason,
-                "kind": kind,
-                "operation_id": operation_id,
-                "reason": reason,
-                "request_id": request_id,
-                "seq": operation_seq,
-                "ts": _now(),
-            },
-        )
+        record: dict[str, object] = {
+            "charged": charged,
+            "finish_reason": finish_reason,
+            "kind": kind,
+            "operation_id": operation_id,
+            "reason": reason,
+            "request_id": request_id,
+            "seq": operation_seq,
+            "ts": _now(),
+        }
+        if api_error is not None:
+            record["api_error"] = api_error
+        self._append_jsonl(artifact_root / "failures.jsonl", record)
 
     def _write_stop(self, reason: str) -> None:
         self._write_private(self.ledger.stop_path, reason + "\n", exclusive=False)
@@ -631,6 +828,15 @@ class MeteredOpenAIBackend:
 
 def _token_count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _finite_nonnegative_number(value: object) -> bool:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value) and value >= 0
+    except OverflowError:
+        return False
 
 
 def _redact(value: str, secret: str) -> str:

@@ -134,6 +134,24 @@ def test_missing_key_keeps_prepared_run_reusable(prepared, monkeypatch):
     assert not (run / "execution").exists()
 
 
+def test_openrouter_is_frozen_during_preparation_and_requires_its_key(prepared, monkeypatch):
+    pilot, original, _, _ = prepared
+    run = original.with_name("router-pilot")
+    info = pilot.prepare_replay(Path("fixture-export"), Path("fixture-plan"), Path("fixture-judge"), run, transport="openrouter")
+    assert json.loads((run / "replay-plan.json").read_text())["transport"] == "openrouter"
+    monkeypatch.setenv("OPENAI_API_KEY", "unrelated-direct-key")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+        pilot.execute_replay(run, expected_plan_sha256=info["plan_sha256"], approval_token="test approval")
+    assert not (run / "execution").exists()
+
+
+def test_unknown_transport_refuses_preparation(prepared):
+    pilot, run, _, _ = prepared
+    with pytest.raises(ValueError, match="transport"):
+        pilot.prepare_replay(Path("fixture-export"), Path("fixture-plan"), Path("fixture-judge"), run.with_name("unknown"), transport="arbitrary-proxy")
+
+
 def test_pinned_judge_refuses_modified_script(tmp_path):
     from lme.scored_pilot import _judge_source
 
@@ -156,8 +174,9 @@ def test_official_client_rejects_unpriced_or_changed_request_settings():
         client.chat.completions.create(model="unknown", messages=[], max_tokens=10, n=1, temperature=0)
 
 
+@pytest.mark.parametrize("transport", ["openai", "openrouter"])
 @pytest.mark.parametrize("mutation", [None, "dataset", "script", "credential"])
-def test_full_offline_execution_uses_common_reader_and_official_script(prepared, monkeypatch, mutation):
+def test_full_offline_execution_uses_common_reader_and_official_script(prepared, monkeypatch, mutation, transport):
     import importlib.machinery
     import sys
     import types
@@ -174,10 +193,15 @@ def test_full_offline_execution_uses_common_reader_and_official_script(prepared,
         monkeypatch.setitem(sys.modules, name, module)
 
     pilot, run, info, _ = prepared
-    monkeypatch.setenv("OPENAI_API_KEY", "fixture-key-not-for-output")
+    if transport == "openrouter":
+        run = run.with_name("router-pilot")
+        info = pilot.prepare_replay(Path("fixture-export"), Path("fixture-plan"), Path("fixture-judge"), run, transport=transport)
+    key_env = "OPENROUTER_API_KEY" if transport == "openrouter" else "OPENAI_API_KEY"
+    monkeypatch.setenv(key_env, "fixture-key-not-for-output")
     prompts = []
 
     def respond(url, *, json, **kwargs):
+        assert url == ("https://openrouter.ai/api/v1/chat/completions" if transport == "openrouter" else "https://api.openai.com/v1/chat/completions")
         prompt = json["messages"][0]["content"]
         prompts.append(prompt)
         if len(prompts) == 1 and mutation == "dataset":
@@ -192,7 +216,8 @@ def test_full_offline_execution_uses_common_reader_and_official_script(prepared,
         answer = "yes" if json["max_tokens"] == 10 else "An answer from the retrieved context."
         if mutation == "credential":
             answer = "fixture-key-not-for-output"
-        return httpx.Response(200, json={"model": "gpt-4o-2024-08-06", "choices": [{"message": {"content": answer}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}})
+        model = "openai/gpt-4o-2024-08-06" if transport == "openrouter" else "gpt-4o-2024-08-06"
+        return httpx.Response(200, json={"id": "fixture-generation", "provider": "OpenAI", "model": model, "choices": [{"message": {"content": answer}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110, "cost": 0.0004}})
 
     monkeypatch.setattr(httpx, "post", respond)
     if mutation == "credential":
@@ -208,9 +233,11 @@ def test_full_offline_execution_uses_common_reader_and_official_script(prepared,
     assert not any("UNAPPROVED-GOLD" in prompt for prompt in prompts)
     assert result["status"] == "complete"
     assert result["publishable"] is False
+    assert result["transport"] == transport
     assert len(prompts) == 42
     assert sum("PUBLIC RETRIEVED CONTEXT" in p for p in prompts) == 7
     assert result["scores"]["main"] == {"correct": 7, "total": 7, "accuracy": 1.0}
-    assert result["cost_usd"] == pytest.approx(42 * (100 * 2.5 + 10 * 10) / 1_000_000)
+    per_call = 0.0004 if transport == "openrouter" else (100 * 2.5 + 10 * 10) / 1_000_000
+    assert result["cost_usd"] == pytest.approx(42 * per_call)
     with pytest.raises((FileExistsError, ValueError)):
         pilot.execute_replay(run, expected_plan_sha256=info["plan_sha256"], approval_token="test approval")

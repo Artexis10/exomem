@@ -100,6 +100,15 @@ artifacts at the repaired provider pin; old evidence is retained unchanged.
    questions from accuracy are thereby never consumed. bm-bench accuracy
    numbers are likewise re-derived; competitor-harness native numbers are
    never republished as ours.
+   Small scored replays can select direct OpenAI or OpenRouter at preparation.
+   The latter uses `openai/gpt-4o-2024-08-06`, restricted to OpenAI without
+   provider fallbacks or prompt transforms. Reader and judge prompts retain
+   the dated snapshot contract. Fixed maximum prices bound pre-call
+   reservations; OpenRouter's reported account charge settles its ledger,
+   while token arithmetic remains an estimate. Transport and response provider
+   identity remain visible in artifacts. External BYOK charges, unknown billing
+   or identity drift stop the diagnostic. Fresh route selection creates a new
+   prepared run; it never resets another run's retained reservation.
 4. **Equivalence gates.** A committed 25-case LongMemEval-S subset
    (3 answerable × 6 types + 7 abstention, hash-ordered selection, recorded
    dataset sha; changes require an OpenSpec task). Twelve diff keys with

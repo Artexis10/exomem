@@ -10,6 +10,8 @@ import pytest
 
 MODEL = "gpt-4o-2024-08-06"
 KEY = "test-key-that-must-not-reach-disk"
+OPENROUTER_KEY = "openrouter-key-that-must-not-reach-disk"
+OPENROUTER_MODEL = "openai/gpt-4o-2024-08-06"
 
 
 class FakeResponse:
@@ -59,6 +61,44 @@ def _backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cap: float = 1.
 
 def _jsonl(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _openrouter_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cap: float = 1.0
+):
+    from lme.metered import MeteredOpenAIBackend
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", OPENROUTER_KEY)
+    return MeteredOpenAIBackend(
+        tmp_path / "metered",
+        cap_usd=cap,
+        approval_token="approved-openrouter-pilot",
+        transport="openrouter",
+    )
+
+
+def _openrouter_success(
+    *,
+    cost: object = 0.0017,
+    provider: object = "OpenAI",
+    model: object = OPENROUTER_MODEL,
+    content: object = "answer",
+    is_byok: object | None = None,
+    upstream_inference_cost: object | None = None,
+) -> dict[str, object]:
+    payload = _success(model=model, content=content)
+    payload["id"] = "gen-openrouter-123"
+    payload["provider"] = provider
+    usage = payload["usage"]
+    assert isinstance(usage, dict)
+    usage["cost"] = cost
+    if is_byok is not None:
+        usage["is_byok"] = is_byok
+    if upstream_inference_cost is not None:
+        usage["cost_details"] = {
+            "upstream_inference_cost": upstream_inference_cost
+        }
+    return payload
 
 
 def test_complete_reserves_before_call_then_commits_measured_usage_and_releases(
@@ -509,3 +549,357 @@ def test_malformed_response_metadata_is_constrained_and_recursively_redacted(
     for path in root.rglob("*"):
         if path.is_file():
             assert KEY not in path.read_text(encoding="utf-8")
+
+
+def test_openrouter_uses_the_fixed_wire_route_and_account_charge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lme import metered
+
+    backend = _openrouter_backend(tmp_path, monkeypatch)
+    observed: dict[str, object] = {}
+
+    def post(url, *, json, headers, timeout):
+        observed.update(url=url, body=json, headers=headers, timeout=timeout)
+        return FakeResponse(_openrouter_success(cost=0.0017))
+
+    monkeypatch.setattr(metered.httpx, "post", post)
+    result = backend.complete("question", max_tokens=10)
+
+    assert result.model_id == MODEL
+    assert result.cost_usd == pytest.approx(0.0017)
+    assert observed == {
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "body": {
+            "model": OPENROUTER_MODEL,
+            "messages": [{"role": "user", "content": "question"}],
+            "temperature": 0,
+            "n": 1,
+            "max_tokens": 10,
+            "provider": {
+                "only": ["openai"],
+                "order": ["openai"],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+                "max_price": {"prompt": 2.5, "completion": 10, "request": 0},
+            },
+            "transforms": [],
+        },
+        "headers": {"Authorization": f"Bearer {OPENROUTER_KEY}"},
+        "timeout": 60.0,
+    }
+    config = json.loads((tmp_path / "metered" / "config.json").read_text())
+    assert config["transport"] == "openrouter"
+    assert config["endpoint"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert config["wire_model"] == OPENROUTER_MODEL
+    assert config["provider"] == "OpenAI"
+    result_row = _jsonl(tmp_path / "metered" / "results.jsonl")[0]
+    assert result_row["cost_usd"] == pytest.approx(0.0017)
+    assert result_row["token_derived_cost_usd"] == pytest.approx(0.000325)
+    assert result_row["generation_id"] == "gen-openrouter-123"
+    assert result_row["provider"] == "OpenAI"
+    assert result_row["actual_model"] == OPENROUTER_MODEL
+    assert _jsonl(tmp_path / "metered" / "ledger.jsonl")[-1][
+        "running_total"
+    ] == pytest.approx(0.0017)
+
+
+def test_openrouter_defaults_to_its_credential_and_allows_an_explicit_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lme.metered import MeteredOpenAIBackend
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    default = MeteredOpenAIBackend(
+        tmp_path / "default",
+        cap_usd=1,
+        approval_token="approved",
+        transport="openrouter",
+    )
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+        default.complete("question")
+
+    monkeypatch.setenv("PILOT_ROUTER_KEY", OPENROUTER_KEY)
+    explicit = MeteredOpenAIBackend(
+        tmp_path / "explicit",
+        cap_usd=1,
+        approval_token="approved",
+        transport="openrouter",
+        api_key_env="PILOT_ROUTER_KEY",
+    )
+    assert explicit.api_key_env == "PILOT_ROUTER_KEY"
+
+
+@pytest.mark.parametrize("transport", ["compat", "", "OPENROUTER", None])
+def test_transport_is_allowlisted(tmp_path: Path, transport: object) -> None:
+    from lme.metered import MeteredConfigurationError, MeteredOpenAIBackend
+
+    with pytest.raises(MeteredConfigurationError, match="transport"):
+        MeteredOpenAIBackend(
+            tmp_path / "metered",
+            cap_usd=1,
+            approval_token="approved",
+            transport=transport,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    "cost", [None, "0.1", -1, math.nan, math.inf, 0.4, 10**400]
+)
+def test_openrouter_invalid_or_overbound_account_cost_retains_reservation_and_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cost: object
+) -> None:
+    from lme import metered
+    from lme.metered import MeteredCallError
+
+    backend = _openrouter_backend(tmp_path, monkeypatch)
+    payload = _openrouter_success(cost=cost)
+    monkeypatch.setattr(
+        metered.httpx, "post", lambda *args, **kwargs: FakeResponse(payload)
+    )
+
+    with pytest.raises(MeteredCallError, match="cost"):
+        backend.complete("question", max_tokens=10)
+    ledger = _jsonl(tmp_path / "metered" / "ledger.jsonl")
+    assert [row["kind"] for row in ledger] == ["approval", "reserve"]
+    assert ledger[-1]["running_total"] == pytest.approx(0.3201)
+    assert (tmp_path / "metered" / "STOP").is_file()
+
+
+@pytest.mark.parametrize(
+    ("model", "provider", "match"),
+    [
+        (MODEL, "OpenAI", "model"),
+        (OPENROUTER_MODEL, "Other", "provider"),
+        (OPENROUTER_MODEL, None, "provider"),
+    ],
+)
+def test_openrouter_wrong_wire_identity_is_billed_then_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model: object,
+    provider: object,
+    match: str,
+) -> None:
+    from lme import metered
+    from lme.metered import MeteredCallError
+
+    backend = _openrouter_backend(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        metered.httpx,
+        "post",
+        lambda *args, **kwargs: FakeResponse(
+            _openrouter_success(cost=0.0017, model=model, provider=provider)
+        ),
+    )
+
+    with pytest.raises(MeteredCallError, match=match):
+        backend.complete("question", max_tokens=10)
+    ledger = _jsonl(tmp_path / "metered" / "ledger.jsonl")
+    assert [row["kind"] for row in ledger] == [
+        "approval",
+        "reserve",
+        "commit",
+        "release",
+    ]
+    assert ledger[-1]["running_total"] == pytest.approx(0.0017)
+    assert (tmp_path / "metered" / "STOP").is_file()
+
+
+def test_openrouter_credential_reflection_is_billed_and_never_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lme import metered
+    from lme.metered import MeteredCallError
+
+    backend = _openrouter_backend(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        metered.httpx,
+        "post",
+        lambda *args, **kwargs: FakeResponse(
+            _openrouter_success(cost=0.0017, content=f"answer {OPENROUTER_KEY}")
+        ),
+    )
+
+    with pytest.raises(MeteredCallError, match="credential"):
+        backend.complete("question", max_tokens=10)
+    assert _jsonl(tmp_path / "metered" / "ledger.jsonl")[-1][
+        "running_total"
+    ] == pytest.approx(0.0017)
+    for path in (tmp_path / "metered").rglob("*"):
+        if path.is_file():
+            assert OPENROUTER_KEY not in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("is_byok", "upstream_cost"),
+    [(True, None), (True, 0.002)],
+)
+def test_openrouter_byok_or_external_upstream_cost_is_recorded_then_stops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    is_byok: bool,
+    upstream_cost: float | None,
+) -> None:
+    from lme import metered
+    from lme.metered import MeteredCallError
+
+    backend = _openrouter_backend(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        metered.httpx,
+        "post",
+        lambda *args, **kwargs: FakeResponse(
+            _openrouter_success(
+                cost=0.0017,
+                is_byok=is_byok,
+                upstream_inference_cost=upstream_cost,
+            )
+        ),
+    )
+
+    with pytest.raises(MeteredCallError, match="BYOK|upstream"):
+        backend.complete("question", max_tokens=10)
+    row = _jsonl(tmp_path / "metered" / "results.jsonl")[0]
+    assert row["account_charge_cost_usd"] == pytest.approx(0.0017)
+    assert row["is_byok"] is is_byok
+    assert row["external_upstream_cost_usd"] == upstream_cost
+    ledger = _jsonl(tmp_path / "metered" / "ledger.jsonl")
+    if upstream_cost is None:
+        assert row["total_liability_cost_usd"] is None
+        assert [entry["kind"] for entry in ledger] == [
+            "approval",
+            "reserve",
+            "commit",
+        ]
+        assert ledger[-1]["running_total"] == pytest.approx(0.3201)
+    else:
+        assert row["total_liability_cost_usd"] == pytest.approx(0.0037)
+        assert [entry["kind"] for entry in ledger] == [
+            "approval",
+            "reserve",
+            "commit",
+            "commit",
+            "release",
+        ]
+        assert ledger[-1]["running_total"] == pytest.approx(0.0037)
+    assert (tmp_path / "metered" / "STOP").is_file()
+
+
+def test_openrouter_non_byok_upstream_cost_is_informative_not_additive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lme import metered
+
+    backend = _openrouter_backend(tmp_path, monkeypatch)
+    payload = _openrouter_success(
+        cost=0.069185,
+        is_byok=False,
+        upstream_inference_cost=0.069185,
+    )
+    usage = payload["usage"]
+    assert isinstance(usage, dict)
+    usage["prompt_tokens"] = 27_658
+    usage["completion_tokens"] = 4
+    usage["prompt_tokens_details"] = {"cached_tokens": 0}
+    monkeypatch.setattr(
+        metered.httpx,
+        "post",
+        lambda *args, **kwargs: FakeResponse(payload),
+    )
+
+    result = backend.complete("question", max_tokens=10)
+
+    assert result.response == "answer"
+    assert result.cost_usd == pytest.approx(0.069185)
+    row = _jsonl(tmp_path / "metered" / "results.jsonl")[0]
+    assert row["account_charge_cost_usd"] == pytest.approx(0.069185)
+    assert row["reported_upstream_inference_cost_usd"] == pytest.approx(0.069185)
+    assert row["external_upstream_cost_usd"] == 0
+    assert row["total_liability_cost_usd"] == pytest.approx(0.069185)
+    assert _jsonl(tmp_path / "metered" / "ledger.jsonl")[-1][
+        "running_total"
+    ] == pytest.approx(0.069185)
+    assert not (tmp_path / "metered" / "STOP").exists()
+
+
+def test_openrouter_positive_upstream_with_missing_byok_is_ambiguous_and_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lme import metered
+    from lme.metered import MeteredCallError
+
+    backend = _openrouter_backend(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        metered.httpx,
+        "post",
+        lambda *args, **kwargs: FakeResponse(
+            _openrouter_success(cost=0.0017, upstream_inference_cost=0.002)
+        ),
+    )
+
+    with pytest.raises(MeteredCallError, match="ambiguous"):
+        backend.complete("question", max_tokens=10)
+    row = _jsonl(tmp_path / "metered" / "results.jsonl")[0]
+    assert row["total_liability_cost_usd"] is None
+    assert row["reported_upstream_inference_cost_usd"] == pytest.approx(0.002)
+    assert row["external_upstream_cost_usd"] is None
+    ledger = _jsonl(tmp_path / "metered" / "ledger.jsonl")
+    assert [entry["kind"] for entry in ledger] == ["approval", "reserve", "commit"]
+    assert ledger[-1]["running_total"] == pytest.approx(0.3201)
+    assert (tmp_path / "metered" / "STOP").is_file()
+
+
+def test_openrouter_malformed_upstream_cost_retains_reservation_and_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lme import metered
+    from lme.metered import MeteredCallError
+
+    backend = _openrouter_backend(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        metered.httpx,
+        "post",
+        lambda *args, **kwargs: FakeResponse(
+            _openrouter_success(cost=0.0017, upstream_inference_cost=10**400)
+        ),
+    )
+
+    with pytest.raises(MeteredCallError, match="upstream"):
+        backend.complete("question", max_tokens=10)
+    ledger = _jsonl(tmp_path / "metered" / "ledger.jsonl")
+    assert [entry["kind"] for entry in ledger] == ["approval", "reserve"]
+    assert ledger[-1]["running_total"] == pytest.approx(0.3201)
+    assert (tmp_path / "metered" / "STOP").is_file()
+
+
+def test_openrouter_non_200_keeps_only_bounded_error_code_and_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lme import metered
+    from lme.metered import MeteredCallError
+
+    backend = _openrouter_backend(tmp_path, monkeypatch)
+    payload = {
+        "error": {
+            "code": "rate_limit_exceeded",
+            "type": "insufficient_quota",
+            "message": f"raw secret {OPENROUTER_KEY}",
+            "metadata": {"debug": OPENROUTER_KEY},
+        }
+    }
+    monkeypatch.setattr(
+        metered.httpx,
+        "post",
+        lambda *args, **kwargs: FakeResponse(payload, status_code=429),
+    )
+
+    with pytest.raises(MeteredCallError, match="unknown usage"):
+        backend.complete("question", max_tokens=10)
+    failure = _jsonl(tmp_path / "metered" / "failures.jsonl")[0]
+    assert failure["api_error"] == {
+        "code": "rate_limit_exceeded",
+        "type": "insufficient_quota",
+    }
+    serialized = json.dumps(failure)
+    assert "message" not in serialized and "metadata" not in serialized
+    assert OPENROUTER_KEY not in serialized

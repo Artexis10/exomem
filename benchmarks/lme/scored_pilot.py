@@ -40,6 +40,7 @@ from lme.reader import ApiReader, _require_approval  # noqa: E402
 _LOCKFILE = _BENCHMARKS_ROOT / "suites/lme_v1/LOCKFILE.json"
 _SCHEMA = "lme-scored-pilot.v1"
 _FILES = ("dataset.json", "contexts.json", "official-evaluate_qa.py")
+_TRANSPORTS = ("openai", "openrouter")
 
 
 def _sha(raw: bytes) -> str:
@@ -197,7 +198,9 @@ def estimate_cost(dataset: LmeDataset, contexts: dict[str, list[str]], judge_sou
     }
 
 
-def prepare_replay(export_path: Path, run_plan_path: Path, judge_home: Path, out: Path, *, size: int = 7, cap_usd: float = 2) -> dict:
+def prepare_replay(export_path: Path, run_plan_path: Path, judge_home: Path, out: Path, *, size: int = 7, cap_usd: float = 2, transport: str = "openai") -> dict:
+    if transport not in _TRANSPORTS:
+        raise ValueError("unsupported diagnostic transport")
     if not math.isfinite(cap_usd) or not 0 < cap_usd <= 25:
         raise ValueError("diagnostic budget cap must be finite and within (0, 25]")
     source = _load_source(export_path, run_plan_path)
@@ -214,6 +217,7 @@ def prepare_replay(export_path: Path, run_plan_path: Path, judge_home: Path, out
         _write(out / "official-evaluate_qa.py", judge)
         plan = {
             "schema": _SCHEMA, "publishable": False, "purpose": "diagnostic-scored-replay",
+            "transport": transport,
             "question_ids": ids, "question_count": len(ids), "source": source.identity,
             "judge": judge_identity, "reader_model": "gpt-4o-2024-08-06",
             "reader_source_sha256": _sha(Path(sys.modules[ApiReader.__module__].__file__).read_bytes()),
@@ -224,7 +228,7 @@ def prepare_replay(export_path: Path, run_plan_path: Path, judge_home: Path, out
         _write(out / "replay-plan.json", plan_bytes)
     finally:
         os.umask(mask)
-    return {"question_count": len(ids), "publishable": False, "plan_sha256": _sha(plan_bytes), "budget_cap_usd": cap_usd, "estimate": cost}
+    return {"question_count": len(ids), "publishable": False, "transport": transport, "plan_sha256": _sha(plan_bytes), "budget_cap_usd": cap_usd, "estimate": cost}
 
 
 def _judge_client(backend):
@@ -283,7 +287,7 @@ def _run_judge(script: Path, hypotheses: Path, dataset: Path, backend, *, script
     return result
 
 
-def execute_replay(out: Path, *, expected_plan_sha256: str, approval_token: str, api_key_env: str = "OPENAI_API_KEY") -> dict:
+def execute_replay(out: Path, *, expected_plan_sha256: str, approval_token: str, api_key_env: str | None = None) -> dict:
     _require_approval(approval_token)
     raw = stable_dataset_bytes(out / "replay-plan.json")
     if _sha(raw) != expected_plan_sha256:
@@ -291,6 +295,11 @@ def execute_replay(out: Path, *, expected_plan_sha256: str, approval_token: str,
     plan = json.loads(raw)
     if plan["schema"] != _SCHEMA or plan["publishable"] is not False:
         raise ValueError("unknown diagnostic plan schema")
+    # Plans prepared before transport selection used the fixed direct route.
+    transport = plan.get("transport", "openai")
+    if transport not in _TRANSPORTS:
+        raise ValueError("unsupported diagnostic transport")
+    api_key_env = api_key_env or ("OPENROUTER_API_KEY" if transport == "openrouter" else "OPENAI_API_KEY")
     snapshots = {name: stable_dataset_bytes(out / name) for name in _FILES}
     for name, payload in snapshots.items():
         if _sha(payload) != plan["artifacts"][name]:
@@ -315,12 +324,12 @@ def execute_replay(out: Path, *, expected_plan_sha256: str, approval_token: str,
     execution = out / "execution"
     execution.mkdir(mode=0o700, exist_ok=False)
     mask = os.umask(0o077)
-    summary = {"schema": _SCHEMA, "status": "failed", "publishable": False, "question_count": len(dataset.questions), "plan_sha256": expected_plan_sha256}
+    summary = {"schema": _SCHEMA, "status": "failed", "publishable": False, "question_count": len(dataset.questions), "plan_sha256": expected_plan_sha256, "transport": transport}
     try:
         _write(execution / "replay-plan.json", raw)
         for name, payload in snapshots.items():
             _write(execution / name, payload)
-        backend = MeteredOpenAIBackend(execution, cap_usd=plan["budget_cap_usd"], approval_token=approval_token, api_key_env=api_key_env)
+        backend = MeteredOpenAIBackend(execution, cap_usd=plan["budget_cap_usd"], approval_token=approval_token, api_key_env=api_key_env, transport=transport)
         reader = ApiReader(backend=backend, approval_token=approval_token, run_dir=execution)
         contexts = json.loads(snapshots["contexts.json"])
         lanes = {"main": [], "ceiling": [], "floor": []}
@@ -363,14 +372,15 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--out", required=True, type=Path)
     prepare.add_argument("--size", type=int, choices=(7, 25), default=7)
     prepare.add_argument("--budget-cap-usd", type=float, default=2)
+    prepare.add_argument("--transport", choices=_TRANSPORTS, default="openai")
     run = commands.add_parser("run", help="execute a prepared diagnostic under its frozen budget")
     run.add_argument("--out", required=True, type=Path)
     run.add_argument("--expected-plan-sha256", required=True)
     run.add_argument("--metered-approval", required=True)
-    run.add_argument("--api-key-env", default="OPENAI_API_KEY")
+    run.add_argument("--api-key-env", help="credential variable; defaults to the prepared transport's key")
     args = parser.parse_args(argv)
     if args.command == "prepare":
-        result = prepare_replay(args.export, args.run_plan, args.judge_home, args.out, size=args.size, cap_usd=args.budget_cap_usd)
+        result = prepare_replay(args.export, args.run_plan, args.judge_home, args.out, size=args.size, cap_usd=args.budget_cap_usd, transport=args.transport)
     else:
         result = execute_replay(args.out, expected_plan_sha256=args.expected_plan_sha256, approval_token=args.metered_approval, api_key_env=args.api_key_env)
     print(json.dumps(result, indent=2, allow_nan=False))

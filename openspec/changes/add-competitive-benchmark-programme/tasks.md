@@ -476,6 +476,14 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       export, the common reader, and unchanged pinned official judge under one
       reserved budget. Preserve source artifacts; diagnostics remain
       non-publishable and cannot authorize a full run.
+- [ ] 7.0a Support the explicitly selected OpenRouter route for small scored
+      diagnostics, binding the dated model and OpenAI provider, recording
+      reported charges and retaining uncertainty across failed attempts.
+- [ ] 7.0b Validate reader question placement and first-person attribution
+      before a full scored run: the diagnostic reader abstained on explicit
+      answer evidence, while separate single-question prompt probes recovered
+      the answer. Freeze any corrected common prompt and validate it on a
+      fresh diagnostic cohort; preserve the original scores and receipts.
 - [ ] 7.1 Fixture tier across all lanes, zero spend
 - [ ] 7.2 LongMemEval-S fetched + sha pinned; canonical selection artifact
       committed (direct stub pilot remains open)

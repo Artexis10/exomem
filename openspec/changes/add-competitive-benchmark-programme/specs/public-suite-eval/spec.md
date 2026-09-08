@@ -61,6 +61,20 @@ the reservation and halt further calls. The diagnostic SHALL preserve original
 artifacts, report unmeasured isolation and equivalence explicitly, remain
 non-publishable, and SHALL NOT supply full-run approval evidence.
 
+The prepared plan SHALL bind either direct OpenAI or OpenRouter transport.
+OpenRouter SHALL use the same dated model snapshot, restrict routing to the
+OpenAI provider without fallbacks, disable prompt transforms, and enforce
+maximum provider prices consistent with the reserved amount. Its account charge
+SHALL come from reported usage cost; token-derived estimates SHALL remain
+separate. Missing or invalid cost evidence SHALL stop execution with the
+reservation retained. A changed response model or provider SHALL fail after
+known charges are recorded. Nonzero external BYOK charges SHALL prevent a
+proxy-only cost from being presented as complete. Response artifacts SHALL
+distinguish the upstream cost breakdown from external liability: an explicitly
+non-BYOK chat response SHALL settle only its reported account charge.
+Response artifacts SHALL preserve transport, provider and generation identity
+without credentials.
+
 #### Scenario: A small diagnostic gives a measured spending baseline
 - **WHEN** seven representative cases are prepared and approved for execution
 - **THEN** the reader and judge share one immutable capped ledger
@@ -79,3 +93,10 @@ non-publishable, and SHALL NOT supply full-run approval evidence.
 - **WHEN** a diagnostic finishes successfully
 - **THEN** its result remains non-publishable and does not replace equivalence,
   scored-pilot, full-run approval or comparative publication gates
+
+#### Scenario: OpenRouter supplies the same scored diagnostic
+- **WHEN** an approved plan selects OpenRouter and a separate local key
+- **THEN** the common reader and unchanged official judge share that fixed
+  route and one capped ledger
+- **AND** every successful response records the model, provider and reported
+  account charge, without substituting a model or relaxing the budget
