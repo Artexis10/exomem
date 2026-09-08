@@ -70,3 +70,4 @@ routes:
   # private transfer listener and its exact per-cell @file transport.
   transferProfile: legacy
   transferServersTransport: ""
+  privatePeerHostname: ""

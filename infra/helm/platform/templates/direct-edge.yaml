@@ -202,8 +202,17 @@ data:
         - certFile: /var/run/exomem-private-transfer/tls/tls.crt
           keyFile: /var/run/exomem-private-transfer/tls/tls.key
       options:
+        # A conflicting hostname/TLSOption association falls back to default.
+        # That fallback must retain the same edge-client authentication policy.
+        default:
+          minVersion: VersionTLS12
+          sniStrict: true
+          clientAuth:
+            caFiles: [/var/run/exomem-private-transfer/edge-client-ca/ca.crt]
+            clientAuthType: RequireAndVerifyClientCert
         private-transfer:
           minVersion: VersionTLS12
+          sniStrict: true
           clientAuth:
             caFiles: [/var/run/exomem-private-transfer/edge-client-ca/ca.crt]
             clientAuthType: RequireAndVerifyClientCert

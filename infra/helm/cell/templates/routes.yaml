@@ -42,9 +42,14 @@ metadata:
     {{- include "exomem-cell.labels" . | nindent 4 }}
 spec:
   entryPoints: [{{ if $privateTransfer }}private-transfer{{ else }}web{{ end }}]
+  {{- if $privateTransfer }}
+  tls:
+    options:
+      name: private-transfer@file
+  {{- end }}
   routes:
     - kind: Rule
-      match: Host(`{{ .Values.transferHostname }}`) && (Path(`/cells/{{ .Values.cellId }}/public/exomem/v2/transfers/upload`) || Path(`/cells/{{ .Values.cellId }}/public/exomem/v2/transfers/download`))
+      match: {{ if $privateTransfer }}(Host(`{{ .Values.transferHostname }}`) || Host(`{{ .Values.routes.privatePeerHostname }}`)){{ else }}Host(`{{ .Values.transferHostname }}`){{ end }} && (Path(`/cells/{{ .Values.cellId }}/public/exomem/v2/transfers/upload`) || Path(`/cells/{{ .Values.cellId }}/public/exomem/v2/transfers/download`))
       middlewares:
         - name: {{ .Values.resourceName }}-strip-cell
       services:

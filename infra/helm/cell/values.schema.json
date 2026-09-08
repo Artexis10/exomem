@@ -80,17 +80,21 @@
     "routes": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "controlHostname", "transferProfile", "transferServersTransport"],
+      "required": ["enabled", "controlHostname", "transferProfile", "transferServersTransport", "privatePeerHostname"],
       "properties": {
         "enabled": {"type": "boolean"},
         "controlHostname": {"type": "string"},
         "transferProfile": {"enum": ["legacy", "private-transfer"]},
-        "transferServersTransport": {"type": "string"}
+        "transferServersTransport": {"type": "string"},
+        "privatePeerHostname": {"type": "string"}
       },
       "allOf": [
         {
           "if": {"properties": {"transferProfile": {"const": "private-transfer"}}},
-          "then": {"properties": {"transferServersTransport": {"pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?@file$"}}}
+          "then": {"properties": {
+            "transferServersTransport": {"pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?@file$"},
+            "privatePeerHostname": {"pattern": "^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?\\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?\\.svc\\.cluster\\.local$"}
+          }}
         }
       ]
     },

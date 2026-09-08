@@ -64,3 +64,4 @@ routes:
   controlHostname: control.example.test
   transferProfile: legacy
   transferServersTransport: ""
+  privatePeerHostname: ""
