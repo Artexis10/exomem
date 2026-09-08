@@ -446,6 +446,11 @@ uv sync --extra media
 - `media`: OCR for images, PDF extraction, Office document extraction, and
   faster-whisper ASR for audio/video.
 
+CSV, TSV and JSON evidence uploads get dataset source cards for discovery and
+exact queries. YAML, JSONL, XML and TOML exports get bounded text previews.
+These paths need no optional extras; see [source formats](docs/source-formats.md)
+for limits and governance behavior.
+
 `lean` and `hybrid` remain available for constrained machines. Generated image
 captioning and speaker diarization are advanced opt-ins, not requirements for
 the standard multimodal path.
