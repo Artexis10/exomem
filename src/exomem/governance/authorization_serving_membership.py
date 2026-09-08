@@ -448,6 +448,7 @@ def _parse_attestation(
     now: int,
     expected_epoch: int,
     expected_cell_id: str,
+    allow_expired: bool = False,
 ) -> ReplicaReadinessAttestation:
     if not isinstance(value, dict) or set(value) != _ATTESTATION_FIELDS:
         raise ServingMembershipUnavailable
@@ -463,7 +464,9 @@ def _parse_attestation(
     if (
         epoch != expected_epoch
         or _identifier(value["cell_id"]) != expected_cell_id
-        or not attested_at <= now < expires_at
+        or attested_at > now
+        or attested_at >= expires_at
+        or (not allow_expired and now >= expires_at)
         or expires_at - attested_at > MAX_ATTESTATION_TTL_SECONDS
     ):
         raise ServingMembershipUnavailable
@@ -564,6 +567,28 @@ def parse_serving_membership(
 ) -> ServingMembershipEpoch:
     """Authenticate one exact, current serving-membership epoch."""
 
+    return _parse_serving_membership(
+        raw,
+        verifier_keys=verifier_keys,
+        now=now,
+        expected_cell_id=expected_cell_id,
+        expected_logical_vault_id=expected_logical_vault_id,
+        expected_epoch=expected_epoch,
+        expected_digest=expected_digest,
+    )
+
+
+def _parse_serving_membership(
+    raw: bytes,
+    *,
+    verifier_keys: Mapping[str, bytes],
+    now: int,
+    expected_cell_id: str,
+    expected_logical_vault_id: str,
+    expected_epoch: int,
+    expected_digest: str,
+    allow_expired: bool = False,
+) -> ServingMembershipEpoch:
     try:
         current = _integer(now)
         digest = serving_membership_digest(raw)
@@ -592,7 +617,9 @@ def parse_serving_membership(
         issued_at = _integer(value["issued_at"])
         expires_at = _integer(value["expires_at"])
         if (
-            not issued_at <= current < expires_at
+            issued_at > current
+            or issued_at >= expires_at
+            or (not allow_expired and current >= expires_at)
             or expires_at - issued_at > MAX_ATTESTATION_TTL_SECONDS
         ):
             raise ServingMembershipUnavailable
@@ -609,6 +636,7 @@ def parse_serving_membership(
                 now=current,
                 expected_epoch=epoch,
                 expected_cell_id=cell_id,
+                allow_expired=allow_expired,
             )
             for item in raw_replicas
         )
@@ -640,7 +668,7 @@ def parse_serving_membership(
             signing_key_id=signing_key_id,
             record_digest=digest,
         )
-        _validate_record_shape(record, now=current)
+        _validate_record_shape(record, now=None if allow_expired else current)
         if encode_serving_membership(record, verifier_keys=verifier_keys) != raw:
             raise ServingMembershipUnavailable
         return record
