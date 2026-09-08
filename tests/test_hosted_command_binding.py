@@ -11,6 +11,7 @@ from exomem import hosted_gateway as gateway
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "contracts" / "hosted-agent-command-binding-v1.json"
 COMMAND_BINDING_CANDIDATE = "hosted-alpha-agent-v4-command-binding-v1"
+DIRECT_CANDIDATE = "hosted-alpha-agent-v4-direct-v1"
 
 
 def _fixture_producer_tuple(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, object], dict[str, object]]:
@@ -48,13 +49,14 @@ def test_command_binding_fixture_does_not_follow_current_package_release(
 
 
 def test_signed_compatibility_advertises_command_binding() -> None:
-    manifest = hosted_plugins.compatibility_manifest(ROOT, candidate=COMMAND_BINDING_CANDIDATE)
+    for candidate in {COMMAND_BINDING_CANDIDATE, DIRECT_CANDIDATE}:
+        manifest = hosted_plugins.compatibility_manifest(ROOT, candidate=candidate)
 
-    assert manifest["features"] == ["agent-command-binding-v1"]
-    assert manifest["profile"] == commands.HOSTED_ALPHA_AGENT_V4_PROFILE
+        assert manifest["features"] == ["agent-command-binding-v1"]
+        assert manifest["profile"] == commands.HOSTED_ALPHA_AGENT_V4_PROFILE
     assert hosted_plugins.load_definition(ROOT, candidate=COMMAND_BINDING_CANDIDATE).version == "0.4.1"
     for candidate in hosted_plugins.CANDIDATE_PROFILES:
-        if candidate != COMMAND_BINDING_CANDIDATE:
+        if candidate not in {COMMAND_BINDING_CANDIDATE, DIRECT_CANDIDATE}:
             assert "features" not in hosted_plugins.compatibility_manifest(ROOT, candidate=candidate)
 
 
