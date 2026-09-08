@@ -35,6 +35,8 @@ from .models import (
 from .provider_identity import cell_resource_name
 from .wire_protocol import WIRE_PROTOCOL_V1, WIRE_PROTOCOL_V2
 
+GOVERNANCE_PROVISION_CHECKPOINT_VERSION = "gpi1"
+
 
 class RepositoryConflict(RuntimeError):
     pass
@@ -61,10 +63,12 @@ class ClaimConflict(RepositoryConflict):
 
 
 def _holds_governance_checkpoint(operation: Operation, checkpoint: str) -> bool:
-    return (
-        operation.action in {OperationAction.PROVISION, OperationAction.ROLLFORWARD}
-        and operation.wire_protocol == WireProtocol.V2
-        and checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":")
+    if operation.wire_protocol != WireProtocol.V2:
+        return False
+    if checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":"):
+        return operation.action in {OperationAction.PROVISION, OperationAction.ROLLFORWARD}
+    return operation.action == OperationAction.PROVISION and checkpoint.startswith(
+        GOVERNANCE_PROVISION_CHECKPOINT_VERSION + ":"
     )
 
 
@@ -78,10 +82,20 @@ def _foreign_governance_barrier(operation: Any):
             barrier.id != operation.id,
             barrier.tenant_id == operation.tenant_id,
             or_(barrier.cell_id == operation.cell_id, operation.action == OperationAction.DESTROY),
-            barrier.action.in_({OperationAction.PROVISION, OperationAction.ROLLFORWARD}),
             barrier.wire_protocol == WireProtocol.V2,
-            barrier.checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":"),
-            barrier.state.in_({OperationState.PENDING, OperationState.CLAIMED, OperationState.ERROR}),
+            or_(
+                and_(
+                    barrier.action.in_({OperationAction.PROVISION, OperationAction.ROLLFORWARD}),
+                    barrier.checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":"),
+                ),
+                and_(
+                    barrier.action == OperationAction.PROVISION,
+                    barrier.checkpoint.startswith(GOVERNANCE_PROVISION_CHECKPOINT_VERSION + ":"),
+                ),
+            ),
+            barrier.state.in_(
+                {OperationState.PENDING, OperationState.CLAIMED, OperationState.ERROR}
+            ),
         )
         .exists()
     )
@@ -496,7 +510,11 @@ async def _release_completed_capacity(
         },
     }
     required = proof_fields.get(operation.action)
-    if required is None or set(result) != required or any(result[key] is not True for key in required):
+    if (
+        required is None
+        or set(result) != required
+        or any(result[key] is not True for key in required)
+    ):
         return
     if operation.action is OperationAction.DISCARD and operation.cell_id is None:
         raise ImmutableMetadataConflict("discard capacity release has no authenticated cell")
@@ -529,8 +547,7 @@ async def _release_completed_capacity(
             and not (
                 operation.action is OperationAction.DISCARD
                 and reservation.resource_name == cell_resource_name(operation.cell_id)
-                and reservation.reserving_provider_operation_id
-                == operation.external_operation_id
+                and reservation.reserving_provider_operation_id == operation.external_operation_id
             )
         )
         for reservation in reservations
@@ -677,7 +694,9 @@ class OperationRepository:
                         .with_for_update()
                     )
                     if existing is not None and str(existing.wire_protocol) != wire_protocol:
-                        raise IdempotencyConflict("idempotency key is bound to another wire protocol")
+                        raise IdempotencyConflict(
+                            "idempotency key is bound to another wire protocol"
+                        )
                     if existing is not None and existing.canonical_request_sha256 != digest:
                         raise IdempotencyConflict("idempotency key is bound to another request")
                     if fence is not None and fence_generation < fence.fence_generation:
@@ -766,8 +785,7 @@ class OperationRepository:
                 runtime_identity: dict[str, str] | None = None
                 target = request.get("runtimeTarget")
                 if isinstance(target, dict) and all(
-                    isinstance(key, str) and isinstance(value, str)
-                    for key, value in target.items()
+                    isinstance(key, str) and isinstance(value, str) for key, value in target.items()
                 ):
                     runtime_identity = dict(target)
                 elif isinstance(request.get("releaseVersion"), str) and isinstance(

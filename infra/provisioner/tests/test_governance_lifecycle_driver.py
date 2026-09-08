@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 from test_provider_lifecycle import _config, _context, _v2_request
 
-from exomem_provisioner.driver import DriverFinal, DriverPending, DriverTerminal
+from exomem_provisioner.driver import DriverFinal, DriverPending
 from exomem_provisioner.governance_migration_checkpoint import MigrationCheckpoint
 from exomem_provisioner.lifecycle import CellLifecycleDriver, HighFidelityProviderPlane
 from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2
@@ -27,6 +27,10 @@ class MigrationPlane(HighFidelityProviderPlane):
         self.result = None
 
     async def governance_rollforward(self, metadata, request, context):
+        self.migration_calls.append(context)
+        return self.result or DriverPending(context.checkpoint, 30)
+
+    async def governance_provision(self, metadata, request, context):
         self.migration_calls.append(context)
         return self.result or DriverPending(context.checkpoint, 30)
 
@@ -55,8 +59,11 @@ async def test_dispatch_preserves_governance_checkpoint(phase):
 async def test_governance_provision_cannot_enter_legacy_admission():
     plane = MigrationPlane()
     driver = CellLifecycleDriver(plane=plane, config=config(), volume_worker=None)
-    with pytest.raises(DriverTerminal, match="PROVISIONER_GOVERNANCE_PROVISION_UNAVAILABLE"):
-        await driver.execute("provision", _v2_request(), _context(wire_protocol=WIRE_PROTOCOL_V2))
+    context = _context(wire_protocol=WIRE_PROTOCOL_V2)
+    assert await driver.execute("provision", _v2_request(), context) == DriverPending(
+        context.checkpoint, 30
+    )
+    assert plane.migration_calls == [context]
 
 
 @pytest.mark.asyncio
@@ -72,3 +79,27 @@ async def test_governance_final_result_only_follows_plane_completion():
         )
         == plane.result
     )
+
+
+@pytest.mark.asyncio
+async def test_offline_restore_candidate_does_not_enter_fresh_governance_enrollment():
+    plane = MigrationPlane()
+    driver = CellLifecycleDriver(plane=plane, config=config(), volume_worker=None)
+    context = _context(wire_protocol=WIRE_PROTOCOL_V2)
+    request = _v2_request(provisionMode="restore-candidate")
+    result = await driver.execute("provision", request, context)
+    assert result.checkpoint == "namespace-ready"
+    assert not plane.migration_calls
+    context = replace(context, checkpoint=result.checkpoint)
+    result = await driver.execute("provision", request, context)
+    assert result.checkpoint == "release-applied"
+    assert not plane.migration_calls
+
+
+def test_offline_restore_chart_never_passes_governance_mode_to_storage_init():
+    from exomem_provisioner.lifecycle import _fixed_helm_values, _metadata_from_context
+
+    values = _fixed_helm_values(
+        _metadata_from_context(_context()), _v2_request(provisionMode="restore-candidate"), config()
+    )
+    assert values["workloadMode"] == "restore" and values["migrationMode"] == "none"

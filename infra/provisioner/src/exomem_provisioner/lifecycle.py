@@ -739,6 +739,13 @@ class LifecyclePlane(Protocol):
         self, metadata: OpaqueProviderMetadata, request: dict[str, Any], context: EffectContext
     ) -> DriverPending | DriverFinal: ...
 
+    async def governance_provision(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        context: EffectContext,
+    ) -> DriverPending | DriverFinal: ...
+
     """Provider composition required by the cell lifecycle reconciler."""
 
     async def observed_fence(self, tenant_id: str) -> int: ...
@@ -1836,7 +1843,12 @@ def _fixed_helm_values(
         ),
         "initOperationId": metadata.operation_id,
         "initRequestId": _deterministic_uuid4(metadata.operation_id + ":init"),
-        "migrationMode": config.migration_mode,
+        "migrationMode": (
+            "none"
+            if request["provisionMode"] == "restore-candidate"
+            and config.migration_mode == "governance-v3-to-v4"
+            else config.migration_mode
+        ),
         "pvcSize": "10Gi",
         "provisionMode": request["provisionMode"],
         "providerIdentity": {
@@ -1949,6 +1961,10 @@ class CellLifecycleDriver:
         context: EffectContext,
     ) -> DriverPending | DriverFinal:
         try:
+            if context.checkpoint.startswith("gpi1:") and (
+                action != "provision" or context.wire_protocol != WIRE_PROTOCOL_V2
+            ):
+                raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
             if context.checkpoint.startswith(CHECKPOINT_VERSION + ":") and (
                 action not in {"provision", "rollforward"}
                 or context.wire_protocol != WIRE_PROTOCOL_V2
@@ -1971,9 +1987,13 @@ class CellLifecycleDriver:
                 return observation
             if action == "provision":
                 if self._config.migration_mode == "governance-v3-to-v4":
-                    # Fresh-cell enrollment must use the same guarded sequence;
-                    # the legacy initializer is not governance admission.
-                    raise DriverTerminal("PROVISIONER_GOVERNANCE_PROVISION_UNAVAILABLE")
+                    if request.get("provisionMode") == "restore-candidate":
+                        if context.checkpoint.startswith(("gpi1:", CHECKPOINT_VERSION + ":")):
+                            raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+                        return await self._provision(request, context)
+                    return await self._plane.governance_provision(
+                        _metadata_from_context(context), request, context
+                    )
                 return await self._provision(request, context)
             if action == "health":
                 return DriverFinal(

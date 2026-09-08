@@ -28,6 +28,7 @@ from .durability_driver import DurabilityActionDriver
 from .entrypoint import help_requested
 from .governance_migration_coordinator import HostedGovernanceMigrationCoordinator
 from .governance_migration_job import KubernetesGovernanceMigrationAdapter
+from .governance_storage_init import KubernetesGovernanceStorageInitAdapter
 from .lifecycle import CellLifecycleDriver, LifecycleConfig
 from .live import (
     KubernetesProviderRegistry,
@@ -206,6 +207,13 @@ def build_live_provider_components(
         capacity=capacity,
         identity_verifier=identity_verifier,
         config=lifecycle_config,
+        storage_init=KubernetesGovernanceStorageInitAdapter(
+            core_v1=core_v1,
+            batch_v1=batch_v1,
+            apps_v1=apps_v1,
+            identity_verifier=identity_verifier,
+            runtime_image=lifecycle_config.image,
+        ),
         governance_migration=HostedGovernanceMigrationCoordinator(
             cell=cell,
             jobs=KubernetesGovernanceMigrationAdapter(
@@ -217,6 +225,7 @@ def build_live_provider_components(
         fingerprint=KubernetesVaultFingerprintAdapter(
             core_v1=core_v1,
             batch_v1=batch_v1,
+            apps_v1=apps_v1,
             image=lock.components.provisioner.image,
         ),
     )
