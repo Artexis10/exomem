@@ -72,6 +72,12 @@ This selects Sol with low reasoning for writing and answering; the official
 judge remains `gpt-4o-2024-08-06`. Preparation records both roles and their
 rates. All requests share one immutable ledger and spending cap.
 
+The economical profile is `--agent-model z-ai/glm-5.3-flash --transport openrouter`
+with the official local tokenizer supplied through `--agent-tokenizer`.
+This profile uses **high reasoning** for both writing and answering, while the
+official judge remains unchanged. Historical low-effort preparations retain
+their original frozen harness and cannot be executed under the new profile.
+
 The Sol profile preserves returned reasoning blocks across tool calls and uses
 only parameters advertised by OpenRouter's standard OpenAI endpoint. Its frozen
 promotional rates, verified on 2026-09-08, are $2/M input, $0.20/M cached input,

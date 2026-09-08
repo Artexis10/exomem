@@ -41,6 +41,7 @@ def test_glm_profile_uses_regular_prices_and_its_own_provider():
     assert profile.wire_model("openrouter") == GLM_WIRE
     assert profile.provider_name == "Z.AI"
     assert profile.provider_slug == "z-ai/fp8"
+    assert profile.reasoning_effort == "high"
     assert (profile.input_rate, profile.cached_rate, profile.output_rate) == (.15, .03, .5)
     assert profile.tokenizer != "o200k_base"
     with pytest.raises(ValueError):
@@ -65,6 +66,7 @@ def test_glm_and_openai_judge_share_one_ledger_with_distinct_routes(tmp_path, to
     assert result.message == message
     body = client.requests[0]["json"]
     assert body["model"] == GLM_WIRE
+    assert body["reasoning"]["effort"] == "high"
     assert client.requests[0]["headers"]["X-OpenRouter-Metadata"] == "enabled"
     assert body["provider"]["only"] == ["z-ai/fp8"]
     assert body["provider"]["allow_fallbacks"] is False

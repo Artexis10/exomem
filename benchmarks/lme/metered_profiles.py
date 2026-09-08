@@ -50,7 +50,7 @@ def model_profile(model: str, transport: str) -> ModelProfile:
                             "https://openrouter.ai/openai/gpt-5.6-sol")
     if model == GLM_MODEL and transport == "openrouter":
         # Regular prices, independent of the temporary September promotion.
-        return ModelProfile(model, .15, .03, .15, .5, "low",
+        return ModelProfile(model, .15, .03, .15, .5, "high",
             "https://openrouter.ai/z-ai/glm-5.3-flash", tokenizer="huggingface-json",
             tokenizer_source="https://huggingface.co/zai-org/GLM-5.3-Flash/resolve/"
                 "eb9eb208eb0d988989d07a6a12d0fdeb5f52574a/tokenizer.json",

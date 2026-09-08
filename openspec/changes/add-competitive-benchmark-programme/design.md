@@ -727,7 +727,9 @@ or replace the external LongMemEval dataset and judge.
   authoritative. A profile change requires a fresh preparation and is reported
   as a changed agent configuration, never relabeled as a rerun of the old model.
   The economical alternative is GLM-5.3-Flash through the pinned Z.AI FP8
-  endpoint. Request the permanent dated release and freeze its exact public
+  endpoint with high reasoning for new writer and answer preparations. Historical
+  low-effort artifacts retain their frozen settings; do not resume them under a
+  different profile. Request the permanent dated release and freeze its exact public
   response alias, which OpenRouter returns for that release; refuse other
   response identities and verify the selected endpoint's model and provider.
   Use regular input/cache/output rates of $0.15/$0.03/$0.50 per

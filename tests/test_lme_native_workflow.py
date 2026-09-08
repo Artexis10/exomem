@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -78,7 +79,7 @@ def test_native_real_mcp_compilation_correction_and_fresh_recall(tmp_path, monke
     execution = out / "execution"
     execution.mkdir()
     backend = ScriptedMaintenance()
-    rows, envelope = asyncio.run(pilot.run_native_cases(plan, execution, pilot._snapshots(out, plan), backend=backend, python=ROOT / ".venv/bin/python"))
+    rows, envelope = asyncio.run(pilot.run_native_cases(plan, execution, pilot._snapshots(out, plan), backend=backend, python=Path(sys.executable)))
     row = rows[0]
     assert row["status"] == "completed", (row, backend.requests[-1][-1])
     assert row["hypothesis"] == "Cedar."

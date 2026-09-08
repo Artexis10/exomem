@@ -52,6 +52,8 @@ basis, never harvested from output prose by the harness.
 ### Requirement: Native Agent Profiles Are Economical And Reproducible
 Native diagnostics SHALL accept explicitly verified economical agent models,
 including GLM-5.3-Flash through OpenRouter, without changing the official judge.
+New GLM-5.3-Flash preparations SHALL use high reasoning for writing and answering;
+historical low-effort artifacts SHALL retain their original frozen profile.
 Each preparation SHALL bind model settings, provider routing, regular-price
 reservation rates and tokenizer identity. A non-OpenAI tokenizer SHALL be
 supplied locally, verified against an immutable official digest and frozen with

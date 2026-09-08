@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,7 @@ from benchmarks.lme.adapter import lme_profile
 from benchmarks.lme.native_cell import NativeCell, _profile_settings, copy_model_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = ROOT / ".venv" / "bin" / "python"
+PYTHON = Path(sys.executable)
 
 
 def _product_result(result: dict) -> dict:
