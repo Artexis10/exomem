@@ -424,7 +424,7 @@ async def test_user_recovery_and_attachment_ceilings_fail_closed(
     ],
 ) -> None:
     _, repository, authority = capacity_context
-    for index in range(6):
+    for index in range(4):
         claimed, worker = await _claimed(
             repository,
             operation=f"user-{index}",
@@ -448,28 +448,28 @@ async def test_user_recovery_and_attachment_ceilings_fail_closed(
             claim_generation=claimed.claim_generation,
             now=NOW,
         )
-    seventh, worker = await _claimed(
+    fifth, worker = await _claimed(
         repository,
-        operation="user-seven",
-        tenant="tenant-user-seven",
-        cell="cell-user-seven",
+        operation="user-five",
+        tenant="tenant-user-five",
+        cell="cell-user-five",
         fence=1,
     )
     observed = _observation()
     with pytest.raises(CapacityBlocked) as user_error:
         await authority.reserve(
-            seventh,
+            fifth,
             _request(
-                operation="user-seven",
-                tenant="tenant-user-seven",
-                cell="cell-user-seven",
+                operation="user-five",
+                tenant="tenant-user-five",
+                cell="cell-user-five",
                 fence=1,
             ),
             receipt=_receipt(observed),
             observation=observed,
             worker_id=worker,
-            claim_token=seventh.claim_token or "",
-            claim_generation=seventh.claim_generation,
+            claim_token=fifth.claim_token or "",
+            claim_generation=fifth.claim_generation,
             now=NOW,
         )
     assert user_error.value.reason == "capacity-user-exhausted"
@@ -551,13 +551,13 @@ async def test_recovery_and_orphan_limits_are_separate(
 
 
 @pytest.mark.asyncio
-async def test_concurrent_sixth_slot_attempts_cannot_over_admit(
+async def test_concurrent_final_slot_attempts_cannot_over_admit(
     capacity_context: tuple[
         ProvisionerDatabase, OperationRepository, CapacityReservationAuthority
     ],
 ) -> None:
     database, repository, authority = capacity_context
-    for index in range(5):
+    for index in range(3):
         await _reserve(
             repository,
             authority,
@@ -607,7 +607,7 @@ async def test_concurrent_sixth_slot_attempts_cannot_over_admit(
             .select_from(CapacityReservation)
             .where(CapacityReservation.released_at.is_(None))
         )
-    assert active == 6
+    assert active == 4
 
 
 @pytest.mark.asyncio
@@ -1453,6 +1453,96 @@ def _namespace(metadata: OpaqueProviderMetadata, mode: str):
     )
 
 
+def _live_admission(
+    database: ProvisionerDatabase,
+    *,
+    contract: dict[str, object],
+    public_key: str,
+    receipt: str,
+    namespaces: list[object],
+) -> LiveCapacityAdmission:
+    class Core:
+        def list_namespace(self):
+            return SimpleNamespace(items=namespaces)
+
+        def read_namespace(self, name):
+            assert name == "kube-system"
+            return SimpleNamespace(metadata=SimpleNamespace(uid="cluster-uid-0001"))
+
+        def list_persistent_volume(self):
+            return SimpleNamespace(items=[])
+
+        def list_persistent_volume_claim_for_all_namespaces(self):
+            return SimpleNamespace(items=[])
+
+        def list_node(self):
+            return SimpleNamespace(
+                items=[
+                    SimpleNamespace(
+                        metadata=SimpleNamespace(name="node-one"),
+                        spec=SimpleNamespace(provider_id="hcloud://101"),
+                    )
+                ]
+            )
+
+        def read_namespaced_config_map(self, name, namespace):
+            assert (name, namespace) == ("capacity-receipt", "exomem-platform")
+            return SimpleNamespace(data={"receipt.json": receipt})
+
+    class Storage:
+        def list_volume_attachment(self):
+            return SimpleNamespace(items=[])
+
+    return LiveCapacityAdmission(
+        core_v1=Core(),
+        storage_v1=Storage(),
+        sessions=database.session_factory,
+        contract=contract,
+        public_key=public_key,
+        receipt_namespace="exomem-platform",
+        receipt_config_map="capacity-receipt",
+        expected_server_id=101,
+        expected_location="fsn1",
+        now=lambda: NOW,
+    )
+
+
+async def _admit_live(
+    admission: LiveCapacityAdmission,
+    repository: OperationRepository,
+    *,
+    operation: str,
+    tenant: str,
+    cell: str,
+) -> str | None:
+    claimed, worker = await _claimed(
+        repository,
+        operation=operation,
+        tenant=tenant,
+        cell=cell,
+        fence=1,
+    )
+    return await admission.admit(
+        claimed,
+        _request(operation=operation, tenant=tenant, cell=cell, fence=1),
+        worker_id=worker,
+        claim_token=claimed.claim_token or "",
+        claim_generation=claimed.claim_generation,
+        provider_operation_id=claimed.external_operation_id,
+        provider_fence_generation=claimed.fence_generation,
+        now=NOW,
+    )
+
+
+def _public_key(private_key: Ed25519PrivateKey) -> str:
+    return base64.urlsafe_b64encode(
+        private_key.public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+    ).decode().rstrip("=")
+
+
 @pytest.mark.asyncio
 async def test_kubernetes_observer_classifies_modes_and_binds_exact_hcloud_node() -> None:
     serve = OpaqueProviderMetadata("tenant-one", "cell-one", "operation-one", 1)
@@ -1939,6 +2029,151 @@ async def test_live_admission_converts_transient_kubernetes_read_error_to_pendin
     assert reason == "capacity-live-observation-mismatch"
 
 
+@pytest.mark.asyncio
+async def test_live_admission_denies_a_fifth_user_observed_on_the_node(
+    capacity_context: tuple[
+        ProvisionerDatabase, OperationRepository, CapacityReservationAuthority
+    ],
+) -> None:
+    database, repository, _ = capacity_context
+    private_key = Ed25519PrivateKey.generate()
+    contract = _contract(private_key)
+    namespaces = [
+        _namespace(
+            OpaqueProviderMetadata(
+                f"tenant-observed-{index}",
+                f"cell-observed-{index}",
+                f"operation-observed-{index}",
+                1,
+            ),
+            "serve",
+        )
+        for index in range(4)
+    ]
+    admission = _live_admission(
+        database,
+        contract=contract,
+        public_key=_public_key(private_key),
+        receipt=_signed_receipt(
+            private_key,
+            contract,
+            users=4,
+            recovery=0,
+            attached=0,
+            cluster_uid="cluster-uid-0001",
+        ),
+        namespaces=namespaces,
+    )
+
+    reason = await _admit_live(
+        admission,
+        repository,
+        operation="operation-fifth-observed",
+        tenant="tenant-fifth-observed",
+        cell="cell-fifth-observed",
+    )
+
+    assert reason == "capacity-user-exhausted"
+
+
+@pytest.mark.asyncio
+async def test_live_admission_keeps_outstanding_reservations_when_observation_is_small(
+    capacity_context: tuple[
+        ProvisionerDatabase, OperationRepository, CapacityReservationAuthority
+    ],
+) -> None:
+    database, repository, authority = capacity_context
+    for index in range(4):
+        await _reserve(
+            repository,
+            authority,
+            operation=f"operation-reserved-{index}",
+            tenant=f"tenant-reserved-{index}",
+            cell=f"cell-reserved-{index}",
+            fence=1,
+        )
+    private_key = Ed25519PrivateKey.generate()
+    contract = _contract(private_key)
+    admission = _live_admission(
+        database,
+        contract=contract,
+        public_key=_public_key(private_key),
+        receipt=_signed_receipt(
+            private_key,
+            contract,
+            users=0,
+            recovery=0,
+            attached=0,
+            cluster_uid="cluster-uid-0001",
+        ),
+        namespaces=[],
+    )
+
+    reason = await _admit_live(
+        admission,
+        repository,
+        operation="operation-small-observation",
+        tenant="tenant-small-observation",
+        cell="cell-small-observation",
+    )
+
+    assert reason == "capacity-user-exhausted"
+
+
+@pytest.mark.asyncio
+async def test_live_admission_allows_one_concurrent_final_user_slot(
+    capacity_context: tuple[
+        ProvisionerDatabase, OperationRepository, CapacityReservationAuthority
+    ],
+) -> None:
+    database, repository, authority = capacity_context
+    for index in range(3):
+        await _reserve(
+            repository,
+            authority,
+            operation=f"operation-final-slot-{index}",
+            tenant=f"tenant-final-slot-{index}",
+            cell=f"cell-final-slot-{index}",
+            fence=1,
+        )
+    private_key = Ed25519PrivateKey.generate()
+    contract = _contract(private_key)
+    admission = _live_admission(
+        database,
+        contract=contract,
+        public_key=_public_key(private_key),
+        receipt=_signed_receipt(
+            private_key,
+            contract,
+            users=0,
+            recovery=0,
+            attached=0,
+            cluster_uid="cluster-uid-0001",
+        ),
+        namespaces=[],
+    )
+
+    reasons = await asyncio.gather(
+        _admit_live(
+            admission,
+            repository,
+            operation="operation-final-slot-one",
+            tenant="tenant-final-slot-one",
+            cell="cell-final-slot-one",
+        ),
+        _admit_live(
+            admission,
+            repository,
+            operation="operation-final-slot-two",
+            tenant="tenant-final-slot-two",
+            cell="cell-final-slot-two",
+        ),
+    )
+
+    assert reasons.count(None) == 1
+    assert reasons.count("capacity-user-exhausted") == 1
+
+
 def test_capacity_model_enums_are_exact() -> None:
     assert CapacityReservationClass.USER.value == "USER"
     assert CapacityReservationClass.RECOVERY.value == "RECOVERY"
@@ -1956,17 +2191,20 @@ def test_verifier_pin_matches_the_shipped_capacity_contract() -> None:
     the symptom. Every fixture in this file hardcodes the same values, so
     nothing else here would notice.
     """
-    contract = json.loads(
-        (
-            Path(__file__).resolve().parents[3]
-            / "infra/operations/private-alpha-capacity-v1.json"
-        ).read_text(encoding="utf-8")
-    )
+    repository_root = Path(__file__).resolve().parents[3]
+    contracts = [
+        json.loads((repository_root / path).read_text(encoding="utf-8"))
+        for path in (
+            "infra/operations/private-alpha-capacity-v1.json",
+            "infra/helm/platform/files/private-alpha-capacity-v1.json",
+        )
+    ]
     source = (
         Path(__file__).resolve().parents[1] / "src/exomem_provisioner/capacity.py"
     ).read_text(encoding="utf-8")
 
-    for field, value in contract["limits"].items():
+    assert contracts[0]["limits"] == contracts[1]["limits"]
+    for field, value in contracts[0]["limits"].items():
         assert f'"{field}": {value},' in source or f'"{field}": {value},\n' in source, (
             f"provisioner pin does not carry {field}={value} from the shipped contract"
         )

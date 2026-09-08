@@ -590,9 +590,9 @@ def _snapshot(row: CapacityReservation) -> CapacityReservationSnapshot:
 class CapacityReservationAuthority:
     """Serialize one live-evidence admission decision on ledger row 1."""
 
-    USER_LIMIT = 6
+    USER_LIMIT = 4
     RECOVERY_LIMIT = 2
-    POTENTIAL_LIMIT = 8
+    POTENTIAL_LIMIT = 6
 
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
