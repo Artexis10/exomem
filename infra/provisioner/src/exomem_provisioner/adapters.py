@@ -2253,9 +2253,33 @@ class HelmCliAdapter:
             return any(cls._has_secret_key(item) for item in value)
         return False
 
-    async def ensure_release(
-        self, metadata: OpaqueProviderMetadata, values: dict[str, Any]
+    @staticmethod
+    def _validate_effect_options(
+        rollback_on_failure: bool,
+        effect_guard: Callable[[], Awaitable[None]] | None,
     ) -> None:
+        if type(rollback_on_failure) is not bool or (
+            effect_guard is not None and not callable(effect_guard)
+        ):
+            raise MetadataConflict(
+                "Helm effect options are invalid",
+                reason=ConflictReason.HELM_EFFECT_OPTIONS_INVALID,
+            )
+
+    async def ensure_release(
+        self,
+        metadata: OpaqueProviderMetadata,
+        values: dict[str, Any],
+        *,
+        rollback_on_failure: bool = True,
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        """Reconcile with a caller-owned guard immediately before the Helm effect.
+
+        Disable rollback after irreversible storage changes. Uncertain target
+        outcomes then remain retryable; callers retain their durable checkpoint.
+        """
+        self._validate_effect_options(rollback_on_failure, effect_guard)
         if self._has_secret_key(values):
             raise MetadataConflict(
                 "Helm values must not carry plaintext credentials",
@@ -2278,33 +2302,42 @@ class HelmCliAdapter:
                 json.dump(values, handle, sort_keys=True, separators=(",", ":"))
                 handle.flush()
                 os.fsync(handle.fileno())
-            result = await self._runner(
-                (
-                    self._binary,
-                    "upgrade",
-                    "--install",
-                    metadata.resource_name,
-                    self._chart_path,
-                    "--version",
-                    self._chart_version,
-                    "--labels",
-                    ",".join(
-                        f"{key}={value}" for key, value in sorted(metadata.hcloud_labels.items())
-                    ),
-                    "--namespace",
-                    metadata.resource_name,
-                    "--create-namespace=false",
-                    "--atomic",
-                    "--wait",
-                    "--wait-for-jobs",
-                    "--timeout",
-                    "5m",
-                    "--values",
-                    str(temporary),
+            command = (
+                self._binary,
+                "upgrade",
+                "--install",
+                metadata.resource_name,
+                self._chart_path,
+                "--version",
+                self._chart_version,
+                "--labels",
+                ",".join(
+                    f"{key}={value}" for key, value in sorted(metadata.hcloud_labels.items())
                 ),
-                environment,
+                "--namespace",
+                metadata.resource_name,
+                "--create-namespace=false",
+                *(("--atomic",) if rollback_on_failure else ()),
+                "--wait",
+                "--wait-for-jobs",
+                "--timeout",
+                "5m",
+                "--values",
+                str(temporary),
             )
+            if effect_guard is not None:
+                await effect_guard()
+            try:
+                result = await self._runner(command, environment)
+            except OSError:
+                if not rollback_on_failure:
+                    raise DriverRetryable("pinned Helm outcome is uncertain") from None
+                raise
             if result.returncode != 0:
+                if not rollback_on_failure:
+                    # An irreversible target may already be applied. Keep the
+                    # caller's durable phase; never authorize the old image.
+                    raise DriverRetryable("pinned Helm outcome is uncertain")
                 raise MetadataConflict(
                     "pinned Helm reconciliation failed",
                     reason=ConflictReason.PINNED_HELM_RECONCILIATION_FAILED,
@@ -2561,7 +2594,10 @@ class HelmCliAdapter:
         values: dict[str, Any],
         *,
         operation_id: str,
+        rollback_on_failure: bool = True,
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
+        self._validate_effect_options(rollback_on_failure, effect_guard)
         if "runtimeUpgrade" in values:
             raise MetadataConflict(
                 "runtime upgrade marker is provisioner-owned",
@@ -2576,9 +2612,16 @@ class HelmCliAdapter:
             "operationDigest": self._operation_digest(operation_id),
             "priorRevision": prior_revision,
         }
-        if current == desired:
+        # Saved values alone do not prove an irreversible target was applied:
+        # a failed or unacknowledged non-atomic upgrade can persist them first.
+        if current == desired and rollback_on_failure:
             return
-        await self.ensure_release(metadata, desired)
+        await self.ensure_release(
+            metadata,
+            desired,
+            rollback_on_failure=rollback_on_failure,
+            effect_guard=effect_guard,
+        )
 
     async def rollback_release(
         self,
