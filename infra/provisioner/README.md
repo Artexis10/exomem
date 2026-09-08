@@ -74,6 +74,18 @@ uv run --frozen ruff check .
 RUN_POSTGRESQL17_TEST=1 uv run --frozen pytest -q tests/test_postgresql17.py
 ```
 
+Run the durable governance-migration barrier cases against both SQLite and a
+disposable PostgreSQL 17 container from this directory:
+
+```bash
+RUN_POSTGRESQL17_TEST=1 uv run --frozen pytest -q tests/test_governance_migration_barrier.py
+```
+
+The PostgreSQL cases assert the connected backend, server major version, runtime
+role, and schema before exercising the same barrier scenarios. They are skipped
+without the opt-in flag; `-k postgresql` selects only the PostgreSQL cases. Docker
+resources are uniquely named and removed by the fixture after the run.
+
 The pinned production provider libraries are `kubernetes` 35.x for Kubernetes
 1.35 and the official Hetzner `hcloud` 2.x client. The shared provisioner image
 contains PostgreSQL 17.10 client tools (`pg_dump`, `pg_restore`, `psql`,
