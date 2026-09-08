@@ -408,8 +408,8 @@ def test_record_memory_registry_is_selector_gated_and_conservatively_annotated()
     assert canonical.tier == 1
     assert canonical.product_surface == "primary"
     assert canonical.product_actions == command.product_actions
-    assert command.mcp_annotations.readOnlyHint is False
-    assert command.mcp_annotations.destructiveHint is True
+    assert command.mcp_annotations.read_only_hint is False
+    assert command.mcp_annotations.destructive_hint is True
     assert invocation_is_read_only(command, {"action": "inspect", "collection": "x"}) is True
     assert invocation_is_read_only(command, {"action": "describe"}) is True
     assert invocation_is_read_only(command, {"action": "validate"}) is True
