@@ -431,7 +431,7 @@ def test_hosted_readiness_binds_the_control_plane_cell_vault_and_replica(
     monkeypatch.setattr(
         authorization_session_lifecycle,
         "_hosted_custody_generation",
-        lambda _root, _custody: (b"keyring", b"control", b"membership"),
+        lambda _root: (b"keyring", b"control", b"membership"),
     )
     monkeypatch.setattr(
         authorization_session_lifecycle,
@@ -501,7 +501,7 @@ def test_hosted_readiness_carries_a_frozen_private_governance_proof(
     monkeypatch.setattr(
         authorization_session_lifecycle,
         "_hosted_custody_generation",
-        lambda _root, _custody: (b"keyring", b"control", b"membership"),
+        lambda _root: (b"keyring", b"control", b"membership"),
     )
     monkeypatch.setattr(
         authorization_session_lifecycle,
@@ -566,7 +566,7 @@ def test_hosted_readiness_refuses_a_changed_custody_generation(
     monkeypatch.setattr(
         authorization_session_lifecycle,
         "_hosted_custody_generation",
-        lambda _root, _custody: next(generations),
+        lambda _root: next(generations),
     )
     monkeypatch.setattr(
         authorization_session_lifecycle,
@@ -611,11 +611,10 @@ def test_hosted_readiness_refuses_a_custody_generation_that_changes_and_reverts(
     }.items():
         monkeypatch.setenv(variable, str(path))
     monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "replica-7")
-    loaded = iter((custody, changed))
     monkeypatch.setattr(
         authorization_custody,
         "load_authorization_custody",
-        lambda _root, *, now: next(loaded),
+        lambda _root, *, now: changed,
     )
     monkeypatch.setattr(
         store,
@@ -626,12 +625,78 @@ def test_hosted_readiness_refuses_a_custody_generation_that_changes_and_reverts(
     monkeypatch.setattr(
         authorization_session_lifecycle,
         "_hosted_custody_generation",
-        lambda _root, _custody: generation,
+        lambda _root: generation,
     )
     monkeypatch.setattr(
         authorization_session_lifecycle,
         "_matches_hosted_custody_generation",
         lambda _generation, observed, *, now: observed is custody,
+    )
+
+    readiness = authorization_session_lifecycle.hosted_serving_membership_readiness(
+        tmp_path,
+        expected_cell_id="cell-7",
+        expected_logical_vault_id="logical-vault-7",
+        expected_replica_id="replica-7",
+        now=NOW,
+    )
+
+    assert readiness == authorization_serving_membership.unavailable_readiness()
+
+
+def test_hosted_readiness_refuses_a_refreshed_foreign_cell_custody(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "governance.sqlite"
+    connection, migration = _file_connection(database_path)
+    connection.close()
+    custody = _hosted_custody(migration.activation_state_digest)
+    control = replace(custody.control, cell_id="foreign-cell")
+    keyring = replace(custody.keyring, cell_id="foreign-cell")
+    assert custody.serving_membership is not None
+    replica = replace(
+        custody.serving_membership.replicas[0],
+        cell_id="foreign-cell",
+        control_digest=authorization_custody.control_attestation_digest(control),
+        keyring_digest=authorization_custody.keyring_attestation_digest(keyring),
+    )
+    foreign = replace(
+        custody,
+        keyring=keyring,
+        control=control,
+        serving_membership=replace(
+            custody.serving_membership,
+            cell_id="foreign-cell",
+            replicas=(replica,),
+        ),
+    )
+    for variable, path in {
+        authorization_custody.KEYRING_FILE_ENV: authorization_custody.HOSTED_KEYRING_FILE,
+        authorization_custody.CONTROL_FILE_ENV: authorization_custody.HOSTED_CONTROL_FILE,
+        authorization_custody.MEMBERSHIP_FILE_ENV: authorization_custody.HOSTED_MEMBERSHIP_FILE,
+    }.items():
+        monkeypatch.setenv(variable, str(path))
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "replica-7")
+    monkeypatch.setattr(
+        authorization_custody,
+        "load_authorization_custody",
+        lambda _root, *, now: foreign,
+    )
+    monkeypatch.setattr(
+        store,
+        "open_authorization_session_connection",
+        lambda _root: sqlite3.connect(database_path),
+    )
+    monkeypatch.setattr(
+        authorization_session_lifecycle,
+        "_hosted_custody_generation",
+        lambda _root: (b"keyring", b"control", b"membership"),
+    )
+    monkeypatch.setattr(
+        authorization_session_lifecycle,
+        "_matches_hosted_custody_generation",
+        lambda _generation, _custody, *, now: True,
     )
 
     readiness = authorization_session_lifecycle.hosted_serving_membership_readiness(

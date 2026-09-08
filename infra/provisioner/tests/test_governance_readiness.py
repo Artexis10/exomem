@@ -162,10 +162,28 @@ def test_verifier_accepts_only_the_matching_enrolled_schema_four_serving_bundle(
     [
         lambda proof: proof | {"extra": True},
         lambda proof: {key: value for key, value in proof.items() if key != "storeAgreement"},
-        lambda proof: {**proof, "schemaVersion": True},
-        lambda proof: {**proof, "actualSchema": True},
+        lambda proof: {**proof, "schemaVersion": 2},
+        lambda proof: {**proof, "actualSchema": 3},
+        lambda proof: {**proof, "cellId": "other-cell"},
+        lambda proof: {**proof, "vaultId": "other-vault"},
+        lambda proof: {**proof, "replicaId": "other-replica"},
+        lambda proof: {**proof, "softwareVersion": "other-version"},
         lambda proof: {**proof, "governanceEnrolled": False},
+        lambda proof: {**proof, "activationStoreId": "other-activation"},
+        lambda proof: {**proof, "activationEpoch": 10},
+        lambda proof: {**proof, "activationStateDigest": "f" * 64},
+        lambda proof: {**proof, "custodyRevision": "f" * 64},
+        lambda proof: {**proof, "membershipEpoch": 10},
         lambda proof: {**proof, "membershipDigest": "f" * 64},
+        lambda proof: {**proof, "storeAgreement": False},
+        lambda proof: {**proof, "cellId": ""},
+        lambda proof: {**proof, "vaultId": "bad\nvalue"},
+        lambda proof: {**proof, "replicaId": "\U0010ffff" * 513},
+        lambda proof: {**proof, "softwareVersion": ""},
+        lambda proof: {**proof, "activationStoreId": ""},
+        lambda proof: {**proof, "activationStateDigest": "not-a-digest"},
+        lambda proof: {**proof, "custodyRevision": "not-a-digest"},
+        lambda proof: {**proof, "membershipDigest": "not-a-digest"},
     ],
 )
 def test_verifier_refuses_every_non_exact_private_proof(mutate) -> None:
@@ -185,12 +203,76 @@ def test_verifier_refuses_every_non_exact_private_proof(mutate) -> None:
 
 
 @pytest.mark.parametrize(
+    "field,value",
+    [
+        ("schemaVersion", True),
+        ("actualSchema", True),
+        ("activationEpoch", True),
+        ("membershipEpoch", True),
+        ("schemaVersion", 0),
+        ("actualSchema", -1),
+        ("activationEpoch", 0),
+        ("membershipEpoch", -1),
+        ("schemaVersion", 1 << 63),
+        ("actualSchema", 1 << 63),
+        ("activationEpoch", 1 << 63),
+        ("membershipEpoch", 1 << 63),
+    ],
+)
+def test_verifier_refuses_non_integer_or_unbounded_private_counters(
+    field: str,
+    value: object,
+) -> None:
+    bundle = _serving_bundle()
+
+    with pytest.raises(MetadataConflict):
+        verify_governance_readiness(
+            _proof(bundle) | {field: value},
+            bundle=bundle,
+            cell_id=CELL_ID,
+            vault_id=VAULT_ID,
+            replica_id=REPLICA_ID,
+            software_version=SOFTWARE_VERSION,
+        )
+
+
+@pytest.mark.parametrize("proof", [None, [], "proof", 1, True])
+def test_verifier_refuses_non_object_private_proof(proof: object) -> None:
+    bundle = _serving_bundle()
+
+    with pytest.raises(MetadataConflict):
+        verify_governance_readiness(
+            proof,
+            bundle=bundle,
+            cell_id=CELL_ID,
+            vault_id=VAULT_ID,
+            replica_id=REPLICA_ID,
+            software_version=SOFTWARE_VERSION,
+        )
+
+
+@pytest.mark.parametrize(
     "bundle_change,identity_change",
     [
         (lambda bundle: replace(bundle, revision="f" * 64), {}),
         (lambda bundle: replace(bundle, membership_schema_version=3), {}),
         (lambda bundle: replace(bundle, replica_state="DRAINING"), {}),
+        (lambda bundle: replace(bundle, governance_enrolled=False), {}),
+        (lambda bundle: replace(bundle, issuance_stopped=True), {}),
+        (lambda bundle: replace(bundle, no_in_flight=True), {}),
+        (lambda bundle: replace(bundle, software_version="other-version"), {}),
+        (lambda bundle: replace(bundle, activation_store_id="other-activation"), {}),
+        (lambda bundle: replace(bundle, activation_epoch=10), {}),
+        (lambda bundle: replace(bundle, activation_state_digest="f" * 64), {}),
+        (lambda bundle: replace(bundle, epoch=10), {}),
+        (lambda bundle: replace(bundle, membership_digest="f" * 64), {}),
+        (lambda bundle: replace(bundle, revision="not-a-digest"), {}),
+        (lambda bundle: replace(bundle, control=b"{}"), {}),
+        (lambda bundle: replace(bundle, membership=b"{}"), {}),
+        (lambda bundle: bundle, {"cell_id": "other-cell"}),
+        (lambda bundle: bundle, {"vault_id": "other-vault"}),
         (lambda bundle: bundle, {"replica_id": "other-replica"}),
+        (lambda bundle: bundle, {"software_version": "other-version"}),
     ],
 )
 def test_verifier_refuses_any_bundle_or_identity_mismatch(bundle_change, identity_change) -> None:
