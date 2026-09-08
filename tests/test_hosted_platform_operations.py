@@ -285,6 +285,10 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     assert "--member-sha256" not in workflow
     assert 'uvx --from "ruff==${RUFF_VERSION}"' in validator
     assert 'uvx --from "mypy==${MYPY_VERSION}"' in validator
+    assert (
+        'uv run --frozen --with "${infra_dir}/provisioner" pytest -q '
+        '"${repo_root}"/tests/test_hosted_*.py'
+    ) in validator
     assert '(cd "${repo_root}" && uv lock --check)' in validator
     assert 'terraform_bin="$(resolve_executable "${TERRAFORM_BIN:-terraform}")"' in validator
     assert (

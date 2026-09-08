@@ -14,10 +14,13 @@ from exomem_provisioner.config import ProvisionerSettings
 from exomem_provisioner.crypto import AesGcmEnvelopeCodec
 from exomem_provisioner.database import ProvisionerDatabase
 from exomem_provisioner.models import (
+    CellOperationLock,
     CredentialMetadata,
+    Operation,
     OperationAction,
     OperationState,
     ResourceKind,
+    TenantFence,
 )
 from exomem_provisioner.repository import (
     AdmissionPolicy,
@@ -488,6 +491,84 @@ async def test_live_claim_can_renew_but_expired_claim_cannot_be_revived(
             claim_generation=claim.claim_generation,
             now=now + timedelta(seconds=51),
         )
+
+
+@pytest.mark.asyncio
+async def test_active_claim_guard_is_read_only_and_does_not_extend_leases(repository):
+    await repository.submit("provision", "guard-read-only", _request())
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    claim = await repository.claim_next("guard-worker", now=now)
+    assert claim is not None and claim.claim_token
+    async with repository.session_factory() as session:
+        lock = await session.get(CellOperationLock, claim.cell_id)
+        before_lock = (lock.lease_expires_at, lock.updated_at)
+    await repository.assert_active_claim(
+        claim.id,
+        "guard-worker",
+        claim_token=claim.claim_token,
+        claim_generation=claim.claim_generation,
+        now=now + timedelta(seconds=1),
+    )
+    assert await repository.get_by_id(claim.id) == claim
+    async with repository.session_factory() as session:
+        lock = await session.get(CellOperationLock, claim.cell_id)
+        assert (lock.lease_expires_at, lock.updated_at) == before_lock
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "owner",
+        "token",
+        "generation",
+        "state",
+        "expiry",
+        "tenant-fence",
+        "missing-lock",
+        "lock-tenant",
+        "lock-operation",
+        "lock-fence",
+        "lock-expiry",
+    ],
+)
+async def test_active_claim_guard_rereads_all_authorities_before_effect(repository, case):
+    await repository.submit("provision", "guard-changed", _request())
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    claim = await repository.claim_next("guard-worker", now=now)
+    assert claim is not None and claim.claim_token
+    arguments = dict(
+        claim_token=claim.claim_token, claim_generation=claim.claim_generation, now=now
+    )
+    await repository.assert_active_claim(claim.id, "guard-worker", **arguments)
+    async with repository.session_factory.begin() as session:
+        operation = await session.get(Operation, claim.id)
+        lock = await session.get(CellOperationLock, claim.cell_id)
+        if case == "owner":
+            operation.claim_owner = "other-worker"
+        elif case == "token":
+            operation.claim_token = "different-token"
+        elif case == "generation":
+            operation.claim_generation += 1
+        elif case == "state":
+            operation.state = OperationState.PENDING
+        elif case == "expiry":
+            operation.claim_expires_at = now
+        elif case == "tenant-fence":
+            fence = await session.get(TenantFence, claim.tenant_id)
+            fence.fence_generation += 1
+        elif case == "missing-lock":
+            await session.delete(lock)
+        elif case == "lock-tenant":
+            lock.tenant_id = "foreign-tenant"
+        elif case == "lock-operation":
+            lock.operation_id = "foreign-operation"
+        elif case == "lock-fence":
+            lock.fence_generation += 1
+        elif case == "lock-expiry":
+            lock.lease_expires_at = now
+    with pytest.raises((ClaimConflict, StaleFence)):
+        await repository.assert_active_claim(claim.id, "guard-worker", **arguments)
 
 
 @pytest.mark.asyncio
