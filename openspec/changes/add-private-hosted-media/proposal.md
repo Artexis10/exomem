@@ -8,10 +8,11 @@ Hosted Exomem must preserve documents, images, and audio and make their contents
 - Separate tenant volume-unlock credentials and application encryption keys; preserve existing custody, recovery, and migration authorities.
 - Keep Backblaze server-side encryption and add application encryption before every sensitive object upload, including export delivery and platform recovery data.
 - Extend the existing media ledger and guarded result commit with bounded CPU execution, tenant-scoped worker capabilities, fair scheduling, and enforceable compute admission budgets.
-- Make document extraction and OCR the first hosted processing profile. Add CPU CLIP image indexing and a warm text-query encoder; add timestamped ASR through an optional, separately budgeted worker profile. Defer diarization.
+- Make document extraction and OCR the first hosted processing profile, reusing the Python PDF/office parsers with a CPU installation independent of ASR/CUDA. Add CPU CLIP image indexing and a warm text-query encoder; add timestamped ASR through an optional, separately budgeted worker profile. Defer diarization.
 - Keep original upload/download available independently of extraction, subject to existing transfer, governance, and storage limits.
 - Prepare a 10 GB logical storage tier with explicit physical headroom and a tenant-scoped incremental backup design before considering 100 GB or 1 TB tiers. Do not change current limits or provision those capacities in this proposal.
-- Record the current friends-tier unit economics without assuming that two or three EUR 5 subscriptions fund the whole deployment.
+- Evaluate the owner-accepted EUR 5–10 friends-tier range for three expected paying users and a possible fourth, plus the operator's cell. Keep the current four-user-cell gate and actual price changes separate from that demand forecast.
+- Compare direct HTTPS with the existing Tunnel as a later privacy improvement, without treating an ingress replacement as part of launch activation.
 - Stage implementation after the launch-owned gateway and custody changes settle. This proposal changes specifications only and does not authorize a deployment, key rotation, purchase, or launch cutover.
 
 ## Capabilities

@@ -36,10 +36,11 @@
 ## 5. Enable bounded CPU media profiles
 
 - [ ] 5.1 Add global/tenant resource admission and bounded round-robin scheduling, initially one heavy job globally; verify fairness, crash recovery and preservation of interactive/recovery reserves under a multi-tenant backlog.
-- [ ] 5.2 Enable explicit hosted document/OCR profiles over existing extraction engines; verify scanned PDFs, office documents and images preserve originals and produce governed searchable text with available page provenance.
+- [ ] 5.2 Enable explicit hosted document/OCR profiles over existing extraction engines; verify scanned PDFs, office documents and images preserve originals and produce governed searchable text with available page provenance. Split CPU document/OCR dependencies from ASR/CUDA installation while preserving existing desktop/media extras, and prove extraction in the resulting CPU-only image.
 - [ ] 5.3 Enable CPU CLIP indexing and a compatible warm text-query encoder behind measured admission; verify retrieval quality, vector identity, cold/warm memory and that queries never depend on GPU boot. Keep the profile disabled if acceptance fails.
 - [ ] 5.4 Add bounded timestamped CPU ASR using the pinned selected profile; verify supported audio, missing dependencies, corrupt input and completion without diarization or reasoning-model calls.
 - [ ] 5.5 Expose preserved/queued/processing/indexed/budget-blocked/failed status through the existing product surfaces; verify core upload/download and text recall while all media processing is unavailable, and inspect any changed UI through the required browser acceptance procedure.
+- [ ] 5.6 Verify document fidelity with multi-sheet XLSX, DOCX tables, PPTX slides and mixed text/scanned PDF fixtures; prove useful structural context, original-byte preservation, truthful unsupported/protected-file status and no macro execution, external-link fetching or inference API calls.
 
 ## 6. Add optional paid execution with cost admission
 
@@ -53,7 +54,7 @@
 - [ ] 7.1 Add explicit logical-byte accounting and physical-headroom admission while preserving the current transfer ceiling; verify that a 10,000,000,000-byte entitlement cannot activate on insufficient physical storage and that no 100 GB/1 TB allocation is created by a quota setting.
 - [ ] 7.2 Implement tenant-scoped incremental encrypted backup objects and snapshot manifests behind dual-read compatibility; verify unchanged object reuse, tenant isolation, corruption detection and canonical round-trip restoration.
 - [ ] 7.3 Add reachability/retention-aware garbage collection and old-archive retirement; verify deleted/current/locked snapshot cases and retained key availability before removing any historical representation.
-- [ ] 7.4 Refresh the existing capacity/economics evidence with actual stored versions, net receipts and incremental provider costs; verify the friends-tier subsidy or break-even statement includes the operator cell and does not increase the admitted cell count or paid budget implicitly.
+- [ ] 7.4 Refresh the existing capacity/economics evidence with actual stored versions, net receipts and incremental provider costs; verify the EUR 5–10 price comparison for three paying friends plus the operator, retain the four-user-cell gate for a possible fourth friend, and do not increase capacity, catalog prices or paid budgets implicitly.
 - [ ] 7.5 Fence object/manifest publication against reachability-based garbage collection; verify concurrent new snapshots, orphan recovery, interrupted GC and Object Lock failures remain restorable before large-tier admission or full-archive retirement.
 
 ## 8. Verify and coordinate activation

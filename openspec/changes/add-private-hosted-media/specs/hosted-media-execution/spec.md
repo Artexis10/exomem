@@ -88,6 +88,18 @@ The hosted media offering SHALL include document extraction and OCR, with separa
 - **THEN** extracted text and supported page provenance become searchable through the existing governed result path
 - **AND** the original document remains unchanged
 
+#### Scenario: CPU document profile runs independently of heavy media inference
+
+- **WHEN** the hosted document/OCR profile is installed without ASR, CLIP or CUDA dependencies
+- **THEN** supported PDF, DOCX, XLSX and PPTX parsing and configured OCR remain available through the existing extraction authority
+- **AND** conversion makes no external inference request or macro/external-link execution, while original bytes remain available independently of conversion success
+
+#### Scenario: Spreadsheet or office structure informs retrieval
+
+- **WHEN** a supported multi-sheet workbook, table-containing document or presentation is extracted
+- **THEN** fixture-verified text and available sheet/table/slide context enter the governed search representation
+- **AND** the system does not claim that extraction reproduces full layout, executes macros or recalculates formulas
+
 #### Scenario: Visual search queries an indexed image
 
 - **WHEN** an enabled CLIP profile receives a supported visual query

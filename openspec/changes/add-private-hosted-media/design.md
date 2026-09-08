@@ -24,6 +24,15 @@ The service can read authorized tenant content while serving search and processi
 
 Keep Cloudflare Tunnel for the first hardening phase and disclose Cloudflare and any content-bearing Vercel rewrite as processors in the actual request path. Tunnel encryption does not hide content from Cloudflare's TLS termination. A later direct HTTPS data hostname, with TLS terminated at the controlled gateway and Cloudflare DNS-only, can remove both intermediaries from content traffic; retaining a Vercel rewrite would defeat that purpose. That migration changes the public endpoint/OAuth/client compatibility boundary and is deferred to a separate approved change. Authentication, rate limits and origin protection must accompany it.
 
+Direct HTTPS is the preferred direction for reducing content processors after launch, subject to a separately reviewed migration. It can use the existing gateway and server address; it does not inherently require another server. The comparison is:
+
+| Route | Privacy boundary | Operational trade-off |
+| --- | --- | --- |
+| Existing Tunnel | Cloudflare terminates content TLS; any Vercel content rewrite is also in the path | Outbound origin connectivity and Cloudflare edge protection simplify exposure management |
+| Direct HTTPS data endpoint | Content TLS terminates at the controlled gateway; DNS-only Cloudflare does not proxy those bytes | Public gateway exposure, certificate renewal, rate limits, request limits and network/application abuse protection become our responsibility |
+
+The future migration must bypass both intermediaries on the complete content path, use a publicly trusted certificate with tested renewal, and verify real Claude/ChatGPT authentication, streaming, upload/download and revocation. DNS-only on one record is insufficient if its CNAME chain or application rewrite still traverses a proxy. Keep administrative endpoints private. Benchmark latency from client locations; removing a hop does not guarantee better network routing. Website/DNS hosting may remain separate, but a hosted browser UI still trusts its code delivery even when uploads travel directly. These comparisons do not replace the current encrypted storage, worker or operator trust requirements.
+
 True provider-blind operation requires client-held keys and client-side processing/search, or a separately evaluated attested compute design. Neither is assumed compatible with the current generic hosted MCP product or its small budget.
 
 ### 2. Encrypt every network boundary carrying content or credentials
@@ -106,6 +115,10 @@ The decisive source/lease/deletion checks happen again inside the same serialize
 | CLIP | CPU image embedding in background; warm CPU text encoder for queries | Text-to-image and image similarity retrieval alongside OCR/text search |
 | Timestamped ASR | Bounded CPU jobs first; optional ephemeral GPU when measured throughput justifies it | Searchable transcript with timestamps |
 
+Reuse the actual Python parsing paths: PyMuPDF for PDFs, with Tesseract on scanned pages; MarkItDown with its DOCX/XLSX/PPTX extras for Word, Excel and PowerPoint, using the existing office dependencies including mammoth, openpyxl and python-pptx. HTML and existing plain-text/email/calendar paths remain supported through their current adapters. Ordinary parsing uses no inference API and requires no GPU. Preserve originals because extracted Markdown is a search representation, not a lossless replacement for document layout or spreadsheet behavior.
+
+The current `media` extra groups these parsers with faster-whisper, CTranslate2 and CUDA runtime wheels. Introduce CPU-only document/OCR dependency groups and worker images without requiring the ASR, vision or CUDA stack; preserve existing desktop/media installation compatibility. Keep the single extraction dispatch rather than duplicating converters in the control plane. Verify multi-sheet XLSX values and sheet context, DOCX tables, PPTX slide content and mixed text/scanned PDFs against fixtures. Do not execute document macros, fetch external links or claim formula recalculation; unavailable protected/unsupported formats remain preserved with an actionable status.
+
 OCR is required for the hosted media offering. Explicitly select a processing profile through the existing owner/entitlement configuration; retain the pure-substrate rule that prose-emitting model transducers are off without that selection. Selection authorizes the pinned transducer, not instruction-following models or an external inference provider. Diarization remains disabled and has no delivery dependency.
 
 CLIP complements OCR: OCR finds visible words; CLIP finds visual similarity and concepts. Preserve the existing vector dimensions and encoder identity when enabling the current model. Quantization or an ONNX conversion requires retrieval-quality and numerical compatibility evaluation, not an assumption that an exported model is interchangeable. The text query encoder must be warm within the admitted cell footprint; queries must not wait for a GPU to start. If this cannot fit, leave visual search pending and measure a separately isolated query service before changing the boundary. Do not duplicate full model stacks per cell without measuring total node residency.
@@ -133,6 +146,18 @@ The checked-in private-alpha model records EUR 3.34 net from a EUR 5 friends pay
 
 These totals exclude new compute and any incremental database, website, monitoring or support costs. Equal shares would be about EUR 5.50 and EUR 4.27 per cell respectively, also above a friend's EUR 3.34 net receipt. Charging enough to cover this entire recorded baseline would mean roughly EUR 11.49 with two paying friends or EUR 8.11 with three, under the recorded fee/tax model and before extra costs. This is arithmetic, not an approved price change. The existing capacity gate prevents assuming that more paying tenants can simply be added to the same node. A founder-funded baseline can make EUR 5 useful as an introductory marginal-cost tier, but the subsidy must be explicit.
 
+The owner accepts evaluating EUR 5–10/month where the delivered value justifies it, with three expected paying friends and a potential fourth. For three paying friends plus the operator, the recorded fee/tax formula gives this sensitivity against the EUR 17.078 baseline:
+
+| Gross monthly price per friend | Approximate total net receipts | Remainder after baseline |
+| --- | ---: | ---: |
+| EUR 5.00 | EUR 10.03 | EUR -7.05 |
+| EUR 7.50 | EUR 15.70 | EUR -1.38 |
+| EUR 10.00 | EUR 21.37 | EUR 4.30 |
+
+This table computes with unrounded intermediate values; the earlier table uses the recorded rounded EUR 3.34 receipt. EUR 10 is the working recommendation for a cost-covering paid offer with functioning private document/OCR and image retrieval, while processing allowances remain bounded. EUR 4.30 is limited operating headroom, not a profit guarantee or an automatic GPU budget. No billing catalog changes are authorized by this price comparison.
+
+Three friends plus the operator consume all four currently admitted user cells. The potential fourth friend would require a fifth user cell. Do not promise or charge for that slot until the separate capacity gate admits it with recovery headroom intact. The present attachment policy, not just RAM, binds that gate; buying a larger single server does not by itself change its volume-attachment allowance. A separate measured capacity revision can evaluate attachment reserve or multi-node placement before publishing new economics.
+
 Storage entitlement is a ceiling, not pre-provisioned physical consumption. Specify a future 10 GB tier as exactly 10,000,000,000 logical canonical bytes, separately from GiB PVC sizing. Preserve the current 5 GiB limit until quota accounting, indexes, simultaneous upload scratch, free-space reserve and restore headroom support an increase. The 90 MiB transfer ceiling is unchanged; resumable larger uploads need a separate contract change.
 
 Current backups are daily full archives with roughly a month of retained versions. A mostly incompressible 10 GB media vault can therefore account for about 300 GB of backup bodies before additional copies and lifecycle overlap. At the advertised B2 rate that is about USD 2.09/month, whereas one 10 GB copy is about USD 0.07. A 1 TB entitlement does not imply a USD 6.95 total storage bill when active storage and historical copies are included.
@@ -151,6 +176,7 @@ Sources checked 2026-09-08:
 - [Scaleway GPU pricing](https://www.scaleway.com/en/pricing/gpu/): L4-1-24G EUR 0.79/hour. Eight compute hours would be EUR 6.32 before extras, not eight audio hours of promised throughput.
 - [Scaleway billing](https://www.scaleway.com/en/docs/instances/faq/): most GPU instances bill by minute including startup/standby; allocated storage and IPs continue billing independently. Pin the selected SKU's current terms before admission uses a price.
 - [Cloudflare TLS boundary](https://developers.cloudflare.com/ssl/faq/) and [Tunnel HTTPS origins](https://developers.cloudflare.com/tunnel/troubleshooting/https-origins/): edge termination and origin certificate verification are distinct controls.
+- [Cloudflare proxy status](https://developers.cloudflare.com/dns/proxy-status/): DNS-only records expose the origin address and remove Cloudflare's HTTP proxy/security features; a proxied CNAME chain can still route traffic through Cloudflare.
 
 Retain the launch acceptance workload and thresholds from `simplify-hosted-launch-boundaries`: at least 100 warm samples and 20 cold runs from a European vantage, warm p95 initialization/tool listing <=500 ms, small durable capture/recall <=1 second, cold initialization <=2 seconds, with the specified two synthetic cells and five clients. Run the same workload with admitted OCR/CLIP/ASR background activity. These are acceptance targets, not measured results. Measure query-encoder residency, queue wait, processing duration, decoded input size and total node memory separately. GPU cold-start latency is acceptable only for asynchronous jobs.
 
@@ -175,4 +201,4 @@ Retain the launch acceptance workload and thresholds from `simplify-hosted-launc
 ## Open Questions
 
 - Exact production CPU job limits and model warm-idle durations come from the bounded acceptance benchmark; changing them must not relax the isolation, cost or latency contract.
-- The commercial choice is whether the operator funds the recorded remainder or changes the friends price. Both cases use the same architecture; paid GPU budgets remain zero until funded.
+- The final commercial price and included processing allowance remain to be selected within the discussed EUR 5–10 range using measured costs and delivered features. Paid GPU budgets remain zero until funded, and the potential fifth user cell requires a separate capacity decision.
