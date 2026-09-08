@@ -94,12 +94,16 @@ def test_product_mcp_retrieval_surface_replaces_portable_primitives(
     ask_schema = tools["ask_memory"]["outputSchema"]
     assert ask_schema["type"] == "object"
     assert ask_schema["required"] == ["result"]
-    assert ask_schema["properties"]["result"]["anyOf"][0]["type"] == "array"
-    assert ask_schema["properties"]["result"]["anyOf"][1]["type"] == "object"
+    ask_success, ask_failure = ask_schema["properties"]["result"]["anyOf"]
+    assert ask_success["anyOf"][0]["type"] == "array"
+    assert ask_success["anyOf"][1]["type"] == "object"
+    assert ask_failure["properties"]["success"]["const"] is False
 
     read_schema = tools["read_memory"]["outputSchema"]
     assert read_schema["type"] == "object"
-    assert read_schema["additionalProperties"] is True
+    read_success, read_failure = read_schema["anyOf"]
+    assert read_success["additionalProperties"] is True
+    assert read_failure["properties"]["success"]["const"] is False
 
     ask_inputs = tools["ask_memory"]["inputSchema"]["properties"]
     read_inputs = tools["read_memory"]["inputSchema"]["properties"]

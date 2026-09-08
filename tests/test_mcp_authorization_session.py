@@ -51,6 +51,11 @@ def test_generated_mcp_schema_exposes_only_optional_consumed_placeholder(
         schema = tools[name]["inputSchema"]
         assert "authorization_session_credential" in schema["properties"]
         assert "authorization_session_credential" not in schema.get("required", [])
+        credential = schema["properties"]["authorization_session_credential"]
+        assert credential["type"] == "string"
+        assert "anyOf" not in credential
+        assert "default" not in credential
+        assert "Omit" in credential["description"]
         assert "principal" not in schema["properties"]
         assert "principal_scope" not in schema["properties"]
         assert "issuer" not in schema["properties"]
@@ -111,10 +116,10 @@ def test_sanitized_http_body_replays_once_then_preserves_disconnect() -> None:
     assert calls == 1
 
 
+@pytest.mark.parametrize("presented", ["not-a-session-bearer", None])
 def test_invalid_mcp_credential_wins_before_fastmcp_argument_validation(
-    vault, monkeypatch: pytest.MonkeyPatch
+    vault, monkeypatch: pytest.MonkeyPatch, presented
 ) -> None:
-    presented = "not-a-session-bearer"
 
     with TestClient(
         _server(vault, monkeypatch).http_app(stateless_http=True, json_response=True)
@@ -142,7 +147,8 @@ def test_invalid_mcp_credential_wins_before_fastmcp_argument_validation(
     assert response.status_code in {200, 400}
     assert "authorization session is unavailable" in response.text
     assert "limit" not in response.text
-    assert presented not in response.text
+    if isinstance(presented, str):
+        assert presented not in response.text
 
 
 def test_mcp_verifies_present_credential_before_route_selector_validation(

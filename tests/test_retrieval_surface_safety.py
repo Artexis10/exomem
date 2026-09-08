@@ -88,7 +88,9 @@ def test_product_mcp_retrieval_schemas_are_safe(
 
     read_schema = tools["read_memory"]["outputSchema"]
     assert read_schema["type"] == "object"
-    assert read_schema["additionalProperties"] is True
+    read_success, read_failure = read_schema["anyOf"]
+    assert read_success["additionalProperties"] is True
+    assert read_failure["properties"]["success"]["const"] is False
     read_inputs = tools["read_memory"]["inputSchema"]["properties"]
     assert {"path", "unit_ref"} <= set(read_inputs)
 

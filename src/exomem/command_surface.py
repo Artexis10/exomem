@@ -14,10 +14,15 @@ import uuid
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass, field
 
 from mcp.types import ToolAnnotations
 from pydantic import Field, WithJsonSchema
+
+if typing.TYPE_CHECKING:
+    from fastmcp import FastMCP
+    from fastmcp.tools import Tool
 
 from . import call_spans, capabilities, reserved_paths
 from .call_spans import (  # noqa: F401 - re-exported for existing importers
@@ -331,6 +336,15 @@ class Command:
         return mcp_tool_annotations(self.name, read_only=self.read_only)
 
 
+def _authorization_credential_schema(schema: dict) -> None:
+    """Advertise omission, not null, for the raw boundary's optional bearer."""
+    # Python needs an optional default for omission. The protected raw carrier
+    # deliberately rejects presented non-strings before Pydantic sees them.
+    schema.pop("anyOf", None)
+    schema.pop("default", None)
+    schema["type"] = "string"
+
+
 def bind_vault(
     leaf: Callable,
     *injected: object,
@@ -420,8 +434,9 @@ def bind_vault(
                 Field(
                     description=(
                         "Optional authorization-session bearer. Consumed by the raw "
-                        "MCP boundary before tool validation."
-                    )
+                        "MCP boundary before tool validation. Omit when unused; "
+                        "never send null or an empty string."
+                    ),
                 ),
             ],
         )
@@ -567,6 +582,51 @@ def bind_vault(
         ann["return"] = resolved["return"]
     wrapper.__annotations__ = ann
     return wrapper
+
+
+def register_mcp_tool(
+    mcp: FastMCP, bound: Callable[..., typing.Any], **kwargs: typing.Any
+) -> Tool:
+    """Advertise raw carrier and failure contracts without changing serialization."""
+    from fastmcp.tools import FunctionTool
+
+    tool = FunctionTool.from_function(bound, run_in_thread=True, **kwargs)
+    credential = tool.parameters.get("properties", {}).get("authorization_session_credential")
+    if credential is not None:
+        # FastMCP adds the Python default after field-level schema transforms;
+        # normalize the final advertised carrier without changing validation.
+        _authorization_credential_schema(credential)
+    if tool.output_schema is not None:
+        schema = deepcopy(tool.output_schema)
+        failure = {
+            "type": "object",
+            "properties": {
+                "success": {"const": False},
+                "error": {
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string"},
+                        "message": {"type": "string"},
+                        "remediation": {"type": ["string", "null"]},
+                    },
+                    "required": ["code", "message", "remediation"],
+                    "additionalProperties": True,
+                },
+            },
+            "required": ["success", "error"],
+            "additionalProperties": True,
+        }
+        if schema.get("x-fastmcp-wrap-result") is True:
+            payload = schema["properties"]["result"]
+            schema["properties"]["result"] = {"anyOf": [payload, failure]}
+        else:
+            # References in a success schema remain rooted at the document.
+            definitions = schema.pop("$defs", None)
+            schema = {"type": "object", "anyOf": [schema, failure]}
+            if definitions is not None:
+                schema["$defs"] = definitions
+        tool.output_schema = schema
+    return mcp.add_tool(tool)
 
 
 def mcp_retry_scope() -> str | None:
