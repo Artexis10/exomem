@@ -596,7 +596,10 @@ http:
     try:
         for _ in range(30):
             try:
-                if b"200" in request("/cells/cell-beta/public/exomem/v2/transfers/download", "GET")[:32]:
+                if (
+                    b"200"
+                    in request("/cells/cell-beta/public/exomem/v2/transfers/download", "GET")[:32]
+                ):
                     break
             except OSError:
                 time.sleep(0.1)
