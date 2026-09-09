@@ -745,3 +745,50 @@ async def test_swapped_ciphertext_fails_closed_during_session_listing() -> None:
 
     with pytest.raises(SessionStoreUnavailable, match="storage key"):
         await authority.list_sessions()
+
+
+@pytest.mark.anyio
+async def test_rejected_sessions_name_their_reason_without_leaking_material(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Every rejection reaches the client as an identical 401.
+
+    Without a server-side reason an operator cannot tell an expiry from a
+    rotated signing key from a bumped generation, and the records are
+    encrypted at rest so the files answer nothing either.
+    """
+    store = AtomicMemoryStore()
+    moment = 1_800_000_000.0
+    authority = _authority(store, clock=lambda: moment)
+    bearer, record, _refresh = await authority.issue_offline(
+        client_id="client",
+        scopes=("offline_access", "exomem:read"),
+        identity=_identity(),
+    )
+
+    with caplog.at_level("INFO", logger="exomem.auth_sessions"):
+        assert await authority.validate(bearer) is not None
+        assert not [r for r in caplog.records if "session_rejected" in r.getMessage()]
+
+        expired = _authority(
+            store, clock=lambda: moment + ACCESS_TOKEN_TTL_SECONDS + 1
+        )
+        caplog.clear()
+        assert await expired.validate(bearer) is None
+        expiry_messages = [
+            r.getMessage() for r in caplog.records if "session_rejected" in r.getMessage()
+        ]
+
+        caplog.clear()
+        assert await authority.validate("exo_a2.notarealsession000000.x") is None
+        unknown_messages = [
+            r.getMessage() for r in caplog.records if "session_rejected" in r.getMessage()
+        ]
+
+    assert any("reason=expired" in message for message in expiry_messages)
+    assert any("reason=no_matching_record" in message for message in unknown_messages)
+    for message in expiry_messages + unknown_messages:
+        assert bearer not in message
+        assert record.token_digest not in message
+        assert str(record.github_user_id) not in message
+        assert record.github_login not in message
