@@ -17,6 +17,7 @@ from fastmcp.server.auth.oauth_proxy.models import (
     ClientCode,
 )
 from fastmcp.server.auth.oauth_proxy.ui import create_error_html
+from fastmcp.server.auth.redirect_validation import build_client_redirect
 from mcp.server.auth.provider import AuthorizationCode, RefreshToken, TokenError
 from mcp.server.auth.routes import create_protected_resource_routes
 from mcp.server.auth.settings import RevocationOptions
@@ -369,9 +370,12 @@ class ExomemSessionOAuthProxy(OAuthProxy):
                     }
                     if error_description:
                         error_params["error_description"] = error_description
-                    separator = "&" if "?" in client_redirect_uri else "?"
                     return RedirectResponse(
-                        url=f"{client_redirect_uri}{separator}{urlencode(error_params)}",
+                        url=build_client_redirect(
+                            client_redirect_uri,
+                            error_params,
+                            iss=str(self.issuer_url),
+                        ),
                         status_code=302,
                     )
                 return self._error_response(
@@ -482,11 +486,10 @@ class ExomemSessionOAuthProxy(OAuthProxy):
             )
             await self._transaction_store.delete(key=txn_id)
 
-            client_redirect_uri = transaction["client_redirect_uri"]
-            separator = "&" if "?" in client_redirect_uri else "?"
-            callback_url = (
-                f"{client_redirect_uri}{separator}"
-                f"{urlencode({'code': client_code, 'state': transaction['client_state']})}"
+            callback_url = build_client_redirect(
+                transaction["client_redirect_uri"],
+                {"code": client_code, "state": transaction["client_state"]},
+                iss=str(self.issuer_url),
             )
             response = RedirectResponse(url=callback_url, status_code=302)
             self._clear_consent_binding_cookie(request, response, txn_id)

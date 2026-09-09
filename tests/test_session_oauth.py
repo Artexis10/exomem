@@ -1177,3 +1177,78 @@ async def test_actual_revocation_route_invalidates_only_the_clients_token() -> N
     assert await proxy.load_access_token("owned-token") is None
     assert await proxy.load_access_token("other-token") is not None
     assert authority.revoked_bearers == [("owned-token", "oauth-client-revocation")]
+
+
+@pytest.mark.anyio
+async def test_callback_success_redirect_carries_the_rfc9207_issuer() -> None:
+    """The inherited metadata promises RFC 9207, so every response must keep it.
+
+    `OAuthProxy` advertises `authorization_response_iss_parameter_supported`
+    unconditionally from FastMCP 4 onward. A conforming client then rejects an
+    authorization response carrying no `iss`, which is what broke
+    reauthentication on 0.76.0: this override hand-built the client redirect
+    with only `code` and `state`.
+    """
+    proxy = _proxy(cleanup_transport=httpx.MockTransport(lambda request: httpx.Response(204)))
+    await _seed_transaction(proxy)
+    _install_token_exchange(proxy, {"access_token": "temporary-github-token"})
+
+    response = await proxy._handle_idp_callback(_callback_request())
+
+    assert response.status_code == 302
+    params = parse_qs(urlparse(response.headers["location"]).query)
+    assert params["iss"] == [str(proxy.issuer_url)]
+    assert params["state"] == ["client-state"]
+    assert params["code"]
+
+
+@pytest.mark.anyio
+async def test_callback_error_redirect_carries_the_rfc9207_issuer() -> None:
+    proxy = _proxy(cleanup_transport=httpx.MockTransport(lambda request: httpx.Response(204)))
+    await _seed_transaction(proxy)
+
+    response = await proxy._handle_idp_callback(
+        Request(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "https",
+                "path": "/auth/callback",
+                "raw_path": b"/auth/callback",
+                "query_string": (
+                    b"error=access_denied&error_description=nope&state=transaction-id"
+                ),
+                "headers": [],
+                "client": ("127.0.0.1", 12345),
+                "server": ("memory.example", 443),
+            }
+        )
+    )
+
+    assert response.status_code == 302
+    params = parse_qs(urlparse(response.headers["location"]).query)
+    assert params["iss"] == [str(proxy.issuer_url)]
+    assert params["error"] == ["access_denied"]
+    assert params["state"] == ["client-state"]
+
+
+@pytest.mark.anyio
+async def test_the_served_metadata_still_advertises_the_issuer_parameter() -> None:
+    """Guard the premise the two redirect tests rest on.
+
+    If the framework ever stopped advertising RFC 9207 support, those tests
+    would keep passing while the contract they protect had quietly changed.
+    """
+    proxy = _proxy()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=Starlette(routes=proxy.get_routes("/mcp"))),
+        base_url="https://memory.example",
+    ) as client:
+        response = await client.get("/.well-known/oauth-authorization-server")
+
+    assert response.status_code == 200, response.text
+    metadata = response.json()
+    assert metadata["authorization_response_iss_parameter_supported"] is True
+    assert metadata["issuer"] == str(proxy.issuer_url)
