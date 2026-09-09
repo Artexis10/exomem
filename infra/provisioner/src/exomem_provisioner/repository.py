@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -44,6 +45,10 @@ GOVERNANCE_PROVISION_CHECKPOINT_PHASES = frozenset({"initializing", "complete", 
 INITIAL_RETRY_AFTER_SECONDS = 2
 _GOVERNANCE_RECOVERY_MARKER = "_governance_recovery_v1"
 _GOVERNANCE_RECOVERY_DOMAIN = b"exomem.hosted-governance-recovery-snapshot.v1\0"
+_GOVERNANCE_RECOVERY_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+# "Ineligible" must never be expressible by a caller. A shared ``None`` would
+# compare equal to a ``None`` digest and requeue exactly the rows this refuses.
+_GOVERNANCE_RECOVERY_INELIGIBLE = object()
 
 
 class RepositoryConflict(RuntimeError):
@@ -1402,10 +1407,15 @@ class OperationRepository:
         rechecks remain the sole authority over the live cell, and the retained
         governance checkpoint keeps blocking successors until it completes.
         """
+        if not isinstance(expected_digest, str) or (
+            _GOVERNANCE_RECOVERY_DIGEST.fullmatch(expected_digest) is None
+        ):
+            raise RepositoryConflict("governance recovery digest is invalid")
         async with self._sessions.begin() as session:
             operation = await _lock_operation_fence_first(session, operation_id)
             resumed_at = await _database_now(session, now)
             fence = await session.get(TenantFence, operation.tenant_id)
+            current: object
             try:
                 current = _governance_recovery_snapshot(
                     operation,
@@ -1413,7 +1423,7 @@ class OperationRepository:
                     self._governance_recovery_request(operation),
                 )
             except RepositoryConflict:
-                current = None
+                current = _GOVERNANCE_RECOVERY_INELIGIBLE
             if current != expected_digest:
                 # Only the digest recorded by the latest committed requeue is an
                 # acknowledgement replay. Any older one refers to a row state

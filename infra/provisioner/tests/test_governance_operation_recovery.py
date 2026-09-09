@@ -152,6 +152,32 @@ async def test_recovery_rechecks_snapshot_and_conflicts_in_commit_transaction(re
     assert await row(repository, operation_id) == before
 
 
+@pytest.mark.parametrize("expected", [None, "", "A" * 64, "a" * 63])
+@pytest.mark.parametrize("ineligible", ["error_code", "claimed"])
+async def test_malformed_digest_never_requeues_an_eligible_or_ineligible_row(
+    sqlite_repository, expected, ineligible
+):
+    repository = sqlite_repository
+    operation_id = await failed(repository)
+    before = await row(repository, operation_id)
+    with pytest.raises(RepositoryConflict):
+        await repository.resume_governance_recovery(operation_id, expected_digest=expected, now=NOW)
+    assert await row(repository, operation_id) == before
+    async with repository.session_factory.begin() as session:
+        operation = await session.get(Operation, operation_id)
+        if ineligible == "error_code":
+            operation.error_code = None
+        else:
+            operation.state = OperationState.CLAIMED
+            operation.claim_owner = "live-worker"
+            operation.claim_token = "live-claim"
+            operation.claim_expires_at = NOW + timedelta(seconds=60)
+    stalled = await row(repository, operation_id)
+    with pytest.raises(RepositoryConflict):
+        await repository.resume_governance_recovery(operation_id, expected_digest=expected, now=NOW)
+    assert await row(repository, operation_id) == stalled
+
+
 async def test_postgresql_concurrent_resume_has_one_transition(postgresql_repository):
     repository = postgresql_repository
     operation_id = await failed(repository)
