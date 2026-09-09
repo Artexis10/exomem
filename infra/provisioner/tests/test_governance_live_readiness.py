@@ -97,7 +97,7 @@ class ReadinessHarness:
             location="fsn1",
             runtime_target=target,
             legacy_runtime_units={(SOFTWARE_VERSION, "1"): target},
-            migration_mode=mode,  # type: ignore[arg-type] # Not enabled by configuration yet.
+            migration_mode=mode,
         )
         worker_policy = {"workerCount": 2, "semantic": True, "media": False}
         self.request = {

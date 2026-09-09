@@ -127,7 +127,9 @@ def test_selected_deployment_lock_is_strict_and_exposes_admission_inputs(tmp_pat
         load_deployment_lock(path)
 
 
-@pytest.mark.parametrize("migration_mode", ("binding-v1-to-v2", "state-root-v1"))
+@pytest.mark.parametrize(
+    "migration_mode", ("binding-v1-to-v2", "state-root-v1", "governance-v3-to-v4")
+)
 def test_selected_runtime_exposes_only_signed_forward_upgrade_metadata(
     tmp_path: Path, migration_mode: str
 ) -> None:
@@ -150,10 +152,11 @@ def test_selected_runtime_exposes_only_signed_forward_upgrade_metadata(
     assert lock.runtimeUpgrade.substrateConsumerCommit == "8" * 40
     assert lock.runtimeUpgrade.substrateTrustSha256 == "7" * 64
 
-    value["runtimeUpgrade"]["migrationMode"] = "arbitrary-script"  # type: ignore[index]
-    path.write_text(json.dumps(value), encoding="utf-8")
-    with pytest.raises(ValueError):
-        load_deployment_lock(path)
+    for unknown in ("arbitrary-script", "governance-v4-to-v5"):
+        value["runtimeUpgrade"]["migrationMode"] = unknown  # type: ignore[index]
+        path.write_text(json.dumps(value), encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_deployment_lock(path)
 
 
 def test_selected_lock_accepts_an_authoritatively_empty_legacy_catalog(tmp_path: Path) -> None:

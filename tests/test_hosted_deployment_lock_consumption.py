@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parents[1]
 PREPARE = ROOT / "infra/scripts/prepare_hosted_release.py"
@@ -27,6 +28,7 @@ SUBSTRATE_TRUST = (
     ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/substrate-trust-0.57.2.json"
 )
 LOCK_PAIR = ROOT / "infra/contracts/exomem-hosted-deployment-lock-pair-v2.json"
+LOCK_SCHEMA = ROOT / "infra/contracts/exomem-hosted-deployment-lock-v2.schema.json"
 
 
 def _module(path: Path = PREPARE):
@@ -191,6 +193,29 @@ def _pair() -> dict[str, object]:
         "schemaVersion": 2,
         "locks": [expand, contract],
     }
+
+
+def test_lock_schema_admits_the_governance_migration_mode_and_still_refuses_unknown_ones() -> None:
+    validator = Draft202012Validator(json.loads(LOCK_SCHEMA.read_text(encoding="utf-8")))
+    pair = _pair()
+    members = pair["locks"]
+    assert isinstance(members, list)
+    for member in members:
+        member["runtimeUpgrade"] = {
+            "compatibilityDigest": "9" * 64,
+            "migrationMode": "governance-v3-to-v4",
+            "substrateConsumerCommit": "8" * 40,
+            "substrateTrustSha256": "7" * 64,
+        }
+
+    assert not list(validator.iter_errors(pair))
+
+    for member in members:
+        member["runtimeUpgrade"]["migrationMode"] = "governance-v4-to-v5"
+
+    errors = list(validator.iter_errors(pair))
+    assert errors
+    assert all(error.json_path.endswith("migrationMode") for error in errors)
 
 
 def _v3_member() -> dict[str, object]:
