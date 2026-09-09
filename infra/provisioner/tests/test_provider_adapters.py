@@ -565,7 +565,7 @@ async def test_helm_cli_checks_pinned_version_and_uses_private_values_file(tmp_p
 
     async def runner(argv: tuple[str, ...], environment: dict[str, str]) -> SimpleNamespace:
         calls.append(argv)
-        assert environment == {"HELM_DRIVER": "configmap"}
+        assert environment == {"HELM_DRIVER": "configmap", "HELM_DEBUG": "false"}
         if argv[1] == "version":
             return SimpleNamespace(returncode=0, stdout="v3.19.4\n", stderr="")
         values_path = Path(argv[argv.index("--values") + 1])
@@ -603,7 +603,7 @@ async def test_helm_cli_checks_pinned_version_and_uses_private_values_file(tmp_p
 @pytest.mark.asyncio
 async def test_helm_cli_rejects_secret_values_and_version_drift(tmp_path: Path) -> None:
     async def wrong_version(_argv: tuple[str, ...], environment: dict[str, str]) -> SimpleNamespace:
-        assert environment == {"HELM_DRIVER": "configmap"}
+        assert environment == {"HELM_DRIVER": "configmap", "HELM_DEBUG": "false"}
         return SimpleNamespace(returncode=0, stdout="v3.18.0\n", stderr="")
 
     adapter = HelmCliAdapter(
@@ -631,7 +631,7 @@ async def test_helm_runtime_transition_replays_and_rolls_back_the_original_revis
     async def runner(argv: tuple[str, ...], environment: dict[str, str]) -> SimpleNamespace:
         nonlocal current_revision, current_values
         calls.append(argv)
-        assert environment == {"HELM_DRIVER": "configmap"}
+        assert environment == {"HELM_DRIVER": "configmap", "HELM_DEBUG": "false"}
         if argv[1] == "version":
             return SimpleNamespace(returncode=0, stdout="v3.19.4\n", stderr="")
         if argv[1:3] == ("get", "values"):

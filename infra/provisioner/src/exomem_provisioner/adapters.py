@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, overload
 
 import httpx
 from kubernetes.client import ApiClient
@@ -2952,7 +2952,10 @@ class HelmCliAdapter:
         "secret",
     }
     _PENDING_RELEASE_STATUSES = ("pending-install", "pending-upgrade")
-    _RELEASE_ABSENT = "release: not found"
+    _RELEASE_ABSENT = "Error: release: not found"
+    # HELM_DEBUG makes Helm print a stack dump after the `Error:` line; pin
+    # it off so the pod environment cannot move the exact absence line.
+    _HELM_ENVIRONMENT = {"HELM_DRIVER": "configmap", "HELM_DEBUG": "false"}
     _CHART_NAME = re.compile(r"^name:[ \t]*([A-Za-z0-9][A-Za-z0-9._-]{0,62})[ \t]*$", re.M)
 
     def __init__(
@@ -3032,7 +3035,7 @@ class HelmCliAdapter:
                 "Helm values must not carry plaintext credentials",
                 reason=ConflictReason.HELM_VALUES_MUST_NOT_CARRY_PLAINTEXT_CREDENTIALS,
             )
-        environment = {"HELM_DRIVER": "configmap"}
+        environment = dict(self._HELM_ENVIRONMENT)
         await self._require_version(environment)
         if effect_guard is not None:
             await self._reconcile_own_pending_release(
@@ -3144,7 +3147,7 @@ class HelmCliAdapter:
         return value
 
     async def current_release_values(self, metadata: OpaqueProviderMetadata) -> dict[str, Any]:
-        environment = {"HELM_DRIVER": "configmap"}
+        environment = dict(self._HELM_ENVIRONMENT)
         await self._require_version(environment)
         return await self._current_values(metadata, environment)
 
@@ -3188,6 +3191,24 @@ class HelmCliAdapter:
             )
         return value
 
+    @overload
+    async def _release_history(
+        self,
+        metadata: OpaqueProviderMetadata,
+        environment: dict[str, str],
+        *,
+        absent_ok: Literal[False] = False,
+    ) -> tuple[dict[str, Any], ...]: ...
+
+    @overload
+    async def _release_history(
+        self,
+        metadata: OpaqueProviderMetadata,
+        environment: dict[str, str],
+        *,
+        absent_ok: Literal[True],
+    ) -> tuple[dict[str, Any], ...] | None: ...
+
     async def _release_history(
         self,
         metadata: OpaqueProviderMetadata,
@@ -3201,7 +3222,8 @@ class HelmCliAdapter:
         status: a release that was never recorded, which the caller may install
         (`None`), and a history read that did not answer, which is uncertain. A
         reconcile must never mistake the second for the first and walk into
-        Helm's own lock.
+        Helm's own lock. Absence is only the exact error line the pinned CLI
+        prints last; the same words inside any other error stay uncertain.
         """
         result = await self._runner(
             (
@@ -3223,7 +3245,12 @@ class HelmCliAdapter:
                     "Helm release history is unavailable",
                     reason=ConflictReason.HELM_RELEASE_HISTORY_IS_UNAVAILABLE,
                 )
-            if self._RELEASE_ABSENT in str(getattr(result, "stderr", "")):
+            lines = [
+                line.strip()
+                for line in str(getattr(result, "stderr", "")).splitlines()
+                if line.strip()
+            ]
+            if lines and lines[-1] == self._RELEASE_ABSENT:
                 return None
             raise self._pending_release_uncertain()
         if len(result.stdout.encode("utf-8")) > 262_144:
@@ -3307,8 +3334,10 @@ class HelmCliAdapter:
 
         The pinned CLI has no machine-readable output for `helm show chart`, so
         the one top-level `name:` line of the rendered `Chart.yaml` is read
-        exactly. An unreadable or ambiguous answer blocks the reconcile rather
-        than authenticating a record on a partial match.
+        exactly. The chart is baked into this image, so an unreadable or
+        ambiguous answer is a wiring defect: it fails terminally under its own
+        reason rather than authenticating a record on a partial match or
+        retrying with the routes closed until an operator notices.
         """
         if self._chart_reference_cache is None:
             result = await self._runner(
@@ -3328,7 +3357,10 @@ class HelmCliAdapter:
                 else []
             )
             if len(names) != 1:
-                raise self._pending_release_uncertain()
+                raise MetadataConflict(
+                    "pinned Helm chart is unreadable",
+                    reason=ConflictReason.HELM_PINNED_CHART_IS_UNREADABLE,
+                )
             self._chart_reference_cache = f"{names[0]}-{self._chart_version}"
         return self._chart_reference_cache
 
@@ -3520,7 +3552,7 @@ class HelmCliAdapter:
         *,
         operation_id: str,
     ) -> tuple[dict[str, Any], int]:
-        environment = {"HELM_DRIVER": "configmap"}
+        environment = dict(self._HELM_ENVIRONMENT)
         await self._require_version(environment)
         current = await self._current_values(metadata, environment)
         marker = current.get("runtimeUpgrade")
@@ -3572,7 +3604,7 @@ class HelmCliAdapter:
         operation_id: str,
         require_marker: bool = False,
     ) -> None:
-        environment = {"HELM_DRIVER": "configmap"}
+        environment = dict(self._HELM_ENVIRONMENT)
         await self._require_version(environment)
         current = await self._current_values(metadata, environment)
         marker = current.get("runtimeUpgrade")
