@@ -148,9 +148,19 @@ class ExomemSessionOAuthProxy(OAuthProxy):
 
     @override
     async def load_access_token(self, token: str) -> AccessToken | None:
+        # This is the only place a presented credential reaches validation, so
+        # its absence from the log is what distinguishes "the client sent a
+        # token we rejected" from "the client sent no token at all". Both
+        # surface as an identical `POST /mcp 401` in the access log, and they
+        # are different problems with different fixes: the first is a session
+        # dying server-side, the second is a client that has stopped
+        # presenting one. Without this line, silence is ambiguous rather than
+        # reassuring.
         record = await self._session_authority.validate(token)
         if record is None:
+            logger.info("event=credential_presented outcome=rejected")
             return None
+        logger.debug("event=credential_presented outcome=accepted")
         return AccessToken(
             token=token,
             client_id=record.client_id,
@@ -177,12 +187,17 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         """Load only an Exomem-owned refresh grant, never FastMCP legacy state."""
         if client.client_id is None:
             return None
+        # Whether the client even attempts a refresh is the other half of the
+        # picture: a client that re-authorizes from scratch every hour looks
+        # the same from the access log as one whose refresh is being refused.
         grant = await self._session_authority.validate_refresh(
             refresh_token,
             client_id=client.client_id,
         )
         if grant is None:
+            logger.info("event=refresh_attempted outcome=rejected")
             return None
+        logger.info("event=refresh_attempted outcome=accepted")
         return RefreshToken(
             token=refresh_token,
             client_id=grant.client_id,
@@ -208,7 +223,12 @@ class ExomemSessionOAuthProxy(OAuthProxy):
                 scopes=normalized_scopes,
             )
         except InvalidRefreshToken as error:
+            # Rotation refusals name their own cause already; surfacing it here
+            # is what tells an operator a refresh loop is failing rather than
+            # never being tried.
+            logger.info("event=refresh_rotated outcome=refused reason=%s", error)
             raise TokenError("invalid_grant", str(error)) from error
+        logger.info("event=refresh_rotated outcome=ok")
         return OAuthToken(
             access_token=access,
             token_type="Bearer",
