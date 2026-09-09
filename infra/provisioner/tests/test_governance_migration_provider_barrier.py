@@ -211,7 +211,7 @@ async def test_lifecycle_propagates_pending_observation_before_dispatch():
     driver = CellLifecycleDriver(
         plane=SimpleNamespace(observe_operation=observe, observed_fence=fence),
         volume_worker=None,
-        config=SimpleNamespace(),
+        config=SimpleNamespace(migration_mode="none"),
     )
     assert await driver.execute("resume", {}, context) is pending
 
@@ -229,7 +229,7 @@ async def test_unrelated_action_cannot_adopt_a_migration_checkpoint(action):
     driver = CellLifecycleDriver(
         plane=SimpleNamespace(observed_fence=fence, observe_operation=observe),
         volume_worker=None,
-        config=SimpleNamespace(),
+        config=SimpleNamespace(migration_mode="none"),
     )
     context = EffectContext(
         "internal-operation",

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import argparse
+import io
 import json
 import re
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -130,6 +133,8 @@ def test_recovery_command_has_only_fixed_modes_and_environment_free_help(
         "successor-retarget-preflight",
         "successor-retarget",
         "verify-successor-retarget",
+        "governance-recovery-preflight",
+        "governance-recovery-resume",
     ):
         assert parser.parse_args([mode, "--stdin"]).mode == mode
     with pytest.raises(recovery.RecoveryRefusal):
@@ -195,6 +200,186 @@ def test_operation_identity_requires_stdin() -> None:
 
     with pytest.raises(recovery.RecoveryRefusal, match="operation identity source is invalid"):
         recovery.read_operation_identity()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "\n",
+        f"{uuid.uuid4()}\n",
+        f"not-a-uuid\n{'a' * 64}\n",
+        f"{uuid.uuid4()}\n{'a' * 63}\n",
+        f"{uuid.uuid4()}\n{'A' * 64}\n",
+        f"{uuid.uuid4()}\n{'a' * 64}",
+        f"{uuid.uuid4()}\n{'a' * 64}\n{'b' * 64}\n",
+    ],
+)
+def test_governance_recovery_stdin_is_exactly_one_identity_and_digest(raw: str) -> None:
+    recovery = _module()
+
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.read_governance_recovery_identity(stdin=raw)
+
+
+def test_governance_recovery_stdin_is_the_only_identity_source() -> None:
+    recovery = _module()
+    identity = str(uuid.uuid4())
+    digest = "a" * 64
+
+    assert recovery.read_governance_recovery_identity(stdin=f"{identity}\n{digest}\n") == (
+        identity,
+        digest,
+    )
+    with pytest.raises(recovery.RecoveryRefusal, match="operation identity source is invalid"):
+        recovery.read_governance_recovery_identity()
+    with pytest.raises(recovery.RecoveryRefusal, match="operation identity is invalid"):
+        recovery.read_operation_identity(stdin=f"{identity}\n{digest}\n")
+
+
+def test_governance_recovery_modes_never_echo_a_digest_supplied_as_an_argument(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    recovery = _module()
+    forbidden = "a" * 64
+
+    assert recovery.main(["governance-recovery-resume", "--expected-digest", forbidden]) == 2
+
+    captured = capsys.readouterr()
+    assert forbidden not in captured.out
+    assert forbidden not in captured.err
+    assert json.loads(captured.out) == {
+        "refusal": "command arguments are invalid",
+        "status": "refused",
+    }
+
+
+class _StubRecoveryDatabase:
+    """Records every use, so a refusal can be proven to precede database work."""
+
+    def __init__(self, dialect_name: str) -> None:
+        self.engine = SimpleNamespace(dialect=SimpleNamespace(name=dialect_name))
+        self.session_factory_reads = 0
+        self.disposed = 0
+
+    @property
+    def session_factory(self) -> object:
+        self.session_factory_reads += 1
+        return SimpleNamespace(kind="session-factory")
+
+    async def dispose(self) -> None:
+        self.disposed += 1
+
+
+def _patch_governance_run(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    database: _StubRecoveryDatabase,
+    incluster: list[str],
+    stdin: str,
+) -> None:
+    monkeypatch.setattr(
+        "exomem_provisioner.recovery_settings.load_recovery_settings",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            envelope_key=SimpleNamespace(get_secret_value=lambda: "e" * 32)
+        ),
+    )
+    monkeypatch.setattr(
+        "exomem_provisioner.database.ProvisionerDatabase", lambda _settings: database
+    )
+    monkeypatch.setattr(
+        "kubernetes.config.load_incluster_config",
+        lambda *_args, **_kwargs: incluster.append("load_incluster_config"),
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO(stdin))
+
+
+@pytest.mark.parametrize("mode", ["governance-recovery-preflight", "governance-recovery-resume"])
+async def test_governance_recovery_refuses_sqlite_before_any_database_work(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    recovery = _module()
+    database = _StubRecoveryDatabase("sqlite")
+    incluster: list[str] = []
+    _patch_governance_run(
+        monkeypatch, database=database, incluster=incluster, stdin=f"{uuid.uuid4()}\n"
+    )
+
+    with pytest.raises(recovery.RecoveryRefusal, match="PostgreSQL is required"):
+        await recovery._run(argparse.Namespace(mode=mode, stdin=True))
+
+    assert incluster == []
+    assert database.session_factory_reads == 0
+    assert database.disposed == 1
+
+
+async def test_governance_recovery_returns_before_any_kubernetes_contact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovery = _module()
+    identity = str(uuid.uuid4())
+    digest = "b" * 64
+    database = _StubRecoveryDatabase("postgresql")
+    incluster: list[str] = []
+    calls: list[str] = []
+
+    class _StubRepository:
+        def __init__(self, session_factory: object, *, codec: object) -> None:
+            assert session_factory.kind == "session-factory"
+            assert codec is not None
+            calls.append("constructed")
+
+        async def preflight_governance_recovery(self, operation_id: str) -> str:
+            assert operation_id == identity
+            calls.append("preflight")
+            return digest
+
+        async def resume_governance_recovery(
+            self, operation_id: str, *, expected_digest: str
+        ) -> str:
+            assert operation_id == identity
+            assert expected_digest == digest
+            calls.append("resume")
+            return "queued"
+
+    monkeypatch.setattr(recovery, "OperationRepository", _StubRepository)
+    _patch_governance_run(
+        monkeypatch, database=database, incluster=incluster, stdin=f"{identity}\n"
+    )
+    assert await recovery._run(
+        argparse.Namespace(mode="governance-recovery-preflight", stdin=True)
+    ) == {"status": "eligible", "recovery_digest": digest}
+
+    _patch_governance_run(
+        monkeypatch,
+        database=database,
+        incluster=incluster,
+        stdin=f"{identity}\n{digest}\n",
+    )
+    assert await recovery._run(
+        argparse.Namespace(mode="governance-recovery-resume", stdin=True)
+    ) == {"status": "queued", "recovery_digest": digest}
+
+    assert incluster == []
+    assert calls == ["constructed", "preflight", "constructed", "resume"]
+    assert database.session_factory_reads == 2
+    assert database.disposed == 2
+
+
+def test_governance_recovery_output_is_closed_and_content_free(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    recovery = _module()
+    digest = "a" * 64
+
+    for status in ("eligible", "queued", "already-queued"):
+        assert recovery.emit_result({"status": status, "recovery_digest": digest}) == 0
+        assert json.loads(capsys.readouterr().out) == {
+            "recovery_digest": digest,
+            "status": status,
+        }
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.emit_result({"status": "queued", "operation_id": str(uuid.uuid4())})
 
 
 def test_canonical_hash_is_order_stable_and_never_serializes_secret_fields() -> None:

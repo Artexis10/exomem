@@ -328,6 +328,85 @@ curl --fail-with-body --silent --show-error --max-redirs 0 --max-time 30 \
   --data-binary "@${health_request}"
 ```
 
+## Governance migration recovery
+
+Use this for a v2 `PROVISION`/`ROLLFORWARD` operation that failed while holding a
+retained governance checkpoint (`gm1:...` or `gpi1:...`). Preserving that
+checkpoint keeps successors fenced; it does not by itself make the operation
+resumable. This procedure requeues **the same operation at the same checkpoint**
+under the current tenant fence. It never creates, retargets, or replaces one.
+
+Unlike the init-retry procedure above, **do not scale the routine worker to
+zero.** The requeue is a database scheduling change only: it observes nothing in
+Kubernetes and grants no effect authority. The worker is what must pick the
+operation back up and recheck the claim, fence, PVC and custody against the live
+cell, so it has to be running for the recovery to complete.
+
+This section does not continue the procedure above, which deletes its operator
+Pod when its inspection window closes. Recreate the Pod first: repeat the lock
+selection and the `kubectl apply -f -` manifest from
+[Init-retry false-negative recovery](#init-retry-false-negative-recovery) --
+the block ending in
+`kubectl -n exomem-platform wait --for=condition=Ready "pod/$operator_pod"` --
+so `$operator_pod`, `$lock_name`, `$lock_key` and `$runtime_selection` are set
+in this shell. The same environment, ServiceAccount, and stop conditions apply.
+
+Then supply **this** incident's confidential internal operation ID in its own
+mode-`0600` file. Do not reuse or copy `$recovery_identity`: it holds a
+different operation, and resuming the wrong one is not reversible. Keep `$governance_identity` until the incident record is closed, then remove it the same way as `$recovery_identity`.
+
+```bash
+umask 077
+governance_identity=/secure/operator/governance-operation-id
+# Write the failed governance operation's internal ID into this file with the
+# operator's approved local editor. Never through argv, a shell heredoc, or a
+# copy of $recovery_identity.
+test -f "$governance_identity" && test ! -L "$governance_identity"
+test "$(stat -c %u "$governance_identity")" = "$(id -u)"
+test "$(stat -c %a "$governance_identity")" = 600
+test "$(wc -l < "$governance_identity")" = 1
+```
+
+Both modes take that identity from stdin exactly as above.
+`governance-recovery-resume` reads a second stdin line: the 64-hex
+`recovery_digest` the preflight returned. Supplying it as a command argument is
+refused. Pipe it from the preflight result rather than writing it to a file:
+
+```bash
+set -euo pipefail
+preflight="$(timeout 75s kubectl -n exomem-platform exec -i "$operator_pod" -- \
+  exomem-provisioner-recover-init-retry governance-recovery-preflight --stdin \
+  < "$governance_identity")"
+recovery_digest="$(printf '%s' "$preflight" | jq -er '.recovery_digest')"
+timeout 75s kubectl -n exomem-platform exec -i "$operator_pod" -- \
+  exomem-provisioner-recover-init-retry governance-recovery-resume --stdin \
+  < <(cat "$governance_identity"; printf '%s\n' "$recovery_digest")
+```
+
+The preflight writes nothing. It returns `{"status":"eligible", ...}` only for a
+terminal, unclaimed, result-free, same-provider-identity row at the current
+tenant fence whose stored request still matches its canonical hash and whose
+checkpoint actually decodes. Anything else refuses and the row is untouched.
+
+The resume refuses unless that exact digest still describes the row and no cell
+operation lease, foreign governance barrier, non-final tenant destruction, or
+claimed same-cell operation exists. It returns `queued` once. Replaying the
+digest recorded by the latest requeue returns `already-queued` and writes
+nothing; any older digest is a conflict.
+
+If the resume acknowledgement is lost or uncertain, replay the **same** digest:
+`already-queued` proves the requeue already committed, and `queued` proves it
+had not. Never run a fresh preflight-and-resume pair to settle an uncertain
+acknowledgement -- inspect the operation first, because a second preflight
+returns a new digest that would requeue a row the worker may already own. A
+refusal of the ordinary first attempt is a stop condition; re-run the preflight
+and use the new digest only when no resume has been issued for it.
+
+After `queued`, the routine worker claims the operation at the next claim
+generation with the same checkpoint and re-verifies the live cell itself.
+Bounded-poll the content-free `inspect` result as above until `FINAL /
+complete`. Preserve only that JSON output and the recovery digest.
+
 ## Verify
 
 ```bash

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select, true, update
@@ -14,7 +16,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .crypto import EnvelopeCodec
+from .driver import DriverTerminal
 from .governance_migration_checkpoint import CHECKPOINT_VERSION as GOVERNANCE_CHECKPOINT_VERSION
+from .governance_migration_checkpoint import MigrationCheckpoint
+from .governance_migration_checkpoint import _binding as _canonical_binding
 from .models import (
     BackupRecord,
     CapacityDestructiveFence,
@@ -36,6 +41,14 @@ from .provider_identity import cell_resource_name
 from .wire_protocol import WIRE_PROTOCOL_V1, WIRE_PROTOCOL_V2
 
 GOVERNANCE_PROVISION_CHECKPOINT_VERSION = "gpi1"
+GOVERNANCE_PROVISION_CHECKPOINT_PHASES = frozenset({"initializing", "complete", "drained"})
+INITIAL_RETRY_AFTER_SECONDS = 2
+_GOVERNANCE_RECOVERY_MARKER = "_governance_recovery_v1"
+_GOVERNANCE_RECOVERY_DOMAIN = b"exomem.hosted-governance-recovery-snapshot.v1\0"
+_GOVERNANCE_RECOVERY_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+# "Ineligible" must never be expressible by a caller. A shared ``None`` would
+# compare equal to a ``None`` digest and requeue exactly the rows this refuses.
+_GOVERNANCE_RECOVERY_INELIGIBLE = object()
 
 
 class RepositoryConflict(RuntimeError):
@@ -110,6 +123,83 @@ def _terminal_failure_checkpoint(operation: Operation) -> str:
     if _holds_governance_checkpoint(operation, operation.checkpoint):
         return operation.checkpoint
     return "failed"
+
+
+def _retained_governance_checkpoint(operation: Operation) -> bool:
+    # A retained hint is preserved for inspection even when malformed, so a
+    # recovery path must decode it here rather than trust the denial prefix.
+    checkpoint = operation.checkpoint
+    if not _holds_governance_checkpoint(operation, checkpoint):
+        return False
+    if checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":"):
+        try:
+            MigrationCheckpoint.decode(checkpoint)
+        except DriverTerminal:
+            return False
+        return True
+    _, _, remainder = checkpoint.partition(":")
+    phase, _, binding = remainder.partition(":")
+    return phase in GOVERNANCE_PROVISION_CHECKPOINT_PHASES and _canonical_binding(binding)
+
+
+def _snapshot_value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        return _as_utc(value).isoformat()
+    if isinstance(value, dict):
+        return {str(key): _snapshot_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_snapshot_value(item) for item in value]
+    return value
+
+
+def _governance_recovery_digest(operation: Operation, fence_generation: int) -> str:
+    # Cover every stored column, not only the eligibility predicates: a row
+    # mutated between preflight and resume must never requeue under the digest
+    # the operator actually read and approved.
+    payload: dict[str, Any] = {
+        column.name: _snapshot_value(getattr(operation, column.name))
+        for column in Operation.__table__.columns
+    }
+    payload["tenant_fence_generation"] = fence_generation
+    return hashlib.sha256(
+        _GOVERNANCE_RECOVERY_DOMAIN
+        + json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _governance_recovery_snapshot(
+    operation: Operation,
+    fence: TenantFence | None,
+    request: dict[str, Any] | None,
+) -> str:
+    """Digest exactly one terminal, unclaimed, current-fence, same-operation row."""
+    if (
+        fence is None
+        or operation.state is not OperationState.ERROR
+        or operation.finalized_at is None
+        or operation.error_code is None
+        or operation.claim_owner is not None
+        or operation.claim_token is not None
+        or operation.claim_expires_at is not None
+        or operation.result_ciphertext is not None
+        or operation.result_redacted != {}
+        or operation.external_operation_id != operation.provider_operation_id
+        or operation.fence_generation != operation.provider_fence_generation
+        or operation.fence_generation != fence.fence_generation
+        or request is None
+        or canonical_request_sha256(request) != operation.canonical_request_sha256
+        or not _retained_governance_checkpoint(operation)
+    ):
+        raise RepositoryConflict("operation is not an eligible governance recovery")
+    return _governance_recovery_digest(operation, fence.fence_generation)
 
 
 @dataclass(frozen=True, slots=True)
@@ -670,7 +760,7 @@ class OperationRepository:
         wire_protocol: str = WIRE_PROTOCOL_V1,
         admission: AdmissionPolicy | None = None,
         fresh_rejection: str | None = None,
-        retry_after_seconds: int = 2,
+        retry_after_seconds: int = INITIAL_RETRY_AFTER_SECONDS,
     ) -> OperationSnapshot:
         action_value = OperationAction(action)
         digest = canonical_request_sha256(request)
@@ -1153,6 +1243,16 @@ class OperationRepository:
                 claim_generation=claim_generation,
                 now=now,
             )
+            if _holds_governance_checkpoint(operation, operation.checkpoint):
+                if (
+                    operation.checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":")
+                    and checkpoint.startswith(GOVERNANCE_PROVISION_CHECKPOINT_VERSION + ":")
+                ):
+                    raise ClaimConflict("governance migration cannot return to initialization")
+                if not _holds_governance_checkpoint(operation, checkpoint):
+                    # Capacity waits and other scheduling outcomes must not
+                    # discard the plan binding or release the denial barrier.
+                    checkpoint = operation.checkpoint
             if _holds_governance_checkpoint(operation, checkpoint) and not (
                 _holds_governance_checkpoint(operation, operation.checkpoint)
             ):
@@ -1263,6 +1363,120 @@ class OperationRepository:
             await _release_cell_operation_lock(session, operation)
             await session.flush()
             return _operation_snapshot(operation)
+
+    def _governance_recovery_request(self, operation: Operation) -> dict[str, Any] | None:
+        try:
+            return self._codec.decrypt_json(
+                operation.request_ciphertext,
+                purpose=(f"operation-request:{operation.action.value}:{operation.idempotency_key}"),
+            )
+        except Exception:  # noqa: BLE001 - an undecodable envelope is only ever ineligible
+            return None
+
+    async def preflight_governance_recovery(
+        self,
+        operation_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> str:
+        """Digest one eligible terminal governance row without writing anything."""
+        # Eligibility here is structural, not scheduled: nothing about this row
+        # expires, so the caller's clock only matters when the resume commits.
+        del now
+        async with self._sessions() as session:
+            operation = await session.get(Operation, operation_id)
+            if operation is None:
+                raise RepositoryConflict("operation does not exist")
+            fence = await session.get(TenantFence, operation.tenant_id)
+            return _governance_recovery_snapshot(
+                operation,
+                fence,
+                self._governance_recovery_request(operation),
+            )
+
+    async def resume_governance_recovery(
+        self,
+        operation_id: str,
+        *,
+        expected_digest: str,
+        now: datetime | None = None,
+    ) -> str:
+        """Requeue the same operation at the same checkpoint under its exact digest.
+
+        This changes scheduling only. The worker's claim, fence, PVC and custody
+        rechecks remain the sole authority over the live cell, and the retained
+        governance checkpoint keeps blocking successors until it completes.
+        """
+        if not isinstance(expected_digest, str) or (
+            _GOVERNANCE_RECOVERY_DIGEST.fullmatch(expected_digest) is None
+        ):
+            raise RepositoryConflict("governance recovery digest is invalid")
+        async with self._sessions.begin() as session:
+            operation = await _lock_operation_fence_first(session, operation_id)
+            resumed_at = await _database_now(session, now)
+            fence = await session.get(TenantFence, operation.tenant_id)
+            current: object
+            try:
+                current = _governance_recovery_snapshot(
+                    operation,
+                    fence,
+                    self._governance_recovery_request(operation),
+                )
+            except RepositoryConflict:
+                current = _GOVERNANCE_RECOVERY_INELIGIBLE
+            if current != expected_digest:
+                # Only the digest recorded by the latest committed requeue is an
+                # acknowledgement replay. Any older one refers to a row state
+                # that a later failure or edit has already replaced.
+                marker = operation.progress.get(_GOVERNANCE_RECOVERY_MARKER)
+                if isinstance(marker, dict) and marker.get("preflight_sha256") == expected_digest:
+                    return "already-queued"
+                raise RepositoryConflict("governance recovery digest does not match the row")
+            if operation.cell_id is not None and (
+                await session.get(CellOperationLock, operation.cell_id, with_for_update=True)
+                is not None
+            ):
+                raise RepositoryConflict("cell operation lease is unresolved")
+            if await session.scalar(select(_foreign_governance_barrier(operation))):
+                raise RepositoryConflict("operation overlaps unfinished governance migration")
+            overlapping = await session.scalar(
+                select(Operation.id)
+                .where(
+                    Operation.id != operation.id,
+                    Operation.tenant_id == operation.tenant_id,
+                    or_(
+                        and_(
+                            Operation.action == OperationAction.DESTROY,
+                            Operation.state != OperationState.FINAL,
+                        ),
+                        and_(
+                            Operation.cell_id == operation.cell_id,
+                            Operation.state == OperationState.CLAIMED,
+                        ),
+                    ),
+                )
+                .limit(1)
+            )
+            if overlapping is not None:
+                raise RepositoryConflict("governance recovery overlaps an existing operation")
+            operation.state = OperationState.PENDING
+            operation.error_code = None
+            operation.finalized_at = None
+            operation.available_at = resumed_at
+            operation.retry_after_seconds = INITIAL_RETRY_AFTER_SECONDS
+            operation.progress = {
+                **operation.progress,
+                "failure_attempts": 0,
+                _GOVERNANCE_RECOVERY_MARKER: {
+                    "schema": 1,
+                    "preflight_sha256": expected_digest,
+                    "claim_generation": operation.claim_generation,
+                    "committed_at": resumed_at.isoformat(),
+                },
+            }
+            operation.updated_at = resumed_at
+            await session.flush()
+            return "queued"
 
     async def complete(
         self,
