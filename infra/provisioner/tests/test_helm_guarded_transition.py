@@ -96,6 +96,7 @@ class HelmTransport:
         self.history_failure: tuple[int, str] | None = None
         self.revision_values_failure: tuple[int, str] | None = None
         self.chart_yaml = CHART_YAML
+        self.chart_failure: tuple[int, str] | None = None
         self.core = HelmReleaseConfigMaps(self.history)
         self.adapter = HelmCliAdapter(
             binary="helm",
@@ -129,11 +130,14 @@ class HelmTransport:
         return name
 
     async def run(self, argv, environment):
-        assert environment == {"HELM_DRIVER": "configmap"}
+        assert environment == {"HELM_DRIVER": "configmap", "HELM_DEBUG": "false"}
         self.calls.append(argv)
         if argv[1] == "version":
             stdout = "v3.19.4\n"
         elif argv[1:3] == ("show", "chart"):
+            if self.chart_failure is not None:
+                code, message = self.chart_failure
+                return SimpleNamespace(returncode=code, stdout="", stderr=message)
             stdout = self.chart_yaml
         elif argv[1:3] == ("get", "values"):
             if "--revision" in argv:
@@ -466,6 +470,69 @@ async def test_a_release_that_was_never_recorded_lets_the_governed_install_proce
 
 
 @pytest.mark.asyncio
+async def test_helm_debug_is_pinned_off_so_the_absent_line_stays_last(tmp_path):
+    # With HELM_DEBUG inherited from the pod environment, Helm appends a
+    # stack dump after the `Error:` line, so an absent release would read as
+    # uncertain forever. Every Helm call therefore pins the flag off.
+    class Recording(HelmTransport):
+        environments: list[dict[str, str]] = []
+
+        async def run(self, argv, environment):
+            self.environments.append(dict(environment))
+            return await super().run(argv, environment)
+
+    h = Recording(tmp_path)
+    h.history_failure = (1, "Error: release: not found\n")
+
+    await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert h.environments and all(
+        env["HELM_DEBUG"] == "false" and env["HELM_DRIVER"] == "configmap" for env in h.environments
+    )
+    assert _upgrades(h) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_absent_release_is_recognized_only_by_its_exact_error_line(tmp_path):
+    h = HelmTransport(tmp_path)
+    # Helm prints kubeconfig warnings ahead of the error on the same stream.
+    h.history_failure = (
+        1,
+        "WARNING: Kubernetes configuration file is group-readable. "
+        "This is insecure. Location: /tmp/kubeconfig\n"
+        "Error: release: not found\n",
+    )
+
+    await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert h.core.reads == [] and h.core.deletes == []
+    assert _upgrades(h) == 1
+    assert "--install" in h.calls[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "Error: query: failed to query with labels: release: not found\n",
+        "Error: release: not found: context deadline exceeded\n",
+        "Error: release: not found\nError: Kubernetes cluster unreachable\n",
+        "error: release: not found\n",
+    ],
+)
+async def test_a_history_error_that_merely_mentions_absence_stays_uncertain(tmp_path, stderr):
+    h = HelmTransport(tmp_path)
+    h.leave_pending("pending-upgrade", revision=2)
+    h.history_failure = (1, stderr)
+
+    with pytest.raises(DriverRetryable):
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert h.core.reads == [] and h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("rollback", [True, False])
 async def test_an_unanswered_history_read_never_walks_into_the_helm_lock(tmp_path, rollback):
     h = HelmTransport(tmp_path)
@@ -543,14 +610,25 @@ async def test_a_pending_install_under_a_foreign_chart_name_is_refused(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_an_unreadable_pinned_chart_blocks_the_reconcile_without_a_delete(tmp_path):
+@pytest.mark.parametrize("shape", ["no-name", "two-names", "cli-failure", "oversized"])
+async def test_an_unreadable_pinned_chart_is_a_terminal_wiring_defect(tmp_path, shape):
     h = HelmTransport(tmp_path)
     h.leave_pending("pending-upgrade", revision=2)
-    h.chart_yaml = "apiVersion: v2\nversion: 0.1.0\n"
+    if shape == "no-name":
+        h.chart_yaml = "apiVersion: v2\nversion: 0.1.0\n"
+    elif shape == "two-names":
+        h.chart_yaml = CHART_YAML + "name: other\n"
+    elif shape == "cli-failure":
+        h.chart_failure = (1, 'Error: path "chart" not found\n')
+    else:
+        h.chart_yaml = CHART_YAML + "description: " + "x" * 70_000 + "\n"
 
-    with pytest.raises(DriverRetryable):
+    # The chart is baked into the provisioner image; it cannot become readable
+    # by waiting, so retrying with the routes closed only hides the defect.
+    with pytest.raises(MetadataConflict) as raised:
         await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
 
+    assert raised.value.reason is ConflictReason.HELM_PINNED_CHART_IS_UNREADABLE
     assert h.core.deletes == []
     assert _upgrades(h) == 0
 
