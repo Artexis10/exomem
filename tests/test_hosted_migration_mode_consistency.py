@@ -16,8 +16,14 @@ from pathlib import Path
 from typing import get_args, get_type_hints
 
 import pytest
-from exomem_provisioner.config import DeploymentRuntimeUpgrade, SelectedDeploymentRuntime
-from exomem_provisioner.lifecycle import LifecycleConfig
+
+# The core CI shards run without the provisioner package; the hosted-infrastructure
+# job installs it and exercises this invariant, as the sibling hosted tests do.
+_config = pytest.importorskip("exomem_provisioner.config")
+_lifecycle = pytest.importorskip("exomem_provisioner.lifecycle")
+DeploymentRuntimeUpgrade = _config.DeploymentRuntimeUpgrade
+SelectedDeploymentRuntime = _config.SelectedDeploymentRuntime
+LifecycleConfig = _lifecycle.LifecycleConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_SCHEMA = ROOT / "infra/contracts/exomem-hosted-deployment-lock-v2.schema.json"
