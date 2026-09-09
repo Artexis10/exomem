@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.76.0](https://github.com/Artexis10/exomem/compare/v0.75.0...v0.76.0) (2026-09-08)
+
+
+### Features
+
+* **hosted:** add custody-neutral governance migration runner ([#1131](https://github.com/Artexis10/exomem/issues/1131)) ([f92c727](https://github.com/Artexis10/exomem/commit/f92c7272c6a9ed4c9d53851f93576251c1732a0d))
+* **hosted:** add custody-safe governance migration primitives ([#1127](https://github.com/Artexis10/exomem/issues/1127)) ([78edf3b](https://github.com/Artexis10/exomem/commit/78edf3b8b1194b4347f27fa7a95779ac668ef753))
+* **hosted:** add guarded irreversible Helm transitions ([#1161](https://github.com/Artexis10/exomem/issues/1161)) ([c6fa37a](https://github.com/Artexis10/exomem/commit/c6fa37a624d363a6972b397d7bd87a1f95f25ede))
+* **hosted:** bind control-key handoff to BWS source ([#1119](https://github.com/Artexis10/exomem/issues/1119)) ([be382ef](https://github.com/Artexis10/exomem/commit/be382efced5dbc7732185f31eb46b2aedad37202))
+* **hosted:** bind governance migration Jobs to stopped cells ([#1132](https://github.com/Artexis10/exomem/issues/1132)) ([0b29e1a](https://github.com/Artexis10/exomem/commit/0b29e1abe9b19bcc3c883d304254eb1f9855c3a0))
+* **hosted:** bind migration membership successors to Job evidence ([#1133](https://github.com/Artexis10/exomem/issues/1133)) ([2ec65c0](https://github.com/Artexis10/exomem/commit/2ec65c0f93868cdf2a756f4b90bf85ab49e24d34))
+* **hosted:** coordinate migration and prove private readiness ([#1155](https://github.com/Artexis10/exomem/issues/1155)) ([ab95e0f](https://github.com/Artexis10/exomem/commit/ab95e0fc7a9d2ceae6e951bab245a6f3a9efb194))
+* **hosted:** gate readiness and retain target recovery intent ([#1159](https://github.com/Artexis10/exomem/issues/1159)) ([778bbf0](https://github.com/Artexis10/exomem/commit/778bbf0eae6ee346076df01c4af6c5586bb849c2))
+* **mcp:** upgrade to FastMCP 4.0.3 ([#1157](https://github.com/Artexis10/exomem/issues/1157)) ([96a18a0](https://github.com/Artexis10/exomem/commit/96a18a06fd6c738452d3299f8a03ba9c3e607d6b))
+* **provisioner:** bind target recovery to live stopped-cell proofs ([#1162](https://github.com/Artexis10/exomem/issues/1162)) ([4a81460](https://github.com/Artexis10/exomem/commit/4a81460a112d5082ebf302a4464e6e7a4c43abdf))
+* **provisioner:** enroll fresh cells before admission ([#1165](https://github.com/Artexis10/exomem/issues/1165)) ([70c9736](https://github.com/Artexis10/exomem/commit/70c973659d12a46b83ec283ecaa87e80310bd121))
+* **provisioner:** wire governed rollforward lifecycle ([#1164](https://github.com/Artexis10/exomem/issues/1164)) ([abfb772](https://github.com/Artexis10/exomem/commit/abfb7724bde5a609c0650d2ded1ed1f7a2c2362f))
+
+
+### Bug Fixes
+
+* **benchmarks:** score f21 detector misses as failures ([#1122](https://github.com/Artexis10/exomem/issues/1122)) ([1821d6e](https://github.com/Artexis10/exomem/commit/1821d6eddb5ec5410308fd55dc4b4481024435bb))
+* **hosted:** bind migration recovery checkpoints and provider effects ([#1138](https://github.com/Artexis10/exomem/issues/1138)) ([eb724a8](https://github.com/Artexis10/exomem/commit/eb724a835b0bc52b55148eab543ca382af964271))
+* **hosted:** fence successor work through migration completion ([#1152](https://github.com/Artexis10/exomem/issues/1152)) ([16967a7](https://github.com/Artexis10/exomem/commit/16967a72aa381d9886b206309e26a99aa40c23f7))
+* **hosted:** preserve actual governance schema and enrollment ([#1129](https://github.com/Artexis10/exomem/issues/1129)) ([59c869e](https://github.com/Artexis10/exomem/commit/59c869efebf1fb11ebc70790e97a03af7e15320d))
+* **hosted:** preserve checkpoints and fence guarded worker effects ([#1134](https://github.com/Artexis10/exomem/issues/1134)) ([90fc035](https://github.com/Artexis10/exomem/commit/90fc035d9ff9e81bcf313424ccbb4a62c11775ac))
+* **hosted:** reconcile exact migration Job cleanup and replay ([#1154](https://github.com/Artexis10/exomem/issues/1154)) ([6ddbd35](https://github.com/Artexis10/exomem/commit/6ddbd3577467e0ea6a58a8dc8119d30853426312))
+* **hosted:** recover enrolled governance migration after custody expiry ([#1136](https://github.com/Artexis10/exomem/issues/1136)) ([07d28b6](https://github.com/Artexis10/exomem/commit/07d28b68f60e629743be4cfce1ef64383b2c6728))
+
+
+### Performance
+
+* reduce durable write latency with indexed dependencies ([#1121](https://github.com/Artexis10/exomem/issues/1121)) ([3331807](https://github.com/Artexis10/exomem/commit/33318071ebed7d5721e9b2b66146ffa3373a2e1b))
+
 ## [0.75.0](https://github.com/Artexis10/exomem/compare/v0.74.0...v0.75.0) (2026-09-07)
 
 
