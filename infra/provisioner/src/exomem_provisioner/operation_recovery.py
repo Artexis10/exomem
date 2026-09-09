@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import re
 import sys
 import uuid
 from collections.abc import Sequence
@@ -36,7 +37,7 @@ from .models import (
     TenantFence,
 )
 from .provider_identity import cell_resource_name
-from .repository import canonical_request_sha256
+from .repository import OperationRepository, RepositoryConflict, canonical_request_sha256
 
 _FIXED_MODES = (
     "preflight",
@@ -55,7 +56,13 @@ _FIXED_MODES = (
     "successor-retarget-preflight",
     "successor-retarget",
     "verify-successor-retarget",
+    "governance-recovery-preflight",
+    "governance-recovery-resume",
 )
+_GOVERNANCE_RECOVERY_MODES = frozenset(
+    {"governance-recovery-preflight", "governance-recovery-resume"}
+)
+_RECOVERY_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _RECOVERY_MARKER = "_init_retry_recovery_v1"
 _RETARGET_MARKER = "_runtime_retarget_recovery_v1"
 _RETARGET_RESUME_MARKER = "_runtime_retarget_resume_v1"
@@ -293,6 +300,19 @@ def read_operation_identity(*, stdin: str | None = None) -> str:
     if str(parsed) != value:
         raise RecoveryRefusal("operation identity is invalid")
     return value
+
+
+def read_governance_recovery_identity(*, stdin: str | None = None) -> tuple[str, str]:
+    """Read exactly one operation identity and one preflight digest, in that order."""
+    if stdin is None:
+        raise RecoveryRefusal("operation identity source is invalid")
+    if stdin.count("\n") != 2 or not stdin.endswith("\n"):
+        raise RecoveryRefusal("operation identity is invalid")
+    identity, digest = stdin[:-1].split("\n")
+    operation_id = read_operation_identity(stdin=identity + "\n")
+    if _RECOVERY_DIGEST.fullmatch(digest) is None:
+        raise RecoveryRefusal("recovery digest is invalid")
+    return operation_id, digest
 
 
 def require_postgresql(dialect: str) -> None:
@@ -2579,6 +2599,34 @@ class _ProductionRecoveryObserver:
         )
 
 
+async def _run_governance_recovery(
+    mode: str,
+    *,
+    repository: OperationRepository,
+    stdin: str,
+) -> dict[str, object]:
+    """Two-step digest-bound requeue of one retained governance failure.
+
+    Neither step observes or mutates Kubernetes: the routine worker's claim,
+    fence, PVC and custody rechecks stay the only authority over the live cell.
+    """
+    if mode == "governance-recovery-preflight":
+        operation_id = read_operation_identity(stdin=stdin)
+        try:
+            digest = await repository.preflight_governance_recovery(operation_id)
+        except RepositoryConflict as error:
+            raise RecoveryRefusal("governance recovery preflight failed") from error
+        return {"status": "eligible", "recovery_digest": digest}
+    operation_id, expected_digest = read_governance_recovery_identity(stdin=stdin)
+    try:
+        status = await repository.resume_governance_recovery(
+            operation_id, expected_digest=expected_digest
+        )
+    except RepositoryConflict as error:
+        raise RecoveryRefusal("governance recovery resume failed") from error
+    return {"status": status, "recovery_digest": expected_digest}
+
+
 def emit_result(payload: dict[str, object]) -> int:
     if set(payload) - _OUTPUT_KEYS or not isinstance(payload.get("status"), str):
         raise RecoveryRefusal("recovery output is invalid")
@@ -2609,6 +2657,16 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     try:
         settings: RecoverySettings = load_recovery_settings()
         database = ProvisionerDatabase(settings)
+        if args.mode in _GOVERNANCE_RECOVERY_MODES:
+            require_postgresql(database.engine.dialect.name)
+            return await _run_governance_recovery(
+                args.mode,
+                repository=OperationRepository(
+                    database.session_factory,
+                    codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
+                ),
+                stdin=sys.stdin.read(),
+            )
         config.load_incluster_config()
         api_client = client.ApiClient()
         identity = ProviderRecoveryIdentityVerifier.from_public_key(

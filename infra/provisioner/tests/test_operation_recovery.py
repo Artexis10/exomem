@@ -130,6 +130,8 @@ def test_recovery_command_has_only_fixed_modes_and_environment_free_help(
         "successor-retarget-preflight",
         "successor-retarget",
         "verify-successor-retarget",
+        "governance-recovery-preflight",
+        "governance-recovery-resume",
     ):
         assert parser.parse_args([mode, "--stdin"]).mode == mode
     with pytest.raises(recovery.RecoveryRefusal):
@@ -195,6 +197,74 @@ def test_operation_identity_requires_stdin() -> None:
 
     with pytest.raises(recovery.RecoveryRefusal, match="operation identity source is invalid"):
         recovery.read_operation_identity()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "\n",
+        f"{uuid.uuid4()}\n",
+        f"not-a-uuid\n{'a' * 64}\n",
+        f"{uuid.uuid4()}\n{'a' * 63}\n",
+        f"{uuid.uuid4()}\n{'A' * 64}\n",
+        f"{uuid.uuid4()}\n{'a' * 64}",
+        f"{uuid.uuid4()}\n{'a' * 64}\n{'b' * 64}\n",
+    ],
+)
+def test_governance_recovery_stdin_is_exactly_one_identity_and_digest(raw: str) -> None:
+    recovery = _module()
+
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.read_governance_recovery_identity(stdin=raw)
+
+
+def test_governance_recovery_stdin_is_the_only_identity_source() -> None:
+    recovery = _module()
+    identity = str(uuid.uuid4())
+    digest = "a" * 64
+
+    assert recovery.read_governance_recovery_identity(stdin=f"{identity}\n{digest}\n") == (
+        identity,
+        digest,
+    )
+    with pytest.raises(recovery.RecoveryRefusal, match="operation identity source is invalid"):
+        recovery.read_governance_recovery_identity()
+    with pytest.raises(recovery.RecoveryRefusal, match="operation identity is invalid"):
+        recovery.read_operation_identity(stdin=f"{identity}\n{digest}\n")
+
+
+def test_governance_recovery_modes_never_echo_a_digest_supplied_as_an_argument(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    recovery = _module()
+    forbidden = "a" * 64
+
+    assert recovery.main(["governance-recovery-resume", "--expected-digest", forbidden]) == 2
+
+    captured = capsys.readouterr()
+    assert forbidden not in captured.out
+    assert forbidden not in captured.err
+    assert json.loads(captured.out) == {
+        "refusal": "command arguments are invalid",
+        "status": "refused",
+    }
+
+
+def test_governance_recovery_output_is_closed_and_content_free(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    recovery = _module()
+    digest = "a" * 64
+
+    for status in ("eligible", "queued", "already-queued"):
+        assert recovery.emit_result({"status": status, "recovery_digest": digest}) == 0
+        assert json.loads(capsys.readouterr().out) == {
+            "recovery_digest": digest,
+            "status": status,
+        }
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.emit_result({"status": "queued", "operation_id": str(uuid.uuid4())})
 
 
 def test_canonical_hash_is_order_stable_and_never_serializes_secret_fields() -> None:
