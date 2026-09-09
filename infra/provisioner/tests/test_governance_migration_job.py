@@ -268,8 +268,18 @@ def test_manifest_is_exact_nonroot_custody_read_only_job(phase):
     mounts = {item["mountPath"]: item for item in container["volumeMounts"]}
     assert mounts["/run/exomem/authorization-session"]["readOnly"] is True
     assert mounts["/var/lib/exomem/logs"]["readOnly"] is True
-    assert mounts["/var/lib/exomem/vault"]["readOnly"] is (phase == "inspect")
-    assert mounts["/var/lib/exomem/state"]["readOnly"] is (phase == "inspect")
+    # Every phase writes the data volume: the runner's schema probe opens the
+    # writer-lease store even while inspecting, which writes coordination
+    # state under the state root. Inspect leaves the vault and the governance
+    # store untouched by code rather than by a read-only mount.
+    assert mounts["/var/lib/exomem/vault"]["readOnly"] is False
+    assert mounts["/var/lib/exomem/state"]["readOnly"] is False
+    volumes = {item["name"]: item for item in spec["volumes"]}
+    assert volumes["data"]["persistentVolumeClaim"]["readOnly"] is False
+    assert volumes["authorization-session-source"]["secret"]["defaultMode"] == 0o444
+    custody = spec["initContainers"][0]["volumeMounts"][0]
+    assert custody["name"] == "authorization-session-source"
+    assert custody["readOnly"] is True
     assert "exomem-cell-credentials" not in json.dumps(body)
 
 
@@ -514,7 +524,18 @@ async def test_adapter_refuses_ambiguous_or_failed_job_without_adopting_replacem
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "kind", ["env", "envFrom", "init-command", "extra-container", "mount", "token", "capability"]
+    "kind",
+    [
+        "env",
+        "envFrom",
+        "init-command",
+        "extra-container",
+        "mount",
+        "stale-inspect-mount",
+        "stale-inspect-claim",
+        "token",
+        "capability",
+    ],
 )
 async def test_adapter_refuses_extra_execution_or_custody_authority(kind):
     request = _request()
@@ -532,6 +553,11 @@ async def test_adapter_refuses_extra_execution_or_custody_authority(kind):
             spec["containers"] *= 2
         elif kind == "mount":
             spec["containers"][0]["volumeMounts"][3]["readOnly"] = False
+        elif kind == "stale-inspect-mount":
+            # The pre-2026-09-09 read-only inspect body is a foreign Job.
+            spec["containers"][0]["volumeMounts"][0]["readOnly"] = True
+        elif kind == "stale-inspect-claim":
+            spec["volumes"][0]["persistentVolumeClaim"]["readOnly"] = True
         elif kind == "token":
             spec["automountServiceAccountToken"] = True
         else:

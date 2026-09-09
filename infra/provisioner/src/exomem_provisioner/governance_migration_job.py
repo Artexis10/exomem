@@ -284,7 +284,7 @@ def build_governance_migration_job(
                             "name": "data",
                             "mountPath": _ROOT + "/" + path,
                             "subPath": path,
-                            "readOnly": request.phase == "inspect" or path == "logs",
+                            "readOnly": path == "logs",
                         }
                         for path in ("vault", "state", "logs")
                     ],
@@ -302,7 +302,13 @@ def build_governance_migration_job(
                 "name": "data",
                 "persistentVolumeClaim": {
                     "claimName": resource + "-data",
-                    "readOnly": request.phase == "inspect",
+                    # Every phase mounts data read-write: the runner opens the
+                    # writer-lease store to read the schema even while
+                    # inspecting. Inspect never mutates the vault or the
+                    # governance store; it does write writer-lease coordination
+                    # state (locks, reserved-identity generation) under the
+                    # state root.
+                    "readOnly": False,
                 },
             },
             {
