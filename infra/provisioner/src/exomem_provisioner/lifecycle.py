@@ -1845,11 +1845,12 @@ def _fixed_helm_values(
         ),
         "initOperationId": metadata.operation_id,
         "initRequestId": _deterministic_uuid4(metadata.operation_id + ":init"),
+        # The cell chart has no governance behaviour: the v3-to-v4 migration runs in the
+        # coordinator's own Job against a stopped cell. Every chart apply on this path --
+        # restore shell, initializer, and the rollforward's serving values -- must therefore
+        # carry a mode the cell chart still admits, or the apply fails schema validation.
         "migrationMode": (
-            "none"
-            if request["provisionMode"] == "restore-candidate"
-            and config.migration_mode == "governance-v3-to-v4"
-            else config.migration_mode
+            "none" if config.migration_mode == "governance-v3-to-v4" else config.migration_mode
         ),
         "pvcSize": "10Gi",
         "provisionMode": request["provisionMode"],

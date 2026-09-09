@@ -213,7 +213,9 @@ def test_lock_schema_admits_the_governance_migration_mode_and_still_refuses_unkn
     for member in members:
         member["runtimeUpgrade"]["migrationMode"] = "governance-v4-to-v5"
 
-    assert list(validator.iter_errors(pair))
+    errors = list(validator.iter_errors(pair))
+    assert errors
+    assert all(error.json_path.endswith("migrationMode") for error in errors)
 
 
 def _v3_member() -> dict[str, object]:

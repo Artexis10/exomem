@@ -2926,6 +2926,8 @@ def test_cell_state_root_migration_mode_enables_only_the_offline_state_migrator(
 def test_cell_chart_refuses_the_governance_migration_mode() -> None:
     """Governance migration runs in the coordinator's Job, never in an in-cell storage init."""
 
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
     result = _render_process(
         CELL,
         CELL / "values.initialize.yaml",
