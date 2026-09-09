@@ -1349,3 +1349,107 @@ def test_the_embedded_toolchain_stand_ins_are_valid_python() -> None:
     assert bodies, "no embedded Python stand-in found to check"
     for body in bodies:
         ast.parse(textwrap.dedent(body).lstrip())
+
+
+def test_publishing_over_an_existing_service_env_retains_the_predecessor(
+    tmp_path: Path,
+) -> None:
+    """A rewrite of a live cell's configuration must stay recoverable.
+
+    The publish replaces the managed file atomically, so without a retained
+    predecessor a stale dotenv silently destroys a drifted live configuration.
+    """
+    require_posix_executable_scripts()
+    env, service_root, env_file = _fixture(tmp_path)
+    first = _invoke(env, service_root, env_file, "--profile", "lean")
+    assert first.returncode == 0, first.stderr
+
+    service_env = Path(env["XDG_CONFIG_HOME"]) / "exomem" / "service.env"
+    original = service_env.read_text(encoding="utf-8")
+
+    env_file.write_text(
+        env_file.read_text(encoding="utf-8").replace(
+            "GITHUB_CLIENT_SECRET=secret&value",
+            "GITHUB_CLIENT_SECRET=rotated&value",
+        ),
+        encoding="utf-8",
+    )
+    second = _invoke(env, service_root, env_file, "--profile", "lean")
+    assert second.returncode == 0, second.stderr
+
+    assert "rotated&value" in service_env.read_text(encoding="utf-8")
+    retained = sorted(service_env.parent.glob("service.env.previous*"))
+    assert retained, "the replaced configuration was not retained"
+    assert retained[-1].read_text(encoding="utf-8") == original
+    assert stat.S_IMODE(retained[-1].stat().st_mode) == 0o600
+    assert str(retained[-1]) in second.stdout
+
+
+def test_existing_service_refuses_a_differing_vault_render(tmp_path: Path) -> None:
+    """A vault change during a re-render is never a benign upgrade.
+
+    The state root, index and graph all derive from the vault path, so a stale
+    dotenv must not rebind a running cell to a different knowledge base.
+    """
+    require_posix_executable_scripts()
+    env, service_root, env_file = _fixture(tmp_path)
+    first = _invoke(env, service_root, env_file, "--profile", "lean")
+    assert first.returncode == 0, first.stderr
+
+    service_env = Path(env["XDG_CONFIG_HOME"]) / "exomem" / "service.env"
+    before = service_env.read_text(encoding="utf-8")
+    original_vault = tmp_path / "vault"
+    other_vault = tmp_path / "other-vault"
+    other_vault.mkdir()
+    env_file.write_text(
+        env_file.read_text(encoding="utf-8").replace(
+            f"EXOMEM_VAULT_PATH={original_vault}",
+            f"EXOMEM_VAULT_PATH={other_vault}",
+        ),
+        encoding="utf-8",
+    )
+
+    refused = _invoke(env, service_root, env_file, "--profile", "lean")
+
+    assert refused.returncode != 0
+    assert str(original_vault) in refused.stderr
+    assert str(other_vault) in refused.stderr
+    assert "--rebind-vault" in refused.stderr
+    assert service_env.read_text(encoding="utf-8") == before
+
+
+def test_existing_service_rebinds_the_vault_when_opted_in(tmp_path: Path) -> None:
+    require_posix_executable_scripts()
+    env, service_root, env_file = _fixture(tmp_path)
+    first = _invoke(env, service_root, env_file, "--profile", "lean")
+    assert first.returncode == 0, first.stderr
+
+    other_vault = tmp_path / "other-vault"
+    other_vault.mkdir()
+    env_file.write_text(
+        env_file.read_text(encoding="utf-8").replace(
+            f"EXOMEM_VAULT_PATH={tmp_path / 'vault'}",
+            f"EXOMEM_VAULT_PATH={other_vault}",
+        ),
+        encoding="utf-8",
+    )
+
+    moved = _invoke(env, service_root, env_file, "--profile", "lean", "--rebind-vault")
+
+    assert moved.returncode == 0, moved.stderr
+    service_env = Path(env["XDG_CONFIG_HOME"]) / "exomem" / "service.env"
+    assert f'EXOMEM_VAULT_PATH="{other_vault}"' in service_env.read_text(encoding="utf-8")
+
+
+def test_fresh_install_is_unaffected_by_the_vault_rebinding_refusal(
+    tmp_path: Path,
+) -> None:
+    require_posix_executable_scripts()
+    result, _service_root, _trace, env = _run(tmp_path, "--profile", "lean")
+
+    assert result.returncode == 0, result.stderr
+    service_env = Path(env["XDG_CONFIG_HOME"]) / "exomem" / "service.env"
+    assert f'EXOMEM_VAULT_PATH="{tmp_path / "vault"}"' in service_env.read_text(
+        encoding="utf-8"
+    )
+    assert not sorted(service_env.parent.glob("service.env.previous*"))
