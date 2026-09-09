@@ -19,6 +19,35 @@ GPI1 = "gpi1:initializing:" + "A" * 43
 GM1 = MigrationCheckpoint("inspect", "a" * 64, "A" * 43).encode()
 
 
+@pytest.mark.parametrize("checkpoint", [GPI1, GM1])
+async def test_generic_pending_cannot_erase_governance_barrier(repository, checkpoint):
+    operation = await _submit(repository)
+    await _mark(repository, operation, state=OperationState.PENDING, checkpoint=checkpoint)
+    claim = await repository.claim_next("worker", now=NOW)
+    pending = await repository.mark_pending(
+        operation.id, "worker", claim_token=claim.claim_token,
+        claim_generation=claim.claim_generation, checkpoint="capacity-pending",
+        retry_after_seconds=300, now=NOW,
+    )
+    assert pending.checkpoint == checkpoint
+    assert pending.retry_after_seconds == 300
+    assert await repository.claim_next("worker", now=NOW + timedelta(seconds=299)) is None
+    assert await repository.claim_next("worker", now=NOW + timedelta(seconds=300)) is not None
+
+
+async def test_migration_cannot_return_to_storage_initialization(repository):
+    operation = await _submit(repository)
+    await _mark(repository, operation, state=OperationState.PENDING, checkpoint=GM1)
+    claim = await repository.claim_next("worker", now=NOW)
+    with pytest.raises(ClaimConflict):
+        await repository.mark_pending(
+            operation.id, "worker", claim_token=claim.claim_token,
+            claim_generation=claim.claim_generation, checkpoint=GPI1,
+            retry_after_seconds=1, now=NOW,
+        )
+    assert (await repository.get_by_id(operation.id)).checkpoint == GM1
+
+
 async def _submit(repository, action="provision", *, wire_protocol=WIRE_PROTOCOL_V2, **changes):
     request = _v2_request(**changes)
     return await repository.submit(

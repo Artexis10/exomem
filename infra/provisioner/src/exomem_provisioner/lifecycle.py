@@ -1961,6 +1961,12 @@ class CellLifecycleDriver:
         context: EffectContext,
     ) -> DriverPending | DriverFinal:
         try:
+            if context.checkpoint.startswith(("gpi1:", CHECKPOINT_VERSION + ":")) and (
+                self._config.migration_mode != "governance-v3-to-v4"
+            ):
+                # A queued recovery is not permission to fall back to a legacy
+                # initializer or rollforward after worker configuration drift.
+                raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
             if context.checkpoint.startswith("gpi1:") and (
                 action != "provision" or context.wire_protocol != WIRE_PROTOCOL_V2
             ):

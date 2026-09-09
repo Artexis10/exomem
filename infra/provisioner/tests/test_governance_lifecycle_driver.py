@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 from test_provider_lifecycle import _config, _context, _v2_request
 
-from exomem_provisioner.driver import DriverFinal, DriverPending
+from exomem_provisioner.driver import DriverFinal, DriverPending, DriverTerminal
 from exomem_provisioner.governance_migration_checkpoint import MigrationCheckpoint
 from exomem_provisioner.lifecycle import CellLifecycleDriver, HighFidelityProviderPlane
 from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2
@@ -103,3 +103,26 @@ def test_offline_restore_chart_never_passes_governance_mode_to_storage_init():
         _metadata_from_context(_context()), _v2_request(provisionMode="restore-candidate"), config()
     )
     assert values["workloadMode"] == "restore" and values["migrationMode"] == "none"
+
+
+@pytest.mark.parametrize("mode", ["none", "binding-v1-to-v2", "state-root-v1"])
+@pytest.mark.parametrize("action,checkpoint", [
+    ("provision", "gpi1:initializing:" + "A" * 43),
+    ("provision", MigrationCheckpoint("inspect", "a" * 64, "A" * 43).encode()),
+    ("rollforward", MigrationCheckpoint("inspect", "a" * 64, "A" * 43).encode()),
+])
+async def test_retained_governance_checkpoint_refuses_legacy_mode_before_provider_observation(
+    mode, action, checkpoint,
+):
+    class UnobservedPlane(MigrationPlane):
+        async def observe_operation(self, context, request):
+            pytest.fail("retained migration must not reach legacy provider observation")
+
+    driver = CellLifecycleDriver(
+        plane=UnobservedPlane(), config=replace(config(), migration_mode=mode), volume_worker=None
+    )
+    with pytest.raises(DriverTerminal, match="PROVISIONER_CHECKPOINT_INVALID"):
+        await driver.execute(
+            action, _v2_request(compatibilityDigest="9" * 64),
+            _context(checkpoint=checkpoint, wire_protocol=WIRE_PROTOCOL_V2),
+        )

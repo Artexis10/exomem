@@ -1153,6 +1153,16 @@ class OperationRepository:
                 claim_generation=claim_generation,
                 now=now,
             )
+            if _holds_governance_checkpoint(operation, operation.checkpoint):
+                if (
+                    operation.checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":")
+                    and checkpoint.startswith(GOVERNANCE_PROVISION_CHECKPOINT_VERSION + ":")
+                ):
+                    raise ClaimConflict("governance migration cannot return to initialization")
+                if not _holds_governance_checkpoint(operation, checkpoint):
+                    # Capacity waits and other scheduling outcomes must not
+                    # discard the plan binding or release the denial barrier.
+                    checkpoint = operation.checkpoint
             if _holds_governance_checkpoint(operation, checkpoint) and not (
                 _holds_governance_checkpoint(operation, operation.checkpoint)
             ):
