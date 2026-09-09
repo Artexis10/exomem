@@ -353,7 +353,7 @@ in this shell. The same environment, ServiceAccount, and stop conditions apply.
 
 Then supply **this** incident's confidential internal operation ID in its own
 mode-`0600` file. Do not reuse or copy `$recovery_identity`: it holds a
-different operation, and resuming the wrong one is not reversible.
+different operation, and resuming the wrong one is not reversible. Keep `$governance_identity` until the incident record is closed, then remove it the same way as `$recovery_identity`.
 
 ```bash
 umask 077
