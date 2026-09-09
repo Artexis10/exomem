@@ -190,6 +190,7 @@ def build_live_provider_components(
             expected_version=settings.helm_version,
             chart_path=settings.cell_chart_path,
             chart_version=settings.cell_chart_version,
+            core_v1=core_v1,
         ),
         runtime=PrivateCellApiAdapter(
             request=requester,

@@ -3805,3 +3805,97 @@ print(json.dumps({'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}))
     finally:
         for image in (old_image, target_image):
             _run(["docker", "image", "rm", "--force", image], check=False)
+
+
+def test_exact_k3s_admits_only_the_pending_helm_release_configmap_delete(k3s: str) -> None:
+    platform = _render(PLATFORM, PLATFORM / "values.validation.yaml", "exomem-platform")
+    route_crds = [
+        item
+        for item in platform
+        if item.get("kind") == "CustomResourceDefinition"
+        and item.get("metadata", {}).get("name")
+        in {"ingressroutes.traefik.io", "middlewares.traefik.io"}
+    ]
+    assert len(route_crds) == 2
+    _kubectl(k3s, ["apply", "--filename=-"], documents=route_crds)
+    _kubectl(
+        k3s,
+        ["apply", "--filename=-"],
+        documents=[
+            item
+            for item in platform
+            if item.get("kind") in {"ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}
+        ],
+    )
+    _wait_for_policy_typecheck(k3s, "exomem-provisioner-scope")
+
+    namespace = "exo-helm-pending"
+    provisioner = "system:serviceaccount:exomem-platform:exomem-cell-provisioner"
+    _kubectl(
+        k3s,
+        ["apply", "--filename=-"],
+        documents=[
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "exomem-platform"}},
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}},
+        ],
+    )
+    # The authority under test is the shipped one: the ServiceAccount, ClusterRole
+    # and ClusterRoleBinding rendered from provisioner-rbac.yaml, not a role
+    # written for this test.
+    shipped_rbac = [
+        item
+        for item in platform
+        if item.get("kind") in {"ServiceAccount", "ClusterRole", "ClusterRoleBinding"}
+        and item.get("metadata", {}).get("name") == "exomem-cell-provisioner"
+    ]
+    assert {item["kind"] for item in shipped_rbac} == {
+        "ServiceAccount",
+        "ClusterRole",
+        "ClusterRoleBinding",
+    }
+    _kubectl(k3s, ["apply", "--filename=-"], documents=shipped_rbac)
+
+    pending = f"sh.helm.release.v1.{namespace}.v2"
+    unrelated = namespace + "-not-a-release"
+    _kubectl(
+        k3s,
+        ["apply", "--filename=-"],
+        documents=[
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "name": pending,
+                    "namespace": namespace,
+                    "labels": {
+                        "owner": "helm",
+                        "name": namespace,
+                        "status": "pending-upgrade",
+                        "version": "2",
+                    },
+                },
+                "data": {"release": "SDRzSUFBQUFBQUFBLw=="},
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": unrelated, "namespace": namespace},
+                "data": {"release": "SDRzSUFBQUFBQUFBLw=="},
+            },
+        ],
+    )
+
+    admitted = _kubectl(
+        k3s,
+        ["delete", "configmap", pending, f"--namespace={namespace}", f"--as={provisioner}"],
+        check=False,
+    )
+    assert admitted.returncode == 0, admitted.stdout + admitted.stderr
+
+    refused = _kubectl(
+        k3s,
+        ["delete", "configmap", unrelated, f"--namespace={namespace}", f"--as={provisioner}"],
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "exact fixed names derived from the tenant namespace" in refused.stderr
