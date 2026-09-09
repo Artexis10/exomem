@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.76.1](https://github.com/Artexis10/exomem/compare/v0.76.0...v0.76.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **auth:** carry the RFC 9207 issuer on client redirects ([#1166](https://github.com/Artexis10/exomem/issues/1166)) ([1a5dc6a](https://github.com/Artexis10/exomem/commit/1a5dc6a0de0f929d5614ac46536259762ed5f93e))
+
 ## [0.76.0](https://github.com/Artexis10/exomem/compare/v0.75.0...v0.76.0) (2026-09-08)
 
 
