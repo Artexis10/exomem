@@ -1,0 +1,70 @@
+# Design — repair the Records writer
+
+## Context
+
+See proposal.md for motivation. Facts in the tree that fix the shape (main at `22e7bfc8`, origin/main at `b7af6bc0`, no Records changes between):
+
+- `records._validate_values(manifest, item)` owns item validation for both profiles and has the manifest, therefore the storage strategy, in scope. It calls `_validate_representable(value)`, which refuses any string containing `\n`/`\r` (or over the byte cap) with no field path, and raises `SCHEMA_UNKNOWN_FIELD` without naming the fields. `manifest.schema.validate` raises on the first type or enum failure.
+- `vault.serialize_frontmatter` → `_format_yaml_line` → `yaml_scalar` renders strings needing quotes via `json.dumps`, which is YAML double-quoted style; `yaml.safe_load` reads `"a\n\nb"` back as the original string. Markdown-item frontmatter can therefore already carry line breaks losslessly; only the gate forbids it. Markdown-log headings, notes and delimited child rows genuinely cannot (`record_formats.py` ~L740-810).
+- Item audit markers are collected from the adapter snapshot's records, i.e. files under `storage.source` (`records._audit_markers`). `MarkdownItemsAdapter.read` walks `storage.source` only. `recall_policy` rejects every Records-layer descendant except an exact `_collection.md`. A directory beside `Items/` is therefore outside items, audit and recall by construction.
+- `record_memory` has a closed action set and a per-action argument matrix; changing either moves the tool-surface fingerprint pin. Bootstrap text is not touched by this change, so the compact byte ceiling is not at risk.
+- The shipped convention since #948: refusals name the argument at fault in `details`.
+
+## Goals / Non-Goals
+
+**Goals:** make Markdown-item ledgers with multi-line values writable without escaping; make every candidate refusal actionable in one round trip; never lose a refused observation; make a blocked ledger countable through inspection and inventory.
+
+**Non-Goals:** presentation rendering changes; schema-evolution advice derived from held items; due-state carriers or attention families for held counts; `plan_memory` hold arguments (the mechanics land in the shared substrate so Planning can adopt them later without redesign); any change to how items are named or stored; repairing live vault content from code.
+
+## Decisions
+
+### D1 — Strategy-aware representability with a round-trip proof
+
+`_validate_values` passes the storage strategy and a field-path accumulator into the representability check. Markdown-log keeps the existing rule (no line breaks, no `\r`, byte cap) because its rendering cannot carry them. Markdown-item values drop the line-break rule and keep the byte cap; instead, after schema normalisation, the writer serialises the complete candidate frontmatter (system fields plus values) with `vault.serialize_frontmatter`, parses it back with the same frontmatter reader the adapter uses, normalises through the schema, and compares field by field. Any difference refuses `UNREPRESENTABLE_RECORD_VALUE` naming the field; nothing is staged. Dataset strategies are query-only in this delivery, so the rule does not apply to them.
+
+*Why a round trip rather than allow-listing characters:* the proof is the property we want (read-back equality), it costs one serialise-and-parse per mutation on data already in memory, and it catches any future serializer quirk instead of encoding today's. *Rejected:* emitting YAML block scalars (`|`) — a second serialisation path for one field type, and the existing quoting already round-trips; a per-field manifest flag (`multiline: true`) — pushes a substrate limitation into every schema.
+
+### D2 — Field-addressed, complete refusals
+
+Validation collects issues instead of raising on the first: `{field, code, reason, received}` where `field` is a dotted path with array indices (`metrics[0].source`), `code` is the existing stable code, `received` is the value class (`str`, `int`, `object`, `null`). The refusal keeps the first issue's code and message as today and carries the full list in `details.issues`, plus `details.field` for the first issue so existing consumers keep working. `SCHEMA_UNKNOWN_FIELD` lists every undeclared field. Schema type and enum failures need the schema validator to expose an issue-collecting entry point; if the current one only raises, a thin wrapper runs field by field and aggregates.
+
+### D3 — Item-key remediation
+
+Before UUID normalisation, a non-UUID `item_key` is compared with the candidate's natural-key field values. If it equals one of them, or the candidate's natural key is complete, the `INVALID_RECORD_ID` refusal carries `details.natural_key` (declared field names), `details.received`, and a remediation sentence: `item_key` is the internal UUID identity; omit it and identity derives from the natural key. `describe` gains the same sentence in its identity section. Nothing about identity derivation changes.
+
+### D4 — Held records as human-owned files beside the items
+
+A refusal for a candidate-content reason (D1, D2 codes) holds the candidate by default. Shape:
+
+- Path: `<collection dir>/Held/<held_id>.md`, where `held_id` is the derived item key when the natural key is complete (so re-holding the same candidate replays onto one file) and a fresh UUID otherwise. `Held` has one portable spelling, like item filenames.
+- Frontmatter (all single-line, generated): `type: held-record`, `collection_id`, `held_id`, `attempted_action` (`append`|`update`), `target_item_key` (update only), `held_at`, `why`, `candidate_sha256`, `diagnostics` (the D2 issue list).
+- Body: one fenced `json` block containing the exact candidate — `item` (or `changes` and `delete_fields`), `body`, and the caller's guards — so the payload is lossless by construction and independent of the very representability rules that refused it.
+- Resume: `append`/`update` with `held=<held_id>` loads the file (must live under this collection and carry its `collection_id`), applies shallow overrides from `item`/`changes` (`null` removes a field), and runs the ordinary guarded path. Success commits the item and removes the held file inside the same mutation boundary; if removal fails after the item is committed, the response warns `HELD_CLEANUP_FAILED` and the item stands. A repeated refusal rewrites the held file in place with the new diagnostics and returns the same `held_id`.
+- Discard: new action `discard` with `collection`, `held`, `why`; removes the file and records nothing in the audit chain (the hold never entered it).
+- Opt-out: `hold=false` on `append`/`update` restores refuse-without-file.
+- Soft-fail: if writing the held file raises, the original refusal is returned unchanged with a warning; a hold never produces a second error.
+- Invisibility: the directory is outside `storage.source`, so adapter reads, queries, audit markers and recall ignore it without new exclusion code; tests pin that.
+- Disclosure: held candidates pass through the same per-item release filter as items before inspection or inventory counts them (the cross-audience count leak caught in #758 review is the reason).
+
+*Why files, not review-state:* the candidate is user data — an observation the user made — and the doctrine keeps user data in human-owned Markdown; a server-internal store would hide it from Obsidian and from a vault backup. *Why a new action for discard rather than a flag on update:* `update` with `discard=true` would be an update that updates nothing; a closed action reads better in `describe` and in the argument matrix. *Rejected:* holding under `Items/` with a marker (would need adapter, audit and recall exclusions and would be counted by anything that forgets them); silently committing a best-effort item (violates structured-only canonical values).
+
+### D5 — Coverage in inspection and inventory
+
+`inspect_collection` gains `coverage: {committed, held, held_refs}` where `held_refs` is bounded (20) and each entry carries `held_id`, `held_at`, `attempted_action` and a one-line diagnostics summary, never candidate values. `inventory_collections` gains `committed` and `held` per collection. Both are computed from the same governance-filtered census the inspection already performs plus one bounded listing of `Held/`.
+
+### D6 — Contract text, not new doctrine
+
+The scaffold references `planning-records.md` and `mutation-results.md` (and the md5-identical plugin copy, hosted renders via the existing regeneration scripts) gain one sentence: a refused Record write is held, the response names the field, fix and resume by `held` reference; do not preserve diagnostic breadcrumbs as Evidence. Bootstrap text is unchanged in this change.
+
+## Risks / Trade-offs
+
+- [Held files accumulate when nobody resumes them] → inspection lists them with age; `discard` exists; a stale-held finding belongs to the follow-on change's coverage family, not here.
+- [Round-trip comparison false negatives on typed fields (dates, numbers) if compared as raw strings] → compare after the schema's own normalisation on both sides, using the adapter's reader; tests cover date, datetime, integer, nested object and array fields.
+- [Different clients ignore `held`] → the refusal is unchanged and still actionable; `held` is additive.
+- [Tool-surface fingerprint and argument-matrix pins move] → re-pin deliberately with the reason recorded in the pin's docstring; the matrix tests assert `held`/`hold`/`discard` only on the actions that accept them.
+- [A candidate that is unrepresentable in frontmatter is also unrepresentable in the held file] → the held frontmatter carries only generated single-line fields; the candidate lives in a fenced JSON body.
+- [Planning items keep the old strict rule until they adopt the arguments] → D1 applies to both profiles automatically since it lives in the shared validator; only the hold/resume/discard surface is Records-first.
+
+## Migration Plan
+
+Additive; no data migration. Deploy through the existing local service upgrade and hosted promotion. Rollback is a plain revert: held files are inert Markdown of a type nothing else reads. After deploy, live repair of the Public Posts v2 items is operational work through `record_memory` (append the 2026-09-09 reply with real line breaks; update the 2026-09-08 item's escaped value), not part of this change.
