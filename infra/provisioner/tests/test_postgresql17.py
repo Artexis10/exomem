@@ -112,6 +112,32 @@ def _run(command: list[str], *, check: bool = True) -> subprocess.CompletedProce
     return result
 
 
+_INIT_COMPLETE = "PostgreSQL init process complete; ready for start up."
+
+
+def _wait_until_serving(container: str) -> None:
+    """Block until the image's real server, not its init-time one, is serving.
+
+    The official image first runs a temporary server on the Unix socket to
+    apply its init scripts, and `pg_isready` answers from that server too.
+    It then stops it and starts the real one, so a probe that passed a
+    moment earlier can be followed by "connection to server on socket ...
+    failed". Require the entrypoint's init-complete line first, then a
+    successful readiness probe against the server that follows it.
+    """
+    for _ in range(120):
+        logs = _run(["docker", "logs", container], check=False)
+        if _INIT_COMPLETE in logs.stdout + logs.stderr:
+            ready = _run(
+                ["docker", "exec", container, "pg_isready", "--username", "postgres"],
+                check=False,
+            )
+            if ready.returncode == 0:
+                return
+        time.sleep(0.5)
+    raise AssertionError(_run(["docker", "logs", container], check=False).stdout)
+
+
 @pytest.fixture(scope="module")
 def postgresql17() -> Iterator[PostgreSQL17]:
     if shutil.which("docker") is None:
@@ -138,16 +164,7 @@ def postgresql17() -> Iterator[PostgreSQL17]:
         ]
     )
     try:
-        for _ in range(60):
-            ready = _run(
-                ["docker", "exec", container, "pg_isready", "--username", "postgres"],
-                check=False,
-            )
-            if ready.returncode == 0:
-                break
-            time.sleep(0.5)
-        else:
-            raise AssertionError(_run(["docker", "logs", container], check=False).stdout)
+        _wait_until_serving(container)
         port_output = _run(["docker", "port", container, "5432/tcp"]).stdout.strip()
         port_match = re.search(r":([0-9]+)$", port_output)
         assert port_match is not None, port_output
@@ -185,16 +202,7 @@ def other_postgresql17(postgresql17: PostgreSQL17) -> Iterator[PostgreSQL17]:
         ]
     )
     try:
-        for _ in range(60):
-            ready = _run(
-                ["docker", "exec", container, "pg_isready", "--username", "postgres"],
-                check=False,
-            )
-            if ready.returncode == 0:
-                break
-            time.sleep(0.5)
-        else:
-            raise AssertionError(_run(["docker", "logs", container], check=False).stdout)
+        _wait_until_serving(container)
         server = PostgreSQL17(
             container=container,
             network=postgresql17.network,
