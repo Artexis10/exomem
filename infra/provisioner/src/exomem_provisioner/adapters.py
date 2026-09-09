@@ -2951,6 +2951,7 @@ class HelmCliAdapter:
         "password",
         "secret",
     }
+    _PENDING_RELEASE_STATUSES = ("pending-install", "pending-upgrade")
 
     def __init__(
         self,
@@ -2961,6 +2962,7 @@ class HelmCliAdapter:
         chart_version: str,
         runner: Runner = _subprocess_runner,
         temporary_directory: Path | None = None,
+        core_v1: Any | None = None,
     ) -> None:
         self._binary = binary
         self._expected_version = expected_version
@@ -2968,6 +2970,16 @@ class HelmCliAdapter:
         self._chart_version = chart_version
         self._runner = runner
         self._temporary_directory = temporary_directory
+        self._core = core_v1
+
+    def _core_v1(self) -> Any:
+        """Resolve the release-record client the same way the other adapters do."""
+        if self._core is None:
+            from kubernetes import client, config
+
+            config.load_incluster_config()
+            self._core = client.CoreV1Api()
+        return self._core
 
     @classmethod
     def _has_secret_key(cls, value: Any) -> bool:
@@ -3014,6 +3026,10 @@ class HelmCliAdapter:
             )
         environment = {"HELM_DRIVER": "configmap"}
         await self._require_version(environment)
+        if effect_guard is not None:
+            await self._reconcile_own_pending_release(
+                metadata, values, environment, effect_guard=effect_guard
+            )
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -3247,6 +3263,153 @@ class HelmCliAdapter:
                 reason=ConflictReason.HELM_DEPLOYED_REVISION_IS_AMBIGUOUS,
             )
         return revisions[0]
+
+    @staticmethod
+    def _pending_release_is_foreign() -> MetadataConflict:
+        return MetadataConflict(
+            "pending Helm release record was not written by this operation",
+            reason=ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN,
+        )
+
+    @staticmethod
+    def _pending_release_uncertain() -> DriverRetryable:
+        return DriverRetryable("pinned Helm outcome is uncertain")
+
+    @staticmethod
+    def _canonical(values: dict[str, Any]) -> str:
+        return json.dumps(values, sort_keys=True, separators=(",", ":"))
+
+    async def _reconcile_own_pending_release(
+        self,
+        metadata: OpaqueProviderMetadata,
+        values: dict[str, Any],
+        environment: dict[str, str],
+        *,
+        effect_guard: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Clear this call's own abandoned release record so its exact target can retry.
+
+        A provisioner killed mid `helm upgrade --wait` leaves the release at
+        `pending-upgrade` or `pending-install`, and Helm refuses every later
+        attempt at the same target while that record stands. Only a record this
+        call authenticates as its own is cleared, under a fresh claim and with
+        API preconditions; a foreign one stays fenced and terminal.
+        """
+        try:
+            history = await self._release_history(metadata, environment)
+        except MetadataConflict as error:
+            if error.reason is ConflictReason.HELM_RELEASE_HISTORY_IS_UNAVAILABLE:
+                # No record yet: `upgrade --install` writes the first one.
+                return
+            raise
+        pending = [item for item in history if item.get("status") in self._PENDING_RELEASE_STATUSES]
+        if not pending:
+            return
+        record = pending[0]
+        chart = record.get("chart")
+        if (
+            len(pending) != 1
+            or record["revision"] != max(item["revision"] for item in history)
+            or not isinstance(chart, str)
+            or not chart.endswith("-" + self._chart_version)
+            or len(chart) <= len(self._chart_version) + 1
+        ):
+            raise self._pending_release_is_foreign()
+        deployed = [item for item in history if item.get("status") == "deployed"]
+        if record["status"] == "pending-install":
+            if len(history) != 1:
+                raise self._pending_release_is_foreign()
+            prior = None
+        else:
+            if len(deployed) != 1 or deployed[0].get("chart") != chart:
+                raise self._pending_release_is_foreign()
+            prior = deployed[0]
+        if self._canonical(
+            await self._revision_values(metadata, environment, record["revision"])
+        ) != self._canonical(values):
+            raise self._pending_release_is_foreign()
+        await self._delete_pending_release(metadata, record["revision"], effect_guard=effect_guard)
+        await self._prove_pending_release_cleared(
+            metadata, environment, record["revision"], prior=prior
+        )
+
+    async def _delete_pending_release(
+        self,
+        metadata: OpaqueProviderMetadata,
+        revision: int,
+        *,
+        effect_guard: Callable[[], Awaitable[None]],
+    ) -> None:
+        namespace = metadata.resource_name
+        name = f"sh.helm.release.v1.{namespace}.v{revision}"
+        try:
+            current = await asyncio.to_thread(
+                self._core_v1().read_namespaced_config_map, name, namespace
+            )
+        except (ClaimConflict, StaleFence):
+            raise
+        except Exception as error:  # noqa: BLE001 - provider payloads must not escape
+            if _api_status(error) == 404:
+                return
+            raise self._pending_release_uncertain() from None
+        current_metadata = getattr(current, "metadata", None)
+        uid = getattr(current_metadata, "uid", None)
+        resource_version = getattr(current_metadata, "resource_version", None)
+        labels = dict(getattr(current_metadata, "labels", None) or {})
+        if (
+            not isinstance(uid, str)
+            or not uid
+            or not isinstance(resource_version, str)
+            or not resource_version
+            or labels.get("owner") != "helm"
+            or labels.get("name") != namespace
+            or labels.get("version") != str(revision)
+            or labels.get("status") not in self._PENDING_RELEASE_STATUSES
+        ):
+            raise self._pending_release_is_foreign()
+        await effect_guard()
+        try:
+            await asyncio.to_thread(
+                self._core_v1().delete_namespaced_config_map,
+                name,
+                namespace,
+                body={
+                    "propagationPolicy": "Foreground",
+                    "preconditions": {"uid": uid, "resourceVersion": resource_version},
+                },
+            )
+        except (ClaimConflict, StaleFence):
+            raise
+        except Exception as error:  # noqa: BLE001 - provider payloads must not escape
+            if _api_status(error) != 404:
+                # One delete per pass. An unacknowledged one is uncertain, never
+                # repeated, and never rolled back: the caller keeps its checkpoint.
+                raise self._pending_release_uncertain() from None
+
+    async def _prove_pending_release_cleared(
+        self,
+        metadata: OpaqueProviderMetadata,
+        environment: dict[str, str],
+        revision: int,
+        *,
+        prior: dict[str, Any] | None,
+    ) -> None:
+        try:
+            history = await self._release_history(metadata, environment)
+        except MetadataConflict as error:
+            if error.reason is not ConflictReason.HELM_RELEASE_HISTORY_IS_UNAVAILABLE:
+                raise
+            if prior is None:
+                return
+            raise self._pending_release_uncertain() from None
+        latest = max(history, key=lambda item: item["revision"])
+        if (
+            prior is None
+            or any(item["revision"] == revision for item in history)
+            or latest["revision"] != prior["revision"]
+            or latest.get("status") != "deployed"
+        ):
+            raise self._pending_release_uncertain()
 
     @staticmethod
     def _operation_digest(operation_id: str) -> str:
