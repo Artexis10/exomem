@@ -3837,42 +3837,23 @@ def test_exact_k3s_admits_only_the_pending_helm_release_configmap_delete(k3s: st
         documents=[
             {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "exomem-platform"}},
             {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}},
-            {
-                "apiVersion": "v1",
-                "kind": "ServiceAccount",
-                "metadata": {"name": "exomem-cell-provisioner", "namespace": "exomem-platform"},
-            },
-            {
-                "apiVersion": "rbac.authorization.k8s.io/v1",
-                "kind": "ClusterRole",
-                "metadata": {"name": "admission-test-helm-pending"},
-                "rules": [
-                    {
-                        "apiGroups": [""],
-                        "resources": ["configmaps"],
-                        "verbs": ["delete", "get", "list"],
-                    }
-                ],
-            },
-            {
-                "apiVersion": "rbac.authorization.k8s.io/v1",
-                "kind": "ClusterRoleBinding",
-                "metadata": {"name": "admission-test-helm-pending"},
-                "roleRef": {
-                    "apiGroup": "rbac.authorization.k8s.io",
-                    "kind": "ClusterRole",
-                    "name": "admission-test-helm-pending",
-                },
-                "subjects": [
-                    {
-                        "kind": "ServiceAccount",
-                        "name": "exomem-cell-provisioner",
-                        "namespace": "exomem-platform",
-                    }
-                ],
-            },
         ],
     )
+    # The authority under test is the shipped one: the ServiceAccount, ClusterRole
+    # and ClusterRoleBinding rendered from provisioner-rbac.yaml, not a role
+    # written for this test.
+    shipped_rbac = [
+        item
+        for item in platform
+        if item.get("kind") in {"ServiceAccount", "ClusterRole", "ClusterRoleBinding"}
+        and item.get("metadata", {}).get("name") == "exomem-cell-provisioner"
+    ]
+    assert {item["kind"] for item in shipped_rbac} == {
+        "ServiceAccount",
+        "ClusterRole",
+        "ClusterRoleBinding",
+    }
+    _kubectl(k3s, ["apply", "--filename=-"], documents=shipped_rbac)
 
     pending = f"sh.helm.release.v1.{namespace}.v2"
     unrelated = namespace + "-not-a-release"

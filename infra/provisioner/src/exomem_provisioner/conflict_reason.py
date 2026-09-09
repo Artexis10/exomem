@@ -184,6 +184,7 @@ class ConflictReason(StrEnum):
     HELM_EFFECT_OPTIONS_INVALID = "helm-effect-options-invalid"
     HELM_PENDING_RELEASE_IS_FOREIGN = "helm-pending-release-is-foreign"
     HELM_RELEASE_HISTORY_IS_INVALID = "helm-release-history-is-invalid"
+    HELM_RELEASE_RECORD_CLIENT_IS_UNAVAILABLE = "helm-release-record-client-is-unavailable"
     HELM_RELEASE_HISTORY_IS_UNAVAILABLE = "helm-release-history-is-unavailable"
     HELM_RUNTIME_ROLLBACK_AUTHORITY_IS_ABSENT = "helm-runtime-rollback-authority-is-absent"
     HELM_RUNTIME_ROLLBACK_AUTHORITY_IS_AMBIGUOUS = "helm-runtime-rollback-authority-is-ambiguous"

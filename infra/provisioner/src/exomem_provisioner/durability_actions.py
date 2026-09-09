@@ -967,6 +967,7 @@ async def _run_durability_actions(settings: DurabilityActionSettings) -> None:
             expected_version=settings.helm_version,
             chart_path=settings.cell_chart_path,
             chart_version=settings.cell_chart_version,
+            core_v1=core,
         )
         recovery_restore = B2RestoreObjectStore(
             _b2_client(

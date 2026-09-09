@@ -2952,6 +2952,8 @@ class HelmCliAdapter:
         "secret",
     }
     _PENDING_RELEASE_STATUSES = ("pending-install", "pending-upgrade")
+    _RELEASE_ABSENT = "release: not found"
+    _CHART_NAME = re.compile(r"^name:[ \t]*([A-Za-z0-9][A-Za-z0-9._-]{0,62})[ \t]*$", re.M)
 
     def __init__(
         self,
@@ -2971,14 +2973,20 @@ class HelmCliAdapter:
         self._runner = runner
         self._temporary_directory = temporary_directory
         self._core = core_v1
+        self._chart_reference_cache: str | None = None
 
     def _core_v1(self) -> Any:
-        """Resolve the release-record client the same way the other adapters do."""
-        if self._core is None:
-            from kubernetes import client, config
+        """The release-record client, which the composition root must supply.
 
-            config.load_incluster_config()
-            self._core = client.CoreV1Api()
+        Building one here would load cluster configuration on the event loop and
+        replace the process-global default, and a missing one is a wiring defect
+        rather than an uncertain provider outcome: refuse it terminally instead.
+        """
+        if self._core is None:
+            raise MetadataConflict(
+                "Helm release record client is unavailable",
+                reason=ConflictReason.HELM_RELEASE_RECORD_CLIENT_IS_UNAVAILABLE,
+            )
         return self._core
 
     @classmethod
@@ -3184,7 +3192,17 @@ class HelmCliAdapter:
         self,
         metadata: OpaqueProviderMetadata,
         environment: dict[str, str],
-    ) -> tuple[dict[str, Any], ...]:
+        *,
+        absent_ok: bool = False,
+    ) -> tuple[dict[str, Any], ...] | None:
+        """Read the release history under every existing shape check.
+
+        `absent_ok` separates the two outcomes Helm reports with the same exit
+        status: a release that was never recorded, which the caller may install
+        (`None`), and a history read that did not answer, which is uncertain. A
+        reconcile must never mistake the second for the first and walk into
+        Helm's own lock.
+        """
         result = await self._runner(
             (
                 self._binary,
@@ -3199,7 +3217,16 @@ class HelmCliAdapter:
             ),
             environment,
         )
-        if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 262_144:
+        if result.returncode != 0:
+            if not absent_ok:
+                raise MetadataConflict(
+                    "Helm release history is unavailable",
+                    reason=ConflictReason.HELM_RELEASE_HISTORY_IS_UNAVAILABLE,
+                )
+            if self._RELEASE_ABSENT in str(getattr(result, "stderr", "")):
+                return None
+            raise self._pending_release_uncertain()
+        if len(result.stdout.encode("utf-8")) > 262_144:
             raise MetadataConflict(
                 "Helm release history is unavailable",
                 reason=ConflictReason.HELM_RELEASE_HISTORY_IS_UNAVAILABLE,
@@ -3275,9 +3302,35 @@ class HelmCliAdapter:
     def _pending_release_uncertain() -> DriverRetryable:
         return DriverRetryable("pinned Helm outcome is uncertain")
 
-    @staticmethod
-    def _canonical(values: dict[str, Any]) -> str:
-        return json.dumps(values, sort_keys=True, separators=(",", ":"))
+    async def _chart_reference(self, environment: dict[str, str]) -> str:
+        """The `<name>-<version>` string Helm records for the chart this pins.
+
+        The pinned CLI has no machine-readable output for `helm show chart`, so
+        the one top-level `name:` line of the rendered `Chart.yaml` is read
+        exactly. An unreadable or ambiguous answer blocks the reconcile rather
+        than authenticating a record on a partial match.
+        """
+        if self._chart_reference_cache is None:
+            result = await self._runner(
+                (
+                    self._binary,
+                    "show",
+                    "chart",
+                    self._chart_path,
+                    "--version",
+                    self._chart_version,
+                ),
+                environment,
+            )
+            names = (
+                self._CHART_NAME.findall(result.stdout)
+                if result.returncode == 0 and len(result.stdout.encode("utf-8")) <= 65_536
+                else []
+            )
+            if len(names) != 1:
+                raise self._pending_release_uncertain()
+            self._chart_reference_cache = f"{names[0]}-{self._chart_version}"
+        return self._chart_reference_cache
 
     async def _reconcile_own_pending_release(
         self,
@@ -3295,42 +3348,41 @@ class HelmCliAdapter:
         call authenticates as its own is cleared, under a fresh claim and with
         API preconditions; a foreign one stays fenced and terminal.
         """
-        try:
-            history = await self._release_history(metadata, environment)
-        except MetadataConflict as error:
-            if error.reason is ConflictReason.HELM_RELEASE_HISTORY_IS_UNAVAILABLE:
-                # No record yet: `upgrade --install` writes the first one.
-                return
-            raise
+        history = await self._release_history(metadata, environment, absent_ok=True)
+        if history is None:
+            # No record yet: `upgrade --install` writes the first one.
+            return
         pending = [item for item in history if item.get("status") in self._PENDING_RELEASE_STATUSES]
         if not pending:
             return
         record = pending[0]
-        chart = record.get("chart")
         if (
             len(pending) != 1
             or record["revision"] != max(item["revision"] for item in history)
-            or not isinstance(chart, str)
-            or not chart.endswith("-" + self._chart_version)
-            or len(chart) <= len(self._chart_version) + 1
+            or record.get("chart") != await self._chart_reference(environment)
         ):
             raise self._pending_release_is_foreign()
-        deployed = [item for item in history if item.get("status") == "deployed"]
-        if record["status"] == "pending-install":
+        pending_install = record["status"] == "pending-install"
+        if pending_install:
             if len(history) != 1:
                 raise self._pending_release_is_foreign()
-            prior = None
         else:
-            if len(deployed) != 1 or deployed[0].get("chart") != chart:
+            deployed = [item for item in history if item.get("status") == "deployed"]
+            if len(deployed) != 1 or deployed[0].get("chart") != record.get("chart"):
                 raise self._pending_release_is_foreign()
-            prior = deployed[0]
-        if self._canonical(
-            await self._revision_values(metadata, environment, record["revision"])
-        ) != self._canonical(values):
+        try:
+            recorded = await self._revision_values(metadata, environment, record["revision"])
+        except MetadataConflict as error:
+            # An unread revision proves nothing either way; only an invalid one
+            # is a statement about the record.
+            if error.reason is ConflictReason.HISTORICAL_HELM_VALUES_ARE_UNAVAILABLE:
+                raise self._pending_release_uncertain() from None
+            raise
+        if recorded != values:
             raise self._pending_release_is_foreign()
         await self._delete_pending_release(metadata, record["revision"], effect_guard=effect_guard)
         await self._prove_pending_release_cleared(
-            metadata, environment, record["revision"], prior=prior
+            metadata, environment, record["revision"], pending_install=pending_install
         )
 
     async def _delete_pending_release(
@@ -3346,7 +3398,7 @@ class HelmCliAdapter:
             current = await asyncio.to_thread(
                 self._core_v1().read_namespaced_config_map, name, namespace
             )
-        except (ClaimConflict, StaleFence):
+        except (ClaimConflict, StaleFence, MetadataConflict):
             raise
         except Exception as error:  # noqa: BLE001 - provider payloads must not escape
             if _api_status(error) == 404:
@@ -3357,7 +3409,8 @@ class HelmCliAdapter:
         resource_version = getattr(current_metadata, "resource_version", None)
         labels = dict(getattr(current_metadata, "labels", None) or {})
         if (
-            not isinstance(uid, str)
+            getattr(current_metadata, "deletion_timestamp", None) is not None
+            or not isinstance(uid, str)
             or not uid
             or not isinstance(resource_version, str)
             or not resource_version
@@ -3366,17 +3419,22 @@ class HelmCliAdapter:
             or labels.get("version") != str(revision)
             or labels.get("status") not in self._PENDING_RELEASE_STATUSES
         ):
-            raise self._pending_release_is_foreign()
+            # The object in hand is not the record the history authenticated:
+            # already terminating, or relabelled since. That is an uncertain
+            # provider state, not a foreign record, and never a second delete.
+            raise self._pending_release_uncertain()
         await effect_guard()
         try:
             await asyncio.to_thread(
                 self._core_v1().delete_namespaced_config_map,
                 name,
                 namespace,
-                body={
-                    "propagationPolicy": "Foreground",
-                    "preconditions": {"uid": uid, "resourceVersion": resource_version},
-                },
+                # No propagation policy. A release record has no dependents, and
+                # foreground deletion adds a finalizer that keeps the record
+                # listed and terminating for seconds -- Helm's ConfigMap driver
+                # does not filter those, so the clearance proof would fail on
+                # the success path.
+                body={"preconditions": {"uid": uid, "resourceVersion": resource_version}},
             )
         except (ClaimConflict, StaleFence):
             raise
@@ -3392,23 +3450,19 @@ class HelmCliAdapter:
         environment: dict[str, str],
         revision: int,
         *,
-        prior: dict[str, Any] | None,
+        pending_install: bool,
     ) -> None:
-        try:
-            history = await self._release_history(metadata, environment)
-        except MetadataConflict as error:
-            if error.reason is not ConflictReason.HELM_RELEASE_HISTORY_IS_UNAVAILABLE:
-                raise
-            if prior is None:
-                return
-            raise self._pending_release_uncertain() from None
+        history = await self._release_history(metadata, environment, absent_ok=True)
+        if pending_install:
+            if history is not None:
+                raise self._pending_release_uncertain()
+            return
+        if history is None or any(item["revision"] == revision for item in history):
+            raise self._pending_release_uncertain()
+        # Any deployed revision may be the survivor; what matters is that no
+        # pending record is latest, which is exactly what unblocks Helm.
         latest = max(history, key=lambda item: item["revision"])
-        if (
-            prior is None
-            or any(item["revision"] == revision for item in history)
-            or latest["revision"] != prior["revision"]
-            or latest.get("status") != "deployed"
-        ):
+        if latest.get("status") in self._PENDING_RELEASE_STATUSES:
             raise self._pending_release_uncertain()
 
     @staticmethod
