@@ -1163,24 +1163,48 @@ class SessionAuthority:
         return record
 
     async def _validate_authoritatively(self, bearer: str) -> SessionRecord | None:
+        # Every rejection below reaches the client as an indistinguishable 401.
+        # Without a server-side reason, an operator seeing clients logged out
+        # cannot tell an expiry from a rotated signing key from a bumped
+        # generation, and the records are encrypted at rest so the files answer
+        # nothing either. These lines name the branch and nothing else: no
+        # bearer, no digest, no identity.
         record = await self._load_session_for_bearer(bearer)
         if record is None:
+            logger.info("event=session_rejected reason=no_matching_record")
             return None
-        if (
-            record.status != "active"
-            or record.issuer != self.issuer
-            or record.audience != self.audience
-        ):
+        if record.status != "active":
+            logger.info(
+                "event=session_rejected reason=status status=%s", record.status
+            )
+            return None
+        if record.issuer != self.issuer or record.audience != self.audience:
+            logger.info("event=session_rejected reason=issuer_or_audience_mismatch")
             return None
         if record.generation != await self.current_generation():
+            logger.info("event=session_rejected reason=generation_mismatch")
             return None
         if record.schema_version == _ACCESS_SCHEMA_VERSION:
             if record.expires_at is None or float(self.clock()) >= record.expires_at:
+                logger.info(
+                    "event=session_rejected reason=expired age_seconds=%s",
+                    None
+                    if record.expires_at is None
+                    else round(float(self.clock()) - record.expires_at, 1),
+                )
                 return None
             if record.family_id is None:
+                logger.info("event=session_rejected reason=missing_refresh_family")
                 return None
             family = await self._load_family(record.family_id)
-            if family is None or not await self._family_is_active(family):
+            if family is None:
+                logger.info("event=session_rejected reason=refresh_family_absent")
+                return None
+            if not await self._family_is_active(family):
+                logger.info(
+                    "event=session_rejected reason=refresh_family_inactive status=%s",
+                    family.status,
+                )
                 return None
         return record
 
