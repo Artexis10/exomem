@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.77.0](https://github.com/Artexis10/exomem/compare/v0.76.1...v0.77.0) (2026-09-09)
+
+
+### Features
+
+* **hosted:** create the genesis governance store and name an unreadable one ([#1178](https://github.com/Artexis10/exomem/issues/1178)) ([dc73adc](https://github.com/Artexis10/exomem/commit/dc73adc9cafdf6626c4c2f8249d9b5d41034c6a4))
+* **hosted:** make governance-v3-to-v4 a selectable migration mode ([#1175](https://github.com/Artexis10/exomem/issues/1175)) ([f2b4abc](https://github.com/Artexis10/exomem/commit/f2b4abcd9142c2d736bf55bcbd0d3c70f78a2c23))
+* **provisioner:** requeue a failed governance migration under its retained checkpoint ([#1173](https://github.com/Artexis10/exomem/issues/1173)) ([329704f](https://github.com/Artexis10/exomem/commit/329704fa35b5f454a4bdc73a163a62621f6bf9d4))
+
+
+### Bug Fixes
+
+* **auth:** name the reason a session was rejected ([#1170](https://github.com/Artexis10/exomem/issues/1170)) ([d046bdd](https://github.com/Artexis10/exomem/commit/d046bddfff548b857915d806a88bbbdaaaab2131))
+* **auth:** observe credential presentation and refresh outcomes ([#1172](https://github.com/Artexis10/exomem/issues/1172)) ([417b4fe](https://github.com/Artexis10/exomem/commit/417b4fefc03a870dc56a08feb9886d4d9fc75af1))
+* **hosted:** mount governance migration Job data read-write in every phase ([#1176](https://github.com/Artexis10/exomem/issues/1176)) ([1e2ed2e](https://github.com/Artexis10/exomem/commit/1e2ed2e3da81650b7b5903ed02ffba3719c4150d))
+* **install:** retain replaced service config and refuse vault rebinding ([#1169](https://github.com/Artexis10/exomem/issues/1169)) ([8d9191e](https://github.com/Artexis10/exomem/commit/8d9191e8d4c82b29d73419bc7fbd6e093ae7a0b4))
+* **provisioner:** harden Helm history absence and pinned-chart reads ([#1177](https://github.com/Artexis10/exomem/issues/1177)) ([5561cec](https://github.com/Artexis10/exomem/commit/5561cec39e9efd9f3e0c3f4f7985869516c92905))
+* **provisioner:** reconcile the operation's own pending Helm release record ([#1174](https://github.com/Artexis10/exomem/issues/1174)) ([3c52b05](https://github.com/Artexis10/exomem/commit/3c52b0555b9ee74d720c9468f886b43f65dd3cab))
+
 ## [0.76.1](https://github.com/Artexis10/exomem/compare/v0.76.0...v0.76.1) (2026-09-09)
 
 
