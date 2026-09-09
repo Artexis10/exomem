@@ -753,3 +753,44 @@ def test_hosted_commit_rejects_drift_without_standalone_effects(
         )
         == custody_before
     )
+
+
+def test_schema_version_reports_an_absent_governance_store_as_none(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+
+    assert not store.sidecar_path(vault).exists()
+    assert store.authorization_session_schema_version(vault) is None
+    assert store.authorization_session_schema_version_if_readable(vault) is None
+
+
+@pytest.mark.parametrize("shape", ["directory", "denied"])
+def test_schema_version_raises_for_a_present_unreadable_governance_store(
+    tmp_path: Path, shape: str
+) -> None:
+    vault = _vault(tmp_path)
+    path = store.sidecar_path(vault)
+    if shape == "directory":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.mkdir()
+    else:
+        if os.geteuid() == 0:
+            pytest.skip("root ignores the permission bits this shape relies on")
+        _open_v3(vault)
+        path.chmod(0o000)
+
+    with pytest.raises(store.GovernanceStoreUnreadable) as unreadable:
+        store.authorization_session_schema_version(vault)
+
+    message = str(unreadable.value)
+    assert str(vault) not in message and str(path) not in message
+    assert "sqlite" not in message.lower() and "Errno" not in message
+    # The tolerant reading every serving caller keeps is unchanged.
+    assert store.authorization_session_schema_version_if_readable(vault) is None
+
+
+def test_schema_version_reports_a_readable_v3_store_exactly(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    _open_v3(vault)
+
+    assert store.authorization_session_schema_version(vault) == 3
+    assert store.authorization_session_schema_version_if_readable(vault) == 3

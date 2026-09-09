@@ -2395,10 +2395,32 @@ def initialize_hosted_cell_v2(
     )
 
 
+def _ensure_genesis_governance_store(binding: HostedBindingV2) -> None:
+    """Create the never-served schema-3 governance sidecar of a fresh cell.
+
+    A cell whose governance store has never been opened carries no schema
+    proof at all, which the hosted migration coordinator cannot tell apart
+    from a store it failed to read. Initialization is the only lifecycle
+    point allowed to create one, and it never opens a sidecar that already
+    exists: the coordinator owns the v3-to-v4 transition, and a store this
+    step cannot classify is left exactly as found for the runner to report.
+    """
+
+    from .governance import store as governance_store
+
+    try:
+        if governance_store.authorization_session_schema_version(binding.vault_root) is not None:
+            return
+    except governance_store.GovernanceStoreUnreadable:
+        return
+    governance_store.open_connection(binding.vault_root).close()
+
+
 def _migrate_hosted_machine_state_under_lifetime_lock(
     binding: HostedBindingV2,
     *,
     authority_source: str,
+    after_migration: Callable[[HostedBindingV2], None] | None = None,
 ):
     """Run the state migrator while the caller holds the hosted lifetime lock."""
 
@@ -2413,6 +2435,10 @@ def _migrate_hosted_machine_state_under_lifetime_lock(
         "EXOMEM_VAULT_PATH": str(binding.vault_root),
         "EXOMEM_HOSTED_STATE_ROOT": str(binding.state_root),
         "EXOMEM_STATE_ROOT": str(binding.state_root / "vault-state"),
+        # Every other hosted boundary binds the lease state to the cell's own
+        # state root. Without it a Job with a read-only root filesystem falls
+        # back to `$HOME/.cache/exomem` and cannot open any owned sidecar.
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(binding.state_root),
         "EXOMEM_LOG_DIR": str(binding.log_root),
     }
     previous = {name: os.environ.get(name) for name in overrides}
@@ -2425,6 +2451,10 @@ def _migrate_hosted_machine_state_under_lifetime_lock(
             binding.vault_root,
             authority=authority,
         )
+        if after_migration is not None:
+            # Runs inside the bound environment and before ownership converges,
+            # so anything it creates is handed to the runtime uid/gid below.
+            after_migration(binding)
         # The initialization/restore Job is privileged so it can converge
         # legacy v1 ownership. State copied by that process must be handed back
         # to the immutable runtime uid/gid before the tenant pod can start.
@@ -2452,6 +2482,7 @@ def _migrate_hosted_machine_state_offline(binding: HostedBindingV2) -> None:
         _migrate_hosted_machine_state_under_lifetime_lock(
             binding,
             authority_source="hosted target-image initialization job",
+            after_migration=_ensure_genesis_governance_store,
         )
 
 
