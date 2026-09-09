@@ -24,6 +24,7 @@ PACKAGE_VERSION=""
 ENV_FILE=""
 LEGACY_MCP_COMPAT=0
 RESUME_STOPPED_TRANSITION=0
+REBIND_VAULT=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -50,6 +51,10 @@ Options:
   --legacy-mcp-compat       Set EXOMEM_MCP_LEGACY_COMPAT=1 in the service
   --resume-stopped-transition
                             Continue a prior failed transition proven stopped
+  --rebind-vault            Allow an existing service's vault path to change.
+                            Refused by default: the state root, index and graph
+                            all derive from it, so a re-render that moves it
+                            points the service at a different knowledge base
   -h, --help                Show this help
 EOF
 }
@@ -113,6 +118,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --resume-stopped-transition)
             RESUME_STOPPED_TRANSITION=1
+            shift
+            ;;
+        --rebind-vault)
+            REBIND_VAULT=1
             shift
             ;;
         -h|--help)
@@ -252,6 +261,22 @@ fi
 OLD_PORT="$(exomem_service_port "$SERVICE_DEFINITION")"
 VAULT="$(exomem_dotenv_file_value "$ENV_FILE" EXOMEM_VAULT_PATH)"
 [[ -n "$VAULT" ]] || die "EXOMEM_VAULT_PATH is required in $ENV_FILE"
+
+# The vault path is the cell's identity: its state root, index and graph are
+# all derived from it. A re-render that moves it points a running service at a
+# different knowledge base, which is never what an upgrade means. A drifted
+# live config against a stale `--env-file` is exactly how that happens, so
+# require the move to be asked for rather than inferred.
+PERSISTED_VAULT="$(exomem_dotenv_file_value "$SERVICE_ENV_FILE" EXOMEM_VAULT_PATH)"
+if [[ "$EXISTING_SERVICE" == 1 && -n "$PERSISTED_VAULT" && "$PERSISTED_VAULT" != "$VAULT" ]]; then
+    if [[ "$REBIND_VAULT" != 1 ]]; then
+        die "refusing to rebind the existing service's vault:
+  currently serving: $PERSISTED_VAULT (from $SERVICE_ENV_FILE)
+  would render:      $VAULT (from $ENV_FILE)
+pass --rebind-vault to move it deliberately, or correct $ENV_FILE"
+    fi
+    echo "Rebinding the service vault from $PERSISTED_VAULT to $VAULT as requested."
+fi
 DOTENV_STATE_ROOT="$(exomem_dotenv_file_value "$ENV_FILE" EXOMEM_STATE_ROOT)"
 PREFERRED_STATE_ROOT="${EXOMEM_STATE_ROOT:-${DOTENV_STATE_ROOT:-$(exomem_platform_state_root)}}"
 [[ "$PREFERRED_STATE_ROOT" == /* ]] \
@@ -294,9 +319,18 @@ else
         || die "fresh install cannot prove its listener is unbound"
 fi
 
+SERVICE_ENV_PUBLISHED_THIS_RUN=0
+
 durable_publish_service_env() {
     local source="$1"
-    "$VENV_PYTHON" - "$source" "$SERVICE_ENV_FILE" <<'PY'
+    local retain="retain"
+    # Only the configuration this run did NOT write is worth keeping. A fresh
+    # install publishes the state-root binding before the full render, and a
+    # predecessor holding that one line would be a misleading thing to hand
+    # someone who is trying to recover their real configuration.
+    [[ "$SERVICE_ENV_PUBLISHED_THIS_RUN" == 1 ]] && retain="no-retain"
+    SERVICE_ENV_PUBLISHED_THIS_RUN=1
+    "$VENV_PYTHON" - "$source" "$SERVICE_ENV_FILE" "$retain" <<'PY'
 from __future__ import annotations
 
 import os
@@ -308,6 +342,30 @@ source = Path(sys.argv[1])
 destination = Path(sys.argv[2])
 payload = source.read_bytes()
 destination.parent.mkdir(parents=True, exist_ok=True)
+
+# Retain what we are about to destroy. `os.replace` below is atomic and
+# leaves no trace of the previous contents, so a stale `--env-file` can
+# silently take a drifted live configuration with it -- vault path, host
+# additions and all. Retention happens BEFORE the replacement becomes
+# visible, so an interrupted publish still leaves the predecessor behind.
+if destination.exists() and sys.argv[3] == "retain":
+    previous = destination.with_name(f"{destination.name}.previous")
+    keeper, keeper_name = tempfile.mkstemp(
+        prefix=f".{previous.name}.", dir=destination.parent
+    )
+    kept = Path(keeper_name)
+    try:
+        with os.fdopen(keeper, "wb") as handle:
+            handle.write(destination.read_bytes())
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(kept, 0o600)
+        os.replace(kept, previous)
+    except BaseException:
+        kept.unlink(missing_ok=True)
+        raise
+    print(f"retained the previous service environment at {previous}")
+
 descriptor, temporary_name = tempfile.mkstemp(
     prefix=f".{destination.name}.", dir=destination.parent
 )

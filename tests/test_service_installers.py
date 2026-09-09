@@ -53,16 +53,16 @@ def _fake_python(path: Path) -> None:
             sys.argv = sys.argv[1:]
             runpy.run_path(script, run_name="__main__")
 
-        if len(sys.argv) == 4 and sys.argv[1] == "-":
-            _, _, source_raw, destination_raw = sys.argv
-            source = Path(source_raw)
-            destination = Path(destination_raw)
-            temporary = destination.with_name(f".{destination.name}.fake-tmp")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            temporary.write_bytes(source.read_bytes())
-            temporary.chmod(stat.S_IRUSR | stat.S_IWUSR)
-            temporary.replace(destination)
+        if len(sys.argv) == 5 and sys.argv[1] == "-":
+            # Run the installer's real publisher rather than a paraphrase of
+            # it. This program is plain stdlib and it owns the invariants that
+            # matter here -- atomic replacement, owner-only permissions, and
+            # retaining the configuration it is about to destroy -- so a
+            # stand-in that reimplements it tests the stand-in instead.
+            program = sys.stdin.read()
+            sys.argv = sys.argv[1:]
             log("durably publish service env")
+            exec(compile(program, "<durable_publish_service_env>", "exec"), {"__name__": "__main__"})
             raise SystemExit(0)
 
         if len(sys.argv) == 6 and sys.argv[1] == "-":

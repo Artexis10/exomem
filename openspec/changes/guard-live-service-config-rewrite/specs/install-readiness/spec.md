@@ -10,7 +10,10 @@ When it publishes a managed service environment file over an existing one, the
 installer SHALL first retain the previous file's contents under a distinct
 predecessor path readable only by the current user, and SHALL report that path.
 Retention SHALL happen before the replacement becomes visible, so an interrupted
-publish never leaves the previous configuration unrecoverable.
+publish never leaves the previous configuration unrecoverable. Configuration
+written earlier by the same installer run SHALL NOT be retained, so a predecessor
+always holds configuration the run did not author rather than an intermediate
+render of its own.
 
 For a service that already exists, the installer SHALL compare the vault path it
 is about to render against the vault path recorded in the managed environment
@@ -50,3 +53,4 @@ unaffected by this refusal.
 #### Scenario: First install is unaffected
 - **WHEN** no managed service environment file exists yet, or it records no vault path
 - **THEN** the installer renders the selected dotenv without a rebinding refusal
+- **AND** no predecessor is left behind, because every file the run replaced was its own
