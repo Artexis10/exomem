@@ -1252,3 +1252,30 @@ async def test_the_served_metadata_still_advertises_the_issuer_parameter() -> No
     metadata = response.json()
     assert metadata["authorization_response_iss_parameter_supported"] is True
     assert metadata["issuer"] == str(proxy.issuer_url)
+
+
+@pytest.mark.anyio
+async def test_a_rejected_credential_is_distinguishable_from_none_presented(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A 401 with no credential and a 401 with a bad one look identical.
+
+    The access log shows `POST /mcp 401` either way, but one is a session
+    dying server-side and the other is a client that has stopped presenting a
+    token. Only the first reaches `load_access_token`, so its log line is what
+    makes silence mean something.
+    """
+    proxy = _proxy()
+    bogus = "exo_a2.notarealsession000000.x"
+
+    with caplog.at_level("INFO", logger="exomem.session_oauth"):
+        assert await proxy.load_access_token(bogus) is None
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "credential_presented" in record.getMessage()
+    ]
+    assert any("outcome=rejected" in message for message in messages)
+    for message in messages:
+        assert bogus not in message
