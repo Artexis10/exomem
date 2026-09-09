@@ -3232,6 +3232,12 @@ def test_exact_k3s_governance_migration_admission(k3s: str) -> None:
             "d" * 64 if phase == "commit" else None,
         )
         job = build_governance_migration_job(request, recovery_envelope="signed-migration-envelope")
+        template_spec = job["spec"]["template"]["spec"]
+        # Data is read-write in every phase; custody stays a read-only mount.
+        assert template_spec["volumes"][0]["persistentVolumeClaim"]["readOnly"] is False
+        assert [
+            mount.get("readOnly", False) for mount in template_spec["containers"][0]["volumeMounts"]
+        ] == [False, False, True, True, False]
         accepted = admit(job, provisioner)
         assert accepted.returncode == 0, accepted.stdout + accepted.stderr
         pod = {"apiVersion": "v1", "kind": "Pod", **copy.deepcopy(job["spec"]["template"])}
@@ -3266,10 +3272,9 @@ def test_exact_k3s_governance_migration_admission(k3s: str) -> None:
             "secret-env",
             "mixed-label",
             "extra-init",
-            "inspect-write",
+            "data-mount-readonly",
+            "data-claim-readonly",
         ):
-            if kind == "inspect-write" and phase != "inspect":
-                continue
             mutated = copy.deepcopy(pod)
             spec = mutated["spec"]
             if kind == "image":
@@ -3287,8 +3292,12 @@ def test_exact_k3s_governance_migration_admission(k3s: str) -> None:
             elif kind == "extra-init":
                 spec["initContainers"].append(copy.deepcopy(spec["initContainers"][0]))
                 spec["initContainers"][1]["name"] = "additional-execution"
+            elif kind == "data-mount-readonly":
+                # The pre-2026-09-09 read-only inspect shape: the policy still
+                # cares about the data mount, it now requires it read-write.
+                spec["containers"][0]["volumeMounts"][0]["readOnly"] = True
             else:
-                spec["containers"][0]["volumeMounts"][0]["readOnly"] = False
+                spec["volumes"][0]["persistentVolumeClaim"]["readOnly"] = True
             denied = admit(mutated, controller)
             assert denied.returncode != 0, kind
             assert "denied request" in denied.stderr, denied.stderr
