@@ -258,7 +258,9 @@ class LifecycleConfig:
     records_reader_version: int | None = None
     lifecycle_actions_enabled: bool = False
     compatibility_digest: str | None = None
-    migration_mode: Literal["none", "binding-v1-to-v2", "state-root-v1"] = "none"
+    migration_mode: Literal["none", "binding-v1-to-v2", "state-root-v1", "governance-v3-to-v4"] = (
+        "none"
+    )
 
     def runtime_target_for(self, request: dict[str, Any], *, v2: bool) -> dict[str, str]:
         if v2:

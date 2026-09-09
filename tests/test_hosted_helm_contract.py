@@ -238,6 +238,42 @@ def test_platform_requires_cross_repository_trust_in_runtime_upgrade_metadata(
     assert "runtime upgrade is invalid" in result.stderr
 
 
+def test_platform_admits_the_governance_migration_mode_but_no_other_new_one(
+    tmp_path: Path,
+) -> None:
+    """The coordinator's governance migration is selectable from a real deployment lock."""
+
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
+    lock = json.loads(values["provisioner"]["deploymentLockJson"])
+    lock["runtimeUpgrade"] = {
+        "compatibilityDigest": "c" * 64,
+        "migrationMode": "governance-v3-to-v4",
+        "substrateConsumerCommit": "d" * 40,
+        "substrateTrustSha256": "e" * 64,
+    }
+    accepted = _lock_override(tmp_path / "governance", lock)
+    _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=("--values", str(accepted)),
+    )
+
+    lock["runtimeUpgrade"]["migrationMode"] = "governance-v4-to-v5"
+    rejected = _lock_override(tmp_path / "unknown", lock)
+    result = _render_process(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        release_name="exomem-platform",
+        extra_args=("--values", str(rejected)),
+    )
+    assert result.returncode != 0
+    assert "runtime upgrade is invalid" in result.stderr
+
+
 def test_platform_accepts_an_authoritatively_empty_legacy_catalog(tmp_path: Path) -> None:
     if HELM is None:
         pytest.skip("set HELM_BIN to run pinned Helm rendering")
@@ -2885,6 +2921,25 @@ def test_cell_state_root_migration_mode_enables_only_the_offline_state_migrator(
     }
     assert env["EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION"] == "1"
     assert not any(document.get("kind") == "StatefulSet" for document in documents)
+
+
+def test_cell_chart_refuses_the_governance_migration_mode() -> None:
+    """Governance migration runs in the coordinator's Job, never in an in-cell storage init."""
+
+    result = _render_process(
+        CELL,
+        CELL / "values.initialize.yaml",
+        namespace="cell-alpha-test",
+        extra_args=(
+            "--set",
+            "workloadMode=migrate",
+            "--set",
+            "migrationMode=governance-v3-to-v4",
+        ),
+    )
+
+    assert result.returncode != 0
+    assert "migrationMode" in result.stderr
 
 
 def test_cell_chart_rejects_mismatched_runtime_and_provider_cell_ids(tmp_path: Path) -> None:

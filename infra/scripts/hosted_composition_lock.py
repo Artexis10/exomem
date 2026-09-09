@@ -209,7 +209,12 @@ def _runtime_upgrade(value: object) -> dict[str, object]:
         },
     )
     _sha256(upgrade["compatibilityDigest"], label="runtime upgrade compatibility")
-    if upgrade["migrationMode"] not in {"none", "binding-v1-to-v2", "state-root-v1"}:
+    if upgrade["migrationMode"] not in {
+        "none",
+        "binding-v1-to-v2",
+        "state-root-v1",
+        "governance-v3-to-v4",
+    }:
         _error("runtime upgrade migration mode is invalid")
     _commit(upgrade["substrateConsumerCommit"], label="runtime upgrade Substrate consumer")
     _sha256(upgrade["substrateTrustSha256"], label="runtime upgrade Substrate trust")
