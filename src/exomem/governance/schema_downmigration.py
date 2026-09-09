@@ -1494,7 +1494,7 @@ def _downmigrate_enrolled_v4_store_locked(
     root = Path(vault_root)
     moment = _bounded_integer(now, minimum=1)
     marker = marker_session.marker
-    version = store.authorization_session_schema_version(root)
+    version = store.authorization_session_schema_version_if_readable(root)
     if marker is not None and marker.get("phase") in {"legacy-aligned", "complete"}:
         if version != store.SCHEMA_USER_VERSION:
             raise DownmigrationUnavailable

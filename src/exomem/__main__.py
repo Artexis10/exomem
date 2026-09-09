@@ -1587,7 +1587,7 @@ def _governance_schema_status(vault: Path, *, now: int) -> dict[str, object]:
         for item in membership.replicas
     ]
     return {
-        "schema_version": store.authorization_session_schema_version(vault),
+        "schema_version": store.authorization_session_schema_version_if_readable(vault),
         "governance_enrolled": control.governance_enrolled,
         "logical_vault_id": control.logical_vault_id,
         "activation_store_id": control.activation_store_id,

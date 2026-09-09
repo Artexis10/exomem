@@ -826,3 +826,55 @@ import test_hosted_governance_job
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def _remove_sidecar(vault: Path) -> Path:
+    database = store.sidecar_path(vault)
+    for path in database.parent.glob(database.name + "*"):
+        path.unlink()
+    return database
+
+
+def test_job_reports_an_absent_governance_store_distinctly(cell, monkeypatch, capsys, tmp_path):
+    binding, now, request = cell
+    job = _job(monkeypatch, binding)
+    _remove_sidecar(binding.vault_root)
+    terminal = tmp_path / "termination-log"
+    monkeypatch.setattr(job, "TERMINATION_LOG", terminal)
+    monkeypatch.setenv(job.REQUEST_ENV, _canonical(request).decode())
+
+    with pytest.raises(job.HostedGovernanceStoreAbsent):
+        job.execute(_canonical(request), now=now)
+
+    assert job.main() == 1
+    assert json.loads(terminal.read_bytes()) == {"code": "HOSTED_GOVERNANCE_STORE_ABSENT"}
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("shape", ["directory", "denied"])
+def test_job_reports_an_unreadable_governance_store_distinctly(
+    cell, monkeypatch, capsys, tmp_path, shape
+):
+    binding, now, request = cell
+    job = _job(monkeypatch, binding)
+    database = store.sidecar_path(binding.vault_root)
+    if shape == "directory":
+        _remove_sidecar(binding.vault_root)
+        database.mkdir()
+    else:
+        if os.geteuid() == 0:
+            pytest.skip("root ignores the permission bits this shape relies on")
+        database.chmod(0o000)
+    terminal = tmp_path / "termination-log"
+    monkeypatch.setattr(job, "TERMINATION_LOG", terminal)
+    monkeypatch.setenv(job.REQUEST_ENV, _canonical(request).decode())
+
+    with pytest.raises(job.HostedGovernanceStoreUnreadable):
+        job.execute(_canonical(request), now=now)
+
+    assert job.main() == 1
+    written = terminal.read_bytes()
+    assert json.loads(written) == {"code": "HOSTED_GOVERNANCE_STORE_UNREADABLE"}
+    text = written.decode()
+    assert str(binding.vault_root) not in text and str(database) not in text
+    assert capsys.readouterr() == ("", "")

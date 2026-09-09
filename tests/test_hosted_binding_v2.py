@@ -72,6 +72,11 @@ def test_target_image_init_job_holds_lifetime_then_state_migration_lock(
         "_converge_tree_ownership",
         lambda _entries, owner: events.append(("ownership", owner.cell_id)),
     )
+    monkeypatch.setattr(
+        hosted_runtime,
+        "_ensure_genesis_governance_store",
+        lambda owner: events.append(("genesis-store", owner.cell_id)),
+    )
     monkeypatch.setenv("EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION", "1")
 
     code, data = hosted_runtime.execute_hosted_init_v2(
@@ -97,6 +102,7 @@ def test_target_image_init_job_holds_lifetime_then_state_migration_lock(
         ("lifetime-enter", binding.state_root, binding.cell_id),
         ("authority", "hosted target-image initialization job"),
         ("state-migration-lock", binding.vault_root, authority),
+        ("genesis-store", binding.cell_id),
         ("preflight", binding.state_root),
         ("ownership", binding.cell_id),
         "lifetime-exit",
@@ -123,16 +129,24 @@ def test_real_hosted_lifetime_holder_excludes_target_image_state_migration(
         "migrate_vault_state_offline",
         lambda vault, *, authority: calls.append((Path(vault), authority)),
     )
+    genesis: list[Path] = []
+    monkeypatch.setattr(
+        hosted_runtime,
+        "_ensure_genesis_governance_store",
+        lambda owner: genesis.append(owner.vault_root),
+    )
 
     with hosted_restore.acquire_hosted_lifetime_lock(binding.state_root, binding=binding):
         with pytest.raises(OperatorFailure) as error:
             hosted_runtime._migrate_hosted_machine_state_offline(binding)
         assert error.value.code == "HOSTED_RESTORE_BUSY"
         assert calls == []
+        assert genesis == []
 
     hosted_runtime._migrate_hosted_machine_state_offline(binding)
 
     assert calls == [(binding.vault_root, authority)]
+    assert genesis == [binding.vault_root]
 
 
 def _binding(tmp_path: Path, **overrides: object) -> HostedBindingV2:
@@ -669,3 +683,118 @@ def test_resumed_staging_is_converged_before_it_is_published(
         if stat.S_IMODE(path.lstat().st_mode) & 0o077
     }
     assert leaked == {}, f"resumed staging published unconverged entries: {leaked}"
+
+
+def _init_request(binding: HostedBindingV2) -> dict[str, object]:
+    return {
+        "request_id": "123e4567-e89b-42d3-a456-426614174000",
+        "operation_id": "genesis-governance-operation",
+        "cell_id": binding.cell_id,
+        "vault_id": binding.vault_id,
+        "vault_root": str(binding.vault_root),
+        "state_root": str(binding.state_root),
+        "log_root": str(binding.log_root),
+        "expected_release": __version__,
+        "expected_protocol": HOSTED_PROTOCOL_VERSION,
+        "runtime_uid": binding.runtime_uid,
+        "runtime_gid": binding.runtime_gid,
+        "active_credential_version": "credential-v1",
+    }
+
+
+def _genesis_sidecar(binding: HostedBindingV2) -> Path:
+    matches = sorted((binding.state_root / "vault-state").glob("*/.governance.sqlite"))
+    assert len(matches) == 1, matches
+    return matches[0]
+
+
+def _sidecar_user_version(path: Path) -> int:
+    import sqlite3
+
+    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        return int(connection.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        connection.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hosted lifetime locking requires POSIX flock")
+def test_fresh_initialize_creates_a_schema_three_genesis_governance_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binding = _binding(tmp_path)
+    monkeypatch.setattr(hosted_runtime, "_default_security_bootstrap", _bootstrap)
+    monkeypatch.setenv("EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION", "1")
+
+    code, _data = hosted_runtime.execute_hosted_init_v2(_init_request(binding))
+
+    assert code == "HOSTED_CELL_INITIALIZED"
+    sidecar = _genesis_sidecar(binding)
+    assert sidecar.is_file()
+    assert _sidecar_user_version(sidecar) == 3
+    before = sidecar.read_bytes()
+
+    replay, _replay_data = hosted_runtime.execute_hosted_init_v2(_init_request(binding))
+
+    assert replay == "HOSTED_CELL_INITIALIZED"
+    assert sidecar.read_bytes() == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hosted lifetime locking requires POSIX flock")
+def test_initialize_never_opens_an_existing_v4_governance_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    from exomem.governance import store
+
+    binding = _binding(tmp_path)
+    monkeypatch.setattr(hosted_runtime, "_default_security_bootstrap", _bootstrap)
+    monkeypatch.setenv("EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION", "1")
+    hosted_runtime.execute_hosted_init_v2(_init_request(binding))
+    sidecar = _genesis_sidecar(binding)
+    connection = sqlite3.connect(sidecar)
+    try:
+        connection.execute("PRAGMA user_version = 4")
+        connection.commit()
+    finally:
+        connection.close()
+    before = sidecar.read_bytes()
+    monkeypatch.setattr(
+        store, "open_connection", lambda *_a, **_k: pytest.fail("v4 store opened for writing")
+    )
+
+    code, _data = hosted_runtime.execute_hosted_init_v2(_init_request(binding))
+
+    assert code == "HOSTED_CELL_INITIALIZED"
+    assert sidecar.read_bytes() == before
+    assert _sidecar_user_version(sidecar) == 4
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hosted lifetime locking requires POSIX flock")
+def test_restore_state_migration_never_creates_a_genesis_governance_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import state_migration
+
+    binding = _binding(tmp_path)
+    monkeypatch.setattr(
+        state_migration,
+        "assert_offline_migration_authority",
+        lambda *, source: object(),
+    )
+    monkeypatch.setattr(
+        state_migration,
+        "migrate_vault_state_offline",
+        lambda _vault, *, authority: None,
+    )
+    monkeypatch.setattr(
+        hosted_runtime,
+        "_ensure_genesis_governance_store",
+        lambda _binding: pytest.fail("restore must not create a governance store"),
+    )
+
+    hosted_runtime._migrate_hosted_machine_state_under_lifetime_lock(
+        binding,
+        authority_source="hosted restore candidate",
+    )

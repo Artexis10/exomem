@@ -359,7 +359,7 @@ def _migration_identity(
                 or not replica.no_in_flight
                 for replica in membership_record.replicas
             )
-            or store.authorization_session_schema_version(vault_root) != store.SCHEMA_USER_VERSION
+            or store.authorization_session_schema_version_if_readable(vault_root) != store.SCHEMA_USER_VERSION
         ):
             raise authorization_custody.AuthorizationCustodyUnavailable
         custody_digest, identity_digest = _hosted_custody_digests(custody)
@@ -2390,7 +2390,7 @@ def restore_forward_migration_backup(
                     identity_may_change=False,
                 ),
             ):
-                version = store.authorization_session_schema_version(root)
+                version = store.authorization_session_schema_version_if_readable(root)
                 if version not in {
                     store.SCHEMA_USER_VERSION,
                     schema_v4.SCHEMA_USER_VERSION,
@@ -2766,7 +2766,7 @@ def _commit_enrolled_forward_migration(
             )
             custody = load_custody(root, now=now)
             control = custody.control
-            version = store.authorization_session_schema_version(root)
+            version = store.authorization_session_schema_version_if_readable(root)
             if (
                 not control.governance_enrolled
                 or control.logical_vault_id != backup.target.logical_vault_id
@@ -2916,7 +2916,7 @@ def commit_forward_migration(
             root,
             identity_may_change=False,
         ):
-            version = store.authorization_session_schema_version(root)
+            version = store.authorization_session_schema_version_if_readable(root)
             if version == store.SCHEMA_USER_VERSION:
                 backup = prepare_forward_migration_backup(
                     root,
