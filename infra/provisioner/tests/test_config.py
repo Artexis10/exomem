@@ -159,6 +159,45 @@ def test_selected_runtime_exposes_only_signed_forward_upgrade_metadata(
             load_deployment_lock(path)
 
 
+def test_expand_lock_matches_a_cataloged_legacy_v2_identity_except_to_place_an_image(
+    tmp_path: Path,
+) -> None:
+    value = _deployment_lock()
+    composition = value["composition"]
+    assert isinstance(composition, dict)
+    legacy_contract = dict(composition["legacyCatalog"][0]["contract"])
+    path = tmp_path / "selected-lock.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    lock = load_deployment_lock(path)
+    legacy_target = {
+        field: legacy_contract[field]
+        for field in (
+            "releaseVersion",
+            "protocolVersion",
+            "agentProfile",
+            "gatewayContractDigest",
+            "commandFingerprint",
+            "schemaDigest",
+        )
+    }
+    legacy_request = {"runtimeTarget": {**legacy_target, "compatibilityDigest": "9" * 64}}
+    v2 = "exomem-cell-provisioner.v2"
+
+    assert lock.matches_runtime_request(legacy_request, wire_protocol=v2)
+    assert lock.matches_runtime_request(
+        legacy_request, wire_protocol=v2, action="renew-authorization"
+    )
+    for placing in ("provision", "rollforward", "rollback-rollforward"):
+        assert not lock.matches_runtime_request(legacy_request, wire_protocol=v2, action=placing)
+    assert not lock.matches_runtime_request(
+        {"runtimeTarget": {**legacy_request["runtimeTarget"], "schemaDigest": "1" * 64}},
+        wire_protocol=v2,
+    )
+    assert lock.matches_runtime_request(
+        {"runtimeTarget": dict(value["runtimeTarget"])}, wire_protocol=v2, action="provision"
+    )
+
+
 def test_selected_lock_accepts_an_authoritatively_empty_legacy_catalog(tmp_path: Path) -> None:
     value = _deployment_lock()
     composition = value["composition"]

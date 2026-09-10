@@ -39,7 +39,12 @@ from .provider_identity import (
     decode_hcloud_identity_envelope,
     provider_operation_resource_name,
 )
-from .wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
+from .wire_protocol import (
+    FORWARD_ONLY_ACTIONS,
+    RUNTIME_IDENTITY_FIELDS,
+    WIRE_PROTOCOL_V2,
+    runtime_identity,
+)
 
 
 class MetadataConflict(RuntimeError):
@@ -262,16 +267,58 @@ class LifecycleConfig:
         "none"
     )
 
-    def runtime_target_for(self, request: dict[str, Any], *, v2: bool) -> dict[str, str]:
+    def _forward_target(self) -> dict[str, str]:
+        if self.runtime_target is None:
+            raise MetadataConflict("selected runtime target is unavailable")
+        compatibility_digest = self.compatibility_digest or self.runtime_target.get(
+            "compatibilityDigest"
+        )
+        if compatibility_digest is None:
+            return dict(self.runtime_target)
+        return {**self.runtime_target, "compatibilityDigest": compatibility_digest}
+
+    def _legacy_unit_for(
+        self, request: dict[str, Any], *, action: str | None
+    ) -> dict[str, str] | None:
+        """The cataloged legacy contract a v2 request names by exact identity, if any.
+
+        A legacy match is by all six contract fields, never by release label alone,
+        and is never offered to an action that places a runtime image: those only
+        ever target the selected forward release.
+        """
+
+        if action in FORWARD_ONLY_ACTIONS:
+            return None
+        try:
+            identity = runtime_identity(request)
+        except (KeyError, ValueError):
+            return None
+        if self.runtime_target is not None and identity == self._forward_target():
+            return None
+        unit = (self.legacy_runtime_units or {}).get(
+            (identity.get("releaseVersion"), identity.get("protocolVersion"))
+        )
+        if unit is None or any(
+            unit.get(field) != identity.get(field) for field in RUNTIME_IDENTITY_FIELDS
+        ):
+            return None
+        return unit
+
+    def runtime_target_for(
+        self, request: dict[str, Any], *, v2: bool, action: str | None = None
+    ) -> dict[str, str]:
         if v2:
-            if self.runtime_target is None:
-                raise MetadataConflict("selected runtime target is unavailable")
-            compatibility_digest = self.compatibility_digest or self.runtime_target.get(
-                "compatibilityDigest"
-            )
-            if compatibility_digest is None:
-                return dict(self.runtime_target)
-            return {**self.runtime_target, "compatibilityDigest": compatibility_digest}
+            forward = self._forward_target()
+            legacy = self._legacy_unit_for(request, action=action)
+            if legacy is None:
+                return forward
+            target = {field: legacy[field] for field in RUNTIME_IDENTITY_FIELDS}
+            # The catalog records no compatibility digest: the request's own is the
+            # one Substrate bound this cell to, and the health probe reports it back.
+            compatibility_digest = runtime_identity(request).get("compatibilityDigest")
+            if compatibility_digest is not None:
+                target["compatibilityDigest"] = compatibility_digest
+            return target
         target = runtime_identity(request)
         try:
             return (self.legacy_runtime_units or {})[
@@ -280,15 +327,22 @@ class LifecycleConfig:
         except KeyError as error:
             raise MetadataConflict("legacy runtime unit is not selected") from error
 
-    def matches_runtime_request(self, request: dict[str, Any], *, v2: bool) -> bool:
+    def matches_runtime_request(
+        self, request: dict[str, Any], *, v2: bool, action: str | None = None
+    ) -> bool:
         try:
-            expected = self.runtime_target_for(request, v2=v2)
+            expected = self.runtime_target_for(request, v2=v2, action=action)
         except MetadataConflict:
             return False
         return runtime_identity(request) == expected if v2 else True
 
-    def runtime_image_for(self, request: dict[str, Any], *, v2: bool) -> str:
-        return self.image if v2 else self.runtime_target_for(request, v2=False)["runtimeImage"]
+    def runtime_image_for(
+        self, request: dict[str, Any], *, v2: bool, action: str | None = None
+    ) -> str:
+        if not v2:
+            return self.runtime_target_for(request, v2=False)["runtimeImage"]
+        legacy = self._legacy_unit_for(request, action=action)
+        return self.image if legacy is None else legacy["runtimeImage"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1925,11 +1979,13 @@ class CellLifecycleDriver:
     async def observed_fence(self, tenant_id: str) -> int:
         return await self._plane.observed_fence(tenant_id)
 
-    def runtime_target_matches(self, request: dict[str, Any], context: EffectContext) -> bool:
+    def runtime_target_matches(
+        self, request: dict[str, Any], context: EffectContext, action: str | None = None
+    ) -> bool:
         if "runtimeTarget" not in request and "releaseVersion" not in request:
             return True
         return self._config.matches_runtime_request(
-            request, v2=context.wire_protocol == WIRE_PROTOCOL_V2
+            request, v2=context.wire_protocol == WIRE_PROTOCOL_V2, action=action
         )
 
     def rollforward_target_matches(self, request: dict[str, Any], context: EffectContext) -> bool:
@@ -1937,7 +1993,7 @@ class CellLifecycleDriver:
             context.wire_protocol == WIRE_PROTOCOL_V2
             and self._config.compatibility_digest is not None
             and request.get("compatibilityDigest") == self._config.compatibility_digest
-            and self.runtime_target_matches(request, context)
+            and self.runtime_target_matches(request, context, "rollforward")
         )
 
     async def _stop_failed_rollforward(self, metadata: OpaqueProviderMetadata) -> None:
@@ -1987,7 +2043,7 @@ class CellLifecycleDriver:
             if action not in {
                 "rollforward",
                 "rollback-rollforward",
-            } and not self.runtime_target_matches(request, context):
+            } and not self.runtime_target_matches(request, context, action):
                 raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
             if await self.observed_fence(context.tenant_id) > context.fence_generation:
                 raise DriverTerminal("PROVISIONER_STALE_FENCE")

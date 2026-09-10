@@ -1482,6 +1482,119 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
 
 
 @pytest.mark.asyncio
+async def test_private_cell_api_health_reports_the_identity_the_request_names() -> None:
+    """A legacy cell under an expand lock is probed by its own profile and compatibility digest."""
+
+    calls: list[str] = []
+    agent_contract_base = {
+        "schema_version": 1,
+        "protocol_version": "1",
+        "exomem_release": "0.22.0",
+        "agent_profile": {
+            "profile": "hosted-alpha-agent-v1",
+            "active_capability_sha256": "c" * 64,
+        },
+        "commands": [],
+    }
+    runtime_digest = hashlib.sha256(
+        json.dumps(agent_contract_base, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    async def request(
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json: object = None,
+    ) -> _Response:
+        del method, headers, json
+        calls.append(url)
+        if url.endswith("/agent/hosted-alpha-agent-v1/contract"):
+            return _Response(
+                200,
+                {
+                    **agent_contract_base,
+                    "digest": {"algorithm": "sha256", "value": runtime_digest},
+                },
+                raw=True,
+            )
+        if url.endswith("/contract"):
+            return _Response(200, {"digest": {"algorithm": "sha256", "value": "b" * 64}}, raw=True)
+        if url.endswith("/ready"):
+            return _Response(
+                200,
+                {
+                    "cell_id": "cell-alpha",
+                    "vault_id": "tenant-alpha",
+                    "exomem_release": "0.22.0",
+                    "hosted_protocol": "1",
+                    "authenticated_credential_version": "1",
+                    "security_revision": 1,
+                    "service_authenticated": True,
+                    "mutation_authority": True,
+                    "admission_phase": "active",
+                    "read_admission": True,
+                    "write_admission": True,
+                    "worker_policy_digest": hashlib.sha256(
+                        b'{"media":false,"semantic":true,"workerCount":2}'
+                    ).hexdigest(),
+                },
+            )
+        return _Response(200, {"live": True, "cell_id": "cell-alpha", "protocol_version": "1"})
+
+    config = LifecycleConfig(
+        image="repo@sha256:" + "f" * 64,
+        chart_path="chart",
+        chart_version="0.1.0",
+        helm_version="3.19.4",
+        control_hostname="control.example.invalid",
+        transfer_hostname="transfer.example.invalid",
+        browser_origin="https://substratesystems.io",
+        release_version="0.23.0",
+        protocol_version="1",
+        contract_digest="f" * 64,
+        location="fsn1",
+        runtime_target={
+            "releaseVersion": "0.23.0",
+            "protocolVersion": "1",
+            "agentProfile": "hosted-alpha-agent-v2",
+            "gatewayContractDigest": "f" * 64,
+            "commandFingerprint": "c" * 64,
+            "schemaDigest": "d" * 64,
+        },
+        compatibility_digest="8" * 64,
+    )
+    legacy_target = {
+        "releaseVersion": "0.22.0",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "b" * 64,
+        "commandFingerprint": "c" * 64,
+        "schemaDigest": "d" * 64,
+        "compatibilityDigest": "9" * 64,
+    }
+    adapter = PrivateCellApiAdapter(request=request, internal_origin="http://cells.invalid")
+
+    health = await adapter.health(
+        _metadata(),
+        credential=_credential(),
+        protocol_version="1",
+        config=config,
+        expected_release="0.22.0",
+        expected_worker_policy={"workerCount": 2, "semantic": True, "media": False},
+        require_runtime_identity=True,
+        expected_contract_digest="b" * 64,
+        expected_target=legacy_target,
+    )
+
+    assert health.ready is True
+    assert health.agent_profile == "hosted-alpha-agent-v1"
+    assert health.compatibility_digest == "9" * 64
+    assert "http://cells.invalid/private/exomem/v1/agent/hosted-alpha-agent-v1/contract" in calls
+    assert not any("hosted-alpha-agent-v2" in url for url in calls)
+
+
+@pytest.mark.asyncio
 async def test_private_cell_api_derives_release_independent_schema_digest_from_agent_contract() -> (
     None
 ):

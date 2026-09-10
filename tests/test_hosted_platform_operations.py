@@ -194,7 +194,9 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     )
     assert install_step["if"] == "steps.validator-cache.outputs.cache-hit != 'true'"
     expose_step = next(
-        step for step in static_job["steps"] if step.get("name") == "Expose infrastructure validators"
+        step
+        for step in static_job["steps"]
+        if step.get("name") == "Expose infrastructure validators"
     )
     assert 'echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"' in expose_step["run"]
     assert 'echo "$PWD/.venv-hosted-ci/bin" >> "$GITHUB_PATH"' in expose_step["run"]
@@ -244,8 +246,7 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     release_proof_step = next(
         step
         for step in release_job["steps"]
-        if step.get("name")
-        == "Derive and prove both published images from the reviewed phase lock"
+        if step.get("name") == "Derive and prove both published images from the reviewed phase lock"
     )
     for script in (
         "prepare_hosted_release.py",
@@ -1363,15 +1364,11 @@ def test_active_secret_selection_is_complete_and_the_signer_publishes_a_verified
     assert selection["schema_version"] == 1
     assert set(selection["destinations"]) == expected
     assert all(
-        re.fullmatch(r"v[1-9][0-9]*", version)
-        for version in selection["destinations"].values()
+        re.fullmatch(r"v[1-9][0-9]*", version) for version in selection["destinations"].values()
     )
     assert all(
         (
-            ROOT
-            / destination["target"].format(
-                version=selection["destinations"][destination_id]
-            )
+            ROOT / destination["target"].format(version=selection["destinations"][destination_id])
         ).is_file()
         for secret in matrix["secrets"].values()
         for destination_id, destination in secret["destinations"].items()
@@ -2293,15 +2290,19 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
     # `protocol` names the default wire envelope, not an exhaustive action gate.
     # This map is the served HTTP surface, and the ingress route is generated
     # against it, so an action absent here is unreachable however it is called.
-    # `renew-authorization` is v2-only on the wire -- the frozen v1 corpus in
-    # provisioner-wire-v1.json never gains an action -- but it is still served,
-    # so it belongs in the composition.
+    # `renew-authorization`, `rollforward` and `rollback-rollforward` are v2-only
+    # on the wire -- the frozen v1 corpus in provisioner-wire-v1.json never gains
+    # an action -- but they are still served, so they belong in the composition;
+    # the 0.77.0 rollforward on the alpha was refused at the ingress because the
+    # two rollforward actions were missing here.
     assert set(contract["provisioner"]["actions"]) == {
         "provision",
         "health",
         "rotate-credential",
         "quiesce",
         "renew-authorization",
+        "rollforward",
+        "rollback-rollforward",
         "resume",
         "stop",
         "export",

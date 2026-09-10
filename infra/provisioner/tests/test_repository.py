@@ -32,6 +32,7 @@ from exomem_provisioner.repository import (
     StaleFence,
     _claim_statement,
     canonical_request_sha256,
+    legacy_targets_from,
 )
 from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V1, WIRE_PROTOCOL_V2
 
@@ -255,11 +256,130 @@ async def test_submission_admission_is_atomic_and_protocol_bound(
         await repository.submit(
             "provision",
             "wrong-v2-target",
-            {**v2_request, "operationId": "wrong-v2-target", "runtimeTarget": {**forward_target, "schemaDigest": "d" * 64}},
+            {
+                **v2_request,
+                "operationId": "wrong-v2-target",
+                "runtimeTarget": {**forward_target, "schemaDigest": "d" * 64},
+            },
             wire_protocol=WIRE_PROTOCOL_V2,
             admission=expand,
         )
     assert await repository.get("provision", "wrong-v2-target") is None
+
+
+@pytest.mark.asyncio
+async def test_expand_admits_a_cataloged_legacy_v2_target_only_when_its_identity_matches(
+    repository: OperationRepository,
+) -> None:
+    """A live v2 cell keeps renewing on its legacy release during an expand."""
+
+    forward_target = {
+        "releaseVersion": "0.35.1",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+        "compatibilityDigest": "e" * 64,
+    }
+    legacy_identity = {
+        "releaseVersion": "0.34.0",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "1" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+    }
+    expand = AdmissionPolicy(
+        mode="expand",
+        legacy_catalog=frozenset({("0.34.0", "1")}),
+        forward_target=forward_target,
+        legacy_targets=legacy_targets_from([legacy_identity]),
+    )
+    legacy_request = {
+        **_request(operationId="legacy-v2-renew", fenceGeneration=3),
+        "runtimeTarget": {**legacy_identity, "compatibilityDigest": "9" * 64},
+    }
+    legacy_request.pop("releaseVersion")
+    legacy_request.pop("protocolVersion")
+
+    admitted = await repository.submit(
+        "renew-authorization",
+        "legacy-v2-renew",
+        legacy_request,
+        wire_protocol=WIRE_PROTOCOL_V2,
+        admission=expand,
+    )
+    assert admitted.wire_protocol == WIRE_PROTOCOL_V2
+
+    with pytest.raises(AdmissionRejected):
+        await repository.submit(
+            "renew-authorization",
+            "legacy-v2-drift",
+            {
+                **legacy_request,
+                "operationId": "legacy-v2-drift",
+                "runtimeTarget": {**legacy_request["runtimeTarget"], "schemaDigest": "d" * 64},
+            },
+            wire_protocol=WIRE_PROTOCOL_V2,
+            admission=expand,
+        )
+    assert await repository.get("renew-authorization", "legacy-v2-drift") is None
+
+    # Placing a runtime image always names the forward target, even for a cataloged
+    # legacy identity, and an explicit null target is not the absence of one.
+    for action, key, override in (
+        ("provision", "legacy-v2-provision", {}),
+        ("rollforward", "legacy-v2-rollforward", {"compatibilityDigest": "e" * 64}),
+        ("renew-authorization", "legacy-v2-null", {"runtimeTarget": None}),
+    ):
+        with pytest.raises(AdmissionRejected):
+            await repository.submit(
+                action,
+                key,
+                {**legacy_request, "operationId": key, **override},
+                wire_protocol=WIRE_PROTOCOL_V2,
+                admission=expand,
+            )
+        assert await repository.get(action, key) is None
+
+    uncataloged = AdmissionPolicy(
+        mode="expand",
+        legacy_catalog=frozenset(),
+        forward_target=forward_target,
+    )
+    with pytest.raises(AdmissionRejected):
+        await repository.submit(
+            "renew-authorization",
+            "legacy-v2-uncataloged",
+            {**legacy_request, "operationId": "legacy-v2-uncataloged"},
+            wire_protocol=WIRE_PROTOCOL_V2,
+            admission=uncataloged,
+        )
+
+    contract = AdmissionPolicy(
+        mode="contract",
+        legacy_catalog=frozenset({("0.34.0", "1")}),
+        forward_target=forward_target,
+        legacy_targets=legacy_targets_from([legacy_identity]),
+    )
+    with pytest.raises(AdmissionRejected):
+        await repository.submit(
+            "renew-authorization",
+            "legacy-v2-contract",
+            {**legacy_request, "operationId": "legacy-v2-contract"},
+            wire_protocol=WIRE_PROTOCOL_V2,
+            admission=contract,
+        )
+    assert await repository.get("renew-authorization", "legacy-v2-contract") is None
+    replay = await repository.submit(
+        "renew-authorization",
+        "legacy-v2-renew",
+        legacy_request,
+        wire_protocol=WIRE_PROTOCOL_V2,
+        admission=contract,
+    )
+    assert replay.id == admitted.id
 
 
 @pytest.mark.asyncio
