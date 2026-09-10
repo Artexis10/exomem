@@ -8,7 +8,7 @@ That floor is a fixed number. The smallest endpoint held open continuously is 18
 
 - Give the provisioner its own PostgreSQL inside the existing k3s cluster, on the Hetzner CSI encrypted-retain storage class the platform already uses, and repoint `EXOMEM_PROVISIONER_DATABASE_URL` at it.
 - Migrate the `exomem_provisioner` schema, which is already isolated from Substrate's `public` schema in the shared database: 15 tables, 6.7 MB, 288 rows at the time of writing.
-- Keep Substrate on the serverless endpoint, where its request-driven traffic and single reconcile cron actually match how that product is priced.
+- Keep Substrate on the serverless endpoint, and slow its `exomem-reconcile` schedule past the autosuspend window in the same cutover. Relocating the provisioner is necessary but not sufficient: that cron currently runs every minute against a five-minute window, so it would hold the endpoint open on its own. The documented renewal margin is twenty minutes, which a five-minute cadence still satisfies for far more cells than the alpha has.
 - Bring the existing suspended database-backup CronJob into service against the in-cluster store, so relocating operational state does not relocate it out of a backup path.
 - Extend the budget preflight so it reports the retained compute baseline's *cause*, not only its existence, and so an always-on consumer sharing a scale-to-zero endpoint is a named failed control rather than an unexplained baseline.
 
