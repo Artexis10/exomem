@@ -1,0 +1,24 @@
+{
+  "runtimes": [
+    {
+      "agentProfile": "hosted-alpha-agent-v4",
+      "commandFingerprint": "4b4b71280fec7915042483207b1ab0e15e916148ac1b88ef965e03671de80968",
+      "compatibilityDigest": "320e75168c5f72b73551e56f43a82b8d3ee77bf39158ae42ef3292a25b576ec6",
+      "gatewayContractDigest": "fa554d6c379d0c98aa8bf9cb31525d1b5be6ff19647afedba35f3e2058b85be1",
+      "protocolVersion": "1",
+      "releaseVersion": "0.77.0",
+      "runtimeImage": "ghcr.io/artexis10/exomem@sha256:73ab2439e653d490b800eb810c370e297da0efcad176557756b46b89b5c82172",
+      "schemaDigest": "60b5aec6f872874234a214e778e26ce57fa5805af8ce744bdd68efe8ca0fcb26"
+    },
+    {
+      "agentProfile": "hosted-alpha-agent-v4",
+      "commandFingerprint": "4b4b71280fec7915042483207b1ab0e15e916148ac1b88ef965e03671de80968",
+      "compatibilityDigest": "636d271faaa57d38730a5638abb9f12797cb49189e99be9762632f03ae49117c",
+      "gatewayContractDigest": "402284f29ec84b9a956a1c2f796e152e621c897f2bcd09e96e21ff84abf5091a",
+      "protocolVersion": "1",
+      "releaseVersion": "0.73.1",
+      "runtimeImage": "ghcr.io/artexis10/exomem@sha256:fb6ebd669aa60832ddb135948b58762975639bfc7a642274c722848ae576c430",
+      "schemaDigest": "60b5aec6f872874234a214e778e26ce57fa5805af8ce744bdd68efe8ca0fcb26"
+    }
+  ]
+}
