@@ -713,8 +713,10 @@ class KubernetesRestoreCandidateResolver:
     async def resolve(self, candidate_cell_id: str, *, source_vault_id: str):
         context = await self._context(candidate_cell_id, source_vault_id=source_vault_id)
         metadata = context.metadata
+        # A restore recovers the cell on the release its stored provision named, so
+        # a cell that a later expand catalogs as legacy keeps its own image here.
         target = self._config.runtime_target_for(
-            context.request, v2=context.wire_protocol == WIRE_PROTOCOL_V2
+            context.request, v2=context.wire_protocol == WIRE_PROTOCOL_V2, action="restore"
         )
         controller = HelmRestoreCandidateController(
             metadata=metadata,
@@ -794,7 +796,7 @@ class KubernetesRestoreCandidateResolver:
             archive_stager=self._stager,
             binding=binding,
             image=self._config.runtime_image_for(
-                context.request, v2=context.wire_protocol == WIRE_PROTOCOL_V2
+                context.request, v2=context.wire_protocol == WIRE_PROTOCOL_V2, action="restore"
             ),
             staging_image=self._provisioner_image,
             release_version=target["releaseVersion"],
@@ -860,7 +862,7 @@ class KubernetesRestoreCandidateResolver:
             or request.get("cellId") != metadata.subject_id
             or request.get("fenceGeneration") != metadata.fence_generation
             or not self._config.matches_runtime_request(
-                request, v2=rows[0].wire_protocol == WIRE_PROTOCOL_V2
+                request, v2=rows[0].wire_protocol == WIRE_PROTOCOL_V2, action="restore"
             )
         ):
             raise RestoreJobFailed("restore candidate provision request differs")

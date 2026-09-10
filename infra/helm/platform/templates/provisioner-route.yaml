@@ -17,6 +17,8 @@ spec:
         Path(`/cells/rotate-credential`) ||
         Path(`/cells/quiesce`) ||
         Path(`/cells/renew-authorization`) ||
+        Path(`/cells/rollforward`) ||
+        Path(`/cells/rollback-rollforward`) ||
         Path(`/cells/resume`) ||
         Path(`/cells/stop`) ||
         Path(`/cells/export`) ||

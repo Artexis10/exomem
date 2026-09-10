@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import secrets
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -38,7 +39,12 @@ from .models import (
     WireProtocol,
 )
 from .provider_identity import cell_resource_name
-from .wire_protocol import WIRE_PROTOCOL_V1, WIRE_PROTOCOL_V2
+from .wire_protocol import (
+    FORWARD_ONLY_ACTIONS,
+    RUNTIME_IDENTITY_FIELDS,
+    WIRE_PROTOCOL_V1,
+    WIRE_PROTOCOL_V2,
+)
 
 GOVERNANCE_PROVISION_CHECKPOINT_VERSION = "gpi1"
 GOVERNANCE_PROVISION_CHECKPOINT_PHASES = frozenset({"initializing", "complete", "drained"})
@@ -202,6 +208,19 @@ def _governance_recovery_snapshot(
     return _governance_recovery_digest(operation, fence.fence_generation)
 
 
+LegacyTarget = tuple[tuple[str, str], ...]
+
+
+def legacy_target_key(target: Mapping[str, object]) -> LegacyTarget:
+    """Reduce a runtime target to the six identity fields a legacy contract carries."""
+
+    return tuple((field, str(target.get(field))) for field in RUNTIME_IDENTITY_FIELDS)
+
+
+def legacy_targets_from(contracts: Iterable[Mapping[str, object]]) -> frozenset[LegacyTarget]:
+    return frozenset(legacy_target_key(contract) for contract in contracts)
+
+
 @dataclass(frozen=True, slots=True)
 class AdmissionPolicy:
     """Immutable deployment admission inputs supplied by the selected lock."""
@@ -209,6 +228,10 @@ class AdmissionPolicy:
     mode: str
     legacy_catalog: frozenset[tuple[str, str]]
     forward_target: dict[str, str]
+    # Exact six-field identities of the cataloged legacy contracts. A v2 request
+    # names its runtime by these fields plus a compatibility digest, so a live
+    # legacy cell is admitted by identity, never by release label alone.
+    legacy_targets: frozenset[LegacyTarget] = frozenset()
 
 
 def _admit_submission(
@@ -217,6 +240,7 @@ def _admit_submission(
     wire_protocol: str,
     request: dict[str, Any],
     existing: Operation | None,
+    action: str | None = None,
 ) -> None:
     if wire_protocol not in {WIRE_PROTOCOL_V1, WIRE_PROTOCOL_V2}:
         raise AdmissionRejected("unsupported wire protocol")
@@ -234,8 +258,25 @@ def _admit_submission(
             if identity not in policy.legacy_catalog:
                 raise AdmissionRejected("legacy runtime is not cataloged")
         return
-    if "runtimeTarget" in request and request["runtimeTarget"] != policy.forward_target:
-        raise AdmissionRejected("runtime target does not match deployment lock")
+    if "runtimeTarget" not in request:
+        return
+    target = request["runtimeTarget"]
+    if target == policy.forward_target:
+        return
+    if (
+        action not in FORWARD_ONLY_ACTIONS
+        and isinstance(target, Mapping)
+        and legacy_target_key(target) in policy.legacy_targets
+    ):
+        # A cell still on a cataloged legacy release keeps renewing, checking and
+        # stopping through the expand window; only the actions that place a runtime
+        # image must name the forward target. Contract mode refuses only a fresh
+        # legacy submission, mirroring v1: an operation already accepted may be
+        # replayed for its acknowledgement until it settles.
+        if policy.mode == "expand" or existing is not None:
+            return
+        raise AdmissionRejected("fresh legacy runtime is not admitted in contract mode")
+    raise AdmissionRejected("runtime target does not match deployment lock")
 
 
 def canonical_request_bytes(request: dict[str, Any]) -> bytes:
@@ -798,6 +839,7 @@ class OperationRepository:
                         wire_protocol=wire_protocol,
                         request=request,
                         existing=existing,
+                        action=action_value.value,
                     )
                     if existing is not None:
                         return _operation_snapshot(existing)
@@ -1244,10 +1286,9 @@ class OperationRepository:
                 now=now,
             )
             if _holds_governance_checkpoint(operation, operation.checkpoint):
-                if (
-                    operation.checkpoint.startswith(GOVERNANCE_CHECKPOINT_VERSION + ":")
-                    and checkpoint.startswith(GOVERNANCE_PROVISION_CHECKPOINT_VERSION + ":")
-                ):
+                if operation.checkpoint.startswith(
+                    GOVERNANCE_CHECKPOINT_VERSION + ":"
+                ) and checkpoint.startswith(GOVERNANCE_PROVISION_CHECKPOINT_VERSION + ":"):
                     raise ClaimConflict("governance migration cannot return to initialization")
                 if not _holds_governance_checkpoint(operation, checkpoint):
                     # Capacity waits and other scheduling outcomes must not

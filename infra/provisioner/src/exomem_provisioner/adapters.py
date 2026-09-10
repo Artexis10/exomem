@@ -12,7 +12,7 @@ import os
 import re
 import tempfile
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2241,7 +2241,15 @@ class PrivateCellApiAdapter:
         expected_contract_digest: str | None = None,
         expected_governance: HostedAuthorizationBundle | None = None,
         retry_transport: bool = False,
+        expected_target: Mapping[str, str] | None = None,
     ) -> HealthObservation:
+        # The runtime identity a v2 request names for this cell. During an expand a
+        # cell still on a cataloged legacy release reports its own profile and
+        # compatibility digest, not the selected forward ones.
+        if expected_target is None and config.runtime_target is not None:
+            expected_target = config.runtime_target_for(
+                {"runtimeTarget": config.runtime_target}, v2=True
+            )
         live = await self._call(
             "GET",
             metadata,
@@ -2300,12 +2308,12 @@ class PrivateCellApiAdapter:
         records_reader_version: int | None = None
         lifecycle_actions_enabled: bool | None = None
         if require_runtime_identity:
-            if config.runtime_target is None:
+            if expected_target is None:
                 raise MetadataConflict(
                     "selected runtime identity is unavailable",
                     reason=ConflictReason.SELECTED_RUNTIME_IDENTITY_IS_UNAVAILABLE,
                 )
-            selected_profile = config.runtime_target["agentProfile"]
+            selected_profile = expected_target["agentProfile"]
             agent_response = await self._request_response(
                 "GET",
                 metadata,
@@ -2475,10 +2483,8 @@ class PrivateCellApiAdapter:
                 command_fingerprint=command_fingerprint,
                 schema_digest=schema_digest,
                 compatibility_digest=(
-                    config.runtime_target_for(
-                        {"runtimeTarget": config.runtime_target}, v2=True
-                    ).get("compatibilityDigest")
-                    if require_runtime_identity
+                    expected_target.get("compatibilityDigest")
+                    if require_runtime_identity and expected_target is not None
                     else None
                 ),
                 records_reader_version=records_reader_version,

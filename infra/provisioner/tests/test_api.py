@@ -78,22 +78,84 @@ def _settings(path: Path) -> ProvisionerSettings:
     digest = "a" * 64
     commit = "b" * 40
     target = {
-        "releaseVersion": "0.35.1", "protocolVersion": "1", "agentProfile": "hosted-alpha-agent-v1",
-        "gatewayContractDigest": digest, "commandFingerprint": "c" * 64, "schemaDigest": "d" * 64,
+        "releaseVersion": "0.35.1",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": digest,
+        "commandFingerprint": "c" * 64,
+        "schemaDigest": "d" * 64,
     }
     legacy_contract = {
-        **target, "releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1",
-        "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit,
+        **target,
+        "releaseVersion": "0.22.0",
+        "protocolVersion": "exomem-hosted.v1",
+        "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}",
+        "sourceCommit": commit,
     }
     lock_path = path.with_suffix(".lock.json")
-    lock_path.write_text(json.dumps({
-        "artifact": "exomem-hosted-deployment-lock", "schemaVersion": 2, "admissionMode": "expand",
-        "components": {"runtime": {"image": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "candidateSha256": digest}, "provisioner": {"image": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}", "sourceCommit": commit, "candidateSha256": "e" * 64, "wireProtocol": "exomem-cell-provisioner.v2"}},
-        "runtimeTarget": target,
-        "runtimeUpgrade": {"compatibilityDigest": "e" * 64, "migrationMode": "none", "substrateConsumerCommit": commit, "substrateTrustSha256": "e" * 64},
-        "composition": {"commit": commit, "sourceClosure": {name: {"candidateCommit": commit, "compositionCommit": commit, "paths": ["src/**"]} for name in ("runtime", "provisioner")}, "forwardContractSha256": digest, "authoritativeLegacyReleaseSetSha256": "f" * 64, "legacyCatalog": [{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1", "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "contractSha256": _canonical_sha256(legacy_contract), "contract": legacy_contract}], "legacyReleaseSetSha256": _canonical_sha256([{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"}])},
-        "rollback": {"provisionerImage": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}", "provisionerSourceCommit": commit, "v1CorpusSha256": digest, "legacyManifestSha256": digest, "substrateV1ConsumerCommit": commit},
-    }), encoding="utf-8")
+    lock_path.write_text(
+        json.dumps(
+            {
+                "artifact": "exomem-hosted-deployment-lock",
+                "schemaVersion": 2,
+                "admissionMode": "expand",
+                "components": {
+                    "runtime": {
+                        "image": f"ghcr.io/artexis10/exomem@sha256:{digest}",
+                        "sourceCommit": commit,
+                        "candidateSha256": digest,
+                    },
+                    "provisioner": {
+                        "image": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}",
+                        "sourceCommit": commit,
+                        "candidateSha256": "e" * 64,
+                        "wireProtocol": "exomem-cell-provisioner.v2",
+                    },
+                },
+                "runtimeTarget": target,
+                "runtimeUpgrade": {
+                    "compatibilityDigest": "e" * 64,
+                    "migrationMode": "none",
+                    "substrateConsumerCommit": commit,
+                    "substrateTrustSha256": "e" * 64,
+                },
+                "composition": {
+                    "commit": commit,
+                    "sourceClosure": {
+                        name: {
+                            "candidateCommit": commit,
+                            "compositionCommit": commit,
+                            "paths": ["src/**"],
+                        }
+                        for name in ("runtime", "provisioner")
+                    },
+                    "forwardContractSha256": digest,
+                    "authoritativeLegacyReleaseSetSha256": "f" * 64,
+                    "legacyCatalog": [
+                        {
+                            "releaseVersion": "0.22.0",
+                            "protocolVersion": "exomem-hosted.v1",
+                            "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}",
+                            "sourceCommit": commit,
+                            "contractSha256": _canonical_sha256(legacy_contract),
+                            "contract": legacy_contract,
+                        }
+                    ],
+                    "legacyReleaseSetSha256": _canonical_sha256(
+                        [{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"}]
+                    ),
+                },
+                "rollback": {
+                    "provisionerImage": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}",
+                    "provisionerSourceCommit": commit,
+                    "v1CorpusSha256": digest,
+                    "legacyManifestSha256": digest,
+                    "substrateV1ConsumerCommit": commit,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     return ProvisionerSettings(
         bearer=_BEARER,
         envelope_key="envelope-key-sentinel-00000000000000",
@@ -493,7 +555,9 @@ async def test_rollforward_is_v2_only_strict_and_idempotently_persisted(
 
 
 @pytest.mark.asyncio
-async def test_serving_requires_a_selected_lock_and_locked_health_advertises_v2(tmp_path: Path) -> None:
+async def test_serving_requires_a_selected_lock_and_locked_health_advertises_v2(
+    tmp_path: Path,
+) -> None:
     no_lock = ProvisionerSettings(
         bearer=_BEARER,
         envelope_key="envelope-key-sentinel-00000000000000",
@@ -511,8 +575,14 @@ async def test_serving_requires_a_selected_lock_and_locked_health_advertises_v2(
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="https://provisioner.test"
     ) as client:
-        assert (await client.get("/health/live")).json() == {"protocol": WIRE_PROTOCOL_V2, "status": "live"}
-        assert (await client.get("/health/ready")).json() == {"protocol": WIRE_PROTOCOL_V2, "status": "ready"}
+        assert (await client.get("/health/live")).json() == {
+            "protocol": WIRE_PROTOCOL_V2,
+            "status": "live",
+        }
+        assert (await client.get("/health/ready")).json() == {
+            "protocol": WIRE_PROTOCOL_V2,
+            "status": "ready",
+        }
 
 
 async def _ready(value: bool) -> bool:
@@ -619,6 +689,94 @@ async def test_api_exposes_exact_seventeen_post_paths_and_strict_pending_union(
             "checkpoint": "requested",
             "retryAfterSeconds": 2,
         }
+
+
+@pytest.mark.asyncio
+async def test_expand_lock_renews_a_live_legacy_v2_cell(tmp_path: Path) -> None:
+    """A cell still on the outgoing v2 release keeps its authorization during an expand."""
+
+    path = tmp_path / "legacy-v2.sqlite"
+    settings = _settings(path)
+    lock_path = path.with_suffix(".lock.json")
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    legacy_identity = {
+        "releaseVersion": "0.34.0",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "1" * 64,
+        "commandFingerprint": "c" * 64,
+        "schemaDigest": "d" * 64,
+    }
+    contract = {
+        **legacy_identity,
+        "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{'2' * 64}",
+        "sourceCommit": "3" * 40,
+    }
+    contract_sha256 = hashlib.sha256(
+        (json.dumps(contract, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    ).hexdigest()
+    lock["composition"]["legacyCatalog"].append(
+        {
+            "releaseVersion": "0.34.0",
+            "protocolVersion": "1",
+            "runtimeImage": contract["runtimeImage"],
+            "sourceCommit": contract["sourceCommit"],
+            "contractSha256": contract_sha256,
+            "contract": contract,
+        }
+    )
+    catalog = sorted(
+        lock["composition"]["legacyCatalog"],
+        key=lambda unit: (unit["releaseVersion"], unit["protocolVersion"]),
+    )
+    lock["composition"]["legacyCatalog"] = catalog
+    release_set = [
+        {"releaseVersion": unit["releaseVersion"], "protocolVersion": unit["protocolVersion"]}
+        for unit in catalog
+    ]
+    lock["composition"]["legacyReleaseSetSha256"] = hashlib.sha256(
+        (json.dumps(release_set, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    ).hexdigest()
+    # Settings load the lock on every access, so rewriting the file is enough.
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    database = ProvisionerDatabase(settings)
+    await database.create_for_tests()
+    repository = OperationRepository(
+        database.session_factory,
+        codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
+        claim_seconds=settings.claim_seconds,
+    )
+    app = create_app(
+        settings=settings,
+        readiness_probe=database.ready,
+        repository=repository,
+        provider_identity_codec=ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root"),
+    )
+    body = _body_for("renew-authorization")
+    body["runtimeTarget"] = {**legacy_identity, "compatibilityDigest": "9" * 64}
+    drifted = {
+        **body,
+        "operationId": "legacy-drift",
+        "runtimeTarget": {**body["runtimeTarget"], "gatewayContractDigest": "5" * 64},
+    }
+    headers = _headers("legacy-v2-renew")
+    headers["X-Exomem-Provisioner-Protocol"] = WIRE_PROTOCOL_V2
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="https://provisioner.test"
+        ) as client:
+            admitted = await client.post("/cells/renew-authorization", headers=headers, json=body)
+            rejected = await client.post(
+                "/cells/renew-authorization",
+                headers=_headers("legacy-drift")
+                | {"X-Exomem-Provisioner-Protocol": WIRE_PROTOCOL_V2},
+                json=drifted,
+            )
+    finally:
+        await database.dispose()
+    assert admitted.status_code == 202, admitted.text
+    assert rejected.status_code == 422
+    assert rejected.json() == {"code": "PROVISIONER_REJECTED", "retryable": False}
 
 
 @pytest.mark.asyncio

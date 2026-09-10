@@ -1629,6 +1629,7 @@ class RecoveryService:
                 request,
                 wire_protocol=operation.wire_protocol.value,
                 selection=self._runtime_selection,
+                action=operation.action.value,
             )
         ):
             raise RecoveryRefusal("retarget resume preflight failed")
@@ -1698,6 +1699,7 @@ class RecoveryService:
                 request,
                 wire_protocol=operation.wire_protocol.value,
                 selection=self._runtime_selection,
+                action=operation.action.value,
             )
         ):
             raise RecoveryRefusal("retarget retry preflight failed")
@@ -1782,6 +1784,7 @@ class RecoveryService:
                 request,
                 wire_protocol=operation.wire_protocol.value,
                 selection=self._runtime_selection,
+                action=operation.action.value,
             )
         ):
             raise RecoveryRefusal("successor retarget preflight failed")
@@ -1895,6 +1898,7 @@ class RecoveryService:
                 request,
                 wire_protocol=operation.wire_protocol.value,
                 selection=self._runtime_selection,
+                action=operation.action.value,
             )
         ):
             raise RecoveryRefusal("retarget preflight failed")
@@ -1987,6 +1991,7 @@ class RecoveryService:
                 request,
                 wire_protocol=operation.wire_protocol.value,
                 selection=self._runtime_selection,
+                action=operation.action.value,
             )
         ):
             raise RecoveryRefusal("recovery preflight failed")

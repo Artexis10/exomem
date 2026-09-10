@@ -18,6 +18,23 @@ from .schemas import (
 WIRE_PROTOCOL_V1 = "exomem-cell-provisioner.v1"
 WIRE_PROTOCOL_V2 = "exomem-cell-provisioner.v2"
 
+# The fields a reviewed runtime contract carries. A v2 request names its runtime
+# by these plus a compatibility digest that the legacy catalog never records.
+RUNTIME_IDENTITY_FIELDS = (
+    "releaseVersion",
+    "protocolVersion",
+    "agentProfile",
+    "gatewayContractDigest",
+    "commandFingerprint",
+    "schemaDigest",
+)
+
+# Actions that place or replace a runtime image only ever target the selected
+# forward release. Every other action operates on a cell as it already stands, so
+# a cell still on a cataloged legacy release keeps renewing, checking, stopping
+# and resuming through an expand window instead of lapsing.
+FORWARD_ONLY_ACTIONS = frozenset({"provision", "rollforward", "rollback-rollforward"})
+
 REQUEST_MODELS_BY_PROTOCOL: Mapping[str, Mapping[str, type[StrictSchema]]] = MappingProxyType(
     {
         WIRE_PROTOCOL_V1: V1_REQUEST_MODELS,

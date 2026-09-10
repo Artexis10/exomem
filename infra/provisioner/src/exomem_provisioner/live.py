@@ -1509,6 +1509,7 @@ class LiveLifecyclePlane:
             expected_worker_policy=dict(request["workerPolicy"]),
             require_runtime_identity=v2,
             expected_contract_digest=target["gatewayContractDigest"],
+            **({"expected_target": target} if v2 else {}),
             **({"expected_governance": bundle, "retry_transport": True} if governed else {}),
         )
         if governed:
@@ -1737,7 +1738,8 @@ class LiveLifecyclePlane:
             self._config.migration_mode != "governance-v3-to-v4"
             or context.wire_protocol != WIRE_PROTOCOL_V2
             or self._governance_migration is None
-            or runtime_identity(request) != self._config.runtime_target_for(request, v2=True)
+            or runtime_identity(request)
+            != self._config.runtime_target_for(request, v2=True, action="rollforward")
         ):
             raise unavailable()
         try:
@@ -1821,7 +1823,8 @@ class LiveLifecyclePlane:
                 metadata.operation_id,
                 metadata.fence_generation,
             )
-            or runtime_identity(request) != self._config.runtime_target_for(request, v2=True)
+            or runtime_identity(request)
+            != self._config.runtime_target_for(request, v2=True, action="provision")
         ):
             raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
         owner = self._owned[self._key(metadata)]
@@ -1881,7 +1884,8 @@ class LiveLifecyclePlane:
                     metadata.operation_id,
                     metadata.fence_generation,
                 )
-                or runtime_identity(request) != self._config.runtime_target_for(request, v2=True)
+                or runtime_identity(request)
+                != self._config.runtime_target_for(request, v2=True, action="provision")
             ):
                 raise DriverTerminal("PROVISIONER_GOVERNANCE_PROVISION_UNAVAILABLE")
             if context.checkpoint.startswith(CHECKPOINT_VERSION + ":"):

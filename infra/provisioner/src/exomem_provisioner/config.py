@@ -407,6 +407,17 @@ class DeploymentLock(BaseModel):
         )
 
     @property
+    def legacy_targets(self) -> tuple[dict[str, str], ...]:
+        """The six-field runtime identity of every cataloged legacy contract."""
+
+        from .wire_protocol import RUNTIME_IDENTITY_FIELDS
+
+        return tuple(
+            {field: getattr(unit.contract, field) for field in RUNTIME_IDENTITY_FIELDS}
+            for unit in self.composition.legacyCatalog
+        )
+
+    @property
     def authoritative_legacy_release_set_sha256(self) -> str:
         return self.composition.authoritativeLegacyReleaseSetSha256
 
@@ -416,8 +427,14 @@ class DeploymentLock(BaseModel):
         *,
         wire_protocol: str,
         selection: Literal["active", "rollback"] | None = None,
+        action: str | None = None,
     ) -> bool:
-        from .wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
+        from .wire_protocol import (
+            FORWARD_ONLY_ACTIONS,
+            RUNTIME_IDENTITY_FIELDS,
+            WIRE_PROTOCOL_V2,
+            runtime_identity,
+        )
 
         try:
             target = runtime_identity(request)
@@ -431,7 +448,14 @@ class DeploymentLock(BaseModel):
             expected = selected.runtimeTarget.model_dump(mode="json")
             if selected.compatibilityDigest is not None:
                 expected["compatibilityDigest"] = selected.compatibilityDigest
-            return target == expected
+            if target == expected:
+                return True
+            # A cell still on a cataloged legacy release matches by its exact six-field
+            # contract identity, except for the actions that place a runtime image.
+            if action in FORWARD_ONLY_ACTIONS:
+                return False
+            identity = {field: target.get(field) for field in RUNTIME_IDENTITY_FIELDS}
+            return identity in self.legacy_targets
         return (target["releaseVersion"], target["protocolVersion"]) in self.legacy_catalog
 
 
