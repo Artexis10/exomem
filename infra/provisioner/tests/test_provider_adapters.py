@@ -704,10 +704,90 @@ async def test_helm_runtime_transition_replays_and_rolls_back_the_original_revis
     )
     assert sum(call[1] == "rollback" for call in calls) == 1
 
+    # An operation that never applied anything has nothing to revert once the
+    # release carries no marker at all: its rollback is a no-op, not a refusal.
+    await adapter.rollback_release(
+        _metadata(), operation_id="different-operation", require_marker=True
+    )
+    assert sum(call[1] == "rollback" for call in calls) == 1
+    assert current_values == {"workloadMode": "serve", "image": "old"}
+
+
+@pytest.mark.asyncio
+async def test_helm_rollback_of_a_never_applied_rollforward_is_a_no_op(tmp_path: Path) -> None:
+    """A recovery may roll back a rollforward that never reached Helm; another operation's
+    live marker still refuses."""
+
+    calls: list[tuple[str, ...]] = []
+    current_values: dict[str, object] = {"workloadMode": "serve", "image": "old"}
+    revision_values: dict[int, dict[str, object]] = {1: dict(current_values)}
+    current_revision = 1
+
+    async def runner(argv: tuple[str, ...], environment: dict[str, str]) -> SimpleNamespace:
+        nonlocal current_revision, current_values
+        calls.append(argv)
+        del environment
+        if argv[1] == "version":
+            return SimpleNamespace(returncode=0, stdout="v3.19.4\n", stderr="")
+        if argv[1:3] == ("get", "values"):
+            selected = (
+                revision_values[int(argv[argv.index("--revision") + 1])]
+                if "--revision" in argv
+                else current_values
+            )
+            return SimpleNamespace(returncode=0, stdout=json.dumps(selected), stderr="")
+        if argv[1] == "history":
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "revision": revision,
+                            "status": "deployed" if revision == current_revision else "superseded",
+                        }
+                        for revision in sorted(revision_values)
+                    ]
+                ),
+                stderr="",
+            )
+        if argv[1] == "upgrade":
+            values_path = Path(argv[argv.index("--values") + 1])
+            current_values = json.loads(values_path.read_text(encoding="utf-8"))
+            current_revision += 1
+            revision_values[current_revision] = dict(current_values)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    adapter = HelmCliAdapter(
+        binary="helm",
+        expected_version="3.19.4",
+        chart_path="chart",
+        chart_version="0.1.0",
+        runner=runner,
+        temporary_directory=tmp_path,
+    )
+
+    await adapter.rollback_release(_metadata(), operation_id="never-applied", require_marker=True)
+
+    assert not any(call[1] == "rollback" for call in calls)
+    assert current_values == {"workloadMode": "serve", "image": "old"}
+    assert revision_values == {1: {"workloadMode": "serve", "image": "old"}}
+
+    await adapter.transition_release(
+        _metadata(), {"workloadMode": "serve", "image": "target"}, operation_id="rollforward-alpha"
+    )
+    assert current_values["runtimeUpgrade"] == {
+        "schemaVersion": 1,
+        "operationDigest": hashlib.sha256(b"rollforward-alpha").hexdigest(),
+        "priorRevision": 1,
+    }
+
     with pytest.raises(MetadataConflict, match="rollback authority is absent"):
         await adapter.rollback_release(
-            _metadata(), operation_id="different-operation", require_marker=True
+            _metadata(), operation_id="never-applied", require_marker=True
         )
+    assert not any(call[1] == "rollback" for call in calls)
+    assert current_values["image"] == "target"
 
 
 class _CustomObjects:
