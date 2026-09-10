@@ -101,7 +101,10 @@ infra/scripts/hosted_fleet_inventory.py collect \
 ```
 
 Resolve every reported ghost, missing binding, divergent identity, stale capacity
-claim, active assignment, or unfinished operation before continuing. Then provide
+claim, active assignment, or unfinished operation before continuing. A
+reviewer-purpose tenant whose reviewer credential has expired is still a `reviewer`
+cell and rolls forward like any other; only live reviewer authority on a tenant that
+is not reviewer-purpose is reported as `reviewer_state_divergence`. Then provide
 immutable source commits and contract digests for exactly the inventory's
 `legacyRuntimes`. Missing, duplicate, mutable, or extra descriptor units are refused.
 An empty fleet uses an explicit empty `units` list rather than omitting the proof.

@@ -92,6 +92,7 @@ def _add_live_cell(
     cell_id: str,
     runtime: dict[str, str],
     reviewer: bool = False,
+    reviewer_authority: bool | None = None,
 ) -> None:
     substrate = sources["substrate"]
     substrate["routableCells"].append({"cellId": cell_id, "runtime": _control_runtime(runtime)})
@@ -99,8 +100,9 @@ def _add_live_cell(
     substrate["capacityClaims"].append({"cellId": cell_id})
     substrate["capacityActiveCellCount"] += 1
     if reviewer:
-        substrate["reviewerAuthorities"].append({"cellId": cell_id})
         substrate["reviewerTenants"].append({"cellId": cell_id})
+    if reviewer if reviewer_authority is None else reviewer_authority:
+        substrate["reviewerAuthorities"].append({"cellId": cell_id})
 
     sources["provisioner"]["desiredCells"].append(
         {"cellId": cell_id, "runtime": dict(runtime), "state": "ready"}
@@ -189,6 +191,53 @@ def test_reconciles_ordinary_and_reviewer_cells(
     assert inventory["counts"]["targetCells"] == 1
     assert inventory["counts"]["legacyCells"] == 0
     assert module.zero_fleet_noop(inventory) is False
+
+
+def test_reviewer_purpose_outlives_its_expired_reviewer_credential() -> None:
+    """Reviewer credentials expire between runs; the tenant's purpose does not."""
+
+    module = _module()
+    target = _runtime("0.57.2", "a")
+    legacy = _runtime("0.57.1", "b")
+    sources = _empty_sources()
+    _add_live_cell(
+        sources, cell_id="cell_1809ce5c", runtime=legacy, reviewer=True, reviewer_authority=False
+    )
+
+    inventory = module.reconcile_inventory(sources, target=target)
+
+    assert inventory["status"] == "consistent"
+    assert inventory["issues"] == []
+    cell = inventory["cells"][0]
+    assert cell["classification"] == "reviewer"
+    assert cell["surfaces"]["reviewerPurpose"] is True
+    assert cell["surfaces"]["reviewerAuthority"] is False
+    assert inventory["counts"]["reviewerCells"] == 1
+    assert inventory["counts"]["ordinaryCells"] == 0
+    assert inventory["counts"]["legacyCells"] == 1
+    facts = module.execution_inventory_facts(inventory)
+    assert facts["cells"][0]["class"] == "reviewer"
+    assert facts["cells"][0]["status"] == "pending"
+
+
+def test_live_reviewer_authority_on_an_ordinary_tenant_is_a_divergence() -> None:
+    module = _module()
+    target = _runtime("0.57.2", "a")
+    sources = _empty_sources()
+    _add_live_cell(
+        sources, cell_id="cell_1809ce5c", runtime=target, reviewer=False, reviewer_authority=True
+    )
+
+    inventory = module.reconcile_inventory(sources, target=target)
+
+    assert inventory["status"] == "inconsistent"
+    assert inventory["issues"] == ["reviewer_state_divergence"]
+    cell = inventory["cells"][0]
+    assert cell["classification"] == "inconsistent"
+    assert cell["surfaces"]["reviewerPurpose"] is False
+    assert cell["surfaces"]["reviewerAuthority"] is True
+    with pytest.raises(module.InventoryError, match="inconsistent"):
+        module.execution_inventory_facts(inventory)
 
 
 def test_substrate_cannot_assert_or_be_required_to_know_the_runtime_image() -> None:
