@@ -96,6 +96,29 @@ This uses disposable signed custody and a real SQLite store with a controlled
 Kubernetes adapter. It crashes after the database commit, reconciles the failed
 Job, and proves exact replay without another cutover or changed custody bytes.
 
+`tests/test_hosted_k3s_governance_drill.py` in the repository root is the same
+drill against a real cluster instead of a controlled adapter: it seeds a
+disposable cell on the exact K3s harness with the shipped cell chart, publishes
+signed schema-3 DRAINING custody through `KubernetesCellAdapter`, and replays
+`HostedGovernanceMigrationCoordinator.advance` with the target-image runner
+executing in-cluster and reporting through `/dev/termination-log`. It loses one
+real acknowledgement per effect boundary and requires the same operation to
+finish; it reconciles a genuine `pending-upgrade` record left by a `helm upgrade
+--wait` killed mid-flight; its coordinator scenarios construct
+`HostedGovernanceMigrationCoordinator` the way `production.py` does and drive it
+directly against the cluster, while its recovery scenario composes
+`build_live_provider_components` from a lock that selects
+`governance-v3-to-v4`, substituting only a disposable SQLite
+`OperationRepository`, and requeues a terminally failed migration under its own
+digest; and it verifies the migrated cell's private governance readiness proof
+with `governance_readiness.verify_governance_readiness`. It is gated on
+`RUN_K3S_GOVERNANCE_DRILL_TEST=1` plus `RUN_K3S_RUNTIME_TEST=1`, `HELM_BIN` and
+Docker, skips without the provisioner package, and retains content-safe
+per-scenario evidence (phase trail, custody revisions, activation-tuple digest,
+actual schema) as JSON under the pytest scratch root. The
+`governance_migration_drill` `workflow_dispatch` input of
+`.github/workflows/hosted-infrastructure.yml` runs it on demand.
+
 The pinned production provider libraries are `kubernetes` 35.x for Kubernetes
 1.35 and the official Hetzner `hcloud` 2.x client. The shared provisioner image
 contains PostgreSQL 17.10 client tools (`pg_dump`, `pg_restore`, `psql`,
