@@ -62,6 +62,10 @@ append or update it and the agent reports the mutation. Ask one focused question
 when collections compete or identity, date, provenance, or ownership is unclear.
 When no collection fits, use `record_memory(action="describe")` and propose a
 concise collection; the agent must not silently create a long-lived schema.
+A refused Record write is held rather than lost: the response names the failing
+field and returns a `held` reference, so fix the named field and resume by that
+reference (or `discard` it) instead of looping or preserving diagnostic
+breadcrumbs as Evidence.
 
 For a Planning or Records collection stored as Markdown items, YAML frontmatter
 is the sole canonical value source and the UUID remains durable identity. A

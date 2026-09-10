@@ -6,8 +6,14 @@ from pathlib import Path
 
 from record_fixtures import copy_x3_fixture
 
-from exomem import commands, mutation_terminal, record_formats, record_memory, records
-from exomem import graph_sync
+from exomem import (
+    commands,
+    graph_sync,
+    mutation_terminal,
+    record_formats,
+    record_memory,
+    records,
+)
 from exomem import hosted_gateway as gateway
 from exomem import structured_collections as collections
 from exomem.writer_lease import LeaseConfig, LeaseManager
@@ -22,7 +28,14 @@ RECORD_ACTIONS = (
     "update",
     "revise",
     "rebaseline",
+    "discard",
 )
+
+#: What `hosted-alpha-agent-v2` published, frozen. A historical Hosted candidate
+#: is an immutable release identity whose contract must not follow the live
+#: registry (see `hosted_legacy_schemas`), so a new action lands on the current
+#: profile and leaves this list where its promotion record found it.
+HOSTED_V2_RECORD_ACTIONS = tuple(action for action in RECORD_ACTIONS if action != "discard")
 
 
 def test_record_command_exposes_the_lifecycle_arguments_and_selector_routing() -> None:
@@ -63,7 +76,7 @@ def test_record_command_exposes_the_lifecycle_arguments_and_selector_routing() -
     )
     assert all(
         not commands.invocation_is_read_only(command, {"action": action})
-        for action in ("create", "append", "update", "revise", "rebaseline")
+        for action in ("create", "append", "update", "revise", "rebaseline", "discard")
     )
 
 
@@ -126,7 +139,11 @@ def test_hosted_records_v2_is_additive_and_v1_remains_unchanged() -> None:
     assert descriptor.product_commands == tuple(command.name for command in v2)
     contract = gateway.build_agent_gateway_contract(profile="hosted-alpha-agent-v2")
     record_tool = next(entry["mcp_tool"] for entry in contract["commands"] if entry["name"] == "record_memory")
-    assert record_tool["inputSchema"]["properties"]["action"]["enum"] == list(RECORD_ACTIONS)
+    assert record_tool["inputSchema"]["properties"]["action"]["enum"] == list(
+        HOSTED_V2_RECORD_ACTIONS
+    )
+    assert "held" not in record_tool["inputSchema"]["properties"]
+    assert "hold" not in record_tool["inputSchema"]["properties"]
 
 
 def test_public_revise_keeps_the_closed_receipt_through_graph_handoff_and_replay(

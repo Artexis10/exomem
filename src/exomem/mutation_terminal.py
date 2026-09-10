@@ -22,6 +22,9 @@ _RECORD_RECEIPT_FIELDS = (
     "operation",
     "collection_id",
     "item_key",
+    # Only a discard carries this; it names the candidate the call removed, and
+    # without it the compact response says nothing about what was discarded.
+    "held_id",
     "before_item_hash",
     "after_item_hash",
     "before_manifest_hash",
@@ -1528,15 +1531,23 @@ def valid_record_receipt(value: Any) -> bool:
         value.get("_record_receipt") != _RECORD_RECEIPT_MARKER
         or type(value.get("receipt_version")) is not int
         or value.get("receipt_version") != _RECORD_RECEIPT_VERSION
-        or operation not in {"create", "append", "update"}
         or not _normalized_uuid(value.get("collection_id"))
         or not isinstance(value.get("affected_paths"), list)
         or len(value["affected_paths"]) > 16
         or not all(
             isinstance(path, str) and 0 < len(path) <= 1024 for path in value["affected_paths"]
         )
-        or value.get("outcome") not in {"committed", "replayed"}
     ):
+        return False
+    # A discard has its own closed shape and never mixes with the committing
+    # operations: it is admitted here rather than by widening their outcome set,
+    # so `outcome: discarded` stays impossible for an append or an update.
+    if operation == "discard":
+        return _valid_discard_receipt(value)
+    if operation not in {"create", "append", "update"} or value.get("outcome") not in {
+        "committed",
+        "replayed",
+    }:
         return False
     outcome = value.get("outcome")
     correlation = value.get("audit_correlation")
@@ -1602,6 +1613,33 @@ def valid_record_receipt(value: Any) -> bool:
     if operation == "create":
         return True
     return False
+
+
+def _valid_discard_receipt(value: Mapping[str, Any]) -> bool:
+    """Whether *value* is the closed receipt a held-candidate discard returns.
+
+    A discard removes a candidate that never entered the audit chain, so there
+    is no item key, no item or container hash and nothing to correlate; the
+    removed reference and its path are the whole of it. The key set is exact so
+    that admitting this shape cannot admit a malformed committing receipt.
+    """
+    if set(value) != {
+        "_record_receipt",
+        "receipt_version",
+        "operation",
+        "collection_id",
+        "held_id",
+        "affected_paths",
+        "outcome",
+        "audit_correlation",
+    }:
+        return False
+    return (
+        value.get("outcome") == "discarded"
+        and _normalized_uuid(value.get("held_id"))
+        and value.get("audit_correlation") is None
+        and len(value["affected_paths"]) == 1
+    )
 
 
 def _valid_lifecycle_record_receipt(value: Mapping[str, Any]) -> bool:

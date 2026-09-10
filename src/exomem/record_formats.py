@@ -2337,6 +2337,63 @@ def _closes_fence(line: bytes, fence: tuple[bytes, int]) -> bool:
     return count >= minimum and stripped[count:].strip() == b""
 
 
+@dataclass(frozen=True, slots=True)
+class LogGrammarTokens:
+    """The literal tokens a Markdown-log rendering reserves for its own grammar.
+
+    A candidate value carrying one of them cannot be rendered losslessly, which
+    makes it a representability failure of that storage strategy exactly like a
+    line break — so the validator judges it with a field path before the writer
+    lease, and the render checks stay only as a last line of defence.
+    """
+
+    #: Heading fields declared `type: string`; dated fields render through a
+    #: manifest-owned format, so their raw value is not what reaches the heading.
+    heading_string_fields: tuple[str, ...]
+    separator: str
+    note_field: str | None
+    note_open: str | None
+    note_close: str | None
+    container_field: str
+    child_fields: tuple[str, ...]
+    delimiter: str
+
+
+def log_grammar_tokens(
+    manifest: collections.CollectionManifest,
+) -> LogGrammarTokens | None:
+    """Return the log grammar's reserved tokens, or None if it does not parse.
+
+    An unparseable descriptor is a manifest fault, not a candidate fault, so it
+    is left to the render layer to refuse rather than reported against a field.
+    """
+    if manifest.storage.strategy != "markdown-log":
+        return None
+    heading = manifest.storage.descriptor.get("item_heading")
+    if not isinstance(heading, Mapping):
+        return None
+    try:
+        grammar = _heading_grammar(heading)
+        _prefix, delimiter, fields, container = _child_grammar(
+            manifest.storage.descriptor.get("child_rows"), manifest.schema
+        )
+    except collections.CollectionError:
+        return None
+    note = grammar.note
+    return LogGrammarTokens(
+        heading_string_fields=tuple(
+            field.name for field in grammar.fields if field.type == "string"
+        ),
+        separator=grammar.separator,
+        note_field=note.field if note is not None else None,
+        note_open=note.open if note is not None else None,
+        note_close=note.close if note is not None else None,
+        container_field=container,
+        child_fields=fields,
+        delimiter=delimiter,
+    )
+
+
 def _heading_grammar(value: Mapping[str, Any]) -> _HeadingGrammar:
     if set(value) != {"level", "fields", "separator", "note"} and set(value) != {
         "level",

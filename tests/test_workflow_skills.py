@@ -374,6 +374,22 @@ def test_shipped_records_guidance_routes_observed_state_without_magic_verbs() ->
         / "operations.md",
     )
 
+    mutation_copies = (
+        workflow_skills.WORKFLOW_SKILLS_DIR.parent / "references" / "mutation-results.md",
+        repo_root
+        / "plugins"
+        / "claude-code"
+        / "skills"
+        / "exomem"
+        / "references"
+        / "mutation-results.md",
+    )
+    for path in skill_copies + mutation_copies:
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        assert "is held rather than lost" in text
+        assert "`held` reference" in text or "held=..." in text
+        assert "breadcrumbs as Evidence" in text
+
     for path in skill_copies + operation_copies:
         text = " ".join(path.read_text(encoding="utf-8").split())
         assert "without waiting for a magic verb" in text

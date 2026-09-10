@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import stat
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
@@ -24,6 +24,8 @@ _PUBLIC_LINK_INDEX_AUTHORIZED_BYTES = 4 * 1024 * 1024
 _INTERNAL_LINK_INDEX_AUTHORIZED_BYTES = 32 * 1024 * 1024
 _MAX_LINK_INDEX_ENTRY_BYTES = 256 * 1024
 _PRESENTATION_FINDING_LIMIT = 128
+#: Held references are a route back to a blocked candidate, not a listing of one.
+_HELD_REFERENCE_LIMIT = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +50,7 @@ _INSPECTION_KEYS = frozenset(
         "lifecycle_guards",
         "presentation",
         "observed_values",
+        "coverage",
     }
 )
 _INSPECTION_VIEW_QUERY_KEYS = frozenset(
@@ -520,6 +523,10 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
     )
     if observed_values is not None and normalized_observed is None:
         return None
+    coverage = payload.get("coverage")
+    normalized_coverage = None if coverage is None else _inspection_coverage(coverage)
+    if coverage is not None and normalized_coverage is None:
+        return None
     contract, legacy = payload.get("contract"), payload.get("legacy")
     if kind == "collection":
         if legacy is not None or not isinstance(contract, Mapping):
@@ -665,8 +672,67 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         ),
         **({"lifecycle_guards": dict(guards)} if guards is not None else {}),
         **({"observed_values": normalized_observed} if normalized_observed is not None else {}),
+        **({"coverage": normalized_coverage} if normalized_coverage is not None else {}),
     }
     return result
+
+
+def _inspection_coverage(value: Any) -> dict[str, Any] | None:
+    """Rebuild the coverage block; a reference names a candidate, never its values."""
+    if not isinstance(value, Mapping) or set(value) != {
+        "committed",
+        "held",
+        "held_refs",
+        "unreadable",
+    }:
+        return None
+    committed, held, references = value["committed"], value["held"], value["held_refs"]
+    unreadable = value["unreadable"]
+    if (
+        type(committed) is not int
+        or committed < 0
+        or type(held) is not int
+        or held < 0
+        or type(unreadable) is not int
+        or not 0 <= unreadable <= held
+        or not isinstance(references, list)
+        or len(references) > _HELD_REFERENCE_LIMIT
+        or len(references) > held
+    ):
+        return None
+    normalized: list[dict[str, Any]] = []
+    for reference in references:
+        if not isinstance(reference, Mapping) or set(reference) != {
+            "held_id",
+            "held_at",
+            "attempted_action",
+            "diagnostics",
+        }:
+            return None
+        held_id = _inspection_identifier(reference.get("held_id"))
+        held_at = _inspection_string(reference.get("held_at"), maximum=64)
+        action = reference.get("attempted_action")
+        summary = _inspection_string(
+            reference.get("diagnostics"), maximum=256, nonempty=False
+        )
+        if held_id is None or held_at is None or action not in {"append", "update"}:
+            return None
+        if summary is None:
+            return None
+        normalized.append(
+            {
+                "held_id": held_id,
+                "held_at": held_at,
+                "attempted_action": action,
+                "diagnostics": summary,
+            }
+        )
+    return {
+        "committed": committed,
+        "held": held,
+        "unreadable": unreadable,
+        "held_refs": normalized,
+    }
 
 
 egress.register_projector(
@@ -703,6 +769,7 @@ egress.register_projector(
         "lifecycle_guards",
         "presentation",
         "observed_values",
+        "coverage",
     ),
     validator=_validate_record_inspection,
 )
@@ -717,6 +784,7 @@ egress.register_projector(
         "operation",
         "collection_id",
         "item_key",
+        "held_id",
         "before_item_hash",
         "after_item_hash",
         "before_manifest_hash",
@@ -1279,6 +1347,13 @@ def inspect_collection(
                 "audit": _inspection_audit(audit),
                 "saved_views": saved_views,
                 "lifecycle_guards": guards,
+                "coverage": _collection_coverage(
+                    root,
+                    manifest,
+                    committed=inspection.record_count,
+                    authorize=lambda path: _authorize(root, path, receipt=True),
+                    references=True,
+                ),
                 # Item-derived, so it rides the same authorized item pass the rest
                 # of this payload does; nothing recomputes it from unfiltered bytes.
                 **(
@@ -1301,6 +1376,79 @@ def inspect_collection(
         projected = egress.project(payload, egress.LEVEL_FULL, kind="record_inspection") or {}
         egress.emit_boundary_receipt(collector)
         return projected
+
+
+def _collection_coverage(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    *,
+    committed: int | None,
+    authorize: Callable[[str], bool],
+    references: bool,
+) -> dict[str, Any]:
+    """Committed and held counts for one collection, under the item release filter.
+
+    Held candidates pass the same per-item filter the items do before they are
+    counted or named, so a blocked ledger is visible to exactly the audiences
+    allowed to see what is blocking it.
+    """
+    from . import records
+
+    # A count-only surface opens nothing: it answers "how many", and a held
+    # payload is the caller's own refused observation.
+    census = records.held_census(root, manifest, authorize_path=authorize, load=references)
+    coverage: dict[str, Any] = {"committed": committed, "held": census.held}
+    if references:
+        coverage["unreadable"] = census.unreadable
+        coverage["held_refs"] = [
+            {
+                "held_id": candidate.held_id,
+                "held_at": candidate.held_at,
+                "attempted_action": candidate.attempted_action,
+                "diagnostics": _diagnostics_summary(candidate.diagnostics),
+            }
+            for candidate in census.candidates[:_HELD_REFERENCE_LIMIT]
+        ]
+    return coverage
+
+
+def _diagnostics_summary(diagnostics: Sequence[Mapping[str, Any]]) -> str:
+    """One line naming the first failing field and code, never a candidate value.
+
+    An undeclared field name is caller-supplied text that may itself be a value
+    in the wrong position, so those are counted rather than echoed.
+    """
+    if not diagnostics:
+        return ""
+    first = diagnostics[0]
+    code = str(first.get("code", ""))
+    if code == "SCHEMA_UNKNOWN_FIELD":
+        undeclared = sum(1 for issue in diagnostics if issue.get("code") == code)
+        return f"{code}: {undeclared} undeclared fields"
+    summary = f"{code}: {first.get('field', '')}"
+    remaining = len(diagnostics) - 1
+    return f"{summary} (+{remaining} more)" if remaining > 0 else summary
+
+
+def _inventory_coverage(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    authorize: Callable[[str], bool],
+) -> dict[str, Any]:
+    """Inventory-grade coverage: counts only, and `None` when items are unreadable.
+
+    A collection this sweep cannot read has no honest committed count, and zero
+    would claim one. Absent is not an option here because every row carries the
+    same keys, so the hole is named rather than filled.
+    """
+    try:
+        snapshot = record_formats.load_adapter(root, manifest, authorize_path=authorize).read()
+        committed: int | None = len(snapshot.records)
+    except collections.CollectionError:
+        committed = None
+    return _collection_coverage(
+        root, manifest, committed=committed, authorize=authorize, references=False
+    )
 
 
 def _presentation_inspection(
@@ -1332,7 +1480,13 @@ def _presentation_inspection(
 
 
 def inventory_collections(vault_root: Path, *, semantic_profile: str = "records") -> dict[str, Any]:
-    """Return a bounded authorized inventory without opening canonical item data.
+    """Return a bounded authorized inventory with a per-collection census.
+
+    It returns no item contents and parses no legacy item grammar, but the
+    committed count is a real census: each releasable first-class collection's
+    adapter snapshot is read to count its items, and a collection that cannot be
+    read reports `committed: None` rather than a zero it did not measure. The
+    held count is taken from a directory listing and opens no candidate payload.
 
     Both profiles answer "what is here?" the same way and under the same
     disclosure filtering; only the profile selected and the legacy-tracker sweep
@@ -1370,6 +1524,7 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
                     "lifecycle": manifest.lifecycle,
                     "storage_strategy": manifest.storage.strategy,
                     "natural_key": list(manifest.schema.natural_key),
+                    **_inventory_coverage(root, manifest, authorize),
                 }
                 for manifest in manifests
             ],
@@ -2146,6 +2301,7 @@ def project_mutation_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
             "operation",
             "collection_id",
             "item_key",
+            "held_id",
             "before_item_hash",
             "after_item_hash",
             "before_manifest_hash",
