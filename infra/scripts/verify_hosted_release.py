@@ -751,24 +751,30 @@ def _evidence_file(
 
 
 def _validate_legacy_manifest(manifest: dict[str, Any], lock: dict[str, Any]) -> None:
-    """Validate rollback evidence and bind it when a live legacy unit remains."""
+    """Validate rollback evidence and keep it exact for any legacy unit it names.
+
+    The rollback tuple is the frozen D0 baseline carried from lock to lock; which
+    runtimes are still live is proven by the fleet inventory and the reviewed legacy
+    catalog, not by this manifest. A manifest naming a release the catalog carries
+    must agree with that unit's identity; one naming a release outside the catalog
+    is the baseline itself and is accepted.
+    """
 
     validate_release_manifest(manifest, manifest)
-    legacy_catalog = lock["composition"]["legacyCatalog"]
-    if not legacy_catalog:
-        return
-    matches = []
-    for unit in legacy_catalog:
+    for unit in lock["composition"]["legacyCatalog"]:
         contract = unit["contract"]
         if (
-            manifest["release"] == contract["releaseVersion"]
-            and manifest["hostedProtocol"] == contract["protocolVersion"]
-            and manifest["runtimeImage"] == contract["runtimeImage"]
-            and manifest["sourceCommit"] == contract["sourceCommit"]
+            manifest["release"] != contract["releaseVersion"]
+            or manifest["hostedProtocol"] != contract["protocolVersion"]
         ):
-            matches.append(unit)
-    if len(matches) != 1:
-        raise ValueError("rollback manifest does not equal one reviewed legacy runtime identity")
+            continue
+        if (
+            manifest["runtimeImage"] != contract["runtimeImage"]
+            or manifest["sourceCommit"] != contract["sourceCommit"]
+        ):
+            raise ValueError(
+                "rollback manifest contradicts the reviewed legacy runtime identity it names"
+            )
 
 
 def _substitute_v1_corpus_tokens(value: object) -> object:

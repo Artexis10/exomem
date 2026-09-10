@@ -367,6 +367,41 @@ def test_empty_legacy_catalog_still_accepts_a_valid_rollback_manifest() -> None:
         verifier._validate_legacy_manifest(manifest, lock)
 
 
+def test_rollback_baseline_outside_the_legacy_catalog_is_accepted() -> None:
+    """The D0 rollback tuple outlives the legacy fleet it was first bound to."""
+
+    verifier = _module(VERIFIER)
+    lock = _member("expand")
+    catalog = lock["composition"]["legacyCatalog"]  # type: ignore[index]
+    assert catalog, "the fixture pair must carry a reviewed legacy unit"
+    manifest = json.loads(LEGACY_MANIFEST.read_text(encoding="utf-8"))
+    assert all(
+        (manifest["release"], manifest["hostedProtocol"])
+        != (unit["contract"]["releaseVersion"], unit["contract"]["protocolVersion"])
+        for unit in catalog
+    )
+
+    verifier._validate_legacy_manifest(manifest, lock)
+
+
+def test_rollback_manifest_must_agree_with_the_legacy_unit_it_names() -> None:
+    verifier = _module(VERIFIER)
+    lock = _member("expand")
+    contract = lock["composition"]["legacyCatalog"][0]["contract"]  # type: ignore[index]
+    manifest = json.loads(LEGACY_MANIFEST.read_text(encoding="utf-8"))
+    manifest["release"] = contract["releaseVersion"]
+    manifest["hostedProtocol"] = contract["protocolVersion"]
+    manifest["runtimeImage"] = contract["runtimeImage"]
+    manifest["sourceCommit"] = contract["sourceCommit"]
+    manifest["publishedTag"] = f"ghcr.io/artexis10/exomem:{contract['sourceCommit']}-hosted"
+
+    verifier._validate_legacy_manifest(manifest, lock)
+
+    manifest["runtimeImage"] = "ghcr.io/artexis10/exomem@sha256:" + "f" * 64
+    with pytest.raises(ValueError, match="contradicts the reviewed legacy runtime identity"):
+        verifier._validate_legacy_manifest(manifest, lock)
+
+
 def test_fixed_lock_evidence_rejects_substituted_runtime_trust(tmp_path: Path) -> None:
     verifier = _module(VERIFIER)
     lock = _member("expand")
