@@ -3525,14 +3525,15 @@ class HelmCliAdapter:
             )
         return prior
 
-    async def _rollback_already_committed(
+    async def _operation_prior_revisions(
         self,
         metadata: OpaqueProviderMetadata,
         environment: dict[str, str],
         *,
-        current: dict[str, Any],
         operation_digest: str,
-    ) -> bool:
+    ) -> set[int]:
+        """The rollback points recorded by every revision this operation ever applied."""
+
         prior_revisions: set[int] = set()
         for item in await self._release_history(metadata, environment):
             revision = item["revision"]
@@ -3540,6 +3541,16 @@ class HelmCliAdapter:
             prior = self._runtime_upgrade_prior(historical.get("runtimeUpgrade"), operation_digest)
             if prior is not None:
                 prior_revisions.add(prior)
+        return prior_revisions
+
+    async def _rollback_already_committed(
+        self,
+        metadata: OpaqueProviderMetadata,
+        environment: dict[str, str],
+        *,
+        current: dict[str, Any],
+        prior_revisions: set[int],
+    ) -> bool:
         if not prior_revisions:
             return False
         if len(prior_revisions) != 1:
@@ -3617,19 +3628,31 @@ class HelmCliAdapter:
         digest = self._operation_digest(operation_id)
         prior = self._runtime_upgrade_prior(marker, digest)
         if prior is None:
-            if require_marker and await self._rollback_already_committed(
-                metadata,
-                environment,
-                current=current,
-                operation_digest=digest,
+            if not require_marker:
+                return
+            prior_revisions = await self._operation_prior_revisions(
+                metadata, environment, operation_digest=digest
+            )
+            if await self._rollback_already_committed(
+                metadata, environment, current=current, prior_revisions=prior_revisions
             ):
                 return
-            if require_marker:
-                raise MetadataConflict(
-                    "Helm runtime rollback authority is absent",
-                    reason=ConflictReason.HELM_RUNTIME_ROLLBACK_AUTHORITY_IS_ABSENT,
-                )
-            return
+            if marker is None and not prior_revisions:
+                # No revision ever carried this operation's marker and nothing else
+                # holds one: the rollforward never reached Helm, so the release is
+                # already the runtime a rollback would restore. Refusing here would
+                # leave the caller's recovery unable to finish for a cell that was
+                # never touched. A marker owned by another operation still refuses:
+                # reverting someone else's transition is not this operation's authority.
+                # Accepted residual: a worker that dies right after its apply, followed by
+                # enough unrelated transitions to age the marked revision out of Helm's
+                # retained history, reads the same way; the cell operation lock makes
+                # that a crash-plus-ten-mutations event, not an ordinary retry.
+                return
+            raise MetadataConflict(
+                "Helm runtime rollback authority is absent",
+                reason=ConflictReason.HELM_RUNTIME_ROLLBACK_AUTHORITY_IS_ABSENT,
+            )
         result = await self._runner(
             (
                 self._binary,
