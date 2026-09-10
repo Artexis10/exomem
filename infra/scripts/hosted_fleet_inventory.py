@@ -1478,14 +1478,17 @@ def reconcile_inventory(
         ):
             current["issues"].add("runtime_identity_divergence")
 
-        reviewer_flags = {current["reviewerAuthority"], current["reviewerTenant"]}
-        if reviewer_flags == {False, True}:
+        # A reviewer-purpose tenant is a reviewer cell for its whole life: the purpose
+        # is immutable, while reviewer credentials are issued for bounded windows and
+        # expire between runs. Only live reviewer authority on a tenant that is not
+        # reviewer-purpose is a divergence.
+        if current["reviewerAuthority"] and not current["reviewerTenant"]:
             current["issues"].add("reviewer_state_divergence")
         for issue in current["issues"]:
             issues.add(issue)
 
         terminal = destroyed_binding and not live_other
-        reviewer = current["reviewerAuthority"] and current["reviewerTenant"]
+        reviewer = current["reviewerTenant"]
         if current["issues"]:
             classification = "inconsistent"
             inconsistent_count += 1
