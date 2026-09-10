@@ -242,6 +242,12 @@ def _governance_recovery_snapshot(
     return _governance_recovery_digest(operation, fence.fence_generation)
 
 
+# One restart per row. A caller that must retry gets its work re-attempted once;
+# if it fails again the row stays terminal, so the refusal reaches the caller and
+# counts against its own budget instead of hiding a repeatable failure behind a
+# perpetual pending.
+_REPLAY_RESTART_MARKER = "_replay_restart_v1"
+
 LegacyTarget = tuple[tuple[str, str], ...]
 
 
@@ -893,6 +899,13 @@ class OperationRepository:
                             existing.finalized_at = None
                             existing.available_at = restarted_at
                             existing.retry_after_seconds = retry_after_seconds
+                            # Recording the restart also spends it: the predicate
+                            # requires empty progress, so this row can never be
+                            # restarted a second time.
+                            existing.progress = {
+                                **existing.progress,
+                                _REPLAY_RESTART_MARKER: restarted_at.isoformat(),
+                            }
                             await session.flush()
                         return _operation_snapshot(existing)
                     if fence is None:

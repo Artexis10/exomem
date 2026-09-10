@@ -1069,9 +1069,24 @@ async def test_replay_restarts_a_terminal_operation_that_recorded_nothing(
         row = await session.get(Operation, submitted.id)
         assert row is not None
         assert (row.checkpoint, row.error_code, row.finalized_at) == ("queued", None, None)
-        assert row.progress == {}
+        # The restart is recorded, which also spends it.
+        assert list(row.progress) == ["_replay_restart_v1"]
     reclaimed = await repository.claim_next("requeue-worker-two")
     assert reclaimed is not None and reclaimed.id == submitted.id
+    assert reclaimed.claim_token is not None
+
+    # A second failure is the caller's answer, not another restart: the refusal has
+    # to reach it so the failure counts against its own budget.
+    await repository.fail(
+        submitted.id,
+        "requeue-worker-two",
+        claim_token=reclaimed.claim_token,
+        claim_generation=reclaimed.claim_generation,
+        code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+    )
+    second = await repository.submit("rollback-rollforward", "requeue-effect-free", request)
+    assert second.state is OperationState.ERROR
+    assert await repository.claim_next("requeue-worker-three") is None
 
 
 @pytest.mark.asyncio
