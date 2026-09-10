@@ -53,6 +53,11 @@ on:
         required: false
         default: false
         type: boolean
+      governance_migration_drill:
+        description: Run the disposable governance v3-to-v4 migration and recovery drill
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -268,6 +273,46 @@ jobs:
           uv run --frozen python infra/scripts/verify_provisioner_image.py \
             --image "$PROVISIONER_IMAGE" \
             --require-published
+
+  governance-migration-drill:
+    name: Disposable governance migration and recovery drill
+    if: github.event_name == 'workflow_dispatch' && inputs.governance_migration_drill
+    needs: static
+    runs-on: ubuntu-24.04
+    # The drill builds the runtime image, imports it into exact K3s, and replays
+    # the migration once per interruption boundary against a real cluster.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Install the exact pinned Helm
+        run: |
+          source infra/tool-versions.env
+          go install helm.sh/helm/v3/cmd/helm@v${HELM_VERSION}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Build the platform chart dependencies
+        run: helm dependency build infra/helm/platform
+      - name: Replay the governance migration and recovery drill on exact K3s
+        env:
+          RUN_K3S_GOVERNANCE_DRILL_TEST: "1"
+          RUN_K3S_RUNTIME_TEST: "1"
+        run: |
+          HELM_BIN="$(command -v helm)" \
+          uv run --frozen --with-editable ./infra/provisioner \
+            pytest -q -p no:cacheprovider tests/test_hosted_k3s_governance_drill.py
 
   external-blackbox:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.external_blackbox)
