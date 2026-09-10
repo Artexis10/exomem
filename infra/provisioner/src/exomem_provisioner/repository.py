@@ -42,6 +42,7 @@ from .provider_identity import cell_resource_name
 from .wire_protocol import (
     FORWARD_ONLY_ACTIONS,
     RUNTIME_IDENTITY_FIELDS,
+    SINGLE_PHASE_ACTIONS,
     WIRE_PROTOCOL_V1,
     WIRE_PROTOCOL_V2,
 )
@@ -129,6 +130,39 @@ def _terminal_failure_checkpoint(operation: Operation) -> str:
     if _holds_governance_checkpoint(operation, operation.checkpoint):
         return operation.checkpoint
     return "failed"
+
+
+def _is_effect_free_terminal(operation: Operation) -> bool:
+    """Whether a terminal row still describes work that was submitted and never done.
+
+    Only a single-phase action qualifies -- one whose dispatch settles or raises
+    without parking on a checkpoint of its own. A terminal failure collapses any
+    non-governance checkpoint to "failed", so for a multi-phase action the row no
+    longer says how far the attempt got: a rollforward that failed while releasing
+    its maintenance lease, with the new image already live and serving, reads
+    exactly like one that never started. Restarting that would close the routes of
+    a healthy cell to redo work it had already finished.
+
+    Within the single-phase set, failure state and retained progress are still
+    distinct. A governance checkpoint, a counted retry attempt, a stored result, a
+    live claim, provider identity drift -- any of them means the attempt reached
+    something, and only a reviewed recovery may restart it.
+    """
+
+    return (
+        operation.action.value in SINGLE_PHASE_ACTIONS
+        and operation.state is OperationState.ERROR
+        and operation.checkpoint == "failed"
+        and not operation.progress
+        and operation.result_ciphertext is None
+        and not operation.result_redacted
+        and operation.claim_owner is None
+        and operation.claim_token is None
+        and operation.claim_expires_at is None
+        and operation.finalized_at is not None
+        and operation.external_operation_id == operation.provider_operation_id
+        and operation.fence_generation == operation.provider_fence_generation
+    )
 
 
 def _retained_governance_checkpoint(operation: Operation) -> bool:
@@ -842,6 +876,24 @@ class OperationRepository:
                         action=action_value.value,
                     )
                     if existing is not None:
+                        if _is_effect_free_terminal(existing) and not await session.scalar(
+                            select(func.count())
+                            .select_from(Resource)
+                            .where(Resource.operation_id == existing.id)
+                        ):
+                            # The caller is asking for exactly this work again and the
+                            # row proves the first attempt did nothing. Answering the
+                            # replay with a permanent refusal strands it: a control
+                            # plane whose own contract requires it to retry has no
+                            # other move, and no operator stands in that loop.
+                            restarted_at = datetime.now(UTC)
+                            existing.state = OperationState.PENDING
+                            existing.checkpoint = "queued"
+                            existing.error_code = None
+                            existing.finalized_at = None
+                            existing.available_at = restarted_at
+                            existing.retry_after_seconds = retry_after_seconds
+                            await session.flush()
                         return _operation_snapshot(existing)
                     if fence is None:
                         session.add(

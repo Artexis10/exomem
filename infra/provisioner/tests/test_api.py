@@ -16,6 +16,7 @@ from exomem_provisioner.config import PROVISIONER_PROTOCOL, ProvisionerSettings
 from exomem_provisioner.crypto import AesGcmEnvelopeCodec
 from exomem_provisioner.database import ProvisionerDatabase
 from exomem_provisioner.driver import FakeDriver
+from exomem_provisioner.models import OperationState
 from exomem_provisioner.provider_identity import ProviderRecoveryIdentityCodec
 from exomem_provisioner.repository import OperationRepository
 from exomem_provisioner.schemas import FailureResponse, ProvisionRequest, TargetRequest
@@ -1221,3 +1222,54 @@ async def test_unexpected_exception_response_and_repr_do_not_expose_request_secr
     assert response.json() == {"code": "PROVISIONER_UNAVAILABLE", "retryable": True}
     assert _SERVICE_CREDENTIAL not in response.text
     assert "person@example.invalid" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_replay_of_an_effect_free_terminal_operation_is_accepted_again(
+    tmp_path: Path,
+) -> None:
+    """A control plane whose contract makes it retry is not refused forever."""
+
+    path = tmp_path / "requeue-api.sqlite"
+    settings = _settings(path)
+    database = ProvisionerDatabase(settings)
+    await database.create_for_tests()
+    repository = OperationRepository(
+        database.session_factory,
+        codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
+        claim_seconds=settings.claim_seconds,
+    )
+    app = create_app(
+        settings=settings,
+        readiness_probe=database.ready,
+        repository=repository,
+        provider_identity_codec=ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root"),
+    )
+    body = _body_for("renew-authorization")
+    headers = _headers("requeue-api") | {"X-Exomem-Provisioner-Protocol": WIRE_PROTOCOL_V2}
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="https://provisioner.test"
+        ) as client:
+            accepted = await client.post("/cells/renew-authorization", headers=headers, json=body)
+            assert accepted.status_code == 202
+            operation = await repository.get("renew-authorization", "requeue-api")
+            assert operation is not None
+            claim = await repository.claim_next("requeue-api-worker")
+            assert claim is not None and claim.claim_token is not None
+            await repository.fail(
+                operation.id,
+                "requeue-api-worker",
+                claim_token=claim.claim_token,
+                claim_generation=claim.claim_generation,
+                code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+            )
+
+            replay = await client.post("/cells/renew-authorization", headers=headers, json=body)
+
+        assert replay.status_code == 202
+        assert replay.json()["operationId"] == body["operationId"]
+        restarted = await repository.get("renew-authorization", "requeue-api")
+        assert restarted is not None and restarted.state is OperationState.PENDING
+    finally:
+        await database.dispose()

@@ -35,6 +35,18 @@ RUNTIME_IDENTITY_FIELDS = (
 # and resuming through an expand window instead of lapsing.
 FORWARD_ONLY_ACTIONS = frozenset({"provision", "rollforward", "rollback-rollforward"})
 
+# Actions whose own dispatch settles in one pass: it returns a final result or
+# raises, and never parks on a checkpoint of its own, so a terminally failed
+# attempt cannot have left durable progress behind. Every other action advances
+# through checkpoints whose names a terminal failure collapses to "failed", which
+# destroys the evidence of how far it got. The shared observation that runs before
+# dispatch can still park any action -- a cell carrying a stray governance
+# migration Job, say -- but that keeps the operation pending rather than failing
+# it. `CellLifecycleDriver.execute` is the authority for this set and
+# `test_single_phase_actions_settle_without_a_checkpoint_of_their_own` keeps it
+# honest.
+SINGLE_PHASE_ACTIONS = frozenset({"health", "renew-authorization", "rollback-rollforward"})
+
 REQUEST_MODELS_BY_PROTOCOL: Mapping[str, Mapping[str, type[StrictSchema]]] = MappingProxyType(
     {
         WIRE_PROTOCOL_V1: V1_REQUEST_MODELS,
