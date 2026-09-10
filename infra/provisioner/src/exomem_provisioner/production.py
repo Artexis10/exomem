@@ -39,6 +39,7 @@ from .main import _require_production_database
 from .provider_identity import ProviderRecoveryIdentityVerifier
 from .repository import OperationRepository
 from .worker import ProvisionerWorker
+from .worker_loop import run_polling_loop
 from .worker_ownership import ROUTINE_OPERATION_ACTIONS
 
 
@@ -294,9 +295,11 @@ async def _run_worker() -> None:
             capacity_admission=components.capacity,
         )
         try:
-            while True:
-                if not await worker.run_once():
-                    await asyncio.sleep(provider.poll_seconds)
+            await run_polling_loop(
+                worker,
+                poll_seconds=provider.poll_seconds,
+                idle_poll_seconds=provider.idle_poll_seconds,
+            )
         finally:
             await database.dispose()
             await asyncio.to_thread(api_client.close)

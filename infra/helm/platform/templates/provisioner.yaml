@@ -280,6 +280,8 @@ spec:
                   fieldPath: metadata.name
             - name: EXOMEM_PROVISIONER_POLL_SECONDS
               value: {{ .Values.provisioner.pollSeconds | quote }}
+            - name: EXOMEM_PROVISIONER_IDLE_POLL_SECONDS
+              value: {{ .Values.provisioner.idlePollSeconds | quote }}
             - name: HOME
               value: /tmp
             - name: HELM_CACHE_HOME

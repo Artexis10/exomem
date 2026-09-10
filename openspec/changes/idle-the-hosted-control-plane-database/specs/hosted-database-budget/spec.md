@@ -28,7 +28,7 @@ The preflight SHALL distinguish an endpoint capacity ceiling, an alert-only mont
 
 ### Requirement: Placement is a budget control
 
-The preflight SHALL classify every declared consumer of a metered scale-to-zero endpoint as request-driven or always-on, where always-on means the consumer contacts the database on a fixed interval shorter than the endpoint's autosuspend window. An always-on consumer sharing a metered scale-to-zero endpoint SHALL be a named failed control, and the guidance SHALL identify relocation of that consumer, not a plan change, threshold or quota, as the remedy. Consumers SHALL be resolved by endpoint identity rather than by hostname, because a pooled and a direct hostname can address one endpoint.
+The preflight SHALL classify every declared consumer of a metered scale-to-zero endpoint as request-driven or always-on, where always-on means the consumer contacts the database on a fixed interval shorter than the endpoint's autosuspend window. An always-on consumer sharing a metered scale-to-zero endpoint SHALL be a named failed control, and the guidance SHALL identify either relocating that consumer or removing its always-on property, not a plan change, threshold or quota, as the remedy. Because the endpoint stays awake for its most frequent consumer, the guidance SHALL state that the control passes only when every declared consumer clears the autosuspend window. Consumers SHALL be resolved by endpoint identity rather than by hostname, because a pooled and a direct hostname can address one endpoint.
 
 #### Scenario: A poller shares the metered endpoint
 

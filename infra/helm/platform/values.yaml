@@ -37,6 +37,9 @@ provisioner:
   location: fsn1
   internalOrigin: http://{resource}.{namespace}.svc.cluster.local:8765
   pollSeconds: "1"
+  # Ceiling for the routine worker's idle backoff. It must stay above the database's
+  # autosuspend timeout, or an idle fleet keeps a serverless endpoint awake for nothing.
+  idlePollSeconds: "300"
   providerRecoveryPublicKeySecret:
     name: exomem-provider-recovery-verifier
     key: public-key
@@ -53,17 +56,17 @@ admission:
 
 scheduler:
   contractVersion: 1
-  contractSha256: 02c1b9fa8d031ed77df9015f8555cfc95545b266767474aa52a8ccf08f4b40fc
+  contractSha256: 03ec8f7ae6f1a221ef8ac73e390be029b180df08e0b55806812496ea9fca7733
   secretName: exomem-hosted-scheduler
   secretKey: secret
 
 observability:
-  contractSha256: b616e6b07b39226cb16296b86c818e8f613efa85e883f261efb0685fd87ec7dd
+  contractSha256: 30671acff9bfc15fa825fbc72292f6435cf3ce994c0de04f4649ee46ee343f63
   alertDeliverySecretName: exomem-hosted-alert-delivery
   alertDeliverySecretKey: url
 
 capacityCollector:
-  schedule: "* * * * *"
+  schedule: "*/5 * * * *"
   contractSha256: 9339f62fd322c1d82361ec90506d45e840a38d7abd3f7948507d03adcc572e76
   hcloudServerId: 0
   stateConfigMap: exomem-capacity-receipt
@@ -75,7 +78,7 @@ capacityCollector:
     key: token
 
 durability:
-  contractSha256: 3d1445fe13a4be75ea7bed5c9593f8745e5197926710786cd48c2e9463582dc8
+  contractSha256: 8381b6b85f9afa45eb25323a4b4aedba3ecc1234aa632b38a852f86c14fb48c6
   storageContractSha256: 68e26665af9a48c831c975bc96afb03fbf47e229f89a3c13bc852809787de0f5
   b2Endpoint: ""
   b2Region: ""
