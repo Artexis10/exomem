@@ -1039,3 +1039,101 @@ async def test_encrypted_request_and_refs_survive_restart_without_plaintext_in_d
         operation_columns = {row[1] for row in connection.execute("PRAGMA table_info(operations)")}
     assert "request_json" not in operation_columns
     assert "request_ciphertext" in operation_columns
+
+
+@pytest.mark.asyncio
+async def test_replay_restarts_a_terminal_operation_that_recorded_nothing(
+    repository: OperationRepository,
+) -> None:
+    """A control plane that must retry gets its work restarted, not refused forever."""
+
+    request = _request(operationId="requeue-alpha")
+    submitted = await repository.submit("rollback-rollforward", "requeue-effect-free", request)
+    claim = await repository.claim_next("requeue-worker")
+    assert claim is not None and claim.claim_token is not None
+    await repository.fail(
+        submitted.id,
+        "requeue-worker",
+        claim_token=claim.claim_token,
+        claim_generation=claim.claim_generation,
+        code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+    )
+    failed = await repository.get("rollback-rollforward", "requeue-effect-free")
+    assert failed is not None and failed.state is OperationState.ERROR
+
+    replay = await repository.submit("rollback-rollforward", "requeue-effect-free", request)
+
+    assert replay.id == submitted.id
+    assert replay.state is OperationState.PENDING
+    async with repository.session_factory() as session:
+        row = await session.get(Operation, submitted.id)
+        assert row is not None
+        assert (row.checkpoint, row.error_code, row.finalized_at) == ("queued", None, None)
+        assert row.progress == {}
+    reclaimed = await repository.claim_next("requeue-worker-two")
+    assert reclaimed is not None and reclaimed.id == submitted.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "effect", ("resource", "counted-retry", "retained-checkpoint", "multi-phase-action")
+)
+async def test_replay_refuses_a_terminal_operation_that_recorded_anything(
+    repository: OperationRepository,
+    effect: str,
+) -> None:
+    """Anything the first attempt may have retained keeps the row terminal.
+
+    `multi-phase-action` is the case a terminal failure cannot describe: it
+    collapses the checkpoint to "failed", so a provision that got most of the way
+    through is durably indistinguishable from one that never began.
+    """
+
+    action = "provision" if effect == "multi-phase-action" else "rollback-rollforward"
+    request = _request(operationId=f"kept-{effect}")
+    submitted = await repository.submit(action, f"kept-{effect}", request)
+    claim = await repository.claim_next("kept-worker")
+    assert claim is not None and claim.claim_token is not None
+    if effect == "resource":
+        await repository.record_resource(
+            operation_id=submitted.id,
+            worker_id="kept-worker",
+            claim_token=claim.claim_token,
+            claim_generation=claim.claim_generation,
+            tenant_id=str(request["tenantId"]),
+            cell_id=str(request["cellId"]),
+            kind=ResourceKind.KUBERNETES_NAMESPACE,
+            recoverable_reference="cell-namespace",
+            provider_operation_id=str(request["operationId"]),
+            provider_fence_generation=int(request["fenceGeneration"]),  # type: ignore[arg-type]
+        )
+    elif effect == "counted-retry":
+        await repository.record_retryable_failure(
+            submitted.id,
+            "kept-worker",
+            claim_token=claim.claim_token,
+            claim_generation=claim.claim_generation,
+            retry_after_seconds=1,
+        )
+        claim = await repository.claim_next(
+            "kept-worker", now=datetime.now(UTC) + timedelta(days=1)
+        )
+        assert claim is not None and claim.claim_token is not None
+    await repository.fail(
+        submitted.id,
+        "kept-worker",
+        claim_token=claim.claim_token,
+        claim_generation=claim.claim_generation,
+        code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+    )
+    if effect == "retained-checkpoint":
+        async with repository.session_factory.begin() as session:
+            row = await session.get(Operation, submitted.id)
+            assert row is not None
+            row.checkpoint = "gm1:complete:" + "A" * 43
+
+    replay = await repository.submit(action, f"kept-{effect}", request)
+
+    assert replay.id == submitted.id
+    assert replay.state is OperationState.ERROR
+    assert await repository.claim_next("kept-worker-two") is None

@@ -47,7 +47,11 @@ from exomem_provisioner.provider_identity import (
     provider_operation_resource_name,
 )
 from exomem_provisioner.repository import OperationRepository
-from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
+from exomem_provisioner.wire_protocol import (
+    SINGLE_PHASE_ACTIONS,
+    WIRE_PROTOCOL_V2,
+    runtime_identity,
+)
 from exomem_provisioner.worker import ProvisionerWorker
 
 
@@ -485,9 +489,7 @@ async def test_rollforward_waits_for_zero_runtime_proof_before_fingerprint_and_m
                 return False
             return await super().runtime_stopped(metadata)
 
-        async def canonical_vault_fingerprint(
-            self, metadata, request, operation_id, *, phase
-        ):
+        async def canonical_vault_fingerprint(self, metadata, request, operation_id, *, phase):
             self.events.append(f"fingerprint:{phase}")
             return await super().canonical_vault_fingerprint(
                 metadata, request, operation_id, phase=phase
@@ -2279,3 +2281,34 @@ def test_every_provider_conflict_on_the_provision_path_names_its_condition() -> 
                 unlabelled.append(f"{module.__name__}:{node.lineno}")
 
     assert unlabelled == [], f"MetadataConflict raised without a condition label: {unlabelled}"
+
+
+@pytest.mark.asyncio
+async def test_single_phase_actions_settle_without_a_checkpoint_of_their_own() -> None:
+    """The repository's restart rule reads this set as proof of no retained progress.
+
+    A terminal failure collapses any non-governance checkpoint to "failed", so the
+    only actions whose failed row still proves nothing was retained are the ones
+    whose dispatch never parks on a checkpoint of its own. This keeps that
+    declaration true. The shared observation ahead of dispatch can still park a
+    cell carrying a stray migration artifact, but that leaves the operation
+    pending rather than terminally failed, which is not what the rule acts on.
+    """
+
+    plane = _RenewingPlane(location="fsn1")
+    config = replace(_config(), runtime_target=_runtime_target(), compatibility_digest="9" * 64)
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+    request = _v2_request()
+    await plane.seed_ready_cell(_metadata(), request, config)
+    context = _context(wire_protocol=WIRE_PROTOCOL_V2)
+
+    assert isinstance(await driver.execute("health", request, context), DriverFinal)
+    assert isinstance(await driver.execute("renew-authorization", request, context), DriverFinal)
+    # No prior rollforward is committed, so this is the failing shape; it must still
+    # settle in one pass rather than parking on a checkpoint.
+    with pytest.raises(DriverTerminal, match="PROVISIONER_PROVIDER_METADATA_CONFLICT"):
+        await driver.execute(
+            "rollback-rollforward", _v2_request(compatibilityDigest="9" * 64), context
+        )
+
+    assert SINGLE_PHASE_ACTIONS == {"health", "renew-authorization", "rollback-rollforward"}
