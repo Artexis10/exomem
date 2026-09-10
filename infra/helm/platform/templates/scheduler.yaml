@@ -17,7 +17,7 @@
 {{- if ne (int $contract.kubernetesJobPolicy.maxAttempts) (add 1 (int $contract.kubernetesJobPolicy.backoffLimit) | int) -}}
 {{- fail "scheduler maxAttempts must equal backoffLimit plus one" -}}
 {{- end }}
-{{- if or (ne $contract.observability.contentFree true) (ne $contract.observability.attemptCounterMetric "exomem_hosted_scheduler_attempts_total") (ne $contract.observability.failureCounterMetric "exomem_hosted_scheduler_failures_total") (ne $contract.observability.durationHistogramMetric "exomem_hosted_scheduler_duration_seconds") (ne $contract.observability.lastSuccessMetric "exomem_hosted_scheduler_last_success_unixtime") (ne (int $contract.observability.missedRunAlertAfterSeconds) 180) (ne (int $contract.observability.consecutiveFailureAlertThreshold) 2) -}}
+{{- if or (ne $contract.observability.contentFree true) (ne $contract.observability.attemptCounterMetric "exomem_hosted_scheduler_attempts_total") (ne $contract.observability.failureCounterMetric "exomem_hosted_scheduler_failures_total") (ne $contract.observability.durationHistogramMetric "exomem_hosted_scheduler_duration_seconds") (ne $contract.observability.lastSuccessMetric "exomem_hosted_scheduler_last_success_unixtime") (ne (int $contract.observability.missedRunAlertAfterSeconds) 900) (ne (int $contract.observability.consecutiveFailureAlertThreshold) 2) -}}
 {{- fail "unsupported hosted scheduler observability contract" -}}
 {{- end }}
 {{- $schedulerEnvironmentVariable := $contract.authentication.schedulerEnvironmentVariable -}}
@@ -66,6 +66,8 @@ data:
 {{- $cadenceSeconds := 0 -}}
 {{- if eq $job.schedule "* * * * *" -}}
 {{- $cadenceSeconds = 60 -}}
+{{- else if eq $job.schedule "*/5 * * * *" -}}
+{{- $cadenceSeconds = 300 -}}
 {{- else if eq $job.schedule "17 * * * *" -}}
 {{- $cadenceSeconds = 3600 -}}
 {{- else -}}

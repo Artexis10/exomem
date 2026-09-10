@@ -36,6 +36,8 @@ data:
 {{- $cadenceSeconds := 0 -}}
 {{- if eq $job.schedule "* * * * *" -}}
 {{- $cadenceSeconds = 60 -}}
+{{- else if eq $job.schedule "*/5 * * * *" -}}
+{{- $cadenceSeconds = 300 -}}
 {{- else if eq $job.schedule "17 * * * *" -}}
 {{- $cadenceSeconds = 3600 -}}
 {{- else -}}

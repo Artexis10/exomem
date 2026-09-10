@@ -33,7 +33,7 @@
     "provisioner": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["deploymentLockJson", "deploymentLockSha256", "runtimeSelection", "replicas", "databaseSchema", "databaseRole", "trustedProxyIps", "cellChartPath", "cellChartVersion", "helmBinary", "helmVersion", "controlHostname", "transferHostname", "browserOrigin", "location", "internalOrigin", "pollSeconds", "providerRecoveryPublicKeySecret", "providerRecoverySigningKeySecret", "capacityReceiptPublicKeySecret"],
+      "required": ["deploymentLockJson", "deploymentLockSha256", "runtimeSelection", "replicas", "databaseSchema", "databaseRole", "trustedProxyIps", "cellChartPath", "cellChartVersion", "helmBinary", "helmVersion", "controlHostname", "transferHostname", "browserOrigin", "location", "internalOrigin", "pollSeconds", "idlePollSeconds", "providerRecoveryPublicKeySecret", "providerRecoverySigningKeySecret", "capacityReceiptPublicKeySecret"],
       "properties": {
         "deploymentLockJson": {"type": "string", "minLength": 1, "maxLength": 1048576, "contentMediaType": "application/json"},
         "deploymentLockSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
@@ -52,6 +52,7 @@
         "location": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,31}$"},
         "internalOrigin": {"type": "string", "pattern": "^https?://\\{resource\\}\\.\\{namespace\\}\\.svc\\.cluster\\.local:[0-9]{2,5}$"},
         "pollSeconds": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+        "idlePollSeconds": {"type": "string", "pattern": "^[1-9][0-9]*$"},
         "providerRecoveryPublicKeySecret": {
           "type": "object",
           "additionalProperties": false,
@@ -117,7 +118,7 @@
       "additionalProperties": false,
       "required": ["schedule", "contractSha256", "hcloudServerId", "stateConfigMap", "privateKeySecret", "hcloudTokenSecret"],
       "properties": {
-        "schedule": {"const": "* * * * *"},
+        "schedule": {"const": "*/5 * * * *"},
         "contractSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
         "hcloudServerId": {"type": "integer", "minimum": 1},
         "stateConfigMap": {"const": "exomem-capacity-receipt"},

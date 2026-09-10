@@ -1046,7 +1046,7 @@ def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -
     }
 
     collector = _find(documents, "CronJob", "exomem-capacity-receipt-collector")
-    assert collector["spec"]["schedule"] == "* * * * *"
+    assert collector["spec"]["schedule"] == "*/5 * * * *"
     assert collector["spec"]["concurrencyPolicy"] == "Forbid"
     pod = collector["spec"]["jobTemplate"]["spec"]["template"]["spec"]
     assert pod["serviceAccountName"] == "exomem-capacity-receipt-collector"
@@ -1197,7 +1197,7 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
         "exomem-deletion-dispatcher": (
             "CronJob",
             ["exomem-deletion-dispatcher"],
-            "* * * * *",
+            "*/5 * * * *",
             True,
         ),
         "exomem-volume-worker": (
@@ -1701,7 +1701,7 @@ def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() 
         "kind": "CronJob",
         "command": ["exomem-durability-actions"],
         "serviceAccount": "exomem-durability-actions",
-        "schedule": "* * * * *",
+        "schedule": "*/5 * * * *",
         "concurrencyPolicy": "Forbid",
         "startingDeadlineSeconds": 45,
         "activeDeadlineSeconds": 4800,
@@ -1722,7 +1722,7 @@ def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() 
     }
 
     cronjob = _find(documents, "CronJob", "exomem-durability-actions")
-    assert cronjob["spec"]["schedule"] == "* * * * *"
+    assert cronjob["spec"]["schedule"] == "*/5 * * * *"
     assert cronjob["spec"]["concurrencyPolicy"] == "Forbid"
     assert cronjob["spec"]["startingDeadlineSeconds"] == 45
     assert cronjob["spec"]["jobTemplate"]["spec"]["activeDeadlineSeconds"] == 4800
@@ -2044,6 +2044,27 @@ def test_runtime_k3s_gate_pins_the_reviewed_release_unit() -> None:
     }
 
 
+def test_no_cronjob_schedule_sits_inside_the_database_autosuspend_window() -> None:
+    """Every heartbeat must clear the endpoint's autosuspend window.
+
+    The endpoint stays awake for its most frequent consumer, so a single job added back
+    at one-minute cadence returns the whole platform to a permanently-awake database and
+    silently undoes the saving. This asserts the property rather than each schedule, so a
+    future CronJob has to opt into the cost explicitly rather than inherit it by copying
+    a neighbour.
+    """
+    documents = _render(
+        PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform"
+    )
+    offenders = sorted(
+        document["metadata"]["name"]
+        for document in documents
+        if document.get("kind") == "CronJob"
+        and document["spec"]["schedule"].split()[0] in {"*", "*/1"}
+    )
+    assert offenders == [], offenders
+
+
 def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> None:
     documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
     storage = _find(documents, "StorageClass", "exomem-hcloud-encrypted-retain")
@@ -2307,7 +2328,11 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         assert env["TARGET_URL"] == contract["origin"] + job["path"]
         assert env["CONNECT_TIMEOUT_SECONDS"] == "5"
         assert env["TOTAL_TIMEOUT_SECONDS"] == "20"
-        assert env["CADENCE_SECONDS"] == ("60" if job["schedule"] == "* * * * *" else "3600")
+        assert env["CADENCE_SECONDS"] == {
+            "* * * * *": "60",
+            "*/5 * * * *": "300",
+            "17 * * * *": "3600",
+        }[job["schedule"]]
         assert container["command"] == [
             "python",
             "/opt/exomem-hosted/scheduler_runtime.py",
@@ -2356,7 +2381,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "durationHistogramMetric": "exomem_hosted_scheduler_duration_seconds",
         "lastSuccessMetric": "exomem_hosted_scheduler_last_success_unixtime",
         "failureCounterMetric": "exomem_hosted_scheduler_failures_total",
-        "missedRunAlertAfterSeconds": 180,
+        "missedRunAlertAfterSeconds": 900,
         "consecutiveFailureAlertThreshold": 2,
     }
 
@@ -2408,7 +2433,7 @@ def test_platform_renders_owned_namespaces_and_content_free_observability() -> N
     assert contract == json.loads(
         (ROOT / "infra/contracts/observability-v1.json").read_text(encoding="utf-8")
     )
-    assert contract["alerts"]["scheduler_missed_run_seconds"] == 180
+    assert contract["alerts"]["scheduler_missed_run_seconds"] == 900
     assert contract["alerts"]["scheduler_consecutive_failures"] == 2
     assert contract["poll_interval_seconds"] == 300
     scheduler_check = next(
@@ -2456,7 +2481,7 @@ def test_platform_renders_owned_namespaces_and_content_free_observability() -> N
         item["name"]: item.get("value")
         for item in evaluator["spec"]["template"]["spec"]["containers"][0]["env"]
     }
-    assert evaluator_env["MISSED_RUN_SECONDS"] == "180"
+    assert evaluator_env["MISSED_RUN_SECONDS"] == "900"
     assert evaluator_env["FAILURE_THRESHOLD"] == "2"
     evaluator_container = evaluator["spec"]["template"]["spec"]["containers"][0]
     webhook = next(

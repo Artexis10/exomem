@@ -33,7 +33,7 @@
     "exomem_pvc_free_bytes"
   ],
   "alerts": {
-    "scheduler_missed_run_seconds": 180,
+    "scheduler_missed_run_seconds": 900,
     "scheduler_consecutive_failures": 2,
     "backup_warn_age_seconds": 93600,
     "backup_block_age_seconds": 108000,

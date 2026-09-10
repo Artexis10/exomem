@@ -25,6 +25,7 @@ from .production import build_live_capacity_admission
 from .provider_identity import ProviderRecoveryIdentityCodec
 from .repository import OperationRepository
 from .worker import CapacityAdmission, ProvisionerWorker
+from .worker_loop import run_polling_loop
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,9 +125,11 @@ async def _run_volume_worker() -> None:
         capacity_admission=capacity,
     )
     try:
-        while True:
-            if not await worker.run_once():
-                await asyncio.sleep(settings.poll_seconds)
+        await run_polling_loop(
+            worker,
+            poll_seconds=settings.poll_seconds,
+            idle_poll_seconds=settings.idle_poll_seconds,
+        )
     finally:
         await database.dispose()
         await asyncio.to_thread(api_client.close)

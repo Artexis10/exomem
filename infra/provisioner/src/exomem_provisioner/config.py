@@ -611,6 +611,10 @@ class ProviderWorkerSettings(BaseSettings):
     internal_origin: str = Field(min_length=1, max_length=2048)
     worker_id: str = Field(min_length=1, max_length=128)
     poll_seconds: float = Field(default=1.0, ge=0.05, le=30)
+    # Ceiling for the idle backoff in `worker_loop.run_polling_loop`. It has to sit
+    # comfortably above the database's autosuspend timeout or the endpoint never gets
+    # an idle gap long enough to suspend, which is the entire point of backing off.
+    idle_poll_seconds: float = Field(default=300.0, ge=0.05, le=3600)
     provider_recovery_public_key: str = Field(
         min_length=40,
         max_length=128,
@@ -732,6 +736,10 @@ class VolumeWorkerSettings(BaseSettings):
     location: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,31}$")
     worker_id: str = Field(min_length=1, max_length=128)
     poll_seconds: float = Field(default=1.0, ge=0.05, le=30)
+    # Ceiling for the idle backoff in `worker_loop.run_polling_loop`. It has to sit
+    # comfortably above the database's autosuspend timeout or the endpoint never gets
+    # an idle gap long enough to suspend, which is the entire point of backing off.
+    idle_poll_seconds: float = Field(default=300.0, ge=0.05, le=3600)
     capacity_receipt_public_key: str = Field(
         min_length=43,
         max_length=43,

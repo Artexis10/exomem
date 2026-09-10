@@ -28,7 +28,7 @@ def test_durability_workload_commands_and_privileges_are_disjoint() -> None:
     assert workloads["deletion"]["kind"] == "JobTemplate"
     assert "schedule" not in workloads["deletion"]
     assert workloads["deletionDispatcher"]["kind"] == "CronJob"
-    assert workloads["deletionDispatcher"]["schedule"] == "* * * * *"
+    assert workloads["deletionDispatcher"]["schedule"] == "*/5 * * * *"
     assert workloads["deletionDispatcher"]["concurrencyPolicy"] == "Forbid"
     assert workloads["deletion"]["maxOperations"] == 1
     assert workloads["deliveryGc"]["automountServiceAccountToken"] is False
@@ -103,7 +103,7 @@ def test_recurring_deletion_dispatcher_has_no_privileged_provider_or_key_materia
         "kind": "CronJob",
         "command": ["exomem-deletion-dispatcher"],
         "serviceAccount": "exomem-deletion-dispatcher",
-        "schedule": "* * * * *",
+        "schedule": "*/5 * * * *",
         "concurrencyPolicy": "Forbid",
         "startingDeadlineSeconds": 45,
         "activeDeadlineSeconds": 30,
