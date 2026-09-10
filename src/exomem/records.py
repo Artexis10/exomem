@@ -6,12 +6,13 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import stat
 import unicodedata
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NotRequired
@@ -41,6 +42,46 @@ _LIFECYCLE_RECEIPT_VERSION = 2
 _LIFECYCLE_REQUEST_DOMAIN = b"exomem-record-lifecycle-request:v2\0"
 _LIFECYCLE_GAP_DOMAIN = b"exomem-record-gap:v2\0"
 _LIFECYCLE_CHECKPOINT_DOMAIN = b"exomem-record-checkpoint:v2\0"
+#: Identity stand-in for the pre-commit round-trip probe. The probe proves the
+#: caller's values survive serialization; the real key is assigned later and is
+#: never what the comparison looks at.
+_ROUND_TRIP_PROBE_KEY = "00000000-0000-4000-8000-000000000000"
+_MAX_RECEIVED_KEY_CHARS = 256
+_HELD_TYPE = "held-record"
+_HELD_DIRECTORY = "Held"
+#: Tagged form for the floats strict JSON cannot spell, restored on resume.
+_HELD_FLOAT_TAG = "__float__"
+#: Wraps a candidate object whose shape collides with an encoder tag.
+_HELD_ESCAPE_TAG = "__escaped__"
+_HELD_RESERVED_SHAPES = ({_HELD_FLOAT_TAG}, {_HELD_ESCAPE_TAG})
+_HELD_NON_FINITE = {
+    "NaN": float("nan"),
+    "Infinity": float("inf"),
+    "-Infinity": float("-inf"),
+}
+_MAX_HELD_BYTES = 256 * 1024
+_MAX_HELD_DIAGNOSTICS = 50
+#: How many held files one census may open. It bounds work, never the count:
+#: the count is taken from the directory listing.
+_MAX_HELD_LOADS = 500
+#: Refusals about the candidate's own content, and therefore the ones worth
+#: preserving. A guard refusal (stale hash, natural-key conflict) is about the
+#: collection's state, so re-stating the write is the whole remedy.
+_CANDIDATE_CONTENT_CODES = frozenset(
+    {"UNREPRESENTABLE_RECORD_VALUE", "SCHEMA_UNKNOWN_FIELD", "SCHEMA_FIELD_TYPE", "SCHEMA_ENUM"}
+)
+_HOLD_FAILED_WARNING = (
+    "HELD_CANDIDATE_NOT_WRITTEN: the refused candidate could not be preserved; "
+    "correct the named fields and resubmit it"
+)
+_HELD_CLEANUP_WARNING = (
+    "HELD_CLEANUP_FAILED: the item committed but its held file could not be removed; "
+    "discard the held reference"
+)
+_ITEM_KEY_REMEDIATION = (
+    "item_key is the internal UUID identity of an item, not its natural key; "
+    "omit item_key on append and identity derives from the declared natural key"
+)
 
 
 class ArtifactDeliveryProof(TypedDict):
@@ -59,6 +100,9 @@ class ArtifactDelivery(TypedDict):
     verified_remote_field: str
     platform_reference_field: NotRequired[str]
     platform_proof: NotRequired[ArtifactDeliveryProof]
+
+
+_HOLD_FAILURES = (OSError, ValueError, TypeError, vault.BatchWriteError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,12 +212,14 @@ def append_record(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
     *,
-    item: Mapping[str, Any],
+    item: Mapping[str, Any] | None = None,
     item_key: str | None = None,
     expected_container_hash: str | None = None,
     why: str,
-    body: str = "",
+    body: str | None = None,
     delivery: ArtifactDelivery | None = None,
+    hold: bool = True,
+    held: str | None = None,
     validate_snapshot: Callable[
         [collections.CollectionManifest, record_formats.AdapterSnapshot, str, Mapping[str, Any]],
         None,
@@ -183,20 +229,72 @@ def append_record(
     """Append one structured item, or return a content-identical replay."""
     root = Path(vault_root)
     _validate_why(why)
-    _refuse_excluded_authored_names(item)
+    hold = _validate_hold(hold)
+    held_id = _validate_held_reference(held)
+    if held_id is None and item is None:
+        raise collections.CollectionError("INVALID_ITEM", "item must be an object")
+    overrides: Mapping[str, Any] = {} if item is None else item
+    _refuse_excluded_authored_names(overrides)
     supplied_manifest = record_governance.resolve_collection_for_mutation(root, collection)
     if supplied_manifest.storage.strategy == "dataset":
         record_formats.load_adapter(root, supplied_manifest).refuse_mutation("append")
-    key = _validate_item_key(item_key) if item_key else None
-    values = _validate_values(supplied_manifest, item)
-    _validate_body(body)
-    if body and supplied_manifest.storage.strategy == "markdown-log":
-        raise collections.CollectionError(
-            "UNREPRESENTABLE_RECORD_BODY", "markdown-log storage cannot represent item bodies"
-        )
+    key = (
+        _validate_item_key(item_key, manifest=supplied_manifest, candidate=overrides)
+        if item_key
+        else None
+    )
+    if held_id is None:
+        try:
+            _validate_values(supplied_manifest, overrides)
+        except collections.CollectionError as error:
+            # A holdable refusal is deferred to the guarded pass, which is the
+            # only place a candidate may be preserved. Nothing else changes: the
+            # same refusal is raised a moment later from inside the boundary.
+            if not _holding_enabled(supplied_manifest, hold) or (
+                error.code not in _CANDIDATE_CONTENT_CODES
+            ):
+                raise
+    if body is not None:
+        _validate_body(body)
+        if body and supplied_manifest.storage.strategy == "markdown-log":
+            raise collections.CollectionError(
+                "UNREPRESENTABLE_RECORD_BODY", "markdown-log storage cannot represent item bodies"
+            )
+    warnings: list[str] = []
     with writer_lease.active_manager().mutation_guard(root, operation="record_append"):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
-        values = _validate_values(manifest, item)
+        resumed = _load_held_candidate(root, manifest, held_id) if held_id else None
+        if resumed is None:
+            item = overrides
+        else:
+            item = _apply_held_overrides(_held_mapping(resumed.candidate, "item"), overrides)
+            _refuse_excluded_authored_names(item)
+        body = _resumed_body(resumed, body)
+        _validate_body(body)
+        if body and manifest.storage.strategy == "markdown-log":
+            raise collections.CollectionError(
+                "UNREPRESENTABLE_RECORD_BODY", "markdown-log storage cannot represent item bodies"
+            )
+        try:
+            values = _validate_values(manifest, item)
+        except collections.CollectionError as error:
+            raise _hold_refusal(
+                root,
+                manifest,
+                error,
+                hold=hold,
+                attempted_action="append",
+                candidate={
+                    "action": "append",
+                    "item": dict(item),
+                    "item_key": item_key,
+                    "body": body,
+                    "guards": {"expected_container_hash": expected_container_hash},
+                },
+                why=why,
+                key_values=item,
+                held_id=resumed.held_id if resumed is not None else None,
+            ) from None
         if key is None:
             # An omitted identity is derived from the declared natural key, so a
             # re-stated observation replays instead of arriving as a second item.
@@ -260,18 +358,22 @@ def append_record(
                 )
                 if delivery_guard is not None:
                     delivery_guard.recheck(root)
-                return _result(
-                    operation="append",
-                    manifest=manifest,
-                    key=key,
-                    before_item_hash=existing[0].source.hash,
-                    after_item_hash=existing[0].source.hash,
-                    before_container_hash=current_hash,
-                    after_container_hash=current_hash,
-                    affected_paths=[existing[0].source.path],
-                    payload_hash=payload_hash,
-                    outcome="replayed",
-                    audit_correlation=correlation,
+                _release_held_file(root, resumed, warnings)
+                return _with_warnings(
+                    _result(
+                        operation="append",
+                        manifest=manifest,
+                        key=key,
+                        before_item_hash=existing[0].source.hash,
+                        after_item_hash=existing[0].source.hash,
+                        before_container_hash=current_hash,
+                        after_container_hash=current_hash,
+                        affected_paths=[existing[0].source.path],
+                        payload_hash=payload_hash,
+                        outcome="replayed",
+                        audit_correlation=correlation,
+                    ),
+                    warnings,
                 )
             raise collections.CollectionError(
                 "RECORD_ID_CONFLICT", "record ID already has different data"
@@ -385,6 +487,8 @@ def append_record(
             outcome="committed",
             audit_correlation=audit_correlation,
         )
+        _release_held_file(root, resumed, warnings)
+        committed = _with_warnings(committed, warnings)
     # Outside the guard on purpose -- see `_due_state_carrier`.
     advisory = _due_state_carrier(root, manifest, path=committed_path, key=key, values=values)
     return {"due_state": advisory, **committed} if advisory else committed
@@ -600,7 +704,7 @@ def update_record(
     collection: str | Path | collections.CollectionManifest,
     *,
     item_key: str,
-    changes: Mapping[str, Any],
+    changes: Mapping[str, Any] | None = None,
     expected_container_hash: str,
     expected_item_version: str,
     why: str,
@@ -608,6 +712,8 @@ def update_record(
     delete_fields: tuple[str, ...] = (),
     body: str | None = None,
     refresh_presentation: bool = False,
+    hold: bool = True,
+    held: str | None = None,
     validate_snapshot: Callable[
         [collections.CollectionManifest, record_formats.AdapterSnapshot, str, Mapping[str, Any]],
         None,
@@ -617,22 +723,35 @@ def update_record(
     """Apply a guarded, exact-key update to one existing Markdown record."""
     root = Path(vault_root)
     _validate_why(why)
+    hold = _validate_hold(hold)
+    held_id = _validate_held_reference(held)
     if body is not None:
         _validate_body(body)
-    item_key = _validate_item_key(item_key)
+    item_key = _validate_update_item_key(root, collection, item_key, changes)
     if type(refresh_presentation) is not bool:
         raise collections.CollectionError(
             "INVALID_RECORD_PRESENTATION", "refresh_presentation must be boolean"
         )
-    if not isinstance(changes, Mapping) or (
-        not changes and not delete_fields and body is None and not refresh_presentation
+    overrides: Mapping[str, Any] = {} if changes is None else changes
+    if held_id is None and (
+        not isinstance(changes, Mapping)
+        or (not changes and not delete_fields and body is None and not refresh_presentation)
     ):
         raise collections.CollectionError(
             "INVALID_RECORD_CHANGES", "changes must be a non-empty object"
         )
-    _refuse_excluded_authored_names(changes)
+    _refuse_excluded_authored_names(overrides)
+    warnings: list[str] = []
     with writer_lease.active_manager().mutation_guard(root, operation="record_update"):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
+        resumed = _load_held_candidate(root, manifest, held_id) if held_id else None
+        if resumed is None:
+            changes = overrides
+        else:
+            changes = _apply_held_overrides(_held_mapping(resumed.candidate, "changes"), overrides)
+            _refuse_excluded_authored_names(changes)
+            delete_fields = delete_fields or _held_delete_fields(resumed)
+            body = _resumed_update_body(resumed, body)
         if refresh_presentation and (
             manifest.record_presentation is None and manifest.item_presentation is None
         ):
@@ -693,7 +812,31 @@ def update_record(
         for name in delete_fields:
             merged.pop(name, None)
         merged.update(changes)
-        values = _validate_values(manifest, merged)
+        try:
+            values = _validate_values(manifest, merged)
+        except collections.CollectionError as error:
+            raise _hold_refusal(
+                root,
+                manifest,
+                error,
+                hold=hold,
+                attempted_action="update",
+                candidate={
+                    "action": "update",
+                    "item_key": item_key,
+                    "changes": dict(changes),
+                    "delete_fields": list(delete_fields),
+                    "body": body,
+                    "guards": {
+                        "expected_container_hash": expected_container_hash,
+                        "expected_item_version": expected_item_version,
+                    },
+                },
+                why=why,
+                key_values=merged,
+                held_id=resumed.held_id if resumed is not None else None,
+                target_item_key=item_key,
+            ) from None
         if _natural_key_moved(manifest, record.values, values):
             twins = _natural_key_twins(manifest, snapshot, item_key, values)
             if twins:
@@ -826,6 +969,8 @@ def update_record(
         )
         committed_path = record.source.path
         before_values = dict(record.values)
+        _release_held_file(root, resumed, warnings)
+        committed = _with_warnings(committed, warnings)
     # Outside the guard on purpose -- see `_due_state_carrier`.
     advisory = _due_state_carrier(
         root,
@@ -2611,6 +2756,12 @@ def _load_guarded_manifest(
 def _validate_values(
     manifest: collections.CollectionManifest, item: Mapping[str, Any]
 ) -> dict[str, Any]:
+    """Validate one candidate, reporting every failing field in one refusal.
+
+    The refusal keeps the code and message the raise-first path produced, so
+    existing consumers are untouched; the complete field-addressed account rides
+    in ``details.issues`` beside ``details.field`` for the first issue.
+    """
     if not isinstance(item, Mapping):
         raise collections.CollectionError("INVALID_ITEM", "item must be an object")
     names = set(item)
@@ -2621,22 +2772,201 @@ def _validate_values(
             "RESERVED_RECORD_FIELD", "item uses a reserved system field"
         )
     representational = _log_note_field(manifest)
-    unknown = (
-        names - set(manifest.schema.fields) - ({representational} if representational else set())
-    )
-    if unknown:
-        raise collections.CollectionError(
-            "SCHEMA_UNKNOWN_FIELD", "item uses fields outside the schema"
+    declared = set(manifest.schema.fields) | ({representational} if representational else set())
+    issues: list[_Issue] = []
+    for name in sorted(names - declared):
+        issues.append(
+            _Issue(
+                field=name,
+                code="SCHEMA_UNKNOWN_FIELD",
+                reason=f"field is not declared: {name}",
+                received=_value_class(item[name]),
+                headline="item uses fields outside the schema",
+            )
         )
     schema_values = {name: value for name, value in item.items() if name in manifest.schema.fields}
-    value = manifest.schema.validate(schema_values)
+    value = _collect_schema_issues(manifest.schema, schema_values, issues)
     if representational:
         note = item.get(representational)
         if note is not None and type(note) is not str:
-            raise collections.CollectionError("SCHEMA_FIELD_TYPE", "heading note must be a string")
+            issues.append(
+                _Issue(
+                    field=representational,
+                    code="SCHEMA_FIELD_TYPE",
+                    reason="heading note must be a string",
+                    received=_value_class(note),
+                )
+            )
         value[representational] = note
-    _validate_representable(value)
+    _collect_representation_issues(manifest, value, issues)
+    if not issues and manifest.storage.strategy == "markdown-items":
+        _collect_round_trip_issues(manifest, value, issues)
+    if issues:
+        raise _issue_refusal(issues)
     return value
+
+
+@dataclass(frozen=True, slots=True)
+class _Issue:
+    """One field-addressed validation failure."""
+
+    field: str
+    code: str
+    reason: str
+    received: str
+    #: The message the raise-first path used for this failure class. It differs
+    #: from `reason` only where the shipped refusal spoke about the item rather
+    #: than the field, and it is what the aggregated refusal still says.
+    headline: str = ""
+    #: Where the failure lives when no single field is at fault. The whole
+    #: candidate frontmatter round-trips as one block, so naming an empty field
+    #: would claim an address the failure does not have.
+    scope: str = ""
+
+    def as_detail(self) -> dict[str, str]:
+        detail: dict[str, str] = {}
+        if self.field:
+            detail["field"] = self.field
+        if self.scope:
+            detail["scope"] = self.scope
+        detail.update({"code": self.code, "reason": self.reason, "received": self.received})
+        return detail
+
+
+def _issue_refusal(issues: list[_Issue]) -> collections.CollectionError:
+    first = issues[0]
+    details: dict[str, Any] = {}
+    if first.field:
+        details["field"] = first.field
+    if first.scope:
+        details["scope"] = first.scope
+    details["issues"] = [issue.as_detail() for issue in issues]
+    return collections.CollectionError(first.code, first.headline or first.reason, details)
+
+
+def _value_class(value: Any) -> str:
+    """The received value's JSON class, never the value itself."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "str"
+    if isinstance(value, Mapping):
+        return "object"
+    if isinstance(value, list | tuple):
+        return "array"
+    return type(value).__name__
+
+
+def _collect_schema_issues(
+    schema: collections.ItemSchema, values: Mapping[str, Any], issues: list[_Issue]
+) -> dict[str, Any]:
+    """Run the shipped per-field schema rules field by field, in declared order."""
+    value = dict(values)
+    for name, spec in schema.fields.items():
+        if spec.required and name not in value:
+            issues.append(
+                _Issue(
+                    field=name,
+                    code="SCHEMA_REQUIRED_FIELD",
+                    reason=f"required field is missing: {name}",
+                    received="null",
+                )
+            )
+        if name in value:
+            _collect_field_issues(name, name, value[name], spec, issues)
+    return value
+
+
+def _collect_field_issues(
+    path: str, name: str, value: Any, spec: collections.FieldSpec, issues: list[_Issue]
+) -> None:
+    """Address one field's failure, refining the path into arrays and objects.
+
+    The shipped validator stays the authority on whether a value is acceptable;
+    the refinement below only decides which sub-path to name.
+    """
+    try:
+        collections.validate_field_value(name, value, spec)
+        return
+    except collections.CollectionError as error:
+        failure = error
+    located = _locate_field_failure(path, name, value, spec)
+    if not located:
+        issues.append(
+            _Issue(
+                field=path,
+                code=failure.code,
+                reason=failure.reason,
+                received=_value_class(value),
+            )
+        )
+        return
+    for sub_path, sub_value, sub_failure in located:
+        issues.append(
+            _Issue(
+                field=sub_path,
+                code=sub_failure.code,
+                reason=sub_failure.reason,
+                received=_value_class(sub_value),
+            )
+        )
+
+
+def _locate_field_failure(
+    path: str, name: str, value: Any, spec: collections.FieldSpec
+) -> list[tuple[str, Any, collections.CollectionError]]:
+    if spec.type == "array" and isinstance(value, list) and spec.items is not None:
+        found: list[tuple[str, Any, collections.CollectionError]] = []
+        for index, entry in enumerate(value):
+            try:
+                collections.validate_field_value(name, entry, spec.items)
+            except collections.CollectionError as error:
+                deeper = _locate_field_failure(f"{path}[{index}]", name, entry, spec.items)
+                found.extend(deeper or [(f"{path}[{index}]", entry, error)])
+        return found
+    if spec.type == "object" and isinstance(value, Mapping):
+        offending = _non_json_path(path, value)
+        if offending is not None and offending[0] != path:
+            sub_path, sub_value = offending
+            return [
+                (
+                    sub_path,
+                    sub_value,
+                    collections.CollectionError(
+                        "SCHEMA_FIELD_TYPE", f"field has wrong type: {name}"
+                    ),
+                )
+            ]
+    return []
+
+
+def _non_json_path(path: str, value: Any) -> tuple[str, Any] | None:
+    """The path of the first value that cannot be represented as JSON."""
+    if value is None or type(value) in {str, int, bool}:
+        return None
+    if type(value) is float:
+        return None if math.isfinite(value) else (path, value)
+    if isinstance(value, list | tuple):
+        for index, item in enumerate(value):
+            found = _non_json_path(f"{path}[{index}]", item)
+            if found is not None:
+                return found
+        return None
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if type(key) is not str:
+                return (path, value)
+            found = _non_json_path(f"{path}.{key}", item)
+            if found is not None:
+                return found
+        return None
+    return (path, value)
 
 
 def _log_note_field(manifest: collections.CollectionManifest) -> str | None:
@@ -2671,18 +3001,164 @@ def _refuse_excluded_manifest_fields(
     raise collections.CollectionError(vault.EXCLUDED_FIELD_CODE, reason, details={"field": field})
 
 
-def _validate_representable(value: Any) -> None:
+def _collect_representation_issues(
+    manifest: collections.CollectionManifest, values: Mapping[str, Any], issues: list[_Issue]
+) -> None:
+    """Judge representability against the collection's own storage strategy.
+
+    Markdown-log rendering puts values into headings, notes and delimited child
+    rows, none of which can carry a line break. Markdown-item frontmatter can:
+    the writer's own quoting escapes one, and the round trip below proves it.
+    """
+    line_breaks_allowed = manifest.storage.strategy == "markdown-items"
+    already = {issue.field for issue in issues}
+    for name, value in values.items():
+        if name in already:
+            continue
+        _collect_value_representation(name, value, line_breaks_allowed, issues)
+    if manifest.storage.strategy == "markdown-log":
+        _collect_log_grammar_issues(manifest, values, issues)
+
+
+def _collect_log_grammar_issues(
+    manifest: collections.CollectionManifest, values: Mapping[str, Any], issues: list[_Issue]
+) -> None:
+    """Refuse candidate values that carry the log grammar's own tokens.
+
+    The heading separator, the note brackets and the row delimiter are as
+    unrepresentable in this strategy as a line break; judging them here gives
+    the caller the field path and lets the refusal hold the candidate.
+    """
+    tokens = record_formats.log_grammar_tokens(manifest)
+    if tokens is None:
+        return
+    seen = {issue.field for issue in issues}
+
+    def refuse(path: str, reason: str, value: Any) -> None:
+        if path in seen:
+            return
+        seen.add(path)
+        issues.append(_unrepresentable(path, reason, value))
+
+    for name in tokens.heading_string_fields:
+        value = values.get(name)
+        if not isinstance(value, str):
+            continue
+        # The render layer refuses an empty heading string and a whitespace-only
+        # note as unrenderable; judged here they carry a field path and hold.
+        if not value:
+            refuse(name, "a heading value cannot be empty", value)
+        elif tokens.separator in value:
+            refuse(name, "a heading value cannot carry the heading separator", value)
+    note_field, opening, closing = tokens.note_field, tokens.note_open, tokens.note_close
+    if note_field is not None:
+        note = values.get(note_field)
+        if isinstance(note, str):
+            if not note.strip():
+                refuse(note_field, "a heading note cannot be empty", note)
+            elif opening and closing and (opening in note or closing in note):
+                refuse(note_field, "a heading note cannot carry its own brackets", note)
+    rows = values.get(tokens.container_field)
+    if isinstance(rows, list):
+        for index, row in enumerate(rows):
+            if not isinstance(row, Mapping):
+                continue
+            for name in tokens.child_fields:
+                cell = row.get(name)
+                if isinstance(cell, str) and tokens.delimiter in cell:
+                    refuse(
+                        f"{tokens.container_field}[{index}].{name}",
+                        "a child row value cannot carry the row delimiter",
+                        cell,
+                    )
+
+
+def _collect_value_representation(
+    path: str, value: Any, line_breaks_allowed: bool, issues: list[_Issue]
+) -> None:
     if isinstance(value, str):
-        if len(value.encode("utf-8")) > _MAX_VALUE_BYTES or "\r" in value or "\n" in value:
-            raise collections.CollectionError(
-                "UNREPRESENTABLE_RECORD_VALUE", "record value cannot render losslessly"
+        if len(value.encode("utf-8")) > _MAX_VALUE_BYTES:
+            issues.append(_unrepresentable(path, "record value exceeds the byte limit", value))
+        elif not line_breaks_allowed and ("\r" in value or "\n" in value):
+            issues.append(
+                _unrepresentable(
+                    path, "this storage strategy cannot carry a line break in a value", value
+                )
             )
     elif isinstance(value, Mapping):
-        for item in value.values():
-            _validate_representable(item)
+        for key, item in value.items():
+            _collect_value_representation(f"{path}.{key}", item, line_breaks_allowed, issues)
     elif isinstance(value, list):
-        for item in value:
-            _validate_representable(item)
+        for index, item in enumerate(value):
+            _collect_value_representation(f"{path}[{index}]", item, line_breaks_allowed, issues)
+
+
+def _unrepresentable(path: str, reason: str, value: Any) -> _Issue:
+    return _Issue(
+        field=path,
+        code="UNREPRESENTABLE_RECORD_VALUE",
+        reason=reason,
+        received=_value_class(value),
+        headline="record value cannot render losslessly",
+    )
+
+
+def _unrepresentable_candidate(reason: str, values: Mapping[str, Any]) -> _Issue:
+    """A round-trip failure of the whole block, which no single field owns."""
+    return _Issue(
+        field="",
+        code="UNREPRESENTABLE_RECORD_VALUE",
+        reason=reason,
+        received=_value_class(values),
+        headline="record value cannot render losslessly",
+        scope="frontmatter",
+    )
+
+
+def _collect_round_trip_issues(
+    manifest: collections.CollectionManifest, values: Mapping[str, Any], issues: list[_Issue]
+) -> None:
+    """Prove a Markdown item reads back exactly what the caller supplied.
+
+    Serialising the complete candidate frontmatter and parsing it with the reader
+    the collection actually uses is the property we want, rather than a guess at
+    which characters today's serializer can carry.
+    """
+    profile = profile_for(manifest.semantic_profile)
+    frontmatter: dict[str, Any] = {
+        "type": profile.item_type,
+        "collection_id": manifest.collection_id,
+        profile.item_id_property: collections.ItemIdentity(
+            manifest.collection_id, _ROUND_TRIP_PROBE_KEY
+        ).key,
+        "schema_version": manifest.schema.version,
+    }
+    frontmatter.update(values)
+    text = "---\n" + vault.serialize_frontmatter(frontmatter) + "\n---\n"
+    try:
+        parsed, _body, marker = vault.parse_frontmatter(text, strict=True)
+    except vault.FrontmatterError:
+        parsed, marker = {}, None
+    if marker is None:
+        issues.append(
+            _unrepresentable_candidate("candidate frontmatter does not parse back", values)
+        )
+        return
+    try:
+        candidate = collections.normalize_item_values(manifest.schema, values)
+        restored = collections.normalize_item_values(
+            manifest.schema, {name: parsed.get(name) for name in values}
+        )
+    except collections.CollectionError:
+        issues.append(
+            _unrepresentable_candidate("candidate values do not normalize back", values)
+        )
+        return
+    for name in values:
+        if candidate.get(name) != restored.get(name):
+            issues.append(
+                _unrepresentable(name, "record value does not read back identically", values[name])
+            )
 
 
 def _validate_why(why: str) -> None:
@@ -2703,11 +3179,575 @@ def _validate_body(body: str) -> None:
         raise collections.CollectionError("INVALID_RECORD_BODY", "record body is too large")
 
 
-def _validate_item_key(key: str) -> str:
+# --------------------------------------------------------------------------
+# Held records
+#
+# A candidate refused for its own content is an observation the user made. It is
+# preserved as an ordinary human-owned Markdown file beside the items -- outside
+# the item source, so adapter reads, queries, audit markers and recall pass over
+# it without a single exclusion rule -- and can be resumed or discarded by
+# reference. Holding never produces a second error: if it fails, the original
+# refusal stands with a warning.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class HeldCandidate:
+    """One refused candidate preserved beside its collection."""
+
+    held_id: str
+    path: str
+    collection_id: str
+    attempted_action: str
+    target_item_key: str | None
+    held_at: str
+    why: str
+    candidate_sha256: str
+    diagnostics: tuple[Mapping[str, Any], ...]
+    candidate: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class HeldCensus:
+    """What a collection's held directory holds for one audience."""
+
+    #: Every authorized held file, counted from the listing.
+    held: int
+    #: Those that were opened and could not be loaded.
+    unreadable: int
+    #: Those that loaded, bounded by how many the census was willing to open.
+    candidates: tuple[HeldCandidate, ...]
+
+
+def hold_candidate(
+    vault_root: Path,
+    manifest: collections.CollectionManifest,
+    *,
+    attempted_action: str,
+    candidate: Mapping[str, Any],
+    why: str,
+    issues: Sequence[Mapping[str, Any]] = (),
+    key_values: Mapping[str, Any] | None = None,
+    held_id: str | None = None,
+    target_item_key: str | None = None,
+) -> dict[str, Any]:
+    """Write one refused candidate to `<collection dir>/Held/<held_id>.md`.
+
+    Frontmatter is generated and single-line throughout, so a held file never
+    depends on the representability rules that refused its candidate; the exact
+    payload lives in one fenced JSON block instead.
+    """
+    root = Path(vault_root)
+    directory = _held_directory(manifest)
+    if not _held_directory_is_outside_source(manifest):
+        raise collections.CollectionError(
+            "HELD_DIRECTORY_UNSAFE",
+            "held candidates cannot live under the collection's item source",
+            {"held_directory": directory, "source": manifest.storage.source},
+        )
+    reference = held_id or _derive_held_id(manifest, key_values)
+    relative = f"{directory}/{reference}.md"
+    # The held file is a write into the vault, so it is subject to the same full
+    # release the collection's own paths are. A caller who cannot see the held
+    # subtree does not get to write into it; the soft-fail rule turns that into
+    # the original refusal plus a warning rather than a second error.
+    allowed = record_governance.full_release_filter(root)
+    if not allowed(directory) or not allowed(relative):
+        raise collections.CollectionError(
+            "HELD_NOT_RELEASED",
+            "held candidates cannot be written into a withheld path",
+            {"held_directory": directory},
+        )
+    body = json.dumps(
+        _encode_held_value(candidate),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+        default=_held_json_default,
+    )
+    diagnostics = [dict(issue) for issue in list(issues)[:_MAX_HELD_DIAGNOSTICS]]
+    frontmatter: dict[str, Any] = {
+        "type": _HELD_TYPE,
+        "collection_id": manifest.collection_id,
+        "held_id": reference,
+        "attempted_action": attempted_action,
+        **({"target_item_key": target_item_key} if target_item_key else {}),
+        "held_at": dt.datetime.now(tz=dt.UTC).isoformat().replace("+00:00", "Z"),
+        "why": why,
+        "candidate_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        # A YAML list of objects cannot be rendered on one line, and the whole
+        # point of the frontmatter is that it is single-line and generated. The
+        # structured list rides as compact JSON text and reads back exactly.
+        "diagnostics": json.dumps(diagnostics, ensure_ascii=False, separators=(",", ":")),
+    }
+    text = (
+        "---\n"
+        + vault.serialize_frontmatter(frontmatter)
+        + "\n---\n\n```json\n"
+        + body
+        + "\n```\n"
+    )
+    vault.batch_atomic_write(
+        [
+            vault.PlannedWrite(
+                root / relative,
+                text,
+                ensure_directories=(root / directory,),
+            )
+        ],
+        vault_root=root,
+    )
+    return {"held_id": reference, "path": relative, "diagnostics": diagnostics}
+
+
+def discard_held(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    *,
+    held: str,
+    why: str,
+) -> dict[str, Any]:
+    """Remove one held candidate by reference, leaving the audit chain alone."""
+    root = Path(vault_root)
+    _validate_why(why)
+    held_id = _validate_held_reference(held)
+    if held_id is None:
+        raise _held_not_found()
+    with writer_lease.active_manager().mutation_guard(root, operation="record_discard"):
+        manifest = record_governance.resolve_collection_for_mutation(root, collection)
+        record_governance.require_mutation_visibility(root, manifest)
+        candidate = _load_held_candidate(root, manifest, held_id)
+        try:
+            _remove_held_file(root, candidate.path)
+        except OSError as error:
+            raise collections.CollectionError(
+                "HELD_NOT_REMOVED",
+                "held candidate could not be removed",
+                {"argument": "held"},
+            ) from error
+    return {
+        "_record_receipt": _RECEIPT_MARKER,
+        "receipt_version": _RECEIPT_VERSION,
+        "operation": "discard",
+        "collection_id": manifest.collection_id,
+        "held_id": held_id,
+        "affected_paths": [candidate.path],
+        "outcome": "discarded",
+        "audit_correlation": None,
+    }
+
+
+def held_census(
+    vault_root: Path,
+    manifest: collections.CollectionManifest,
+    *,
+    authorize_path: Callable[[str], bool] | None = None,
+    load: bool = True,
+) -> HeldCensus:
+    """Count the authorized held candidates, and open them only if asked.
+
+    The count comes from the directory listing, so it is exact however many
+    files there are: a bound on how many candidates may be *named* is not a
+    bound on how many exist, and reporting the smaller number told a caller the
+    ledger was less blocked than it is. A file that is opened and does not load
+    is counted as unreadable rather than silently dropped, and a caller that
+    wants only a count passes `load=False`, which parses no candidate payload.
+    """
+    root = Path(vault_root)
+    directory_name = _held_directory(manifest)
+    directory = root / directory_name
+    if not _held_directory_is_outside_source(manifest) or not directory.is_dir():
+        return HeldCensus(0, 0, ())
+    try:
+        entries = sorted(entry.name for entry in directory.iterdir() if entry.is_file())
+    except OSError:
+        return HeldCensus(0, 0, ())
+    references: list[str] = []
+    for name in entries:
+        if not name.endswith(".md"):
+            continue
+        reference = collections.memory_refs.normalize_id(name.removesuffix(".md"))
+        if reference is None:
+            continue
+        if authorize_path is not None and not authorize_path(f"{directory_name}/{name}"):
+            continue
+        references.append(reference)
+    if not load:
+        return HeldCensus(len(references), 0, ())
+    found: list[HeldCandidate] = []
+    unreadable = 0
+    for reference in references[:_MAX_HELD_LOADS]:
+        try:
+            found.append(_load_held_candidate(root, manifest, reference))
+        except collections.CollectionError:
+            unreadable += 1
+    return HeldCensus(len(references), unreadable, tuple(found))
+
+
+def _held_directory(manifest: collections.CollectionManifest) -> str:
+    return (Path(manifest.path).parent / _HELD_DIRECTORY).as_posix()
+
+
+def _held_directory_is_outside_source(manifest: collections.CollectionManifest) -> bool:
+    """Whether `Held/` sits beside the items rather than inside them.
+
+    `storage.source` may legally be the collection directory itself, which would
+    put held files inside the directory the adapter walks and move the container
+    hash. That collection simply cannot hold, and the caller soft-fails.
+    """
+    held = _portable_key(_held_directory(manifest))
+    source = _portable_key(manifest.storage.source)
+    return held != source and not held.startswith(f"{source}/")
+
+
+def _portable_key(path: str) -> str:
+    return "/".join(
+        unicodedata.normalize("NFKC", part).casefold() for part in path.strip("/").split("/")
+    )
+
+
+def _derive_held_id(
+    manifest: collections.CollectionManifest, values: Mapping[str, Any] | None
+) -> str:
+    """The identity a complete natural key implies, so a re-hold replays one file."""
+    if isinstance(values, Mapping):
+        try:
+            derived = collections.derived_item_key(manifest, values)
+        except (collections.CollectionError, ValueError, TypeError):
+            derived = None
+        if derived is not None:
+            return derived
+    return str(uuid.uuid4())
+
+
+def _held_json_default(value: Any) -> str:
+    if isinstance(value, dt.date | dt.datetime):
+        return value.isoformat()
+    raise TypeError(f"held candidate carries an unserializable value: {type(value).__name__}")
+
+
+def _encode_held_value(value: Any) -> Any:
+    """Tag non-finite floats so the fenced body stays strict, portable JSON.
+
+    `NaN` and the infinities are legal Python floats and a perfectly ordinary
+    reason for a `SCHEMA_FIELD_TYPE` refusal, but `json.dumps(allow_nan=False)`
+    raises on them -- which lost the very candidate the hold exists to keep.
+    """
+    if type(value) is float and not math.isfinite(value):
+        if math.isnan(value):
+            return {_HELD_FLOAT_TAG: "NaN"}
+        return {_HELD_FLOAT_TAG: "Infinity" if value > 0 else "-Infinity"}
+    if isinstance(value, Mapping):
+        encoded = {key: _encode_held_value(item) for key, item in value.items()}
+        # A candidate object may legitimately have the exact shape of a tag. Wrap
+        # it so decode never mistakes caller data for an encoder marker; the
+        # wrapper itself is a reserved shape and is wrapped the same way.
+        if set(value) in _HELD_RESERVED_SHAPES:
+            return {_HELD_ESCAPE_TAG: encoded}
+        return encoded
+    if isinstance(value, list | tuple):
+        return [_encode_held_value(item) for item in value]
+    return value
+
+
+def _decode_held_value(value: Any) -> Any:
+    """Restore the tagged non-finite floats a resume must see unchanged."""
+    if isinstance(value, Mapping):
+        if set(value) == {_HELD_ESCAPE_TAG} and isinstance(value[_HELD_ESCAPE_TAG], Mapping):
+            # An escaped literal: decode its children, never its own shape.
+            return {key: _decode_held_value(item) for key, item in value[_HELD_ESCAPE_TAG].items()}
+        if set(value) == {_HELD_FLOAT_TAG} and value[_HELD_FLOAT_TAG] in _HELD_NON_FINITE:
+            return _HELD_NON_FINITE[value[_HELD_FLOAT_TAG]]
+        return {key: _decode_held_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_decode_held_value(item) for item in value]
+    return value
+
+
+def _validate_hold(hold: object) -> bool:
+    if type(hold) is not bool:
+        raise collections.CollectionError("INVALID_RECORD_HOLD", "hold must be boolean")
+    return hold
+
+
+def _validate_held_reference(held: object) -> str | None:
+    if held is None:
+        return None
+    normalized = collections.memory_refs.normalize_id(held) if isinstance(held, str) else None
+    if normalized is None:
+        raise _held_not_found()
+    return normalized
+
+
+def _held_not_found() -> collections.CollectionError:
+    return collections.CollectionError(
+        "HELD_NOT_FOUND", "held candidate does not exist", {"argument": "held"}
+    )
+
+
+def _load_held_candidate(
+    root: Path, manifest: collections.CollectionManifest, held_id: str
+) -> HeldCandidate:
+    relative = f"{_held_directory(manifest)}/{held_id}.md"
+    try:
+        data, _guard = vault.read_bounded_guarded_bytes(root, relative, limit=_MAX_HELD_BYTES)
+        text = data.decode("utf-8")
+        frontmatter, body, marker = vault.parse_frontmatter(text, strict=True)
+    except (vault.PathGuardError, vault.FrontmatterError, UnicodeDecodeError) as error:
+        raise _held_not_found() from error
+    if marker is None or frontmatter.get("type") != _HELD_TYPE:
+        raise _held_not_found()
+    if str(frontmatter.get("held_id", "")) != held_id:
+        raise _held_not_found()
+    stored_collection = collections.memory_refs.normalize_id(
+        str(frontmatter.get("collection_id", ""))
+    )
+    if stored_collection != manifest.collection_id:
+        raise collections.CollectionError(
+            "HELD_COLLECTION_MISMATCH",
+            "held candidate belongs to another collection",
+            {"argument": "held"},
+        )
+    candidate = _held_candidate_payload(body)
+    diagnostics = _held_diagnostics(frontmatter.get("diagnostics"))
+    return HeldCandidate(
+        held_id=held_id,
+        path=relative,
+        collection_id=manifest.collection_id,
+        attempted_action=str(frontmatter.get("attempted_action", "")),
+        target_item_key=(
+            str(frontmatter["target_item_key"]) if frontmatter.get("target_item_key") else None
+        ),
+        held_at=str(frontmatter.get("held_at", "")),
+        why=str(frontmatter.get("why", "")),
+        candidate_sha256=str(frontmatter.get("candidate_sha256", "")),
+        diagnostics=diagnostics,
+        candidate=candidate,
+    )
+
+
+def _held_candidate_payload(body: str) -> Mapping[str, Any]:
+    opening = body.find("```json")
+    if opening < 0:
+        raise _held_not_found()
+    rest = body[opening + len("```json") :]
+    closing = rest.find("```")
+    if closing < 0:
+        raise _held_not_found()
+    try:
+        payload = json.loads(rest[:closing])
+    except ValueError as error:
+        raise _held_not_found() from error
+    if not isinstance(payload, Mapping):
+        raise _held_not_found()
+    return _decode_held_value(payload)
+
+
+def _held_diagnostics(value: Any) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(value, str):
+        return ()
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    return tuple(item for item in parsed if isinstance(item, Mapping))
+
+
+def _remove_held_file(root: Path, relative: str) -> None:
+    (root / relative).unlink()
+
+
+def _holding_enabled(manifest: collections.CollectionManifest, hold: bool) -> bool:
+    """Whether this collection may preserve a refused candidate at all.
+
+    Only the Records profile can: `plan_memory` has no `held`, `hold` or
+    `discard` argument, strips `details` from its refusals and reports no
+    coverage, so a held Planning file would be a vault write the caller could
+    neither see, list nor remove. Planning adopts the arguments in a later
+    change; until then the shared writer refuses without a file.
+    """
+    return hold and manifest.semantic_profile == "records"
+
+
+def _hold_refusal(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    error: collections.CollectionError,
+    *,
+    hold: bool,
+    attempted_action: str,
+    candidate: Mapping[str, Any],
+    why: str,
+    key_values: Mapping[str, Any] | None = None,
+    held_id: str | None = None,
+    target_item_key: str | None = None,
+) -> collections.CollectionError:
+    """Attach a held reference to a candidate-content refusal, or a warning."""
+    if not _holding_enabled(manifest, hold) or error.code not in _CANDIDATE_CONTENT_CODES:
+        return error
+    details = dict(error.details)
+    try:
+        held = hold_candidate(
+            root,
+            manifest,
+            attempted_action=attempted_action,
+            candidate=candidate,
+            why=why,
+            issues=details.get("issues") or (),
+            key_values=key_values,
+            held_id=held_id,
+            target_item_key=target_item_key,
+        )
+    except _HOLD_FAILURES as failure:
+        log.warning("held candidate was not written: %s", type(failure).__name__)
+        details["warnings"] = [_HOLD_FAILED_WARNING]
+        return collections.CollectionError(error.code, error.reason, details)
+    details["held"] = held
+    return collections.CollectionError(error.code, error.reason, details)
+
+
+def _apply_held_overrides(
+    base: Mapping[str, Any], overrides: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Shallow overrides onto a held candidate; `null` removes the field."""
+    merged = dict(base)
+    for name, value in overrides.items():
+        if value is None:
+            merged.pop(name, None)
+        else:
+            merged[name] = value
+    return merged
+
+
+def _held_mapping(candidate: Mapping[str, Any], name: str) -> dict[str, Any]:
+    value = candidate.get(name)
+    if not isinstance(value, Mapping):
+        raise _held_not_found()
+    return dict(value)
+
+
+def _held_delete_fields(resumed: HeldCandidate) -> tuple[str, ...]:
+    stored = resumed.candidate.get("delete_fields")
+    if not isinstance(stored, list):
+        return ()
+    return tuple(name for name in stored if isinstance(name, str))
+
+
+def _resumed_update_body(resumed: HeldCandidate, body: str | None) -> str | None:
+    """`None` still means "leave the body alone" on a resumed update."""
+    if body is not None:
+        return body
+    stored = resumed.candidate.get("body")
+    return stored if isinstance(stored, str) else None
+
+
+def _resumed_body(resumed: HeldCandidate | None, body: str | None) -> str:
+    """The caller's body wins; an omitted one falls back to the held candidate's."""
+    if body is not None:
+        return body
+    if resumed is None:
+        return ""
+    stored = resumed.candidate.get("body")
+    return stored if isinstance(stored, str) else ""
+
+
+def _with_warnings(result: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
+    """Attach warnings only when there are any, so the ordinary shape is unchanged."""
+    return {**result, "warnings": list(warnings)} if warnings else result
+
+
+def _release_held_file(root: Path, resumed: HeldCandidate | None, warnings: list[str]) -> None:
+    """Remove a resumed held file after its item committed, or warn and move on.
+
+    The item stands either way: a leftover held file is inert Markdown the caller
+    can discard, and turning it into a failure would undo a good commit.
+    """
+    if resumed is None:
+        return
+    try:
+        _remove_held_file(root, resumed.path)
+    except OSError:
+        warnings.append(_HELD_CLEANUP_WARNING)
+
+
+def _validate_item_key(
+    key: str,
+    *,
+    manifest: collections.CollectionManifest | None = None,
+    candidate: Mapping[str, Any] | None = None,
+) -> str:
     normalized = collections.memory_refs.normalize_id(key)
     if normalized is None:
-        raise collections.CollectionError("INVALID_RECORD_ID", "record ID must be a UUID")
+        raise _invalid_item_key(key, manifest, candidate)
     return normalized
+
+
+def _validate_update_item_key(
+    root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    item_key: Any,
+    changes: Any,
+) -> str:
+    """Normalize an update's item key, resolving the collection only to remediate.
+
+    The collection is opened only once the key is already known to be wrong, and
+    only through the mutation resolver, so an unreadable or withheld collection
+    still refuses the key without disclosing that it exists.
+    """
+    normalized = (
+        collections.memory_refs.normalize_id(item_key) if isinstance(item_key, str) else None
+    )
+    if normalized is not None:
+        return normalized
+    try:
+        manifest: collections.CollectionManifest | None = (
+            record_governance.resolve_collection_for_mutation(root, collection)
+        )
+    except (collections.CollectionError, OSError, ValueError):
+        manifest = None
+    raise _invalid_item_key(item_key, manifest, changes if isinstance(changes, Mapping) else None)
+
+
+def _invalid_item_key(
+    key: Any,
+    manifest: collections.CollectionManifest | None,
+    candidate: Mapping[str, Any] | None,
+) -> collections.CollectionError:
+    """Refuse a non-UUID item key, naming the natural key when that is the mistake.
+
+    A caller who supplies the observation's own natural-key value as `item_key`
+    is not guessing a UUID badly; it has mistaken the internal identity for the
+    key it already knows, and the only useful answer names both.
+    """
+    details: dict[str, Any] = {"argument": "item_key", "received": _received_item_key(key)}
+    if manifest is not None and _reads_as_natural_key(manifest, candidate, key):
+        details["natural_key"] = list(manifest.schema.natural_key)
+        details["remediation"] = _ITEM_KEY_REMEDIATION
+    return collections.CollectionError("INVALID_RECORD_ID", "record ID must be a UUID", details)
+
+
+def _received_item_key(key: Any) -> str:
+    if type(key) is not str:
+        return _value_class(key)
+    return key if len(key) <= _MAX_RECEIVED_KEY_CHARS else key[:_MAX_RECEIVED_KEY_CHARS]
+
+
+def _reads_as_natural_key(
+    manifest: collections.CollectionManifest,
+    candidate: Mapping[str, Any] | None,
+    key: Any,
+) -> bool:
+    declared = manifest.schema.natural_key
+    if not declared or not isinstance(candidate, Mapping):
+        return False
+    if all(candidate.get(name) is not None for name in declared):
+        return True
+    return any(
+        candidate.get(name) is not None and str(candidate[name]) == key for name in declared
+    )
 
 
 def _natural_key_twins(

@@ -13,7 +13,18 @@ from .cli_ops import OpError
 from .structured_collections import CollectionError
 
 ACTIONS = frozenset(
-    {"describe", "validate", "inspect", "create", "query", "append", "update", "revise", "rebaseline"}
+    {
+        "describe",
+        "validate",
+        "inspect",
+        "create",
+        "query",
+        "append",
+        "update",
+        "revise",
+        "rebaseline",
+        "discard",
+    }
 )
 
 _ACTION_FIELDS = {
@@ -42,7 +53,17 @@ _ACTION_FIELDS = {
         }
     ),
     "append": frozenset(
-        {"collection", "item", "why", "item_key", "expected_container_hash", "body", "delivery"}
+        {
+            "collection",
+            "item",
+            "why",
+            "item_key",
+            "expected_container_hash",
+            "body",
+            "delivery",
+            "held",
+            "hold",
+        }
     ),
     "update": frozenset(
         {
@@ -53,8 +74,11 @@ _ACTION_FIELDS = {
             "expected_item_version",
             "why",
             "refresh_presentation",
+            "held",
+            "hold",
         }
     ),
+    "discard": frozenset({"collection", "held", "why"}),
     "revise": frozenset(
         {"collection", "manifest_text", "expected_manifest_hash", "expected_container_hash", "why"}
     ),
@@ -68,7 +92,10 @@ _REQUIRED_FIELDS = {
     "validate": frozenset({"manifest_text"}),
     "create": frozenset({"manifest_path", "manifest_text", "why"}),
     "query": frozenset({"collection"}),
-    "append": frozenset({"collection", "item", "why"}),
+    # `item` is required only when the caller is not resuming a held candidate,
+    # which the argument rules below say in as many words.
+    "append": frozenset({"collection", "why"}),
+    "discard": frozenset({"collection", "held", "why"}),
     "update": frozenset(
         {
             "collection",
@@ -104,7 +131,18 @@ _QUERY_SHAPING_FIELDS = frozenset(
 
 def record_memory(
     vault_root: Path,
-    action: Literal["describe", "validate", "inspect", "create", "query", "append", "update", "revise", "rebaseline"],
+    action: Literal[
+        "describe",
+        "validate",
+        "inspect",
+        "create",
+        "query",
+        "append",
+        "update",
+        "revise",
+        "rebaseline",
+        "discard",
+    ],
     collection: str | None = None,
     manifest_path: str | None = None,
     manifest_text: str | None = None,
@@ -135,19 +173,22 @@ def record_memory(
     changes: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
     refresh_presentation: bool | None = None,
+    held: str | None = None,
+    hold: bool | None = None,
 ) -> dict[str, Any]:
-    """Describe, validate, inspect, create, query, append, update, revise, or rebaseline Records.
+    """Describe, validate, inspect, create, query, append, update, revise, rebaseline, or discard Records.
 
     Records are human-owned event and state histories.  This command keeps the
     complete workflow on one product surface while routing mutations to guarded
     writers and reads through governance-aware projections.
 
     Args:
-        action: describe, validate, inspect, create, query, append, or update.
+        action: describe, validate, inspect, create, query, append, update, revise,
+            rebaseline, or discard.
         collection: Optional for inventory inspect; required for targeted reads/writes.
         manifest_path: Proposed manifest path for validate or create.
         manifest_text: Complete proposed manifest text for validate or create.
-        why: Concise audit reason for create, append, or update.
+        why: Concise audit reason for create, append, update, or discard.
         scaffold: Create an initial canonical source for create; defaults to true.
         view: Saved query view for query; cannot be combined with inline shaping.
         filters: Query predicates.
@@ -165,7 +206,9 @@ def record_memory(
         include_agent_history: Include bounded governed agent mutation history.
         output_format: Query output format.
         item: Item values for append.
-        item_key: Stable item ID for append or update.
+        item_key: The item's internal UUID identity, required for update. Omit it
+            on append and identity derives from the collection's declared natural
+            key; supplying a natural-key value here refuses.
         expected_container_hash: Exact current container hash for append or update.
         body: Optional Markdown item body for append.
         delivery: Optional receipt-gated artifact-delivery validation envelope
@@ -173,6 +216,12 @@ def record_memory(
         changes: Targeted changes for update.
         expected_item_version: Exact current item version for update.
         refresh_presentation: Guardedly rebuild the managed Markdown presentation during update.
+        held: Reference to a held candidate. On append or update it resumes that
+            candidate, with `item` or `changes` supplying optional overrides and a
+            null value removing a field; on discard it names the candidate to remove.
+        hold: Set false to refuse an invalid candidate without holding it. A refused
+            append or update otherwise preserves the complete candidate as a held
+            file under the collection and returns its reference beside the refusal.
     """
     values = {
         "collection": collection,
@@ -205,6 +254,8 @@ def record_memory(
         "changes": changes,
         "expected_item_version": expected_item_version,
         "refresh_presentation": refresh_presentation,
+        "held": held,
+        "hold": hold,
     }
     _validate_arguments(action, values)
     try:
@@ -281,7 +332,6 @@ def record_memory(
             )
         if action == "append":
             assert collection is not None
-            assert item is not None
             assert why is not None
             manifest = record_governance.require_records_profile(
                 record_governance.resolve_collection_for_mutation(vault_root, collection)
@@ -290,12 +340,24 @@ def record_memory(
                 "item": item,
                 "item_key": item_key,
                 "expected_container_hash": expected_container_hash,
-                "body": "" if body is None else body,
                 "why": why,
+                "held": held,
+                "hold": True if hold is None else hold,
             }
+            # An omitted body leaves a resumed candidate's own body in place.
+            if body is not None:
+                append_kwargs["body"] = body
             if delivery is not None:
                 append_kwargs["delivery"] = delivery
             return records.append_record(vault_root, manifest, **append_kwargs)
+        if action == "discard":
+            assert collection is not None
+            assert held is not None
+            assert why is not None
+            manifest = record_governance.require_records_profile(
+                record_governance.resolve_collection_for_mutation(vault_root, collection)
+            )
+            return records.discard_held(vault_root, manifest, held=held, why=why)
         if action == "revise":
             assert collection is not None
             assert manifest_text is not None
@@ -326,7 +388,7 @@ def record_memory(
             )
         assert collection is not None
         assert item_key is not None
-        assert changes is not None or refresh_presentation is True
+        assert changes is not None or refresh_presentation is True or held is not None
         assert expected_container_hash is not None
         assert expected_item_version is not None
         assert why is not None
@@ -342,6 +404,8 @@ def record_memory(
             expected_item_version=expected_item_version,
             why=why,
             refresh_presentation=refresh_presentation is True,
+            held=held,
+            hold=True if hold is None else hold,
         )
     except (CollectionError, query_data.QueryDataError) as error:
         raise OpError(
@@ -392,8 +456,20 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         if missing:
             parts.append(f"missing for {action}: " + ", ".join(sorted(missing)))
         _invalid_arguments("; ".join(parts))
-    if action == "update" and values["changes"] is None and values["refresh_presentation"] is not True:
-        _invalid_arguments("update requires changes or refresh_presentation=true")
+    if action == "append" and values["item"] is None and values["held"] is None:
+        _invalid_arguments("append requires item or held")
+    if (
+        action == "update"
+        and values["changes"] is None
+        and values["refresh_presentation"] is not True
+        and values["held"] is None
+    ):
+        _invalid_arguments("update requires changes, held, or refresh_presentation=true")
+    if action in {"append", "update"} and values["hold"] is False and values["held"] is not None:
+        # A resume that refuses again rewrites its held file in place, so
+        # declining the hold would leave the previous attempt's diagnostics
+        # standing as the answer to a question just asked again.
+        _invalid_arguments("hold=false cannot be combined with held")
     if action == "update" and values["refresh_presentation"] not in {None, True}:
         _invalid_arguments("refresh_presentation must be true when supplied")
     if action == "validate" and ((values["collection"] is None) == (values["manifest_path"] is None)):

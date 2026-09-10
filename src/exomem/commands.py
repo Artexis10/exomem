@@ -9491,6 +9491,7 @@ def op_record_memory(
         "update",
         "revise",
         "rebaseline",
+        "discard",
     ],
     collection: str | None = None,
     manifest_path: str | None = None,
@@ -9522,6 +9523,8 @@ def op_record_memory(
     changes: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
     refresh_presentation: bool | None = None,
+    held: str | None = None,
+    hold: bool | None = None,
 ) -> dict[str, Any]:
     """Capture, inspect, and govern durable observed state in one Records command.
 
@@ -9531,8 +9534,8 @@ def op_record_memory(
     if none fits, describe and propose a concise collection before explicit create.
 
     Args:
-        action: Exactly one of describe, validate, inspect, query, create, append, update, revise, or rebaseline.
-        collection: Optional for inventory inspect; required for targeted inspect, query, revision validate, append, update, revise, and rebaseline.
+        action: Exactly one of describe, validate, inspect, query, create, append, update, revise, rebaseline, or discard.
+        collection: Optional for inventory inspect; required for targeted inspect, query, revision validate, append, update, revise, rebaseline, and discard.
         manifest_path: Proposed manifest path for create-mode validate or create.
         manifest_text: Complete proposed manifest text for validate, create, or revise.
         why: Audit reason for create, append, update, revise, or rebaseline.
@@ -9552,8 +9555,9 @@ def op_record_memory(
         continuation: Snapshot-bound query continuation.
         include_agent_history: Include bounded agent mutation history.
         output_format: json, markdown, or csv query output.
-        item: Values for append.
-        item_key: Stable item ID for append or update.
+        item: Values for append; shallow overrides when resuming a held candidate.
+        item_key: The item's internal UUID identity, required for update. Omit it on
+            append and identity derives from the collection's declared natural key.
         expected_container_hash: Exact current container hash for append, update, revise, or rebaseline.
         expected_manifest_hash: Exact current manifest hash for revise or rebaseline.
         acknowledged_gap_codes: Exact inspect-reported gap codes for rebaseline.
@@ -9564,6 +9568,12 @@ def op_record_memory(
         changes: Targeted values for update.
         expected_item_version: Exact current item version for update.
         refresh_presentation: Guardedly rebuild the managed Markdown presentation during update.
+        held: Reference to a held candidate: resumes it on append or update, with
+            item or changes supplying overrides and a null value removing a field;
+            names the candidate to remove on discard.
+        hold: Set false to refuse an invalid candidate without holding it. A refused
+            append or update otherwise preserves the complete candidate as a held
+            file under the collection and returns its reference beside the refusal.
     """
     return record_memory_module.record_memory(
         vault_root,
@@ -9598,6 +9608,8 @@ def op_record_memory(
         changes=changes,
         expected_item_version=expected_item_version,
         refresh_presentation=refresh_presentation,
+        held=held,
+        hold=hold,
     )
 
 

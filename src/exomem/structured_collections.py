@@ -307,6 +307,50 @@ def manifest_authoring_contract() -> dict[str, Any]:
             "presentation_version": 1,
             "identity": "collection_id plus record_id or plan_id; filename and body are projections",
         },
+        "held_records": {
+            "why": (
+                "a Records append or update refused for its own content preserves the "
+                "complete candidate instead of discarding it, and returns the reference "
+                "beside the unchanged refusal"
+            ),
+            "location": "<collection directory>/Held/<held_id>.md",
+            "frontmatter": [
+                "type",
+                "collection_id",
+                "held_id",
+                "attempted_action",
+                "target_item_key",
+                "held_at",
+                "why",
+                "candidate_sha256",
+                "diagnostics",
+            ],
+            "body": "one fenced json block carrying the exact candidate",
+            "refusal_details": "code, reason, field, issues, held",
+            "resume": (
+                "append or update with held=<held_id>; item or changes supply shallow "
+                "overrides and a null value removes a field"
+            ),
+            "discard": "discard with collection, held and why removes the candidate",
+            "decline": "hold=false refuses without writing a held file",
+            "visibility": (
+                "held candidates are not items: they are not counted, queried, recalled "
+                "or hashed into the audit chain, and holding never advances the audit head"
+            ),
+            "coverage": "inspect reports coverage.committed, coverage.held and coverage.held_refs",
+        },
+        "item_identity": {
+            "item_key": "the internal UUID identity of an item, not its natural key",
+            "omitted": (
+                "omit item_key and identity derives from the declared natural key, so a "
+                "restated observation replays instead of arriving as a second item"
+            ),
+            "refusal": (
+                "a non-UUID item_key refuses with INVALID_RECORD_ID; when the value is a "
+                "natural-key value, or the candidate's natural key is complete, the details "
+                "name the declared natural key and say to omit item_key"
+            ),
+        },
         "plan_links": {
             "reference": "opaque Planning reference stored under links.plans[].reference",
             "query": "bounded Records query descriptor: filters and limit",
@@ -2566,6 +2610,49 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
         type(value) is type(option) and value == option for option in spec.enum
     ):
         raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}")
+
+
+def validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
+    """Validate one declared field, raising the same refusal `validate` raises.
+
+    Exposed so an aggregating validator can run the shipped per-field rules
+    field by field, and address each failure by path, without a second copy of
+    those rules drifting away from this one.
+    """
+    _validate_field_value(name, value, spec)
+
+
+def normalize_item_values(schema: ItemSchema, values: Mapping[str, Any]) -> dict[str, Any]:
+    """Project validated item values into their canonical comparison form.
+
+    Dates and datetimes go through the schema's own normalization so a candidate
+    and its parsed round-trip compare on meaning rather than on which Python type
+    the YAML reader happened to produce.
+    """
+    return {
+        name: _normalize_item_value(value, schema.fields.get(name))
+        for name, value in values.items()
+    }
+
+
+def _normalize_item_value(value: Any, spec: FieldSpec | None) -> Any:
+    if value is None:
+        return None
+    if spec is not None and spec.type == "date":
+        return _normalize_date(value)
+    if spec is not None and spec.type == "datetime":
+        return _normalize_datetime(value)
+    if spec is not None and spec.type == "array" and isinstance(value, list | tuple):
+        return [_normalize_item_value(item, spec.items) for item in value]
+    if type(value) is dt.datetime:
+        return value.isoformat()
+    if type(value) is dt.date:
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {str(key): _normalize_item_value(item, None) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_normalize_item_value(item, None) for item in value]
+    return value
 
 
 def _natural_key_value(value: Any, field_type: str | None) -> Any:

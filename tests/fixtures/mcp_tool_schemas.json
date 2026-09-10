@@ -4449,7 +4449,7 @@
       "additionalProperties": false,
       "properties": {
         "action": {
-          "description": "Exactly one of describe, validate, inspect, query, create, append, update, revise, or rebaseline.",
+          "description": "Exactly one of describe, validate, inspect, query, create, append, update, revise, rebaseline, or discard.",
           "enum": [
             "describe",
             "validate",
@@ -4459,7 +4459,8 @@
             "append",
             "update",
             "revise",
-            "rebaseline"
+            "rebaseline",
+            "discard"
           ],
           "type": "string"
         },
@@ -4473,7 +4474,7 @@
             }
           ],
           "default": null,
-          "description": "Optional for inventory inspect; required for targeted inspect, query, revision validate, append, update, revise, and rebaseline."
+          "description": "Optional for inventory inspect; required for targeted inspect, query, revision validate, append, update, revise, rebaseline, and discard."
         },
         "manifest_path": {
           "anyOf": [
@@ -4726,7 +4727,7 @@
             }
           ],
           "default": null,
-          "description": "Values for append."
+          "description": "Values for append; shallow overrides when resuming a held candidate."
         },
         "item_key": {
           "anyOf": [
@@ -4738,7 +4739,7 @@
             }
           ],
           "default": null,
-          "description": "Stable item ID for append or update."
+          "description": "The item's internal UUID identity, required for update. Omit it on append and identity derives from the collection's declared natural key."
         },
         "expected_container_hash": {
           "anyOf": [
@@ -4903,6 +4904,30 @@
           ],
           "default": null,
           "description": "Guardedly rebuild the managed Markdown presentation during update."
+        },
+        "held": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reference to a held candidate: resumes it on append or update, with item or changes supplying overrides and a null value removing a field; names the candidate to remove on discard."
+        },
+        "hold": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Set false to refuse an invalid candidate without holding it. A refused append or update otherwise preserves the complete candidate as a held file under the collection and returns its reference beside the refusal."
         },
         "response_detail": {
           "default": "compact",

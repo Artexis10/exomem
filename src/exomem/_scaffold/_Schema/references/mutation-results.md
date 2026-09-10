@@ -83,6 +83,12 @@ draft fields alone refuses with `SEMANTIC_CONTRACT_BLOCKED` and a
 sequence. Prefer adding the real relation over asserting none exists; the
 disposition is for material that genuinely stands alone.
 
+A refused Record append or update is held rather than lost: the refusal names
+every failing field under `details.issues` and returns a `held` reference, so fix
+the named field and resume with `record_memory(action="append"|"update",
+held=...)`, or `discard` it — never loop, and never preserve diagnostic
+breadcrumbs as Evidence.
+
 On MCP these expected refusals arrive as normal tool content with top-level
 `success: false`; inspect the structured `error` rather than treating it as a
 transport failure. A `receipt_id` is diagnostic and is not a transferable

@@ -10,6 +10,8 @@ from record_fixtures import (
     copy_dataset_fixture,
     copy_vehicle_maintenance_fixture,
     copy_x3_fixture,
+    ledger_item,
+    setup_ledger_collection,
 )
 from record_presentation_fixtures import manifest_text
 
@@ -2678,3 +2680,239 @@ def test_record_inspection_egress_refuses_observed_vocabulary_on_a_legacy_tracke
     )
 
     assert smuggled == {"withheld": True, "reason": "invalid_projector_payload"}
+
+
+# --------------------------------------------------------------------------
+# Coverage: committed items and held candidates
+# --------------------------------------------------------------------------
+
+
+def _ledger_with_one_item(tmp_path: Path) -> collections.CollectionManifest:
+    manifest = collections.load_manifest(tmp_path, setup_ledger_collection(tmp_path))
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item=ledger_item(),
+        expected_container_hash=snapshot.snapshot,
+        why="record a published entry",
+    )
+    return collections.load_manifest(tmp_path, tmp_path / manifest.path)
+
+
+def _hold_one(tmp_path: Path, manifest: collections.CollectionManifest) -> str:
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=ledger_item(slug="held-entry", unlisted_channel="digest"),
+            why="record a published entry",
+        )
+    return caught.value.details["held"]["held_id"]
+
+
+def test_inspect_reports_coverage_for_committed_and_held(tmp_path: Path) -> None:
+    manifest = _ledger_with_one_item(tmp_path)
+    held_id = _hold_one(tmp_path, manifest)
+
+    inspection = record_governance.inspect_collection(tmp_path, manifest.path)
+
+    coverage = inspection["coverage"]
+    assert coverage["committed"] == 1
+    assert coverage["held"] == 1
+    assert [reference["held_id"] for reference in coverage["held_refs"]] == [held_id]
+    reference = coverage["held_refs"][0]
+    assert reference["attempted_action"] == "append"
+    assert reference["held_at"].startswith("20")
+    # A caller-supplied key may itself be a value in the wrong position, so the
+    # summary counts the undeclared fields rather than echoing their names.
+    assert reference["diagnostics"] == "SCHEMA_UNKNOWN_FIELD: 1 undeclared fields"
+    assert coverage["unreadable"] == 0
+    # A reference is a pointer, never the observation it stands for.
+    assert "quarterly" not in json.dumps(coverage)
+    assert "held-entry" not in json.dumps(coverage)
+    assert "unlisted_channel" not in json.dumps(coverage)
+
+
+def test_inspect_bounds_held_references(tmp_path: Path) -> None:
+    manifest = _ledger_with_one_item(tmp_path)
+    for index in range(21):
+        records.hold_candidate(
+            tmp_path,
+            manifest,
+            attempted_action="append",
+            candidate={"action": "append", "item": {"slug": f"entry-{index}"}, "body": ""},
+            why="record a published entry",
+            issues=[{"field": "slug", "code": "SCHEMA_FIELD_TYPE", "reason": "x", "received": "str"}],
+            held_id=f"11111111-1111-4111-8111-{index:012d}",
+        )
+
+    coverage = record_governance.inspect_collection(tmp_path, manifest.path)["coverage"]
+
+    assert coverage["held"] == 21
+    assert len(coverage["held_refs"]) == 20
+
+
+def _clone_held_files(
+    tmp_path: Path, manifest: collections.CollectionManifest, count: int
+) -> Path:
+    """Fill the held directory with `count` well-formed files, cheaply."""
+    seed = "11111111-1111-4111-8111-000000000000"
+    records.hold_candidate(
+        tmp_path,
+        manifest,
+        attempted_action="append",
+        candidate={"action": "append", "item": {"slug": "entry"}, "body": ""},
+        why="record a published entry",
+        issues=[
+            {"field": "slug", "code": "SCHEMA_FIELD_TYPE", "reason": "x", "received": "str"}
+        ],
+        held_id=seed,
+    )
+    directory = tmp_path / "Knowledge Base/Records/Publications/Held"
+    template = (directory / f"{seed}.md").read_text(encoding="utf-8")
+    for index in range(1, count):
+        reference = f"11111111-1111-4111-8111-{index:012d}"
+        (directory / f"{reference}.md").write_text(
+            template.replace(seed, reference), encoding="utf-8"
+        )
+    return directory
+
+
+def test_coverage_counts_every_held_file_beyond_the_listing_bound(tmp_path: Path) -> None:
+    """A capped count is a wrong count: the bound belongs to references only."""
+    manifest = _ledger_with_one_item(tmp_path)
+    directory = _clone_held_files(tmp_path, manifest, 505)
+    assert len(list(directory.glob("*.md"))) == 505
+
+    coverage = record_governance.inspect_collection(tmp_path, manifest.path)["coverage"]
+
+    assert coverage["held"] == 505
+    assert coverage["unreadable"] == 0
+    assert len(coverage["held_refs"]) == 20
+
+
+def test_a_held_file_that_cannot_be_loaded_is_reported_not_hidden(tmp_path: Path) -> None:
+    manifest = _ledger_with_one_item(tmp_path)
+    readable = _hold_one(tmp_path, manifest)
+    directory = tmp_path / "Knowledge Base/Records/Publications/Held"
+    (directory / "11111111-1111-4111-8111-000000000009.md").write_text(
+        "this is not a held record\n", encoding="utf-8"
+    )
+
+    coverage = record_governance.inspect_collection(tmp_path, manifest.path)["coverage"]
+
+    assert coverage["held"] == 2
+    assert coverage["unreadable"] == 1
+    assert [reference["held_id"] for reference in coverage["held_refs"]] == [readable]
+
+
+def test_a_count_only_inventory_never_reads_a_held_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inventory answers "how many", so it has no reason to open a candidate."""
+    manifest = _ledger_with_one_item(tmp_path)
+    _hold_one(tmp_path, manifest)
+    opened: list[str] = []
+    real = records._load_held_candidate
+
+    def spy(root, target, held_id):
+        opened.append(held_id)
+        return real(root, target, held_id)
+
+    monkeypatch.setattr(records, "_load_held_candidate", spy)
+
+    inventory = record_governance.inventory_collections(tmp_path)
+
+    row = next(
+        entry for entry in inventory["collections"] if entry["manifest_path"] == manifest.path
+    )
+    assert row["held"] == 1
+    assert opened == []
+
+
+def test_the_inventory_docstring_states_the_bounded_census() -> None:
+    """The docstring claimed it opened nothing while it read every collection."""
+    docstring = record_governance.inventory_collections.__doc__ or ""
+
+    assert "without opening canonical item data" not in docstring
+    assert "census" in docstring
+
+
+def test_inventory_reports_committed_and_held_per_collection(tmp_path: Path) -> None:
+    manifest = _ledger_with_one_item(tmp_path)
+    _hold_one(tmp_path, manifest)
+
+    inventory = record_governance.inventory_collections(tmp_path)
+
+    row = next(
+        entry
+        for entry in inventory["collections"]
+        if entry["manifest_path"] == manifest.path
+    )
+    assert row["committed"] == 1
+    assert row["held"] == 1
+
+
+def _withhold_the_held_directory(tmp_path: Path) -> None:
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    governance = tmp_path / "Knowledge Base" / "_Governance"
+    (governance / "scopes" / "held.yaml").write_text(
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5FZZ\n"
+        "name: Held\n"
+        'paths: ["Records/Publications/Held/**"]\n',
+        encoding="utf-8",
+    )
+    (governance / "rules" / "held.yaml").write_text(
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5FZY\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FZZ"]\n'
+        "audience: external\nceiling: 0\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_withheld_held_candidate_contributes_neither_reference_nor_count(
+    tmp_path: Path,
+) -> None:
+    manifest = _ledger_with_one_item(tmp_path)
+    _hold_one(tmp_path, manifest)
+    _withhold_the_held_directory(tmp_path)
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        inspection = record_governance.inspect_collection(tmp_path, manifest.path)
+        inventory = record_governance.inventory_collections(tmp_path)
+
+    assert inspection["coverage"]["held"] == 0
+    assert inspection["coverage"]["held_refs"] == []
+    row = next(
+        entry
+        for entry in inventory["collections"]
+        if entry["manifest_path"] == manifest.path
+    )
+    assert row["held"] == 0
+
+
+def test_a_hold_into_a_withheld_directory_soft_fails_to_the_original_refusal(
+    tmp_path: Path,
+) -> None:
+    """Holding writes into the vault, so it obeys the same release the items do."""
+    manifest = _ledger_with_one_item(tmp_path)
+    _withhold_the_held_directory(tmp_path)
+    held_directory = tmp_path / "Knowledge Base/Records/Publications/Held"
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with pytest.raises(collections.CollectionError) as caught:
+            records.append_record(
+                tmp_path,
+                manifest.path,
+                item=ledger_item(slug="held-entry", unlisted_channel="digest"),
+                why="record a published entry",
+            )
+
+    assert caught.value.code == "SCHEMA_UNKNOWN_FIELD"
+    assert caught.value.details["issues"]
+    assert "held" not in caught.value.details
+    assert caught.value.details["warnings"]
+    assert not held_directory.exists()

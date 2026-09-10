@@ -3104,6 +3104,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "update": "mutation",
         "revise": "mutation",
         "rebaseline": "mutation",
+        "discard": "mutation",
     },
     ("plan_memory", "action"): {
         "inspect": "structure",
