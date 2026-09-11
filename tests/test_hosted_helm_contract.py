@@ -2044,6 +2044,27 @@ def test_runtime_k3s_gate_pins_the_reviewed_release_unit() -> None:
     }
 
 
+def test_provisioner_api_validates_the_database_once_at_startup_not_every_five_seconds() -> None:
+    """Database validation is a boot-time invariant, not a serving-time one.
+
+    ``/health/ready`` runs four PostgreSQL queries. As a readiness probe it fired
+    every five seconds forever, which is one more consumer keeping a serverless
+    endpoint from ever suspending, and on any database blip it removed the only API
+    pod from the Service, turning a per-request 503 into a whole-service outage.
+    The startup probe keeps the validation; the periodic probes never touch the
+    database.
+    """
+    documents = _render(
+        PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform"
+    )
+    api = _find(documents, "Deployment", "exomem-provisioner-api")
+    (container,) = api["spec"]["template"]["spec"]["containers"]
+    assert container["startupProbe"]["httpGet"]["path"] == "/health/ready"
+    assert container["startupProbe"]["failureThreshold"] >= 12
+    for periodic in ("readinessProbe", "livenessProbe"):
+        assert container[periodic]["httpGet"]["path"] == "/health/live", periodic
+
+
 def test_no_cronjob_schedule_sits_inside_the_database_autosuspend_window() -> None:
     """Every heartbeat must clear the endpoint's autosuspend window.
 
