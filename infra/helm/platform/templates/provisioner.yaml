@@ -126,11 +126,24 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
-          readinessProbe:
+          # /health/ready validates the database once: migration head, runtime role
+          # and schema owner. Those are boot-time invariants, so they belong on the
+          # startup probe. Polling them every five seconds cost four PostgreSQL
+          # queries per probe against a database billed by wakefulness, and on any
+          # database blip it pulled the only API pod out of the Service, which is a
+          # worse outage than the app answering 503 itself.
+          startupProbe:
             httpGet:
               path: /health/ready
               port: http
             periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 36
+          readinessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
             timeoutSeconds: 2
           livenessProbe:
             httpGet:
