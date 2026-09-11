@@ -383,4 +383,4 @@ Every test lands red first (failing output recorded before the implementation, t
   191 passed, 0 failed (local 1.12.0 adds 79 pre-existing Purpose-placeholder
   warnings on main specs, none from this change); archive discipline OK;
   `validate-public-artifacts.py --repository`: 4022 files clean.
-- [ ] 6.3 (optional, post-deploy, operational) On the live vault through `record_memory`: append the 2026-09-09 public reply into the canonical outbound-social collection with real line breaks; update the 2026-09-08 item's escaped `exact_text`; inspect reports five committed and zero held. Not code; recorded for closure evidence only.
+- Post-deploy operational follow-up, not a task of this change: on the live vault through `record_memory`, update the 2026-09-08 item's escaped `exact_text` to real line breaks and append every publish after 2026-09-08 that ended Evidence-only, then confirm inspect reports zero held. Tracked in the delivery runbook for the release that carries this change; the change itself is complete at merge.

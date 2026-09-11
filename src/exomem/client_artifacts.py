@@ -20,12 +20,16 @@ from pathlib import Path, PurePosixPath
 from queue import Empty, Queue
 from urllib.parse import urljoin, urlsplit
 
+from .cli_ops import OpError
 from .preserve import (
     _ADOPTION_RECEIPT_FIELD,
     _ADOPTION_RECEIPT_FIELDS,
     _ADOPTION_RECEIPT_VERSION,
+    DESTINATION_ACCEPTED_FORM,
+    DuplicateArtifact,
     PreserveError,
-    _sanitize_segment,
+    destination_duplicate_index,
+    destination_segment_refusal,
     preserve_stream,
 )
 from .vault import (
@@ -311,10 +315,25 @@ def _content_type(value: object) -> str | None:
 
 
 def _validate_destination(scope: str, category: str) -> None:
-    if not _sanitize_segment(scope):
-        raise SafeFetchError("INVALID_PRESERVE", "scope is empty or invalid")
-    if not _sanitize_segment(category):
-        raise SafeFetchError("INVALID_PRESERVE", "category is empty or invalid")
+    """Refuse a malformed destination before a single handle is fetched.
+
+    A whole-call refusal rather than per-file rows: the destination is one
+    property of the call, not of any file in it, and a caller that mistyped it
+    has nothing to salvage from a partial batch.
+    """
+    for field, value in (("scope", scope), ("category", category)):
+        reason = destination_segment_refusal(value, field=field)
+        if reason is not None:
+            raise OpError(
+                "INVALID_PRESERVE",
+                reason,
+                "Supply the segment as one path segment and nest with `category`.",
+                details={
+                    "field": field,
+                    "reason": reason,
+                    "accepted_form": DESTINATION_ACCEPTED_FORM,
+                },
+            )
 
 
 def _yaml_page_path_safe(value: str) -> bool:
@@ -465,6 +484,28 @@ def stage_artifact(
 def _failed(file_id: str, error: SafeFetchError | PreserveError) -> dict[str, str]:
     reason = "artifact already exists" if error.code == "ARTIFACT_EXISTS" else error.reason[:300]
     return {"file_id": file_id, "outcome": "failed", "code": error.code, "reason": reason}
+
+
+#: The three terminal states one preserved file can end in. `outcome` mirrors
+#: them for one release -- an existing client branching on `stored`/`failed`
+#: keeps working, and `already_stored` reports `outcome="stored"` beside a
+#: `duplicate_of` naming what was already there.
+_PRESERVE_STATES = ("stored", "already_stored", "failed")
+
+
+def _batch_result(rows: list[dict | None]) -> dict:
+    """One ordered outcome per input file, each with a terminal state."""
+    files: list[dict] = []
+    for row in rows:
+        if row is None:
+            continue
+        files.append(row if "state" in row else {**row, "state": row["outcome"]})
+    return {
+        "files": files,
+        "summary": {
+            state: sum(row["state"] == state for row in files) for state in _PRESERVE_STATES
+        },
+    }
 
 
 def _bounded_file_id(file: object) -> str:
@@ -1057,21 +1098,19 @@ def _preserve_evidence_adoption(
         return prepared
     envelope, selected_index = prepared
     outcomes = _adoption_outcomes(files, selected_index)
+    # `_validate_destination` refuses the whole call; only the YAML-safety check
+    # below is a per-file outcome, because it guards how the page renders rather
+    # than where the artifact lands.
+    _validate_destination(scope, category)
     try:
-        _validate_destination(scope, category)
-        if not all(
-            _yaml_page_path_safe(value)
-            for value in (_sanitize_segment(scope), _sanitize_segment(category))
-        ):
+        if not all(_yaml_page_path_safe(value) for value in (scope, category)):
             raise SafeFetchError(
                 "INVALID_PRESERVE", "adoption destination contains unsafe characters"
             )
     except SafeFetchError as error:
         outcomes[selected_index] = _failed(envelope.selected_file_id, error)
         return _finish_adoption(outcomes)
-    destination = _destination(
-        vault_root, "Evidence", _sanitize_segment(scope), _sanitize_segment(category)
-    )
+    destination = _destination(vault_root, "Evidence", scope, category)
     selected = files[selected_index]
     try:
         receipt = _existing_receipt(
@@ -1341,27 +1380,20 @@ def preserve_artifacts(
             files=files,
             adoption=adoption,
         )
+    # Before the empty-batch shortcut: a malformed destination is a property of
+    # the call, so `files=[]` with `scope="a/b"` must refuse rather than report
+    # a successful batch of nothing.
+    _validate_destination(scope, category)
     if not isinstance(files, list) or not files:
-        return {"files": [], "summary": {"stored": 0, "failed": 0}}
-    try:
-        _validate_destination(scope, category)
-    except SafeFetchError as error:
-        return {
-            "files": [
-                _failed(str(file.get("file_id") or "") if isinstance(file, Mapping) else "", error)
-                for file in files
-            ],
-            "summary": {"stored": 0, "failed": len(files)},
-        }
+        return _batch_result([])
     if len(files) > MAX_FILES:
         error = SafeFetchError("TOO_MANY_FILES", "too many files in one request")
-        return {
-            "files": [
+        return _batch_result(
+            [
                 _failed(str(file.get("file_id") or "") if isinstance(file, Mapping) else "", error)
                 for file in files
-            ],
-            "summary": {"stored": 0, "failed": len(files)},
-        }
+            ]
+        )
     budget = FetchBudget()
     batch_deadline = _monotonic() + _BATCH_DEADLINE_SECONDS
     staged: dict[int, StagedArtifact] = {}
@@ -1381,6 +1413,10 @@ def preserve_artifacts(
             outcomes[index] = _failed(file_id, error)
 
     manager = active_manager()
+    # One pass over the destination's sidecars for the whole batch. Every file
+    # this call stores is added to it below, so a later file in the same batch
+    # still sees an earlier one's bytes.
+    duplicates = destination_duplicate_index(vault_root, scope=scope, category=category)
     try:
         for index, artifact in staged.items():
             try:
@@ -1391,6 +1427,34 @@ def preserve_artifacts(
                     and len(artifact.content_type) > _MAX_CONTENT_TYPE_CHARS
                 ):
                     raise SafeFetchError("INVALID_FILE", "staged file metadata is invalid")
+                # After staging, before the commit boundary: a retry under a new
+                # identity must report what is already there rather than write a
+                # second copy of one fact into an append-only tree. Nothing is
+                # written and the audit chain does not advance for this file --
+                # but the call has a terminal answer about canonical state, so
+                # it is marked committed and gets the same terminal envelope a
+                # stored file gets. Without that an all-duplicate batch, which
+                # is what retrying under a new identity produces, would come
+                # back as a bare leaf dict with no request or receipt identity.
+                duplicate = duplicates.get(artifact.sha256)
+                if duplicate is not None:
+                    mark_active_mutation_committed()
+                    outcomes[index] = {
+                        "file_id": artifact.file_id,
+                        "outcome": "stored",
+                        "state": "already_stored",
+                        "duplicate_of": {"path": duplicate.path, "ref": duplicate.ref},
+                        "stored_path": duplicate.path,
+                        "path": duplicate.path,
+                        "ref": duplicate.ref,
+                        "size": artifact.size,
+                        "hash": artifact.sha256,
+                        "hash_algorithm": "sha256",
+                        "media_id": f"sha256:{artifact.sha256}",
+                        "content_type": artifact.content_type,
+                        "warnings": [],
+                    }
+                    continue
                 with manager.mutation_guard(
                     vault_root,
                     request_id=active_mutation_request_id(),
@@ -1423,10 +1487,34 @@ def preserve_artifacts(
                             media_processing.reconcile_media(vault_root, vault_root / payload["path"], explicit=False)
                 except Exception:  # noqa: BLE001 - the original bytes are durable and recoverable
                     warnings.append("media reconciliation failed; evidence remains recoverable")
+                stored_path = payload.get("stored_path") or payload.get("path")
+                stored_hash = payload.get("hash")
+                stored_ref = payload.get("ref")
+                if (
+                    isinstance(stored_hash, str)
+                    and isinstance(stored_path, str)
+                    and isinstance(stored_ref, str)
+                    and stored_ref
+                ):
+                    # Visible to the rest of this batch: two identical files in
+                    # one call are one fact, and the second must report the copy
+                    # the first just wrote.
+                    duplicates.setdefault(
+                        stored_hash,
+                        DuplicateArtifact(
+                            hash=stored_hash,
+                            path=stored_path,
+                            sidecar_path=str(payload.get("sidecar_path") or ""),
+                            ref=stored_ref,
+                        ),
+                    )
                 outcomes[index] = {
                     "file_id": artifact.file_id,
                     "outcome": "stored",
-                    "stored_path": payload.get("stored_path") or payload.get("path"),
+                    "state": "stored",
+                    "stored_path": stored_path,
+                    "path": stored_path,
+                    "ref": payload.get("ref"),
                     "size": payload.get("size"),
                     "hash": payload.get("hash"),
                     "hash_algorithm": payload.get("hash_algorithm"),
@@ -1439,11 +1527,4 @@ def preserve_artifacts(
     finally:
         for artifact in staged.values():
             artifact.path.unlink(missing_ok=True)
-    final = [outcome for outcome in outcomes if outcome is not None]
-    return {
-        "files": final,
-        "summary": {
-            "stored": sum(item["outcome"] == "stored" for item in final),
-            "failed": sum(item["outcome"] == "failed" for item in final),
-        },
-    }
+    return _batch_result(outcomes)

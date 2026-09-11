@@ -1910,6 +1910,147 @@ def test_hosted_pending_error_omits_absent_public_idempotency_key(
     assert "private-detail-sentinel" not in response.text
 
 
+def test_hosted_outcome_unknown_carries_the_structured_fields(tmp_path: Path) -> None:
+    """The one error a connector most needs to interpret must not arrive bare.
+
+    `MUTATION_OUTCOME_UNKNOWN` was missing from the hosted shape table, so
+    `_hosted_mutation_error_details` returned `{}` for it and the ChatGPT client
+    had only prose to distinguish "never executed" from "committed, outcome
+    unknown".
+    """
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-outcome-unknown",
+        credential="outcome-unknown-service-credential-0001",
+        invoker=MutationErrorInvoker(
+            "MUTATION_OUTCOME_UNKNOWN",
+            status="uncertain",
+            committed=None,
+        ),
+    )
+
+    response = client.post(
+        "/private/exomem/v1/command/remember",
+        headers=_headers(config),
+        json=_remember_body("HOSTED-OUTCOME-UNKNOWN"),
+    )
+
+    assert response.status_code == 409, response.text
+    error = response.json()["error"]
+    assert error["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert error["status"] == "uncertain"
+    assert error["committed"] is None
+    assert error["receipt_id"] == "0123456789abcdef"
+
+
+def _status_bearing_mutation_codes() -> set[str]:
+    """Every mutation code any module gives a `status`+`committed` detail pair.
+
+    Read out of the package itself rather than restated here: a hand-copied list
+    is exactly how `MUTATION_OUTCOME_UNKNOWN` came to be missing from the hosted
+    table for four releases. Scanning the whole package rather than the writer
+    lease alone is the same argument one level up -- `semantic_contract.py`
+    raises `MUTATION_WARMING` with the same detail pair, and a scan of one file
+    would not see a code declared where the maintainer happened to put it.
+    """
+    import ast
+
+    import exomem
+
+    package_root = Path(exomem.__file__).parent
+    codes: set[str] = set()
+    for module in sorted(package_root.rglob("*.py")):
+        codes |= _status_bearing_codes_in(ast.parse(module.read_text(encoding="utf-8")))
+    return codes
+
+
+def _status_bearing_codes_in(tree) -> set[str]:  # noqa: ANN001
+    import ast
+
+    def dict_has_status(node: ast.AST) -> bool:
+        # `status` alone is ambiguous -- `WRITER_COORDINATOR_CONTRACT_ABSENT`
+        # carries an HTTP status under the same key. The mutation terminal's
+        # status always travels with `committed`, which is exactly the pair the
+        # hosted shape table stores.
+        if not isinstance(node, ast.Dict):
+            return False
+        keys = {key.value for key in node.keys if isinstance(key, ast.Constant)}
+        return {"status", "committed"} <= keys
+
+    status_named_dicts = {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and dict_has_status(node.value)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    status_named_dicts |= {
+        node.target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.value is not None
+        and dict_has_status(node.value)
+    }
+
+    codes: set[str] = set()
+    for node in ast.walk(tree):
+        # `OpError("CODE", ..., details={"status": ...})` and the same shape
+        # through `super().__init__(...)` or a named details dict.
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                if keyword.arg != "details":
+                    continue
+                if dict_has_status(keyword.value) or (
+                    isinstance(keyword.value, ast.Name)
+                    and keyword.value.id in status_named_dicts
+                ):
+                    first = node.args[0] if node.args else None
+                    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                        codes.add(first.value)
+        # `if error.code == "CODE": error.details.update(status=...)`
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Compare):
+            comparators = node.test.comparators
+            if not comparators or not isinstance(comparators[0], ast.Constant):
+                continue
+            code = comparators[0].value
+            if not isinstance(code, str):
+                continue
+            for inner in ast.walk(node.test):
+                if isinstance(inner, ast.Attribute) and inner.attr == "code":
+                    break
+            else:
+                continue
+            for statement in node.body:
+                for inner in ast.walk(statement):
+                    if (
+                        isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr == "update"
+                        and {"status", "committed"}
+                        <= {keyword.arg for keyword in inner.keywords}
+                    ):
+                        codes.add(code)
+    return {code for code in codes if code.isupper() and "_" in code}
+
+
+def test_every_status_bearing_mutation_code_has_a_hosted_shape() -> None:
+    from exomem.server_hosted import _HOSTED_MUTATION_ERROR_SHAPES
+
+    codes = _status_bearing_mutation_codes()
+
+    # The scan must actually find the known family, or an empty result would
+    # make this assertion vacuously true.
+    assert {
+        "MUTATION_BUSY",
+        "MUTATION_WARMING",
+        "MUTATION_ACKNOWLEDGEMENT_PENDING",
+        "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
+        "MUTATION_OUTCOME_UNKNOWN",
+    } <= codes
+    assert codes <= set(_HOSTED_MUTATION_ERROR_SHAPES)
+
+
 def test_lifecycle_routes_gate_reads_writes_and_sealing(tmp_path: Path) -> None:
     client, config, lifecycle, invoker = _cell(
         tmp_path,

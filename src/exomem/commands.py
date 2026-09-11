@@ -23,6 +23,7 @@ import hashlib
 import inspect
 import json
 import logging
+import mimetypes
 import os
 import re
 import typing
@@ -4257,6 +4258,37 @@ def op_link(
     return result.as_dict()
 
 
+def _note_committed_artifact_targets(result: object) -> None:
+    """Hand the ledger the vault-relative paths this write committed.
+
+    Structural paths only, taken from the outcome rather than the arguments --
+    an artifact write addresses none, so its ledger row could not say what
+    landed. Never a URL, a handle id, or content. Only rows whose terminal
+    state is `stored`: an `already_stored` row names a path an earlier call
+    committed, and recording it here would attribute that write to this one.
+    """
+    from . import call_ledger
+
+    def committed(item: Mapping[str, object]) -> bool:
+        return item.get("state", item.get("outcome")) == "stored"
+
+    paths: list[str] = []
+    if isinstance(result, Mapping):
+        files = result.get("files")
+        if isinstance(files, (list, tuple)):
+            for item in files:
+                if not isinstance(item, Mapping) or not committed(item):
+                    continue
+                value = item.get("path") or item.get("stored_path")
+                if isinstance(value, str):
+                    paths.append(value)
+        elif committed(result):
+            value = result.get("path") or result.get("stored_path")
+            if isinstance(value, str):
+                paths.append(value)
+    call_ledger.note_committed_targets(paths)
+
+
 def op_preserve(
     vault_root: Path,
     scope: str,
@@ -4297,6 +4329,61 @@ def op_preserve(
         exists — Evidence is append-only, pick a new filename).
     """
     preserve_module = _preserve_module()
+    from .cli_ops import OpError
+
+    # Validated, never normalised: a separator in `scope` used to be deleted and
+    # the artifact written somewhere else, which forks one case across two trees.
+    for field, value in (("scope", scope), ("category", category)):
+        reason = preserve_module.destination_segment_refusal(value, field=field)
+        if reason is not None:
+            raise OpError(
+                "INVALID_PRESERVE",
+                reason,
+                "Supply the segment as one path segment and nest with `category`.",
+                details={
+                    "field": field,
+                    "reason": reason,
+                    "accepted_form": preserve_module.DESTINATION_ACCEPTED_FORM,
+                },
+            )
+    # Same destination-scoped lookup the batch command uses, run before the
+    # write: Evidence is append-only, so the same bytes under the same family
+    # are one fact, and reporting the copy that is already there beats adding a
+    # second one that no later reader can tell apart.
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest() if isinstance(content, str) else ""
+    duplicate = preserve_module.find_duplicate_artifact(
+        vault_root, scope=scope, category=category, sha256=digest
+    )
+    if duplicate is not None:
+        from .writer_lease import mark_active_mutation_committed
+
+        # Nothing is written, but the call has a terminal answer about canonical
+        # state, so it is marked committed and comes back inside the same
+        # terminal envelope the stored branch gets -- with the same field set,
+        # so one command does not have two response shapes.
+        mark_active_mutation_committed()
+        # Nothing is handed to the ledger: this call committed nothing, and the
+        # path it resolved to was recorded by the call that did.
+        return {
+            "path": duplicate.path,
+            "stored_path": duplicate.path,
+            "sidecar_path": duplicate.sidecar_path,
+            "ref": duplicate.ref,
+            "state": "already_stored",
+            "outcome": "stored",
+            "duplicate_of": {"path": duplicate.path, "ref": duplicate.ref},
+            "warnings": [],
+            "size": len(content.encode("utf-8")) if isinstance(content, str) else None,
+            "hash": digest or None,
+            "hash_algorithm": "sha256",
+            "media_id": f"sha256:{digest}" if digest else None,
+            # The same derivation the stored branch uses, from the sanitized
+            # filename: a name whose sanitized form has a different extension
+            # must not yield two content types for one set of bytes.
+            "content_type": mimetypes.guess_type(
+                preserve_module._sanitize_filename(filename)
+            )[0],
+        }
     try:
         result = preserve_module.preserve(
             vault_root,
@@ -4308,7 +4395,9 @@ def op_preserve(
         )
     except preserve_module.PreserveError as e:
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
-    return result.as_dict()
+    payload = result.as_dict()
+    _note_committed_artifact_targets(payload)
+    return payload
 
 
 def op_note(
@@ -6132,7 +6221,7 @@ def op_capture_source(
     if files or adoption is not None:
         from . import client_artifacts
 
-        return client_artifacts.capture_source_artifacts(
+        captured = client_artifacts.capture_source_artifacts(
             vault_root,
             source_schema=source_schema,
             title=title,
@@ -6146,6 +6235,8 @@ def op_capture_source(
             projects=projects,
             adoption=adoption,
         )
+        _note_committed_artifact_targets(captured)
+        return captured
     source = op_add(
         vault_root,
         source_schema,
@@ -6206,9 +6297,15 @@ def op_preserve_evidence(
     file handles, use `preserve_artifacts`; otherwise use `transfer_artifact`
     plus `/upload`. Bytes never pass through the model.
 
+    The outcome carries a terminal `state`: `stored`, or `already_stored` when
+    those exact bytes are already under that destination, in which case nothing
+    is written and the outcome names the existing path and ref.
+
     Args:
-        scope: Incident, case, project, or domain key.
-        category: Evidence category within the scope.
+        scope: Incident, case, project, or domain key. One path segment, never
+            a path. A separator or reserved character is refused, not rewritten.
+        category: Evidence category within the scope. One path segment, not a
+            path; nest with this argument rather than with `/` in `scope`.
         filename: Artifact filename, including extension.
         content: UTF-8 text to preserve as received.
         description: Optional sidecar description.
@@ -6234,13 +6331,19 @@ def op_preserve_artifacts(
 
     Use this canonical binary-preservation command when the client can supply
     temporary HTTPS file handles. Exomem retrieves each handle server-side and
-    returns one stored or failed outcome per file; no binary data is passed as
-    base64 through model-visible arguments. Clients without file handles keep
-    using `transfer_artifact(operation="upload")` followed by `/upload`.
+    returns one terminal state per file — `stored`, `already_stored`, or
+    `failed`. `already_stored` means those exact bytes are already under that
+    destination, so nothing was written and the outcome names the existing path
+    and ref; retrying a lost response with the same identity replays the batch
+    rather than duplicating it. No binary data is passed as base64 through
+    model-visible arguments. Clients without file handles keep using
+    `transfer_artifact(operation="upload")` followed by `/upload`.
 
     Args:
-        scope: Incident, case, project, or domain key.
-        category: Evidence category within the scope.
+        scope: Incident, case, project, or domain key. One path segment, never
+            a path. A separator or reserved character is refused, not rewritten.
+        category: Evidence category within the scope. One path segment, not a
+            path; nest with this argument rather than with `/` in `scope`.
         files: Ordered temporary file handles. Each object requires `download_url`
             and `file_id`; `mime_type` and `file_name` are optional.
         adoption: Optional explicit adoption identity selecting exactly one
@@ -6256,6 +6359,7 @@ def op_preserve_artifacts(
         result = client_artifacts.preserve_artifacts(
             vault_root, scope=scope, category=category, files=files, adoption=adoption
         )
+    _note_committed_artifact_targets(result)
     # No batch deltas: Evidence blobs author no predictions, questions,
     # experiments or supersession pointers, so this leaf's own writes never move
     # a projected category (design D3). The carriage value is the session
