@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change add-first-class-records. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Human-owned collection manifests
 The system SHALL represent each explicit structured collection with an ordinary, human-readable Markdown manifest under the governed Knowledge Base. The manifest SHALL carry a stable collection identifier, title, semantic profile, schema version, storage strategy and canonical source, item-schema reference or inline schema, lifecycle, and optional templates, views, governance classification, and links. The manifest SHALL be the collection contract, not a copy of its items, and future `records` and `planning` profiles SHALL use this same contract.
 
@@ -69,7 +71,7 @@ Chronological-log child rows SHALL declare a bounded `container_field` in additi
 - **THEN** its rows remain readable and editable with ordinary tools, Exomem can query them without an opaque database, and this delivery refuses dataset append/update rather than silently reserializing the file
 
 ### Requirement: Collection-scoped item identity and exact source versioning
-Every safely mutable item SHALL expose an identity tuple `(collection_uuid, canonical_item_key)` and an item version derived from its exact current source bytes. New agent-authored Markdown items SHALL receive an explicit UUID item key through the active semantic profile's declared ID property and marker contract. Query-only datasets MAY expose a bounded manifest-declared string key, but arbitrary dataset keys SHALL NOT be treated as global Exomem IDs. Standalone Records references SHALL retain `exomem://record/<collection-uuid>/<percent-encoded-key>`; standalone Planning references SHALL use `exomem://plan/<collection-uuid>/<percent-encoded-key>`. A reference parser SHALL require the namespace to match the selected profile.
+Every safely mutable item SHALL expose an identity tuple `(collection_uuid, canonical_item_key)` and an item version derived from its exact current source bytes. New agent-authored Markdown items SHALL receive an explicit UUID item key through the active semantic profile's declared ID property and marker contract. Query-only datasets MAY expose a bounded manifest-declared string key, but arbitrary dataset keys SHALL NOT be treated as global Exomem IDs. Standalone Records references SHALL retain `exomem://record/<collection-uuid>/<percent-encoded-key>`; standalone Planning references SHALL use `exomem://plan/<collection-uuid>/<percent-encoded-key>`. A reference parser SHALL require the namespace to match the selected profile. An explicit item key that is not a UUID SHALL refuse with `INVALID_RECORD_ID`; when the supplied value equals a natural-key field value of the candidate, or the candidate's declared natural key is complete, the refusal SHALL name the declared natural key and explain that identity derives from it when the key is omitted.
 
 #### Scenario: Explicit identity survives a non-semantic edit
 - **WHEN** a user changes an item field, title, body, or path without changing its explicit item identifier
@@ -90,6 +92,10 @@ Every safely mutable item SHALL expose an identity tuple `(collection_uuid, cano
 #### Scenario: Namespace mismatch refuses
 - **WHEN** a Planning operation receives an `exomem://record/...` item reference or a Records operation receives an `exomem://plan/...` item reference
 - **THEN** resolution refuses the profile mismatch without searching by the encoded key alone
+
+#### Scenario: Natural-key value supplied as an item key refuses with remediation
+- **WHEN** an append supplies the candidate's natural-key value as `item_key`
+- **THEN** the refusal keeps `INVALID_RECORD_ID`, names the declared natural-key fields and the received value, and states that identity derives from the natural key when `item_key` is omitted
 
 ### Requirement: Minimal typed item schemas
 Collection schemas SHALL support required and optional open-vocabulary fields with bounded primitive types, enums, arrays, objects, date or datetime values, units metadata, and link fields, except that a schema SHALL NOT declare a schema-excluded frontmatter field name. The substrate SHALL impose only identity and schema-version mechanics universally; occurred time, status, units, provenance, relations, uncertainty, reconstruction, and lifecycle SHALL be present only when the collection schema makes them meaningful, and uncertainty SHALL NOT be expressed as a numeric confidence field because the schema-excluded set forbids that name.
@@ -231,7 +237,7 @@ Generated tables, observed progress renderings, summaries, and export-shaped que
 - **THEN** the returned content is labelled derived and the manifest continues to name the Markdown log as canonical
 
 ### Requirement: Manual-edit visibility and report-only inspection
-Queries SHALL read current canonical files so ordinary editor and Obsidian changes become visible without AI mediation. Collection inspection SHALL detect out-of-band source changes, duplicate or missing identities, schema violations, missing templates, audit-history gaps, and stale saved-view provenance without rewriting canonical files. Generic derived-index repair SHALL remain owned by `maintain_memory(mode="reconcile", dry_run=false)`.
+Queries SHALL read current canonical files so ordinary editor and Obsidian changes become visible without AI mediation. Collection inspection SHALL detect out-of-band source changes, duplicate or missing identities, schema violations, missing templates, audit-history gaps, and stale saved-view provenance without rewriting canonical files. Collection inspection SHALL report held candidates and coverage counts without adopting, rewriting, or counting them as items. Generic derived-index repair SHALL remain owned by `maintain_memory(mode="reconcile", dry_run=false)`.
 
 #### Scenario: Direct edit appears on next query
 - **WHEN** a user adds, changes, or removes a valid item directly in an ordinary editor
@@ -244,6 +250,10 @@ Queries SHALL read current canonical files so ordinary editor and Obsidian chang
 #### Scenario: Inspect reports an undeclared manual field
 - **WHEN** a human adds a property that is not declared by the collection schema to an otherwise readable Record item
 - **THEN** inspection reports a schema violation without dropping, rewriting, or silently adopting the property
+
+#### Scenario: Inspection reports a held candidate without adopting it
+- **WHEN** a collection directory contains a held candidate beside its items
+- **THEN** inspection reports it under coverage with its reference and diagnostics summary, the item count excludes it, and no canonical file is rewritten
 
 ### Requirement: The binding manifest contract is machine-discoverable
 The collection substrate SHALL project a deterministic versioned manifest JSON Schema derived from the same constants and constraints enforced by the binding parser. The projection SHALL distinguish closed enums from open strings, include required fields and nested field grammar, and contain canonical minimal and complete examples that parse successfully.
@@ -596,3 +606,14 @@ Structured-file apply SHALL stage all path moves and SHALL publish no visible pa
 
 - **WHEN** publication fails after a compatibility-Unicode source has been staged and other targets have been installed
 - **THEN** every original path and hash is restored, every planned final target is absent, and collection inspection reports the same status as before apply
+
+### Requirement: Item validation refusals are field-addressed and complete
+Item validation for structured-collection mutations SHALL preserve stable error codes and add machine-readable details naming each failing field path — dotted for nested objects and indexed for arrays — together with the reason and the received value class, and SHALL report every failing field in one response rather than only the first encountered.
+
+#### Scenario: Every undeclared field is named
+- **WHEN** a candidate item carries two fields the schema does not declare
+- **THEN** the refusal keeps `SCHEMA_UNKNOWN_FIELD` and its details list both field names
+
+#### Scenario: Nested failure is addressed by path
+- **WHEN** the third element of a declared array-of-object field carries a value of the wrong type
+- **THEN** the refusal details name that element's path with its index and the failing sub-field, the reason, and the received value class
