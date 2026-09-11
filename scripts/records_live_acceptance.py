@@ -57,6 +57,12 @@ _COMPACT_MUTATION_OPTIONAL = frozenset(
         # written page shows recurring durable material outside its declared scope,
         # and never carried by a Records mutation.
         "structure_suggestion",
+        # The episode-completeness advisory. A structured write IS a capture, so a
+        # Records mutation does carry it — on the first write after a quiet
+        # interval, and on no write inside one. Listed as optional for exactly
+        # that reason: which of an acceptance run's writes carries it is a fact
+        # about the run's timing, not about the receipt.
+        "capture_sweep",
     }
 )
 _COMPACT_V1_RECEIPT = frozenset(

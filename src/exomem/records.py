@@ -491,7 +491,9 @@ def append_record(
         committed = _with_warnings(committed, warnings)
     # Outside the guard on purpose -- see `_due_state_carrier`.
     advisory = _due_state_carrier(root, manifest, path=committed_path, key=key, values=values)
-    return {"due_state": advisory, **committed} if advisory else committed
+    sweep = _capture_sweep_carrier(root, manifest, key=key)
+    committed = {"due_state": advisory, **committed} if advisory else committed
+    return {"capture_sweep": sweep, **committed} if sweep else committed
 
 
 def _delivery_refusal(
@@ -980,7 +982,9 @@ def update_record(
         values=values,
         previous=before_values,
     )
-    return {"due_state": advisory, **committed} if advisory else committed
+    sweep = _capture_sweep_carrier(root, manifest, key=item_key)
+    committed = {"due_state": advisory, **committed} if advisory else committed
+    return {"capture_sweep": sweep, **committed} if sweep else committed
 
 
 def create_collection(
@@ -4228,6 +4232,49 @@ def _due_state_carrier(
         return {**block, "_vault": str(root)}
     except Exception:  # noqa: BLE001 -- a due-state count never breaks a commit
         log.debug("structured due-state projection failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _capture_sweep_carrier(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    *,
+    key: str | None,
+) -> dict[str, Any] | None:
+    """The episode-completeness advisory this structured write may carry.
+
+    A structured write IS a capture: an appended event or a queued intent lands
+    the same kind of durable fact a page write does, and an episode that produced
+    one very often produced more. So it sits on the same seam, beside
+    `_due_state_carrier`, after the mutation guard has been released, with the
+    same rule that a failure costs the caller an advisory and never the receipt.
+
+    No page state and no corpus, so no `unpaged_mentions`: there are no body
+    wikilinks on a structured item to read, and inventing a hint from field text
+    would be the semantic judgement this design keeps off the server.
+    """
+    try:
+        from . import capture_sweep
+
+        return capture_sweep.block(root, ref=_structured_reference(manifest, key))
+    except Exception:  # noqa: BLE001 -- an episode advisory never breaks a commit
+        log.debug("structured capture-sweep advisory failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _structured_reference(
+    manifest: collections.CollectionManifest, key: str | None
+) -> str | None:
+    """The canonical collection-scoped reference for one written item, or None."""
+    try:
+        if not key:
+            return None
+        profile = str(getattr(manifest, "semantic_profile", "") or "").casefold()
+        builder = (
+            collections.plan_ref if profile == "planning" else collections.record_ref
+        )
+        return builder(manifest.collection_id, key)
+    except Exception:  # noqa: BLE001
         return None
 
 

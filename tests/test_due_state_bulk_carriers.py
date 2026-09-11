@@ -385,7 +385,11 @@ def test_the_block_leaves_the_operation_outcome_keys_untouched(
     control = _adopt(vault, directory="legacy-control")
 
     assert "due_state" not in control, control
-    assert set(carrying) - {"due_state"} == set(control)
+    # `capture_sweep` is a SECOND independent advisory on this seam, governed by
+    # its own quiet interval rather than by `served`, so it is excluded from both
+    # sides rather than from one. The invariant under test is unchanged.
+    volatile = {"due_state", "capture_sweep"}
+    assert set(carrying) - volatile == set(control) - volatile
     for key in ("ok", "state", "status", "terminal", "mutated"):
         assert carrying[key] == control[key]
 
