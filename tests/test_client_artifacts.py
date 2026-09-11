@@ -444,7 +444,7 @@ def test_mixed_batch_keeps_truth_when_one_content_type_is_oversized(
 
     assert [item["outcome"] for item in result["files"]] == ["stored", "failed"]
     assert [item["file_id"] for item in compact["files"]] == ["file-good", "file-bad"]
-    assert compact["summary"] == {"stored": 1, "failed": 1}
+    assert compact["summary"] == {"stored": 1, "already_stored": 0, "failed": 1}
 
 
 def test_mixed_long_collision_reason_stays_in_compact_artifact_receipt(
@@ -462,6 +462,9 @@ def test_mixed_long_collision_reason_stays_in_compact_artifact_receipt(
 
         def exists(self) -> bool:
             return True
+
+        def glob(self, _pattern: str) -> list[ExistingArtifactPath]:
+            return []
 
         def relative_to(self, _vault_root: Path) -> PurePosixPath:
             return PurePosixPath(*self.parts)
@@ -526,10 +529,11 @@ def test_mixed_long_collision_reason_stays_in_compact_artifact_receipt(
     )
 
     assert [item["outcome"] for item in compact["files"]] == ["stored", "failed"]
-    assert compact["summary"] == {"stored": 1, "failed": 1}
+    assert compact["summary"] == {"stored": 1, "already_stored": 0, "failed": 1}
     assert compact["files"][1] == {
         "file_id": "file-collision",
         "outcome": "failed",
+        "state": "failed",
         "code": "ARTIFACT_EXISTS",
         "reason": "artifact already exists",
     }
@@ -602,6 +606,7 @@ def test_preserve_artifacts_refuses_invalid_destination_before_any_fetch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from exomem import client_artifacts
+    from exomem.cli_ops import OpError
 
     monkeypatch.setattr(
         client_artifacts,
@@ -609,24 +614,17 @@ def test_preserve_artifacts_refuses_invalid_destination_before_any_fetch(
         lambda *_args: pytest.fail("invalid scope must not fetch any file"),
     )
 
-    result = commands.op_preserve_artifacts(
-        tmp_path,
-        scope="..",
-        category="raw",
-        files=[{"download_url": "https://files.example/proof", "file_id": "file-one"}],
-    )
+    with pytest.raises(OpError) as refused:
+        commands.op_preserve_artifacts(
+            tmp_path,
+            scope="..",
+            category="raw",
+            files=[{"download_url": "https://files.example/proof", "file_id": "file-one"}],
+        )
 
-    assert result == {
-        "files": [
-            {
-                "file_id": "file-one",
-                "outcome": "failed",
-                "code": "INVALID_PRESERVE",
-                "reason": "scope is empty or invalid",
-            }
-        ],
-        "summary": {"stored": 0, "failed": 1},
-    }
+    assert refused.value.code == "INVALID_PRESERVE"
+    assert refused.value.details["field"] == "scope"
+    assert "'.' or '..'" in refused.value.details["reason"]
 
 
 def test_preserve_artifacts_rejects_over_eight_files_before_fetch(
@@ -646,7 +644,7 @@ def test_preserve_artifacts_rejects_over_eight_files_before_fetch(
 
     result = commands.op_preserve_artifacts(tmp_path, scope="case", category="raw", files=files)
 
-    assert result["summary"] == {"stored": 0, "failed": 9}
+    assert result["summary"] == {"stored": 0, "already_stored": 0, "failed": 9}
     assert {item["code"] for item in result["files"]} == {"TOO_MANY_FILES"}
 
 
@@ -721,7 +719,7 @@ def test_eight_artifacts_keep_ordered_receipt_and_replay_once(
 
     assert first == replay
     assert [row["file_id"] for row in first["files"]] == [file["file_id"] for file in files]
-    assert first["summary"] == {"stored": 8, "failed": 0}
+    assert first["summary"] == {"stored": 8, "already_stored": 0, "failed": 0}
     assert first["warnings_count"] == 1
     assert first["paths"] == [
         f"Knowledge Base/Evidence/case/raw/file-{index}.bin" for index in range(8)
@@ -851,12 +849,13 @@ def test_preserve_artifacts_reports_each_file_and_marks_committed(
     )
 
     assert calls == ["proof.bin", "commit"]
-    assert result["summary"] == {"stored": 1, "failed": 1}
+    assert result["summary"] == {"stored": 1, "already_stored": 0, "failed": 1}
     assert [item["file_id"] for item in result["files"]] == ["file-ok", "file-bad"]
     assert result["files"][0]["outcome"] == "stored"
     assert result["files"][1] == {
         "file_id": "file-bad",
         "outcome": "failed",
+        "state": "failed",
         "code": "SAFE_FETCH_FAILED",
         "reason": "download URL must use HTTPS",
     }
@@ -897,7 +896,7 @@ def test_preserve_artifacts_keeps_append_only_collision_as_one_failed_outcome(
         files=[{"download_url": "https://files.example/proof", "file_id": "file-collision"}],
     )
 
-    assert result["summary"] == {"stored": 0, "failed": 1}
+    assert result["summary"] == {"stored": 0, "already_stored": 0, "failed": 1}
     assert result["files"][0]["code"] == "ARTIFACT_EXISTS"
 
 
@@ -951,3 +950,627 @@ def test_preserve_artifacts_marks_commit_before_media_reconciliation(
     assert result["files"][0]["warnings"] == [
         "media reconciliation failed; evidence remains recoverable"
     ]
+
+
+class _NullBoundaryManager:
+    def mutation_guard(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        return nullcontext()
+
+
+def _staged(tmp_path: Path, file_id: str, filename: str, payload: bytes):  # noqa: ANN202
+    """One freshly staged artifact; `preserve_artifacts` unlinks what it gets."""
+    import hashlib
+    import uuid
+
+    from exomem import client_artifacts
+
+    path = tmp_path / f"{file_id}-{uuid.uuid4().hex}.bin"
+    path.write_bytes(payload)
+    return client_artifacts.StagedArtifact(
+        file_id=file_id,
+        path=path,
+        size=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        content_type="application/octet-stream",
+        filename=filename,
+    )
+
+
+def test_preserve_artifacts_reports_one_terminal_state_per_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every row carries a terminal `state` and the identity of what landed.
+
+    `outcome` stays for one release and mirrors `state`, so an existing client
+    branching on `stored`/`failed` keeps working while a new one can tell a
+    fresh commit from a duplicate that was already there.
+    """
+    from exomem import client_artifacts
+    from exomem.mutation_terminal import committed_terminal
+
+    staged_rows = {
+        "file-stored": ("stored.bin", b"first"),
+        "file-duplicate": ("duplicate.bin", b"first"),
+    }
+
+    def stage_artifact(file, _budget, **_kwargs):  # noqa: ANN001, ANN202
+        if file["file_id"] == "file-bad":
+            raise client_artifacts.SafeFetchError(
+                "SAFE_FETCH_FAILED", "download URL must use HTTPS"
+            )
+        filename, payload = staged_rows[file["file_id"]]
+        return _staged(tmp_path, file["file_id"], filename, payload)
+
+    def preserve_stream(_vault, **kwargs):  # noqa: ANN001, ANN202
+        stored = f"Knowledge Base/Evidence/case/raw/{kwargs['filename']}"
+        return type(
+            "Result",
+            (),
+            {
+                "as_dict": lambda self: {
+                    "path": stored,
+                    "stored_path": stored,
+                    "sidecar_path": f"{stored}.md",
+                    "ref": "exomem://note/abcdef0123456789",
+                    "size": 5,
+                    "hash": "c" * 64,
+                    "hash_algorithm": "sha256",
+                    "media_id": "sha256:" + "c" * 64,
+                    "content_type": "application/octet-stream",
+                    "warnings": [],
+                }
+            },
+        )()
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", stage_artifact)
+    monkeypatch.setattr(client_artifacts, "preserve_stream", preserve_stream)
+    monkeypatch.setattr(client_artifacts, "mark_active_mutation_committed", lambda: None)
+    monkeypatch.setattr(client_artifacts, "active_manager", _NullBoundaryManager)
+
+    result = commands.op_preserve_artifacts(
+        tmp_path,
+        scope="case",
+        category="raw",
+        files=[
+            {"download_url": "https://files.example/one", "file_id": "file-stored"},
+            {"download_url": "http://invalid.example/nope", "file_id": "file-bad"},
+        ],
+    )
+
+    stored, failed = result["files"]
+    assert stored["state"] == "stored"
+    assert stored["outcome"] == "stored"
+    assert stored["path"] == "Knowledge Base/Evidence/case/raw/stored.bin"
+    assert stored["stored_path"] == stored["path"]
+    assert stored["ref"] == "exomem://note/abcdef0123456789"
+    assert stored["hash"] == "c" * 64
+    assert stored["hash_algorithm"] == "sha256"
+    assert stored["size"] == 5
+    assert stored["media_id"] == "sha256:" + "c" * 64
+    assert stored["content_type"] == "application/octet-stream"
+    assert stored["warnings"] == []
+    assert failed["state"] == "failed"
+    assert failed["outcome"] == "failed"
+    assert result["summary"] == {"stored": 1, "already_stored": 0, "failed": 1}
+
+    terminal = committed_terminal(
+        result, request_id="request-1", receipt_id="0123456789abcdef", idempotency_key=None
+    )
+    assert terminal["request_id"] == "request-1"
+    assert terminal["receipt_id"] == "0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    ("scope", "category", "field", "needle"),
+    (
+        ("food/caviarhouse-group-order", "roe-tasting", "scope", "/"),
+        ("food", "roe:tasting", "category", ":"),
+        ("food", "roe\x01tasting", "category", "control character"),
+        ("  food  ", "roe-tasting", "scope", "whitespace"),
+        ("food", "roe-tasting ", "category", "whitespace"),
+    ),
+)
+def test_destination_segments_are_refused_never_normalised(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: str,
+    category: str,
+    field: str,
+    needle: str,
+) -> None:
+    """A malformed destination is refused before a single byte moves.
+
+    The live vault holds one logical case split across
+    `Evidence/food/caviarhouse-group-order/` and
+    `Evidence/foodcaviarhouse-group-order/` because the separator was deleted
+    instead of refused. Silent normalisation forks the tree; a named refusal
+    costs the caller one corrected call.
+    """
+    from exomem import client_artifacts
+    from exomem.cli_ops import OpError
+
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda *_args, **_kwargs: pytest.fail("a malformed destination must not fetch"),
+    )
+
+    with pytest.raises(OpError) as refused:
+        client_artifacts.preserve_artifacts(
+            vault,
+            scope=scope,
+            category=category,
+            files=[{"download_url": "https://files.example/a", "file_id": "file-one"}],
+        )
+
+    assert refused.value.code == "INVALID_PRESERVE"
+    assert refused.value.details["field"] == field
+    assert needle in refused.value.details["reason"]
+    assert "one path segment" in refused.value.details["accepted_form"]
+    evidence = vault / "Knowledge Base" / "Evidence"
+    assert not (evidence / "foodcaviarhouse-group-order").exists()
+    assert not (evidence / "food").exists()
+
+
+def test_preserve_evidence_refuses_a_reserved_character_in_category(vault: Path) -> None:
+    """The text lane refuses the same way, naming the field it refused."""
+    from exomem.cli_ops import OpError
+
+    with pytest.raises(OpError) as refused:
+        commands.op_preserve_evidence(
+            vault,
+            scope="case",
+            category="letters:2026",
+            filename="letter.txt",
+            content="Dear Mr. Kivi,",
+        )
+
+    assert refused.value.code == "INVALID_PRESERVE"
+    assert refused.value.details["field"] == "category"
+    assert not (vault / "Knowledge Base" / "Evidence" / "case").exists()
+
+
+def test_valid_destination_segments_are_used_byte_for_byte(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import client_artifacts
+
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda file, _budget, **_kwargs: _staged(
+            tmp_path, file["file_id"], "clean.bin", b"clean"
+        ),
+    )
+    monkeypatch.setattr(client_artifacts, "mark_active_mutation_committed", lambda: None)
+    monkeypatch.setattr(client_artifacts, "active_manager", _NullBoundaryManager)
+
+    result = client_artifacts.preserve_artifacts(
+        vault,
+        scope="caviarhouse-group-order",
+        category="roe-tasting-and-butter-mayo",
+        files=[{"download_url": "https://files.example/a", "file_id": "file-one"}],
+    )
+
+    assert result["files"][0]["path"] == (
+        "Knowledge Base/Evidence/caviarhouse-group-order/"
+        "roe-tasting-and-butter-mayo/clean.bin"
+    )
+
+
+def test_all_duplicate_batch_still_carries_the_mutation_terminal(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retrying under a new identity is an all-duplicate batch by construction.
+
+    That is this change's own recovery path, so it has to come back with an
+    envelope -- `request_id`, `receipt_id`, bounded rows -- and not as a bare
+    leaf dict that never reached the terminal projector at all.
+    """
+    from exomem import client_artifacts, writer_lease
+
+    payload = b"all-duplicate-bytes"
+    plan = {"file-first": "one.bin", "file-retry": "two.bin"}
+
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda file, _budget, **_kwargs: _staged(
+            tmp_path, file["file_id"], plan[file["file_id"]], payload
+        ),
+    )
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    command = _command("preserve_artifacts")
+
+    stored = writer_lease.invoke_command(
+        command,
+        vault,
+        scope="case",
+        category="raw",
+        files=[{"download_url": "https://files.example/a", "file_id": "file-first"}],
+        idempotency_key="all-duplicate-first",
+    )
+    assert stored["files"][0]["state"] == "stored"
+
+    duplicate = writer_lease.invoke_command(
+        command,
+        vault,
+        scope="case",
+        category="raw",
+        files=[{"download_url": "https://files.example/b", "file_id": "file-retry"}],
+        idempotency_key="all-duplicate-retry",
+    )
+
+    assert duplicate["ok"] is True
+    assert duplicate["status"] == "committed"
+    assert duplicate["terminal"] is True
+    assert duplicate["request_id"]
+    assert duplicate["receipt_id"]
+    assert duplicate["files"][0]["state"] == "already_stored"
+    assert duplicate["summary"] == {"stored": 0, "already_stored": 1, "failed": 0}
+    assert not (vault / "Knowledge Base" / "Evidence" / "case" / "raw" / "two.bin").exists()
+
+
+def test_duplicate_preserve_evidence_still_carries_the_mutation_terminal(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The single-file lane needs the same envelope as its stored branch."""
+    from exomem import writer_lease
+
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    command = _command("preserve_evidence")
+    content = "Dear Mr. Kivi, please cease and desist."
+
+    stored = writer_lease.invoke_command(
+        command,
+        vault,
+        scope="case",
+        category="letters",
+        filename="letter.txt",
+        content=content,
+        idempotency_key="evidence-first",
+    )
+    assert stored["status"] == "committed"
+
+    duplicate = writer_lease.invoke_command(
+        command,
+        vault,
+        scope="case",
+        category="letters",
+        filename="letter-copy.txt",
+        content=content,
+        idempotency_key="evidence-retry",
+    )
+
+    assert duplicate["ok"] is True
+    assert duplicate["status"] == "committed"
+    assert duplicate["terminal"] is True
+    assert duplicate["request_id"]
+    assert duplicate["receipt_id"]
+    assert not (
+        vault / "Knowledge Base" / "Evidence" / "case" / "letters" / "letter-copy.txt"
+    ).exists()
+
+
+def test_identical_files_inside_one_batch_are_one_fact(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The destination index is built once but stays live for the batch."""
+    from exomem import client_artifacts
+
+    payload = b"same-bytes-twice"
+    plan = {"file-one": "one.bin", "file-two": "two.bin"}
+
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda file, _budget, **_kwargs: _staged(
+            tmp_path, file["file_id"], plan[file["file_id"]], payload
+        ),
+    )
+    monkeypatch.setattr(client_artifacts, "mark_active_mutation_committed", lambda: None)
+    monkeypatch.setattr(client_artifacts, "active_manager", _NullBoundaryManager)
+
+    result = client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="intra",
+        files=[
+            {"download_url": "https://files.example/one", "file_id": "file-one"},
+            {"download_url": "https://files.example/two", "file_id": "file-two"},
+        ],
+    )
+
+    assert [row["state"] for row in result["files"]] == ["stored", "already_stored"]
+    assert result["summary"] == {"stored": 1, "already_stored": 1, "failed": 0}
+    evidence = vault / "Knowledge Base" / "Evidence" / "case" / "intra"
+    assert (evidence / "one.bin").is_file()
+    assert not (evidence / "two.bin").exists()
+
+
+def test_the_destination_is_read_once_for_the_whole_batch(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-file rescans made an eight-file batch eight passes over the category."""
+    from exomem import client_artifacts, preserve
+
+    scans: list[str] = []
+    real_index = preserve.destination_duplicate_index
+
+    def counted(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        scans.append("scan")
+        return real_index(*args, **kwargs)
+
+    monkeypatch.setattr(client_artifacts, "destination_duplicate_index", counted)
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda file, _budget, **_kwargs: _staged(
+            tmp_path, file["file_id"], f"{file['file_id']}.bin", file["file_id"].encode()
+        ),
+    )
+    monkeypatch.setattr(client_artifacts, "mark_active_mutation_committed", lambda: None)
+    monkeypatch.setattr(client_artifacts, "active_manager", _NullBoundaryManager)
+
+    client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="scanned",
+        files=[
+            {"download_url": f"https://files.example/{index}", "file_id": f"file-{index}"}
+            for index in range(4)
+        ],
+    )
+
+    assert scans == ["scan"]
+
+
+def test_a_duplicate_without_a_resolvable_ref_is_stored_not_failed(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An `already_stored` outcome names a path *and* a ref, or it is not one.
+
+    Half an identity used to reach the client as `INVALID_ARTIFACT_RECEIPT` for
+    a file that was neither written nor failed.
+    """
+    from exomem import client_artifacts, preserve
+
+    payload = b"unreffable-bytes"
+    plan = {"file-first": "one.bin", "file-retry": "two.bin"}
+
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda file, _budget, **_kwargs: _staged(
+            tmp_path, file["file_id"], plan[file["file_id"]], payload
+        ),
+    )
+    monkeypatch.setattr(client_artifacts, "mark_active_mutation_committed", lambda: None)
+    monkeypatch.setattr(client_artifacts, "active_manager", _NullBoundaryManager)
+
+    stored = client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="unreffable",
+        files=[{"download_url": "https://files.example/a", "file_id": "file-first"}],
+    )
+    assert stored["files"][0]["state"] == "stored"
+
+    monkeypatch.setattr(preserve.memory_refs, "ref_from_markdown", lambda _source: None)
+
+    retry = client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="unreffable",
+        files=[{"download_url": "https://files.example/b", "file_id": "file-retry"}],
+    )
+
+    assert retry["files"][0]["state"] == "stored"
+    assert retry["summary"] == {"stored": 1, "already_stored": 0, "failed": 0}
+
+
+def test_a_sidecar_pointing_outside_its_destination_is_not_a_duplicate(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The page is vault data and its `artifact_path` reaches the client."""
+    from exomem import preserve
+
+    stored = preserve.preserve(
+        vault,
+        scope="case",
+        category="contained",
+        filename="proof.txt",
+        content="contained bytes",
+    )
+    sidecar = vault / stored.sidecar_path
+    escaped = sidecar.read_text(encoding="utf-8").replace(
+        f"artifact_path: {stored.path}",
+        "artifact_path: Knowledge Base/Evidence/case/elsewhere/proof.txt",
+    )
+    sidecar.write_text(escaped, encoding="utf-8", newline="\n")
+
+    index = preserve.destination_duplicate_index(vault, scope="case", category="contained")
+
+    assert index == {}
+
+
+@pytest.mark.parametrize(
+    ("value", "needle"),
+    (
+        ("x" * 300, "longer than"),
+        ("case.", "cannot end with"),
+        ("CON", "reserved device name"),
+        ("com1.txt", "reserved device name"),
+        ("ca​se", "control character"),
+        ("ca‮se", "control character"),
+    ),
+)
+def test_hostile_destination_segments_are_refused(value: str, needle: str) -> None:
+    from exomem.preserve import destination_segment_refusal
+
+    reason = destination_segment_refusal(value, field="scope")
+
+    assert reason is not None
+    assert needle in reason
+
+
+def test_an_empty_batch_still_refuses_a_malformed_destination(vault: Path) -> None:
+    """`files=[]` used to report a successful batch of nothing under `a/b`."""
+    from exomem.cli_ops import OpError
+    from exomem.client_artifacts import preserve_artifacts
+
+    with pytest.raises(OpError) as refused:
+        preserve_artifacts(vault, scope="food/caviar", category="raw", files=[])
+
+    assert refused.value.details["field"] == "scope"
+
+
+def test_mixed_batch_states_are_exact_when_the_middle_file_fails(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One item's failure erases nothing, and the counts are per state."""
+    from exomem import client_artifacts
+
+    plan = {
+        "file-one": ("one.bin", b"one"),
+        "file-three": ("three.bin", b"three"),
+    }
+
+    def stage_artifact(file, _budget, **_kwargs):  # noqa: ANN001, ANN202
+        if file["file_id"] == "file-two":
+            raise client_artifacts.SafeFetchError(
+                "SAFE_FETCH_FAILED", "download could not be retrieved"
+            )
+        filename, payload = plan[file["file_id"]]
+        return _staged(tmp_path, file["file_id"], filename, payload)
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", stage_artifact)
+    monkeypatch.setattr(client_artifacts, "mark_active_mutation_committed", lambda: None)
+    monkeypatch.setattr(client_artifacts, "active_manager", _NullBoundaryManager)
+
+    result = client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="mixed",
+        files=[
+            {"download_url": "https://files.example/one", "file_id": "file-one"},
+            {"download_url": "https://files.example/two", "file_id": "file-two"},
+            {"download_url": "https://files.example/three", "file_id": "file-three"},
+        ],
+    )
+
+    assert [row["file_id"] for row in result["files"]] == [
+        "file-one",
+        "file-two",
+        "file-three",
+    ]
+    assert [row["state"] for row in result["files"]] == ["stored", "failed", "stored"]
+    assert result["summary"] == {"stored": 2, "already_stored": 0, "failed": 1}
+    assert "stored_path" not in result["files"][1]
+    evidence = vault / "Knowledge Base" / "Evidence" / "case" / "mixed"
+    assert (evidence / "one.bin").is_file()
+    assert (evidence / "three.bin").is_file()
+
+
+def test_preserve_evidence_reports_a_duplicate_instead_of_a_second_copy(
+    vault: Path,
+) -> None:
+    """The text lane reads the same three-state vocabulary as the batch lane."""
+    first = commands.op_preserve_evidence(
+        vault,
+        scope="case",
+        category="letters",
+        filename="2026-09-10-letter.txt",
+        content="Dear Mr. Kivi, please cease and desist.",
+    )
+    assert first["state"] == "stored"
+
+    again = commands.op_preserve_evidence(
+        vault,
+        scope="case",
+        category="letters",
+        filename="2026-09-10-letter-copy.txt",
+        content="Dear Mr. Kivi, please cease and desist.",
+    )
+    assert again["state"] == "already_stored"
+    assert again["duplicate_of"] == {"path": first["path"], "ref": first["ref"]}
+    assert again["path"] == first["path"]
+    assert not (
+        vault / "Knowledge Base" / "Evidence" / "case" / "letters" / "2026-09-10-letter-copy.txt"
+    ).exists()
+
+
+def test_duplicate_bytes_under_a_new_identity_are_reported_not_stored(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The natural recovery -- retry under a new identity -- stops duplicating.
+
+    Evidence is append-only, so the second write of the same bytes under the
+    same destination is not a correction, it is a second copy of one fact. The
+    lookup is destination-scoped on purpose: the same bytes in another evidence
+    family are two facts and both are stored.
+    """
+    from exomem import client_artifacts
+
+    payload = b"caviarhouse-invoice-bytes"
+    plan = {
+        "file-first": ("invoice.bin", payload),
+        "file-retry": ("invoice-retry.bin", payload),
+    }
+    commits: list[str] = []
+
+    def stage_artifact(file, _budget, **_kwargs):  # noqa: ANN001, ANN202
+        filename, content = plan[file["file_id"]]
+        return _staged(tmp_path, file["file_id"], filename, content)
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", stage_artifact)
+    monkeypatch.setattr(
+        client_artifacts, "mark_active_mutation_committed", lambda: commits.append("commit")
+    )
+    monkeypatch.setattr(client_artifacts, "active_manager", _NullBoundaryManager)
+
+    first = client_artifacts.preserve_artifacts(
+        vault,
+        scope="food",
+        category="caviar",
+        files=[{"download_url": "https://files.example/a", "file_id": "file-first"}],
+    )
+    row = first["files"][0]
+    assert row["state"] == "stored"
+    stored_path = row["path"]
+    stored_ref = row["ref"]
+    assert commits == ["commit"]
+
+    evidence = vault / "Knowledge Base" / "Evidence" / "food" / "caviar"
+    before = sorted(item.name for item in evidence.iterdir())
+
+    retry = client_artifacts.preserve_artifacts(
+        vault,
+        scope="food",
+        category="caviar",
+        files=[{"download_url": "https://files.example/b", "file_id": "file-retry"}],
+    )
+    duplicate = retry["files"][0]
+    assert duplicate["state"] == "already_stored"
+    assert duplicate["outcome"] == "stored"
+    assert duplicate["duplicate_of"] == {"path": stored_path, "ref": stored_ref}
+    assert duplicate["path"] == stored_path
+    assert duplicate["ref"] == stored_ref
+    assert retry["summary"] == {"stored": 0, "already_stored": 1, "failed": 0}
+    assert sorted(item.name for item in evidence.iterdir()) == before
+    # The retry writes nothing and yet marks the mutation committed: it has a
+    # terminal answer about canonical state, which is what earns it a terminal
+    # envelope. The directory listing above is what proves nothing was written.
+    assert commits == ["commit", "commit"]
+
+    other_family = client_artifacts.preserve_artifacts(
+        vault,
+        scope="food",
+        category="butter-mayo",
+        files=[{"download_url": "https://files.example/c", "file_id": "file-retry"}],
+    )
+    assert other_family["files"][0]["state"] == "stored"
+    assert other_family["summary"] == {"stored": 1, "already_stored": 0, "failed": 0}
+    assert commits == ["commit", "commit", "commit"]

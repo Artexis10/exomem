@@ -46,6 +46,7 @@ from .mutation_lock import (
 from .mutation_lock import _release_os_lock as _release_owner_lock
 from .mutation_lock import _try_os_lock as _try_owner_lock
 from .mutation_terminal import (
+    _DERIVED_COMPONENT_NAMES,
     ResponseDetail,
     committed_terminal,
     needs_review_terminal,
@@ -202,6 +203,17 @@ _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = Conte
 )
 
 _FAST_ACK_DEADLINE_SECONDS = 2.0
+
+#: PROVISIONAL. The single-origin request budget the write-path resilience
+#: contract assumes (60s), and the slice reserved for shaping and delivering
+#: the terminal once the acknowledgement is done. The derived acknowledgement
+#: now runs *after* the terminal is durable, so the only thing it can still
+#: cost the caller is the response: bound it by what is left of the request
+#: rather than letting a slow index or graph fan-out spend the whole budget on
+#: work whose outcome is already recorded as `pending`. One definition, in one
+#: module, so the pair cannot drift apart. Revisited by the latency change.
+_MUTATION_REQUEST_BUDGET_SECONDS = 60.0
+_TERMINAL_DELIVERY_RESERVE_SECONDS = 5.0
 
 
 def _publish_pending_visibility(vault_root: Path, receipt: Any) -> bool:
@@ -501,18 +513,60 @@ def _fast_ack_outcome(values: Iterable[str], *, not_required: bool = False) -> s
 def _acknowledge_derived_batches(
     result: Any,
     session: _FastAcknowledgementSession,
+    *,
+    budget_deadline: float | None = None,
 ) -> Any:
     """Prove, publish, signal and freeze one post-canonical status snapshot."""
     if not session.batches:
         return result
     with call_spans.span("derived.acknowledgement"):
-        return _acknowledge_derived_batches_timed(result, session)
+        return _acknowledge_derived_batches_timed(
+            result, session, budget_deadline=budget_deadline
+        )
+
+
+def _acknowledgement_component_names() -> tuple[str, ...]:
+    """The derived components one acknowledgement is answerable for.
+
+    `graph` and `write_advisory` carry their own terminal fields and are not
+    part of `derived_sync_components`; the compact projection validates against
+    the same closed set, so a name outside it would simply be dropped.
+    """
+    from . import derived_receipts
+
+    return tuple(
+        sorted(
+            component.value
+            for component in derived_receipts.DerivedComponent
+            if component.value in _DERIVED_COMPONENT_NAMES
+        )
+    )
 
 
 def _acknowledge_derived_batches_timed(
     result: Any,
     session: _FastAcknowledgementSession,
+    *,
+    budget_deadline: float | None = None,
 ) -> Any:
+    # What this acknowledgement still owes, per batch: a component that batch 1
+    # completed says nothing about batch 2's, so one shared set would under-report
+    # a multi-batch mutation. A failure before any status is read owes the whole
+    # set, which is the honest answer -- nothing about them was proven.
+    owed: dict[str, set[str]] = {}
+
+    def still_owed() -> tuple[str, ...] | None:
+        """What is owed, or None when no batch was examined at all.
+
+        `None` and `()` are different answers and the caller treats them so:
+        nothing examined means nothing is known, and the honest report is the
+        whole applicable set; an examined batch that owes nothing reports
+        exactly that.
+        """
+        if not owed:
+            return None
+        return tuple(sorted(set().union(*owed.values())))
+
     try:
         from . import derived_receipts, index_sync
 
@@ -522,6 +576,8 @@ def _acknowledge_derived_batches_timed(
             min(batch.canonical_commit_monotonic for batch in session.batches)
             + _FAST_ACK_DEADLINE_SECONDS
         )
+        if budget_deadline is not None:
+            deadline = min(deadline, budget_deadline)
         # Prove and publish newest first. An older batch is superseded only once
         # the newer batch covering it holds live pending custody, and when both
         # batches belong to one mutation the newer one is published by this same
@@ -569,6 +625,10 @@ def _acknowledge_derived_batches_timed(
         for batch in session.batches:
             receipt = batch.receipt
             superseded = receipt.batch_id in superseded_batches
+            # A superseded batch owes nothing: the newer batch that covers it
+            # owns its convergence.
+            batch_owed = set() if superseded else set(_acknowledgement_component_names())
+            owed[receipt.batch_id] = batch_owed
             statuses = []
             for component in derived_receipts.DerivedComponent:
                 status = derived_receipts.component_status(
@@ -588,6 +648,8 @@ def _acknowledge_derived_batches_timed(
                         status,
                         deadline_monotonic=deadline,
                     )
+                if status.state in {"completed", "not_required"}:
+                    batch_owed.discard(str(component.value))
                 statuses.append(status)
             if superseded:
                 # The newer batch that superseded this one owns both the
@@ -654,14 +716,121 @@ def _acknowledge_derived_batches_timed(
     except _PostCommitOutcomeUncertain:
         raise
     except Exception as error:
-        # Name the class only -- never the message, which can carry a path.
-        # Without it a projection defect is indistinguishable from a storage
-        # failure in the caller's committed-uncertain terminal.
+        # Name the class only in the log -- never the message, which can carry
+        # a path. The caller's terminal names the derived components instead:
+        # an exception class tells a reader nothing about what is behind.
         logger.warning(
-            "fast acknowledgement failed; returning committed-uncertain (%s)",
+            "fast acknowledgement failed; the persisted terminal degrades to "
+            "derived_sync=pending (%s)",
             type(error).__name__,
         )
-        raise _PostCommitOutcomeUncertain() from error
+        uncertain = _PostCommitOutcomeUncertain()
+        uncertain.derived_components = still_owed()
+        uncertain.advisory_result_ref = _claimed_advisory_ref(session)
+        raise uncertain from error
+
+
+def _claimed_advisory_ref(session: _FastAcknowledgementSession) -> str | None:
+    """The stable result ref for an advisory job this session already claimed.
+
+    The claim is taken at the committed handoff and retained, so a failed
+    acknowledgement leaves a real job behind. Reporting the advisory as pending
+    without its ref would leave the caller holding a job it cannot ask about.
+    """
+    if not session.advisory_claimed:
+        return None
+    try:
+        from . import derived_receipts
+
+        for batch in reversed(session.batches):
+            if batch.advisory_target is None:
+                continue
+            ref = derived_receipts.advisory_result_ref(session.vault_root, batch.receipt)
+            if isinstance(ref, str) and ref:
+                return ref
+    except Exception:  # noqa: BLE001 - a committed terminal never depends on this probe
+        return None
+    return None
+
+
+#: The one warning a lost acknowledgement adds to an already-persisted success
+#: terminal. Names the derived components and nothing else: a failure message
+#: can carry a vault path, and this string reaches the client.
+_DERIVED_ACKNOWLEDGEMENT_PENDING_WARNING = (
+    "derived state acknowledgement did not complete ({components}); "
+    "derived state reconciles behind this committed write"
+)
+
+
+def _awaiting_derived_acknowledgement(result: Any) -> Any:
+    """Mark a terminal that is durable but whose acknowledgement has not run.
+
+    No components and no warning: nothing has failed yet, and the only claim
+    being made is that derived state is not proven current at this instant.
+    """
+    if not isinstance(result, Mapping) or result.get("state") != "committed":
+        return result
+    if result.get("derived_sync") is not None:
+        return result
+    return {**result, "derived_sync": "pending"}
+
+
+def _derived_acknowledgement_pending(result: Any, error: BaseException) -> Any:
+    """Project a lost derived acknowledgement into a persisted success terminal.
+
+    The commit is proven and the terminal is durable, so the honest report is a
+    success whose derived custody has not caught up -- not the committed-uncertain
+    error, which the contract reserves for a terminal that could not be persisted
+    at all.
+
+    `derived_sync_components` is how this reaches a compact client: compact
+    carries the envelope fields and deliberately drops free-text warnings for
+    artifact receipts, so the components have to travel in the field, not in
+    the sentence.
+    """
+    if not isinstance(result, Mapping) or result.get("state") != "committed":
+        return result
+    reported = getattr(error, "derived_components", None)
+    # `None` is "nothing known", which owes the whole set; an empty tuple is an
+    # examined acknowledgement that owes nothing, and is left empty.
+    components = _acknowledgement_component_names() if reported is None else tuple(reported)
+    components = tuple(sorted({name for name in components if name in _DERIVED_COMPONENT_NAMES}))
+    warning = _DERIVED_ACKNOWLEDGEMENT_PENDING_WARNING.format(
+        components=", ".join(components) if components else "derived state"
+    )
+    terminal = dict(result)
+    terminal["derived_sync"] = "pending"
+    if components:
+        terminal["derived_sync_components"] = list(components)
+    terminal.pop("derived_sync_code", None)
+    terminal.pop("derived_sync_next_action", None)
+    # The advisory job was claimed with retention before the acknowledgement
+    # ran, so it outlives the failure. Say so, with the ref that can be asked
+    # about; say nothing at all rather than assert `not_required` for a job
+    # whose ref could not be resolved.
+    advisory_ref = getattr(error, "advisory_result_ref", None)
+    if isinstance(advisory_ref, str) and advisory_ref.startswith(
+        "exomem://write-advisory-result/"
+    ):
+        terminal["advisory_sync"] = "pending"
+        terminal["advisory_result_ref"] = advisory_ref
+        terminal.pop("advisory_sync_code", None)
+        terminal.pop("advisory_sync_next_action", None)
+    leaf = terminal.get("leaf_result")
+    if isinstance(leaf, Mapping):
+        existing = leaf.get("warnings")
+        if isinstance(existing, (list, tuple)):
+            warnings = [*existing, warning]
+        elif existing:
+            warnings = [existing, warning]
+        else:
+            warnings = [warning]
+        terminal["leaf_result"] = {**leaf, "warnings": warnings}
+    count = terminal.get("warnings_count")
+    terminal["warnings_count"] = (
+        count if isinstance(count, int) and not isinstance(count, bool) else 0
+    ) + 1
+    return terminal
 
 
 def _direct_mutation_boundary(
@@ -676,6 +845,14 @@ def _direct_mutation_boundary(
         canonical_mutation_identity(root),
         state_root.expanduser().resolve(strict=False),
     )
+
+
+def _carries_graph_rebuild_handoff(result: Any) -> bool:
+    """Whether this result still holds an unfinalized graph-rebuild handoff."""
+    if not isinstance(result, Mapping):
+        return False
+    leaf = result.get("leaf_result", result)
+    return isinstance(leaf, Mapping) and isinstance(leaf.get("_graph_rebuild_handoff"), Mapping)
 
 
 def _durable_graph_outcome(vault_root: Path) -> Any:
@@ -795,6 +972,14 @@ class _PostCommitOutcomeUncertain(OpError):
     """Sanitized terminal state for an unexpected exception after canonical commit."""
 
     committed = True
+    #: Derived components this acknowledgement could not prove, when it is the
+    #: acknowledgement that failed. `None` means nothing is known about them --
+    #: a terminal-persistence failure, or a failure before any batch was read --
+    #: while an empty tuple means a batch was read and owes nothing.
+    derived_components: tuple[str, ...] | None = None
+    #: The claimed advisory job that outlives a failed acknowledgement, if one
+    #: was claimed and its stable result ref could be resolved.
+    advisory_result_ref: str | None = None
 
     def __init__(self) -> None:
         super().__init__(
@@ -2173,6 +2358,8 @@ class IdempotencyStore:
         commit_observed=None,  # noqa: ANN001
         after_canonical_persisted=None,  # noqa: ANN001
         after_operation_guard=None,  # noqa: ANN001
+        after_terminal_acknowledgement=None,  # noqa: ANN001
+        acknowledgement_expected=None,  # noqa: ANN001
         resume_canonically_committed=None,  # noqa: ANN001
         commit_evidence=None,  # noqa: ANN001
         legacy_graph_pending_proof=None,  # noqa: ANN001
@@ -2180,7 +2367,17 @@ class IdempotencyStore:
         if not key:
             with operation_guard() if operation_guard is not None else nullcontext():
                 result = operation()
-            return after_operation_guard(result) if after_operation_guard is not None else result
+            if after_operation_guard is not None:
+                result = after_operation_guard(result)
+            if after_terminal_acknowledgement is None:
+                return result
+            # No replay identity, so no terminal to persist -- but a committed
+            # write must not be reported as uncertain because derived work
+            # failed, so the same degradation applies.
+            try:
+                return after_terminal_acknowledgement(result)
+            except _PostCommitOutcomeUncertain as acknowledgement_error:
+                return _derived_acknowledgement_pending(result, acknowledgement_error)
 
         while True:
             disposition, stored = self._claim_or_inspect(
@@ -2313,11 +2510,22 @@ class IdempotencyStore:
             # The attempt lock is released only after the canonical handoff;
             # derived graph work is deliberately not owned by it.
             self._release_attempt(key, attempt)
+            # Work whose terminal *is* the derived state -- a graph-rebuild
+            # handoff -- stays here, before persistence: a `completed` row must
+            # never hold unfinished operation-completion work, or a crash in
+            # the window replays a terminal that says the rebuild is cleared
+            # while the graph is still quarantined. The composition site binds
+            # a command's guard to this hook or to the post-persistence one.
             if after_operation_guard is None:
                 terminal_result = result
             else:
                 terminal_result = after_operation_guard(result)
             if committed_handoff:
+                # A committed *failure* has no success terminal to protect, so
+                # its derived work still runs before the failure terminal
+                # replaces the canonical row.
+                if after_terminal_acknowledgement is not None:
+                    after_terminal_acknowledgement(terminal_result)
                 assert committed_failure is not None
                 try:
                     self._persist_committed_failure(key, digest, committed_failure)
@@ -2328,6 +2536,19 @@ class IdempotencyStore:
                 self._after_terminal_persisted()
                 assert committed_error is not None
                 raise committed_error
+            # A terminal persisted before its acknowledgement has not proven
+            # any derived state, and the contract says such a terminal reads
+            # `pending`. Writing that first means the crash window and a failed
+            # `_advance_completed_terminal` both leave a row that says pending
+            # -- honest, and self-correcting through reconcile -- instead of a
+            # row that says nothing about derived state at all.
+            #
+            # Read after the leaf returned, like `commit_observed`: whether any
+            # derived work is owed is only known once the leaf has had its
+            # chance to register a batch. A commit that registers none owes
+            # nothing and must not be stamped pending forever.
+            if acknowledgement_expected is not None and acknowledgement_expected():
+                terminal_result = _awaiting_derived_acknowledgement(terminal_result)
             try:
                 terminal_result = self._persist_completed_from_canonical(
                     key, digest, terminal_result
@@ -2336,7 +2557,22 @@ class IdempotencyStore:
                 raise _PostCommitOutcomeUncertain() from storage_error
             self._notify_waiters()
             self._after_terminal_persisted()
-            return terminal_result
+            if after_terminal_acknowledgement is None:
+                return terminal_result
+            # The canonical terminal is durable BEFORE the derived-state
+            # acknowledgement runs. The ledger's `preserve_artifacts` rows are
+            # the other order: commit proven, acknowledgement lost, no terminal
+            # for the identity, and the client's same-identity retry resolved
+            # to the fail-closed outcome-unknown. Committed-uncertain is now
+            # reached only when persisting the terminal itself fails.
+            try:
+                acknowledged = after_terminal_acknowledgement(terminal_result)
+            except _PostCommitOutcomeUncertain as acknowledgement_error:
+                acknowledged = _derived_acknowledgement_pending(
+                    terminal_result, acknowledgement_error
+                )
+            self._advance_completed_terminal(key, digest, acknowledged)
+            return acknowledged
         except BaseException as error:
             # Ordinary, explicitly uncommitted leaf failures are safe to retry.
             # Abrupt exits and anything after the canonical commit point are
@@ -2855,6 +3091,23 @@ class IdempotencyStore:
                 return pickle.loads(row[0])  # noqa: S301 - trusted runtime state
         _log_mutation_event("terminal", receipt=_receipt_tag(key))
         return result
+
+    def _advance_completed_terminal(self, key: str, digest: str, result: Any) -> None:
+        """Refresh the persisted terminal with what the acknowledgement learned.
+
+        Best effort by construction. The terminal is already durable and already
+        correct; failing to advance it costs a reader one stale `derived_sync`
+        field, while raising here would put back the exact failure this ordering
+        removes -- a committed write reported as uncertain because a *derived*
+        step did not land.
+        """
+        try:
+            self._replace_completed(key, digest, result)
+        except Exception as error:  # noqa: BLE001 - the terminal is already durable
+            logger.warning(
+                "committed terminal kept its pre-acknowledgement projection (%s)",
+                type(error).__name__,
+            )
 
     def _replace_completed(self, key: str, digest: str, result: Any) -> None:
         """Advance a durably committed canonical terminal with derived progress."""
@@ -3478,6 +3731,13 @@ class LeaseManager:
         mutation_request_id: str | None = None,
     ) -> Any:
         t_start = time.perf_counter()
+        # Same instant on the clock the acknowledgement's own deadlines use, so
+        # the two bounds are comparable without converting between them.
+        acknowledgement_budget_deadline = (
+            _fast_ack_monotonic()
+            + _MUTATION_REQUEST_BUDGET_SECONDS
+            - _TERMINAL_DELIVERY_RESERVE_SECONDS
+        )
         kwargs = _canonicalize_command_kwargs(kwargs)
         configured_response_detail = getattr(command, "response_detail", None)
         response_detail_default: ResponseDetail = (
@@ -3726,6 +3986,22 @@ class LeaseManager:
                 )
             return graph_sync.committed_graph_failure(checkpoint)
 
+        def joins_unbounded_graph(result: Any) -> bool:
+            """Whether this command's terminal *is* the derived graph state.
+
+            One predicate, two readers that must agree. `wait_for_graph_sync`
+            uses it to decide whether to join the rebuild flight unbounded, and
+            the composition below uses it to decide whether this command's
+            guard runs before or after terminal persistence -- because a
+            command that joins unbounded is exactly the one whose terminal
+            cannot be made durable until that join has finalized its handoff.
+            """
+            return (
+                command.name == "reconcile"
+                or (command.name == "maintain_memory" and kwargs.get("mode") == "reconcile")
+                or _carries_graph_rebuild_handoff(result)
+            )
+
         def wait_for_graph_sync(result: Any) -> Any:
             """Join derived graph work only after the canonical guard released."""
             terminal_result = (
@@ -3733,14 +4009,7 @@ class LeaseManager:
                 if isinstance(result, Mapping)
                 else result
             )
-            reconcile_leaf = (
-                terminal_result.get("leaf_result", terminal_result)
-                if isinstance(terminal_result, Mapping)
-                else None
-            )
-            has_reconcile_handoff = isinstance(reconcile_leaf, Mapping) and isinstance(
-                reconcile_leaf.get("_graph_rebuild_handoff"), Mapping
-            )
+            has_reconcile_handoff = _carries_graph_rebuild_handoff(terminal_result)
 
             def finish_reconcile_graph_status(value: Any, *, current: bool) -> Any:
                 if not isinstance(value, Mapping):
@@ -3786,12 +4055,7 @@ class LeaseManager:
                     # every write paying for it: `reconcile` proves readability
                     # in its own terminal below, and a rebuild handoff has
                     # nothing to hand off until the flight lands.
-                    joins_unbounded = (
-                        has_reconcile_handoff
-                        or command.name == "reconcile"
-                        or (command.name == "maintain_memory" and kwargs.get("mode") == "reconcile")
-                    )
-                    if joins_unbounded:
+                    if joins_unbounded_graph(terminal_result):
                         # graph-join: unbounded by design (reconcile proves the
                         # graph is readable in its own terminal).
                         graph_sync.wait_for_registered(root, state_root=self.config.state_dir)
@@ -3880,7 +4144,11 @@ class LeaseManager:
 
         def finish_fast_ack_and_graph(result: Any) -> Any:
             acknowledged = (
-                _acknowledge_derived_batches(result, fast_ack_session)
+                _acknowledge_derived_batches(
+                    result,
+                    fast_ack_session,
+                    budget_deadline=acknowledgement_budget_deadline,
+                )
                 if fast_ack_session is not None
                 else result
             )
@@ -4278,6 +4546,35 @@ class LeaseManager:
                 and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
             )
         )
+        # One guard, two possible seams. The handoff clause of the predicate is
+        # a property of the *result*, so the choice is made when the guard is
+        # reached rather than when it is bound -- and recorded, so a guard that
+        # already ran before persistence (finalizing and thereby stripping the
+        # handoff it was selected by) is not run a second time after it.
+        guard_ran_before_persistence = False
+
+        def finish_before_terminal_persistence(result: Any) -> Any:
+            nonlocal guard_ran_before_persistence
+            if not joins_unbounded_graph(result):
+                # The guard used to strip the canonical checkpoint binding here;
+                # it now runs after persistence, so strip it at this seam rather
+                # than persisting an internal key into the completed row. The
+                # *canonical* row keeps it, which is what the resume path reads.
+                if isinstance(result, Mapping) and "_graph_sync_checkpoint" in result:
+                    return {
+                        key: value
+                        for key, value in result.items()
+                        if key != "_graph_sync_checkpoint"
+                    }
+                return result
+            guard_ran_before_persistence = True
+            return finish_fast_ack_and_graph(result)
+
+        def finish_after_terminal_persistence(result: Any) -> Any:
+            if guard_ran_before_persistence:
+                return result
+            return finish_fast_ack_and_graph(result)
+
         try:
             result = self.idempotency.run(
                 key,
@@ -4303,7 +4600,17 @@ class LeaseManager:
                 ),
                 commit_observed=lambda: commit_state["observed"],
                 after_canonical_persisted=persist_graph_sync_progress,
-                after_operation_guard=finish_fast_ack_and_graph,
+                after_operation_guard=finish_before_terminal_persistence,
+                after_terminal_acknowledgement=finish_after_terminal_persistence,
+                # Whether derived work is *owed*, not whether a hook is bound
+                # and not whether a session exists: the session is built before
+                # the leaf runs, from a feature flag and a vault root, so it
+                # cannot know whether a batch will be registered. A commit that
+                # registers none owes no component and must not be stamped
+                # pending. Evaluated after the leaf, where the batches are known.
+                acknowledgement_expected=lambda: (
+                    fast_ack_session is not None and bool(fast_ack_session.batches)
+                ),
                 resume_canonically_committed=resume_graph_sync,
                 commit_evidence=exact_commit_evidence,
                 legacy_graph_pending_proof=legacy_graph_pending_proof,

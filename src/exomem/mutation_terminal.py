@@ -162,6 +162,19 @@ def _without_graph_rebuild_handoff(result: Any) -> Any:
     return result
 
 
+#: The terminal states one preserved file can end in. `outcome` mirrors them
+#: for one release, reporting `already_stored` as `stored`, so a reader that
+#: needs to tell a fresh commit from a duplicate reads `state`.
+_ARTIFACT_STATES = frozenset({"stored", "already_stored", "failed"})
+
+
+def _artifact_state(item: Any) -> Any:
+    """This row's terminal state, falling back to the lane that has no states."""
+    if not isinstance(item, Mapping):
+        return None
+    return item.get("state", item.get("outcome"))
+
+
 def _warning_count(result: Any) -> int:
     if not isinstance(result, Mapping):
         return 0
@@ -231,8 +244,12 @@ def _path_projection(result: Any) -> dict[str, Any]:
         return {"paths": []}
     artifact_receipt = _artifact_receipt_projection(result)
     if artifact_receipt:
+        # Only what this call stored. A duplicate names a path an earlier call
+        # committed; reporting it here would claim this mutation wrote it.
         paths = [
-            item["stored_path"] for item in artifact_receipt["files"] if item["outcome"] == "stored"
+            item["stored_path"]
+            for item in artifact_receipt["files"]
+            if _artifact_state(item) == "stored"
         ]
         if len(paths) == 1:
             return {"path": paths[0]}
@@ -540,9 +557,26 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             return None
         return {field: value[field] for field in fields}
 
+    def duplicate_of(value: Any) -> dict[str, Any] | None:
+        """The bounded identity of the artifact a duplicate resolved to."""
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"path", "ref"}
+            or not string(value.get("path"), limit=2048)
+            or not string(value.get("ref"), limit=2048)
+        ):
+            return None
+        return {"path": value["path"], "ref": value["ref"]}
+
     projected: list[dict[str, Any]] = []
     for index, item in enumerate(files):
         if not isinstance(item, Mapping) or not string(item.get("file_id"), limit=256):
+            projected.append(invalid_row(item, index))
+            continue
+        # `outcome` mirrors `state` for one release, so `already_stored` arrives
+        # as `stored`; the state itself has to survive the projection or a
+        # compact client cannot tell a fresh commit from a duplicate.
+        if "state" in item and item["state"] not in _ARTIFACT_STATES:
             projected.append(invalid_row(item, index))
             continue
         outcome = item.get("outcome")
@@ -565,6 +599,7 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                 for key in (
                     "file_id",
                     "outcome",
+                    "state",
                     "stored_path",
                     "size",
                     "hash",
@@ -578,6 +613,12 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             for key in ("path", "page", "ref"):
                 if key in item and string(item[key], limit=2048):
                     row[key] = item[key]
+            if "duplicate_of" in item:
+                duplicate = duplicate_of(item["duplicate_of"])
+                if duplicate is None:
+                    projected.append(invalid_row(item, index))
+                    continue
+                row["duplicate_of"] = duplicate
             if "adoption" in item:
                 receipt = adoption_receipt(item["adoption"], item)
                 if receipt is None:
@@ -594,14 +635,21 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             and string(item.get("code"), limit=64)
             and string(item.get("reason"), limit=300)
         ):
-            row = {key: item[key] for key in ("file_id", "outcome", "code", "reason")}
+            row = {
+                key: item[key]
+                for key in ("file_id", "outcome", "state", "code", "reason")
+                if key in item
+            }
         else:
             projected.append(invalid_row(item, index))
             continue
         projected.append(row)
+    # Counted by terminal state, so the projected summary and the projected
+    # rows report the same three numbers. A row with no state is one of the
+    # adoption/source lanes, whose vocabulary is still its outcome.
     counts = {
-        outcome: sum(item["outcome"] == outcome for item in projected)
-        for outcome in ("stored", "replayed", "failed", "unselected")
+        state: sum(_artifact_state(item) == state for item in projected)
+        for state in ("stored", "already_stored", "replayed", "failed", "unselected")
     }
     adoption_result = any(
         isinstance(item, Mapping)
@@ -612,21 +660,31 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
         raw_stored = summary.get("stored")
         raw_failed = summary.get("failed")
         raw_omitted = summary.get("omitted")
+        raw_already_stored = summary.get("already_stored")
         if (
             nonnegative_int(raw_stored)
             and raw_stored >= counts["stored"]
             and nonnegative_int(raw_failed)
             and raw_failed >= counts["failed"]
             and (raw_omitted is None or nonnegative_int(raw_omitted))
+            and (
+                raw_already_stored is None
+                or (
+                    nonnegative_int(raw_already_stored)
+                    and raw_already_stored >= counts["already_stored"]
+                )
+            )
         ):
             projected_summary = {"stored": raw_stored, "failed": raw_failed}
+            if raw_already_stored is not None:
+                projected_summary["already_stored"] = raw_already_stored
             if raw_omitted is not None:
                 projected_summary["omitted"] = raw_omitted
             return {"files": projected, "summary": projected_summary}
-        return {
-            "files": projected,
-            "summary": {"stored": counts["stored"], "failed": counts["failed"]},
-        }
+        recomputed = {"stored": counts["stored"], "failed": counts["failed"]}
+        if counts["already_stored"] or raw_already_stored is not None:
+            recomputed["already_stored"] = counts["already_stored"]
+        return {"files": projected, "summary": recomputed}
     projected_summary: dict[str, int] = {}
     for outcome in ("stored", "replayed", "failed", "unselected"):
         value = summary.get(outcome)

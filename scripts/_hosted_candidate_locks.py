@@ -1,21 +1,22 @@
-"""Locate a release's generated Hosted plugin locks for one candidate profile.
+"""Locate a release's generated Hosted plugin locks for one candidate.
 
 `exomem.hosted_plugins` writes the default candidate's artifacts directly under
 `plugins/hosted/generated`, and every later candidate under
-`plugins/hosted/generated/candidates/<profile>`. The operator scripts read those
-files out of `--repo`, so they need the same rule.
+`plugins/hosted/generated/candidates/<candidate>`. The operator scripts read
+those files out of `--repo`, so they need the same rule.
 
 It is restated here rather than imported because `--repo` is routinely a
 different checkout from the one the script runs out of -- the harness is run
 from `main` while `--repo` points at a worktree of the released tag -- and an
-import would resolve against whichever tree is on `sys.path`. Only the layout is
-duplicated; every value still comes from the files under `--repo`.
+import would resolve against whichever tree is on `sys.path`. Only the layout
+and the candidate-to-profile map are duplicated; every digest still comes from
+the files under `--repo`.
 
-Reading the wrong profile's locks is not a loud failure. The digests simply
+Reading the wrong candidate's locks is not a loud failure. The digests simply
 belong to a different command surface, and the server-side joins that consume
 them answer a bare 500 or a silent false, inside the promotion window. So
 `read_lock` refuses a lock whose own `profile` field disagrees with the profile
-that was asked for.
+of the candidate that was asked for.
 """
 
 from __future__ import annotations
@@ -27,31 +28,54 @@ from pathlib import Path
 #: under `candidates/`. Mirrors `exomem.hosted_plugins.DEFAULT_CANDIDATE`.
 DEFAULT_CANDIDATE_PROFILE = "hosted-alpha-agent-v1"
 
+#: Candidate name -> the agent profile its locks declare. Mirrors
+#: `exomem.hosted_plugins.CANDIDATE_PROFILES`; `tests/test_reviewer_bootstrap_cli.py`
+#: pins the two maps equal. A candidate is a generated directory, and more than
+#: one candidate can carry the same profile -- the command-binding variant of v4
+#: declares `hosted-alpha-agent-v4` -- so the directory name is not what a lock
+#: declares and must not be compared against it.
+CANDIDATE_PROFILES = {
+    "hosted-alpha-agent-v1": "hosted-alpha-agent-v1",
+    "hosted-alpha-agent-v2": "hosted-alpha-agent-v2",
+    "hosted-alpha-agent-v3": "hosted-alpha-agent-v3",
+    "hosted-alpha-agent-v4": "hosted-alpha-agent-v4",
+    "hosted-alpha-agent-v5": "hosted-alpha-agent-v5",
+    "hosted-alpha-agent-v4-command-binding-v1": "hosted-alpha-agent-v4",
+}
 
-def candidate_generated_root(repo: Path, profile: str) -> Path:
-    """Directory holding `<platform>.lock.json` for `profile` inside `repo`."""
+
+def candidate_generated_root(repo: Path, candidate: str) -> Path:
+    """Directory holding `<platform>.lock.json` for `candidate` inside `repo`."""
     generated = repo / "plugins" / "hosted" / "generated"
-    if profile == DEFAULT_CANDIDATE_PROFILE:
+    if candidate == DEFAULT_CANDIDATE_PROFILE:
         return generated
-    return generated / "candidates" / profile
+    return generated / "candidates" / candidate
 
 
-def read_lock(repo: Path, profile: str, name: str) -> dict:
+def read_lock(repo: Path, candidate: str, name: str) -> dict:
     """Read one lock file, refusing a profile the file itself disagrees with."""
-    path = candidate_generated_root(repo, profile) / name
+    path = candidate_generated_root(repo, candidate) / name
     if not path.is_file():
         raise SystemExit(
             f"{path} does not exist; {repo} does not carry generated artifacts for "
-            f"profile {profile}. Point --repo at a worktree of the release the "
-            f"candidate was cut from, and --profile at that candidate's profile."
+            f"candidate {candidate}. Point --repo at a worktree of the release the "
+            f"candidate was cut from, and --profile at that candidate."
         )
     lock = json.loads(path.read_text())
     # The `.zip.lock.json` files carry only an archive digest, so absence is fine;
     # a present-and-different profile is not.
-    declared = lock.get("profile")
-    if declared is not None and declared != profile:
+    expected = CANDIDATE_PROFILES.get(candidate)
+    if expected is None:
         raise SystemExit(
-            f"{path} declares profile {declared}, not the requested {profile}; "
-            "refusing to promote one profile's candidate on another's digests."
+            f"candidate {candidate} is not in CANDIDATE_PROFILES "
+            f"(scripts/_hosted_candidate_locks.py); add it there, mirroring "
+            "exomem.hosted_plugins.CANDIDATE_PROFILES, before reading its locks."
+        )
+    declared = lock.get("profile")
+    if declared is not None and declared != expected:
+        raise SystemExit(
+            f"{path} declares profile {declared}, not {expected} (the profile of "
+            f"candidate {candidate}); refusing to promote one profile's candidate on "
+            "another's digests."
         )
     return lock

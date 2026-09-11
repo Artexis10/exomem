@@ -85,6 +85,23 @@ def _validate_state(state: dict[str, Any]) -> None:
         raise ValueError("scheduler histogram is invalid")
 
 
+def adopt_cadence(state: dict[str, Any], cadence_seconds: int) -> dict[str, Any]:
+    """Carry a job's counters across a change of its CronJob cadence.
+
+    The job name is identity; the cadence is deployment configuration for that
+    same job and the alert evaluator reads it from this state to place the
+    missed-run boundary. Refusing a changed cadence stops the job on every run
+    after a schedule change until someone rewrites the ConfigMap by hand, which
+    is what happened when the fleet moved from one-minute to five-minute ticks.
+    """
+    _validate_state(state)
+    if cadence_seconds <= 0:
+        raise ValueError("scheduler state identity is invalid")
+    updated = copy.deepcopy(state)
+    updated["cadence_seconds"] = cadence_seconds
+    return updated
+
+
 def record_attempt(
     state: dict[str, Any], *, success: bool, duration_seconds: float, observed_at: int
 ) -> dict[str, Any]:
@@ -387,8 +404,15 @@ def request_once() -> int:
     total_timeout = int(os.environ.get("TOTAL_TIMEOUT_SECONDS", "20"))
     resource, state = _read_state(STATE_PREFIX + job)
     _validate_state(state)
-    if state["job"] != job or state["cadence_seconds"] != cadence:
+    if state["job"] != job:
         raise RuntimeError("scheduler state identity does not match the job")
+    if state["cadence_seconds"] != cadence:
+        print(
+            f"scheduler state for {job} adopts cadence {cadence}s "
+            f"(was {state['cadence_seconds']}s)",
+            file=sys.stderr,
+        )
+        state = adopt_cadence(state, cadence)
     started = time.monotonic()
     previous_handler = signal.getsignal(signal.SIGALRM)
 

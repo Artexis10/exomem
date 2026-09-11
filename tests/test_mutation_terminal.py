@@ -373,6 +373,129 @@ def test_compact_does_not_repeat_artifact_receipt_warnings_at_the_top_level() ->
     assert "warnings" not in compact
 
 
+def _artifact_batch_terminal():
+    """One mixed batch: a fresh commit, a duplicate, and a failure."""
+    mutation_terminal = _terminal_module()
+    return mutation_terminal.committed_terminal(
+        {
+            "files": [
+                {
+                    "file_id": "f1",
+                    "outcome": "stored",
+                    "state": "stored",
+                    "stored_path": "Knowledge Base/Evidence/case/raw/one.bin",
+                    "path": "Knowledge Base/Evidence/case/raw/one.bin",
+                    "ref": "exomem://note/0123456789abcdef",
+                    "size": 10,
+                    "hash": "a" * 64,
+                    "hash_algorithm": "sha256",
+                    "content_type": "application/octet-stream",
+                    "media_id": None,
+                    "warnings": [],
+                },
+                {
+                    "file_id": "f2",
+                    "outcome": "stored",
+                    "state": "already_stored",
+                    "duplicate_of": {
+                        "path": "Knowledge Base/Evidence/case/raw/one.bin",
+                        "ref": "exomem://note/0123456789abcdef",
+                    },
+                    "stored_path": "Knowledge Base/Evidence/case/raw/one.bin",
+                    "path": "Knowledge Base/Evidence/case/raw/one.bin",
+                    "ref": "exomem://note/0123456789abcdef",
+                    "size": 10,
+                    "hash": "a" * 64,
+                    "hash_algorithm": "sha256",
+                    "content_type": "application/octet-stream",
+                    "media_id": None,
+                    "warnings": [],
+                },
+                {
+                    "file_id": "f3",
+                    "outcome": "failed",
+                    "state": "failed",
+                    "code": "SAFE_FETCH_FAILED",
+                    "reason": "download could not be retrieved",
+                },
+            ],
+            "summary": {"stored": 1, "already_stored": 1, "failed": 1},
+        },
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id=None,
+        idempotency_key=None,
+    )
+
+
+def test_compact_artifact_rows_carry_the_terminal_state_and_duplicate() -> None:
+    """A compact client has to be able to tell a commit from a duplicate.
+
+    `outcome` mirrors `state` for one release, so `already_stored` arrives as
+    `stored` -- which is exactly why the state itself has to survive the
+    projection rather than being inferred from it.
+    """
+    mutation_terminal = _terminal_module()
+
+    compact = mutation_terminal.project_terminal(_artifact_batch_terminal(), "compact")
+
+    assert [row["state"] for row in compact["files"]] == [
+        "stored",
+        "already_stored",
+        "failed",
+    ]
+    assert compact["files"][1]["duplicate_of"] == {
+        "path": "Knowledge Base/Evidence/case/raw/one.bin",
+        "ref": "exomem://note/0123456789abcdef",
+    }
+    assert "duplicate_of" not in compact["files"][0]
+
+
+def test_compact_artifact_paths_count_only_what_this_call_stored() -> None:
+    """A duplicate was committed by an earlier call, not by this one."""
+    mutation_terminal = _terminal_module()
+
+    compact = mutation_terminal.project_terminal(_artifact_batch_terminal(), "compact")
+
+    assert compact["path"] == "Knowledge Base/Evidence/case/raw/one.bin"
+    assert "paths" not in compact
+    assert compact["summary"] == {"stored": 1, "already_stored": 1, "failed": 1}
+
+
+def test_compact_artifact_row_with_an_unknown_state_is_invalid() -> None:
+    mutation_terminal = _terminal_module()
+    terminal = mutation_terminal.committed_terminal(
+        {
+            "files": [
+                {
+                    "file_id": "f1",
+                    "outcome": "stored",
+                    "state": "half-stored",
+                    "stored_path": "Knowledge Base/Evidence/case/raw/one.bin",
+                    "size": 10,
+                    "hash": "a" * 64,
+                    "hash_algorithm": "sha256",
+                    "content_type": "application/octet-stream",
+                    "media_id": None,
+                    "warnings": [],
+                }
+            ],
+            "summary": {"stored": 1, "failed": 0},
+        },
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id=None,
+        idempotency_key=None,
+    )
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert compact["files"][0] == {
+        "file_id": "f1",
+        "outcome": "failed",
+        "code": "INVALID_ARTIFACT_RECEIPT",
+        "reason": "artifact result was invalid",
+    }
+
+
 def test_compact_terminal_retains_completed_graph_sync_fields() -> None:
     mutation_terminal = _terminal_module()
     terminal = mutation_terminal.committed_terminal(

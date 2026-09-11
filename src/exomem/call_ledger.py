@@ -52,6 +52,8 @@ import hashlib
 import json
 import os
 import threading
+import time
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -157,7 +159,9 @@ def _argument_shape(arguments: dict[str, Any]) -> tuple[list[str], dict[str, dic
 _TARGET_ARG_NAMES = ("path", "old_path", "new_path", "paths", "target", "targets", "file")
 
 
-def _target_paths(arguments: dict[str, Any]) -> tuple[list[str], bool]:
+def _target_paths(
+    arguments: dict[str, Any], committed: Sequence[str] | None = None
+) -> tuple[list[str], bool]:
     found: list[str] = []
     for name in _TARGET_ARG_NAMES:
         value = arguments.get(name)
@@ -165,8 +169,86 @@ def _target_paths(arguments: dict[str, Any]) -> tuple[list[str], bool]:
             found.append(_clip(value.strip()))
         elif isinstance(value, (list, tuple)):
             found.extend(_clip(item) for item in value if isinstance(item, str) and item.strip())
-    truncated = len(found) > _MAX_TARGET_PATHS
-    return found[:_MAX_TARGET_PATHS], truncated
+    # An artifact write addresses no path-shaped argument: its destination is
+    # assembled from `scope`/`category` and a filename the server derives, so
+    # every `preserve_artifacts` row said `target_paths: []` and the ledger
+    # could not state what landed. The outcome knows; the arguments never did.
+    for value in committed or ():
+        if isinstance(value, str) and value.strip():
+            found.append(_clip(value.strip()))
+    deduplicated = list(dict.fromkeys(found))
+    truncated = len(deduplicated) > _MAX_TARGET_PATHS
+    return deduplicated[:_MAX_TARGET_PATHS], truncated
+
+
+#: Committed target paths for one in-flight call, keyed by the call token.
+#: Bridged through the token for the same reason `call_spans` is: these are
+#: recorded deep inside the synchronous tool wrapper on FastMCP's threadpool,
+#: and a ContextVar mutation there never propagates back to the middleware that
+#: writes the row.
+_targets_lock = threading.Lock()
+_committed_targets: dict[str, dict[str, Any]] = {}
+#: Calls tracked at once, so a missed pop cannot leak indefinitely, and how long
+#: an unpopped entry survives. The same two independent guards `call_spans` uses,
+#: for the same reason: the middleware pops unconditionally, but a direct test
+#: harness or an abandoned call never reaches it. Eviction is by age, not by
+#: insertion order, so a long-running call's targets are not dropped to make
+#: room for a short one that arrived later.
+_MAX_TRACKED_CALLS = 256
+_TARGETS_TTL_SECONDS = 300.0
+
+
+def _sweep_targets_locked(now: float) -> None:
+    for token in [
+        token
+        for token, entry in _committed_targets.items()
+        if now - float(entry["at"]) > _TARGETS_TTL_SECONDS
+    ]:
+        _committed_targets.pop(token, None)
+
+
+def note_committed_targets(paths: Iterable[Any]) -> None:
+    """Record the vault-relative paths this call actually committed.
+
+    Structural paths only -- the same thing `target_paths` already carries for a
+    note write. A no-op outside an MCP call, so CLI, watcher and test paths that
+    mint no token are unaffected. Never raises into the call path.
+    """
+    try:
+        from . import call_spans
+
+        token = call_spans.MCP_CALL_TOKEN.get()
+        if token is None:
+            return
+        clean = [
+            _clip(value.strip())
+            for value in paths
+            if isinstance(value, str) and value.strip()
+        ]
+        now = time.monotonic()
+        with _targets_lock:
+            _sweep_targets_locked(now)
+        if not clean:
+            return
+        with _targets_lock:
+            if token not in _committed_targets and len(_committed_targets) >= _MAX_TRACKED_CALLS:
+                oldest = min(_committed_targets, key=lambda key: _committed_targets[key]["at"])
+                _committed_targets.pop(oldest, None)
+            entry = _committed_targets.setdefault(token, {"at": now, "paths": []})
+            slot: list[str] = entry["paths"]
+            slot.extend(clean[: _MAX_TARGET_PATHS - len(slot)])
+    except Exception:  # noqa: BLE001 - the ledger must never break a call
+        pass
+
+
+def pop_committed_targets(token: str | None) -> list[str]:
+    """Pop this call's committed targets. Unconditional, like the span pop."""
+    if token is None:
+        return []
+    with _targets_lock:
+        _sweep_targets_locked(time.monotonic())
+        entry = _committed_targets.pop(token, None)
+    return list(entry["paths"]) if entry else []
 
 
 def build_row(
@@ -187,10 +269,11 @@ def build_row(
     session_id: str | None = None,
     spans: list[dict[str, Any]] | None = None,
     timestamp: str | None = None,
+    committed_targets: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble one complete, self-hashing ledger row."""
     arg_names, args, args_truncated = _argument_shape(arguments or {})
-    targets, targets_truncated = _target_paths(arguments or {})
+    targets, targets_truncated = _target_paths(arguments or {}, committed_targets)
     row: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "sequence": sequence,
@@ -379,6 +462,9 @@ def record_call(
     is disabled or the append could not be made. A ledger that breaks a call it
     was only supposed to describe is worse than no ledger.
     """
+    from . import call_spans
+
+    committed_targets = pop_committed_targets(call_spans.MCP_CALL_TOKEN.get())
     if not enabled():
         return None
     try:
@@ -406,6 +492,7 @@ def record_call(
                 transport=transport,
                 session_id=session_id,
                 spans=spans,
+                committed_targets=committed_targets,
             )
             append_row(row, path=path)
             _state.update(sequence=row["sequence"], prev_hash=row["row_hash"])

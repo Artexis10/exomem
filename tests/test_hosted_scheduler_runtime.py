@@ -96,6 +96,75 @@ def test_scheduler_alerts_transition_at_180_seconds_and_two_failures() -> None:
     )
 
 
+def _request_environment(monkeypatch: pytest.MonkeyPatch, *, job: str, cadence: int) -> None:
+    monkeypatch.setenv("JOB_NAME", job)
+    monkeypatch.setenv("TARGET_URL", "https://example.invalid/api/cron/" + job)
+    monkeypatch.setenv("EXOMEM_HOSTED_SCHEDULER_SECRET", "test-secret")
+    monkeypatch.setenv("CADENCE_SECONDS", str(cadence))
+
+
+def test_scheduler_request_adopts_a_changed_cadence_and_keeps_its_counters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The live fleet moved exomem-reconcile from one-minute to five-minute ticks
+    # (revision 54) while its state ConfigMap still said 60; every run refused
+    # "identity does not match" for twenty hours. The cadence is deployment
+    # configuration for the same job, so a run must carry the counters across.
+    module = _load()
+    stale = module.initial_state("exomem-reconcile", 60)
+    stale["attempts_total"] = 28_899
+    stale["failures_total"] = 199
+    stale["last_attempt_unixtime"] = 1_789_077_372
+    stale["last_success_unixtime"] = 1_789_077_372
+    stale["duration_seconds"] = {
+        "buckets": {"1": 115, "5": 28_865, "20": 28_899, "+Inf": 28_899},
+        "count": 28_899,
+        "sum": 51_324.173329,
+    }
+    written: list[dict[str, object]] = []
+    _request_environment(monkeypatch, job="exomem-reconcile", cadence=300)
+    monkeypatch.setattr(
+        module, "_read_state", lambda name: ({"metadata": {"name": name}}, dict(stale))
+    )
+    monkeypatch.setattr(module, "_write_state", lambda resource, state: written.append(state))
+    monkeypatch.setattr(module, "_exact_https_request", lambda *args, **kwargs: True)
+
+    assert module.request_once() == 0
+
+    assert len(written) == 1
+    persisted = written[0]
+    assert persisted["job"] == "exomem-reconcile"
+    assert persisted["cadence_seconds"] == 300
+    assert persisted["attempts_total"] == 28_900
+    assert persisted["failures_total"] == 199
+    assert persisted["consecutive_failures"] == 0
+    assert persisted["duration_seconds"]["count"] == 28_900
+    assert persisted["last_success_unixtime"] > 1_789_077_372
+
+
+def test_scheduler_request_still_refuses_another_jobs_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load()
+    foreign = module.initial_state("exomem-export-gc", 300)
+    written: list[dict[str, object]] = []
+    requested: list[str] = []
+    _request_environment(monkeypatch, job="exomem-reconcile", cadence=300)
+    monkeypatch.setattr(
+        module, "_read_state", lambda name: ({"metadata": {"name": name}}, dict(foreign))
+    )
+    monkeypatch.setattr(module, "_write_state", lambda resource, state: written.append(state))
+    monkeypatch.setattr(
+        module, "_exact_https_request", lambda target, *args, **kwargs: requested.append(target)
+    )
+
+    with pytest.raises(RuntimeError, match="identity does not match"):
+        module.request_once()
+
+    assert written == []
+    assert requested == []
+
+
 def test_scheduler_transport_rejects_redirects_and_non_exact_https(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

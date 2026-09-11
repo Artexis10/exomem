@@ -16,7 +16,6 @@ from exomem import (
     vault,
     writer_lease,
 )
-from exomem.cli_ops import OpError
 
 
 def _install_protocol(
@@ -212,6 +211,12 @@ def test_receipt_prepare_failure_leaves_canonical_untouched(
 def test_unproven_post_commit_state_never_returns_ordinary_committed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """An unproven derived state is still never an ordinary committed terminal.
+
+    The terminal is persisted before the acknowledgement runs, so the canonical
+    commit is no longer reported as uncertain -- but the derived custody it
+    could not prove is reported as `pending`, never as a settled one.
+    """
     fake = DerivedReceiptProtocolFake()
 
     def unproven(_root, receipt, **kwargs):  # noqa: ANN001, ARG001
@@ -227,10 +232,10 @@ def test_unproven_post_commit_state_never_returns_ordinary_committed(
     fake.inject("prove_committed", unproven)
     _install_protocol(monkeypatch, fake)
 
-    with pytest.raises(OpError) as caught:
-        _invoke_batch(tmp_path, idempotency_key="unproven")
+    terminal, _target = _invoke_batch(tmp_path, idempotency_key="unproven")
 
-    assert caught.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
+    assert terminal["status"] == "committed"
+    assert terminal["derived_sync"] == "pending"
     assert (tmp_path / "vault" / "Knowledge Base" / "Notes" / "Insights" / "fast.md").exists()
     assert fake.call_count("publish_pending_visibility") == 0
     assert fake.call_count("signal_components") == 0
@@ -336,18 +341,33 @@ def test_absent_component_flight_never_invokes_timed_wait(
     assert terminal["advisory_sync"] == "pending"
 
 
-def test_real_custody_failure_is_not_laundered_to_pending(
+def test_real_custody_failure_degrades_the_persisted_terminal_to_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A custody failure after a persisted terminal is pending, not uncertain.
+
+    It names the derived components that could not be proven, and nothing else:
+    the failure's own message can carry a vault path, and its exception class
+    tells a reader nothing about what derived state is behind.
+    """
     fake = DerivedReceiptProtocolFake()
     fake.inject("publish_pending_visibility", RuntimeError("registration failed"))
     _install_protocol(monkeypatch, fake)
 
-    with pytest.raises(OpError) as caught:
-        _invoke_batch(tmp_path, idempotency_key="publication-failure")
+    terminal, _target = _invoke_batch(
+        tmp_path, idempotency_key="publication-failure", response_detail="full"
+    )
 
-    assert caught.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
-    assert "pending" not in str(caught.value).lower()
+    assert terminal["status"] == "committed"
+    assert terminal["derived_sync"] == "pending"
+    assert terminal["derived_sync_components"]
+    assert any(
+        component in warning
+        for component in terminal["derived_sync_components"]
+        for warning in terminal["warnings"]
+    )
+    assert "RuntimeError" not in json.dumps(terminal)
+    assert "registration failed" not in json.dumps(terminal)
 
 
 @pytest.mark.parametrize(
