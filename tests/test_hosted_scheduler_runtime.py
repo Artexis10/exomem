@@ -279,9 +279,17 @@ def test_alert_evaluation_reads_the_clock_once_so_every_transition_shares_it(
 
 
 def test_chart_seeds_scheduler_state_once_and_never_re_renders_it() -> None:
-    # Re-rendering the state ConfigMaps from a render-time `lookup` snapshot was a
-    # read-modify-write across the whole upgrade: counters, baselines and active
-    # alerts rolled back to whatever the render saw. The chart must only seed.
+    """Pin the seed-once guards at source level.
+
+    Re-rendering the state ConfigMaps from a render-time `lookup` snapshot was a
+    read-modify-write across the whole upgrade: counters, baselines and active
+    alerts rolled back to whatever the render saw. The chart must only seed.
+
+    This is second-best on purpose: `helm template` runs with an empty `lookup`,
+    so no render-level test can reach the omit-when-present branch. The live
+    evidence is the `Skipping delete ... resource-policy: keep` line in the first
+    upgrade's log after this lands.
+    """
     template = (ROOT / "infra/helm/platform/templates/observability.yaml").read_text()
     assert "{{- if not $existingState }}" in template
     assert "{{- if not $existingAlertState }}" in template
