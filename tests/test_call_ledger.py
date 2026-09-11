@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -692,3 +693,83 @@ def test_derived_diagnostics_report_the_capability_flag_both_ways(
     assert (
         call_ledger.derived_diagnostics(vault_root)["fast_durable_ack"] == "inactive"
     )
+
+
+def test_an_artifact_write_records_what_landed_and_no_handle(
+    ledger_dir: Path, vault: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """The ledger has to be able to say what an artifact write put in the vault.
+
+    Its targets come from path-shaped *arguments*, and `preserve_artifacts` has
+    none: the live rows all carried `target_paths: []`. The outcome knows, and
+    handing it over stays within the never-values rule -- a vault-relative path
+    is exactly what a note write already records.
+    """
+    import hashlib
+    import uuid
+
+    from exomem import client_artifacts, commands
+
+    signed_url = "https://files.example/SIGNED-HANDLE-do-not-log?sig=abc123"
+    payload = b"artifact bytes"
+
+    def stage_artifact(file, _budget, **_kwargs):
+        if file["file_id"] == "file-two":
+            raise client_artifacts.SafeFetchError(
+                "SAFE_FETCH_FAILED", "download could not be retrieved"
+            )
+        staged = tmp_path / f"{file['file_id']}-{uuid.uuid4().hex}.bin"
+        staged.write_bytes(payload + file["file_id"].encode())
+        return client_artifacts.StagedArtifact(
+            file_id=file["file_id"],
+            path=staged,
+            size=staged.stat().st_size,
+            sha256=hashlib.sha256(staged.read_bytes()).hexdigest(),
+            content_type="application/octet-stream",
+            filename=f"{file['file_id']}.bin",
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", stage_artifact)
+    monkeypatch.setattr(client_artifacts, "mark_active_mutation_committed", lambda: None)
+    monkeypatch.setattr(
+        client_artifacts,
+        "active_manager",
+        lambda: SimpleNamespace(mutation_guard=lambda *_a, **_k: nullcontext()),
+    )
+
+    arguments = {
+        "scope": "case",
+        "category": "raw",
+        "files": [
+            {"download_url": signed_url, "file_id": "file-one"},
+            {"download_url": signed_url, "file_id": "file-two"},
+            {"download_url": signed_url, "file_id": "file-three"},
+        ],
+    }
+
+    async def call_next(_context):
+        return commands.op_preserve_artifacts(
+            vault,
+            scope=arguments["scope"],
+            category=arguments["category"],
+            files=arguments["files"],
+        )
+
+    result = _drive("preserve_artifacts", arguments, call_next)
+
+    assert result["summary"] == {"stored": 2, "already_stored": 0, "failed": 1}
+    row = _rows(ledger_dir)[0]
+    assert row["target_paths"] == [
+        "Knowledge Base/Evidence/case/raw/file-one.bin",
+        "Knowledge Base/Evidence/case/raw/file-three.bin",
+    ]
+
+    written = "\n".join(
+        p.read_text(encoding="utf-8") for p in ledger_dir.rglob("*") if p.is_file()
+    )
+    assert "SIGNED-HANDLE-do-not-log" not in written
+    assert "sig=abc123" not in written
+    assert "file-one" not in row["args"]
+    for handle_field in ("download_url", "file_id"):
+        assert handle_field not in written
+    assert "artifact bytes" not in written

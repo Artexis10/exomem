@@ -3926,16 +3926,16 @@
     }
   },
   "preserve_artifacts": {
-    "description": "Preserve client-provided binary file handles as append-only Evidence.\n\nUse this canonical binary-preservation command when the client can supply\ntemporary HTTPS file handles. Exomem retrieves each handle server-side and\nreturns one stored or failed outcome per file; no binary data is passed as\nbase64 through model-visible arguments. Clients without file handles keep\nusing `transfer_artifact(operation=\"upload\")` followed by `/upload`.",
+    "description": "Preserve client-provided binary file handles as append-only Evidence.\n\nUse this canonical binary-preservation command when the client can supply\ntemporary HTTPS file handles. Exomem retrieves each handle server-side and\nreturns one terminal state per file — `stored`, `already_stored`, or\n`failed`. `already_stored` means those exact bytes are already under that\ndestination, so nothing was written and the outcome names the existing path\nand ref; retrying a lost response with the same identity replays the batch\nrather than duplicating it. No binary data is passed as base64 through\nmodel-visible arguments. Clients without file handles keep using\n`transfer_artifact(operation=\"upload\")` followed by `/upload`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "scope": {
-          "description": "Incident, case, project, or domain key.",
+          "description": "Incident, case, project, or domain key. One path segment, never a path. A separator or reserved character is refused, not rewritten.",
           "type": "string"
         },
         "category": {
-          "description": "Evidence category within the scope.",
+          "description": "Evidence category within the scope. One path segment, not a path; nest with this argument rather than with `/` in `scope`.",
           "type": "string"
         },
         "files": {
@@ -4036,16 +4036,16 @@
     }
   },
   "preserve_evidence": {
-    "description": "Preserve text evidence as append-only proof material.\n\nUse for receipts, letters, transcripts, warranty records, legal/dispute\nmaterial, and other factual artifacts. For binary files supplied as client\nfile handles, use `preserve_artifacts`; otherwise use `transfer_artifact`\nplus `/upload`. Bytes never pass through the model.",
+    "description": "Preserve text evidence as append-only proof material.\n\nUse for receipts, letters, transcripts, warranty records, legal/dispute\nmaterial, and other factual artifacts. For binary files supplied as client\nfile handles, use `preserve_artifacts`; otherwise use `transfer_artifact`\nplus `/upload`. Bytes never pass through the model.\n\nThe outcome carries a terminal `state`: `stored`, or `already_stored` when\nthose exact bytes are already under that destination, in which case nothing\nis written and the outcome names the existing path and ref.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "scope": {
-          "description": "Incident, case, project, or domain key.",
+          "description": "Incident, case, project, or domain key. One path segment, never a path. A separator or reserved character is refused, not rewritten.",
           "type": "string"
         },
         "category": {
-          "description": "Evidence category within the scope.",
+          "description": "Evidence category within the scope. One path segment, not a path; nest with this argument rather than with `/` in `scope`.",
           "type": "string"
         },
         "filename": {

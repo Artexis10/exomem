@@ -53,6 +53,22 @@ failed canonical write. Continue independent work and ordinary recall; do not
 run maintenance merely to remove the pending label. A graph-dependent query can
 still require current edges and return an explicit freshness refusal.
 
+Artifact preservation reports one terminal `state` per file: `stored` for bytes
+this call committed, `already_stored` when the same SHA-256 already exists under
+the same `Evidence/<scope>/<category>/` destination — that outcome names the
+existing `path` and `ref`, writes nothing, and the batch summary counts it
+separately — and `failed` with a stable code and sanitized reason. `outcome`
+mirrors these for compatibility and reports `already_stored` as `stored` beside
+`duplicate_of`. A batch whose response was lost is recovered by repeating the
+identical call: the terminal is persisted before derived-state acknowledgement,
+so the same identity replays the same per-file paths, hashes, `request_id` and
+`receipt_id` without fetching or writing anything again. A retry under a new
+identity is a different mutation, and bytes already under that destination come
+back as `already_stored` rather than being stored a second time. `scope` and
+`category` are each one path segment: a separator, reserved character, control
+character or surrounding whitespace is refused with `INVALID_PRESERVE` naming the
+field, before any handle is fetched, and nothing is silently normalised.
+
 `MUTATION_WARMING`, `MUTATION_BUSY`, `MUTATION_ACKNOWLEDGEMENT_PENDING`, and
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` remain errors, not successful
 terminals. Preserve the same mutation identity and unchanged payload when
