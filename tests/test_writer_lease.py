@@ -4047,3 +4047,429 @@ def test_ensure_writer_racing_a_live_in_flight_release_gets_a_fresh_token(
     record = acquired["record"]
     assert record.fencing_token > first
     laptop.validate_fencing_token(record.fencing_token)
+
+
+def _fast_ack_derived_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    seam_failure: tuple[str, Exception] | None = None,
+    claimed_component: str | None = None,
+    command_name: str = "remember",
+    leaf_extra: dict | None = None,
+) -> tuple[LeaseManager, object, Path, Path, list[int]]:
+    """One governed canonical batch wired to the real fast-acknowledgement seam.
+
+    Mirrors `tests/test_fast_write_ack.py::_invoke_batch` -- the derived
+    acknowledgement only runs when `EXOMEM_FAST_DURABLE_ACK=1` and the receipt
+    protocol is installed, so a fault-injection test of the acknowledgement
+    ordering has to build the same shape.
+    """
+    from derived_receipt_fakes import DerivedReceiptProtocolFake
+
+    from exomem import derived_receipts, semantic_index
+
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
+    fake = DerivedReceiptProtocolFake()
+    if seam_failure is not None:
+        fake.inject(seam_failure[0], seam_failure[1])
+    if claimed_component is not None:
+
+        def claimed_status(_root, receipt, component):  # noqa: ANN001
+            current = next(
+                item for item in receipt.components if item.component is component
+            )
+            if current.state == "not_required" or component.value != claimed_component:
+                return current
+            return replace(current, state="claimed")
+
+        fake.inject("component_status", *(claimed_status for _ in range(64)))
+    for seam in (
+        "prepare_batch",
+        "prove_committed",
+        "publish_pending_visibility",
+        "signal_components",
+        "component_status",
+        "advisory_result_ref",
+    ):
+        monkeypatch.setattr(derived_receipts, seam, getattr(fake, seam))
+    monkeypatch.setattr(
+        writer_lease_module,
+        "_PENDING_VISIBILITY_PUBLISHER",
+        lambda _root, _receipt: True,
+        raising=False,
+    )
+
+    root = tmp_path / "vault"
+    notes = root / "Knowledge Base" / "Notes" / "Insights"
+    notes.mkdir(parents=True, exist_ok=True)
+    target = notes / "ack.md"
+    calls = [0]
+
+    def leaf(vault_root: Path) -> dict:
+        calls[0] += 1
+        rel_path = target.relative_to(vault_root).as_posix()
+        states = {
+            rel_path: semantic_index.build_parent_index_state(
+                vault_root, rel_path, source="# Ack\n"
+            )
+        }
+        batch_atomic_write(
+            [PlannedWrite(target, "# Ack\n", create_only=not target.exists())],
+            vault_root=vault_root,
+            semantic_states=states,
+        )
+        return {"path": rel_path, "warnings": [], **(leaf_extra or {})}
+
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+    command = SimpleNamespace(name=command_name, leaf=leaf, read_only=False)
+    return manager, command, root, target, calls
+
+
+def test_lost_derived_acknowledgement_persists_a_pending_success_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A committed batch whose derived acknowledgement fails stays a success.
+
+    The ledger's six `preserve_artifacts` rows show this exact cut: the canonical
+    bytes committed, `index.upsert_after_write`/`graph.refresh_paths` then failed,
+    and because the terminal was persisted only after that acknowledgement no
+    terminal existed for the identity -- so the client's same-identity retry
+    resolved to the fail-closed `MUTATION_OUTCOME_UNKNOWN`.
+    """
+    manager, command, root, target, calls = _fast_ack_derived_batch(
+        tmp_path,
+        monkeypatch,
+        seam_failure=("publish_pending_visibility", RuntimeError("registration failed")),
+    )
+
+    first = manager.invoke(
+        command,
+        (root,),
+        {"response_detail": "full"},
+        idempotency_key="lost-acknowledgement",
+        idempotency_principal_scope="principal:alice",
+        mutation_request_id="11111111-1111-4111-8111-111111111111",
+    )
+
+    assert first["status"] == "committed"
+    assert first["derived_sync"] == "pending"
+    # The components, not the exception class: a class name tells a reader
+    # nothing about what derived state is behind.
+    assert "embeddings" in first["derived_sync_components"]
+    assert any("embeddings" in warning for warning in first["warnings"])
+    assert all("RuntimeError" not in warning for warning in first["warnings"])
+    assert all("registration failed" not in warning for warning in first["warnings"])
+    assert target.read_text(encoding="utf-8") == "# Ack\n"
+
+    replay = manager.invoke(
+        command,
+        (root,),
+        {"response_detail": "full"},
+        idempotency_key="lost-acknowledgement",
+        idempotency_principal_scope="principal:alice",
+        mutation_request_id="22222222-2222-4222-8222-222222222222",
+    )
+
+    assert replay["status"] in {"committed", "replayed"}
+    assert replay["derived_sync"] == "pending"
+    assert calls == [1]
+    assert target.read_text(encoding="utf-8") == "# Ack\n"
+
+
+def test_derived_acknowledgement_budget_bounds_the_waiting_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spent request budget stops the *waiting*, not the acknowledgement.
+
+    Proof, publication and signalling are cheap and are what make derived work
+    recoverable; skipping them because a slow leaf ate the request budget would
+    report `pending` for work that was never even attempted. Only the component
+    wait is bounded by what is left of the request.
+    """
+    from exomem import derived_receipts
+
+    manager, command, root, target, calls = _fast_ack_derived_batch(
+        tmp_path, monkeypatch, claimed_component="embeddings"
+    )
+    proofs: list[str] = []
+    expired: list[bool] = []
+    real_prove = derived_receipts.prove_committed
+    real_wait = writer_lease_module._wait_for_derived_component
+
+    def observed_prove(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        proofs.append("prove")
+        return real_prove(*args, **kwargs)
+
+    def observed_wait(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        expired.append(
+            kwargs["deadline_monotonic"] <= writer_lease_module._fast_ack_monotonic()
+        )
+        return real_wait(*args, **kwargs)
+
+    monkeypatch.setattr(derived_receipts, "prove_committed", observed_prove)
+    monkeypatch.setattr(writer_lease_module, "_wait_for_derived_component", observed_wait)
+    # Budget equal to the delivery reserve leaves the waiting nothing.
+    monkeypatch.setattr(
+        writer_lease_module,
+        "_MUTATION_REQUEST_BUDGET_SECONDS",
+        writer_lease_module._TERMINAL_DELIVERY_RESERVE_SECONDS,
+    )
+
+    terminal = manager.invoke(
+        command,
+        (root,),
+        {"response_detail": "full"},
+        idempotency_key="acknowledgement-budget",
+        idempotency_principal_scope="principal:alice",
+        mutation_request_id="55555555-5555-4555-8555-555555555555",
+    )
+
+    assert terminal["status"] == "committed"
+    assert terminal["derived_sync"] == "pending"
+    assert "embeddings" in terminal["derived_sync_components"]
+    # The cheap half ran; only the wait was clamped, to a deadline already past.
+    assert proofs == ["prove"]
+    assert expired and all(expired)
+    assert calls == [1]
+    assert target.read_text(encoding="utf-8") == "# Ack\n"
+
+
+def test_a_commit_that_registers_no_derived_batch_owes_no_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit owing no derived work must not be stamped pending forever.
+
+    The fast-acknowledgement session is built before the leaf runs, from a
+    feature flag and a vault root, so its existence says nothing about whether a
+    batch will be registered. Binding the pending stamp to the session rather
+    than to its batches told every commit that reaches no markdown receipt write
+    -- the delete lanes, trash recovery, a resolved duplicate -- that its derived
+    state was not proven current, persisted that, and replayed it forever.
+    """
+    from exomem import derived_receipts
+
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
+    root = tmp_path / "vault"
+    (root / "Knowledge Base").mkdir(parents=True)
+
+    def prepares_nothing(_vault_root: Path) -> dict:
+        # Committed, but no governed batch: nothing registers derived work.
+        writer_lease_module.mark_active_mutation_committed()
+        return {"path": "Knowledge Base/Notes/Insights/none.md", "warnings": []}
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a batchless commit acknowledged derived work")
+
+    monkeypatch.setattr(derived_receipts, "prove_committed", forbidden)
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+    command = SimpleNamespace(name="remember", leaf=prepares_nothing, read_only=False)
+
+    terminal = manager.invoke(
+        command,
+        (root,),
+        {"response_detail": "full"},
+        idempotency_key="no-derived-batch",
+        idempotency_principal_scope="principal:alice",
+        mutation_request_id="99999999-9999-4999-8999-999999999999",
+    )
+
+    assert terminal["status"] == "committed"
+    assert "derived_sync" not in terminal
+
+    replay = manager.invoke(
+        command,
+        (root,),
+        {"response_detail": "full"},
+        idempotency_key="no-derived-batch",
+        idempotency_principal_scope="principal:alice",
+        mutation_request_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
+    assert "derived_sync" not in replay
+
+
+def test_a_graph_rebuild_handoff_binds_the_pre_persistence_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A handoff in the leaf, not the command name, is what selects the seam.
+
+    An ordinary command whose result carries an unfinalized rebuild handoff has
+    to finish the guard before its terminal is durable, or the crash window puts
+    a `completed` row behind an unfinalized rebuild.
+    """
+    manager, command, root, _target, _calls = _fast_ack_derived_batch(
+        tmp_path,
+        monkeypatch,
+        leaf_extra={"_graph_rebuild_handoff": {"generation": 1}},
+    )
+    seams: list[str] = []
+    store = manager.idempotency
+    original = store._persist_completed_from_canonical
+
+    def observed_persist(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        seams.append("persist")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_persist_completed_from_canonical", observed_persist)
+    monkeypatch.setattr(
+        writer_lease_module,
+        "_acknowledge_derived_batches",
+        lambda result, _session, **_kwargs: seams.append("acknowledge") or result,
+    )
+
+    manager.invoke(
+        command,
+        (root,),
+        {"response_detail": "full"},
+        idempotency_key="handoff-seam",
+        idempotency_principal_scope="principal:alice",
+        mutation_request_id="66666666-6666-4666-8666-666666666666",
+    )
+
+    assert seams == ["acknowledge", "persist"]
+
+
+def test_an_ordinary_command_binds_the_post_persistence_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mirror of the handoff case: persistence first, then acknowledgement."""
+    manager, command, root, _target, _calls = _fast_ack_derived_batch(tmp_path, monkeypatch)
+    seams: list[str] = []
+    store = manager.idempotency
+    original = store._persist_completed_from_canonical
+
+    def observed_persist(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        seams.append("persist")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_persist_completed_from_canonical", observed_persist)
+    monkeypatch.setattr(
+        writer_lease_module,
+        "_acknowledge_derived_batches",
+        lambda result, _session, **_kwargs: seams.append("acknowledge") or result,
+    )
+
+    manager.invoke(
+        command,
+        (root,),
+        {"response_detail": "full"},
+        idempotency_key="ordinary-seam",
+        idempotency_principal_scope="principal:alice",
+        mutation_request_id="77777777-7777-4777-8777-777777777777",
+    )
+
+    assert seams == ["persist", "acknowledge"]
+
+
+def test_a_committed_failure_still_runs_the_derived_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    """A committed failure has no success terminal, but its derived work is real.
+
+    The bytes committed; only the leaf's own answer failed. Skipping the
+    acknowledgement here would leave that batch's derived receipts unproven with
+    nothing to say so.
+    """
+    acknowledged: list[str] = []
+    store = IdempotencyStore(tmp_path / "idempotency.sqlite")
+
+    def commits_then_fails():  # noqa: ANN202
+        raise _committed_error(tmp_path)
+
+    with pytest.raises(vault_module.BatchWriteError):
+        store.run(
+            "committed-failure-ack",
+            "digest",
+            commits_then_fails,
+            after_terminal_acknowledgement=lambda result: acknowledged.append("ack") or result,
+            commit_observed=lambda: True,
+        )
+
+    assert acknowledged == ["ack"]
+
+
+def test_an_unkeyed_mutation_degrades_a_lost_acknowledgement(tmp_path: Path) -> None:
+    """No replay identity is still no reason to call a committed write uncertain."""
+    store = IdempotencyStore(tmp_path / "idempotency.sqlite")
+
+    def acknowledge(_result):  # noqa: ANN001, ANN202
+        raise writer_lease_module._PostCommitOutcomeUncertain()
+
+    result = store.run(
+        None,
+        "digest",
+        lambda: committed_terminal(
+            {"path": "Knowledge Base/Notes/Insights/unkeyed.md", "warnings": []},
+            request_id="88888888-8888-4888-8888-888888888888",
+            receipt_id=None,
+            idempotency_key=None,
+        ),
+        after_terminal_acknowledgement=acknowledge,
+    )
+
+    assert result["status"] == "committed"
+    assert result["derived_sync"] == "pending"
+
+
+def test_terminal_persistence_failure_precedes_the_derived_acknowledgement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Committed-uncertain is now narrowed to terminal-persistence failure.
+
+    The acknowledgement must not have run: it is ordered after the terminal is
+    safe, so a persistence failure never reaches it and the canonical row stays
+    the exact retry anchor.
+    """
+    from exomem import derived_receipts
+
+    manager, command, root, target, calls = _fast_ack_derived_batch(tmp_path, monkeypatch)
+    proofs: list[str] = []
+    real_prove = derived_receipts.prove_committed
+
+    def observed_prove(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        proofs.append("prove")
+        return real_prove(*args, **kwargs)
+
+    monkeypatch.setattr(derived_receipts, "prove_committed", observed_prove)
+
+    original_persist = manager.idempotency._persist_completed_from_canonical
+    failed = False
+
+    def fail_terminal_receipt(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise sqlite3.OperationalError("deterministic receipt write failure")
+        return original_persist(*args, **kwargs)
+
+    monkeypatch.setattr(
+        manager.idempotency, "_persist_completed_from_canonical", fail_terminal_receipt
+    )
+
+    with pytest.raises(OpError) as uncertain:
+        manager.invoke(
+            command,
+            (root,),
+            {"response_detail": "full"},
+            idempotency_key="terminal-persistence-failure",
+            idempotency_principal_scope="principal:alice",
+            mutation_request_id="33333333-3333-4333-8333-333333333333",
+        )
+
+    assert uncertain.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
+    payload = error_dict(uncertain.value)
+    assert payload["status"] == "committed"
+    assert payload["committed"] is True
+    assert proofs == []
+
+    replay = manager.invoke(
+        command,
+        (root,),
+        {"response_detail": "full"},
+        idempotency_key="terminal-persistence-failure",
+        idempotency_principal_scope="principal:alice",
+        mutation_request_id="44444444-4444-4444-8444-444444444444",
+    )
+    assert replay["status"] == "committed"
+    assert calls == [1]
+    assert target.read_text(encoding="utf-8") == "# Ack\n"

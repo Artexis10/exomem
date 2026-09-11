@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change add-mcp-call-ledger. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Every MCP Call Produces Exactly One Ledger Row
 
 The system SHALL append exactly one ledger row for each completed MCP tool call — read or
@@ -121,11 +123,13 @@ of an MCP context SHALL yield null fields rather than an error.
 - **AND** the row is still appended and the call still succeeds
 
 ### Requirement: Arguments Are Recorded As Shape And Hash, Never Values
-
 The system SHALL record call arguments as their names, per-argument byte length and sha256, and
 structural target paths only. It SHALL NOT record any argument value, note content, or raw
 caller credential. Caller identity SHALL be recorded as the pre-hashed principal scope, never a
-raw token or subject.
+raw token or subject. For artifact and evidence writes (`preserve_artifacts`, `preserve_evidence`,
+`capture_source` with files), the committed vault-relative paths from the outcome SHALL be recorded
+in `target_paths` so the ledger can state what landed; filenames derived from content stay
+structural paths, and no file content or handle URL is recorded.
 
 #### Scenario: Query text never reaches the ledger
 
@@ -144,6 +148,12 @@ raw token or subject.
 - **WHEN** a call is made with a verified principal or a bearer credential
 - **THEN** `caller_principal_hash` is the hashed principal scope
 - **AND** no raw token, authorization header, or subject value appears in the row
+
+#### Scenario: Artifact write records what landed
+
+- **WHEN** `preserve_artifacts` stores two files and fails a third
+- **THEN** the ledger row's `target_paths` holds the two committed vault-relative paths and nothing for the failed file
+- **AND** no `download_url`, file content, or handle identifier appears in the row
 
 ### Requirement: The Ledger Writes On A Read-Only Vault Replica
 

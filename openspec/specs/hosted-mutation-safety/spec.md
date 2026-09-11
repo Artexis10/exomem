@@ -3,7 +3,9 @@
 ## Purpose
 
 Define one process-safe, vault-scoped mutation boundary shared by every command surface, transfer path, and background writer.
+
 ## Requirements
+
 ### Requirement: One Process-Safe Mutation Boundary Per Vault
 
 The system SHALL serialize every operation that can modify a vault's canonical Markdown, media, governed indexes, logs, or mutation-owned runtime state through one process-safe boundary keyed by the vault's canonical identity. MCP, REST, CLI, transfer routes, and background workers MUST NOT maintain independent write locks or bypass that boundary.
@@ -213,3 +215,15 @@ Watcher, startup, and mutation-classified `process_media(process|retry)` discove
 - **WHEN** a background reconciliation writes or repairs a canonical media sidecar
 - **THEN** exact sidecar/job mutation occurs under the per-artifact guard
 - **AND** the resulting derived index fanout occurs after that guard is released
+
+### Requirement: Hosted Mutation Error Shapes Cover Every Terminal Code
+The hosted response layer SHALL carry the structured `status` and `committed` fields for every mutation error code the mutation terminal can emit, including `MUTATION_OUTCOME_UNKNOWN` (`status="uncertain"`, `committed=null`), so a connector client can distinguish never-executed, retryable, committed, and uncertain outcomes without parsing prose.
+
+#### Scenario: Outcome-unknown reaches the hosted client
+- **WHEN** a hosted mutation resolves to `MUTATION_OUTCOME_UNKNOWN`
+- **THEN** the hosted error carries `status="uncertain"`, `committed=null`, and the same-identity remediation text
+- **AND** the ledger row records the code as a refusal
+
+#### Scenario: Shape table and terminal codes stay aligned
+- **WHEN** the test suite enumerates the mutation terminal's error codes that carry `status` details
+- **THEN** every such code has an entry in the hosted shape table
