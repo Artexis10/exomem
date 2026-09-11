@@ -86,7 +86,7 @@ SHALL inject nothing beyond the reminder.
 - **AND** no hit's `excerpt` or `signals` (neither requested nor present in
   compact mode) appears anywhere in the block
 
-#### Scenario: An oversized block drops whole lines, never part of a path
+#### Scenario: An oversized block is truncated, never hit-count-limited beyond 3
 
 - **WHEN** the formatted routing-stub block (3 hits, long titles/paths) would
   exceed 600 characters
