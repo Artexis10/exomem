@@ -179,11 +179,15 @@ def test_alert_evaluator_scrapes_content_free_snapshot_and_requires_delivery(
     opener = Opener()
     monkeypatch.setattr(module.urllib.request, "build_opener", lambda *_args: opener)
     transition = {"job": "exomem-reconcile", "alert": "missed-run", "active": True}
-    first_id = module.transition_identifier(module.initial_alert_state(), transition, 0)
-    assert first_id == module.transition_identifier(module.initial_alert_state(), transition, 0)
+    first_id = module.transition_identifier(
+        module.initial_alert_state(), transition, 0, observed_at=1_000
+    )
+    assert first_id == module.transition_identifier(
+        module.initial_alert_state(), transition, 0, observed_at=1_000
+    )
     later_state = module.initial_alert_state()
     later_state["transitions_total"] = 1
-    assert module.transition_identifier(later_state, transition, 0) != first_id
+    assert module.transition_identifier(later_state, transition, 0, observed_at=1_000) != first_id
     module.deliver_transition(
         transition,
         webhook_url=target,
@@ -196,3 +200,30 @@ def test_alert_evaluator_scrapes_content_free_snapshot_and_requires_delivery(
             webhook_url=target,
             transition_id="transition-0001",
         )
+
+
+def test_alert_transition_id_does_not_repeat_after_a_counter_regression() -> None:
+    # Measured 2026-09-11: the alert-state ConfigMap's transitions_total stood at
+    # 78 while the receiver already held sequence 79 from 2026-09-07, so the
+    # FIRING for a twenty-hour reconcile outage was deduplicated and never mailed.
+    # The receiver keys on this id, so a later evaluation must never reuse one.
+    module = _load()
+    transition = {"job": "exomem-reconcile", "alert": "missed-run", "active": True}
+    earlier = module.initial_alert_state()
+    earlier["transitions_total"] = 78
+    earlier_id = module.transition_identifier(earlier, transition, 0, observed_at=1_788_996_839)
+
+    regressed = module.initial_alert_state()
+    regressed["transitions_total"] = 78
+    later_id = module.transition_identifier(regressed, transition, 0, observed_at=1_789_078_320)
+    assert later_id != earlier_id
+
+    # A retry of the same evaluation keeps the same id, so the receiver can
+    # still deduplicate a resend after a lost acknowledgement.
+    assert (
+        module.transition_identifier(regressed, transition, 0, observed_at=1_789_078_320)
+        == later_id
+    )
+
+    with pytest.raises(RuntimeError, match="transition identity is invalid"):
+        module.transition_identifier(regressed, transition, 0, observed_at=0)
