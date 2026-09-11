@@ -64,7 +64,13 @@ def read_lock(repo: Path, candidate: str, name: str) -> dict:
     lock = json.loads(path.read_text())
     # The `.zip.lock.json` files carry only an archive digest, so absence is fine;
     # a present-and-different profile is not.
-    expected = CANDIDATE_PROFILES.get(candidate, candidate)
+    expected = CANDIDATE_PROFILES.get(candidate)
+    if expected is None:
+        raise SystemExit(
+            f"candidate {candidate} is not in CANDIDATE_PROFILES "
+            f"(scripts/_hosted_candidate_locks.py); add it there, mirroring "
+            "exomem.hosted_plugins.CANDIDATE_PROFILES, before reading its locks."
+        )
     declared = lock.get("profile")
     if declared is not None and declared != expected:
         raise SystemExit(

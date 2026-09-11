@@ -470,6 +470,26 @@ def test_candidate_lock_reader_mirrors_the_packages_candidate_profiles() -> None
     assert helper.DEFAULT_CANDIDATE_PROFILE in helper.CANDIDATE_PROFILES
 
 
+def test_candidate_lock_reader_refuses_an_unmapped_candidate(tmp_path: pathlib.Path) -> None:
+    """An unknown candidate name must not fall back to comparing against itself."""
+    _load_module()
+    helper = sys.modules["_hosted_candidate_locks"]
+    candidate = (
+        tmp_path / "plugins" / "hosted" / "generated" / "candidates" / "hosted-alpha-agent-v9"
+    )
+    candidate.mkdir(parents=True)
+    (candidate / "claude.lock.json").write_text(
+        json.dumps(
+            {**OPENAI_PACKAGE_LOCK, "platform": "claude", "profile": "hosted-alpha-agent-v9"}
+        )
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        helper.read_lock(tmp_path, "hosted-alpha-agent-v9", "claude.lock.json")
+
+    assert "not in CANDIDATE_PROFILES" in str(raised.value)
+
+
 def test_prepare_attaches_the_openai_locks_before_anything_else(monkeypatch) -> None:
     """Ordering is the whole point: after `run` starts, this is unrecoverable."""
     module = _load_module()
