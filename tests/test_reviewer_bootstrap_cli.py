@@ -422,6 +422,54 @@ def test_load_locks_refuses_a_lock_that_declares_another_profile(
     assert "declares profile hosted-alpha-agent-v1" in str(raised.value)
 
 
+def test_load_locks_accepts_a_candidate_whose_locks_declare_its_mapped_profile(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A candidate is a generated directory; its locks declare an agent profile.
+
+    `hosted-alpha-agent-v4-command-binding-v1` declares `hosted-alpha-agent-v4`,
+    exactly as `exomem.hosted_plugins.CANDIDATE_PROFILES` says it should, and it
+    is the candidate the 0.77.0 contract was cut from. Measured 2026-09-11: the
+    preflight refused it with "declares profile hosted-alpha-agent-v4, not the
+    requested hosted-alpha-agent-v4-command-binding-v1", comparing the lock
+    against the directory name instead of the candidate's profile.
+    """
+    module = _load_module()
+    candidate_name = "hosted-alpha-agent-v4-command-binding-v1"
+    candidate = tmp_path / "plugins" / "hosted" / "generated" / "candidates" / candidate_name
+    candidate.mkdir(parents=True)
+    (tmp_path / "plugins" / "hosted" / "marketplace-review-fixture-v2.json").write_text(
+        json.dumps({"fixture_version": "v2", "payload_sha256": "ff" * 32})
+    )
+    package = {
+        **OPENAI_PACKAGE_LOCK,
+        "profile": "hosted-alpha-agent-v4",
+        "artifact_sha256": "44" * 32,
+    }
+    (candidate / "claude.lock.json").write_text(json.dumps({**package, "platform": "claude"}))
+    (candidate / "claude.zip.lock.json").write_text(
+        json.dumps({"platform": "claude", "archive_sha256": "0d" * 32})
+    )
+    (candidate / "openai.lock.json").write_text(json.dumps(package))
+    (candidate / "openai.zip.lock.json").write_text(json.dumps(OPENAI_ARCHIVE_LOCK))
+
+    locks = module.load_locks(tmp_path, candidate_name)
+
+    assert locks["profile"] == candidate_name
+    assert locks["openai_package"] == "44" * 32
+
+
+def test_candidate_lock_reader_mirrors_the_packages_candidate_profiles() -> None:
+    """The helper restates the map instead of importing it; pin the two equal."""
+    from exomem.hosted_plugins import CANDIDATE_PROFILES
+
+    _load_module()
+    helper = sys.modules["_hosted_candidate_locks"]
+
+    assert helper.CANDIDATE_PROFILES == dict(CANDIDATE_PROFILES)
+    assert helper.DEFAULT_CANDIDATE_PROFILE in helper.CANDIDATE_PROFILES
+
+
 def test_prepare_attaches_the_openai_locks_before_anything_else(monkeypatch) -> None:
     """Ordering is the whole point: after `run` starts, this is unrecoverable."""
     module = _load_module()
