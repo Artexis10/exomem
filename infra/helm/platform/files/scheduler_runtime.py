@@ -407,6 +407,11 @@ def request_once() -> int:
     if state["job"] != job:
         raise RuntimeError("scheduler state identity does not match the job")
     if state["cadence_seconds"] != cadence:
+        print(
+            f"scheduler state for {job} adopts cadence {cadence}s "
+            f"(was {state['cadence_seconds']}s)",
+            file=sys.stderr,
+        )
         state = adopt_cadence(state, cadence)
     started = time.monotonic()
     previous_handler = signal.getsignal(signal.SIGALRM)
