@@ -363,11 +363,16 @@ def transition_identifier(
 
     The receiver deduplicates on this id, so it must never repeat for a *new*
     transition. The sequence counter alone is not enough: the alert-state
-    ConfigMap's `transitions_total` fell behind the receiver's record (79 against
-    83 rows on 2026-09-11), so the missed-run FIRING for a twenty-hour reconcile
-    outage carried the same id as a transition from four days earlier and was
-    dropped as a duplicate, with no email. Binding the evaluation time keeps a
-    retry within one evaluation idempotent while a later firing is always new.
+    ConfigMap's `transitions_total` fell behind the receiver's record (it stood
+    at 78 when the receiver already held sequence 79; 79 against 83 rows once
+    the run had advanced it, measured 2026-09-11), so the missed-run FIRING for
+    a twenty-hour reconcile outage carried the same id as a transition from four
+    days earlier and was dropped as a duplicate, with no email. Binding the
+    evaluation time keeps a retry within one evaluation idempotent while a later
+    firing is always new. A pass that dies after delivering and before writing
+    its state re-derives the transition under a fresh id on the next loop; the
+    receiver's redundancy check against the last delivered row is what folds
+    that resend, so it is load-bearing rather than a safety net.
     """
     transitions_total = alert_state.get("transitions_total")
     if (

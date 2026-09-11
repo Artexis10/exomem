@@ -227,3 +227,64 @@ def test_alert_transition_id_does_not_repeat_after_a_counter_regression() -> Non
 
     with pytest.raises(RuntimeError, match="transition identity is invalid"):
         module.transition_identifier(regressed, transition, 0, observed_at=0)
+
+
+def test_alert_evaluation_reads_the_clock_once_so_every_transition_shares_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Retry idempotence rests on one observed_at per pass. Two transitions in one
+    # pass must carry the same timestamp, and a resend of that pass must produce
+    # the same ids, which a clock read inside the delivery loop would break.
+    module = _load()
+    clock = iter(range(5_000, 5_100))
+    monkeypatch.setattr(module.time, "time", lambda: next(clock))
+    stale = module.record_attempt(
+        module.initial_state("exomem-reconcile", 60),
+        success=False,
+        duration_seconds=0.1,
+        observed_at=1_000,
+    )
+    stale = module.record_attempt(stale, success=False, duration_seconds=0.1, observed_at=1_001)
+    alert_state = module.initial_alert_state()
+    alert_state["baselines"] = {"exomem-reconcile": 1_000}
+    monkeypatch.setenv("COLLECTOR_SNAPSHOT_URL", "http://collector.invalid/snapshot")
+    monkeypatch.setenv("MISSED_RUN_SECONDS", "180")
+    monkeypatch.setenv("FAILURE_THRESHOLD", "2")
+    monkeypatch.setenv("ALERT_WEBHOOK_URL", "https://alerts.example.invalid/hooks/opaque")
+    monkeypatch.setattr(module, "_fetch_snapshot", lambda url: [stale])
+    monkeypatch.setattr(
+        module, "_read_state", lambda name: ({"metadata": {"name": name}}, dict(alert_state))
+    )
+    delivered: list[tuple[dict[str, object], str]] = []
+    monkeypatch.setattr(
+        module,
+        "deliver_transition",
+        lambda transition, *, webhook_url, transition_id: delivered.append(
+            (transition, transition_id)
+        ),
+    )
+    written: list[dict[str, object]] = []
+    monkeypatch.setattr(module, "_write_state", lambda resource, state: written.append(state))
+    monkeypatch.setattr(module, "_api_request", lambda *args, **kwargs: {})
+
+    module.evaluate_once()
+
+    assert {item[0]["alert"] for item in delivered} == {"missed-run", "consecutive-failures"}
+    observed_at = written[0]["last_evaluated_unixtime"]
+    assert observed_at == 5_000, "one clock read per evaluation"
+    for index, (transition, transition_id) in enumerate(delivered):
+        assert transition_id == module.transition_identifier(
+            alert_state, transition, index, observed_at=observed_at
+        )
+
+
+def test_chart_seeds_scheduler_state_once_and_never_re_renders_it() -> None:
+    # Re-rendering the state ConfigMaps from a render-time `lookup` snapshot was a
+    # read-modify-write across the whole upgrade: counters, baselines and active
+    # alerts rolled back to whatever the render saw. The chart must only seed.
+    template = (ROOT / "infra/helm/platform/templates/observability.yaml").read_text()
+    assert "{{- if not $existingState }}" in template
+    assert "{{- if not $existingAlertState }}" in template
+    assert "$persistedState" not in template
+    assert "$persistedAlertState" not in template
+    assert template.count("helm.sh/resource-policy: keep") >= 2
