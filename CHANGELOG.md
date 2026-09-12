@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.78.0](https://github.com/Artexis10/exomem/compare/v0.77.0...v0.78.0) (2026-09-12)
+
+
+### Features
+
+* **hosted:** agent-run k3s governance migration and recovery drill ([#1180](https://github.com/Artexis10/exomem/issues/1180)) ([a8933d4](https://github.com/Artexis10/exomem/commit/a8933d467294160e306e824763594d816b25dff5))
+* **hosted:** let the control plane's database sleep when the fleet is idle ([#1194](https://github.com/Artexis10/exomem/issues/1194)) ([aef167f](https://github.com/Artexis10/exomem/commit/aef167f3f0cb8f3266f8d6585af9e7548c28662b))
+* **records:** hold refused writes and accept multi-line item values ([#1185](https://github.com/Artexis10/exomem/issues/1185)) ([245fc48](https://github.com/Artexis10/exomem/commit/245fc4885b758bfa66cac33d33d07ea93993cb3f))
+
+
+### Bug Fixes
+
+* **hooks:** retrieve-nudge stubs use hybrid recall and reach the REST lane ([#1203](https://github.com/Artexis10/exomem/issues/1203)) ([4c6e8ce](https://github.com/Artexis10/exomem/commit/4c6e8ce4a05160796a43f7a7889fbc63b0ff8246))
+* **hosted:** accept the frozen rollback baseline when a live legacy cell is not that release ([#1182](https://github.com/Artexis10/exomem/issues/1182)) ([9bedc04](https://github.com/Artexis10/exomem/commit/9bedc042fa3275846ea60a5683a3df7ad97102b4))
+* **hosted:** bind an alert transition id to its evaluation time so a counter regression cannot silence it ([#1201](https://github.com/Artexis10/exomem/issues/1201)) ([2a35e47](https://github.com/Artexis10/exomem/commit/2a35e4747c610e1eb8b94b4bd1150c106978f41e))
+* **hosted:** keep a reviewer-purpose cell out of the inventory refusal once its credential expires ([#1181](https://github.com/Artexis10/exomem/issues/1181)) ([86054c0](https://github.com/Artexis10/exomem/commit/86054c0a8d9e50583a513a3097f3984bd1d9ed4b))
+* **hosted:** keep the outgoing legacy cell alive through an expand and route the rollforward paths ([#1186](https://github.com/Artexis10/exomem/issues/1186)) ([0f52bf1](https://github.com/Artexis10/exomem/commit/0f52bf125ef7aef1f7d12e9f374e82159fd9e038))
+* **hosted:** let a scheduler job adopt a changed cadence instead of refusing forever ([#1199](https://github.com/Artexis10/exomem/issues/1199)) ([dd07daf](https://github.com/Artexis10/exomem/commit/dd07dafcdd4ae7cd18597d275f9d852939447f5b))
+* **hosted:** read a candidate's locks against its profile, not its directory name ([#1200](https://github.com/Artexis10/exomem/issues/1200)) ([4931168](https://github.com/Artexis10/exomem/commit/4931168d7b8d920154361fef29835bfcfc577c1a))
+* **hosted:** validate the provisioner database at startup, not every five seconds ([#1196](https://github.com/Artexis10/exomem/issues/1196)) ([b1bbd2f](https://github.com/Artexis10/exomem/commit/b1bbd2f4ccce7af59cbc31f50bf288f22206fd60))
+* **preserve:** persist the terminal before acknowledging derived state and report one state per file ([#1198](https://github.com/Artexis10/exomem/issues/1198)) ([a9262d7](https://github.com/Artexis10/exomem/commit/a9262d73dbd0a5719f7bb8d2d0b07b2290373776))
+* **provisioner:** let a replay restart a single-phase operation that did nothing ([#1190](https://github.com/Artexis10/exomem/issues/1190)) ([4728b65](https://github.com/Artexis10/exomem/commit/4728b6595bfd9d132f2ac4bdb2d6dc7e27c42820))
+* **provisioner:** spend the replay restart so a repeatable failure still settles ([#1192](https://github.com/Artexis10/exomem/issues/1192)) ([af64d37](https://github.com/Artexis10/exomem/commit/af64d3776f096133672e496bdf25361461abdee2))
+* **provisioner:** treat the rollback of a never-applied rollforward as a no-op ([#1188](https://github.com/Artexis10/exomem/issues/1188)) ([756879a](https://github.com/Artexis10/exomem/commit/756879a961e69c3916c6dc7fb0c94e94186b216a))
+
 ## [0.77.0](https://github.com/Artexis10/exomem/compare/v0.76.1...v0.77.0) (2026-09-09)
 
 
