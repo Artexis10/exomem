@@ -54,7 +54,7 @@ SEQUENCE_TWO_FAMILIES = ("f20", "f21", "f22", "f23", "f24", "f25", "f26")
 #: repo-wide, so a test that pinned its answer to sequence 2 alone would fail the
 #: day another amendment filed — which is drift in the test, not in the gate.
 #: Sequence 3 (f27) left this tuple when its acknowledgment landed on 2026-08-30.
-LATER_WITHHELD_FAMILIES: tuple[str, ...] = ()
+LATER_WITHHELD_FAMILIES: tuple[str, ...] = ("f28", "f29")
 
 
 def _seed_journey_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -135,7 +135,7 @@ def test_the_amendment_receipt_is_pending_and_binds_the_working_document() -> No
     )
 
     receipts = working_amendment_receipts(ROOT)
-    assert [receipt.sequence for receipt in receipts] == [1, 2, 3]
+    assert [receipt.sequence for receipt in receipts] == [1, 2, 3, 4]
     sequence_two = receipts[1]
     assert sequence_two.acknowledgment_status == "pending"
     assert sequence_two.ratifier is None
@@ -1378,6 +1378,9 @@ def _absence_claim_contexts() -> dict[str, AssertionContext]:
     return {
         "signal_absence_checked_across_all_surfaces": AssertionContext(
             snapshot=corpus.f20_corpus(surfaced=False), subject="f20-twin-log"
+        ),
+        "collection_candidate_surfaced_within_budget": AssertionContext(
+            snapshot=corpus.f20_corpus(surfaced=False), subject="f28-collection-promotion-twin-v1"
         ),
         "dismissal_respected_across_passes": AssertionContext(
             snapshot=later, prior=prior, subject="f23-subject"

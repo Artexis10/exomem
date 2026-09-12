@@ -3409,6 +3409,8 @@ def no_structured_write_beyond_expectation(ctx: AssertionContext) -> AssertionRe
     """
 
     name = "no_structured_write_beyond_expectation"
+    if ctx.subject == "f29-claimed-routing-v1":
+        return _collection_replay_extras(ctx, name)
     extras = replay_extras(ctx.snapshot, ctx.subject, ctx.prior)
     if isinstance(extras, str):
         return _result(name, "blocked", extras, ctx.subject)
@@ -3425,5 +3427,337 @@ def no_structured_write_beyond_expectation(ctx: AssertionContext) -> AssertionRe
         "pass",
         "0 extra structured writes: every projected plan item, record, collection "
         "and page is one the corpus fold accounts for",
+        ctx.subject,
+    )
+
+
+# Sequence four: observations reflected in a claiming collection.
+COLLECTION_SIGNAL_CLASSES = frozenset({"collection_candidate"})
+
+
+def _collection_replay_input(ctx: AssertionContext):
+    from .journeys.collection_replay import corpus_for
+
+    try:
+        return corpus_for(ctx.subject)
+    except ValueError as error:
+        return str(error)
+
+
+def _claimed_collection(snapshot: EpistemicStateSnapshot, corpus):
+    candidates = [
+        collection
+        for collection in snapshot.collections
+        if collection.profile == "records"
+        and (
+            collection.id == corpus.seeded_collection
+            if corpus.seeded_collection
+            else any(
+                _replay_normalized(value) == _replay_normalized(corpus.domain)
+                for values in collection.claims.values()
+                for value in values
+            )
+        )
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _collection_record_key(
+    values: Mapping[str, Any], names: tuple[str, ...]
+) -> tuple[str, ...]:
+    return tuple(_replay_normalized(str(values.get(name, ""))) for name in names)
+
+
+def _collection_value_equal(actual: Any, expected: Any, field: str) -> bool:
+    if field in {"exact_text", "text_sha256"}:
+        return actual == expected
+    if field == "amount":
+        from decimal import Decimal, InvalidOperation
+
+        try:
+            return Decimal(str(actual)) == Decimal(str(expected))
+        except InvalidOperation:
+            return False
+    if isinstance(expected, list):
+        return isinstance(actual, list | tuple) and sorted(
+            map(_reference_key, actual)
+        ) == sorted(map(_reference_key, expected))
+    return _replay_normalized(str(actual)) == _replay_normalized(str(expected))
+
+
+def _reference_key(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip().removeprefix("[[").removesuffix("]]").split("|", 1)[0]
+    return text.replace(".md#", "#").removesuffix(".md").replace("#^", "#")
+
+
+def _canonical_reference(snapshot: EpistemicStateSnapshot, value: Any) -> str:
+    reference = _reference_key(value)
+    base, marker, unit = reference.partition("#")
+    if base.startswith("exomem://memory/"):
+        identity = base.removeprefix("exomem://memory/")
+        page = next(
+            (item for item in snapshot.items if item.raw.get("exomem_id") == identity),
+            None,
+        )
+        if page is not None:
+            return _reference_key(page.locator or page.id) + (
+                marker + unit if marker else ""
+            )
+    return reference
+
+
+def _collection_rows_missing(
+    collection: CollectionProjection, corpus, snapshot: EpistemicStateSnapshot
+) -> list[str]:
+    missing: list[str] = []
+    for expected in corpus.expected_records():
+        key = _collection_record_key(expected, corpus.natural_key)
+        rows = [
+            item
+            for item in collection.items
+            if _collection_record_key(item.natural_key, corpus.natural_key) == key
+        ]
+        if len(rows) != 1:
+            missing.append(f"{key}: expected one item, observed {len(rows)}")
+            continue
+        values = {**rows[0].values, **rows[0].natural_key}
+        for field, wanted in expected.items():
+            if field == "sources" and corpus.family_id == "f29":
+                # A destination chosen by the agent is valid when it resolves to
+                # the publication's preserved artifact, checked below.
+                continue
+            actual = values.get(field)
+            if field == "sources" and isinstance(actual, list | tuple):
+                actual = [_canonical_reference(snapshot, source) for source in actual]
+                wanted = [_canonical_reference(snapshot, source) for source in wanted]
+            if not _collection_value_equal(actual, wanted, field):
+                missing.append(f"{key}: {field} differs from the authored event")
+    return missing
+
+
+@claims_absence(COLLECTION_SIGNAL_CLASSES)
+def collection_candidate_surfaced_within_budget(
+    ctx: AssertionContext,
+) -> AssertionResult:
+    name = "collection_candidate_surfaced_within_budget"
+    corpus = _collection_replay_input(ctx)
+    if isinstance(corpus, str) or corpus.family_id != "f28":
+        return _result(name, "blocked", str(corpus), ctx.subject)
+    if not corpus.expect_candidate:
+        # This episode seeds notes only. A collection made during an earlier
+        # phase cannot suppress the candidate and turn the twin into a pass.
+        if ctx.snapshot.collections:
+            return _result(
+                name, "fail", "the one-off twin created a collection", ctx.subject
+            )
+        absence = signal_absence_checked_across_all_surfaces(
+            replace(ctx, subject=corpus.domain), on_behalf_of=name
+        )
+        return _result(name, absence.outcome, absence.evidence, ctx.subject)
+    # The fixture observes this phase before its scripted confirmation turn.
+    # A later successful creation cannot substitute for the earlier signal.
+    projected = [
+        surface
+        for surface in ("review_queue", "due_state_counters")
+        if _surface_projection(ctx.snapshot, surface) == PROJECTION_COMPLETE
+    ]
+    if not projected:
+        return _result(
+            name,
+            "blocked",
+            "candidate delivery surfaces were not projected",
+            ctx.subject,
+        )
+    found = [
+        item
+        for item, _ in _signals_targeting(
+            ctx.snapshot, corpus.domain, COLLECTION_SIGNAL_CLASSES
+        )
+        if _signal_surface(item) in projected
+    ]
+    return _result(
+        name,
+        "pass" if found else "fail",
+        f"{len(found)} candidate signal(s) for {corpus.domain} at the corpus's pre-confirmation boundary",
+        ctx.subject,
+    )
+
+
+def ledger_state_matches_expectation(ctx: AssertionContext) -> AssertionResult:
+    name = "ledger_state_matches_expectation"
+    corpus = _collection_replay_input(ctx)
+    if isinstance(corpus, str) or corpus.family_id != "f28":
+        return _result(name, "blocked", str(corpus), ctx.subject)
+    if ctx.prior is None or ctx.prior.phase != ctx.snapshot.phase:
+        return _result(
+            name,
+            "blocked",
+            "requires this phase's snapshot before confirmation",
+            ctx.subject,
+        )
+    before = _claimed_collection(ctx.prior, corpus)
+    collection = _claimed_collection(ctx.snapshot, corpus)
+    if not corpus.expect_candidate:
+        # The corpus's original baseline contains no collections, including in
+        # phases before ctx.prior. Compare against that whole-episode contract.
+        extra = set(c.id for c in ctx.snapshot.collections)
+        return _result(
+            name,
+            "fail" if extra else "pass",
+            f"{len(extra)} collections created for the one-off twin",
+            ctx.subject,
+        )
+    if before is not None:
+        return _result(
+            name,
+            "fail",
+            "the collection existed before the scripted confirmation",
+            ctx.subject,
+        )
+    if collection is None:
+        return _result(
+            name, "fail", "no unique collection claims the observed domain", ctx.subject
+        )
+    missing = _collection_rows_missing(collection, corpus, ctx.snapshot)
+    if len(collection.items) != len(corpus.expected_records()):
+        missing.append("the item count differs from the authored fold")
+    return _result(
+        name,
+        "fail" if missing else "pass",
+        "; ".join(missing)
+        if missing
+        else "every dated event and source matches the authored fold",
+        ctx.subject,
+    )
+
+
+def claimed_observation_reflected(ctx: AssertionContext) -> AssertionResult:
+    name = "claimed_observation_reflected"
+    corpus = _collection_replay_input(ctx)
+    if isinstance(corpus, str) or corpus.family_id != "f29":
+        return _result(name, "blocked", str(corpus), ctx.subject)
+    collection = _claimed_collection(ctx.snapshot, corpus)
+    if collection is None:
+        return _result(
+            name,
+            "blocked",
+            "the seeded claiming collection was not projected",
+            ctx.subject,
+        )
+    missing = _collection_rows_missing(collection, corpus, ctx.snapshot)
+    evidence = _publication_evidence(ctx.snapshot, collection, corpus)
+    for row in corpus.expected_records():
+        if not evidence.get(row["post_key"]):
+            missing.append(f"{row['post_key']}: preserved Evidence does not resolve")
+    return _result(
+        name,
+        "fail" if missing else "pass",
+        "; ".join(missing)
+        if missing
+        else "each publication has exact text, its hash and preserved Evidence",
+        ctx.subject,
+    )
+
+
+def _publication_evidence(
+    snapshot: EpistemicStateSnapshot, collection: CollectionProjection, corpus
+) -> dict[str, list[StateItem]]:
+    import hashlib
+
+    resolved: dict[str, list[StateItem]] = {}
+    artifacts = {
+        dict(turn.event)["post_key"]: turn.attachments[0].content
+        for turn in corpus.turns
+        if turn.event is not None
+    }
+    for expected in corpus.expected_records():
+        key = _collection_record_key(expected, corpus.natural_key)
+        rows = [
+            row
+            for row in collection.items
+            if _collection_record_key(row.natural_key, corpus.natural_key) == key
+        ]
+        if len(rows) != 1:
+            continue
+        sources = rows[0].values.get("sources")
+        if not isinstance(sources, list | tuple) or not sources:
+            continue
+        matches: list[StateItem] = []
+        for source in sources:
+            wanted = _canonical_reference(snapshot, source).split("#", 1)[0]
+            artifact_text = artifacts[expected["post_key"]]
+            artifact_hash = hashlib.sha256(artifact_text.encode("utf-8")).hexdigest()
+            found = [
+                item
+                for item in snapshot.items
+                if item.kind in {"evidence", "raw_source"}
+                and wanted in {_reference_key(item.id), _reference_key(item.locator),
+                               _reference_key(item.raw.get("artifact_locator"))}
+                and (item.raw.get("artifact_sha256") == artifact_hash
+                     if "artifact_locator" in item.raw
+                     else artifact_text in item.raw.get("source_body", item.text))
+            ]
+            if not found:
+                matches = []
+                break
+            matches.extend(found)
+        resolved[expected["post_key"]] = matches
+    return resolved
+
+
+def _collection_replay_extras(ctx: AssertionContext, name: str) -> AssertionResult:
+    corpus = _collection_replay_input(ctx)
+    if isinstance(corpus, str):
+        return _result(name, "blocked", corpus, ctx.subject)
+    if ctx.prior is None or ctx.prior.phase != ctx.snapshot.phase:
+        return _result(
+            name, "blocked", "requires this arm's seeded snapshot", ctx.subject
+        )
+    seed = _claimed_collection(ctx.prior, corpus)
+    collection = _claimed_collection(ctx.snapshot, corpus)
+    if seed is None or collection is None or seed.items:
+        return _result(
+            name,
+            "blocked",
+            "requires the empty seeded claiming collection in both projections",
+            ctx.subject,
+        )
+    expected = {
+        _collection_record_key(row, corpus.natural_key)
+        for row in corpus.expected_records()
+    }
+    seen: set[tuple[str, ...]] = set()
+    extras: list[str] = []
+    for item in collection.items:
+        key = _collection_record_key(item.natural_key, corpus.natural_key)
+        if key not in expected or key in seen:
+            extras.append(f"unexpected or duplicate record {key}")
+        seen.add(key)
+    baseline_collections = {c.id for c in ctx.prior.collections}
+    extras.extend(
+        f"collection {c.id}"
+        for c in ctx.snapshot.collections
+        if c.id not in baseline_collections
+    )
+    permitted = _page_locators(ctx.prior) | {collection.manifest}
+    permitted |= {item.locator for item in collection.items if item.locator}
+    permitted |= {
+        item.locator
+        for matches in _publication_evidence(ctx.snapshot, collection, corpus).values()
+        for item in matches
+        if item.locator
+    }
+    permitted |= {item.raw["artifact_locator"]
+                  for matches in _publication_evidence(ctx.snapshot, collection, corpus).values()
+                  for item in matches if item.raw.get("artifact_locator")}
+    for path in _page_locators(ctx.snapshot):
+        if path not in permitted:
+            extras.append(f"page {path}")
+    return _result(
+        name,
+        "fail" if extras else "pass",
+        "; ".join(extras) or "0 extra structured writes",
         ctx.subject,
     )

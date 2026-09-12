@@ -30,6 +30,7 @@ silently dropped.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
@@ -470,6 +471,8 @@ def _audit_finding_items(report: Any) -> tuple[StateItem, ...]:
             "category": finding.category,
             "targets": identity or finding.path,
         }
+        if finding.category == "collection_candidate":
+            raw.update(_collection_candidate_raw(meta))
         signal_class = CATEGORY_SIGNAL_CLASSES.get(finding.category)
         if signal_class is not None:
             if not identity:
@@ -495,6 +498,15 @@ def _audit_finding_items(report: Any) -> tuple[StateItem, ...]:
             )
         )
     return tuple(projected)
+
+
+def _collection_candidate_raw(meta: Mapping[str, Any]) -> dict[str, str]:
+    terms = meta.get("domain_terms")
+    units = meta.get("evidence_units")
+    if not isinstance(terms, list | tuple) or not terms or not all(isinstance(term, str) for term in terms):
+        raise ValueError("collection_candidate carries no projected domain terms")
+    return {"signal_class": "collection_candidate", "targets": ",".join(terms),
+            "evidence_units": json.dumps(units or [], ensure_ascii=False)}
 
 
 def _identity_item(identity: str, finding: Any) -> StateItem:
@@ -557,6 +569,16 @@ def _review_queue_items(report: Any) -> tuple[StateItem, ...]:
         )
     ]
     for row in rows:
+        for index, reason in enumerate(row.reasons or ()):
+            if reason.get("category") != "collection_candidate":
+                continue
+            projected.append(StateItem(
+                id=f"review-{row.item_id}-collection-{index}", kind="container",
+                title="collection_candidate", text=str(reason.get("detail") or ""),
+                review_state=row.state or None,
+                raw={"surface": "review_queue", "category": "collection_candidate",
+                     "delivery": "explicit_only", **_collection_candidate_raw(reason.get("meta") or {})},
+            ))
         identity = _entity_candidate_identity(row)
         # Delivery describes the REASON the row's signal came from, never the
         # fused row. The runtime fuses every finding that shares an anchor page
@@ -606,7 +628,8 @@ class VaultProjector(Projector):
     #: 0.4.0 adds the opt-in `runtime_surfaces` projection, which emits signal
     #: and surface items the file-only build cannot produce at all. 0.5.0 adds
     #: opt-in declared-subject measurements before those runtime signals gate.
-    version = "0.5.0"
+    #: 0.6.0 adds claims/values/locators, candidate subjects and exact artifact evidence.
+    version = "0.6.0"
     author = "benchmark-harness"
     endpoints_used = ("filesystem:walk(vault)", "filesystem:read_text(*.md)")
 
@@ -721,6 +744,7 @@ class VaultProjector(Projector):
                 key: _as_text(frontmatter.get(key))
                 for key in (
                     "type",
+                    "exomem_id",
                     "entity_type",
                     "status",
                     "project",
@@ -730,10 +754,23 @@ class VaultProjector(Projector):
                 )
                 if frontmatter.get(key) is not None
             }
+            kind = _kind_for(page_type, entity_type, relative)
+            if kind in {"evidence", "raw_source"}:
+                # StateItem.text is normalized display text. Keep exact source
+                # body and independently observed artifact identity alongside it.
+                raw["source_body"] = body
+                companion = frontmatter.get("governance_companion")
+                if isinstance(companion, Mapping):
+                    artifact = companion.get("artifact_path")
+                    if isinstance(artifact, str) and artifact:
+                        raw["artifact_locator"] = artifact
+                        digest = self._artifact_digest(artifact)
+                        if digest is not None:
+                            raw["artifact_sha256"] = digest
 
             items[item_id] = StateItem(
                 id=item_id,
-                kind=_kind_for(page_type, entity_type, relative),
+                kind=kind,
                 title=str(frontmatter.get("title") or "").strip() or item_id.rsplit("/", 1)[-1],
                 text="\n".join(line for line in body.splitlines()).strip(),
                 current=STATUS_TO_CURRENCY.get(status, "undeclared"),
@@ -771,6 +808,8 @@ class VaultProjector(Projector):
                 )
 
         self._apply_revision_chains(items, successor_of)
+        for artifact in self._project_non_markdown_files():
+            items[artifact.id] = artifact
         for marker in self._project_surfaces(taken_at):
             items[marker.id] = marker
 
@@ -794,6 +833,32 @@ class VaultProjector(Projector):
             ),
             completeness_notes=COMPLETENESS_NOTES,
         )
+
+    def _artifact_digest(self, relative: str) -> str | None:
+        path = (self.vault_root / relative).resolve()
+        if not path.is_relative_to(self.vault_root.resolve()) or not path.is_file():
+            return None
+        with path.open("rb") as source:
+            return hashlib.file_digest(source, "sha256").hexdigest()
+
+    def _project_non_markdown_files(self) -> tuple[StateItem, ...]:
+        """Inventory canonical artifact/record files, including unrepresented ones."""
+        result: list[StateItem] = []
+        for tree in ("Evidence", "Records"):
+            root = self.vault_root / "Knowledge Base" / tree
+            for path in sorted(root.rglob("*")):
+                if not path.is_file() or path.suffix == ".md":
+                    continue
+                relative = path.relative_to(self.vault_root).as_posix()
+                raw = {"artifact_locator": relative}
+                digest = self._artifact_digest(relative)
+                if digest is not None:
+                    raw["artifact_sha256"] = digest
+                result.append(StateItem(
+                    id=f"artifact:{relative}", kind="evidence" if tree == "Evidence" else "container",
+                    locator=relative, locator_kind="file", raw=raw,
+                ))
+        return tuple(result)
 
     def _project_surfaces(self, taken_at: str) -> tuple[StateItem, ...]:
         """Project the four absence surfaces, and the triage store's dismissals.
@@ -1115,6 +1180,11 @@ class VaultProjector(Projector):
             for path, buckets in sorted((categories[category] or {}).items()):
                 for bucket in sorted(buckets or {}):
                     for index, entry in enumerate(buckets[bucket] or []):
+                        candidate_raw = {}
+                        if category == "collection_candidate":
+                            component = entry.get("component") or {}
+                            candidate_raw = _collection_candidate_raw(
+                                entry.get("meta") or component.get("meta") or component)
                         projected.append(
                             StateItem(
                                 id=f"due-{category}-{path}-{bucket}-{index}",
@@ -1126,6 +1196,7 @@ class VaultProjector(Projector):
                                     "category": category,
                                     "bucket": bucket,
                                     "targets": path,
+                                    **candidate_raw,
                                 },
                             )
                         )
@@ -1210,6 +1281,8 @@ class VaultProjector(Projector):
                     },
                     lifecycle=str(frontmatter.get("lifecycle") or "").strip() or None,
                     status=str(frontmatter.get("status") or "").strip() or None,
+                    values=_authored_collection_values(manifest[1], frontmatter),
+                    locator=relative,
                 )
             )
         projected: list[CollectionProjection] = []
@@ -1233,6 +1306,9 @@ class VaultProjector(Projector):
                     ),
                     natural_key=_natural_key_names(frontmatter),
                     items=tuple(sorted(grouped.get(collection_id, []), key=lambda item: item.key)),
+                    claims={name: tuple(values) for name, values in (frontmatter.get("claims") or {}).items()
+                            if isinstance(values, list) and all(isinstance(value, str) for value in values)}
+                    if isinstance(frontmatter.get("claims"), Mapping) else {},
                 )
             )
         return tuple(projected)
@@ -1330,6 +1406,15 @@ class VaultProjector(Projector):
             items[item_id] = items[item_id].model_copy(
                 update={"revision_chain_id": f"chain:{root}", "revision_index": depth}
             )
+
+
+def _authored_collection_values(manifest: Mapping[str, Any], item: Mapping[str, Any]) -> dict[str, Any]:
+    schema = manifest.get("item_schema")
+    fields = schema.get("fields") if isinstance(schema, Mapping) else None
+    if not isinstance(fields, Mapping):
+        return {}
+    # YAML dates become strings; text, numbers and link arrays retain JSON types.
+    return json.loads(json.dumps({name: item[name] for name in fields if name in item}, default=str))
 
 
 def _natural_key_names(frontmatter: Mapping[str, Any]) -> tuple[str, ...]:

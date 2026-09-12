@@ -84,6 +84,7 @@ import os
 import re
 import stat
 import sys
+import unicodedata
 from collections import deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
@@ -148,8 +149,10 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "supersession_integrity",
     "entity_type_unregistered",
     "unreflected_outcomes",
+    "unreflected_observations",
     "scope_divergence_semantic",
     "entity_recurrence",
+    "collection_candidate",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -213,6 +216,7 @@ EPISTEMIC_REVIEW_CATEGORIES: tuple[str, ...] = (
     # union is a calibration decision, on evidence this change deliberately does
     # not yet have (f21 stays withheld).
     "entity_recurrence",
+    "collection_candidate",
 )
 _SEMANTIC_AUDIT_CATEGORIES = frozenset({"semantic_contract_drift", *TYPED_SEMANTIC_CATEGORIES})
 _LEGACY_BACKLOG_CODE = "RELATION_DISPOSITION_MISSING"
@@ -461,7 +465,9 @@ def audit(
     *,
     categories: list[str] | None = None,
     today: dt.date | None = None,
+    now: dt.datetime | None = None,
     semantic_detail: Literal["actionable", "full"] = "actionable",
+    retain_reflected_observations: bool = False,
 ) -> AuditReport:
     """Scan the KB and return a structured findings report.
 
@@ -521,6 +527,15 @@ def audit(
         findings.extend(outcome_findings)
         if outcome_metadata:
             metadata["unreflected_outcomes"] = outcome_metadata
+    if "unreflected_observations" in selected:
+        findings.extend(
+            _check_unreflected_observations(
+                vault_root,
+                pages,
+                now=now,
+                retain_reflected=retain_reflected_observations,
+            )
+        )
     if "supersession_integrity" in selected:
         findings.extend(_check_supersession_integrity(vault_root, pages))
     if "corpus_contradictions" in selected:
@@ -529,6 +544,8 @@ def audit(
         findings.extend(_check_scope_divergence_semantic(vault_root, pages))
     if "entity_recurrence" in selected:
         findings.extend(_check_entity_recurrence(vault_root, pages))
+    if "collection_candidate" in selected:
+        findings.extend(_check_collection_candidate(vault_root, pages))
     if "relation_registry" in selected:
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
@@ -4412,6 +4429,445 @@ def outcome_component(
         "item_title": str(item.values.get("title") or item.identity.key),
         "item_status": str(item.values.get("status") or "open"),
     }
+
+
+def unreflected_observation_component(
+    component: Mapping[str, Any], matched_terms: Iterable[str]
+) -> AuditFinding | None:
+    """Compose one claimed observation finding from audience-visible terms."""
+    terms = sorted({str(term) for term in matched_terms if str(term)})
+    if len(terms) < 2:
+        return None
+    collection_id = str(component.get("collection_id") or "")
+    observation_ref = str(component.get("observation_ref") or "")
+    page_path = str(component.get("page_path") or "")
+    collection = str(component.get("collection") or "")
+    observed_at = str(component.get("observed_at") or "")
+    if not all((collection_id, observation_ref, page_path, collection, observed_at)):
+        return None
+    from . import due_state as due_state_module
+
+    signal_version = hashlib.sha256(
+        json.dumps(
+            [collection_id, observation_ref, terms],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    due_at = due_state_module.observation_due_at(observed_at)
+    if due_at is None:
+        return None
+    stored_component = {
+        **dict(component),
+        "family": "unreflected_observations",
+        "matched_terms": terms,
+    }
+    return AuditFinding(
+        category="unreflected_observations",
+        severity="info",
+        path=page_path,
+        detail=(
+            f"Observation {observation_ref!r} matches {len(terms)} claimed term(s) "
+            f"in {str(component.get('collection_title') or collection)!r} and has no "
+            "reflecting record."
+        ),
+        proposed_fix=(
+            "Review the observation and, if it records durable state, append or update "
+            "the matching collection record with a source link. Nothing is auto-written."
+        ),
+        paths=[collection],
+        meta={
+            "signal_version": signal_version,
+            "review_partition": collection_id,
+            "due_since": due_at,
+            "collection": collection,
+            "collection_id": collection_id,
+            "observation_ref": observation_ref,
+            "matched_terms": terms,
+        },
+        component=stored_component,
+    )
+
+
+def _observation_page_terms(
+    page: find_module.ParsedPage,
+    *,
+    language: Any,
+    relations: Any,
+) -> list[str]:
+    """The authored vocabulary each write path promises to route."""
+    terms = [page.title, *page.tags]
+    if page.rel_path.startswith(f"{kb_prefix()}Evidence/"):
+        match = re.search(
+            r"(?ms)^## Description\s*$\n(?P<body>.*?)(?=^## |\Z)", page.body
+        )
+        if match:
+            terms.append(match.group("body").strip())
+        return terms
+    document = semantic_units.parse_semantic_units(
+        page.body,
+        path=page.rel_path,
+        validate=False,
+        language_registry=language,
+        relation_registry=relations,
+        page_type=page.page_type,
+    )
+    terms.extend(tag for unit in document.units for tag in unit.tags)
+    return terms
+
+
+def _observation_moment(page: find_module.ParsedPage) -> dt.datetime | None:
+    authored = [
+        parsed
+        for name in ("captured", "created", "updated")
+        if (parsed := temporal.parse(page.frontmatter.get(name))) is not None
+    ]
+    if not authored:
+        return None
+    return max(
+        value.instant
+        or dt.datetime.combine(value.day, dt.time(), tzinfo=dt.UTC)
+        for value in authored
+    )
+
+
+def _link_targets_observation(
+    value: Any,
+    *,
+    page_path: str,
+    observation_ref: str,
+    observation_aliases: Iterable[str] = (),
+) -> bool:
+    values = value if isinstance(value, (list, tuple)) else [value]
+    aliases = {
+        text
+        for raw in (page_path, observation_ref, *observation_aliases)
+        if (text := str(raw or "").strip())
+    }
+    path_keys = {
+        _relevance_canon(alias)
+        for alias in aliases
+        if not alias.startswith("exomem://")
+    }
+    for raw in values:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if text in aliases or _relevance_canon(text) in path_keys:
+            return True
+        wikilinks = WIKILINK_PATTERN.findall(text)
+        if any(_relevance_canon(target) in path_keys for target in wikilinks):
+            return True
+    return False
+
+
+def _record_observation_support(
+    manifest: Any,
+    values: Mapping[str, Any],
+    *,
+    page_path: str,
+    observation_ref: str,
+    matched_terms: Iterable[str],
+    observation_aliases: Iterable[str] = (),
+) -> dict[str, Any] | None:
+    for name, spec in manifest.schema.fields.items():
+        is_link = spec.type == "link" or (
+            spec.type == "array" and spec.items is not None and spec.items.type == "link"
+        )
+        if (is_link or name == "sources") and _link_targets_observation(
+            values.get(name),
+            page_path=page_path,
+            observation_ref=observation_ref,
+            observation_aliases=observation_aliases,
+        ):
+            return {"support": "link"}
+    matched = {
+        unicodedata.normalize("NFKC", str(term)).strip().casefold()
+        for term in matched_terms
+    }
+    key_terms = sorted(
+        {
+            term
+            for name in manifest.schema.natural_key
+            if (term := unicodedata.normalize("NFKC", str(values.get(name) or ""))
+                .strip()
+                .casefold())
+            and term in matched
+        }
+    )
+    return {"support": "natural_key", "terms": key_terms} if key_terms else None
+
+
+def _check_unreflected_observations(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+    *,
+    now: dt.datetime | None = None,
+    retain_reflected: bool = False,
+) -> list[AuditFinding]:
+    """Claimed compiled/Evidence observations with no reflecting record."""
+    from . import collection_claims, due_state, memory_refs, record_formats
+
+    root = Path(vault_root)
+    effective_now = now or dt.datetime.now(dt.UTC)
+    if effective_now.tzinfo is None:
+        effective_now = effective_now.replace(tzinfo=dt.UTC)
+    effective_now = effective_now.astimezone(dt.UTC)
+    authorize = _release_filter(root)
+    claims_payload = {
+        "claims": due_state._recompute_claims(root, authorize_path=authorize)
+    }
+    targets = due_state.routing_targets(root, payload=claims_payload, authorize_path=authorize)
+    if not targets:
+        return []
+    language = semantic_language_registry.load_registry(root)
+    relations = relation_registry.load_registry(root)
+    tracked = {
+        str(component.get("observation_ref") or "")
+        for bucket in (
+            ((due_state.load(root) or {}).get("categories") or {})
+            .get("unreflected_observations", {})
+            .values()
+        )
+        for entry in due_state._unbucket(bucket)
+        if isinstance((component := entry.get("component")), Mapping)
+    }
+    collection_cache: dict[str, tuple[Any, Any]] = {}
+    findings: list[AuditFinding] = []
+    for page in pages:
+        if not (
+            page.rel_path.startswith(f"{kb_prefix()}Notes/")
+            or page.rel_path.startswith(f"{kb_prefix()}Evidence/")
+        ):
+            continue
+        if not authorize(page.rel_path) or (page.status or "active") in {
+            "archived",
+            "draft",
+            "dropped",
+            "superseded",
+        }:
+            continue
+        exomem_id = str(page.frontmatter.get("exomem_id") or "")
+        observation_ref = memory_refs.memory_ref(exomem_id) if exomem_id else ""
+        if not observation_ref:
+            continue
+        companion = page.frontmatter.get("governance_companion")
+        artifact_path = companion.get("artifact_path") if isinstance(companion, Mapping) else None
+        observed_at = _observation_moment(page)
+        age = effective_now - observed_at if observed_at is not None else None
+        if (
+            age is None
+            or age < dt.timedelta(0)
+            or (
+                age > dt.timedelta(days=due_state.OBSERVATION_LOOKBACK_DAYS)
+                and observation_ref not in tracked
+            )
+        ):
+            continue
+        terms = _observation_page_terms(page, language=language, relations=relations)
+        routing = collection_claims.route(terms, targets)
+        if routing is None:
+            continue
+        collection = str(routing["collection"])
+        cached = collection_cache.get(collection)
+        if cached is None:
+            manifest = due_state._load_manifest(root, collection)
+            if manifest is None:
+                continue
+            try:
+                snapshot = record_formats.load_adapter(
+                    root,
+                    manifest,
+                    authorize_path=None if retain_reflected else authorize,
+                ).read()
+            except Exception:  # noqa: BLE001 -- incomplete collection cannot settle the signal
+                snapshot = None
+            cached = collection_cache[collection] = (manifest, snapshot)
+        manifest, snapshot = cached
+        matched = list(routing.get("matched_terms") or ())
+        reflectors = []
+        for record in snapshot.records if snapshot is not None else ():
+            if record.ambiguous:
+                continue
+            support = _record_observation_support(
+                manifest,
+                record.values,
+                page_path=page.rel_path,
+                observation_ref=observation_ref,
+                matched_terms=matched,
+                observation_aliases=(artifact_path,),
+            )
+            if support is not None:
+                reflectors.append(
+                    {
+                        "path": str(record.source.path),
+                        "key": str(record.identity.key),
+                        **support,
+                    }
+                )
+        if reflectors and not retain_reflected:
+            continue
+        component = {
+            "collection": collection,
+            "collection_id": str(manifest.collection_id),
+            "collection_title": str(manifest.title),
+            "page_path": page.rel_path,
+            "observation_ref": observation_ref,
+            "observation_aliases": sorted(
+                {
+                    page.rel_path,
+                    observation_ref,
+                    str(artifact_path),
+                }
+            )[:3]
+            if artifact_path
+            else sorted({page.rel_path, observation_ref}),
+            "terms": sorted(collection_claims.normalize_terms(terms)),
+            "observed_at": observed_at.isoformat(),
+            "reflecting_records": reflectors,
+        }
+        finding = unreflected_observation_component(component, matched)
+        if finding is not None:
+            findings.append(finding)
+    return sorted(
+        findings,
+        key=lambda finding: (
+            finding.path,
+            str((finding.meta or {}).get("collection_id") or ""),
+        ),
+    )
+
+
+def _collection_candidate_finding(
+    candidate: Any,
+    rows: list[Mapping[str, Any]],
+    *,
+    project_terms: Iterable[str] = (),
+) -> AuditFinding | None:
+    supporting_rows = sorted(
+        (
+            dict(row)
+            for row in rows
+            if candidate.term in {str(term) for term in row.get("terms") or ()}
+        ),
+        key=lambda row: (
+            str(row.get("date") or ""),
+            str(row.get("page") or ""),
+            str(row.get("unit_ref") or ""),
+        ),
+    )
+    if not supporting_rows:
+        return None
+    supporting = sorted(
+        {
+            (str(row.get("page") or ""), str(row.get("unit_ref") or ""))
+            for row in supporting_rows
+        }
+    )
+    anchor = supporting[0][0]
+    paths = sorted({path for path, _ref in supporting if path != anchor})
+    meta = {
+        "review_partition": candidate.term,
+        "domain_terms": list(candidate.domain_terms),
+        "evidence_units": list(candidate.evidence_units),
+        "strength": candidate.strength,
+        "signal_version": candidate.signal_version,
+        "due_since": dt.date.min.isoformat(),
+    }
+    return AuditFinding(
+        category="collection_candidate",
+        severity="info",
+        path=anchor,
+        detail=(
+            f"Recurring state observations for {candidate.term!r} span enough pages "
+            "and dates to review as a structured collection."
+        ),
+        proposed_fix=(
+            "Review the cited units, draft and validate a collection schema, then ask "
+            "for confirmation before creating it. Nothing is auto-created or backfilled."
+        ),
+        paths=paths,
+        meta=meta,
+        component={
+            "family": "collection_candidate",
+            "term": candidate.term,
+            "units": supporting_rows,
+            "project_terms": sorted({str(term) for term in project_terms}),
+            "meta": meta,
+            **meta,
+        },
+    )
+
+
+def _check_collection_candidate(
+    vault_root: Path, pages: list[find_module.ParsedPage]
+) -> list[AuditFinding]:
+    """Recurring longitudinal unit terms not covered by effective claims."""
+    from . import collection_candidate, due_state, memory_refs, project_keys
+
+    root = Path(vault_root)
+    authorize = _release_filter(root)
+    language = semantic_language_registry.load_registry(root)
+    relations = relation_registry.load_registry(root)
+    rows: list[dict[str, Any]] = []
+    for page in pages:
+        if not page.rel_path.startswith(f"{kb_prefix()}Notes/") or not authorize(
+            page.rel_path
+        ):
+            continue
+        if (page.status or "active") in {"archived", "draft", "dropped", "superseded"}:
+            continue
+        moment = temporal.parse(page.frontmatter.get("created") or page.frontmatter.get("updated"))
+        if moment is None:
+            continue
+        exomem_id = str(page.frontmatter.get("exomem_id") or "")
+        parent_ref = memory_refs.memory_ref(exomem_id) if exomem_id else None
+        document = semantic_units.parse_semantic_units(
+            page.body,
+            path=page.rel_path,
+            parent_ref=parent_ref,
+            validate=False,
+            language_registry=language,
+            relation_registry=relations,
+            page_type=page.page_type,
+        )
+        for unit in document.units:
+            if not unit.unit_ref:
+                continue
+            rows.append(
+                {
+                    "page": page.rel_path,
+                    "unit_ref": unit.unit_ref,
+                    "terms": sorted({*page.tags, *unit.tags, unit.category}),
+                    "date": moment.day.isoformat(),
+                    "text": unit.content,
+                }
+            )
+    claims_payload = {
+        "claims": due_state._recompute_claims(root, authorize_path=authorize)
+    }
+    covered = {
+        term
+        for target in due_state.routing_targets(
+            root, payload=claims_payload, authorize_path=authorize
+        )
+        for term in target.claims
+    }
+    projects = project_keys.load_project_registry(root).keys
+    candidates = collection_candidate.detect(
+        rows, covered_terms=covered, project_terms=projects
+    )
+    findings = [
+        finding
+        for candidate in candidates
+        if (
+            finding := _collection_candidate_finding(
+                candidate, rows, project_terms=projects
+            )
+        )
+        is not None
+    ]
+    return sorted(findings, key=lambda finding: str((finding.meta or {}).get("review_partition")))
 
 
 def unreflected_component(

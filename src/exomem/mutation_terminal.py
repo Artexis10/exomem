@@ -708,6 +708,10 @@ _STRUCTURE_STRENGTHS = frozenset({"strong", "moderate"})
 _MAX_STRUCTURE_REASONS = 8
 _MAX_STRUCTURE_TERMS = 6
 _MAX_STRUCTURE_TOKEN_CHARS = 64
+_MAX_ROUTING_TITLE_CHARS = 160
+_MAX_ROUTING_COLLECTION_CHARS = 512
+_MAX_ROUTING_KEY_FIELDS = 16
+_ROUTING_STRENGTHS = frozenset({"strong", "moderate"})
 #: Advisory kind emitted by the capture path. Its payload names the domain the
 #: fallback captures share, not the off-scope units a compiled write reports.
 _SOURCE_CLASSIFICATION_KIND = "source_classification_debt"
@@ -760,6 +764,54 @@ def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
         if not _bounded_tokens(terms, _MAX_STRUCTURE_TERMS):
             continue
         return {**common, "off_scope_units": units, "cluster_terms": list(terms)}
+    return None
+
+
+def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:
+    """Lift one bounded, validated Records routing advisory from a write leaf."""
+    if not isinstance(leaf, Mapping):
+        return None
+    for container_key in ("creation", "semantic", "source", None):
+        container = leaf if container_key is None else leaf.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        value = container.get("records_routing")
+        if not isinstance(value, Mapping) or set(value) != {
+            "collection",
+            "title",
+            "matched_terms",
+            "natural_key",
+            "strength",
+        }:
+            continue
+        collection = value.get("collection")
+        title = value.get("title")
+        matched_terms = value.get("matched_terms")
+        natural_key = value.get("natural_key")
+        strength = value.get("strength")
+        if not (
+            isinstance(collection, str)
+            and 0 < len(collection) <= _MAX_ROUTING_COLLECTION_CHARS
+            and collection.startswith("Knowledge Base/Records/")
+            and collection.endswith("/_collection.md")
+            and ".." not in collection.split("/")
+        ):
+            continue
+        if not isinstance(title, str) or not 0 < len(title) <= _MAX_ROUTING_TITLE_CHARS:
+            continue
+        if not _bounded_tokens(matched_terms, _MAX_STRUCTURE_TERMS):
+            continue
+        if not _bounded_tokens(natural_key, _MAX_ROUTING_KEY_FIELDS):
+            continue
+        if not isinstance(strength, str) or strength not in _ROUTING_STRENGTHS:
+            continue
+        return {
+            "collection": collection,
+            "title": title,
+            "matched_terms": list(matched_terms),
+            "natural_key": list(natural_key),
+            "strength": strength,
+        }
     return None
 
 
@@ -1502,6 +1554,9 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     structure_suggestion = _structure_suggestion_projection(leaf)
     if structure_suggestion is not None:
         compact["structure_suggestion"] = structure_suggestion
+    records_routing = _records_routing_projection(leaf)
+    if records_routing is not None:
+        compact["records_routing"] = records_routing
     if due_state is not None and _admit_due_state(due_state, due_state_vault):
         compact["due_state"] = due_state
     if relation_advisory is not None:

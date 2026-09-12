@@ -137,6 +137,7 @@ def test_generic_client_can_discover_validate_create_inspect_and_append_from_emp
             "natural_key": ["occurred_on", "label"],
             "committed": 0,
             "held": 0,
+            "unreflected": 0,
         }
     ]
     assert inventory["legacy_trackers"] == []

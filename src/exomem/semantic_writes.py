@@ -940,6 +940,7 @@ class CreationCommit:
     # Advisory only. Absent unless the written page shows recurring durable
     # material outside its own declared scope; never affects the commit.
     structure_suggestion: dict[str, Any] | None = None
+    records_routing: dict[str, Any] | None = None
     # Advisory only, and a DIFFERENT kind of advisory: `structure_suggestion` is
     # evidence about the page just written, while this is a bounded count of what
     # the whole vault currently owes. It rides the same post-commit seam because
@@ -964,6 +965,8 @@ class CreationCommit:
         }
         if self.structure_suggestion is not None:
             value["structure_suggestion"] = self.structure_suggestion
+        if self.records_routing is not None:
+            value["records_routing"] = self.records_routing
         if self.due_state is not None:
             value["due_state"] = self.due_state
         if self.relation_advisory_context is not None:
@@ -1036,6 +1039,7 @@ class ExistingCommit:
     # Advisory only. Absent unless the written page shows recurring durable
     # material outside its own declared scope; never affects the commit.
     structure_suggestion: dict[str, Any] | None = None
+    records_routing: dict[str, Any] | None = None
     # Advisory only, and a DIFFERENT kind of advisory: `structure_suggestion` is
     # evidence about the page just written, while this is a bounded count of what
     # the whole vault currently owes. It rides the same post-commit seam because
@@ -1062,6 +1066,8 @@ class ExistingCommit:
             value["index"] = self.index_report.as_dict()
         if self.structure_suggestion is not None:
             value["structure_suggestion"] = self.structure_suggestion
+        if self.records_routing is not None:
+            value["records_routing"] = self.records_routing
         if self.due_state is not None:
             value["due_state"] = self.due_state
         if self.relation_advisory_context is not None:
@@ -2290,6 +2296,90 @@ def _structure_suggestion(
         return None
 
 
+def _records_routing_from_terms(
+    vault_root: Path, terms: Sequence[str]
+) -> dict[str, Any] | None:
+    """Route authored terms through visible projected claims. Advisory; fail open."""
+    try:
+        from . import collection_claims, due_state
+
+        return collection_claims.route(terms, due_state.routing_targets(vault_root))
+    except Exception:  # noqa: BLE001 -- routing advice never breaks a commit
+        log.debug("collection claims routing failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _records_routing(vault_root: Path, state: Any) -> dict[str, Any] | None:
+    """Collect only the written compiled page's declared routing vocabulary."""
+    return _records_routing_from_terms(vault_root, _records_routing_terms(state))
+
+
+def _records_routing_for_delivery(
+    vault_root: Path, routing: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """Suppress a routed advisory when its review family is quiet or off."""
+    if routing is None:
+        return None
+    try:
+        from . import review_state
+
+        payload = review_state.ReviewStateStore(vault_root).load()
+        if (
+            review_state.disposition_for(
+                "unreflected_observations", payload=payload
+            )
+            != "normal"
+        ):
+            return None
+    except Exception:  # noqa: BLE001 -- disposition failure costs only advice
+        log.debug("collection routing disposition read failed (non-fatal)", exc_info=True)
+        return None
+    return dict(routing)
+
+
+def _records_routing_terms(state: Any) -> list[str]:
+    """Authored title, page tags and unit tags from one compiled state."""
+    frontmatter = getattr(state, "frontmatter", None) or {}
+    raw_tags = frontmatter.get("tags") if isinstance(frontmatter, Mapping) else ()
+    if isinstance(raw_tags, str):
+        page_tags = [raw_tags]
+    elif isinstance(raw_tags, (list, tuple)):
+        page_tags = [str(value) for value in raw_tags]
+    else:
+        page_tags = []
+    document = getattr(state, "document", None)
+    unit_tags = [
+        str(tag)
+        for unit in (getattr(document, "units", None) or ())
+        for tag in (getattr(unit, "tags", None) or ())
+    ]
+    return [str(getattr(state, "title", "") or ""), *page_tags, *unit_tags]
+
+
+def _observation_delta(
+    vault_root: Path,
+    state: Any,
+    routing: Mapping[str, Any] | None,
+) -> None:
+    """Maintain claimed-observation state after a compiled write; fail open."""
+    if not getattr(state, "eligible_compiled", True):
+        return
+    try:
+        from . import due_state, memory_refs
+
+        identity = str(getattr(state, "identity", "") or "")
+        due_state.apply_observation_write_delta(
+            vault_root,
+            path=str(getattr(state, "path", "") or ""),
+            observation_ref=memory_refs.memory_ref(identity) if identity else "",
+            terms=_records_routing_terms(state),
+            routing=routing,
+            observation_aliases=(str(getattr(state, "path", "") or ""),),
+        )
+    except Exception:  # noqa: BLE001 -- observation advice never breaks a commit
+        log.debug("observation due-state delta failed (non-fatal)", exc_info=True)
+
+
 def _due_state_block(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
     """Update the due-state projection for one written page and return its block.
 
@@ -2352,6 +2442,9 @@ def commit_existing(
             timings=timings,
         )
     suggestion = _structure_suggestion(preflight.after, preflight.after_corpus)
+    routing = _records_routing(vault_root, preflight.after)
+    _observation_delta(vault_root, preflight.after, routing)
+    delivered_routing = _records_routing_for_delivery(vault_root, routing)
     due = _due_state_block(vault_root, preflight.path)
     context = {
         "vault": str(Path(vault_root)),
@@ -2360,6 +2453,7 @@ def commit_existing(
     return replace(
         committed,
         structure_suggestion=suggestion,
+        records_routing=delivered_routing,
         due_state=due,
         relation_advisory_context=context,
     )
@@ -3841,6 +3935,9 @@ def commit_creation(
         predecessor_content_hash=predecessor_content_hash,
     )
     suggestion = _structure_suggestion(preflight.semantic_state, preflight.corpus)
+    routing = _records_routing(vault_root, preflight.semantic_state)
+    _observation_delta(vault_root, preflight.semantic_state, routing)
+    delivered_routing = _records_routing_for_delivery(vault_root, routing)
     due = _due_state_block(vault_root, preflight.destination)
     context = {
         "vault": str(Path(vault_root)),
@@ -3849,6 +3946,7 @@ def commit_creation(
     return replace(
         committed,
         structure_suggestion=suggestion,
+        records_routing=delivered_routing,
         due_state=due,
         relation_advisory_context=context,
     )

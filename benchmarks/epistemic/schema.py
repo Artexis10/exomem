@@ -88,7 +88,7 @@ UNPROMPTED_FAMILIES: frozenset[str] = frozenset({"f20", "f21", "f22"})
 #: vocabulary lives in the corpus module beside the fold it protects; this is the
 #: second of its two enforcement points — corpus construction is the first, and a
 #: fixture authored by hand reaches only this one.
-STORE_BEARING_GATED_FAMILIES: frozenset[str] = frozenset({"f27"})
+STORE_BEARING_GATED_FAMILIES: frozenset[str] = frozenset({"f27", "f28", "f29"})
 
 ScenarioKind = Literal["corpus", "operational"]
 
@@ -337,6 +337,8 @@ def _validate_store_bearing_turns(scenario: Scenario, source: str) -> None:
         StoreBearingUtterance,
         assert_no_store_bearing_utterance,
     )
+    if scenario.family_id in {"f28", "f29"}:
+        from .journeys.collection_replay import assert_no_store_bearing_utterance
 
     turns = tuple(
         (op.ref, op.detail)

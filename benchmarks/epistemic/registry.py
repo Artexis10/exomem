@@ -82,6 +82,10 @@ PREREGISTERED_ASSERTIONS: tuple[str, ...] = (
     # and reported together.
     "lifecycle_consequence_landed_unprompted",
     "no_structured_write_beyond_expectation",
+    # Sequence 4: collection claims replay, pending founder acknowledgment.
+    "collection_candidate_surfaced_within_budget",
+    "ledger_state_matches_expectation",
+    "claimed_observation_reflected",
 )
 
 #: Quiet assertions: every one composes
@@ -101,6 +105,7 @@ COMPOSES_ABSENCE_META: frozenset[str] = frozenset(
         "signal_absence_checked_across_all_surfaces",
         "dismissal_respected_across_passes",
         "restructure_signal_cleared_by_state_change",
+        "collection_candidate_surfaced_within_budget",
     }
 )
 
@@ -139,6 +144,8 @@ PREREGISTERED_FAMILIES: tuple[tuple[str, str], ...] = (
     ("f26", "hookless_episode_carrier"),
     # Added by the 2026-08 lifecycle-replay amendment (§7), sequence 3.
     ("f27", "lifecycle_routing_replay"),
+    ("f28", "collection_promotion_replay"),
+    ("f29", "claimed_collection_routing_replay"),
 )
 
 PREREGISTERED_FAMILY_IDS: frozenset[str] = frozenset(
@@ -180,6 +187,8 @@ AMENDMENT_INTRODUCED_FAMILIES: Mapping[str, int] = MappingProxyType(
         # run recorded before acknowledgment remains evidence about the harness
         # and that runtime, never a comparative claim.
         "f27": 3,
+        "f28": 4,
+        "f29": 4,
     }
 )
 
@@ -205,6 +214,9 @@ REQUIRES_ITEM_PAIR: frozenset[str] = frozenset(
 #: and far weaker claim that an empty snapshot would satisfy.
 REQUIRES_SUBJECT: frozenset[str] = frozenset(
     {
+        "collection_candidate_surfaced_within_budget",
+        "ledger_state_matches_expectation",
+        "claimed_observation_reflected",
         # f27's pair reads its expectation out of the corpus the subject names.
         # Subject-less both block with the reason, but blocking at evaluation is
         # late: the mistake is visible at load, and a scenario that forgot the
@@ -225,6 +237,7 @@ REQUIRES_SUBJECT: frozenset[str] = frozenset(
 #: take two snapshots at or before the phase that expects them.
 REQUIRES_SNAPSHOT_PAIR: frozenset[str] = frozenset(
     {
+        "ledger_state_matches_expectation",
         # f27's false-write dual diffs pages against the seeded vault, so the
         # trajectory owes a snapshot taken before the first agent turn. Without
         # it a scaffold page the harness itself laid would be scored as a page

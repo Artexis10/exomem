@@ -11,6 +11,7 @@ tests/test_epistemic_amendment_governance.py
 tests/test_epistemic_assertions.py
 tests/test_epistemic_broker.py
 tests/test_epistemic_cohort.py
+tests/test_epistemic_collection_claims_replay.py
 tests/test_epistemic_contract_receipts.py
 tests/test_epistemic_evidence.py
 tests/test_epistemic_lifecycle_replay.py

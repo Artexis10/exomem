@@ -50,6 +50,8 @@ the public-suite lanes.
 | f25 | restructure_lifecycle | operational | none | restructure_signal_cleared_by_state_change · signal_absence_checked_across_all_surfaces (cleared by state change, not by dismissal; zero merge-class churn in the frozen window) |
 | f26 | hookless_episode_carrier | operational | none | due_state_block_present_in_carrier · continuation_packet_reconstructs_session (end-to-end thin-client episode; due-state block present in the actual compact responses) |
 | f27 | lifecycle_routing_replay | operational | none | lifecycle_consequence_landed_unprompted · no_structured_write_beyond_expectation (a real agent replays an authored episode of ordinary working language with every store-bearing utterance removed; the durable state it leaves is diffed against the state an expert session leaves, in three tiers — intent, outcome, transition — with the false-write dual reported from the same run) |
+| f28 | collection_promotion_replay | operational | none | collection_candidate_surfaced_within_budget · ledger_state_matches_expectation (recurring studio licence events and a frequency-matched one-off twin; candidate observed before confirmation, dated state compared after it) |
+| f29 | claimed_collection_routing_replay | operational | none | claimed_observation_reflected · no_structured_write_beyond_expectation (published observations with exact text and Evidence, plus tentative turns; existing claiming collection) |
 
 ## 2. Assertion registry (deterministic; unknown name = fixture load error)
 
@@ -79,6 +81,9 @@ restructure_signal_cleared_by_state_change
 due_state_block_present_in_carrier
 lifecycle_consequence_landed_unprompted
 no_structured_write_beyond_expectation
+collection_candidate_surfaced_within_budget
+ledger_state_matches_expectation
+claimed_observation_reflected
 ```
 
 All run against neutral state snapshots (never product internals or answer
@@ -223,6 +228,12 @@ Claim-conditioned N/A: a product whose own materials claim a property scores
 Any not_applicable in a family excludes that family from every comparative
 claim, for all providers.
 
+### Collection-claims replay predicates (sequence 4)
+
+- `collection_candidate_surfaced_within_budget`: at the corpus-annotated boundary before confirmation, a projected attention or due-state signal names the domain as a collection candidate. The frequency-matched one-off twin composes `signal_absence_checked_across_all_surfaces`, including counters. Missing projection blocks; it never proves silence. A structured signal-class/target pair or a documented provider mapping into that pair satisfies the predicate.
+- `ledger_state_matches_expectation`: a snapshot pair brackets the scripted confirmation. The resulting collection claims the domain and contains exactly the corpus's dated events, matching identity, date, status, amount, observation precision and source references; tentative turns add nothing. The collection must not exist before confirmation. The twin creates none throughout the episode, whose original baseline contains no collections. Collections may use item files or a documented tabular representation projected into the same declared keys and authored values.
+- `claimed_observation_reflected`: every annotated publication appears once in the seeded claiming collection with the declared natural key, byte-exact final text, matching SHA-256 and every source resolving to preserved Evidence containing the complete supplied proof artifact. Immutable text/plain artifacts are rendered in full in the native user input for both arms; a filename alone is not attachment input. The representation may be item files or documented tabular rows. It is paired with `no_structured_write_beyond_expectation` from the same run and arm; that dual rejects duplicate keys, extra items, extra collections and unrepresented files, including orphans inside a storage directory. Only seeded pages, manifests, individually projected item or backing-file locators and resolved proof Evidence are permitted.
+
 ## 5. Controls
 
 `grep-markdown` (ripgrep over the raw corpus + the same fresh answer agent)
@@ -294,3 +305,5 @@ adversarial comparison at acceptable marginal cost.
   **Catastrophic set: no additions.** A missed consequence is a trust failure, not an integrity failure; putting one in §3 would suppress every aggregate over a routing miss. This amendment adds **no** catastrophic assertions and no budget constant — the tier counts are fixed by the corpus, so there is nothing to calibrate and nothing to freeze. It changes no projector, no runtime and no tool surface, and performs no witness join against the server write log: the projected vault is the state witness, and the transcript's tool-use counts are reported beside it rather than reconciled against it.
 
   Until the receipt is acknowledged, f27 MUST NOT support a comparative run, score, or claim.
+
+- 2026-09-12 — **Collection-claims replay amendment, sequence 4.** Add f28 `collection_promotion_replay` and f29 `claimed_collection_routing_replay` to §1, their three assertions to §2, and their representation-neutral predicates to §4. Both are operational journeys in two client arms, with ordinary user turns that refuse the existing store-bearing vocabulary plus collection, ledger, schema, claim and tracking terms at construction and load. The f28 positive observes candidacy before its scripted confirmation; its frequency-matched twin must stay quiet on every surface. The f29 positive is inseparable from the existing false-write dual. Assertions read the fold of immutable corpus annotations and projected state, never agent claims. Add no operation kind, catastrophic assertion, or budget constant. The existing audit, attention and due-state projections gain candidate domain/evidence metadata; structured projections gain default-empty authored claims and field values plus item locators; page projections retain declared stable identities so exact text, provenance and unrepresented files can be checked (projector 0.5.0 → 0.6.0). Evidence projections also retain the unnormalized source body and independently hash referenced artifact bytes; canonical non-Markdown Evidence and Records files are inventoried so orphan files remain observable. Existing projected fields retain their meaning. Until the receipt is acknowledged, f28 and f29 MUST NOT support comparative runs, scores or claims before founder acknowledgment. Development artifacts are findings about the harness and runtime only, and a harness fault blocks an arm rather than scoring it. Every executed turn requires a successful terminal client result; empty or initialization-only output never counts as completion.
