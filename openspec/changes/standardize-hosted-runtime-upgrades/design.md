@@ -67,9 +67,10 @@ The inventory classifies each cell as target, legacy, reviewer-purpose, terminal
 
 Relying only on the routable table was rejected because prior out-of-band upgrades and destroy-path ghosts have already proven that one view can be stale.
 
-The first release adopting this workflow has one bootstrap asymmetry: the installed
-legacy provisioner cannot execute a collector introduced by the incoming image. In
-that case only, the inventory CLI runs the fixed observation command in a bounded
+The installed provisioner may lack the collector or contain a documented
+history-reading defect reproduced by regression tests and repaired in the reviewed
+incoming candidate. Only in those cases may the operator explicitly select the
+fixed observation command in a bounded
 one-shot Job from the exact digest-pinned, signed provisioner candidate. It derives
 only the runtime database reference, envelope-key reference, database identity, and
 current deployment-lock ConfigMap from the installed API deployment; supplies a
@@ -77,8 +78,18 @@ non-authoritative dummy API bearer; disables service-account token mounting; and
 retains the same non-root, read-only, no-capability security boundary. The Job has no
 tenant mutation command or provider signer, is deadline/TTL bounded, and must be
 deleted before its observation is accepted. Mutable or foreign images, unexpected
-deployment shapes, failed output, and failed cleanup all stop the upgrade. Once the
-installed provisioner contains the collector, the ordinary in-place path is used.
+deployment shapes, failed output, and failed cleanup all stop the upgrade. For a
+reader repair, a private operator receipt beside the closed-schema execution record
+binds its trusted-phase execution ID and canonical SHA-256 to the installed image
+and observed failure, repair source commit, candidate file SHA-256, and signed image.
+Before every Job, including a resumed attempt, the operator re-verifies the candidate
+signatures and compares those current inputs against the receipt. Changed inputs
+stop the attempt and require a newly reviewed receipt; the execution schema is not
+extended. This is not an automatic
+fallback for authentication, connectivity, unknown runtime identity, or inconsistent
+fleet authority. Fresh three-authority reconciliation remains mandatory. Once the
+repaired provisioner is deployed, the ordinary in-place path must pass without the
+bootstrap-image option.
 
 Provisioner operation history outlives destroyed tenants. The observer therefore
 validates every stored runtime identity structurally while deferring catalog
