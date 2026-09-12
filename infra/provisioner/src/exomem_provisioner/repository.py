@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import and_, case, func, or_, select, true, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from .crypto import EnvelopeCodec
 from .driver import DriverTerminal
@@ -963,11 +964,39 @@ class OperationRepository:
     ) -> tuple[FleetOperationSnapshot, ...]:
         """Decrypt requests internally and return no credential-bearing fields."""
 
+        destruction = aliased(Operation)
+        destroyed_history = (
+            select(destruction.id)
+            .where(
+                destruction.action.in_({OperationAction.DESTROY, OperationAction.DISCARD}),
+                destruction.state == OperationState.FINAL,
+                destruction.tenant_id == Operation.tenant_id,
+                or_(
+                    and_(
+                        destruction.action == OperationAction.DESTROY,
+                        destruction.cell_id.is_(None),
+                    ),
+                    destruction.cell_id == Operation.cell_id,
+                ),
+                destruction.fence_generation >= Operation.fence_generation,
+                destruction.created_at >= Operation.created_at,
+            )
+            .exists()
+        )
         observations: list[FleetOperationSnapshot] = []
         async with self._sessions() as session:
             operations = await session.scalars(
                 select(Operation)
-                .where(Operation.cell_id.is_not(None))
+                .where(
+                    Operation.cell_id.is_not(None),
+                    # A completed tenant-wide destroy has no cell ID. Apply its
+                    # scope before replaying obsolete runtime/rollback history,
+                    # without changing the ledger or hiding unfinished work.
+                    ~and_(
+                        Operation.state.in_({OperationState.FINAL, OperationState.ERROR}),
+                        destroyed_history,
+                    ),
+                )
                 .order_by(Operation.created_at, Operation.id)
             )
             for operation in operations:
