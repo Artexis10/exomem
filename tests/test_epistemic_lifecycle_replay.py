@@ -266,7 +266,7 @@ def test_the_registry_mirrors_the_document_for_f27() -> None:
 
 
 def test_the_sequence_three_receipt_folds_the_working_chain() -> None:
-    """The receipt binds sequence 2's document to the amended one, acknowledged."""
+    """Sequence three stays acknowledged as later amendments extend the chain."""
 
     from protocol.contracts import (
         validate_working_preregistration,
@@ -274,7 +274,7 @@ def test_the_sequence_three_receipt_folds_the_working_chain() -> None:
     )
 
     receipts = working_amendment_receipts(ROOT)
-    assert [receipt.sequence for receipt in receipts] == [1, 2, 3]
+    assert [receipt.sequence for receipt in receipts[:3]] == [1, 2, 3]
     sequence_three = receipts[2]
     assert sequence_three.acknowledgment_status == "acknowledged"
     assert sequence_three.ratifier == "Hugo Ander Kivi"
@@ -285,7 +285,7 @@ def test_the_sequence_three_receipt_folds_the_working_chain() -> None:
     # assertion.
     assert sequence_three.catastrophic_set_decision is None
     assert sequence_three.parent_contract_sha256 == receipts[1].contract_sha256
-    assert validate_working_preregistration(ROOT) == sequence_three.contract_sha256
+    assert validate_working_preregistration(ROOT) == receipts[-1].contract_sha256
 
 
 def test_the_withhold_gate_releases_f27_now_sequence_three_is_acknowledged() -> None:
