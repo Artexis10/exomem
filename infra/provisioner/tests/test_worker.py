@@ -780,9 +780,76 @@ async def test_blocked_capacity_never_calls_driver_or_consumes_failure_attempt(
     assert admission.calls == [operation.id]
     assert driver.effect_count("provision", operation.id) == 0
     assert pending is not None and pending.state is OperationState.PENDING
-    assert pending.checkpoint == "capacity-user-exhausted"
+    assert pending.checkpoint == "effect-prepared"
+    assert pending.progress["last_capacity_wait_reason"] == "capacity-user-exhausted"
     assert pending.retry_after_seconds == 300
     assert pending.progress.get("failure_attempts", 0) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "checkpoint",
+    [
+        "namespace-ready",
+        "release-applied",
+        "csi-binding",
+        "volume-registration-required",
+        "volume-owned",
+    ],
+)
+async def test_capacity_pause_resumes_the_durable_provision_step(
+    worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],
+    checkpoint: str,
+) -> None:
+    _, repository, _ = worker_context
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    operation = await repository.submit(
+        "provision", "capacity-resume", _v2_request(), wire_protocol=WIRE_PROTOCOL_V2
+    )
+    claimed = await repository.claim_next("preparer", now=now)
+    assert claimed is not None and claimed.claim_token
+    await repository.mark_pending(
+        operation.id,
+        "preparer",
+        claim_token=claimed.claim_token,
+        claim_generation=claimed.claim_generation,
+        checkpoint=checkpoint,
+        retry_after_seconds=0,
+        now=now,
+    )
+
+    class ResumingDriver:
+        checkpoints: list[str] = []
+
+        async def observed_fence(self, tenant_id):
+            return 0
+
+        async def execute(self, action, request, context):
+            self.checkpoints.append(context.checkpoint)
+            return DriverPending("volume-owned", 1)
+
+    driver = ResumingDriver()
+    admission = _AllowingAdmission("capacity-live-observation-mismatch")
+    worker = ProvisionerWorker(
+        repository, driver, worker_id="capacity-worker", capacity_admission=admission
+    )
+    assert await worker.run_once(now=now)
+    paused = await repository.get_by_id(operation.id)
+    assert paused is not None and paused.state is OperationState.PENDING
+    assert paused.checkpoint == checkpoint
+    assert paused.progress["last_capacity_wait_reason"] == admission.reason
+    assert paused.progress.get("failure_attempts", 0) == 0
+    assert driver.checkpoints == []
+
+    admission.reason = None
+    resumed = ProvisionerWorker(
+        repository, driver, worker_id="replacement-worker", capacity_admission=admission
+    )
+    assert await resumed.run_once(now=now + timedelta(seconds=301))
+    assert driver.checkpoints == [checkpoint]
+    after = await repository.get_by_id(operation.id)
+    assert after is not None and after.checkpoint == "volume-owned"
+    assert after.progress["last_capacity_wait_reason"] == "capacity-live-observation-mismatch"
 
 
 @pytest.mark.asyncio
