@@ -1,0 +1,5 @@
+- [x] Add regression coverage for configurable REST port, `/api/ask_memory`, control-event suppression, and the diagnostic header contract.
+- [x] Implement the hook changes in both byte-identical standalone copies.
+- [x] Pass focused tests, pinned OpenSpec validation, privacy/lint checks, and independent review.
+- [ ] Finish delivery-boundary tests and open the repair PR.
+- [ ] After merge approval, verify the released/deployed hook and archive this change.
