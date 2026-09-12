@@ -2,5 +2,5 @@
 - [x] Implement the hook changes in both byte-identical standalone copies.
 - [x] Pass focused tests, pinned OpenSpec validation, privacy/lint checks, and independent review.
 - [x] Open the repair PR and run the full delivery-boundary checks.
-- [ ] Finish CI after restoring the stable routing-stub marker caught by Track C integration.
+- [x] Restore the stable routing-stub marker and pass final implementation CI (26 successful checks on `bca5d15c`).
 - [ ] After merge approval, verify the released/deployed hook and archive this change.
