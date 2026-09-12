@@ -34,9 +34,10 @@ and no network or subprocess call SHALL be attempted, when `EXOMEM_RETRIEVE_INJE
 
 ### Requirement: REST-First Transport When Configured And Reachable
 
-The hook SHALL attempt exactly one `POST http://127.0.0.1:8765/api/find` request
-(`detail=compact`, `mode=keyword`, `limit=3`, `Authorization: Bearer
-<EXOMEM_REST_API_KEY>`) with a socket timeout of about 2 seconds, before
+The hook SHALL attempt exactly one POST request under the configured-port
+requirement below (`/api/ask_memory`, `detail=compact`, `mode=hybrid`, `limit=3`,
+`Authorization: Bearer <EXOMEM_REST_API_KEY>`) with a socket timeout of about
+2 seconds, before
 considering any other transport, whenever `EXOMEM_RETRIEVE_INJECT` is truthy and
 `EXOMEM_REST_API_KEY` is present in the hook's own environment. The hook SHALL
 treat any failure of that request (connection error, timeout, non-200 status,
@@ -62,7 +63,7 @@ malformed JSON, or an envelope with `success: false`) as "REST unreachable."
 ### Requirement: Opt-In CLI Transport Fallback
 
 The hook SHALL locate an installed `exomem` or `kb` console script via `PATH`
-lookup and invoke it as `find --detail compact --limit 3 --mode keyword --json
+lookup and invoke it as `ask_memory --detail compact --limit 3 --mode hybrid --json
 <prompt>` (subprocess timeout of about 5 seconds) whenever REST was not
 attempted (no `EXOMEM_REST_API_KEY`) or failed, and `EXOMEM_RETRIEVE_INJECT_CLI` is
 set truthy. The hook SHALL treat any failure of that invocation (console
