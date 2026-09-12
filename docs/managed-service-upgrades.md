@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Managed Linux service upgrades
 
 Managed mode keeps the public HTTP listener and accepted connections in a stable

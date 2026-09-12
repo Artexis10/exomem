@@ -379,6 +379,8 @@ def verify_systemd_identity(
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="strict",
             timeout=5,
             check=True,
         )

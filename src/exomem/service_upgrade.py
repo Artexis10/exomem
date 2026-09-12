@@ -64,6 +64,8 @@ def _installed_version(python: Path) -> str:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="strict",
         timeout=10,
     )
     return result.stdout.strip()
