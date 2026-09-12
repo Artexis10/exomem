@@ -328,7 +328,10 @@ class ProvisionerWorker:
                 await self._repository.mark_pending(
                     operation.id,
                     self._worker_id,
-                    checkpoint=block_reason,
+                    # Admission pauses scheduling; it must not replace the
+                    # durable lifecycle step needed by the next worker.
+                    checkpoint=operation.checkpoint,
+                    capacity_wait_reason=block_reason,
                     retry_after_seconds=300,
                     **claim,
                 )
