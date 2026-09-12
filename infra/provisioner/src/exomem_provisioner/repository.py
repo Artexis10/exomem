@@ -1339,6 +1339,7 @@ class OperationRepository:
         claim_generation: int,
         checkpoint: str,
         retry_after_seconds: int,
+        capacity_wait_reason: str | None = None,
         now: datetime | None = None,
     ) -> OperationSnapshot:
         async with self._sessions.begin() as session:
@@ -1390,6 +1391,11 @@ class OperationRepository:
             operation.progress = {
                 **operation.progress,
                 "pending_count": int(operation.progress.get("pending_count", 0)) + 1,
+                **(
+                    {"last_capacity_wait_reason": capacity_wait_reason}
+                    if capacity_wait_reason is not None
+                    else {}
+                ),
             }
             operation.retry_after_seconds = retry_after_seconds
             operation.available_at = pending_at + timedelta(seconds=retry_after_seconds)
