@@ -1,7 +1,7 @@
 # mcp-session-continuity Specification
 
 ## Purpose
-TBD - created by archiving change make-mcp-restarts-session-safe. Update Purpose after archive.
+Preserve authenticated MCP access across process replacement through session-independent HTTP requests, durable OAuth authority, standard discovery metadata and bounded managed worker upgrades.
 
 ## Requirements
 
