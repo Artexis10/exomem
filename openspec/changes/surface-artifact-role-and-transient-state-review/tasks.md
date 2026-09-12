@@ -7,7 +7,7 @@
 
 ## 2. State-based role coverage
 
-- [ ] 2.1 Build derived support from existing corpus eligibility, exact current document unit resolution and normalized substantive-content matching, including supported compiled types in custom Notes subdirectories; test correct-links/wrong-content, missing/stale/duplicate anchors, role mismatch, parent-only links, unsupported kinds and retained origin history.
+- [ ] 2.1 Build derived support from existing corpus eligibility, exact current document unit resolution and line-ending-only substantive-content matching, including supported compiled types in custom Notes subdirectories; test correct-links/wrong-content, changed case-sensitive identifiers/internal indentation, missing/stale/duplicate anchors, role mismatch, parent-only links, unsupported kinds and retained origin history.
 - [ ] 2.2 Implement audience-relative predicate and coverage recomposition while retaining complete shared dependency descriptors; test private synthesis sources, private destinations, eight private supports plus a ninth public one, source aliases, source-generation/policy changes and hidden counts before and after reconcile.
 - [ ] 2.3 Implement settlement and reopening for origin rewrites, valid supersession, result retraction, destination edits/deletion/rename and inactive lifecycle; verify partial method coverage leaves the second method unresolved and no dismissal is written.
 

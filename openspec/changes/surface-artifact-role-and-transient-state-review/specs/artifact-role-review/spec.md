@@ -26,7 +26,7 @@ The system SHALL detect an explicitly reusable method with a distinct reported-s
 
 ### Requirement: Promotion coverage requires represented units in an eligible role home
 
-A role candidate SHALL resolve only when current, readable, eligible compiled destination content represents its qualifying material in the appropriate role and binds it with unambiguous source-unit provenance, or when its origin no longer qualifies. Version-one representation SHALL require normalized substantive-text equality for the procedure or synthesis, exact current links to all required evidence units, and retained synthesis source provenance. Missing, stale or ambiguous unit targets MUST NOT establish coverage, including duplicate anchors. A paraphrase without deterministic equivalence SHALL remain for agent review without restricting the writer. Origin history SHALL be allowed to remain intact. Topic similarity, a parent-page backlink, a path name or a recorded decision alone MUST NOT establish coverage. Existing page eligibility and open-category rules SHALL remain unchanged.
+A role candidate SHALL resolve only when current, readable, eligible compiled destination content represents its qualifying material in the appropriate role and binds it with unambiguous source-unit provenance, or when its origin no longer qualifies. Version-one representation SHALL require parsed substantive-text equality for the procedure or synthesis with line endings normalized only, exact current links to all required evidence units, and retained synthesis source provenance. Comparison MUST preserve substantive case, Unicode, internal indentation, punctuation, values and units. Missing, stale or ambiguous unit targets MUST NOT establish coverage, including duplicate anchors. A paraphrase without deterministic equivalence SHALL remain for agent review without restricting the writer. Origin history SHALL be allowed to remain intact. Topic similarity, a parent-page backlink, a path name or a recorded decision alone MUST NOT establish coverage. Existing page eligibility and open-category rules SHALL remain unchanged.
 
 #### Scenario: Extraction by addition settles only represented material
 - **WHEN** a reusable destination represents and references one method's units while the original experiment retains both methods
@@ -39,6 +39,10 @@ A role candidate SHALL resolve only when current, readable, eligible compiled de
 #### Scenario: Correct links do not substitute for represented content
 - **WHEN** a destination has the right source-unit links but unrelated procedure text, or a required link names a missing or ambiguous anchor
 - **THEN** it does not establish coverage
+
+#### Scenario: Formatting cannot erase a procedural difference
+- **WHEN** destination procedure text changes a case-sensitive identifier or internal code indentation while retaining the correct source links
+- **THEN** it fails the substantive equality check and does not establish coverage
 
 #### Scenario: A custom directory does not create a new page kind
 - **WHEN** a destination has a supported compiled type in a custom Notes subdirectory
