@@ -198,6 +198,7 @@ def test_stop_hook_feedback_text_is_suppressed() -> None:
 
 def test_stub_header_gives_diagnostic_verification_guidance() -> None:
     header = hook_mod._STUB_HEADER.lower()
+    assert header.startswith("kb routing stubs"), "Keep the Track C payload marker stable"
     assert "read_memory" in header
     assert "first relevant" in header
     assert "before investigating" in header
