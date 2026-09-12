@@ -19,5 +19,9 @@
 
 - [x] 4.1 Exercise one real entered authenticated FastMCP Client context before, during and after process replacement in auto and legacy modes; verify the same bearer, keepalive, GET/SSE, in-flight mutation and exactly-once counters.
 - [x] 4.2 Obtain independent code/security review and final behavior verification; resolve findings and rerun affected checks.
-- [ ] 4.3 Run the completion-boundary full test corpus, lint, public-artifact privacy and strict OpenSpec validation; deliver through a ready PR and verified merge.
-- [ ] 4.4 Synchronize the final delta and archive through OpenSpec after merge evidence, validating before and after closure; verify the owned worktree and branch are retired safely.
+- [x] 4.3 Run the completion-boundary full test corpus, lint, public-artifact privacy and strict OpenSpec validation; deliver through a ready PR and verified merge.
+- [x] 4.4 Synchronize the final delta and archive through OpenSpec after merge evidence, validating before and after closure; verify the owned worktree and branch are retired safely.
+
+Delivery evidence: [PR #1224](https://github.com/Artexis10/exomem/pull/1224) merged as `a3e5fe9a99fdefc528ec73a72ab918181b49fe61`. [CI run 34724136947](https://github.com/Artexis10/exomem/actions/runs/34724136947) passed all 25 checks, including 18,351 core/harness tests. Independent review and isolated systemd verification passed. The feature worktree and branch were retired after the verified merge.
+
+Closure evidence: OpenSpec synchronized six added requirements and archived this change on 2026-09-13. Strict validation passed all 197 records before and after the archive; existing session-continuity requirements were retained.
