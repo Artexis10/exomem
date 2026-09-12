@@ -410,8 +410,9 @@ class _UnboundedJoinVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-# Exact background/process-lifecycle joins.  These declarations are deliberately
-# test-local because the worker allowlist excludes the unrelated implementations.
+# Exact lifecycle joins and async waits whose deadlines live in an enclosing
+# wait_for/task race. Event.wait and Process.wait do not accept timeout themselves.
+# These declarations stay test-local and name the owning bound or lifetime.
 _DECLARED_UNBOUNDED_JOINS = {
     (
         "media_worker.py",
@@ -428,6 +429,46 @@ _DECLARED_UNBOUNDED_JOINS = {
         "_receipt_connection",
         "_RECEIPT_CONNECTIONS_CONDITION.wait",
     ): "process-fork resume handshake, not a request flight or worker join",
+    (
+        "service_ingress.py",
+        "ServiceIngress.drain",
+        "self._idle.wait",
+    ): "enclosed by asyncio.wait_for with the supervisor's remaining drain budget",
+    (
+        "service_ingress.py",
+        "ServiceIngress._queue",
+        "self._ready.wait",
+    ): "enclosed by asyncio.wait_for with the remaining 45-second admission budget",
+    (
+        "service_ingress.py",
+        "ServiceIngress.detach_streams",
+        "stream.detached.wait",
+    ): "supervisor encloses detachment in its global handoff deadline",
+    (
+        "service_ingress.py",
+        "_wait_disconnect",
+        "body_complete.wait",
+    ): "SSE disconnect observer owned and cancelled by the outer response lifetime",
+    (
+        "service_ingress.py",
+        "ServiceIngress._relay_stream",
+        "stream.detach.wait",
+    ): "standalone SSE lifetime race with upstream content and client disconnect",
+    (
+        "service_ingress.py",
+        "ServiceIngress._relay_stream",
+        "self._ready.wait",
+    ): "cancelled at each heartbeat timeout or client disconnect during SSE reattachment",
+    (
+        "service_manager.py",
+        "WorkerRuntime.inspect",
+        "probe.wait",
+    ): "reap the metadata-only probe after SIGKILL; serving worker has not been paused",
+    (
+        "service_manager.py",
+        "WorkerRuntime.migrate",
+        "self.child.wait",
+    ): "enclosed by asyncio.wait_for with the remaining migration/handoff deadline",
 }
 
 

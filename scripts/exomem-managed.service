@@ -1,0 +1,23 @@
+# systemd --user template for the opt-in managed Linux service.
+# scripts/install-service.sh renders and installs this unit.
+
+[Unit]
+Description=exomem: managed Knowledge Base MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=__SERVICE_ENV_FILE__
+WorkingDirectory=__WORKING_DIRECTORY__
+ExecStart="__VENV_PYTHON__" -m exomem.service_manager serve --runtime-dir "__MANAGED_RUNTIME_DIR__" --worker-python "__VENV_PYTHON__" --host __BIND_HOST__ --port __PORT__ --unit-name exomem.service
+Restart=always
+RestartSec=5
+KillMode=control-group
+SendSIGKILL=yes
+TimeoutStopSec=30
+CPUWeight=20
+CPUQuota=__CPU_QUOTA__
+
+[Install]
+WantedBy=default.target

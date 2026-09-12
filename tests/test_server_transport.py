@@ -87,15 +87,18 @@ def test_non_sse_or_failed_response_is_not_primed() -> None:
     }
     assert len(asyncio.run(run(base, status=401, content_type=b"text/event-stream"))) == 2
     assert len(asyncio.run(run(base, status=200, content_type=b"application/json"))) == 2
-    assert len(
-        asyncio.run(
-            run(
-                {**base, "method": "POST"},
-                status=200,
-                content_type=b"text/event-stream",
+    assert (
+        len(
+            asyncio.run(
+                run(
+                    {**base, "method": "POST"},
+                    status=200,
+                    content_type=b"text/event-stream",
+                )
             )
         )
-    ) == 2
+        == 2
+    )
 
 
 class _FakeMcp:
@@ -232,3 +235,20 @@ def test_bare_protected_resource_alias_omits_protocol_scope() -> None:
 
     assert metadata["scopes_supported"] == ["exomem:read", "exomem:write"]
     assert "offline_access" not in metadata["scopes_supported"]
+
+
+def test_managed_worker_socket_preserves_public_auth_intent(fake_mcp, monkeypatch, tmp_path):
+    requested = []
+    monkeypatch.delenv("EXOMEM_HOST", raising=False)
+    monkeypatch.delenv("EXOMEM_BASE_URL", raising=False)
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "test-only-key")
+    monkeypatch.setattr(
+        server, "build_server", lambda **kwargs: requested.append(kwargs) or fake_mcp
+    )
+    socket_path = tmp_path / "worker.sock"
+    server.run(transport="streamable-http", host="0.0.0.0", worker_socket=socket_path)
+    assert requested == [{"require_auth": True}]
+    call = fake_mcp.calls[0]
+    assert call["stateless_http"] is True
+    assert call["host"] == "0.0.0.0"
+    assert call["uvicorn_config"]["uds"] == str(socket_path)
