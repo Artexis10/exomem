@@ -595,8 +595,8 @@ async def _await_graph_convergence(
             reason = graph.get("reason") if isinstance(graph, dict) else "no graph in response"
             raise RuntimeError(
                 f"graph did not converge within {_GRAPH_CONVERGENCE_SECONDS:.0f}s of "
-                f"the write that changed it for {traversal_profile!r} ({reason!r}) -- a rebuild that never "
-                f"lands is exactly what this waits for. Server-side state: "
+                f"the write that changed it for {traversal_profile!r} ({reason!r}) -- "
+                "a rebuild that never lands is exactly what this waits for. Server-side state: "
                 f"{_server_side_graph_state()}. Response: {context!r}"
             )
         await asyncio.sleep(_GRAPH_POLL_SECONDS)
