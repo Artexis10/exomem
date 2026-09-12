@@ -61,14 +61,56 @@ closed; add it only after recovering its exact retained compatibility evidence.
 
 Collect Substrate, provisioner, and Kubernetes authority in one pass:
 
-Normally the collector executes inside the installed provisioner API. For the first
-upgrade from a provisioner that predates `exomem-provisioner-fleet-observe`, verify
-the incoming provisioner candidate and set
+Normally the collector executes inside the installed provisioner API. Use the
+incoming-image path only if the installed provisioner predates
+`exomem-provisioner-fleet-observe`, or a documented history-reading defect has been
+reproduced by regression tests and repaired in the reviewed incoming candidate.
+For a repair, retain a private operator receipt beside `execution.json`, not as an
+extra field inside its closed schema. Bind the trusted-phase execution ID and
+canonical SHA-256 to the installed image, observed failure, repair source commit,
+candidate file SHA-256, and exact signed image. Verify that candidate and set
 `EXOMEM_PROVISIONER_BOOTSTRAP_IMAGE` to its exact digest-pinned image. This selects a
 one-shot, tokenless observer Job that carries no real API bearer or provider signer
 and is deleted before its observation is accepted. Never use a mutable tag or an
-image that did not pass the signed-candidate checks. Omit the option once the
-installed provisioner contains the collector.
+image that did not pass the signed-candidate checks. This is an explicit operator
+selection, not an automatic fallback for authentication, connectivity, unknown
+runtime identity, or inconsistent fleet authority. Fresh three-authority
+reconciliation remains required. After deploying the repaired provisioner, omit the
+option and require the installed collector to pass.
+
+Before **every** repair-observer Job, including a resumed attempt, reproduce the
+installed failure with the ordinary collector and record only its bounded diagnostic
+(no credentials) as `installed_failure`. Read the current API image as
+`installed_image`. Set `candidate`, `bundle`, and `candidate_bundle` to the reviewed
+incoming candidate files. Keep the reviewed receipt at
+`$operation_dir/observer-recovery-receipt.json` with the keys compared below. Run
+this check immediately before collection, in a shell that stops on any failure:
+
+```bash
+set -euo pipefail
+infra/scripts/hosted_image_candidate.py verify \
+  --candidate "$candidate" --bundle "$bundle" \
+  --candidate-bundle "$candidate_bundle"
+observer_execution=$(infra/scripts/hosted_runtime_upgrade.py inspect --execution "$execution")
+observer_candidate_sha=$(sha256sum "$candidate" | cut -d ' ' -f 1)
+jq -e --argjson execution "$observer_execution" \
+  --arg installedImage "$installed_image" --arg installedFailure "$installed_failure" \
+  --arg candidateSha256 "$observer_candidate_sha" --slurpfile candidate "$candidate" '
+  $execution.phase == "trusted" and
+  .executionId == $execution.executionId and
+  .executionSha256 == $execution.executionSha256 and
+  .installedImage == $installedImage and .installedFailure == $installedFailure and
+  .candidateSha256 == $candidateSha256 and
+  .repairSourceCommit == $candidate[0].source.commit and
+  .candidateImage == $candidate[0].image.reference
+' "$operation_dir/observer-recovery-receipt.json"
+export EXOMEM_PROVISIONER_BOOTSTRAP_IMAGE=$(jq -er '.image.reference' "$candidate")
+```
+
+A changed execution, installed image/failure, or candidate stops the attempt: obtain
+a newly reviewed receipt, not an automatic overwrite. Retain the receipt with the
+private operation evidence. After expand, use the installed observer; do not rebind
+this receipt to authorize another incoming-image Job at a later phase.
 
 The collector shells out to `kubectl`. A k3s node has no bare `kubectl` — it is
 `k3s kubectl` — so when running this on the node, put a wrapper on a private path
