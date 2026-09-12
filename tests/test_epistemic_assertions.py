@@ -1,6 +1,6 @@
 """Discrimination tests: every registered assertion separates pass from fail.
 
-Each of the 33 pre-registered assertions gets at least one hand-built passing
+Each pre-registered assertion gets at least one hand-built passing
 snapshot (or snapshot pair) and one failing one. A registry entry with no
 discriminating pair is a hole, so the coverage test below is as load-bearing as
 the pairs themselves.
@@ -925,6 +925,67 @@ def due_state_block_present_in_carrier_fail() -> AssertionContext:
     return AssertionContext(snapshot=snapshot((response, *all_surfaces())))
 
 
+def _collection_candidate_context(*, surfaced: bool) -> AssertionContext:
+    from epistemic.journeys.f28_promotion_replay import promotion_corpus
+    from test_epistemic_collection_claims_replay import _snapshot
+
+    corpus = promotion_corpus()
+    candidate = item(
+        "candidate",
+        kind="container",
+        raw={
+            "surface": "due_state_counters",
+            "signal_class": "collection_candidate",
+            "targets": corpus.domain,
+            "category": "collection_candidate",
+        },
+    )
+    return AssertionContext(
+        snapshot=_snapshot(signals=(candidate,) if surfaced else ()),
+        subject=corpus.corpus_id,
+    )
+
+
+def _collection_ledger_context(*, exact: bool) -> AssertionContext:
+    from epistemic.journeys.f28_promotion_replay import promotion_corpus
+    from test_epistemic_collection_claims_replay import _collection, _snapshot
+
+    corpus = promotion_corpus()
+    prior = _snapshot(phase="hookless-confirmed")
+    rows = corpus.expected_records()
+    if not exact:
+        rows[0] = {**rows[0], "observed_precision": "inferred"}
+    return AssertionContext(
+        snapshot=_snapshot(collections=(_collection(corpus, rows=rows),), phase=prior.phase),
+        prior=prior,
+        subject=corpus.corpus_id,
+    )
+
+
+def _claimed_observation_context(*, exact: bool) -> AssertionContext:
+    from epistemic.journeys.f29_claimed_routing_replay import routing_corpus
+    from test_epistemic_collection_claims_replay import _collection, _proof_text, _snapshot
+
+    corpus = routing_corpus()
+    rows = corpus.expected_records()
+    evidence = tuple(
+        item(
+            f"proof-{index}",
+            kind="evidence",
+            locator=row["sources"][0],
+            locator_kind="file",
+            text=_proof_text(corpus, index),
+        )
+        for index, row in enumerate(rows)
+    )
+    if not exact:
+        rows[0] = {**rows[0], "exact_text": rows[0]["exact_text"].replace("\n", "\\n")}
+    return AssertionContext(
+        snapshot=_snapshot(collections=(_collection(corpus, rows=rows),), signals=evidence),
+        subject=corpus.corpus_id,
+    )
+
+
 DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
     "exactly_one_current_revision": (
         exactly_one_current_revision_pass,
@@ -1035,6 +1096,18 @@ DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
     "no_structured_write_beyond_expectation": (
         replay_complete_context,
         replay_overwriting_context,
+    ),
+    "collection_candidate_surfaced_within_budget": (
+        lambda: _collection_candidate_context(surfaced=True),
+        lambda: _collection_candidate_context(surfaced=False),
+    ),
+    "ledger_state_matches_expectation": (
+        lambda: _collection_ledger_context(exact=True),
+        lambda: _collection_ledger_context(exact=False),
+    ),
+    "claimed_observation_reflected": (
+        lambda: _claimed_observation_context(exact=True),
+        lambda: _claimed_observation_context(exact=False),
     ),
 }
 
