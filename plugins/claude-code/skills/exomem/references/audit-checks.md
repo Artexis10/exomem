@@ -38,3 +38,16 @@ stored knowledge.
   inspect `connect_memory(operation="suggest-relations")` or `suggest-links`,
   then add only defensible edges under `## Relations` (or block `relations:`
   metadata). Never turn semantic proximity into a durable edge automatically.
+
+## Artifact role and transient state
+
+`artifact_role_promotion` measures reusable procedures with separately bound
+successful outcomes and synthesis across distinct visible sources in active
+experiments. `transient_state_review` measures current pending wording alongside
+a compatible observed result for the same authored episode and subject. Both
+are deterministic English cue checks; ambiguous or unsupported wording stays
+quiet. Read the exact evidence units before deciding on a governed extraction
+or correction. Review and capture workflows give examples and authority rules.
+Explicit results expose `meta.coverage` as complete, capped, or unknown per
+family, including empty results. Compact due-state omissions do not prove
+complete coverage; reconciliation heals missing or stale derived support.

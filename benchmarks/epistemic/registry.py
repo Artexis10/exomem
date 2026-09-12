@@ -86,6 +86,11 @@ PREREGISTERED_ASSERTIONS: tuple[str, ...] = (
     "collection_candidate_surfaced_within_budget",
     "ledger_state_matches_expectation",
     "claimed_observation_reflected",
+    # Sequence 5: artifact-role and transient-state replay, pending acknowledgment.
+    "role_signal_delivered_after_write",
+    "role_state_settled_with_provenance",
+    "transient_signal_delivered_after_write",
+    "transient_state_settled_without_dismissal",
 )
 
 #: Quiet assertions: every one composes
@@ -146,6 +151,8 @@ PREREGISTERED_FAMILIES: tuple[tuple[str, str], ...] = (
     ("f27", "lifecycle_routing_replay"),
     ("f28", "collection_promotion_replay"),
     ("f29", "claimed_collection_routing_replay"),
+    ("f30", "artifact_role_promotion_replay"),
+    ("f31", "transient_state_hygiene_replay"),
 )
 
 PREREGISTERED_FAMILY_IDS: frozenset[str] = frozenset(
@@ -189,6 +196,8 @@ AMENDMENT_INTRODUCED_FAMILIES: Mapping[str, int] = MappingProxyType(
         "f27": 3,
         "f28": 4,
         "f29": 4,
+        "f30": 5,
+        "f31": 5,
     }
 )
 
@@ -217,6 +226,10 @@ REQUIRES_SUBJECT: frozenset[str] = frozenset(
         "collection_candidate_surfaced_within_budget",
         "ledger_state_matches_expectation",
         "claimed_observation_reflected",
+        "role_signal_delivered_after_write",
+        "role_state_settled_with_provenance",
+        "transient_signal_delivered_after_write",
+        "transient_state_settled_without_dismissal",
         # f27's pair reads its expectation out of the corpus the subject names.
         # Subject-less both block with the reason, but blocking at evaluation is
         # late: the mistake is visible at load, and a scenario that forgot the
@@ -238,6 +251,8 @@ REQUIRES_SUBJECT: frozenset[str] = frozenset(
 REQUIRES_SNAPSHOT_PAIR: frozenset[str] = frozenset(
     {
         "ledger_state_matches_expectation",
+        "role_state_settled_with_provenance",
+        "transient_state_settled_without_dismissal",
         # f27's false-write dual diffs pages against the seeded vault, so the
         # trajectory owes a snapshot taken before the first agent turn. Without
         # it a scaffold page the harness itself laid would be scored as a page

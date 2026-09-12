@@ -1,0 +1,20 @@
+{
+  "acknowledged_on": null,
+  "affected_sections": [
+    "\u00a71 Scenario families",
+    "\u00a72 Assertion registry",
+    "\u00a74 Acceptance predicates",
+    "\u00a77 Amendments"
+  ],
+  "amended_on": "2026-09-12",
+  "artifact_type": "preregistration-amendment-receipt.v1",
+  "contract_path": "benchmarks/epistemic/PREREGISTRATION.md",
+  "contract_sha256": "c88ac441aa61a3bb8ef5cce177ef8335fd5f0d29170fff786e627fded657dab6",
+  "effective_policy": "Applies after founder acknowledgment. Until then f30 and f31 cannot support comparative runs, scores or claims; incomplete or isolation-guard-blocked development runs are harness findings only.",
+  "parent_contract_sha256": "6a72ac63e5f410332f8e8c2f6ba2b6b630cbd4f4f5e2f49b00e200e6a13f3dcd",
+  "ratifier": null,
+  "rationale": "Register same-topic artifact-role and transient-state ordinary-conversation replays with actual delivered-carrier, exact provenance, retained-history and state-settlement controls, including protocol-only, already-promoted, historical and different-trial twins. No operation kind, catastrophic assertion or budget constant changes.",
+  "repository_revision": null,
+  "schema_version": 1,
+  "sequence": 5
+}
