@@ -1,3 +1,45 @@
+## Alpha readiness audit and repair order (2026-09-12)
+
+This map refines the existing acceptance tasks; it does not replace their
+requirements or reopen verified implementation slices. It distinguishes a
+confirmed defect from missing production evidence. It is not a claim that every
+bug has been discovered, and it does not authorize deployment, credential
+cutover, tenant reset or resource deletion.
+
+The source audit used Exomem `9829d101` and Substrate `e5dc886f`; the affected
+Exomem sources and change artifacts were unchanged at `ae02dba7`. Live findings
+below are the September 12 audit snapshot, not a reusable health receipt.
+Reconcile current decisions, deployed identities and owned resources before
+executing a repair. Keep private identifiers and credentials out of this map.
+
+| Boundary / owning tasks | Audit finding | Evidence and closure check |
+| --- | --- | --- |
+| Fresh storage and initialization / 4.0a–4.0c | Confirmed dependency deadlock: the offline storage shell has no consumer, while initialization requires a Bound PVC. | `infra/helm/platform/templates/storage-class.yaml` selects `WaitForFirstConsumer`; `live.py` installs the restore-mode shell before binding; `adapters.py` invokes Helm with `--wait`. The observed PVC remained Pending without Pods or Jobs. Reproduce with the shipped composition and a production-equivalent dynamic provisioner, without a pre-created PV or claimRef; prove binding, initialization and governed readiness. |
+| Interrupted reviewer setup / 3.1, 3.6 | Confirmed resume gap in the separate bootstrap helper, not a withdrawal of the canonical runner's scoped 3.1 evidence. | `scripts/reviewer_bootstrap.py` keeps cookies in memory and exposes no resume command. Test interruption after authority consumption and each subsequent effect, then continue the same attempt without redeeming another invite, repeating committed effects or extending expired authority. |
+| Governance to public readiness / 4.0b–4.0c, 2.4 | Real-cluster migration proof does not cover fresh provisioning or route reopening. | `test_governance_provision_live.py` mocks release creation; `test_hosted_k3s_governance_drill.py` pre-binds storage and bypasses public ingress. Extend the disposable drill through real route publication and an authenticated ingress request; prove denial before actual schema/enrollment readiness and service only afterwards. |
+| Useful memory and denial / 3.2–3.3 | Local protocol tests exist; the selected deployed candidate lacks complete public-path acceptance. | `infra/scripts/accept_hosted_service.py` exercises capture, fresh-client recall, citation readback and two-tenant sentinels. Complete the existing revoked-family, refresh-replay, wrong-audience/client, suspension, concurrent lifecycle, outage and ambiguous-ack checks through their owning boundaries; loopback results cannot close live evidence. |
+| Continuity and exact identity / 3.3, 4.4 | The runner checkpoints continuity, but no runner orchestration owns the later resume; its reported runtime verification remains pending. | Bind authenticated deployed evidence to the configured image/release/profile/contract tuple. Resume after actual access expiry and a fleet renewal window, checking credential renewal and successful service use. A synthetic clock or configured identity alone is insufficient. |
+| Operations, restore and deletion / 2.1, 3.4, 4.4 | Operational gates remain: exposed database credential has no completed rotation receipt; backup/durability and some delivery/GC schedules were suspended. Isolated restore and owned-fixture deletion lack complete live proof. | Reconcile intended controller states against current configuration. Use `docs/runbooks/hosted/secrets.md` for the ready-cell baseline and governed rotation. Exercise backup and isolated restore with source preservation, then the existing authorized deletion lifecycle on run-owned fixtures, including retained-volume/cryptographic-erasure semantics. Never infer that every suspended schedule should be enabled. |
+| Shared gateway and performance / 2.2–2.4, 3.5, 4.3 | A conditional gateway chart exists but no shared gateway deployment was present. Authenticated performance targets remain unproven. | Complete the existing secret, image, private-origin and edge checks before cutover; compare measured paths using the specified corpus, concurrency and cold/warm sample counts. Keep these tasks open unless an explicit scope revision changes them. |
+| Real clients and guidance / 3.6, 4.5 | Claude and ChatGPT acceptance remain separate from generic protocol proof. Reviewer guidance contains stale error-mapping claims. | Retain actual per-host evidence for the exact artifact/runtime. Reconcile `docs/runbooks/hosted/alpha-reviewer-run.md` with current Substrate authoring-error/remediation forwarding and the design's ordinary service admission versus artifact-certification boundary. |
+
+### Consolidated work sequence
+
+- [ ] A.1 Before another live bootstrap attempt, turn each row into an executable check or a precise blocked checkpoint with an owner, dependency, expected result and content-safe evidence location. Reuse existing tests and runners. Exercise downstream stages independently with disposable fixtures so storage cannot hide later failures; skipped or mocked boundaries remain visible in the report.
+- [ ] A.2 Reproduce the first-consumer deadlock red-first in a disposable real cluster. Resolve the binding-consumer versus pre-initialization denial ordering in this change's design before dispatching implementation; preserve operation/fence/PVC ownership, no premature runtime or initializer, guarded effects and exact cleanup. Then implement and prove the full fresh-cell path through real ingress, including interruption and lost acknowledgement. Do not substitute a manually bound volume or ad hoc Pod for the regression.
+- [ ] A.3 Repair reviewer-attempt resumption and complete the canonical acceptance orchestration. Test restart after each committed effect, expired authorization, partial sibling creation and ambiguous acknowledgements; use supported reauthentication where needed rather than persisting an assumption that credentials remain valid. Reuse stable operation and mutation identities. Keep ordinary service acceptance independent of reviewer certification.
+- [ ] A.4 Complete identity, denial, continuity, restore/deletion and performance checks against independent disposable fixtures while A.2 proceeds. Record which checks are local, real-cluster or live-provider evidence. Prepare the exact intended-state and rotation preflights without applying them; any additional mechanism or authority needs a ruling before implementation or execution.
+- [ ] A.5 Before production repair, require author-independent review, successful scoped regressions and the tranche's full applicable suites, plus one uninterrupted fresh production-equivalent journey without manual rescue. Publish the verified repair through the governed release workflow; reconcile the retained live attempt before choosing supported recovery. Obtain the ready-cell baseline and complete the existing governed credential rotation before access expansion. Neither a new invite nor tenant cleanup is the default recovery action.
+- [ ] A.6 On the frozen deployed candidate, complete the consolidated service report, including genuine elapsed renewal windows and isolated recovery. Perform real Claude and ChatGPT acceptance as the final host-specific checks, checkpointing irreducible consent once. Do not mark the alpha ready, or archive this change, while required safety, usefulness, continuity, recovery, performance or deployment evidence is pending. Marketplace publication remains a separate claim under the existing design.
+
+Tasks A.1–A.6 are refinements of sections 2–4, not an alternate launch gate.
+The storage ordering decision in A.2 is unresolved: this map is ready to guide
+diagnosis and test preparation, but is not an implementation-ready delegation
+packet for that repair. Settle consequentially coupled design centrally, then
+delegate bounded ready work with independent review. Keep Neon migration,
+the deferred v5 profile, a second infrastructure stack and authentication
+bypasses outside this tranche.
+
 ## 1. Private agent contract and cell route
 
 - [x] 1.1 Define `contracts/hosted-agent-command-binding-v1.json` and its compatibility feature marker with exact route, header bounds, digest semantics and error mapping; verify producer/consumer fixture tests agree before either repository implements forwarding.
