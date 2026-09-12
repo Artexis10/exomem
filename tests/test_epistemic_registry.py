@@ -27,8 +27,8 @@ def test_registry_keys_equal_the_preregistered_section_two_list() -> None:
     """18 ratified, 6 from §7 sequence 1, 9 from sequence 2, 2 from sequence 3."""
 
     names = parse_preregistered_assertions(PREREGISTRATION.read_text(encoding="utf-8"))
-    assert len(names) == 35
-    assert len(set(names)) == 35
+    assert len(names) == 38
+    assert len(set(names)) == 38
     assert set(ASSERTION_REGISTRY) == set(names)
     assert set(PREREGISTERED_ASSERTIONS) == set(names)
 
@@ -150,15 +150,15 @@ def test_family_registry_matches_preregistration_section_one() -> None:
     from epistemic.registry import PREREGISTERED_FAMILIES, parse_preregistered_families
 
     parsed = parse_preregistered_families(PREREGISTRATION.read_text(encoding="utf-8"))
-    assert len(parsed) == 27
-    assert [family_id for family_id, _name in parsed] == [f"f{n:02d}" for n in range(1, 28)]
+    assert len(parsed) == 29
+    assert [family_id for family_id, _name in parsed] == [f"f{n:02d}" for n in range(1, 30)]
     assert PREREGISTERED_FAMILIES == parsed
 
 
 def test_family_ids_are_exposed_for_load_time_validation() -> None:
     from epistemic.registry import PREREGISTERED_FAMILY_IDS
 
-    assert PREREGISTERED_FAMILY_IDS == frozenset(f"f{n:02d}" for n in range(1, 28))
+    assert PREREGISTERED_FAMILY_IDS == frozenset(f"f{n:02d}" for n in range(1, 30))
 
 
 def test_amendment_introduced_families_are_a_subset_of_the_registered_table() -> None:
@@ -173,6 +173,7 @@ def test_amendment_introduced_families_are_a_subset_of_the_registered_table() ->
     sequence_one = {f"f{n:02d}" for n in range(15, 20)}
     sequence_two = {f"f{n:02d}" for n in range(20, 27)}
     sequence_three = {"f27"}
+    sequence_four = {"f28", "f29"}
     assert {
         family_id
         for family_id, sequence in AMENDMENT_INTRODUCED_FAMILIES.items()
@@ -188,4 +189,5 @@ def test_amendment_introduced_families_are_a_subset_of_the_registered_table() ->
         for family_id, sequence in AMENDMENT_INTRODUCED_FAMILIES.items()
         if sequence == 3
     } == sequence_three
-    assert set(AMENDMENT_INTRODUCED_FAMILIES) == sequence_one | sequence_two | sequence_three
+    assert {family_id for family_id, sequence in AMENDMENT_INTRODUCED_FAMILIES.items() if sequence == 4} == sequence_four
+    assert set(AMENDMENT_INTRODUCED_FAMILIES) == sequence_one | sequence_two | sequence_three | sequence_four
