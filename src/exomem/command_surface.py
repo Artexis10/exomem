@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from mcp.types import ToolAnnotations
 from pydantic import Field, WithJsonSchema
 
-from . import call_spans, capabilities, reserved_paths
+from . import call_spans, capabilities, request_budget, reserved_paths
 from .call_spans import (  # noqa: F401 - re-exported for existing importers
     pop_call_spans,
     record_span,
@@ -696,18 +696,36 @@ def canonical_request_id(value: object) -> str | None:
 
 
 @contextmanager
-def mcp_request_context(request_id: str):
+def mcp_request_context(
+    request_id: str,
+    *,
+    tool: str | None = None,
+    arguments: Mapping[str, object] | None = None,
+):
     """Bind the middleware correlation ID through the synchronous tool wrapper.
 
     Yields the minted per-call token: the failure-signal key that stays unique
     even when concurrent calls share a client-supplied request id.
+
+    The request-scoped deadline is created here, beside the call token, because
+    this is the one place every MCP tool call passes through: a budget minted
+    anywhere further in would be a bound on some paths and not others. `tool`
+    and `arguments` are read only to exempt the reconcile-class commands, whose
+    terminal is the derived state and whose graph join is unbounded by design.
     """
     token = _MCP_REQUEST_ID.set(request_id)
     call_token = uuid.uuid4().hex
     call_reset = _MCP_CALL_TOKEN.set(call_token)
+    budget = (
+        None
+        if request_budget.is_reconcile_class(tool, arguments)
+        else request_budget.RequestBudget(seconds=request_budget.budget_seconds())
+    )
+    budget_reset = request_budget.set_current(budget)
     try:
         yield call_token
     finally:
+        request_budget.reset_current(budget_reset)
         _MCP_CALL_TOKEN.reset(call_reset)
         _MCP_REQUEST_ID.reset(token)
 

@@ -33,7 +33,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from . import call_spans
+from . import call_spans, request_budget
 from . import capabilities as capabilities_module
 from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
@@ -216,6 +216,31 @@ _MUTATION_REQUEST_BUDGET_SECONDS = 60.0
 _TERMINAL_DELIVERY_RESERVE_SECONDS = 5.0
 
 
+def acknowledgement_budget_deadline(entry: float | None = None) -> float:
+    """When the derived acknowledgement must stop waiting, on the monotonic clock.
+
+    Two bounds, and the earlier one wins. The entry-based value is the lease's
+    own: measured from the moment this mutation entered, it keeps a mutation
+    that arrived on a long-lived connection from waiting forever. The request
+    budget's is the connector's: the origin has to have delivered a terminal
+    before the client stops listening, so the wait ends a fixed delivery
+    reserve before the request deadline itself.
+
+    This bounds only the *wait*. A canonical commit already under way is never
+    interrupted by either bound; what expiry changes is that the terminal is
+    reported with `derived_sync` still pending, rather than held back until
+    everything derived has been proven.
+    """
+    started = _fast_ack_monotonic() if entry is None else float(entry)
+    deadline = (
+        started + _MUTATION_REQUEST_BUDGET_SECONDS - _TERMINAL_DELIVERY_RESERVE_SECONDS
+    )
+    budget = request_budget.current()
+    if budget is None:
+        return deadline
+    return min(deadline, budget.deadline - request_budget.DELIVERY_RESERVE_SECONDS)
+
+
 def _publish_pending_visibility(vault_root: Path, receipt: Any) -> bool:
     """The production callee behind the frozen pending-visibility seam.
 
@@ -266,6 +291,120 @@ class _FastAcknowledgementSession:
 _ACTIVE_FAST_ACK_SESSION: ContextVar[_FastAcknowledgementSession | None] = ContextVar(
     "exomem_active_fast_ack_session", default=None
 )
+
+#: Derived work a leaf moved out of its own critical section, to be run once
+#: this mutation's terminal is durable. The queue is a plain list owned by
+#: `invoke` and bound for the leaf through this variable, the same way the
+#: fast-acknowledgement session is: the leaf appends, `invoke` drains at the
+#: position the acknowledgement occupies, and a leaf running outside any
+#: mutation sees no queue at all and keeps doing the work itself.
+_ACTIVE_POST_TERMINAL_FANOUT: ContextVar[list[Any] | None] = ContextVar(
+    "exomem_active_post_terminal_fanout", default=None
+)
+
+
+def defer_until_terminal_persisted(work: Callable[[], list[object]]) -> bool:
+    """Queue `work` to run after this mutation's terminal is persisted.
+
+    Returns False when there is no mutation to defer to — a CLI caller, a
+    watcher, a direct test — so the caller keeps doing the work inline rather
+    than dropping it. Silence is the one answer this must never give.
+    """
+    queue = _ACTIVE_POST_TERMINAL_FANOUT.get()
+    if queue is None:
+        return False
+    queue.append(work)
+    return True
+
+
+def _drain_post_terminal_fanout(queue: list[Any]) -> tuple[list[Any], bool]:
+    """Run every deferred item once, in order, swallowing failures.
+
+    The canonical write is already durable and its terminal already persisted
+    by the time this runs. Derived work that fails here leaves the index behind
+    the vault, which the deferred-refresh record and `derived_sync` exist to
+    report — it must never turn a committed mutation into an error the caller
+    would retry.
+    """
+    reports: list[Any] = []
+    failed = False
+    while queue:
+        work = queue.pop(0)
+        try:
+            outcome = work()
+            if isinstance(outcome, list):
+                reports.extend(outcome)
+        except Exception:  # noqa: BLE001 - the canonical terminal is durable
+            failed = True
+            logger.warning(
+                "post-terminal derived fan-out failed; index refresh is behind",
+                exc_info=True,
+            )
+    return reports, failed
+
+
+def _with_post_terminal_fanout_acknowledgement(
+    result: Any, reports: list[Any], *, drain_failed: bool
+) -> Any:
+    """Project observed non-graph media fan-out into the durable terminal."""
+    if not isinstance(result, Mapping) or result.get("state") != "committed":
+        return result
+
+    from . import index_sync
+
+    component_outcomes: dict[str, tuple[str, str | None]] = {}
+    diagnostics: list[dict[str, str | None]] = []
+    for report in reports:
+        if not isinstance(report, index_sync.IndexSyncReport):
+            drain_failed = True
+            continue
+        for component in report.components:
+            diagnostics.append(
+                {
+                    "component": component.component,
+                    "state": component.outcome,
+                    "code": component.code,
+                }
+            )
+            if component.component not in _DERIVED_COMPONENT_NAMES:
+                continue
+            if component.outcome in {"failed", "degraded"}:
+                outcome = "failed"
+            elif component.outcome in {"registered", "deferred"}:
+                outcome = "pending"
+            elif component.outcome == "accepted" and component.code not in {
+                "embeddings_disabled",
+                "no_eligible_paths",
+            }:
+                outcome = "pending"
+            else:
+                outcome = "completed"
+            previous = component_outcomes.get(component.component)
+            if previous is None or {"completed": 0, "pending": 1, "failed": 2}[
+                outcome
+            ] > {"completed": 0, "pending": 1, "failed": 2}[previous[0]]:
+                component_outcomes[component.component] = (outcome, component.code)
+
+    states = {outcome for outcome, _code in component_outcomes.values()}
+    derived_sync = (
+        "failed"
+        if drain_failed or "failed" in states
+        else "pending"
+        if "pending" in states
+        else "completed"
+    )
+    unfinished = tuple(
+        component
+        for component, (outcome, _code) in component_outcomes.items()
+        if outcome != "completed"
+    )
+    return with_fast_acknowledgement(
+        result,
+        derived_sync=derived_sync,
+        derived_sync_components=unfinished,
+        component_diagnostics=diagnostics,
+        advisory_sync="not_required",
+    )
 
 
 def _fast_ack_enabled() -> bool:
@@ -3732,12 +3871,9 @@ class LeaseManager:
     ) -> Any:
         t_start = time.perf_counter()
         # Same instant on the clock the acknowledgement's own deadlines use, so
-        # the two bounds are comparable without converting between them.
-        acknowledgement_budget_deadline = (
-            _fast_ack_monotonic()
-            + _MUTATION_REQUEST_BUDGET_SECONDS
-            - _TERMINAL_DELIVERY_RESERVE_SECONDS
-        )
+        # the two bounds are comparable without converting between them, and
+        # the earlier of the lease's own budget and the connector's.
+        acknowledgement_deadline = acknowledgement_budget_deadline()
         kwargs = _canonicalize_command_kwargs(kwargs)
         configured_response_detail = getattr(command, "response_detail", None)
         response_detail_default: ResponseDetail = (
@@ -3837,6 +3973,10 @@ class LeaseManager:
                 canonical_terminal=vocabulary_replay_terminal,
             )
         commit_state = {"observed": False}
+        # Derived work the leaf hands back rather than running inside its own
+        # guard. Drained by `idempotency.run`'s post-persistence acknowledgement
+        # hook, strictly after the terminal is durable.
+        post_terminal_fanout: list[Any] = []
         fast_ack_session = (
             _FastAcknowledgementSession(
                 vault_root=receipt_vault_root,
@@ -3898,6 +4038,7 @@ class LeaseManager:
                 if fast_ack_session is not None
                 else None
             )
+            post_terminal_token = _ACTIVE_POST_TERMINAL_FANOUT.set(post_terminal_fanout)
             try:
                 with operation_context(
                     receipt_vault_root,
@@ -3959,6 +4100,7 @@ class LeaseManager:
                 raise
             finally:
                 commit_state["observed"] = _ACTIVE_MUTATION_COMMITTED.get()
+                _ACTIVE_POST_TERMINAL_FANOUT.reset(post_terminal_token)
                 if fast_ack_token is not None:
                     _ACTIVE_FAST_ACK_SESSION.reset(fast_ack_token)
                 _ACTIVE_LEASE_MANAGER.reset(manager_token)
@@ -4147,7 +4289,7 @@ class LeaseManager:
                 _acknowledge_derived_batches(
                     result,
                     fast_ack_session,
-                    budget_deadline=acknowledgement_budget_deadline,
+                    budget_deadline=acknowledgement_deadline,
                 )
                 if fast_ack_session is not None
                 else result
@@ -4190,6 +4332,8 @@ class LeaseManager:
             result: Any, attempt: _ExecutionAttempt, canonical_disposition: str = "success"
         ) -> Any:
             """Persist exact canonical evidence while canonical authority is held."""
+            if post_terminal_fanout:
+                result = _awaiting_derived_acknowledgement(result)
             if not commit_state["observed"]:
                 return result
             try:
@@ -4218,6 +4362,7 @@ class LeaseManager:
                         "operation_id",
                         "warnings_count",
                         "additive_authority",
+                        "derived_sync",
                     )
                     if isinstance(result, Mapping) and name in result
                 }
@@ -4571,6 +4716,13 @@ class LeaseManager:
             return finish_fast_ack_and_graph(result)
 
         def finish_after_terminal_persistence(result: Any) -> Any:
+            if post_terminal_fanout:
+                reports, drain_failed = _drain_post_terminal_fanout(
+                    post_terminal_fanout
+                )
+                result = _with_post_terminal_fanout_acknowledgement(
+                    result, reports, drain_failed=drain_failed
+                )
             if guard_ran_before_persistence:
                 return result
             return finish_fast_ack_and_graph(result)
@@ -4609,7 +4761,9 @@ class LeaseManager:
                 # registers none owes no component and must not be stamped
                 # pending. Evaluated after the leaf, where the batches are known.
                 acknowledgement_expected=lambda: (
-                    fast_ack_session is not None and bool(fast_ack_session.batches)
+                    bool(post_terminal_fanout)
+                    or fast_ack_session is not None
+                    and bool(fast_ack_session.batches)
                 ),
                 resume_canonically_committed=resume_graph_sync,
                 commit_evidence=exact_commit_evidence,

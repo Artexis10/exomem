@@ -1307,8 +1307,12 @@ _CORPUS_CONTEXT_FLIGHTS: dict[tuple[str, str], _CorpusContextFlight] = {}
 
 #: A waiter owns an interactive request budget, not the owner's vault-sized
 #: build duration.  Two seconds is fixed and deliberately non-configurable: it
-#: is far below the measured 103.6-second median post-commit interval and the
-#: 15-second connector timeout while leaving room for ordinary scheduling noise.
+#: is far below the measured 103.6-second median post-commit interval, and it
+#: nests inside every bound above it — the origin's 50-second request budget
+#: (`request_budget.MCP_REQUEST_BUDGET_SECONDS`), the edge's 100-second cap and
+#: the client's 60-second tool timeout — while leaving room for ordinary
+#: scheduling noise.  The 15-second connector timeout this comment used to cite
+#: has not existed since the edge budget was raised.
 _CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS = 2.0
 
 

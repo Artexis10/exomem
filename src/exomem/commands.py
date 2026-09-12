@@ -50,6 +50,7 @@ from . import append_to_file as append_to_file_module
 from . import attention as attention_module
 from . import audit as audit_module
 from . import audit_fix as audit_fix_module
+from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
@@ -98,6 +99,7 @@ from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
 from . import relation_vocabulary as relation_vocabulary_module
 from . import replace as replace_module
+from . import request_budget as request_budget_module
 from . import reserved_paths as reserved_paths_module
 from . import retrieval_explain as retrieval_explain_module
 from . import review_context as review_context_module
@@ -2291,7 +2293,13 @@ def op_find(
         if explain
         else None
     )
-    timings = find_module.FindTimings() if include_timings and projection_runtime is None else None
+    # Collected for every MCP call, returned only when asked for. The stage
+    # table is what makes a slow row attributable, and a diagnostic nobody
+    # turned on is a diagnostic that is never there for the call that needed
+    # it; the cost is a few microseconds of bookkeeping per stage, which the
+    # existing `unattributed_ms` accounting already shows is negligible.
+    collect_timings = include_timings or call_spans_module.MCP_CALL_TOKEN.get() is not None
+    timings = find_module.FindTimings() if collect_timings and projection_runtime is None else None
     timings_suppressed = (
         {"status": "governed_projection"} if projection_runtime is not None else None
     )
@@ -2433,13 +2441,50 @@ def op_find(
                 except Exception:  # noqa: BLE001 - optional enrichment soft-fails
                     referents = None
     pack_obj: dict | None = None
+    active_budget = request_budget_module.current()
     if pack:
-        with find_module._span(timings, "pack"):
-            pack_obj = context_pack_module.assemble_pack(
-                vault_root, hits, graph_enrich=graph_enrich
-            )
-            if release.active:
-                pack_obj = egress_module.annotate_pack(pack_obj, release)
+        # Two decisions, one point. `graph_enrich` runs only inside the pack, so
+        # what has to be left on the clock to start it is the pack's reserve
+        # plus its own — checking it against its reserve alone would admit an
+        # enrichment the pack it rides in cannot pay for.
+        if active_budget is not None and not active_budget.can_afford(
+            request_budget_module.PACK_RESERVE_SECONDS
+        ):
+            active_budget.note_skipped("pack")
+            if graph_enrich:
+                # It cannot run without the pack it rides in, so reporting it
+                # as having run would be a lie the caller cannot check.
+                active_budget.note_skipped("graph_enrich")
+        else:
+            if (
+                graph_enrich
+                and active_budget is not None
+                and not active_budget.can_afford(
+                    request_budget_module.PACK_RESERVE_SECONDS
+                    + request_budget_module.GRAPH_ENRICH_RESERVE_SECONDS
+                )
+            ):
+                active_budget.note_skipped("graph_enrich")
+                graph_enrich = False
+            with find_module._span(timings, "pack"):
+                pack_obj = context_pack_module.assemble_pack(
+                    vault_root,
+                    hits,
+                    graph_enrich=graph_enrich,
+                    deadline=None if active_budget is None else active_budget.deadline,
+                    graph_enrich_reserve_seconds=request_budget_module.GRAPH_ENRICH_RESERVE_SECONDS,
+                    timings=timings,
+                )
+                if active_budget is not None and context_pack_module.DEADLINE_TRUNCATION in (
+                    pack_obj.get("truncation") or []
+                ):
+                    active_budget.note_truncated("pack")
+                if active_budget is not None and context_pack_module.GRAPH_ENRICH_BUDGET_SKIP in (
+                    pack_obj.get("truncation") or []
+                ):
+                    active_budget.note_skipped("graph_enrich")
+                if release.active:
+                    pack_obj = egress_module.annotate_pack(pack_obj, release)
     with find_module._span(timings, "serialize"):
         # `project` is the ONLY serializer to a wire dict (design D3): the raw
         # `Hit.as_dict`/`as_compact_dict` calls that used to sit here are gone
@@ -2469,7 +2514,9 @@ def op_find(
             retrieval_explain_module.attach_hit_explanations(retrieval_trace, hit_dicts)
         # Notices occupy only the slots the over-fetch pool could not backfill.
         hit_dicts.extend(release.notices)
-    timings_dict = timings.as_dict() if timings is not None else None
+    timings_dict = (
+        timings.as_dict() if timings is not None and include_timings else None
+    )
     # Durable structured log → feeds the offline retrieval feedback loop.
     # Best-effort; never affects the returned result.
     if projection_runtime is None:
@@ -2504,6 +2551,13 @@ def op_find(
     # window; `degraded` means a lane broke (e.g. a corrupt embedding sidecar or
     # a crashing model) and the fallback should be investigated, not waited out.
     degraded_marker: list[str] | None = sorted(set(failed)) if failed else None
+    # Advisory, and present only when the budget actually cost the caller
+    # something: a block that always appeared would be a response-shape change
+    # for every client, to report that nothing happened. Read at return so
+    # `remaining_ms_at_return` is what the caller is being told it is.
+    budget_block = (
+        active_budget.as_response_block() if active_budget is not None else None
+    )
     if (
         timings_dict is None
         and timings_suppressed is None
@@ -2511,6 +2565,7 @@ def op_find(
         and degraded_marker is None
         and retrieval_trace is None
         and projected_continuation is None
+        and budget_block is None
     ):
         if not pack and referents is None:
             return hit_dicts
@@ -2537,6 +2592,8 @@ def op_find(
         out["retrieval_profile"] = retrieval_trace.profile()
     if referents is not None:
         out["referents"] = referents
+    if budget_block is not None:
+        out["budget"] = budget_block
     return out
 
 

@@ -53,7 +53,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -268,6 +268,7 @@ def build_row(
     transport: str | None = None,
     session_id: str | None = None,
     spans: list[dict[str, Any]] | None = None,
+    budget: Mapping[str, Any] | None = None,
     timestamp: str | None = None,
     committed_targets: Sequence[str] | None = None,
 ) -> dict[str, Any]:
@@ -312,6 +313,11 @@ def build_row(
         # would have named them. Empty for an uninstrumented path -- absence
         # means "nothing reported", never "nothing happened".
         "spans": _clip_spans(spans),
+        # What the request deadline cost this call, when it cost anything.
+        # `None` on every unbudgeted row, so "the budget was not reached" and
+        # "there was no budget" are the same absence — which is correct: both
+        # mean the caller got the whole answer it asked for.
+        "budget": _clip_budget(budget),
         "truncated": bool(args_truncated or targets_truncated),
     }
     row["row_hash"] = row_hash(row)
@@ -349,6 +355,39 @@ def _clip_spans(spans: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         shaped.append({"name": _clip(name), "count": count, "ms": ms})
     shaped.sort(key=lambda item: item["ms"], reverse=True)
     return shaped[:_MAX_SPANS]
+
+
+#: Stage names kept in one row's budget block. Bounded for the same reason
+#: `_MAX_SPANS` is: the row is hash-chained, and no single call may grow it
+#: without limit.
+_MAX_BUDGET_STAGES = 16
+
+
+def _clip_budget(budget: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize the budget outcome into a bounded, canonical shape.
+
+    Rebuilt field by field rather than passed through, like `_clip_spans`:
+    these rows are hashed, so an unexpected key from a future caller would
+    change a row's identity without any reader knowing what it meant. Stage
+    names only — nothing here may carry a query, a path or an excerpt.
+    """
+    if not budget:
+        return None
+    try:
+        seconds = round(float(budget.get("seconds", 0.0)), 3)
+        remaining_ms = int(budget.get("remaining_ms", 0))
+    except (TypeError, ValueError):
+        return None
+    skipped = [
+        _clip(name)
+        for name in (budget.get("skipped") or [])
+        if isinstance(name, str) and name
+    ]
+    return {
+        "seconds": seconds,
+        "remaining_ms": remaining_ms,
+        "skipped": skipped[:_MAX_BUDGET_STAGES],
+    }
 
 
 def _read_chain_head(path: Path) -> tuple[int, str]:
@@ -455,6 +494,7 @@ def record_call(
     transport: str | None = None,
     session_id: str | None = None,
     spans: list[dict[str, Any]] | None = None,
+    budget: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Append exactly one ledger row. Never raises into the call path.
 
@@ -492,6 +532,7 @@ def record_call(
                 transport=transport,
                 session_id=session_id,
                 spans=spans,
+                budget=budget,
                 committed_targets=committed_targets,
             )
             append_row(row, path=path)
