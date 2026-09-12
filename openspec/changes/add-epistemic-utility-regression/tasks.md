@@ -1,0 +1,19 @@
+## 1. Shared actor and deterministic instrument
+
+- [ ] 1.1 Reconcile current main and PR #1126 ownership/head; identify the smallest reusable native actor commit or coordinate its minimal prerequisite commit. Do not duplicate or import the LME replay scheduler.
+- [ ] 1.2 Register one operational utility action family in PREREGISTRATION §1 and `epistemic/registry.py`, with a new receipt and mirrored amendment-family mapping. Enforce `require_amended_families_released` in utility execution and comparative report loading; test pending, acknowledged, mismatched and unrelated-family cases. Freeze failure/invalidity taxonomy, controls, seed policy, metrics and execution limits before comparative runs. Keep development tests distinct from acknowledged scores.
+- [ ] 1.3 Add red tests in `tests/test_membench_utility_scenarios.py` for same-seed identity, temporal targets, matched variants and evaluator-data exclusion. Implement `utility/schema.py` and `scenarios.py` using existing procedural/oracle types.
+- [ ] 1.4 Add action-grader tests with valid actions, plausible incorrect actions, wrong entities and prohibited side effects. Implement `utility/action_world.py`; grade observed state, not a response string.
+- [ ] 1.5 Add pure scoring tests covering all four paired outcomes, zero control successes, per-family denominators, destructive effects in both-fail pairs, missing/invalid arms and budget failure. Implement `utility/scoring.py` with visible denominators and phase costs.
+- [ ] 1.6 Implement `utility/actor.py` as a thin adapter to the agreed native-agent module from #1126. Add only the message/tool-policy parameters needed by this task. Preserve existing behavior with scoped compatibility tests; defer a generic runtime extraction.
+- [ ] 1.7 Test runner isolation, fresh-session reset, zero Exomem access in controls, no private-target or evaluator-manifest/hash access, arm-order rotation, retry parity matched persistence notices, and complete-pair reservation. Implement `utility/runner.py` with existing cell and ledger machinery.
+- [ ] 1.8 Add the utility subcommand to `benchmarks/run.py` and reading instructions to `benchmarks/README.md`; keep paid execution opt-in. Prove reference-actor useful and harmful controls as instrument tests only.
+
+## 2. First real vertical slice
+
+- [ ] 2.1 Verify all instrument gates, then resolve the concrete protocol acknowledgment required for comparative execution. Record the frozen amendment identity in manifests.
+- [ ] 2.2 Verify a pinned cheap actor can use the shipped memory/action tools. Bind provider, supported effort, model identities and pricing; disable fallback. Use the design's eight calls per phase, 48k input/2k billed output per call and a recorded phase deadline. Verify that the conservative reservation for all three pairs fits the $2 pilot cap at the pinned endpoint price, including extra metered operations; otherwise refuse preflight.
+- [ ] 2.3 Execute helpful-history, self-contained-task and stale-distractor variants for one seed, with no-memory/current-Exomem arms and three fresh sessions per episode. Reserve complete pairs, stop when the next pair does not fit, and preserve incomplete coverage.
+- [ ] 2.4 Inspect actual tool and action traces independently. Confirm that capture/maintenance were agent-authored, final grading used state, and harm/failure was not filtered. Report lifecycle costs separately from action costs.
+- [ ] 2.5 Deliver the reproducible manifest, six-episode results or explicit partial coverage, diagnostics and instrument limitations. Make no general utility/coding claim from this smoke test.
+- [ ] 2.6 Run scoped tests during development, then the repository's full completion suite, strict OpenSpec validation and public-artifact validation. Deliver a ready PR with independent review. Archive only after implementation and acceptance are complete.
