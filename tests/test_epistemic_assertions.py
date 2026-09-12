@@ -986,6 +986,67 @@ def _claimed_observation_context(*, exact: bool) -> AssertionContext:
     )
 
 
+def _role_state_delivery_context(*, family: str, delivered: bool) -> AssertionContext:
+    from test_epistemic_artifact_role_replay import _snapshot
+
+    subject = "f30-role-positive-v1" if family == "f30" else "f31-current-pending-v1"
+    return AssertionContext(
+        snapshot=_snapshot(
+            subject, carrier=delivered, count=3 if family == "f30" else 1,
+            internal=not delivered,
+        ),
+        subject=subject,
+    )
+
+
+def _role_state_settlement_context(*, family: str, settled: bool) -> AssertionContext:
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from epistemic.journeys.role_state_replay import ORIGIN, corpus_for, seed_inputs
+    from epistemic.journeys.role_state_replay_driver import project_replay_snapshot
+
+    subject = "f30-role-positive-v1" if family == "f30" else "f31-current-pending-v1"
+    corpus = corpus_for(subject)
+    with TemporaryDirectory(prefix="role-state-discrimination-") as directory:
+        root = Path(directory)
+        seed_inputs(corpus, root)
+        origin = root / ORIGIN
+        origin.write_text(corpus.expert_origin, encoding="utf-8")
+        prior = project_replay_snapshot(
+            root, phase="hookless-settlement", taken_at="2026-09-12T00:00:00Z",
+        )
+        if settled and family == "f30":
+            promoted = corpus_for("f30-already-promoted-v1")
+            for relative, body in promoted.seed_pages[len(corpus.seed_pages):]:
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(body, encoding="utf-8")
+        elif settled:
+            origin.write_text(
+                corpus.expert_origin.replace(
+                    "No taste results yet.", "Previously, no taste results yet.",
+                ),
+                encoding="utf-8",
+            )
+        final = project_replay_snapshot(
+            root, phase=prior.phase, taken_at="2026-09-12T00:00:01Z",
+        )
+    authority = item(
+        "role-state-consent", kind="container",
+        raw={
+            "surface": "client_action", "authority": "consent",
+            "operation": "observe_memory" if family == "f31" else "remember",
+            "turn_id": "t05-consent" if family == "f30" else "t03-consent",
+            "targets": ORIGIN,
+        },
+    )
+    return AssertionContext(
+        snapshot=final.model_copy(update={"items": (*final.items, authority)}),
+        prior=prior, subject=subject,
+    )
+
+
 DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
     "exactly_one_current_revision": (
         exactly_one_current_revision_pass,
@@ -1108,6 +1169,22 @@ DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
     "claimed_observation_reflected": (
         lambda: _claimed_observation_context(exact=True),
         lambda: _claimed_observation_context(exact=False),
+    ),
+    "role_signal_delivered_after_write": (
+        lambda: _role_state_delivery_context(family="f30", delivered=True),
+        lambda: _role_state_delivery_context(family="f30", delivered=False),
+    ),
+    "transient_signal_delivered_after_write": (
+        lambda: _role_state_delivery_context(family="f31", delivered=True),
+        lambda: _role_state_delivery_context(family="f31", delivered=False),
+    ),
+    "role_state_settled_with_provenance": (
+        lambda: _role_state_settlement_context(family="f30", settled=True),
+        lambda: _role_state_settlement_context(family="f30", settled=False),
+    ),
+    "transient_state_settled_without_dismissal": (
+        lambda: _role_state_settlement_context(family="f31", settled=True),
+        lambda: _role_state_settlement_context(family="f31", settled=False),
     ),
 }
 

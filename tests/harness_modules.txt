@@ -8,6 +8,7 @@ tests/test_database_bootstrap_rotation_gate.py
 tests/test_dataset_identity_case_count.py
 tests/test_due_state_emission_capture.py
 tests/test_epistemic_amendment_governance.py
+tests/test_epistemic_artifact_role_replay.py
 tests/test_epistemic_assertions.py
 tests/test_epistemic_broker.py
 tests/test_epistemic_cohort.py
