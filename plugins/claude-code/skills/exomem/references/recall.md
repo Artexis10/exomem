@@ -61,6 +61,11 @@ to 300. The retrieval profile reports `candidate_limit_requested`,
 The tail keeps fused order. A candidate count bounds scorer work, not wall-clock
 time; model warm-up, hardware, and text length still affect latency.
 
+A `budget` block on the response means the request deadline left no room for the
+stages it names under `skipped` and `truncated`: the result is complete for every
+stage that ran and is not an error, so re-ask with a narrower option set when you
+need what was left out.
+
 Performance presets:
 - Normal lookup: `ask_memory(detail="compact", rerank=false)`.
 - Reasoning context: `ask_memory(deep=true)` when you need a compressed evidence bundle;

@@ -185,7 +185,14 @@ class CallTraceMiddleware(Middleware):
         call_started = time.perf_counter()
         tool_name = _extract_tool_name(context.message)
         request_id = mcp_request_id()
-        with mcp_request_context(request_id) as call_token:
+        # Read before the context opens: the reconcile-class exemption is a
+        # property of the call being dispatched, and the budget has to exist
+        # (or not) before the first stage runs, not after the first guard.
+        with mcp_request_context(
+            request_id,
+            tool=tool_name,
+            arguments=_extract_tool_args(context.message),
+        ) as call_token:
             guard_started = time.perf_counter()
             if tool_name == "edit_memory":
                 try:
@@ -360,10 +367,14 @@ def _record_ledger_row(
 ) -> None:
     """Append one call-ledger row. Never raises into the call path."""
     try:
-        from . import call_ledger
+        from . import call_ledger, request_budget
         from .command_surface import mcp_caller_identity, mcp_retry_scope
 
         identity = mcp_caller_identity()
+        # Read here, at the one point every exit passes through, and while the
+        # request context is still open: the budget object is the same one the
+        # stages mutated, so this is the outcome as the caller experienced it.
+        active_budget = request_budget.current()
         call_ledger.record_call(
             request_id=request_id,
             tool=tool,
@@ -378,6 +389,9 @@ def _record_ledger_row(
             transport=identity.get("transport"),
             session_id=identity.get("session_id"),
             spans=spans,
+            budget=(
+                active_budget.as_ledger_block() if active_budget is not None else None
+            ),
         )
     except Exception:  # noqa: BLE001 - the ledger must never break a call
         pass

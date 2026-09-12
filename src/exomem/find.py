@@ -32,6 +32,7 @@ from . import (
     find_types,
     freshness,
     recall_policy,
+    request_budget,
     runtime_resources,
     structured_filters,
 )
@@ -153,6 +154,25 @@ def _accelerated_device(device: str) -> bool:
     """Whether a resolved torch device is an accelerator worth auto-reranking on."""
     d = (device or "").strip().lower()
     return d == "mps" or d == "cuda" or d.startswith("cuda:")
+
+
+def _rerank_reserve_seconds() -> float:
+    """The rerank reserve, larger when the singleton is not resident.
+
+    The reaper unloads the cross-encoder after 15 idle minutes and the next
+    request reloads it synchronously, inside itself — so on a cold process the
+    reserve has to cover a model load as well as the scoring, or the budget
+    would admit a stage it cannot pay for. Residency is read from the same fact
+    `model_reaper.default_slots()` reads, not from a second bookkeeping.
+    """
+    from . import embeddings as emb
+
+    resident = getattr(emb, "_RERANKER", None) is not None
+    return (
+        request_budget.RERANK_RESERVE_SECONDS
+        if resident
+        else request_budget.RERANK_COLD_RESERVE_SECONDS
+    )
 
 
 def auto_rerank_allowed_by_policy() -> bool:
@@ -1936,7 +1956,11 @@ def find(
     # would keep serving the degraded ranking after the warm completes. A
     # post-warm lane FAILURE (`failed`) is skipped for the same reason: the
     # failure may be transient, so don't pin a BM25-only result in the cache.
-    if cache_key is not None and not degraded and not failed:
+    # A budget-skipped rerank is specific to this request. Do not reuse its
+    # unreranked hits for a later call that can afford the requested stage.
+    active_budget = request_budget.current()
+    budget_skipped_rerank = active_budget is not None and "rerank" in active_budget.skipped
+    if cache_key is not None and not degraded and not failed and not budget_skipped_rerank:
         with _FIND_CACHE_LOCK:
             _FIND_CACHE[cache_key] = copy.deepcopy(hits)
             if cache_checkpoints is not None:
@@ -4500,6 +4524,21 @@ def _find_semantic(
             degraded_out.append("reranker")
         do_rerank = False
         rerank_outcome = {"decision": "deferred", "reason": "model_warming"}
+
+    if do_rerank and hits:
+        # Last, after every other reason the reranker might already be off: a
+        # stage that was never going to run must not be reported as a cost the
+        # budget imposed. Checked before the stage starts rather than cancelled
+        # inside it — `rerank_pairs` does not poll a flag, and a half-applied
+        # rerank would reorder the prefix unpredictably, which is the one
+        # outcome the caller cannot reason about from the hits alone.
+        active_budget = request_budget.current()
+        if active_budget is not None and not active_budget.can_afford(
+            _rerank_reserve_seconds()
+        ):
+            active_budget.note_skipped("rerank")
+            do_rerank = False
+            rerank_outcome = {"decision": "skipped", "reason": "request_budget"}
 
     if timings is not None and not (do_rerank and hits):
         timings.skipped("rerank")
