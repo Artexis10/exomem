@@ -1,0 +1,6 @@
+- [x] Add regression coverage for configurable REST port, `/api/ask_memory`, control-event suppression, and the diagnostic header contract.
+- [x] Implement the hook changes in both byte-identical standalone copies.
+- [x] Pass focused tests, pinned OpenSpec validation, privacy/lint checks, and independent review.
+- [x] Open the repair PR and run the full delivery-boundary checks.
+- [x] Restore the stable routing-stub marker and pass final implementation CI (26 successful checks on `bca5d15c`).
+- [ ] After merge approval, verify the released/deployed hook and archive this change.

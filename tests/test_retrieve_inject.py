@@ -56,6 +56,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "EXOMEM_RETRIEVE_INJECT",
         "EXOMEM_RETRIEVE_INJECT_CLI",
         "EXOMEM_REST_API_KEY",
+        "EXOMEM_REST_PORT",
         "EXOMEM_HOST",
         "EXOMEM_SERVICE_ENV",
         "EXOMEM_PROMINENCE",
@@ -147,6 +148,66 @@ def test_obvious_control_prompts_are_skipped(prompt: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "event",
+    [
+        {"hook_event_name": "task-notification", "prompt": "A task completed."},
+        {"hook_event_name": "task_notification", "prompt": "A task completed."},
+        {"hook_event_name": "stop-hook", "prompt": "Stop hook control."},
+        {"stop_hook_active": True, "prompt": "Stop hook control."},
+    ],
+)
+def test_top_level_task_control_events_are_skipped_before_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    tmp_path: Path,
+    event: dict,
+) -> None:
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_MIN_CHARS", "0")
+    monkeypatch.setattr(
+        hook_mod,
+        "_touch",
+        lambda stamp: (_ for _ in ()).throw(AssertionError("cooldown touched")),
+    )
+    monkeypatch.setattr(
+        hook_mod,
+        "_fetch_via_rest",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("retrieval attempted")),
+    )
+    assert _call_main(monkeypatch, capsys, event, tmp_path / "home") == ""
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "what does task-notification mean here?",
+        "Please investigate the stop-hook behavior in the current repo.",
+        "Stop hook handling is broken; fix the current repo.",
+    ],
+)
+def test_notification_terms_in_ordinary_questions_are_not_suppressed(prompt: str) -> None:
+    assert hook_mod._is_task_control_event({"prompt": prompt}) is False
+
+
+def test_anchored_task_notification_text_is_suppressed() -> None:
+    assert hook_mod._is_task_control_event({"prompt": "<task-notification> completed"}) is True
+
+
+def test_stop_hook_feedback_text_is_suppressed() -> None:
+    assert hook_mod._is_task_control_event({"prompt": "Stop hook feedback: completed"}) is True
+
+
+def test_stub_header_gives_diagnostic_verification_guidance() -> None:
+    header = hook_mod._STUB_HEADER.lower()
+    assert header.startswith("kb routing stubs"), "Keep the Track C payload marker stable"
+    assert "read_memory" in header
+    assert "first relevant" in header
+    assert "before investigating" in header
+    assert "current repo" in header
+    assert "evidence" in header
+    assert "not instructions" in header
+
+
+@pytest.mark.parametrize(
     "prompt",
     [
         "what did I conclude about the kb hook design earlier?",
@@ -205,11 +266,11 @@ def test_format_inject_block_drops_whole_lines_and_never_cuts_a_path() -> None:
 
 def test_format_inject_block_three_readable_filenames_fit_whole() -> None:
     hits = [
-        {"path": f"Knowledge Base/Notes/Insights/{'a-readable-slug-' * 6}{i}.md", "type": "insight", "updated": "2026-09-11T19:27:00Z"}
+        {"path": f"Notes/{'a-readable-slug-' * 4}{i}.md", "type": "insight", "updated": "2026-09-11T19:27:00Z"}
         for i in range(3)
     ]
     block = hook_mod._format_inject_block(hits)
-    assert len([ln for ln in block.splitlines() if ln.startswith("- Knowledge")]) == 3
+    assert len([ln for ln in block.splitlines() if ln.startswith("- Notes")]) == 3
     assert "more not shown" not in block
     assert len(block) <= hook_mod._STUB_BLOCK_MAX_CHARS
 
@@ -270,6 +331,36 @@ def test_fetch_via_rest_respects_exomem_host(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(urllib_request, "urlopen", fake_urlopen)
     hook_mod._fetch_via_rest("prompt", "key")
     assert captured["url"] == "http://10.0.0.5:8765/api/ask_memory"
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [("9123", 9123), ("0", None), ("65536", None), ("bad", None), ("", 8765)],
+)
+def test_rest_port_uses_only_valid_environment_override(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: int
+) -> None:
+    monkeypatch.setenv("EXOMEM_REST_PORT", value)
+    assert hook_mod._rest_port() == expected
+
+
+def test_fetch_via_rest_uses_valid_port_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_REST_PORT", "9123")
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        return _FakeResponse(200, _envelope_bytes([]))
+
+    monkeypatch.setattr(urllib_request, "urlopen", fake_urlopen)
+    hook_mod._fetch_via_rest("prompt", "key")
+    assert captured["url"] == "http://127.0.0.1:9123/api/ask_memory"
+
+
+def test_fetch_via_rest_rejects_invalid_port_without_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_REST_PORT", "bad")
+    monkeypatch.setattr(urllib_request, "urlopen", lambda *args: (_ for _ in ()).throw(AssertionError("request attempted")))
+    assert hook_mod._fetch_via_rest("prompt", "key") is None
 
 
 def test_fetch_via_rest_success_false_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -470,8 +561,7 @@ def test_fetch_via_rest_reads_marked_envelope(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_fetch_via_rest_passes_the_rest_timeout_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hybrid recall embeds the prompt server-side, so the budget is wider than
-    the old keyword lookup; the wiring, not the number, is what this pins."""
+    """Hybrid recall uses the existing REST socket timeout."""
     captured: dict = {}
 
     def fake_urlopen(req, timeout=None):
