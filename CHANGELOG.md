@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.80.0](https://github.com/Artexis10/exomem/compare/v0.79.0...v0.80.0) (2026-09-12)
+
+
+### Features
+
+* **review:** surface reusable artifacts and stale pending state ([#1218](https://github.com/Artexis10/exomem/issues/1218)) ([09a08a0](https://github.com/Artexis10/exomem/commit/09a08a0855e43a698e29f15310eff56e28b83bb2))
+* **service:** preserve client connections during managed upgrades ([#1224](https://github.com/Artexis10/exomem/issues/1224)) ([a3e5fe9](https://github.com/Artexis10/exomem/commit/a3e5fe9a99fdefc528ec73a72ab918181b49fe61))
+
+
+### Bug Fixes
+
+* **hooks:** preserve cell routing and skip control prompts ([#1210](https://github.com/Artexis10/exomem/issues/1210)) ([edc5dc6](https://github.com/Artexis10/exomem/commit/edc5dc609f39a97308b2bbd38ba7a2727c133d3d))
+
 ## [0.79.0](https://github.com/Artexis10/exomem/compare/v0.78.0...v0.79.0) (2026-09-12)
 
 
