@@ -64,7 +64,9 @@ that may affect latency, including freshness/cache lookup, keyword, BM25, vector
 temporal, fusion, filtering/hit construction, rerank, out-of-KB widening, date filtering, pack
 assembly, and serialization. A skipped or unavailable optional lane MUST be represented as skipped
 or unavailable rather than causing the call to fail. Timing diagnostics MUST NOT include note bodies,
-excerpts, vectors, or other bulk content.
+excerpts, vectors, or other bulk content. Inside an MCP tool call the per-stage timings SHALL be
+collected whether or not diagnostics were requested and SHALL be mirrored into the call ledger as
+`recall.<stage>` spans carrying names and milliseconds only; response inclusion remains opt-in.
 
 Every reported stage SHALL be a registered interval so the unattributed remainder
 is computed from real intervals, and each stage SHALL carry its source (`index`,
@@ -89,6 +91,12 @@ is computed from real intervals, and each stage SHALL carry its source (`index`,
 - **THEN** `find` still returns the fallback results it would return today
 - **AND** the timing diagnostics identify that lane as skipped, unavailable, or failed without
   exposing bulk content
+
+#### Scenario: Stage timings reach the ledger inside an MCP call
+
+- **WHEN** `find` runs inside an MCP tool call without timing diagnostics requested
+- **THEN** the response carries no timing object
+- **AND** the call's ledger row carries `recall.<stage>` spans for the stages that ran
 
 #### Scenario: Every stage is an interval with a source
 
