@@ -1489,6 +1489,21 @@ def op_bootstrap(
                 "structure_suggestion": "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': captures keep landing in the 'other' fallback within one domain, so a real kind probably exists",
                 "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then manage_memory_file(operation='reclassify', reason=...).",
                 "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
+                "records_routing": (
+                    "a committed compiled note or Evidence write may name one existing "
+                    "Records collection whose claims match the observation; this is advisory "
+                    "and never appends from the advisory alone"
+                ),
+                "records_routing_handling": (
+                    "read the observation, then route it into the named collection under the "
+                    "served capture disposition; resume a held candidate when one exists"
+                ),
+                "collection_candidate": (
+                    "a strong collection_candidate is a proposal: draft its schema through "
+                    "record_memory describe and validate, ask one question in domain language, "
+                    "and create only after that inline confirmation. Backfill only exactly dated "
+                    "evidence units, citing each unit or artifact in sources"
+                ),
                 "accepted_links": "persist only through edit_memory/remember/replace_memory; never auto-write suggestions",
                 # Deliberately command-free, exactly like the epistemic
                 # commitments: `_filter_bootstrap_payload` deletes any string
@@ -4454,6 +4469,34 @@ def op_preserve(
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     payload = result.as_dict()
     _note_committed_artifact_targets(payload)
+    from . import semantic_writes
+
+    routing_terms = [
+        f"Evidence: {Path(result.path).name}",
+        "evidence",
+        scope.lower().replace(" ", "-"),
+        category.lower().replace(" ", "-"),
+        description.strip() if description and description.strip() else "",
+    ]
+    routing = semantic_writes._records_routing_from_terms(vault_root, routing_terms)
+    try:
+        from . import due_state
+
+        due_state.apply_observation_write_delta(
+            vault_root,
+            path=str(result.sidecar_path or ""),
+            observation_ref=str(result.ref or ""),
+            terms=routing_terms,
+            routing=routing,
+            observation_aliases=(str(result.path or ""),),
+        )
+    except Exception:  # noqa: BLE001 -- due-state advice never breaks Evidence custody
+        log.debug("Evidence observation due-state delta failed (non-fatal)", exc_info=True)
+    delivered_routing = semantic_writes._records_routing_for_delivery(
+        vault_root, routing
+    )
+    if delivered_routing is not None:
+        payload["records_routing"] = delivered_routing
     return payload
 
 

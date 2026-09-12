@@ -768,9 +768,10 @@ def test_acknowledged_amendment_is_recorded_on_every_run_manifest(
     # Sequence 2's pending status rides on the same manifest. A reader can tell
     # which families backed this run and which were withheld from it without
     # reading any other artifact, which is the whole reason the field exists.
-    # Sequence 3 left the withheld set when its acknowledgment landed 2026-08-30.
+    # Sequence 3 left the withheld set when its acknowledgment landed 2026-08-30;
+    # sequence 4 is now pending alongside sequence 2.
     assert manifest.preregistration_identity.withheld_family_ids == frozenset(
-        SEQUENCE_TWO_FAMILIES
+        (*SEQUENCE_TWO_FAMILIES, *SEQUENCE_FOUR_FAMILIES)
     )
     assert manifest.preregistration_lineage is not None
 

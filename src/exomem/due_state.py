@@ -84,7 +84,7 @@ import os
 import tempfile
 import threading
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,6 +109,8 @@ PROJECTION_CATEGORIES: tuple[str, ...] = (
     # Last for the reason it is last in the attention union: it reports an
     # authored binding rather than an authored date, and it is the newest.
     "unreflected_outcomes",
+    "unreflected_observations",
+    "collection_candidate",
 )
 
 #: The categories a single write can soundly settle in full on its own.
@@ -117,6 +119,7 @@ DELTA_CATEGORIES: tuple[str, ...] = (
     "unfinished_experiments",
     "question_aging",
     "unreflected_outcomes",
+    "unreflected_observations",
 )
 
 #: The subset a PAGE write settles. `unreflected_outcomes` is not one of them:
@@ -160,6 +163,10 @@ DELTA_DEFECTS: dict[str, tuple[str, ...]] = {
 #: How many item references the wire block may carry. Small on purpose: the block
 #: is an invitation to consult the review surface, not a replacement for it.
 TOP_LIMIT = 5
+
+# PROVISIONAL: tune from observed behavior, never from preference.
+OBSERVATION_GRACE_HOURS = 24
+OBSERVATION_LOOKBACK_DAYS = 90
 
 #: Past every date a human could plausibly author, so one pass over the shipped
 #: predicates yields every obligation the vault will ever owe. See the module
@@ -305,6 +312,14 @@ def _due_since(finding: Any) -> str | None:
     return value or None
 
 
+def observation_due_at(observed_at: Any) -> str | None:
+    """The exact instant an observation leaves its grace window."""
+    moment = _datetime(observed_at)
+    if moment is None:
+        return None
+    return (moment + dt.timedelta(hours=OBSERVATION_GRACE_HOURS)).isoformat()
+
+
 def _entry(vault_root: Path, finding: Any, refs: dict[str, str]) -> dict[str, Any] | None:
     """Compose one stored entry: review identity, fingerprint, path and due date."""
     from . import attention as attention_module
@@ -312,7 +327,9 @@ def _entry(vault_root: Path, finding: Any, refs: dict[str, str]) -> dict[str, An
     due = _due_since(finding)
     if due is None:
         return None
-    target_ref = refs.get(finding.path)
+    target_ref = str((finding.meta or {}).get("observation_ref") or "") or refs.get(
+        finding.path
+    )
     if not target_ref:
         return None
     partition = str((finding.meta or {}).get("review_partition") or "")
@@ -350,6 +367,11 @@ def _entry(vault_root: Path, finding: Any, refs: dict[str, str]) -> dict[str, An
         # WRITER's count, and an audience that may not see a joined record still
         # reads it in the total.
         **({"component": finding.component} if finding.component else {}),
+        **(
+            {"meta": dict(finding.meta or {})}
+            if finding.category == "collection_candidate"
+            else {}
+        ),
     }
 
 
@@ -394,6 +416,88 @@ def _survivors_only(
     component = entry.get("component")
     if not isinstance(component, dict):
         return entry
+    if component.get("family") == "collection_candidate":
+        from . import audit as audit_module
+        from . import collection_candidate
+
+        visible_rows = [
+            dict(row)
+            for row in component.get("units") or ()
+            if isinstance(row, Mapping)
+            and type(row.get("page")) is str
+            and keep(str(row["page"]))
+        ]
+        claims_payload = {"claims": (load(vault_root) or {}).get("claims") or {}}
+        covered = {
+            term
+            for target in routing_targets(
+                vault_root, payload=claims_payload, authorize_path=keep
+            )
+            for term in target.claims
+        }
+        projects = component.get("project_terms") or ()
+        candidates = collection_candidate.detect(
+            visible_rows, covered_terms=covered, project_terms=projects
+        )
+        candidate = next(
+            (item for item in candidates if item.term == component.get("term")), None
+        )
+        if candidate is None:
+            return None
+        finding = audit_module._collection_candidate_finding(
+            candidate,
+            visible_rows,
+            project_terms=projects,
+        )
+        if finding is None:
+            return None
+        paths = sorted({finding.path, *(finding.paths or [])})
+        return _entry(
+            vault_root, finding, review_state_module.refs_for_paths(vault_root, paths)
+        )
+    if component.get("family") == "unreflected_observations":
+        collection = str(component.get("collection") or "")
+        page_path = str(component.get("page_path") or "")
+        if not collection or not page_path or not keep(collection) or not keep(page_path):
+            return None
+        from . import audit as audit_module
+        from . import collection_claims
+
+        advisory = collection_claims.route(
+            component.get("terms") or (),
+            routing_targets(vault_root, authorize_path=keep),
+        )
+        if not advisory or advisory.get("collection") != collection:
+            return None
+        matched = {str(term) for term in advisory.get("matched_terms") or ()}
+        previous = {str(term) for term in component.get("matched_terms") or ()}
+        for record in component.get("reflecting_records") or ():
+            if (
+                not isinstance(record, Mapping)
+                or type(record.get("path")) is not str
+                or not keep(record["path"])
+                or not _page_exists(vault_root, record["path"])
+            ):
+                continue
+            support = record.get("support")
+            if support == "link":
+                return None
+            if support == "natural_key" and matched.intersection(
+                str(term) for term in record.get("terms") or ()
+            ):
+                return None
+            if support is None and matched == previous:
+                return None
+        finding = audit_module.unreflected_observation_component(
+            component, advisory.get("matched_terms") or ()
+        )
+        if finding is None:
+            return None
+        paths = sorted({finding.path, *(finding.paths or [])})
+        rebuilt = _entry(
+            vault_root, finding, review_state_module.refs_for_paths(vault_root, paths)
+        )
+        return rebuilt
     stored = [
         (str(pair[0]), str(pair[1]))
         for pair in component.get("joined") or []
@@ -427,18 +531,31 @@ def _survivors_only(
 
 
 def _bucket(
-    entries: list[dict[str, Any]], today: dt.date
+    entries: list[dict[str, Any]], today: dt.date, *, now: dt.datetime | None = None
 ) -> dict[str, list[dict[str, Any]]]:
     """Split one page's entries into what is due and what is merely coming."""
     open_rows: list[dict[str, Any]] = []
     pending_rows: list[dict[str, Any]] = []
+    effective_now = now or dt.datetime.now(dt.UTC)
     for entry in entries:
         row = dict(entry)
         due = row.pop("due")
-        if _date(due) is not None and _date(due) > today:
+        due_at = _datetime(due)
+        due_day = _date(due)
+        if due_at is not None and "T" in str(due) and due_at > effective_now:
+            pending_rows.append(
+                {**row, "due_on": due_at.date().isoformat(), "due_at": due_at.isoformat()}
+            )
+        elif due_day is not None and due_day > today:
             pending_rows.append({**row, "due_on": due})
         else:
-            open_rows.append({**row, "due_since": due})
+            open_rows.append(
+                {
+                    **row,
+                    "due_since": due_at.date().isoformat() if due_at is not None else due,
+                    **({"due_at": due_at.isoformat()} if due_at is not None and "T" in str(due) else {}),
+                }
+            )
     open_rows.sort(key=lambda row: (row["due_since"], row["path"], row["ref"]))
     pending_rows.sort(key=lambda row: (row["due_on"], row["path"], row["ref"]))
     return {"open": open_rows, "pending": pending_rows}
@@ -495,7 +612,7 @@ def _unbucket(bucket: Any) -> list[dict[str, Any]]:
             if not isinstance(row, dict):
                 continue
             entry = dict(row)
-            entry["due"] = entry.pop(date_key, _NO_DATE)
+            entry["due"] = entry.pop("due_at", entry.pop(date_key, _NO_DATE))
             out.append(entry)
     return out
 
@@ -507,7 +624,22 @@ def _date(value: Any) -> dt.date | None:
         return None
 
 
-def recompute(vault_root: Path, *, today: dt.date | None = None) -> dict[str, Any]:
+def _datetime(value: Any) -> dt.datetime | None:
+    try:
+        parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.UTC)
+    return parsed.astimezone(dt.UTC)
+
+
+def recompute(
+    vault_root: Path,
+    *,
+    today: dt.date | None = None,
+    now: dt.datetime | None = None,
+) -> dict[str, Any]:
     """Rebuild the whole projection from canonical state. Read-only over the vault.
 
     Runs the four shipped predicates once with a far-future `today` so the result
@@ -516,18 +648,24 @@ def recompute(vault_root: Path, *, today: dt.date | None = None) -> dict[str, An
     """
     from . import audit as audit_module
 
-    today = today or dt.date.today()
+    if now is not None and now.tzinfo is None:
+        now = now.replace(tzinfo=dt.UTC)
+    now = now.astimezone(dt.UTC) if now is not None else dt.datetime.now(dt.UTC)
+    today = today or now.date()
     report = audit_module.audit(
         Path(vault_root),
         categories=sorted(PROJECTION_CATEGORIES),
         today=_FAR_FUTURE,
+        now=now,
+        retain_reflected_observations=True,
     )
     grouped = _entries_from_findings(vault_root, list(report.findings))
     categories: dict[str, dict[str, dict[str, list[dict[str, Any]]]]] = {}
     for category in PROJECTION_CATEGORIES:
         pages = grouped.get(category) or {}
         categories[category] = {
-            path: _bucket(entries, today) for path, entries in sorted(pages.items())
+            path: _bucket(entries, today, now=now)
+            for path, entries in sorted(pages.items())
         }
     return {
         "version": SCHEMA_VERSION,
@@ -539,13 +677,280 @@ def recompute(vault_root: Path, *, today: dt.date | None = None) -> dict[str, An
         # -- a delta that resolves a binding this index does not have yet adds
         # it, and the next reconcile rebuilds the whole thing.
         "bindings": audit_module.outcome_binding_index(Path(vault_root)),
+        "claims": _recompute_claims(Path(vault_root)),
     }
 
 
-def reconcile(vault_root: Path, *, today: dt.date | None = None) -> dict[str, Any]:
+def _claim_values(manifest: Any, values: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep only values needed to recompose claims for a later audience."""
+    selected: dict[str, Any] = {}
+    for name, spec in manifest.schema.fields.items():
+        eligible = spec.type in {"enum", "string"} or (
+            name == "tags"
+            and spec.type == "array"
+            and spec.items is not None
+            and spec.items.type == "string"
+        )
+        if name not in values or (not eligible and name not in manifest.schema.natural_key):
+            continue
+        value = values[name]
+        if type(value) in {str, int, float, bool}:
+            selected[name] = value
+        elif (
+            isinstance(value, list)
+            and len(value) <= 256
+            and all(type(item) in {str, int, float, bool} for item in value)
+        ):
+            selected[name] = list(value)
+    return selected
+
+
+def _claim_projection_row(manifest: Any, snapshot: Any | None) -> dict[str, Any]:
+    items = []
+    if snapshot is not None:
+        items = [
+            {
+                "path": str(record.source.path),
+                "key": str(record.identity.key),
+                "values": _claim_values(manifest, record.values),
+            }
+            for record in snapshot.records
+            if not record.ambiguous
+        ]
+    return {
+        "collection_id": str(manifest.collection_id),
+        "title": str(manifest.title),
+        "manifest_hash": str(manifest.manifest_version.hash),
+        "manifest_stable_hash": str(manifest.manifest_stable_hash),
+        "complete": bool(snapshot is not None and not snapshot.diagnostics),
+        "items": items,
+    }
+
+
+def _recompute_claims(
+    vault_root: Path, *, authorize_path: Any = None
+) -> dict[str, dict[str, Any]]:
+    """Rebuild a claims census, filtering supports before an audience-scoped read."""
+    from . import record_formats
+    from . import structured_collections as collections_module
+
+    claims: dict[str, dict[str, Any]] = {}
+    discovered, _unreadable = collections_module.discover_collections_with_errors(
+        vault_root, authorize_path=authorize_path
+    )
+    for manifest in discovered:
+        if (
+            manifest.semantic_profile != "records"
+            or (authorize_path is not None and not authorize_path(manifest.path))
+            or (authorize_path is not None and not authorize_path(manifest.storage.source))
+        ):
+            continue
+        try:
+            snapshot = record_formats.load_adapter(
+                vault_root, manifest, authorize_path=authorize_path
+            ).read()
+        except (collections_module.CollectionError, OSError, ValueError):
+            snapshot = None
+        claims[str(manifest.path)] = _claim_projection_row(manifest, snapshot)
+    return claims
+
+
+def _observed_claim_counts(
+    manifest: Any, items: list[dict[str, Any]]
+) -> dict[str, dict[str, int]]:
+    from . import collection_claims
+
+    counts: dict[str, dict[str, int]] = {}
+    for item in items:
+        values = item.get("values")
+        if not isinstance(values, Mapping):
+            continue
+        for name, spec in manifest.schema.fields.items():
+            raw = values.get(name)
+            candidates: list[Any]
+            if (
+                name == "tags"
+                and spec.type == "array"
+                and spec.items is not None
+                and spec.items.type == "string"
+                and isinstance(raw, list)
+            ):
+                candidates = raw
+            elif spec.type in {"enum", "string"}:
+                candidates = [raw]
+            else:
+                continue
+            field_counts = counts.setdefault(name, {})
+            seen: set[tuple[str, ...]] = set()
+            for value in candidates:
+                if type(value) not in {str, int, float, bool}:
+                    continue
+                text = str(value).strip()
+                normalized = tuple(sorted(collection_claims.normalize_terms([text])))
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    canonical = " ".join(normalized)
+                    field_counts[canonical] = field_counts.get(canonical, 0) + 1
+    return counts
+
+
+def routing_targets(
+    vault_root: Path,
+    *,
+    payload: dict[str, Any] | None = None,
+    authorize_path: Any = None,
+    principal: Any = None,
+    purpose: str | None = None,
+) -> list[Any]:
+    """Recompose routing targets after filtering every supporting item."""
+    from . import collection_claims, record_governance
+    from . import structured_collections as collections_module
+    from .governance import egress as egress_module
+
+    root = Path(vault_root)
+    state = payload or load(root)
+    rows = (state or {}).get("claims")
+    if not isinstance(rows, Mapping):
+        return []
+    try:
+        keep = authorize_path or egress_module.release_walk_filter(
+            root, principal=principal, purpose=purpose
+        )
+    except Exception:  # noqa: BLE001 -- disclosure failure costs the advisory
+        return []
+    if keep is None:
+        def keep(_path: str) -> bool:
+            return True
+    targets: list[collection_claims.RoutingTarget] = []
+    for manifest_path, row in sorted(rows.items()):
+        if type(manifest_path) is not str or not isinstance(row, Mapping) or not keep(manifest_path):
+            continue
+        try:
+            manifest = collections_module.load_manifest(root, root / manifest_path)
+        except Exception:  # noqa: BLE001 -- stale projections heal on reconcile
+            continue
+        if (
+            manifest.semantic_profile != "records"
+            or manifest.manifest_version.hash != row.get("manifest_hash")
+            or not keep(manifest.storage.source)
+        ):
+            continue
+        stored_items = row.get("items")
+        if not isinstance(stored_items, list):
+            continue
+        visible = [
+            dict(item)
+            for item in stored_items
+            if isinstance(item, Mapping)
+            and type(item.get("path")) is str
+            and keep(str(item["path"]))
+        ]
+        claims = record_governance.effective_claims(
+            manifest,
+            _observed_claim_counts(manifest, visible) if row.get("complete") is True else None,
+        )
+        if not record_governance.is_routing_target(manifest, claims):
+            continue
+        natural_values = {
+            collection_claims.normalize_text(values[name])
+            for item in visible
+            if isinstance((values := item.get("values")), Mapping)
+            for name in manifest.schema.natural_key
+            if type(values.get(name)) in {str, int, float, bool}
+        }
+        targets.append(
+            collection_claims.RoutingTarget(
+                collection=manifest.path,
+                title=manifest.title,
+                claims=claims,
+                natural_key=manifest.schema.natural_key,
+                natural_key_types=tuple(
+                    manifest.schema.fields[name].type for name in manifest.schema.natural_key
+                ),
+                natural_key_values=frozenset(natural_values),
+            )
+        )
+    return targets
+
+
+def collection_observation_coverage(
+    vault_root: Path,
+    manifest_path: str,
+    *,
+    authorize_path: Any,
+    now: dt.datetime | None = None,
+) -> dict[str, Any]:
+    """Count and name claimed observations after audience recomposition."""
+    effective_now = now or dt.datetime.now(dt.UTC)
+    if effective_now.tzinfo is None:
+        effective_now = effective_now.replace(tzinfo=dt.UTC)
+    effective_now = effective_now.astimezone(dt.UTC)
+    payload = load(vault_root)
+    if payload is None:
+        return {"complete": False, "unreflected": [], "pending": []}
+    categories = payload.get("categories")
+    claims = payload.get("claims")
+    manifest = _load_manifest(Path(vault_root), manifest_path)
+    claim_row = claims.get(manifest_path) if isinstance(claims, Mapping) else None
+    pages = (
+        categories.get(_OBSERVATION_FAMILY) or {}
+        if isinstance(categories, Mapping)
+        else {}
+    )
+    if (
+        not isinstance(categories, Mapping)
+        or _OBSERVATION_FAMILY not in categories
+        or not isinstance(claims, Mapping)
+        or not isinstance(claim_row, Mapping)
+        or manifest is None
+        or claim_row.get("manifest_hash") != manifest.manifest_version.hash
+        or claim_row.get("complete") is not True
+        or not isinstance(pages, Mapping)
+        or not authorize_path(manifest_path)
+    ):
+        return {"complete": False, "unreflected": [], "pending": []}
+    open_refs: set[str] = set()
+    pending_refs: set[str] = set()
+    for bucket in pages.values():
+        for entry in _unbucket(bucket):
+            component = entry.get("component")
+            if (
+                not isinstance(component, Mapping)
+                or component.get("family") != _OBSERVATION_FAMILY
+                or str(component.get("collection") or "") != manifest_path
+            ):
+                continue
+            rebuilt = _survivors_only(Path(vault_root), entry, authorize_path)
+            if rebuilt is None:
+                continue
+            component = rebuilt.get("component") or {}
+            page_path = str(component.get("page_path") or "")
+            if not page_path or not _page_exists(Path(vault_root), page_path):
+                continue
+            reference = str(component.get("observation_ref") or "")
+            if not reference:
+                continue
+            due_at = _datetime(rebuilt.get("due"))
+            if due_at is not None and due_at > effective_now:
+                pending_refs.add(reference)
+            else:
+                open_refs.add(reference)
+    return {
+        "complete": True,
+        "unreflected": sorted(open_refs),
+        "pending": sorted(pending_refs),
+    }
+
+
+def reconcile(
+    vault_root: Path,
+    *,
+    today: dt.date | None = None,
+    now: dt.datetime | None = None,
+) -> dict[str, Any]:
     """Full recompute plus persist — the healer after out-of-band edits."""
     existing = load(vault_root) or _UNPERSISTED.get(str(vault_root))
-    payload = recompute(vault_root, today=today)
+    payload = recompute(vault_root, today=today, now=now)
     # The projection is derived and rebuilt from authored state; the emission
     # ledger is a MEASUREMENT of what this vault has told its callers, and a
     # heal is not a reason to forget it.
@@ -737,6 +1142,7 @@ def apply_write_delta(
                 if isinstance(current.get("bindings"), dict)
                 else {}
             ),
+            "claims": dict(current.get("claims") or {}),
         }
         save(vault_root, updated)
     return updated
@@ -749,6 +1155,7 @@ def apply_write_delta(
 #: Whether it is maintained AT ALL is still `STRUCTURED_DELTA_CATEGORIES`'
 #: decision -- see `_settles_at_write_time`.
 _OUTCOME_FAMILY = "unreflected_outcomes"
+_OBSERVATION_FAMILY = "unreflected_observations"
 
 
 def _settles_at_write_time() -> bool:
@@ -761,6 +1168,197 @@ def _settles_at_write_time() -> bool:
     exactly the mechanism-removal probe.
     """
     return _OUTCOME_FAMILY in STRUCTURED_DELTA_CATEGORIES
+
+
+def _observations_at_write_time() -> bool:
+    """Whether structured deltas maintain the observation family."""
+    return _OBSERVATION_FAMILY in STRUCTURED_DELTA_CATEGORIES
+
+
+def apply_observation_write_delta(
+    vault_root: Path,
+    *,
+    path: str,
+    observation_ref: str,
+    terms: list[str] | tuple[str, ...],
+    routing: Mapping[str, Any] | None,
+    observed_at: dt.datetime | None = None,
+    observation_aliases: Iterable[str] = (),
+) -> dict[str, Any] | None:
+    """Fold one committed observation into its own structured family."""
+    if not _observations_at_write_time() or not state_path(vault_root).exists():
+        return None
+    now = observed_at or dt.datetime.now(dt.UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.UTC)
+    now = now.astimezone(dt.UTC)
+    with _LOCK:
+        current = load(vault_root)
+        if current is None:
+            return None
+        categories = dict(current.get("categories") or {})
+        pages = dict(categories.get(_OBSERVATION_FAMILY) or {})
+        replacement: dict[str, Any] | None = None
+        if isinstance(routing, Mapping):
+            collection = str(routing.get("collection") or "")
+            manifest = _load_manifest(Path(vault_root), collection) if collection else None
+            if manifest is not None and manifest.semantic_profile == "records":
+                from . import audit as audit_module
+                from . import collection_claims
+
+                component = {
+                    "collection": collection,
+                    "collection_id": str(manifest.collection_id),
+                    "collection_title": str(manifest.title),
+                    "page_path": str(path),
+                    "observation_ref": str(observation_ref),
+                    "observation_aliases": sorted(
+                        {
+                            text
+                            for raw in (path, observation_ref, *observation_aliases)
+                            if (text := str(raw or "").strip())
+                        }
+                    )[:3],
+                    "terms": sorted(collection_claims.normalize_terms(terms)),
+                    "observed_at": now.isoformat(),
+                }
+                finding = audit_module.unreflected_observation_component(
+                    component, routing.get("matched_terms") or ()
+                )
+                if finding is not None:
+                    refs = review_state_module.refs_for_paths(
+                        Path(vault_root), sorted({finding.path, *(finding.paths or [])})
+                    )
+                    replacement = _entry(Path(vault_root), finding, refs)
+                    if replacement is not None:
+                        matched = set(
+                            str(term)
+                            for term in (finding.component or {}).get("matched_terms") or ()
+                        )
+                        retained: dict[tuple[str, str], dict[str, Any]] = {}
+                        for previous in _unbucket(pages.get(str(path))):
+                            prior = previous.get("component")
+                            if (
+                                not isinstance(prior, Mapping)
+                                or prior.get("collection") != collection
+                                or prior.get("observation_ref") != str(observation_ref)
+                            ):
+                                continue
+                            old_matched = {
+                                str(term) for term in prior.get("matched_terms") or ()
+                            }
+                            for record in prior.get("reflecting_records") or ():
+                                if not isinstance(record, Mapping):
+                                    continue
+                                record_path = str(record.get("path") or "")
+                                record_key = str(record.get("key") or "")
+                                if (
+                                    not record_path
+                                    or not record_key
+                                    or not _page_exists(Path(vault_root), record_path)
+                                ):
+                                    continue
+                                support = record.get("support")
+                                if support == "link":
+                                    retained[(record_path, record_key)] = dict(record)
+                                elif support == "natural_key":
+                                    terms_supported = sorted(
+                                        matched
+                                        & {
+                                            str(term)
+                                            for term in record.get("terms") or ()
+                                        }
+                                    )
+                                    if terms_supported:
+                                        retained[(record_path, record_key)] = {
+                                            "path": record_path,
+                                            "key": record_key,
+                                            "support": "natural_key",
+                                            "terms": terms_supported,
+                                        }
+                                elif matched == old_matched:
+                                    retained[(record_path, record_key)] = dict(record)
+                        replacement["component"] = {
+                            **dict(replacement.get("component") or {}),
+                            "reflecting_records": [
+                                retained[key] for key in sorted(retained)
+                            ],
+                        }
+        if replacement is None:
+            pages.pop(str(path), None)
+        else:
+            pages[str(path)] = _bucket([replacement], now.date(), now=now)
+        categories[_OBSERVATION_FAMILY] = pages
+        return _persist_delta(
+            Path(vault_root), current, categories, now.date(), count_write=False
+        )
+
+
+def _settle_observations_for_record(
+    pages: dict[str, Any],
+    manifest: Any,
+    path: str,
+    key: str,
+    values: Mapping[str, Any],
+    today: dt.date,
+) -> None:
+    """Refresh one record's reflection support without rescanning Records."""
+    from . import audit as audit_module
+
+    for page_path in list(pages):
+        retained: list[dict[str, Any]] = []
+        changed = False
+        for entry in _unbucket(pages.get(page_path)):
+            component = entry.get("component")
+            if not isinstance(component, Mapping) or component.get("family") != _OBSERVATION_FAMILY:
+                retained.append(entry)
+                continue
+            if str(component.get("collection") or "") != str(manifest.path):
+                retained.append(entry)
+                continue
+            reflectors = [
+                dict(record)
+                for record in component.get("reflecting_records") or ()
+                if isinstance(record, Mapping)
+                and not (
+                    str(record.get("path") or "") == str(path)
+                    and str(record.get("key") or "") == str(key)
+                )
+            ]
+            support = audit_module._record_observation_support(
+                manifest,
+                values,
+                page_path=str(component.get("page_path") or ""),
+                observation_ref=str(component.get("observation_ref") or ""),
+                matched_terms=component.get("matched_terms") or (),
+                observation_aliases=component.get("observation_aliases") or (),
+            )
+            if support is not None:
+                reflectors.append(
+                    {"path": str(path), "key": str(key), **support}
+                )
+            retained.append(
+                {
+                    **entry,
+                    "component": {
+                        **dict(component),
+                        "reflecting_records": sorted(
+                            reflectors,
+                            key=lambda record: (
+                                str(record.get("path") or ""),
+                                str(record.get("key") or ""),
+                            ),
+                        ),
+                    },
+                }
+            )
+            changed = True
+        if not changed:
+            continue
+        if retained:
+            pages[page_path] = _bucket(retained, today)
+        else:
+            pages.pop(page_path, None)
 
 
 def _bindings_index(payload: Any) -> dict[str, list[dict[str, Any]]]:
@@ -920,17 +1518,17 @@ def _persist_delta(
     today: dt.date,
     *,
     bindings: dict[str, list[dict[str, Any]]] | None = None,
+    claims: dict[str, Any] | None = None,
+    count_write: bool = True,
 ) -> dict[str, Any]:
     updated = {
         "version": SCHEMA_VERSION,
         "computed_on": today.isoformat(),
         "categories": categories,
-        # Bumped on EVERY governed structured write, including one into a
-        # collection nobody bound. `writes` is the denominator the "how often
-        # does the advisory actually fire?" claim divides by; counting only the
-        # writes that had something to say makes that ratio measure the wrong
-        # population and flatters the governor.
-        "emission": _emission_delta(current, writes=1),
+        # Bumped once per governed write, including one into a collection nobody
+        # bound. Observation maintenance shares the page-write carrier's tick, so
+        # its preceding family delta explicitly leaves this counter unchanged.
+        "emission": _emission_delta(current, writes=1 if count_write else 0),
         **(
             {"bindings": bindings}
             if bindings is not None
@@ -940,6 +1538,7 @@ def _persist_delta(
                 else {}
             )
         ),
+        "claims": claims if claims is not None else dict(current.get("claims") or {}),
     }
     save(vault_root, updated)
     return updated
@@ -1022,9 +1621,49 @@ def apply_record_write_delta(
         current = load(vault_root)
         if current is None:
             return None
+        claims = dict(current.get("claims") or {})
+        claim_row = claims.get(str(manifest.path))
+        if (
+            not isinstance(claim_row, Mapping)
+            or claim_row.get("manifest_stable_hash")
+            != str(manifest.manifest_stable_hash)
+        ):
+            claim_row = _claim_projection_row(manifest, None)
+        else:
+            claim_row = dict(claim_row)
+            claim_row["manifest_hash"] = str(manifest.manifest_version.hash)
+        items = [
+            dict(item)
+            for item in claim_row.get("items") or []
+            if isinstance(item, Mapping)
+            and not (
+                str(item.get("path") or "") == str(path)
+                and str(item.get("key") or "") == str(key)
+            )
+        ]
+        items.append(
+            {
+                "path": str(path),
+                "key": str(key),
+                "values": _claim_values(manifest, values),
+            }
+        )
+        claim_row["items"] = items
+        claims[str(manifest.path)] = claim_row
+        categories = dict(current.get("categories") or {})
+        if _observations_at_write_time():
+            observation_pages = dict(categories.get(_OBSERVATION_FAMILY) or {})
+            _settle_observations_for_record(
+                observation_pages, manifest, path, key, values, today
+            )
+            categories[_OBSERVATION_FAMILY] = observation_pages
         if not _settles_at_write_time():
             return _persist_delta(
-                Path(vault_root), current, dict(current.get("categories") or {}), today
+                Path(vault_root),
+                current,
+                categories,
+                today,
+                claims=claims,
             )
         index = _bindings_index(current)
         rows = [
@@ -1047,7 +1686,6 @@ def apply_record_write_delta(
                         bucket = registered.setdefault(slot, [])
                         if row not in bucket:
                             bucket.append(row)
-        categories = dict(current.get("categories") or {})
         pages = dict(categories.get(_OUTCOME_FAMILY) or {})
         for row in rows:
             planning = _load_manifest(Path(vault_root), str(row.get("planning") or ""))
@@ -1097,7 +1735,12 @@ def apply_record_write_delta(
         _prune_missing_joined(Path(vault_root), pages, today)
         categories[_OUTCOME_FAMILY] = pages
         return _persist_delta(
-            Path(vault_root), current, categories, today, bindings=registered
+            Path(vault_root),
+            current,
+            categories,
+            today,
+            bindings=registered,
+            claims=claims,
         )
 
 
@@ -1432,6 +2075,7 @@ def served_entries(
     vault_root: Path,
     *,
     today: dt.date | None = None,
+    now: dt.datetime | None = None,
     principal: Any = None,
     purpose: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -1445,7 +2089,11 @@ def served_entries(
     """
     from .governance import egress as egress_module
 
-    today = today or dt.date.today()
+    if now is not None:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=dt.UTC)
+        now = now.astimezone(dt.UTC)
+    today = today or (now.date() if now is not None else dt.date.today())
     payload = load(vault_root)
     if payload is None:
         # An unpersistable vault recomputes ONCE per process, not once per read.
@@ -1475,6 +2123,9 @@ def served_entries(
         # this audience may not be allowed to know exists.
         log.debug("release filter unavailable; serving no due state", exc_info=True)
         return []
+    if keep is None:
+        def keep(_path: str) -> bool:
+            return True
 
     store = review_state_module.ReviewStateStore(vault_root)
     try:
@@ -1515,10 +2166,17 @@ def served_entries(
                     if not isinstance(entry, dict):
                         continue
                     due = _date(entry.get(date_key))
+                    due_at = _datetime(entry.get("due_at"))
+                    if due_at is not None and due_at > (now or dt.datetime.now(dt.UTC)):
+                        continue
                     if due is None or due > today:
                         continue  # not yet due — the day-boundary re-bucket
                     path = str(entry.get("path") or "")
-                    if keep is not None and path and not keep(path):
+                    component = entry.get("component")
+                    candidate_component = isinstance(component, Mapping) and component.get(
+                        "family"
+                    ) == "collection_candidate"
+                    if keep is not None and path and not candidate_component and not keep(path):
                         continue  # withheld: contributes to nothing, anywhere
                     if keep is not None:
                         entry = _survivors_only(vault_root, entry, keep)
@@ -1527,6 +2185,7 @@ def served_entries(
                             # this audience, so under that audience there is no
                             # finding -- not a finding with a smaller count.
                             continue
+                        path = str(entry.get("path") or "")
                     if path and not _page_exists(vault_root, path):
                         # Deleted out of band. The projection is maintained, not
                         # authoritative, and reconcile heals it — but until then a
