@@ -2,12 +2,14 @@
 
 ### Requirement: REST-First Transport When Configured And Reachable
 
-The hook SHALL attempt exactly one `POST http://<host>:8765/api/ask_memory`
+The hook SHALL attempt exactly one `POST http://<host>:<port>/api/ask_memory`
 request (`detail=compact`, `mode=hybrid`, `limit=3`, `Authorization: Bearer
 <key>`) with a socket timeout of about 4 seconds, bounded by the shared inject
 budget, before considering any other transport, whenever `EXOMEM_RETRIEVE_INJECT`
 is truthy and a key resolves (from the hook's environment, or from the managed
-install's `service.env`). `<host>` is `EXOMEM_HOST` or `127.0.0.1`. The hook
+install's `service.env`). `<host>` is `EXOMEM_HOST` or `127.0.0.1`; `<port>`
+follows the canonical configured-port requirement (`EXOMEM_REST_PORT`, default
+`8765` only when absent or blank; malformed overrides make no REST request). The hook
 SHALL treat any failure of that request (connection error, timeout, non-200
 status, malformed JSON, or an envelope with `success: false`) as "REST
 unreachable." The hook SHALL read the hit list from either envelope shape the
