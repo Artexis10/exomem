@@ -29,6 +29,7 @@ SEQUENCE_TWO_FAMILIES = ("f20", "f21", "f22", "f23", "f24", "f25", "f26")
 #: the founder acknowledgment recorded in its receipt on 2026-08-30.
 SEQUENCE_THREE_FAMILIES = ("f27",)
 SEQUENCE_FOUR_FAMILIES = ("f28", "f29")
+SEQUENCE_FIVE_FAMILIES = ("f30", "f31")
 #: The squash commit on ``main`` carrying the sequence-3 amended document and its
 #: then-pending receipt (#762), pinned by the founder at acknowledgment.
 SEQUENCE_THREE_ACKNOWLEDGED_REVISION = "287b984418ff3a02b26e05aafeb3bcbae255b27b"
@@ -630,7 +631,7 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     # Pinned exactly, not loosened to an inequality: a chain that silently grew
     # another link would otherwise satisfy every assertion below while nobody
     # had adjudicated the new one.
-    assert len(identity.amendments) == 4
+    assert len(identity.amendments) == 5
     amendment = identity.amendments[0]
     assert amendment.acknowledgment_status == "acknowledged"
     assert amendment.introduced_family_ids == ("f15", "f16", "f17", "f18", "f19")
@@ -663,9 +664,16 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     assert pending_four.acknowledgment_status == "pending"
     assert pending_four.introduced_family_ids == SEQUENCE_FOUR_FAMILIES
     assert pending_four.contract.repository_revision == pending_four.receipt.introduction_revision
-    assert identity.effective.sha256 == pending_four.contract.sha256
-    assert identity.pending_amendments == (pending_two, pending_four)
-    assert identity.withheld_family_ids == frozenset(SEQUENCE_TWO_FAMILIES + SEQUENCE_FOUR_FAMILIES)
+    pending_five = identity.amendments[4]
+    assert pending_five.sequence == 5
+    assert pending_five.acknowledgment_status == "pending"
+    assert pending_five.introduced_family_ids == SEQUENCE_FIVE_FAMILIES
+    assert pending_five.contract.repository_revision == pending_five.receipt.introduction_revision
+    assert identity.effective.sha256 == pending_five.contract.sha256
+    assert identity.pending_amendments == (pending_two, pending_four, pending_five)
+    assert identity.withheld_family_ids == frozenset(
+        SEQUENCE_TWO_FAMILIES + SEQUENCE_FOUR_FAMILIES + SEQUENCE_FIVE_FAMILIES
+    )
 
 
 def test_the_acknowledged_amendment_releases_its_own_families() -> None:
@@ -769,9 +777,9 @@ def test_acknowledged_amendment_is_recorded_on_every_run_manifest(
     # which families backed this run and which were withheld from it without
     # reading any other artifact, which is the whole reason the field exists.
     # Sequence 3 left the withheld set when its acknowledgment landed 2026-08-30;
-    # sequence 4 is now pending alongside sequence 2.
+    # Sequences 4 and 5 are pending alongside sequence 2.
     assert manifest.preregistration_identity.withheld_family_ids == frozenset(
-        (*SEQUENCE_TWO_FAMILIES, *SEQUENCE_FOUR_FAMILIES)
+        (*SEQUENCE_TWO_FAMILIES, *SEQUENCE_FOUR_FAMILIES, *SEQUENCE_FIVE_FAMILIES)
     )
     assert manifest.preregistration_lineage is not None
 
@@ -932,13 +940,21 @@ def test_the_loader_gate_releases_sequences_one_and_three_and_withholds_two() ->
     from protocol.contracts import AmendmentAcknowledgmentPendingError
 
     reset_cache()
-    assert withheld_family_ids(ROOT) == frozenset(SEQUENCE_TWO_FAMILIES + SEQUENCE_FOUR_FAMILIES)
+    assert withheld_family_ids(ROOT) == frozenset(
+        SEQUENCE_TWO_FAMILIES + SEQUENCE_FOUR_FAMILIES + SEQUENCE_FIVE_FAMILIES
+    )
     for family_id in AMENDED_FAMILIES + SEQUENCE_THREE_FAMILIES:
         require_family_released(family_id, repo_root=ROOT)
     for family_id in SEQUENCE_TWO_FAMILIES:
         with pytest.raises(
             AmendmentAcknowledgmentPendingError,
             match=rf"amendment sequence 2 .*pending.*{family_id}",
+        ):
+            require_family_released(family_id, repo_root=ROOT)
+    for family_id in SEQUENCE_FIVE_FAMILIES:
+        with pytest.raises(
+            AmendmentAcknowledgmentPendingError,
+            match=rf"amendment sequence 5 .*pending.*{family_id}",
         ):
             require_family_released(family_id, repo_root=ROOT)
 

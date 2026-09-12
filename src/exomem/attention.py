@@ -69,6 +69,8 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     # them. A vault that declares no binding never sees it.
     "unreflected_outcomes",
     "unreflected_observations",
+    "artifact_role_promotion",
+    "transient_state_review",
 )
 # Registered — selectable via `categories` — but deliberately NOT default,
 # because these read old fields that a long-lived vault can already hold a large
@@ -170,6 +172,7 @@ class AttentionReport:
     all_total: int | None = None
     state_summary: dict[str, int] | None = None
     coverage: dict[str, int] | None = None
+    meta: dict | None = None
     # At most one per family, ever: three manual dismissals in one family earn
     # the family's next surfacing a single offer to quiet it. Present only when
     # an offer was armed on THIS surfacing, so a client never has to read an
@@ -189,6 +192,8 @@ class AttentionReport:
         if self.all_total is not None:
             out["all_total"] = self.all_total
             out["state_summary"] = self.state_summary or {}
+        if self.meta is not None:
+            out["meta"] = self.meta
         if self.coverage is not None:
             out["coverage"] = self.coverage
         if self.quiet_offers:
@@ -442,6 +447,8 @@ def attention(
         )
     ]
     ranked = _rank(findings, categories=resolved, limit=0)
+    if (report.metadata or {}).get("coverage") is not None:
+        ranked.meta = {"coverage": report.metadata["coverage"]}
     return _apply_review_state(
         vault_root,
         ranked,
@@ -997,5 +1004,6 @@ def _apply_review_state(
         all_total=len(report.items),
         state_summary=state_summary,
         coverage=report.coverage,
+        meta=report.meta,
         quiet_offers=offers or None,
     )

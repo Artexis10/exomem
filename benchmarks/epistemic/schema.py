@@ -88,7 +88,7 @@ UNPROMPTED_FAMILIES: frozenset[str] = frozenset({"f20", "f21", "f22"})
 #: vocabulary lives in the corpus module beside the fold it protects; this is the
 #: second of its two enforcement points — corpus construction is the first, and a
 #: fixture authored by hand reaches only this one.
-STORE_BEARING_GATED_FAMILIES: frozenset[str] = frozenset({"f27", "f28", "f29"})
+STORE_BEARING_GATED_FAMILIES: frozenset[str] = frozenset({"f27", "f28", "f29", "f30", "f31"})
 
 ScenarioKind = Literal["corpus", "operational"]
 
@@ -337,7 +337,7 @@ def _validate_store_bearing_turns(scenario: Scenario, source: str) -> None:
         StoreBearingUtterance,
         assert_no_store_bearing_utterance,
     )
-    if scenario.family_id in {"f28", "f29"}:
+    if scenario.family_id in {"f28", "f29", "f30", "f31"}:
         from .journeys.collection_replay import assert_no_store_bearing_utterance
 
     turns = tuple(
@@ -361,6 +361,28 @@ def _validate_store_bearing_turns(scenario: Scenario, source: str) -> None:
         assert_no_store_bearing_utterance(turns)
     except StoreBearingUtterance as error:
         raise ScenarioLoadError(f"{source}: {error}") from error
+    if scenario.family_id in {"f30", "f31"}:
+        from .journeys.role_state_replay import corpus_for
+
+        try:
+            corpus = corpus_for(scenario.scenario_id)
+        except ValueError as error:
+            raise ScenarioLoadError(f"{source}: {error}") from error
+        expected = tuple((turn.turn_id, turn.text) for turn in corpus.turns)
+        by_arm = {
+            arm: tuple(
+                (op.ref, op.detail)
+                for phase in scenario.phases
+                if phase.phase_id.startswith(f"{arm}-")
+                for op in phase.ops
+                if op.op == "agent_turn"
+            )
+            for arm in ("hookless", "hooked")
+        }
+        if any(seen != expected for seen in by_arm.values()) or len(turns) != 2 * len(expected):
+            raise ScenarioLoadError(
+                f"{source}: sequence-five turn drift from immutable corpus {corpus.corpus_id}"
+            )
 
 
 def load_scenario_text(text: str, *, source: str) -> Scenario:

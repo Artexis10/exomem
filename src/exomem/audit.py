@@ -153,6 +153,8 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "scope_divergence_semantic",
     "entity_recurrence",
     "collection_candidate",
+    "artifact_role_promotion",
+    "transient_state_review",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -301,6 +303,7 @@ class AuditReport:
     findings: list[AuditFinding]
     summary: dict[str, int]  # category → count
     metadata: dict | None = None
+    role_state: dict | None = None  # Internal dependency descriptors; never serialized.
 
     def as_dict(self) -> dict:
         value = {
@@ -309,6 +312,8 @@ class AuditReport:
         }
         if self.metadata:
             value["metadata"] = self.metadata
+            if "coverage" in self.metadata:
+                value["meta"] = {"coverage": self.metadata["coverage"]}
         return value
 
     def as_public_dict(
@@ -372,6 +377,8 @@ class AuditReport:
         }
         if self.metadata:
             value["metadata"] = self.metadata
+            if "coverage" in self.metadata:
+                value["meta"] = {"coverage": self.metadata["coverage"]}
         return value
 
 
@@ -487,6 +494,22 @@ def audit(
 
     findings: list[AuditFinding] = []
     metadata: dict = {}
+    role_state = None
+    role_families = selected & {"artifact_role_promotion", "transient_state_review"}
+    if role_families:
+        from . import artifact_role_state
+        from .governance import egress
+        try:
+            role_state = artifact_role_state.build(vault_root, pages)
+            authorize = (
+                egress.release_walk_filter(vault_root) if role_state["origins"] else None
+            ) or (lambda _path: True)
+            role_findings, coverage = artifact_role_state.inspect(vault_root, role_state, authorize)
+            findings.extend(f for f in role_findings if f.category in role_families)
+            metadata["coverage"] = {key: coverage[key] for key in sorted(role_families)}
+        except Exception:  # noqa: BLE001 - measurement failure is explicit, never a write failure
+            log.debug("artifact role audit unavailable", exc_info=True)
+            metadata["coverage"] = dict.fromkeys(sorted(role_families), "unknown")
     link_categories = selected & {"broken_wikilink", "forward_reference"}
     if link_categories:
         findings.extend(_check_wikilinks(vault_root, pages, link_categories))
@@ -586,6 +609,7 @@ def audit(
         findings=findings,
         summary=summary,
         metadata=metadata or None,
+        role_state=role_state,
     )
 
 

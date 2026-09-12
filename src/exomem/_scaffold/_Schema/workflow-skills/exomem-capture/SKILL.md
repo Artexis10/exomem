@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: db0ee3a67796d40699e6a9650477db407887a7546ec69df1ccc06a99b82eb8d4
+  skill_contract: 2f3e7b1c748ddf95775db5c88a02a7ad424030214398cff30f2930bb6d584dcb
   version: "0.1.0"
 ---
 
@@ -65,6 +65,36 @@ substantial curation uses confirmed `restructure_execution`.
 
 ## Lifecycle
 Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `record_memory(action="append")`; when collections compete ask one focused question, and when none fits propose one rather than creating it silently. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome.
+
+## Artifact role and current state
+Read the supporting units for `artifact_role_promotion` and
+`transient_state_review`; neither signal grants mutation authority. Choose a home
+by role even within one topic: a repeatable successful procedure belongs in a
+suitable reusable note, and an attributed multi-source synthesis in a research
+note. Search existing eligible homes first. Keep exact source-unit provenance:
+reference both the procedure and outcome units when extracting a method, or the
+synthesis unit and its distinct sources when compiling a research note. Retain
+the experiment history. A title match or parent backlink does not establish that
+the identified material has a home; exact represented content does, while a
+paraphrase remains a review candidate for the reader to assess.
+
+For example, a batch may contain two separately successful reusable methods and
+a synthesis across two sources. Give each method its own evidence and check the
+synthesis independently; extracting one does not settle the others. A protocol
+without reusable success or a list of citations alone needs no such promotion.
+For a single batch, “No taste results yet” alongside an observed taste result
+invites a current-wording correction; “Previously no taste results existed” is
+history, and taste results do not settle an awaited safety result or a new trial.
+Preserve that history through a governed edit or exact valid supersession.
+
+Extraction/restructuring uses confirmed `restructure_execution`; an
+already-authorized local correction acquires no additional confirmation step.
+Observed transaction state still follows the existing Records claims handoff,
+never an automatic append from a review signal. Item triage changes presentation,
+not evidence coverage. Explicit review exposes complete/capped/unknown coverage;
+compact omission is not proof of a clean page. Apply this role-first reasoning to
+visible conversation transitions before writing too. An MCP-only server cannot
+guarantee detection or capture of a tool-free turn.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific

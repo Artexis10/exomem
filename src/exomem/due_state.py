@@ -94,7 +94,7 @@ from . import review_state as review_state_module
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STATE_FILENAME = ".due-state.json"
 
 #: The four due-state categories, in the tiebreak preference the attention surface
@@ -111,6 +111,8 @@ PROJECTION_CATEGORIES: tuple[str, ...] = (
     "unreflected_outcomes",
     "unreflected_observations",
     "collection_candidate",
+    "artifact_role_promotion",
+    "transient_state_review",
 )
 
 #: The categories a single write can soundly settle in full on its own.
@@ -120,6 +122,8 @@ DELTA_CATEGORIES: tuple[str, ...] = (
     "question_aging",
     "unreflected_outcomes",
     "unreflected_observations",
+    "artifact_role_promotion",
+    "transient_state_review",
 )
 
 #: The subset a PAGE write settles. `unreflected_outcomes` is not one of them:
@@ -132,6 +136,8 @@ PAGE_DELTA_CATEGORIES: tuple[str, ...] = (
     "prediction_window",
     "unfinished_experiments",
     "question_aging",
+    "artifact_role_promotion",
+    "transient_state_review",
 )
 
 #: The remainder: what a STRUCTURED write settles, keyed by plan-item path rather
@@ -382,7 +388,13 @@ def _entries_from_findings(
     paths = sorted({finding.path for finding in findings} | {
         path for finding in findings for path in (finding.paths or [])
     })
-    refs = review_state_module.refs_for_paths(vault_root, paths) if paths else {}
+    refs = {
+        finding.path: finding.component["origin_ref"]
+        for finding in findings if finding.component and finding.component.get("origin_ref")
+    }
+    missing = [path for path in paths if path not in refs]
+    if missing:
+        refs.update(review_state_module.refs_for_paths(vault_root, missing))
     out: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for finding in findings:
         entry = _entry(vault_root, finding, refs)
@@ -415,6 +427,8 @@ def _survivors_only(
     """
     component = entry.get("component")
     if not isinstance(component, dict):
+        return entry
+    if component.get("family") in {"artifact_role_promotion", "transient_state_review"}:
         return entry
     if component.get("family") == "collection_candidate":
         from . import audit as audit_module
@@ -659,7 +673,15 @@ def recompute(
         now=now,
         retain_reflected_observations=True,
     )
-    grouped = _entries_from_findings(vault_root, list(report.findings))
+    from . import artifact_role_review, artifact_role_state
+    role_marker = (
+        artifact_role_state.persist(Path(vault_root), report.role_state)
+        if report.role_state else None
+    )
+    grouped = _entries_from_findings(
+        vault_root,
+        [f for f in report.findings if f.category not in artifact_role_review.FAMILIES],
+    )
     categories: dict[str, dict[str, dict[str, list[dict[str, Any]]]]] = {}
     for category in PROJECTION_CATEGORIES:
         pages = grouped.get(category) or {}
@@ -678,6 +700,7 @@ def recompute(
         # it, and the next reconcile rebuilds the whole thing.
         "bindings": audit_module.outcome_binding_index(Path(vault_root)),
         "claims": _recompute_claims(Path(vault_root)),
+        "role_state": role_marker,
     }
 
 
@@ -1101,7 +1124,20 @@ def apply_write_delta(
     with _LOCK:
         current = load(vault_root) or payload
         categories = dict(current.get("categories") or {})
+        role_index = current.get("role_state")
+        if isinstance(role_index, dict):
+            from . import artifact_role_review, artifact_role_state
+            enabled = set(PAGE_DELTA_CATEGORIES) & set(artifact_role_review.FAMILIES)
+            if enabled:
+                try:
+                    artifact_role_state.apply_delta(vault_root, rel, page, families=enabled)
+                    if page is not None and page.page_type == "experiment":
+                        role_index["has_origins"] = True
+                except Exception:  # noqa: BLE001 - committed mutation retains its receipt
+                    log.debug("artifact role delta unavailable", exc_info=True)
         for category in PAGE_DELTA_CATEGORIES:
+            if category in {"artifact_role_promotion", "transient_state_review"}:
+                continue
             pages_map = dict(categories.get(category) or {})
             entries = (grouped.get(category) or {}).get(rel)
             if entries:
@@ -1143,6 +1179,7 @@ def apply_write_delta(
                 else {}
             ),
             "claims": dict(current.get("claims") or {}),
+            "role_state": role_index,
         }
         save(vault_root, updated)
     return updated
@@ -1539,6 +1576,7 @@ def _persist_delta(
             )
         ),
         "claims": claims if claims is not None else dict(current.get("claims") or {}),
+        "role_state": current.get("role_state"),
     }
     save(vault_root, updated)
     return updated
@@ -2103,7 +2141,7 @@ def served_entries(
         if payload is None:
             return []
 
-    if not _has_entries(payload):
+    if not _has_entries(payload) and not (payload.get("role_state") or {}).get("has_origins"):
         # Nothing stored, so nothing to filter, count or order — and no disclosure
         # decision to make, because the answer is the empty list either way. This
         # is not an optimisation of the egress rule; it is the case where the rule
@@ -2146,7 +2184,21 @@ def served_entries(
 
     order = {category: rank for rank, category in enumerate(PROJECTION_CATEGORIES)}
     rows: list[dict[str, Any]] = []
-    categories = payload.get("categories") or {}
+    categories = dict(payload.get("categories") or {})
+    role_index = payload.get("role_state")
+    if isinstance(role_index, dict):
+        from . import artifact_role_review, artifact_role_state
+        try:
+            findings, _ = artifact_role_state.served(vault_root, keep)
+            role_grouped = _entries_from_findings(vault_root, findings)
+            for family in artifact_role_review.FAMILIES:
+                categories[family] = {
+                    path: _bucket(entries, today)
+                    for path, entries in (role_grouped.get(family) or {}).items()
+                }
+        except Exception:  # noqa: BLE001 - omit advice when its evidence is unavailable
+            for family in artifact_role_review.FAMILIES:
+                categories[family] = {}
     for category in PROJECTION_CATEGORIES:
         if category in excluded:
             # A count of things the user asked not to hear about is a nag by

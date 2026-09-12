@@ -1512,6 +1512,15 @@ def op_bootstrap(
                 # would silently vanish.
                 "due_state": "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due",
                 "due_state_handling": "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy",
+                "artifact_role_state_handling": (
+                    "read supporting units for role/state review; choose a home by role, "
+                    "preserve exact source-unit provenance and history, and route observed "
+                    "state through Records claims. Extraction needs restructure_execution "
+                    "confirmation; already-authorized local corrections need no new approval. "
+                    "Signals grant no authority; compact omission proves no clean coverage. "
+                    "Handle visible role transitions before writing; "
+                    "MCP cannot observe tool-free turns"
+                ),
                 "due_state_authority": "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering",
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
@@ -1890,6 +1899,7 @@ _SESSION_POST_WRITE_KEYS = (
     "due_state",
     "due_state_handling",
     "due_state_authority",
+    "artifact_role_state_handling",
     "review_reason",
     "family_disposition",
     "family_disposition_reading",
