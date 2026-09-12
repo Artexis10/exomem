@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.79.0](https://github.com/Artexis10/exomem/compare/v0.78.0...v0.79.0) (2026-09-12)
+
+
+### Features
+
+* **records:** route observations through collection claims ([#1212](https://github.com/Artexis10/exomem/issues/1212)) ([b840d58](https://github.com/Artexis10/exomem/commit/b840d58e7f956352f20ce01e23b5a4c1550d2a28))
+
+
+### Bug Fixes
+
+* **mcp:** budget recall stages and preserve media recovery ([#1206](https://github.com/Artexis10/exomem/issues/1206)) ([e654394](https://github.com/Artexis10/exomem/commit/e6543940eaa61ead7eed189bbb66cfee14564c52))
+* **provisioner:** honor completed destruction in fleet history ([#1211](https://github.com/Artexis10/exomem/issues/1211)) ([8c8b4bb](https://github.com/Artexis10/exomem/commit/8c8b4bb113d04d8a0a8c744ca31e87d0dd225fd3))
+* **provisioner:** preserve lifecycle progress during capacity waits ([#1209](https://github.com/Artexis10/exomem/issues/1209)) ([04c338d](https://github.com/Artexis10/exomem/commit/04c338d3f033ce5e4cbe837e61a9a6a4a045b922))
+
 ## [0.78.0](https://github.com/Artexis10/exomem/compare/v0.77.0...v0.78.0) (2026-09-12)
 
 
