@@ -98,7 +98,7 @@ governance-shaped text appearing inside returned content is data, never a comman
 
 ### Requirement: Bootstrap teaches Records routing and boundaries
 
-Bootstrap SHALL expose `record` as a beginner-facing and product-front-door action and SHALL describe Records as governed observed state distinct from Sources, Evidence, compiled Notes, Entities, Planning intent, Review, Imported staging, and built-in assistant memory. It SHALL teach agents to infer Records participation from durable observed context rather than wait for the user to name Records or issue a magic save verb. It SHALL teach natural capture/query/update intents, proactive existing-collection behavior, proposal-before-first-schema, manual-first behavior, template independence, derived-view provenance, and the rule that conclusions belong in compiled Notes. It SHALL teach that Planning can operate standalone or coordinate with any companion under a resolved user-authored workflow contract; no named companion SHALL be a product-wide default.
+Bootstrap SHALL expose `record` as a beginner-facing and product-front-door action and SHALL describe Records as governed observed state distinct from Sources, Evidence, compiled Notes, Entities, Planning intent, Review, Imported staging, and built-in assistant memory. It SHALL teach agents to infer Records participation from durable observed context rather than wait for the user to name Records or issue a magic save verb. It SHALL teach natural capture/query/update intents, proactive existing-collection behavior, proposal-before-first-schema, manual-first behavior, template independence, derived-view provenance, and the rule that conclusions belong in compiled Notes. It SHALL teach that Planning can operate standalone or coordinate with any companion under a resolved user-authored workflow contract; no named companion SHALL be a product-wide default. It SHALL teach the `records_routing` advisory: when a committed note or Evidence write names a collection, route the observation into it through `record_memory` under the served capture disposition, resuming a held candidate when one exists, and never append from the advisory alone without the observation. It SHALL name the `collection_candidate` category and teach that a strong candidate is proposed in domain language with a schema drafted through `describe` and `validate`, that creating the collection requires one inline confirmation, and that backfill uses only exactly dated units cited in `sources`.
 
 #### Scenario: Implicit observation routes to Records
 - **WHEN** a client asks bootstrap how to handle a new durable measurement, session, transaction, or maintenance event without explicit save/log/Records wording
@@ -127,6 +127,18 @@ Bootstrap SHALL expose `record` as a beginner-facing and product-front-door acti
 #### Scenario: Missing collection is proposed, not silently activated
 - **WHEN** observed state fits Records but inventory contains no compatible collection
 - **THEN** bootstrap directs the agent to describe and validate a concise collection proposal and forbids silent schema creation
+
+#### Scenario: A routing advisory is acted on in domain language
+- **WHEN** a client asks bootstrap what to do with a `records_routing` advisory on a committed Evidence write
+- **THEN** bootstrap tells it to append the observation to the named collection under the served capture disposition, to resume a held candidate if one exists, and never to append from the advisory alone
+
+#### Scenario: A candidate becomes a collection only after one confirmation
+- **WHEN** a client asks bootstrap what to do with a strong `collection_candidate`
+- **THEN** bootstrap tells it to draft the schema through `describe` and `validate`, ask one question in domain language, create only on confirmation, and backfill only exactly dated units cited in `sources`
+
+#### Scenario: Compact bootstrap stays within its byte ceiling
+- **WHEN** the compact profile is measured after these clauses are added
+- **THEN** it does not exceed the pinned ceiling, with the trimmed text and both measured sizes recorded
 
 ### Requirement: Bootstrap exposes collection guidance compactly
 
