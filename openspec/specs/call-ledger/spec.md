@@ -70,7 +70,12 @@ Every row SHALL carry the latency of the call it records, for reads as well as w
 refusals as well as successes: `duration_ms` for the tool leaf, and `total_ms` for the wall
 clock the caller actually waited, including work done before the leaf. `duration_ms` SHALL keep
 its existing meaning, so that the prose trace and the per-tool duration metric are not silently
-redefined. Rows SHALL also record the total serialized size of the arguments.
+redefined. Rows SHALL also record the total serialized size of the arguments. Rows SHALL carry the
+call's stage `spans` (name, count and milliseconds per stage, bounded in count and name length),
+including `recall.<stage>` spans for recall calls, and a `budget` block (`seconds`,
+`remaining_ms`, `skipped`) whenever a request budget applied, so a slow row can be attributed by
+stage without a second call. Spans and budget blocks SHALL carry no query text, path, excerpt or
+other content.
 
 #### Scenario: A slow call reports how long it took
 
@@ -95,6 +100,17 @@ redefined. Rows SHALL also record the total serialized size of the arguments.
 - **WHEN** two calls carry arguments of very different sizes
 - **THEN** their rows record correspondingly different `request_bytes`
 - **AND** no argument value is recorded to produce that figure
+
+#### Scenario: A recall row attributes its time by stage
+
+- **WHEN** an `ask_memory` call runs inside an MCP call
+- **THEN** the row's `spans` include `recall.` entries for the stages that ran, with milliseconds
+- **AND** no span carries the query text, a hit path or an excerpt
+
+#### Scenario: A budgeted row records what the budget did
+
+- **WHEN** a request budget applied to the call and a stage was skipped
+- **THEN** the row's `budget` names the budget in seconds, the remaining milliseconds at return, and the skipped stages
 
 ### Requirement: Every Row Names The Calling Client
 
