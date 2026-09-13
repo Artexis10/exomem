@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.0](https://github.com/Artexis10/exomem/compare/v0.80.1...v0.81.0) (2026-09-13)
+
+
+### Features
+
+* **bench:** add paired downstream action utility instrument ([#1222](https://github.com/Artexis10/exomem/issues/1222)) ([5a7915b](https://github.com/Artexis10/exomem/commit/5a7915ba0333ec379609d86d508f90341a5df7cd))
+* **memory:** persist engagement choices for each identity and vault ([#1233](https://github.com/Artexis10/exomem/issues/1233)) ([f8455c3](https://github.com/Artexis10/exomem/commit/f8455c3f89cd7c630232cea2b3c36adf46297e6c))
+
+
+### Bug Fixes
+
+* **bench:** separate constraint identifiers from task prose ([#1234](https://github.com/Artexis10/exomem/issues/1234)) ([5c5a5c5](https://github.com/Artexis10/exomem/commit/5c5a5c5e171807306133058368dc21580996cb3e))
+* **hosted:** bind fresh governed storage before registration ([#1230](https://github.com/Artexis10/exomem/issues/1230)) ([cba5396](https://github.com/Artexis10/exomem/commit/cba5396b6f47b79eb538934f295e73361c143a53))
+
 ## [0.80.1](https://github.com/Artexis10/exomem/compare/v0.80.0...v0.80.1) (2026-09-13)
 
 
