@@ -573,7 +573,7 @@ def test_systemd_identity_reports_the_units_environment_file(tmp_path, monkeypat
         "KillMode": "control-group",
         "SendSIGKILL": "yes",
         "TimeoutStopUSec": "30s",
-        "EnvironmentFiles": "/home/owner/.config/exomem/service.env (ignore_errors=no)",
+        "EnvironmentFiles": f"{tmp_path}/service.env (ignore_errors=no)",
     }
     identity = module.verify_systemd_identity(
         "sample.service",
@@ -581,4 +581,4 @@ def test_systemd_identity_reports_the_units_environment_file(tmp_path, monkeypat
         proc_root=proc,
         cgroup_root=tmp_path / "cgroup",
     )
-    assert identity["environment_file"] == "/home/owner/.config/exomem/service.env"
+    assert identity["environment_file"] == str(tmp_path / "service.env")

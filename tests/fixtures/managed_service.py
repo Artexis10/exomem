@@ -44,19 +44,32 @@ async def token(root):
     path.chmod(0o600)
 
 
-def worker(root, socket_path):
+def worker(root, socket_path, standby=False):
     from key_value.aio.stores.memory import MemoryStore
     from starlette.middleware import Middleware
     from starlette.responses import JSONResponse
 
+    from exomem import readiness, service_standby
     from exomem.server import ExomemFastMCP
     from exomem.server_transport import PrimeMcpSSEMiddleware
     from exomem.session_oauth import ExomemSessionOAuthProxy
 
     if (root / "fail-start").exists():
         raise SystemExit(2)
-    (root / "worker.pid").write_text(str(os.getpid()))
-    event(root, "worker-start")
+    if standby:
+        # The graph proof itself is unit-tested against a real vault; this
+        # fixture owns the supervisor lifecycle, so it supplies a checkpoint and
+        # exercises the real readiness, budget and promotion paths.
+        service_standby.snapshot_token = lambda _root: "fixture-checkpoint"
+        service_standby.enter_standby()
+        (root / "standby.pid").write_text(str(os.getpid()))
+        event(root, "standby-start", mark=os.environ.get("EXOMEM_FIXTURE_MARK", ""))
+        readiness.mark_ready("lexical")
+        if not (root / "standby-stalls").exists():
+            service_standby.prove_graph_snapshot(root)
+    else:
+        (root / "worker.pid").write_text(str(os.getpid()))
+        event(root, "worker-start")
 
     class NoExternalTokens:
         required_scopes = []
@@ -100,7 +113,17 @@ def worker(root, socket_path):
 
     @app.custom_route("/health/ready", methods=["GET"])
     async def ready(request):
-        return JSONResponse({"status": "ready"})
+        return JSONResponse(
+            {"status": "ready", "cutover": service_standby.readiness_payload()}
+        )
+
+    @app.custom_route("/control/promote", methods=["POST"])
+    async def promote(request):
+        payload = json.loads(await request.body() or b"{}")
+        record = service_standby.promote(root, migrated=bool(payload.get("migrated")))
+        (root / "worker.pid").write_text(str(os.getpid()))
+        event(root, "promoted", migrated=bool(payload.get("migrated")))
+        return JSONResponse(record)
 
     app.run(
         transport="http",
@@ -111,7 +134,7 @@ def worker(root, socket_path):
     )
 
 
-async def daemon(root, port, unit):
+async def daemon(root, port, unit, env_file=None):
     from exomem.service_ingress import IngressLimits, ServiceIngress
     from exomem.service_manager import (
         Supervisor,
@@ -128,21 +151,32 @@ async def daemon(root, port, unit):
     await token(root)
 
     class FixtureRuntime(WorkerRuntime):
-        async def _spawn(self, command):
+        async def _spawn(self, command, *, standby=False):
             if "worker" in command:
+                socket_path = self.standby_socket if standby else self.socket_path
                 command = [
                     sys.executable,
                     __file__,
                     "worker",
                     str(root),
                     "--socket",
-                    str(self.socket_path),
+                    str(socket_path),
                 ]
+                if standby:
+                    command.append("--standby")
             elif "maintain" in command:
                 command = [sys.executable, __file__, "migrate", str(root)]
-            await super()._spawn(command)
+            await super()._spawn(command, standby=standby)
 
-    runtime = FixtureRuntime(directory / "worker.sock", host="127.0.0.1", port=port)
+        def migration_required(self, target):
+            if (root / "declare-migration").exists():
+                return True, "descriptors_changed"
+            return False, "declared_none"
+
+    runtime = FixtureRuntime(
+        directory / "worker.sock", host="127.0.0.1", port=port, environment_file=env_file
+    )
+    event(root, "supervisor-start", mark=os.environ.get("EXOMEM_FIXTURE_MARK", ""))
     manager = Supervisor(
         directory,
         initial_target={"python": sys.executable, "version": version("exomem")},
@@ -160,11 +194,13 @@ def main():
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--socket", type=Path)
     parser.add_argument("--unit")
+    parser.add_argument("--standby", action="store_true")
+    parser.add_argument("--env-file", type=Path)
     args = parser.parse_args()
     if args.mode == "daemon":
-        asyncio.run(daemon(args.root, args.port, args.unit))
+        asyncio.run(daemon(args.root, args.port, args.unit, args.env_file))
     elif args.mode == "worker":
-        worker(args.root, args.socket)
+        worker(args.root, args.socket, standby=args.standby)
     else:
         for name in ("worker.pid", "escaped.pid"):
             path = args.root / name

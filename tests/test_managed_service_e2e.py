@@ -46,7 +46,7 @@ async def eventually(predicate, timeout=10):
 
 
 @asynccontextmanager
-async def live_fixture(tmp_path):
+async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30"):
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
@@ -62,11 +62,17 @@ async def live_fixture(tmp_path):
             "KB_MCP_DISABLE_MEDIA_EXTRACTION": "1",
             "EXOMEM_DISABLE_CLIP": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
+            # Keep the standby warm budget inside the suite's own patience; the
+            # production default is minutes.
+            "EXOMEM_STANDBY_WARM_SECONDS": warm_seconds,
         }
     )
     log = (tmp_path / "service.log").open("w")
+    command = [sys.executable, str(FIXTURE), "daemon", str(tmp_path), "--port", str(port)]
+    if env_file is not None:
+        command += ["--env-file", str(env_file)]
     child = subprocess.Popen(
-        [sys.executable, str(FIXTURE), "daemon", str(tmp_path), "--port", str(port)],
+        command,
         env=env,
         stdout=log,
         stderr=log,
@@ -95,7 +101,7 @@ async def live_fixture(tmp_path):
                 os.killpg(child.pid, signal.SIGKILL)
                 await asyncio.to_thread(child.wait)
         # A failed fixture must not leave a separately-sessioned worker behind.
-        for name in ("worker.pid", "escaped.pid"):
+        for name in ("worker.pid", "standby.pid", "escaped.pid"):
             path = tmp_path / name
             if path.exists():
                 try:
@@ -389,3 +395,123 @@ def test_shipped_private_worker_runs_full_server_with_existing_auth(vault, tmp_p
                 os.killpg(worker.pid, signal.SIGKILL)
                 worker.wait()
         log.close()
+
+
+def test_a_standby_warms_beside_the_serving_worker_and_is_promoted(tmp_path):
+    """The real supervisor sequence: warm, then cut over (D7, D8)."""
+    from fastmcp import Client
+
+    async def scenario():
+        async with live_fixture(tmp_path) as (url, token, _):
+            async with Client(url, auth=token, mode="auto", timeout=20) as client:
+                before = await client.call_tool("counted", {"marker": "before"})
+                serving = before.data["pid"]
+                started = asyncio.get_running_loop().time()
+                result = await control(tmp_path, "upgrade")
+                unavailable = asyncio.get_running_loop().time() - started
+                assert result["ok"] is True, result
+                handoff = result["handoff"]
+                assert handoff["standby"] == "ready"
+                assert handoff["migration"] == {"state": "skipped", "reason": "declared_none"}
+                assert handoff["promotion"]["snapshot"] == "current"
+                after = await client.call_tool("counted", {"marker": "after"})
+                assert after.data["pid"] != serving
+
+            kinds = [entry["kind"] for entry in events(tmp_path)]
+            # The candidate warms while the old worker is still the one serving,
+            # and the migrator never runs because the target declares none.
+            assert kinds.index("standby-start") < kinds.index("promoted")
+            assert "migrate" not in kinds
+            # The whole cutover, not just the gap, stays well inside the budget.
+            assert unavailable < 20, unavailable
+            # The record carries the window nobody was served in, which is what
+            # an operator compares across releases.
+            assert 0 < handoff["unavailable_ms"] < 20_000, handoff
+
+    asyncio.run(scenario())
+
+
+def test_a_declared_migration_still_runs_between_the_two_workers(tmp_path):
+    from fastmcp import Client
+
+    async def scenario():
+        (tmp_path / "declare-migration").write_text("1")
+        async with live_fixture(tmp_path) as (url, token, _):
+            async with Client(url, auth=token, mode="auto", timeout=20) as client:
+                await client.call_tool("counted", {"marker": "before"})
+                result = await control(tmp_path, "upgrade")
+                assert result["ok"] is True, result
+                assert result["handoff"]["migration"] == {
+                    "state": "ran",
+                    "reason": "descriptors_changed",
+                }
+                await client.call_tool("counted", {"marker": "after"})
+            kinds = [entry["kind"] for entry in events(tmp_path)]
+            # The migrator owns state alone: it runs after the old worker has
+            # stopped and before the standby is promoted.
+            assert kinds.index("standby-start") < kinds.index("migrate")
+            assert kinds.index("migrate") < kinds.index("promoted")
+
+    asyncio.run(scenario())
+
+
+def test_a_stalled_standby_is_discarded_and_the_old_worker_keeps_serving(tmp_path):
+    from fastmcp import Client
+
+    async def scenario():
+        (tmp_path / "standby-stalls").write_text("1")
+        async with live_fixture(tmp_path, warm_seconds="8") as (url, token, _):
+            async with Client(url, auth=token, mode="auto", timeout=20) as client:
+                before = await client.call_tool("counted", {"marker": "before"})
+                serving = before.data["pid"]
+                reader, writer = await asyncio.open_unix_connection(
+                    str(tmp_path / "managed/control.sock")
+                )
+                request = {
+                    "command": "upgrade",
+                    "target": {"python": sys.executable, "version": version("exomem")},
+                }
+                writer.write(json.dumps(request).encode() + b"\n")
+                await writer.drain()
+                try:
+                    result = json.loads(await asyncio.wait_for(reader.readline(), 60))
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+                # The candidate never reaches cutover readiness, so the upgrade
+                # falls back to the one-worker sequence with the waiting
+                # component recorded; the endpoint is never left unserved.
+                assert result["ok"] is True, result
+                assert result["handoff"]["standby"] == "discarded"
+                assert result["handoff"]["waiting"] == "graph_snapshot"
+                assert result["handoff"]["unavailable_ms"] > 0
+                after = await client.call_tool("counted", {"marker": "after"})
+                assert after.data["pid"] != serving
+
+    asyncio.run(scenario())
+
+
+def test_a_standby_is_spawned_with_the_current_service_environment_file(tmp_path):
+    """An edited service environment reaches the next worker without a restart."""
+    from fastmcp import Client
+
+    async def scenario():
+        env_file = tmp_path / "service.env"
+        env_file.write_text("EXOMEM_FIXTURE_MARK=before\n")
+        async with live_fixture(tmp_path, env_file=env_file) as (url, token, _):
+            async with Client(url, auth=token, mode="auto", timeout=20) as client:
+                await client.call_tool("counted", {"marker": "before"})
+                # The operator edits the unit's environment file after the
+                # supervisor has already read it through systemd.
+                env_file.write_text("EXOMEM_FIXTURE_MARK=after\n")
+                result = await control(tmp_path, "upgrade")
+                assert result["ok"] is True, result
+                await client.call_tool("counted", {"marker": "after"})
+            entries = events(tmp_path)
+            supervisor = next(e for e in entries if e["kind"] == "supervisor-start")
+            standby = next(e for e in entries if e["kind"] == "standby-start")
+            assert standby["mark"] == "after"
+            # The supervisor's own environment is unchanged by the child's read.
+            assert supervisor["mark"] == ""
+
+    asyncio.run(scenario())

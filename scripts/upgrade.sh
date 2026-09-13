@@ -127,6 +127,10 @@ if exomem_service_is_managed "$UNIT_FILE"; then
     if [[ "$CLI_SYNC" != "never" ]]; then
         exomem_verify_visible_clis "$SERVED" "$VENV_PYTHON" "$CLI_REQUIRED"
     fi
+    # The handoff record is how the operator sees whether the replacement warmed
+    # as a standby and whether the offline migrator ran.
+    printf '%s' "$RESULT" | "$VENV_PYTHON" -c 'import json,sys; h=json.load(sys.stdin).get("handoff") or {}; m=h.get("migration") or {}; p=h.get("promotion") or {}; print("Handoff: standby={} migration={}({}) snapshot={}{}".format(h.get("standby","unknown"), m.get("state","unknown"), m.get("reason",""), p.get("snapshot","n/a"), "" if h.get("standby") != "discarded" else "; waited on " + str(h.get("waiting")))) if h else None' \
+        || echo "Handoff: this supervisor predates the standby sequence"
     echo "Managed serving version: $SERVED"
     exit 0
 fi

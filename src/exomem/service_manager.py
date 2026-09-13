@@ -402,6 +402,9 @@ class Supervisor:
             handoff, standby = await self._warm_standby(target, resume=resume)
             deadline = Deadline(self.transition_timeout)
             self.phase = "upgrading"
+            # The window operators care about: nobody is served between here and
+            # the resume below.
+            paused_at = time.monotonic()
             self.ingress.pause()
             if not resume:
                 try:
@@ -457,6 +460,9 @@ class Supervisor:
                     self.records.accept(target)
                     self.ingress.resume(client)
                     self.phase = "ready"
+                    handoff["unavailable_ms"] = round(
+                        (time.monotonic() - paused_at) * 1000.0, 1
+                    )
                     return {
                         "ok": True,
                         "phase": "ready",
@@ -915,7 +921,9 @@ class WorkerRuntime:
         if not self.standby_capable:
             raise RuntimeError("target release cannot run as a standby")
         deadline = Deadline(timeout)
-        self.standby_waiting = None
+        # The record always names something: a candidate that never answered its
+        # readiness probe is a fact an operator needs, not an absent field.
+        self.standby_waiting = "unreachable"
         remove_stale_socket(self.standby_socket)
         await self._spawn(
             self._worker_command(target, self.standby_socket, standby=True), standby=True

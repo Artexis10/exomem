@@ -77,6 +77,27 @@ Two release-time hazards it exists to catch:
   venv silently swaps the pinned `+cu132` torch for the default CPU wheel. The deploy fails
   on that regression; pass `-AllowCpuTorch` on hosts that are intentionally CPU-only.
 
+### Managed Linux service: what to check after the handoff
+
+On a managed Linux/WSL unit, `bash scripts/upgrade.sh` stages the release and
+hands off through the standby sequence: the candidate warms beside the worker
+that is still serving, and only then is ingress paused, drained and cut over.
+The script prints the handoff record. Check three things in it:
+
+- `standby=ready` — the candidate warmed. `discarded` names the component it was
+  waiting on and means the upgrade fell back to a cold replacement; the endpoint
+  was still served throughout, but the first writes afterwards will be slower.
+- `migration=skipped(declared_none)` — the target declared no state migration, so
+  the offline migrator did not run. `ran` is expected when the release changes
+  the state descriptor set.
+- `snapshot=current` — the checkpoint the standby proved was still the one on
+  disk at promotion. `rebuild-after-promotion` means the re-proof failed and the
+  coalesced rebuild path is repairing it; expect slower first writes.
+
+Then confirm `/health/ready` reports `status: ready` with `cutover.standby` false.
+The budgets and the full sequence are in
+[managed-service-upgrades.md](managed-service-upgrades.md#the-standby-sequence).
+
 ### Semantic-authoring migration note
 
 This release tightens new in-process writes of active compiled notes. New active
