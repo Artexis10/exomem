@@ -59,7 +59,7 @@ def _request_preference(vault_root: Path) -> dict:
     from .cli_ops import OpError
     from .governance.principal import effective_principal
 
-    preference = {"stored": None, "revision": "missing"}
+    preference = {"stored": None, "contexts": {}, "revision": "missing"}
     if effective_principal().resolved:
         try:
             preference = prominence_preferences.inspect(vault_root)
@@ -115,6 +115,14 @@ WEB_DEFAULT_PROMINENCE = "maximal"
 #: Surfaces that cannot run hooks: no filesystem to install into, no turn-level
 #: re-arming. Everything here defaults to `WEB_DEFAULT_PROMINENCE`.
 HOOKLESS_SURFACES = frozenset({"web", "hosted", "chatgpt", "claude-ai", "openai"})
+
+#: Engagement contexts. Exactly two, both derived from the detected surface: a
+#: saved level may differ between a coding client and a conversational one. The
+#: context tunes eagerness only — it never selects a principal, vault, storage
+#: path or authority ceiling.
+CODING_CONTEXT = "coding"
+CONVERSATION_CONTEXT = "conversation"
+CONTEXTS: tuple[str, ...] = (CODING_CONTEXT, CONVERSATION_CONTEXT)
 
 _PROMINENCE_ENV = "EXOMEM_PROMINENCE"
 _SURFACE_ENV = "EXOMEM_SURFACE"
@@ -412,6 +420,19 @@ def detect_surface() -> str | None:
 def _truthy(value: str | None) -> bool:
     """Shared truthiness convention (mirrors `mode._truthy`)."""
     return bool(value) and value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def context_for_surface(surface: str | None) -> str:
+    """The engagement context one surface belongs to. Pure; no detection.
+
+    Hookless surfaces are conversational; Codex, Claude Code, every other named
+    surface, and an absent or unrecognized one are `coding`, which keeps today's
+    generic default for unknown clients. Callers that want the live surface pass
+    `detect_surface()`; a request argument never supplies the applied context.
+    """
+    if surface and surface.strip().lower() in HOOKLESS_SURFACES:
+        return CONVERSATION_CONTEXT
+    return CODING_CONTEXT
 
 
 def default_for_surface(surface: str | None = None) -> str:
