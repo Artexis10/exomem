@@ -110,6 +110,12 @@ Supply the confidential internal operation ID only through a current-user-owned
 regular mode-`0600` file. Do not put it in a shell history, command argument,
 manifest, log, receipt, or ticket.
 
+The identity is the provisioner's internal operation ID, the key of the
+operation's database record. It is not the `exomem.io/operation-id` annotation
+on the tenant namespace or provider object: that annotation carries the provider
+operation ID, and every recovery mode refuses it as `operation is unavailable`
+without changing anything.
+
 ```bash
 umask 077
 recovery_identity=/secure/operator/recovery-operation-id
