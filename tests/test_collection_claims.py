@@ -1423,6 +1423,46 @@ def test_candidate_serve_recomposes_when_representative_page_is_withheld(
     assert all(row["path"] != hidden for row in filtered)
 
 
+def test_carrier_reuses_projection_and_routing_within_each_audience_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance import egress
+
+    _write_candidate_pages(tmp_path)
+    _write_manifest(tmp_path, claims="claims:\n  terms: [account, subscriptions]\n")
+    _write_observation(tmp_path)
+    now = dt.datetime(2026, 9, 3, 12, tzinfo=dt.UTC)
+    due_state.reconcile(tmp_path, now=now)
+    original_load = due_state.load
+    original_targets = due_state.routing_targets
+    calls = {"load": 0, "routing": 0}
+
+    def load(*args, **kwargs):
+        calls["load"] += 1
+        return original_load(*args, **kwargs)
+
+    def targets(*args, **kwargs):
+        calls["routing"] += 1
+        return original_targets(*args, **kwargs)
+
+    monkeypatch.setattr(due_state, "load", load)
+    monkeypatch.setattr(due_state, "routing_targets", targets)
+    visible = due_state.served_entries(tmp_path, now=now)
+    assert sum(row["category"] == "collection_candidate" for row in visible) >= 2
+    assert any(row["category"] == "unreflected_observations" for row in visible)
+    assert calls == {"load": 1, "routing": 1}
+
+    monkeypatch.setattr(
+        egress,
+        "release_walk_filter",
+        lambda *_args, **_kwargs: lambda path: path != MANIFEST_PATH,
+    )
+    calls.update(load=0, routing=0)
+    withheld = due_state.served_entries(tmp_path, now=now)
+    assert not any(row["category"] == "unreflected_observations" for row in withheld)
+    assert calls == {"load": 1, "routing": 1}
+
+
 def test_collection_coverage_reports_unreflected_and_inventory_count(tmp_path: Path) -> None:
     manifest = collections.load_manifest(
         tmp_path,

@@ -84,7 +84,7 @@ import os
 import tempfile
 import threading
 import uuid
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -405,7 +405,10 @@ def _entries_from_findings(
 
 
 def _survivors_only(
-    vault_root: Path, entry: dict[str, Any], keep: Any
+    vault_root: Path,
+    entry: dict[str, Any],
+    keep: Any,
+    routing: Callable[[], list[Any]],
 ) -> dict[str, Any] | None:
     """Re-derive one entry from the joined pages THIS audience may see.
 
@@ -441,12 +444,9 @@ def _survivors_only(
             and type(row.get("page")) is str
             and keep(str(row["page"]))
         ]
-        claims_payload = {"claims": (load(vault_root) or {}).get("claims") or {}}
         covered = {
             term
-            for target in routing_targets(
-                vault_root, payload=claims_payload, authorize_path=keep
-            )
+            for target in routing()
             for term in target.claims
         }
         projects = component.get("project_terms") or ()
@@ -479,7 +479,7 @@ def _survivors_only(
 
         advisory = collection_claims.route(
             component.get("terms") or (),
-            routing_targets(vault_root, authorize_path=keep),
+            routing(),
         )
         if not advisory or advisory.get("collection") != collection:
             return None
@@ -896,6 +896,23 @@ def routing_targets(
     return targets
 
 
+def _routing_snapshot(
+    vault_root: Path, payload: dict[str, Any], keep: Any
+) -> Callable[[], list[Any]]:
+    """Reuse routing only within one projection read and its audience."""
+    targets: list[Any] | None = None
+
+    def routing() -> list[Any]:
+        nonlocal targets
+        if targets is None:
+            # Reloading the whole projection for every finding multiplies
+            # carrier latency by the number of collection candidates.
+            targets = routing_targets(vault_root, payload=payload, authorize_path=keep)
+        return targets
+
+    return routing
+
+
 def collection_observation_coverage(
     vault_root: Path,
     manifest_path: str,
@@ -934,6 +951,7 @@ def collection_observation_coverage(
         return {"complete": False, "unreflected": [], "pending": []}
     open_refs: set[str] = set()
     pending_refs: set[str] = set()
+    routing = _routing_snapshot(vault_root, payload, authorize_path)
     for bucket in pages.values():
         for entry in _unbucket(bucket):
             component = entry.get("component")
@@ -943,7 +961,7 @@ def collection_observation_coverage(
                 or str(component.get("collection") or "") != manifest_path
             ):
                 continue
-            rebuilt = _survivors_only(Path(vault_root), entry, authorize_path)
+            rebuilt = _survivors_only(Path(vault_root), entry, authorize_path, routing)
             if rebuilt is None:
                 continue
             component = rebuilt.get("component") or {}
@@ -2182,6 +2200,8 @@ def served_entries(
         return []
     excluded = _excluded_families(state_payload)
 
+    routing = _routing_snapshot(vault_root, payload, keep)
+
     order = {category: rank for rank, category in enumerate(PROJECTION_CATEGORIES)}
     rows: list[dict[str, Any]] = []
     categories = dict(payload.get("categories") or {})
@@ -2231,7 +2251,7 @@ def served_entries(
                     if keep is not None and path and not candidate_component and not keep(path):
                         continue  # withheld: contributes to nothing, anywhere
                     if keep is not None:
-                        entry = _survivors_only(vault_root, entry, keep)
+                        entry = _survivors_only(vault_root, entry, keep, routing)
                         if entry is None:
                             # Every page this finding was ABOUT is withheld from
                             # this audience, so under that audience there is no
