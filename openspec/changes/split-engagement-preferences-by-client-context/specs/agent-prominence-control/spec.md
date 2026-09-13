@@ -52,6 +52,10 @@ Effective prominence SHALL resolve from a valid operator environment override, t
 - **WHEN** the operator pins Light and an agent requests Maximal
 - **THEN** the operation reports that the override prevents the change, leaves storage untouched and continues reporting Light
 
+#### Scenario: A clear proceeds under an operator override
+- **WHEN** the operator pins Light and an agent clears a saved coding context value
+- **THEN** the value is removed, the identity-wide value is untouched, and the response reports Light from the operator override
+
 #### Scenario: Known web client has no stored selection
 - **WHEN** a known hookless client bootstraps without an explicit preference
 - **THEN** the response reports Maximal from its surface default

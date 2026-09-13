@@ -12,6 +12,6 @@
 
 ## 3. Delivery
 
-- [ ] 3.1 Obtain an author-independent review of the actual diff covering the migration, the clear/set race under one revision, context derivation for unknown clients, the override precedence and every path the context string travels; resolve blocking findings and recheck.
+- [x] 3.1 Obtain an author-independent review of the actual diff covering the migration, the clear/set race under one revision, context derivation for unknown clients, the override precedence and every path the context string travels; resolve blocking findings and recheck.
 - [ ] 3.2 Run the scoped suites during rounds and the full CI shard suite on the pull request head, strict OpenSpec validation and the public-artifact privacy gate; open a ready pull request with the evidence.
 - [ ] 3.3 Deliver under the standing release authority, save Balanced for `coding` on the personal service, verify a fresh coding client resolves Balanced from `preference:context` and a fresh conversational client resolves Maximal, confirm the unrelated service instance is unchanged, then synchronize and archive this change.
