@@ -616,6 +616,12 @@ def op_configure_memory(
     Adopt the returned engagement contract in the current conversation.
 
     Args:
+        action: "inspect" reads the saved state, "set" writes a level, and
+            "clear" removes one context value.
+        prominence: The level to save — off, light, balanced or maximal; required
+            by set and rejected by clear.
+        expected_revision: The revision a prior inspect returned, so a stale write
+            is refused rather than overwriting a later choice.
         context: Which saved context value to write or clear; the context applied
             to a request is always derived from the client surface, never from
             this argument.
