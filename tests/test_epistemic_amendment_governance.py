@@ -30,6 +30,7 @@ SEQUENCE_TWO_FAMILIES = ("f20", "f21", "f22", "f23", "f24", "f25", "f26")
 SEQUENCE_THREE_FAMILIES = ("f27",)
 SEQUENCE_FOUR_FAMILIES = ("f28", "f29")
 SEQUENCE_FIVE_FAMILIES = ("f30", "f31")
+SEQUENCE_SIX_ACKNOWLEDGED_REVISION = "5a7915ba0333ec379609d86d508f90341a5df7cd"
 #: The squash commit on ``main`` carrying the sequence-3 amended document and its
 #: then-pending receipt (#762), pinned by the founder at acknowledgment.
 SEQUENCE_THREE_ACKNOWLEDGED_REVISION = "287b984418ff3a02b26e05aafeb3bcbae255b27b"
@@ -669,14 +670,16 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     assert pending_five.acknowledgment_status == "pending"
     assert pending_five.introduced_family_ids == SEQUENCE_FIVE_FAMILIES
     assert pending_five.contract.repository_revision == pending_five.receipt.introduction_revision
-    pending_six = identity.amendments[5]
-    assert pending_six.sequence == 6
-    assert pending_six.acknowledgment_status == "pending"
-    assert pending_six.introduced_family_ids == ("f32",)
-    assert identity.effective.sha256 == pending_six.contract.sha256
-    assert identity.pending_amendments == (pending_two, pending_four, pending_five, pending_six)
+    acknowledged_six = identity.amendments[5]
+    assert acknowledged_six.sequence == 6
+    assert acknowledged_six.acknowledgment_status == "acknowledged"
+    assert acknowledged_six.contract.repository_revision == SEQUENCE_SIX_ACKNOWLEDGED_REVISION
+    assert acknowledged_six.receipt.introduction_revision != SEQUENCE_SIX_ACKNOWLEDGED_REVISION
+    assert acknowledged_six.introduced_family_ids == ("f32",)
+    assert identity.effective.sha256 == acknowledged_six.contract.sha256
+    assert identity.pending_amendments == (pending_two, pending_four, pending_five)
     assert identity.withheld_family_ids == frozenset(
-        SEQUENCE_TWO_FAMILIES + SEQUENCE_FOUR_FAMILIES + SEQUENCE_FIVE_FAMILIES + ("f32",)
+        SEQUENCE_TWO_FAMILIES + SEQUENCE_FOUR_FAMILIES + SEQUENCE_FIVE_FAMILIES
     )
 
 
@@ -708,6 +711,7 @@ def test_the_acknowledged_amendment_releases_its_own_families() -> None:
     # Sequence 3 releases through the same identity-level call (spec: the
     # refusal covers run-manifest construction too, not only the loader).
     require_amended_families_released(identity, SEQUENCE_THREE_FAMILIES)
+    require_amended_families_released(identity, ("f32",))
 
 
 def test_the_pending_refusal_is_still_armed_for_a_future_amendment() -> None:
@@ -783,7 +787,7 @@ def test_acknowledged_amendment_is_recorded_on_every_run_manifest(
     # Sequence 3 left the withheld set when its acknowledgment landed 2026-08-30;
     # Sequences 4 and 5 are pending alongside sequence 2.
     assert manifest.preregistration_identity.withheld_family_ids == frozenset(
-        (*SEQUENCE_TWO_FAMILIES, *SEQUENCE_FOUR_FAMILIES, *SEQUENCE_FIVE_FAMILIES, "f32")
+        (*SEQUENCE_TWO_FAMILIES, *SEQUENCE_FOUR_FAMILIES, *SEQUENCE_FIVE_FAMILIES)
     )
     assert manifest.preregistration_lineage is not None
 
@@ -945,7 +949,7 @@ def test_the_loader_gate_releases_sequences_one_and_three_and_withholds_two() ->
 
     reset_cache()
     assert withheld_family_ids(ROOT) == frozenset(
-        SEQUENCE_TWO_FAMILIES + SEQUENCE_FOUR_FAMILIES + SEQUENCE_FIVE_FAMILIES + ("f32",)
+        SEQUENCE_TWO_FAMILIES + SEQUENCE_FOUR_FAMILIES + SEQUENCE_FIVE_FAMILIES
     )
     for family_id in AMENDED_FAMILIES + SEQUENCE_THREE_FAMILIES:
         require_family_released(family_id, repo_root=ROOT)
@@ -1049,3 +1053,23 @@ def test_every_execution_path_now_reaches_an_amended_family() -> None:
         _scenario_yaml("f01", "evidence_path_exists"), source="f01.yaml"
     ).family_id == "f01"
     assert assemble_family(family_id="f01", provider="fixture").family_id == "f01"
+
+
+def test_utility_acknowledgment_releases_both_gates_and_preserves_frozen_contract():
+    from epistemic.amendments import require_family_released
+    from protocol.contracts import (
+        derive_preregistration_identity,
+        require_amended_families_released,
+        working_amendment_receipts,
+    )
+
+    receipt = working_amendment_receipts(ROOT)[5]
+    assert receipt.ratifier == FOUNDER
+    assert receipt.acknowledged_on == "2026-09-13"
+    assert receipt.repository_revision == SEQUENCE_SIX_ACKNOWLEDGED_REVISION
+    before = derive_preregistration_identity(ROOT, contract_revision=SEQUENCE_SIX_ACKNOWLEDGED_REVISION)
+    after = derive_preregistration_identity(ROOT)
+    assert before.amendments[5].acknowledgment_status == "pending"
+    assert after.effective.sha256 == before.effective.sha256
+    require_amended_families_released(after, ("f32",))
+    require_family_released("f32", repo_root=ROOT)
