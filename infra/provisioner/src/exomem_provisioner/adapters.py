@@ -1352,7 +1352,12 @@ class KubernetesVaultFingerprintAdapter:
         template_metadata = template.get("metadata") if isinstance(template, dict) else None
         template_spec = template.get("spec") if isinstance(template, dict) else None
         controls = {key: value for key, value in spec.items() if key != "template"}
-        defaults = {"completionMode": "NonIndexed", "suspend": False, "manualSelector": False}
+        defaults = {
+            "completionMode": "NonIndexed",
+            "suspend": False,
+            "manualSelector": False,
+            "podReplacementPolicy": "TerminatingOrFailed",
+        }
         if (
             identity.get("name") != body["metadata"]["name"]
             or identity.get("namespace") != body["metadata"]["namespace"]
