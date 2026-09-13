@@ -10,15 +10,17 @@ run, which persists nothing, and asserts the stored shape introduces no Job-spec
 field outside ``JOB_SPEC_SERVER_DEFAULTS`` -- the single list every proof
 tolerates -- and that each such field carries the value the proofs expect.
 
-Needs a cluster, and is skipped without one::
-
-    EXOMEM_CONFORMANCE_KUBECONFIG=/path/to/kubeconfig \\
-        pytest tests/test_kubernetes_defaulting_conformance.py
+It runs on the same disposable K3s the other exact-cluster tests use, so CI
+exercises it on every pull request rather than when someone remembers to.
+Point ``EXOMEM_CONFORMANCE_KUBECONFIG`` at a kubeconfig to check another
+cluster instead; the dry run stores nothing, so a production cluster is safe.
 """
 
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -32,6 +34,9 @@ from exomem_provisioner.job_execution import JOB_SPEC_SERVER_DEFAULTS
 from exomem_provisioner.lifecycle import OpaqueProviderMetadata
 
 kubernetes = pytest.importorskip("kubernetes")
+
+sys.path.insert(0, str(Path(__file__).parent))
+from test_hosted_k3s_admission import k3s as k3s  # noqa: E402,F401 - reuse the exact harness
 
 METADATA = OpaqueProviderMetadata("tenant-conformance", "cell-conformance", "operation-a", 3)
 IMAGE = "ghcr.io/example/exomem-provisioner@sha256:" + "a" * 64
@@ -78,10 +83,15 @@ BODIES = {
 
 
 @pytest.fixture(scope="module")
-def cluster():
+def cluster(request, tmp_path_factory):
     path = os.environ.get("EXOMEM_CONFORMANCE_KUBECONFIG")
     if not path:
-        pytest.skip("set EXOMEM_CONFORMANCE_KUBECONFIG to a Kubernetes 1.34+ cluster")
+        # No explicit cluster: stand up the same disposable K3s the other exact
+        # cluster tests use, so this runs wherever they run.
+        from test_hosted_k3s_admission import _host_kubeconfig
+
+        container = request.getfixturevalue("k3s")
+        path = str(_host_kubeconfig(container, tmp_path_factory.mktemp("conformance") / "kubeconfig"))
     kubernetes.config.load_kube_config(config_file=path)
     core = kubernetes.client.CoreV1Api()
     namespace = METADATA.resource_name
