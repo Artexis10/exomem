@@ -139,15 +139,18 @@ _ARTIFACT_ADOPTION_CAPTURE = (
 #: "only" anywhere. An agent reads a closed list inside a capture contract as a
 #: boundary, so an enumeration here would narrow capture rather than complete it,
 #: which is the opposite of the point.
+#: Cut to the minimum that carries the whole rule, because this text sits inside
+#: `engagement` and therefore in FRONT of the action catalogue in the compact
+#: payload. The full class list is not lost: the wire block's `consider` key
+#: carries all ten, and a client that receives this contract receives that block
+#: on its next durable write. What must survive here is the rule, not the roster.
 _EPISODE_SWEEP_CAPTURE = (
-    " After any capture, make one bounded episode-completeness pass over the recent "
-    "exchange for anything else that passes the same reuse-value test — would it "
-    "materially improve a later decision, lookup, repeated task, comparison or "
-    "continuation? For example: a conclusion, an outcome or state change, a stable "
-    "preference, a method or parameter, an entity facet, an operational or vendor "
-    "quirk, evidence worth preserving, a relation, a planning implication, a record "
-    "implication. Never re-write what the response lists as written recently, and "
-    "stay silent when nothing qualifies."
+    " After any capture, make one bounded episode pass over the recent exchange for "
+    "anything else that would materially improve a later decision, lookup, repeated "
+    "task, comparison or continuation — for example an outcome, a stable preference, "
+    "a method, an entity facet or an operational quirk; examples, not a closed set. "
+    "Never re-write what the response lists as written recently, and stay silent "
+    "when nothing qualifies."
 )
 
 _CAPTURE_EFFECTIVE_TEMPLATE = MappingProxyType(

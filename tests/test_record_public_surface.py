@@ -113,13 +113,23 @@ def test_compact_bootstrap_puts_record_route_before_semantic_authoring() -> None
     # contract inside `engagement`, which precedes the action catalogue by
     # design, and 8,192 had no margin left for anything that legitimately sits
     # in front. 10 KiB is still the first sixth of a ~63 KB payload.
-    assert serialized.find(b'"record"') < 10_240
+    #
+    # Re-cut again to 12 KiB, and the same way: two further additions landed in
+    # front, both inside `engagement` and both legitimate. #1233's per-identity
+    # prominence preference took the offset from 10,075 to 10,233 -- seven bytes
+    # under the old proxy, which is not headroom -- and the capture contract's
+    # episode-completeness clause added 418 more, for 10,651. That is 17% of a
+    # 62 KB payload, and 12 KiB is its first fifth; `record` is still reachable
+    # early by any reading of the word.
+    assert serialized.find(b'"record"') < 12_288
     assert serialized.find(b'"record"') < serialized.find(b'"semantic_authoring"')
     # The compact payload's SIZE budget is not asserted here. It lives in
     # `tests/test_bootstrap_compact_budget.py::COMPACT_BYTE_CEILING`, which owns
     # the constraint and records why the number is what it is. This test's
     # subject is placement -- that `record` is reachable early and ahead of
-    # `semantic_authoring` -- and the `< 8192` offsets above are what pin that.
+    # `semantic_authoring` -- and the two offsets above are what pin that. (They
+    # are named generically here on purpose: this sentence still said `< 8192`
+    # two re-cuts after that number stopped being the one on the line.)
     #
     # A duplicate ceiling used to sit on this line, undocumented and 656 bytes
     # lower than the real one. The lower number silently became the gate, so
