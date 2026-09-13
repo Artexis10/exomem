@@ -63,6 +63,38 @@ derived graph lineage. This recovery concerns rebuildable sidecar state only;
 it neither changes Markdown nor selects, promotes, deprecates, or authors a
 relation.
 
+### Which repair a write chose, and why
+
+A committed write that leaves graph work behind reports it as `graph_sync`
+`pending` with a code: `GRAPH_SYNC_REPAIR_QUEUED` when the affected pages are on
+the durable queue and a drain will converge them, `GRAPH_SYNC_REBUILD_IN_PROGRESS`
+when a whole-vault pass is running. Both are healthy. Neither requires rereading
+the written note or running maintenance.
+
+Behind that terminal the dispatch chose one of two repairs, and the log says
+which:
+
+- `graph dispatch routed an unreadable predecessor to incremental repair` — the
+  sidecar could not be read at that instant but proved nothing against itself.
+  The write takes the incremental path, and the affected pages go to the durable
+  queue if it cannot finish; the dispatch outcome is
+  `graph_repair_unreadable_predecessor`. No whole-vault pass runs.
+- `graph dispatch registered a whole-vault rebuild reason=…` — a proven verdict:
+  `graph_sync_predecessor_mismatch` or `…_absent` (the sidecar's acknowledgement
+  is genuinely not this checkpoint's predecessor) or `graph_sync_snapshot_unusable`
+  (no sidecar, a schema or relation-registry drift, a corrupt checkpoint).
+
+A run of whole-vault rebuilds with an *unreadable* reason is the defect
+`seamless-managed-worker-handoff` removed; a run of them with a mismatch or
+unusable reason is a real lineage problem and belongs in reconcile.
+
+Filesystem events the process cannot attribute to itself are recorded per path.
+Any unrepaired external path still fences every read that requires a current
+projection — relation-filtered recall reports `warming` rather than serving stale
+edges — while a governed write on an unaffected path takes the incremental path
+as usual. `freshness.snapshot()["external_pending_paths"]` names what is still
+unrepaired.
+
 ## Event schema
 
 A structured log record (`src/exomem/log_events.py`) carries:
