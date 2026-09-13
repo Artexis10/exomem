@@ -110,6 +110,12 @@ Supply the confidential internal operation ID only through a current-user-owned
 regular mode-`0600` file. Do not put it in a shell history, command argument,
 manifest, log, receipt, or ticket.
 
+The identity is the provisioner's internal operation ID, the key of the
+operation's database record. It is not the `exomem.io/operation-id` annotation
+on the tenant namespace or provider object: that annotation carries the provider
+operation ID, and every recovery mode refuses it as `operation is unavailable`
+without changing anything.
+
 ```bash
 umask 077
 recovery_identity=/secure/operator/recovery-operation-id
@@ -153,7 +159,10 @@ lock_key="$(kubectl -n exomem-platform get configmap "$lock_name" -o json | jq -
 [[ "$lock_key" =~ ^exomem-hosted-deployment-lock-v[23]\.json$ ]] || exit 1
 lock_json="$(kubectl -n exomem-platform get configmap "$lock_name" -o json | \
   jq -r --arg key "$lock_key" '.data[$key]')"
-test "$(printf %s "$lock_json" | sha256sum | awk '{print $1}')" = "$lock_digest"
+# Hash the stored bytes directly: the lock ends in a newline that the digest
+# covers, and command substitution strips it from "$lock_json".
+test "$(kubectl -n exomem-platform get configmap "$lock_name" -o json | \
+  jq -j --arg key "$lock_key" '.data[$key]' | sha256sum | awk '{print $1}')" = "$lock_digest"
 helm_manifest="$(helm -n "$helm_release" get manifest "$helm_release")"
 printf '%s\n' "$helm_manifest" | yq -e --arg name "$lock_name" --arg digest "$lock_digest" \
   'select(.kind == "ConfigMap" and .metadata.name == $name and
