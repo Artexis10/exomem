@@ -85,7 +85,13 @@ def _tool_schemas() -> dict[str, dict[str, Any]]:
                 "properties": {
                     "project": {"type": "string"},
                     "steps": {"type": "array", "items": {"type": "string"}},
-                    "constraint": {"type": "string"},
+                    "constraint": {
+                        "type": "string",
+                        "description": (
+                            "Canonical prerequisite identifier from the task or "
+                            "inspect_project; copy exactly."
+                        ),
+                    },
                 },
                 "required": ["project", "steps", "constraint"],
                 "additionalProperties": False,

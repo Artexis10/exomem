@@ -11,9 +11,9 @@
 
 ## 2. First real vertical slice
 
-- [ ] 2.1 Verify all instrument gates, then resolve the concrete protocol acknowledgment required for comparative execution. Record the frozen amendment identity in manifests.
-- [ ] 2.2 Verify a pinned cheap actor can use the shipped memory/action tools. Bind provider, supported effort, model identities and pricing; disable fallback. Use the design's eight calls per phase, 48k input/2k billed output per call and a recorded phase deadline. Verify that the conservative reservation for all three pairs fits the $2 pilot cap at the pinned endpoint price, including extra metered operations; otherwise refuse preflight.
-- [ ] 2.3 Execute helpful-history, self-contained-task and stale-distractor variants for one seed, with no-memory/current-Exomem arms and three fresh sessions per episode. Reserve complete pairs, stop when the next pair does not fit, and preserve incomplete coverage.
-- [ ] 2.4 Inspect actual tool and action traces independently. Confirm that capture/maintenance were agent-authored, final grading used state, and harm/failure was not filtered. Report lifecycle costs separately from action costs.
-- [ ] 2.5 Deliver the reproducible manifest, six-episode results or explicit partial coverage, diagnostics and instrument limitations. Make no general utility/coding claim from this smoke test.
+- [x] 2.1 Verify all instrument gates, then resolve the concrete protocol acknowledgment required for comparative execution. Record the frozen amendment identity in manifests.
+- [x] 2.2 Verify a pinned cheap actor can use the shipped memory/action tools. Bind provider, supported effort, model identities and pricing; disable fallback. Use the design's eight calls per phase, 48k input/2k billed output per call and a recorded phase deadline. Verify that the conservative reservation for all three pairs fits the $2 pilot cap at the pinned endpoint price, including extra metered operations; otherwise refuse preflight.
+- [x] 2.3 Execute helpful-history, self-contained-task and stale-distractor variants for one seed, with no-memory/current-Exomem arms and three fresh sessions per episode. Reserve complete pairs, stop when the next pair does not fit, and preserve incomplete coverage.
+- [x] 2.4 Inspect actual tool and action traces independently. Confirm that capture/maintenance were agent-authored, final grading used state, and harm/failure was not filtered. Report lifecycle costs separately from action costs.
+- [x] 2.5 Deliver the reproducible manifest, six-episode results or explicit partial coverage, diagnostics and instrument limitations. Make no general utility/coding claim from this smoke test.
 - [ ] 2.6 Run scoped tests during development, then the repository's full completion suite, strict OpenSpec validation and public-artifact validation. Deliver a ready PR with independent review. Archive only after implementation and acceptance are complete.

@@ -113,3 +113,32 @@ def test_current_target_oracle_state_is_internally_consistent() -> None:
         assert oracle.other_state.project == oracle.other_project
         assert oracle.target_project != oracle.other_project
         assert len(set(oracle.current_state.steps)) == len(oracle.current_state.steps)
+
+
+@pytest.mark.parametrize("seed", [0, 11, 13, 71])
+def test_self_contained_actor_can_copy_declared_fields_verbatim(seed):
+    """Narrative field values must be valid exact-state tool arguments.
+
+    The v1 seed-11 actor copied the prerequisite explanation into constraint;
+    both arms were scored wrong despite following the visible instruction.
+    This reference actor reads only the current narrative, never the oracle.
+    """
+    import re
+
+    from membench.utility.action_world import ActionWorld
+
+    episode = generate_episode(seed, "self_contained")
+    narrative = actor_view(episode, 2).narrative
+    project = re.search(r"Apply the configuration for project ([^.]+)\.", narrative)
+    steps = re.search(r"configuration procedure: ([^.]+)\.", narrative)
+    constraint = re.search(r"Constraint: ([^.]+)\.", narrative)
+    assert project and steps and constraint
+    world = ActionWorld(episode)
+    world.advance_phase(2)
+    result = world.call("apply_config", {
+        "project": project[1],
+        "steps": steps[1].split(", then "),
+        "constraint": constraint[1],
+    })
+    assert result["accepted"] is True
+    assert world.grade().success is True

@@ -42,7 +42,7 @@ UTILITY_FAMILY_ID = "f32"
 #: Bumped whenever a manifest field's meaning changes.
 MANIFEST_VERSION = 1
 #: Bumped whenever generated episodes change, so cached runs stop comparing.
-SCENARIO_GENERATOR_VERSION = "utility_action_episode.v1"
+SCENARIO_GENERATOR_VERSION = "utility_action_episode.v2"
 
 #: 8 model calls/phase * 3 phases * 2 arms sharing one pair's model budget.
 CALLS_PER_PAIR = 48
