@@ -187,6 +187,27 @@ exomem_service_python() {
     fi
 }
 
+exomem_service_is_managed() {
+    local unit="${1:-}"
+    [[ -f "$unit" ]] && grep -Eq '^ExecStart=.* -m exomem\.service_manager serve([[:space:]]|$)' "$unit"
+}
+
+exomem_managed_runtime_dir() {
+    local unit="$1" python="$2"
+    "$python" - "$unit" <<'PY'
+import shlex
+import sys
+from pathlib import Path
+
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if line.startswith("ExecStart="):
+        args = shlex.split(line.partition("=")[2])
+        if args[1:4] == ["-m", "exomem.service_manager", "serve"]:
+            print(args[args.index("--runtime-dir") + 1])
+            break
+PY
+}
+
 # Print the port the service was installed with; defaults to 8765.
 exomem_service_port() {
     local unit="${1:-}" port

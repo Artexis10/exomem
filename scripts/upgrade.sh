@@ -48,8 +48,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$PROFILE" in
-    lean|hybrid|standard|media) ;;
-    *) die "profile must be lean, hybrid, standard, or media (got: $PROFILE)" ;;
+    lean|onnx|hybrid|standard|media) ;;
+    *) die "profile must be lean, onnx, hybrid, standard, or media (got: $PROFILE)" ;;
 esac
 case "$CLI_SYNC" in
     auto|always|never) ;;
@@ -98,6 +98,39 @@ fi
 
 SERVICE_ID="$(exomem_service_id "$UNIT_FILE")" \
     || die "could not resolve the service-manager identity from $UNIT_FILE"
+
+if exomem_service_is_managed "$UNIT_FILE"; then
+    [[ "$OS" == "Linux" ]] || die "managed upgrades are supported only on Linux/WSL"
+    [[ "$RESUME_STOPPED_TRANSITION" == 0 ]] \
+        || die "managed recovery uses python -m exomem.service_upgrade --runtime-dir PATH --resume"
+    [[ -z "$VAULT" ]] || die "managed upgrades use the installed service environment; --vault is unavailable"
+    VENV_PYTHON="$(exomem_service_python "$UNIT_FILE" || true)"
+    [[ -n "$VENV_PYTHON" && -x "$VENV_PYTHON" ]] \
+        || die "could not resolve the managed launcher interpreter from $UNIT_FILE"
+    RUNTIME_DIR="$(exomem_managed_runtime_dir "$UNIT_FILE" "$VENV_PYTHON")"
+    [[ -n "$RUNTIME_DIR" ]] || die "could not resolve the managed runtime directory from $UNIT_FILE"
+    MANAGED_ARGS=(--runtime-dir "$RUNTIME_DIR" --profile "$PROFILE")
+    [[ -z "$PACKAGE_VERSION" ]] || MANAGED_ARGS+=(--package-version "$PACKAGE_VERSION")
+    echo "Staging a managed release while $SERVICE_ID serves..."
+    RESULT="$(cd "$REPO_ROOT" && "$VENV_PYTHON" -m exomem.service_upgrade "${MANAGED_ARGS[@]}")" \
+        || die "managed worker upgrade failed; inspect --status and use --resume for recorded recovery"
+    SERVED="$(printf '%s' "$RESULT" | "$VENV_PYTHON" -c \
+        'import json,sys; s=json.load(sys.stdin); assert s.get("ok") and s.get("phase")=="ready"; print(s["active"]["version"])')" \
+        || die "managed service did not report a verified active release"
+    PORT="$(exomem_service_port "$UNIT_FILE")"
+    CLI_REQUIRED=0
+    if [[ "$CLI_SYNC" == "always" ]] || { [[ "$CLI_SYNC" == "auto" ]] && exomem_uv_tool_has_exomem; }; then
+        CLI_REQUIRED=1
+    fi
+    exomem_write_managed_manifest "$VENV_PYTHON" "$SERVED" "$PROFILE" "http://127.0.0.1:$PORT"
+    exomem_sync_uv_cli "${CLI_SYNC}" "$SERVED"
+    if [[ "$CLI_SYNC" != "never" ]]; then
+        exomem_verify_visible_clis "$SERVED" "$VENV_PYTHON" "$CLI_REQUIRED"
+    fi
+    echo "Managed serving version: $SERVED"
+    exit 0
+fi
+[[ "$PROFILE" != "onnx" ]] || die "onnx profile is available only for managed Linux upgrades"
 
 # --- Locate the venv the service ACTUALLY runs ----------------------------------
 # The rendered unit is the source of truth here, the same role the NSSM registry
