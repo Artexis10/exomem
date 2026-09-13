@@ -404,3 +404,95 @@ def test_sidecar_delta_apply_rolls_back_rows_and_checkpoint_together(
         }
     assert any(content.strip().endswith("original") for content in contents)
     assert not any("patched" in content for content in contents)
+
+
+# --- adopted origins: a checkpoint this process did not publish --------------
+
+
+def _foreign(checkpoint: freshness.RecallFreshnessCheckpoint):
+    """The same checkpoint as another process instance would have stamped it."""
+    return checkpoint._replace(instance_id=uuid.uuid4().hex)
+
+
+def test_a_foreign_recall_origin_is_unbridgeable_until_it_is_adopted(
+    tmp_path: Path,
+) -> None:
+    """The refusal that made a replacement worker rebuild its whole vault.
+
+    A worker replacement inherits a derived sidecar stamped with the previous
+    process's instance id. Nothing here has seen that checkpoint, so every delta
+    from it is incomplete and the graph's bounded repair -- which is a delta
+    from exactly that point -- has no lineage to advance
+    (`seamless-managed-worker-handoff`).
+    """
+    page = _kb_file(tmp_path, "adopted-origin.md")
+    _seed(tmp_path, [page])
+    inherited = _foreign(freshness.recall_checkpoint(tmp_path, "vault"))
+
+    assert freshness.recall_delta_since(tmp_path, "vault", inherited).complete is False
+
+    assert freshness.adopt_recall_origin(tmp_path, "vault", inherited) is True
+    adopted = freshness.recall_delta_since(tmp_path, "vault", inherited)
+
+    assert adopted.complete is True
+    assert adopted.changed == frozenset() and adopted.deleted == frozenset()
+
+
+def test_an_adopted_origin_still_reports_what_changed_after_it(tmp_path: Path) -> None:
+    """Adoption sets the origin; the ordinary event history supplies the delta."""
+    page = _kb_file(tmp_path, "adopted-then-edited.md")
+    other = _kb_file(tmp_path, "adopted-sibling.md")
+    _seed(tmp_path, [page, other])
+    inherited = _foreign(freshness.recall_checkpoint(tmp_path, "vault"))
+    assert freshness.adopt_recall_origin(tmp_path, "vault", inherited) is True
+
+    page.write_text(page.read_text(encoding="utf-8") + "\nedited\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, [page], [])
+
+    delta = freshness.recall_delta_since(tmp_path, "vault", inherited)
+
+    assert delta.complete is True
+    assert delta.changed == frozenset({str(page)})
+    assert delta.deleted == frozenset()
+
+
+def test_adoption_refuses_a_cold_scope_and_a_different_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a live scope projecting the same corpus may adopt."""
+    page = _kb_file(tmp_path, "adopted-refusal.md")
+    _seed(tmp_path, [page])
+    current = freshness.recall_checkpoint(tmp_path, "vault")
+    inherited = _foreign(current)
+
+    other_policy = inherited._replace(policy_version="a-different-policy")
+    assert freshness.adopt_recall_origin(tmp_path, "vault", other_policy) is False
+    assert freshness.recall_delta_since(tmp_path, "vault", other_policy).complete is False
+
+    freshness.invalidate(tmp_path)
+    assert freshness.adopt_recall_origin(tmp_path, "vault", inherited) is False
+
+
+def test_invalidating_a_scope_drops_the_origin_adopted_against_it(
+    tmp_path: Path,
+) -> None:
+    """An adopted origin is a statement about a map; it goes with that map."""
+    page = _kb_file(tmp_path, "adopted-invalidated.md")
+    _seed(tmp_path, [page])
+    inherited = _foreign(freshness.recall_checkpoint(tmp_path, "vault"))
+    assert freshness.adopt_recall_origin(tmp_path, "vault", inherited) is True
+
+    freshness.invalidate(tmp_path)
+    _seed(tmp_path, [page])
+
+    assert freshness.adopted_recall_origin(tmp_path, "vault", inherited) is None
+    assert freshness.recall_delta_since(tmp_path, "vault", inherited).complete is False
+
+
+def test_this_process_own_checkpoint_needs_no_adoption(tmp_path: Path) -> None:
+    page = _kb_file(tmp_path, "adopted-own.md")
+    _seed(tmp_path, [page])
+    own = freshness.recall_checkpoint(tmp_path, "vault")
+
+    assert freshness.adopt_recall_origin(tmp_path, "vault", own) is True
+    assert freshness.adopted_recall_origin(tmp_path, "vault", own) is None

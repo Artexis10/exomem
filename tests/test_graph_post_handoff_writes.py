@@ -654,6 +654,10 @@ def counted(self, **kwargs):
 
 EpistemicGraphIndex._rebuild_all_off_boundary = counted
 _seed_live_freshness(root)
+# What the worker runtime's warm-up does for a replacement process, and what a
+# standby does before promotion: prove the inherited snapshot and adopt its
+# checkpoint as this process's delta origin.
+adopted = EpistemicGraphIndex(root).adopt_published_snapshot()
 watcher = file_watcher.FileWatcher(root, debounce_seconds=0.2)
 for index in range(3):
     watcher._record(generated / f"generated-note-{{index + 60:04d}}.md", deleted=False)
@@ -668,6 +672,7 @@ for index in range(WRITE_COUNT):
 print(
     json.dumps(
         {{
+            "adopted": adopted,
             "rebuilds": len(passes),
             "per_write_rebuilds": per_write_rebuilds,
             "acknowledgements": acknowledgements,
@@ -689,16 +694,12 @@ def test_a_replacement_process_serves_its_first_writes_incrementally(
     prove the premise it rests on: the incoming worker really does start with an
     empty self-attribution table and an empty freshness registry.
 
-    It also names the one whole-vault pass phase 1 does *not* remove. A cold
-    process cannot compute a delta from a checkpoint another process instance
-    published, so its first write adopts the inherited snapshot the only way
-    this tree can today -- `recall_delta_incomplete`, one whole-vault pass -- and
-    every write after it is incremental. That cost is independent of this
-    change: a replacement that observes no external event at all pays exactly
-    the same one. Moving it off the serving path is `seamless-managed-worker-handoff`
-    phase 2 (D7: the standby proves or adopts the snapshot while the old worker
-    still serves). What phase 1 owns is that it happens *once*, not once per
-    write, which is what this test pins.
+    It also pins the adoption: a cold process cannot compute a delta from a
+    checkpoint another process instance published, so before
+    `adopt_published_snapshot` its first write rebuilt the whole vault purely to
+    obtain a lineage it could advance. The child proves the inherited snapshot
+    exactly as the worker runtime's warm-up does, and then rebuilds nothing at
+    all.
     """
     import json
     import os
@@ -736,13 +737,12 @@ def test_a_replacement_process_serves_its_first_writes_incrementally(
     assert replacement.returncode == 0, replacement.stderr[-4000:]
     report = json.loads(replacement.stdout.strip().splitlines()[-1])
 
-    per_write = report["per_write_rebuilds"]
-    assert sum(per_write[1:]) == 0, (
-        "every write after the snapshot adoption must be incremental; rebuilds "
-        f"per write were {per_write}"
+    assert report["adopted"] is True, (
+        "the replacement process must be able to prove the snapshot it inherited"
     )
-    assert report["rebuilds"] <= 1, (
-        f"the replacement process rebuilt the whole vault {report['rebuilds']} time(s) "
-        f"for {WRITE_COUNT} writes: {report['acknowledgements']}"
+    per_write = report["per_write_rebuilds"]
+    assert per_write == [0] * WRITE_COUNT, (
+        "a replacement process that adopted its inherited snapshot rebuilds "
+        f"nothing; rebuilds per write were {per_write}"
     )
     _assert_incremental_latency(report["acknowledgements"][1:])

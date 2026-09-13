@@ -148,6 +148,15 @@ def warm_retrieval_catalog(vault_root: Path) -> bool:
     return True
 
 
+def _adopt_graph_snapshot(vault_root: Path) -> bool:
+    """Prove and adopt an inherited graph snapshot, if there is one to adopt."""
+    from . import epistemic_graph
+
+    if not epistemic_graph.graph_enabled():
+        return False
+    return epistemic_graph.EpistemicGraphIndex(vault_root).adopt_published_snapshot()
+
+
 def warm_caches(
     vault_root: Path,
     *,
@@ -199,6 +208,14 @@ def warm_caches(
     # Ordinary recall resolves links through the policy-projected view.  Keep
     # the broad writer resolver lazy so warm-up never reads raw Records titles.
     _step("resolver", lambda: find.recall_resolver_snapshot(vault_root))
+    # A replacement worker inherits a derived graph it did not publish, and
+    # `recall_delta_since` refuses a foreign origin by construction, so its first
+    # governed write used to rebuild the whole vault purely to obtain a lineage
+    # it could advance. Proving the inherited snapshot here -- against the disk
+    # this registry is already projecting -- makes that checkpoint the delta
+    # origin instead (`seamless-managed-worker-handoff`). Soft-fails like every
+    # other step: an unprovable snapshot simply leaves the old behaviour.
+    _step("graph_snapshot", lambda: _adopt_graph_snapshot(vault_root))
     if preload_models and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         # One tiny search warms WHICHEVER backend serves vector search: the vec0
         # backend (sync check + first KNN faults in the vec tables; the numpy

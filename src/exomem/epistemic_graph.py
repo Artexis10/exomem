@@ -1944,6 +1944,18 @@ class EpistemicGraphIndex:
                     conn,
                     resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
                 )
+            if current and stored_checkpoint is not None:
+                # The proof above (or the exact-live check) has just established
+                # that this sidecar describes the corpus this registry is
+                # projecting. Say so to the registry, so the *next* bounded
+                # repair has a lineage to advance from. Without this a process
+                # that did not publish the checkpoint -- a replacement worker,
+                # or a promoted standby -- proves the snapshot, serves reads
+                # from it, and then rebuilds the whole vault on its first write
+                # because `recall_delta_since` cannot bridge a foreign origin
+                # (`seamless-managed-worker-handoff`: make an adopted snapshot
+                # live for the new process).
+                freshness.adopt_recall_origin(self.vault_root, "vault", stored_checkpoint)
         # The `external_pending` term is the same cheap short-circuit described
         # in this method's docstring (contract D7), re-read after the proof so a
         # Class A/C signal that landed mid-proof still fails closed. Scoped to
@@ -1954,6 +1966,37 @@ class EpistemicGraphIndex:
             conn.close()
             return None
         return conn
+
+    def adopt_published_snapshot(self) -> bool:
+        """Prove an inherited sidecar and make its checkpoint live for this process.
+
+        The entry point a standby calls before promotion, and the one a cold
+        process can call at start-up: it runs the ordinary public-reader proof
+        (schema, registry, policy, resolver topology, graph_sync lineage, and
+        the source-bytes proof for a snapshot this process did not publish), and
+        on success the snapshot's checkpoint becomes this registry's delta
+        origin. Returns whether the snapshot is now both readable and
+        incrementally advanceable here.
+
+        Needs the recall registry seeded for the vault scope, which the warm-up
+        does before any of this; it does not need a running watcher, so a
+        standby can prove and adopt while the old worker still serves.
+        """
+        conn = self._open_read_snapshot()
+        if conn is None:
+            return False
+        conn.close()
+        # Adoption is not finished until the *bounded repair* can run, and that
+        # also needs the recall resolver at this exact checkpoint.
+        # `recall_resolver_snapshot_at_checkpoint` refuses a cache miss on
+        # purpose -- a resolver rebuilt from current disk and labelled with an
+        # older checkpoint would lose the pre-delta topology that proves bounded
+        # edge repair. A process that has just proved this snapshot has no such
+        # problem: its registry sits at the adopted origin, so the resolver
+        # built now *is* the pre-delta topology. One walk at start-up, in place
+        # of a whole-vault rebuild on the first write.
+        find_module.recall_resolver_snapshot(self.vault_root)
+        return True
 
     def _snapshot_sources_match_disk(
         self,
