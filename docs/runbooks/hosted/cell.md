@@ -375,9 +375,19 @@ init-retry recovery above. The modes are `shell-resume-preflight`, `shell-resume
 and `verify-shell-resume`.
 
 ```bash
-kubectl -n exomem-platform exec -i "$operator_pod" -- \
-  exomem-provisioner-recover-init-retry shell-resume-preflight < "$recovery_identity"
+for mode in shell-resume-preflight shell-resume verify-shell-resume; do
+  timeout 75s kubectl -n exomem-platform exec -i "$operator_pod" -- \
+    exomem-provisioner-recover-init-retry "$mode" --stdin < "$recovery_identity"
+done
 ```
+
+Run the three modes one at a time, reading each result before the next: stop at
+any refusal, and never run `shell-resume` without a `ready` preflight from the
+same Pod.
+
+The operator Pod runs the provisioner image the deployed lock selects, so these
+modes exist only once the repaired lock is rolled out; against an older lock the
+helper rejects them as an invalid mode, which is the intended deploy-first order.
 
 The preflight proves, read-only: one provision operation for the cell, terminal
 under that code, finalized, with no live claim and no cell operation lock;
