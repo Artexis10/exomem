@@ -73,7 +73,12 @@ def test_lease_status_json_is_the_full_manager_status_shape(capsys: pytest.Captu
     assert payload["holder"] == "laptop"
     assert payload["fencing_token"] == 3
     assert "idempotency" in payload
-    assert set(payload["idempotency"]) == {"pending", "abandoned", "oldest_pending_age_seconds"}
+    assert set(payload["idempotency"]) == {
+        "pending",
+        "abandoned",
+        "oldest_pending_age_seconds",
+        "start_sweep",
+    }
 
 
 def test_lease_release_without_yes_is_refused_and_shows_holder(

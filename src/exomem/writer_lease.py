@@ -170,6 +170,19 @@ _IDEMPOTENCY_ABANDONED_RETRY_AFTER_SECONDS = 60.0
 # probe; it is honored under the pre-existing any-pending-blocks-forever
 # rule for this long before it is classified as an unknown outcome.
 _IDEMPOTENCY_LEGACY_OWNER_GRACE_SECONDS = 600.0
+#: How many non-terminal receipt rows one process start may examine.
+#:
+#: `_prune_expired` removes only terminal rows and `_abandon_if_dead` runs only
+#: when the identical identity is retried, so a `pending`/`reserved`/`executing`
+#: row left by a process that died had no resolver at all. The sweep below is
+#: that resolver, and this is its per-start budget: each examined row costs one
+#: owner-lock probe (open, try-lock, close) and at most one UPDATE, inside the
+#: same write transaction `_claim_or_inspect` already takes, so an unbounded
+#: scan would put a pathological store on the critical path of every process
+#: start. 64 clears the thirteen-row backlog measured on the personal cell with
+#: five times the headroom; anything past it is drained by the next start and
+#: stays visible in `oldest_pending_age_seconds`, which this never resets.
+_IDEMPOTENCY_START_SWEEP_LIMIT = 64
 _OUTCOME_UNKNOWN_TERMINAL = ("exomem.outcome-unknown", 1)
 _OUTCOME_UNKNOWN_PAYLOAD = pickle.dumps(_OUTCOME_UNKNOWN_TERMINAL)
 _WINDOWS_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
@@ -2214,6 +2227,15 @@ class IdempotencyStore:
         )
         self._condition = threading.Condition()
         self._attempts: dict[str, _ExecutionAttempt] = {}
+        # Replaced at the end of a successful construction. An inert store --
+        # one whose runtime root failed validation -- never sweeps, and says so.
+        self.start_sweep: dict[str, Any] = {
+            "ran": False,
+            "examined": 0,
+            "resolved": 0,
+            "retained": 0,
+            "limit_reached": False,
+        }
         self.owner_id: str | None = None
         state_dir_existed = path.parent.exists()
         owners_dir = _owner_lock_path(path.parent, "bootstrap").parent
@@ -2289,6 +2311,80 @@ class IdempotencyStore:
                 if item.exists() and item not in preexisting_private_paths:
                     os.chmod(item, 0o600)
         self._ensure_private_runtime_state()
+        self.start_sweep = self._sweep_dead_non_terminal_rows()
+
+    def _sweep_dead_non_terminal_rows(self) -> dict[str, Any]:
+        """Resolve non-terminal rows whose owner is provably dead, oldest first.
+
+        Every other resolver for a `pending`/`reserved`/`executing` row needs
+        the identical identity to be retried. A client that never retries
+        therefore leaves its row behind forever, which is how a live cell
+        reached thirteen pending receipts with the oldest fourteen days old.
+
+        This resolves such a row EXACTLY the way an on-demand abandonment does
+        -- it calls `_abandon_if_dead` itself, with no commit evidence and no
+        legacy graph proof, so a reclaimed reservation is deleted and anything
+        that may have started a leaf becomes `completed` +
+        `_OUTCOME_UNKNOWN_PAYLOAD`. That probe is fail-closed: an owner whose
+        lock is held, or whose liveness cannot be determined, counts as ALIVE
+        and its row is left exactly as it was. The sweep never widens what may
+        be abandoned; it only stops requiring a retry to trigger it.
+
+        Returns content-free counts for `coordination_status`/`doctor`: how
+        many rows were examined, resolved and retained, and whether the budget
+        was exhausted (so more may remain). Never a key, digest, or result.
+        """
+        examined = 0
+        resolved = 0
+        retained = 0
+        limit_reached = False
+        try:
+            now = self.clock()
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                rows = conn.execute(
+                    "SELECT key, digest, state, result, updated_at, owner, attempt_id, "
+                    "commit_token, commit_secret FROM mutations "
+                    "WHERE state IN ('pending', 'reserved', 'executing') "
+                    "ORDER BY updated_at ASC LIMIT ?",
+                    (_IDEMPOTENCY_START_SWEEP_LIMIT,),
+                ).fetchall()
+                limit_reached = len(rows) >= _IDEMPOTENCY_START_SWEEP_LIMIT
+                for row in rows:
+                    examined += 1
+                    disposition = self._abandon_if_dead(conn, row[0], row[1:], now)
+                    if disposition is None or disposition[1] not in {
+                        "pending",
+                        "reserved",
+                        "executing",
+                    }:
+                        resolved += 1
+                    else:
+                        retained += 1
+        except Exception:  # noqa: BLE001 - a store that cannot be swept still opens
+            logger.warning("idempotency start sweep did not complete", exc_info=True)
+            return {
+                "ran": False,
+                "examined": examined,
+                "resolved": resolved,
+                "retained": retained,
+                "limit_reached": limit_reached,
+            }
+        if resolved:
+            _log_mutation_event(
+                "start_sweep",
+                level=logging.WARNING,
+                examined=examined,
+                resolved=resolved,
+                retained=retained,
+            )
+        return {
+            "ran": True,
+            "examined": examined,
+            "resolved": resolved,
+            "retained": retained,
+            "limit_reached": limit_reached,
+        }
 
     def _ensure_private_runtime_state(self) -> None:
         """Secrets require a local owner-only state directory; never repair one."""
@@ -3379,9 +3475,17 @@ class IdempotencyStore:
                 "pending": len(pending_updated_at),
                 "abandoned": int(abandoned),
                 "oldest_pending_age_seconds": oldest_pending_age_seconds,
+                # What this process start already reaped, so a stale oldest-age
+                # can be read against it rather than mistaken for stalled work.
+                "start_sweep": dict(self.start_sweep),
             }
         except Exception:  # noqa: BLE001 - status must never break the caller
-            return {"pending": None, "abandoned": None, "oldest_pending_age_seconds": None}
+            return {
+                "pending": None,
+                "abandoned": None,
+                "oldest_pending_age_seconds": None,
+                "start_sweep": dict(self.start_sweep),
+            }
 
     @staticmethod
     def _reconciliation_error(subject: str) -> OpError:
