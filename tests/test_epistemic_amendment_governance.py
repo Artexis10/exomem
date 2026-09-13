@@ -631,7 +631,7 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     # Pinned exactly, not loosened to an inequality: a chain that silently grew
     # another link would otherwise satisfy every assertion below while nobody
     # had adjudicated the new one.
-    assert len(identity.amendments) == 5
+    assert len(identity.amendments) == 6
     amendment = identity.amendments[0]
     assert amendment.acknowledgment_status == "acknowledged"
     assert amendment.introduced_family_ids == ("f15", "f16", "f17", "f18", "f19")
@@ -669,10 +669,14 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     assert pending_five.acknowledgment_status == "pending"
     assert pending_five.introduced_family_ids == SEQUENCE_FIVE_FAMILIES
     assert pending_five.contract.repository_revision == pending_five.receipt.introduction_revision
-    assert identity.effective.sha256 == pending_five.contract.sha256
-    assert identity.pending_amendments == (pending_two, pending_four, pending_five)
+    pending_six = identity.amendments[5]
+    assert pending_six.sequence == 6
+    assert pending_six.acknowledgment_status == "pending"
+    assert pending_six.introduced_family_ids == ("f32",)
+    assert identity.effective.sha256 == pending_six.contract.sha256
+    assert identity.pending_amendments == (pending_two, pending_four, pending_five, pending_six)
     assert identity.withheld_family_ids == frozenset(
-        SEQUENCE_TWO_FAMILIES + SEQUENCE_FOUR_FAMILIES + SEQUENCE_FIVE_FAMILIES
+        SEQUENCE_TWO_FAMILIES + SEQUENCE_FOUR_FAMILIES + SEQUENCE_FIVE_FAMILIES + ("f32",)
     )
 
 
@@ -779,7 +783,7 @@ def test_acknowledged_amendment_is_recorded_on_every_run_manifest(
     # Sequence 3 left the withheld set when its acknowledgment landed 2026-08-30;
     # Sequences 4 and 5 are pending alongside sequence 2.
     assert manifest.preregistration_identity.withheld_family_ids == frozenset(
-        (*SEQUENCE_TWO_FAMILIES, *SEQUENCE_FOUR_FAMILIES, *SEQUENCE_FIVE_FAMILIES)
+        (*SEQUENCE_TWO_FAMILIES, *SEQUENCE_FOUR_FAMILIES, *SEQUENCE_FIVE_FAMILIES, "f32")
     )
     assert manifest.preregistration_lineage is not None
 
@@ -941,7 +945,7 @@ def test_the_loader_gate_releases_sequences_one_and_three_and_withholds_two() ->
 
     reset_cache()
     assert withheld_family_ids(ROOT) == frozenset(
-        SEQUENCE_TWO_FAMILIES + SEQUENCE_FOUR_FAMILIES + SEQUENCE_FIVE_FAMILIES
+        SEQUENCE_TWO_FAMILIES + SEQUENCE_FOUR_FAMILIES + SEQUENCE_FIVE_FAMILIES + ("f32",)
     )
     for family_id in AMENDED_FAMILIES + SEQUENCE_THREE_FAMILIES:
         require_family_released(family_id, repo_root=ROOT)

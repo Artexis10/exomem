@@ -1047,6 +1047,23 @@ def _role_state_settlement_context(*, family: str, settled: bool) -> AssertionCo
     )
 
 
+def _utility_context(*, correct: bool = True, damage: bool = False) -> AssertionContext:
+    from membench.utility.action_world import ActionWorld
+    from membench.utility.scenarios import generate_episode
+
+    episode = generate_episode(11, "stale_distractor")
+    world = ActionWorld(episode)
+    world.advance_phase(2)
+    target = episode.oracle.current_state
+    action = {"project": target.project, "steps": list(target.steps), "constraint": target.constraint}
+    if correct:
+        world.call("apply_config", action)
+    if damage:
+        world.call("apply_config", {**action, "project": episode.oracle.other_project})
+    return AssertionContext(snapshot=snapshot(()),
+                            utility_world_snapshot=world.snapshot(), utility_oracle=episode.oracle)
+
+
 DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
     "exactly_one_current_revision": (
         exactly_one_current_revision_pass,
@@ -1185,6 +1202,12 @@ DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
     "transient_state_settled_without_dismissal": (
         lambda: _role_state_settlement_context(family="f31", settled=True),
         lambda: _role_state_settlement_context(family="f31", settled=False),
+    ),
+    "utility_action_state_valid": (
+        lambda: _utility_context(), lambda: _utility_context(correct=False),
+    ),
+    "utility_no_prohibited_effects": (
+        lambda: _utility_context(), lambda: _utility_context(damage=True),
     ),
 }
 

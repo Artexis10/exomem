@@ -1,18 +1,11 @@
 """The frozen assertion registry.
 
-The 35 names below are pre-registered in ``PREREGISTRATION.md`` §2 — eighteen
-committed before any competitor was run by this programme, six added by the
-2026-08 loop-closure amendment, nine added by the 2026-08 no-nudge amendment,
-and two added by the 2026-08 lifecycle-replay amendment, all through the
-governed §7 path. The registry is a closed set on
-purpose: a scenario that names anything else fails to load, which is what stops
-the suite from growing an assertion to fit a result it wanted.
+The assertion and family names below mirror PREREGISTRATION.md through the
+sequence-six downstream action utility amendment. Unknown names fail at
+fixture load; assertions cannot be added after seeing a result.
 
-Registration is not release. The families each amendment introduced stay
-withheld from comparative runs until its receipt is acknowledged; that gate
-lives in :mod:`epistemic.amendments` and fires at the same load-time choke
-point this registry does. Sequence 1 is acknowledged; sequences 2 and 3 are
-not, so f20-f26 and f27 are registered and withheld at once.
+Registration is not release. Each family's amendment receipt controls its
+comparative use through :mod:`epistemic.amendments`.
 
 ``PREREGISTERED_ASSERTIONS`` mirrors §2 in code so the mapping can be checked
 without file I/O at import time; ``tests/test_epistemic_registry.py`` parses the
@@ -91,6 +84,9 @@ PREREGISTERED_ASSERTIONS: tuple[str, ...] = (
     "role_state_settled_with_provenance",
     "transient_signal_delivered_after_write",
     "transient_state_settled_without_dismissal",
+    # Sequence 6: downstream action utility.
+    "utility_action_state_valid",
+    "utility_no_prohibited_effects",
 )
 
 #: Quiet assertions: every one composes
@@ -153,6 +149,7 @@ PREREGISTERED_FAMILIES: tuple[tuple[str, str], ...] = (
     ("f29", "claimed_collection_routing_replay"),
     ("f30", "artifact_role_promotion_replay"),
     ("f31", "transient_state_hygiene_replay"),
+    ("f32", "utility_action_episode"),
 )
 
 PREREGISTERED_FAMILY_IDS: frozenset[str] = frozenset(
@@ -198,6 +195,7 @@ AMENDMENT_INTRODUCED_FAMILIES: Mapping[str, int] = MappingProxyType(
         "f29": 4,
         "f30": 5,
         "f31": 5,
+        "f32": 6,
     }
 )
 

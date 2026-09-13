@@ -89,6 +89,52 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 2 if result.invalid else 0
 
 
+def _cmd_utility_run(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from membench.utility.runner import UtilityRunnerError, run_utility
+    from protocol.contracts import ContractIdentityError
+
+    try:
+        report = asyncio.run(run_utility(
+            Path(args.output), args.seed,
+            product_root=Path(args.product_root), python=Path(args.python),
+            tokenizer_path=Path(args.tokenizer_path),
+            model_cache=Path(args.model_cache) if args.model_cache else None,
+            clip_model_cache=Path(args.clip_model_cache) if args.clip_model_cache else None,
+            profile=args.profile, cap_usd=args.cap_usd, paid=args.paid,
+            approval_token=args.approval_token, phase_seconds=args.phase_seconds,
+        ))
+    except (UtilityRunnerError, ContractIdentityError) as error:
+        print(f"refused: {error}", file=sys.stderr)
+        return 2
+    print(json.dumps({"halted": report["halted"], "attempted_variants": report["attempted_variants"]}, sort_keys=True))
+    return 0
+
+
+def _cmd_utility_read(args: argparse.Namespace) -> int:
+    from membench.utility.runner import UtilityReportError, load_report
+    import membench.utility.runner as utility_runner
+
+    try:
+        loaded = load_report(
+            Path(args.run), Path(args.product_root), allow_synthetic=args.allow_synthetic,
+            identity_validator=utility_runner._default_identity_validator,
+            family_gate=utility_runner._default_report_family_gate,
+            fixture_gate=utility_runner._default_fixture_gate,
+        )
+    except (UtilityReportError, ValueError) as error:
+        print(f"refused: {error}", file=sys.stderr)
+        return 2
+    print(json.dumps({
+        "synthetic": loaded["synthetic"],
+        "seed": loaded["manifest"]["scenario"]["seed"],
+        "scores": loaded["recomputed"]["scores"],
+        "spend": loaded["report"].get("spend"),
+    }, sort_keys=True))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="membench")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -152,6 +198,44 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--runs-root", default=str(_BENCH_ROOT / "runs"))
     p_run.add_argument("--label", default=None)
     p_run.set_defaults(func=_cmd_run)
+
+    p_utility = sub.add_parser("utility", help="epistemic-utility action instrument")
+    utility_sub = p_utility.add_subparsers(dest="utility_command", required=True)
+
+    p_utility_run = utility_sub.add_parser(
+        "run", help="run the paired control/memory smoke for one seed (opt-in paid)"
+    )
+    p_utility_run.add_argument("--output", required=True, help="new run output directory")
+    p_utility_run.add_argument("--seed", type=int, required=True)
+    p_utility_run.add_argument("--product-root", required=True)
+    p_utility_run.add_argument("--python", required=True, help="interpreter used for the native cell/worker")
+    p_utility_run.add_argument("--tokenizer-path", required=True, help="pinned local tokenizer artifact")
+    p_utility_run.add_argument("--model-cache", default=None)
+    p_utility_run.add_argument("--clip-model-cache", default=None)
+    p_utility_run.add_argument("--profile", default="semantic", choices=["semantic", "fixture"])
+    p_utility_run.add_argument("--cap-usd", type=float, default=2.0)
+    p_utility_run.add_argument(
+        "--paid", action="store_true",
+        help="required to spend anything; --help and generation-only paths never spend without it",
+    )
+    p_utility_run.add_argument(
+        "--approval-token", default="",
+        help="operator approval marker; never an API key (read only from its environment variable)",
+    )
+    p_utility_run.add_argument("--phase-seconds", type=float, default=180.0)
+    p_utility_run.set_defaults(func=_cmd_utility_run)
+
+    p_utility_read = utility_sub.add_parser(
+        "read", help="read a saved utility run: protocol gates, digests, independent regrade"
+    )
+    p_utility_read.add_argument("--run", required=True, help="a completed run output directory")
+    p_utility_read.add_argument("--product-root", required=True)
+    p_utility_read.add_argument(
+        "--allow-synthetic", action="store_true",
+        help="read a run whose actor, cell or gates were injected; such a run can never "
+             "support a comparative product claim",
+    )
+    p_utility_read.set_defaults(func=_cmd_utility_read)
 
     args = parser.parse_args(argv)
     return args.func(args)

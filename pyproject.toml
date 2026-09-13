@@ -177,6 +177,8 @@ dev = [
     "pytest>=8.0",
     "pytest-split>=0.11,<1",
     "pytest-timeout>=2.3",
+    "tiktoken>=0.7",
+    "tokenizers>=0.20",
 ]
 # TUI snapshot/interaction testing. Separate group: the lean dev matrix must
 # not require the TUI stack; CI opts in explicitly alongside `--extra tui`.

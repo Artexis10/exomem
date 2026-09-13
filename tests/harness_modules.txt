@@ -24,6 +24,7 @@ tests/test_epistemic_runner.py
 tests/test_epistemic_scenario.py
 tests/test_epistemic_scoring.py
 tests/test_epistemic_snapshot.py
+tests/test_epistemic_utility_assertions.py
 tests/test_equivalence_differ.py
 tests/test_equivalence_selection.py
 tests/test_harness_capture_caching.py
@@ -47,6 +48,12 @@ tests/test_lme_direct_lifecycle.py
 tests/test_lme_duplicate_session_ids.py
 tests/test_lme_exomem_capture.py
 tests/test_lme_hybrid_rag.py
+tests/test_lme_metered.py
+tests/test_lme_metered_actor_output.py
+tests/test_lme_metered_chat.py
+tests/test_lme_native_agent.py
+tests/test_lme_native_agent_instrumentation.py
+tests/test_lme_native_cell.py
 tests/test_lme_normalize.py
 tests/test_lme_providers.py
 tests/test_lme_reader_gate.py
@@ -58,6 +65,7 @@ tests/test_membench_agreement.py
 tests/test_membench_altitude.py
 tests/test_membench_artifacts.py
 tests/test_membench_bounds.py
+tests/test_membench_cli_utility.py
 tests/test_membench_compile_plan.py
 tests/test_membench_crosslingual.py
 tests/test_membench_declared_basis.py
@@ -92,6 +100,13 @@ tests/test_membench_template_suite.py
 tests/test_membench_trackc.py
 tests/test_membench_trackc_join.py
 tests/test_membench_trackd.py
+tests/test_membench_utility_actor.py
+tests/test_membench_utility_cell_fixture.py
+tests/test_membench_utility_report.py
+tests/test_membench_utility_runner.py
+tests/test_membench_utility_scenarios.py
+tests/test_membench_utility_scoring.py
+tests/test_membench_utility_world.py
 tests/test_memorybench_equivalence_projection.py
 tests/test_memorybench_export.py
 tests/test_memorybench_export_observations.py
@@ -119,3 +134,6 @@ tests/test_reviewer_bootstrap_cli.py
 tests/test_service_installers.py
 tests/test_transactional_writes.py
 tests/test_unsupported_platform_disclosure.py
+tests/test_utility_glm_profile.py
+tests/test_utility_metered_limits.py
+tests/test_utility_runner_integrity.py
