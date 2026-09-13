@@ -23,7 +23,11 @@ There, `maximal` holds the same real-world behaviour `balanced` gets for free
 elsewhere. See `default_for_surface`.
 
 Resolution precedence: `EXOMEM_PROMINENCE` env → the current principal/vault
-preference → the shared config file (`mode.config_path()`) → the surface default.
+preference for this request's engagement context → the identity-wide
+principal/vault preference → the shared config file (`mode.config_path()`) →
+the surface default. The context — `coding` or `conversation` — is derived from
+the detected client surface, so one identity can run Balanced while coding and
+Maximal in a conversational client. See `context_for_surface`.
 
 The config file is deliberately the SAME one `mode` uses. It is a fixed, shared path
 for the same reason documented in `mode.config_path`: the MCP server and the CLI are
@@ -451,11 +455,31 @@ def default_for_surface(surface: str | None = None) -> str:
     return DEFAULT_PROMINENCE
 
 
+def _saved_context_level(surface: str | None) -> str | None:
+    """The saved level for the context this request belongs to, if any.
+
+    The context is derived from the surface — the detected one when the caller
+    passes none — never from a request argument. `surface` is an internal
+    "what would this surface get?" knob and is not reachable from the public
+    MCP/REST/CLI parameter set.
+    """
+    contexts = _saved_preference().get("contexts")
+    if not isinstance(contexts, dict):
+        return None
+    applied = context_for_surface(surface if surface is not None else detect_surface())
+    return normalize(contexts.get(applied))
+
+
 def resolve(surface: str | None = None) -> str:
-    """Active level: environment → request preference → machine config → default."""
+    """Active level: environment → this context's saved value → the identity-wide
+    saved value → machine config → surface default."""
     from_env = normalize(os.environ.get(_PROMINENCE_ENV))
     if from_env:
         return from_env
+
+    by_context = _saved_context_level(surface)
+    if by_context:
+        return by_context
 
     stored = normalize(_saved_preference().get("stored"))
     if stored:
@@ -535,10 +559,12 @@ def hook_env(level: str | None = None, surface: str | None = None) -> dict[str, 
 def resolved(surface: str | None = None) -> dict:
     """Bootstrap-shaped view of the active prominence policy."""
     level = resolve(surface)
+    applied_surface = surface if surface is not None else detect_surface()
     result = {
         "level": level,
-        "source": _active_source(),
-        "surface": surface if surface is not None else detect_surface(),
+        "source": _active_source(surface),
+        "surface": applied_surface,
+        "context": context_for_surface(applied_surface),
         "contract": CONTRACTS[level].as_dict(),
         "levels": list(CANON),
         "change_with": "exomem prominence <level>",
@@ -554,13 +580,18 @@ def resolved(surface: str | None = None) -> dict:
 
 def configuration_route() -> str:
     """The identity-scoped setting route for surfaces exposing configure_memory."""
-    return "configure_memory: inspect first; set prominence with expected_revision."
+    return (
+        "configure_memory: inspect first; set prominence with expected_revision, "
+        "optionally for one context; clear removes a context value."
+    )
 
 
-def _active_source() -> str:
+def _active_source(surface: str | None = None) -> str:
     """Where the active level came from — useful when a setting appears not to apply."""
     if normalize(os.environ.get(_PROMINENCE_ENV)):
         return "env"
+    if _saved_context_level(surface):
+        return "preference:context"
     if normalize(_saved_preference().get("stored")):
         return "preference"
     raw = mode.read_config().get(_CONFIG_KEY)

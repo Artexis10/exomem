@@ -467,3 +467,129 @@ def test_every_bootstrap_projection_serves_one_capture_text_per_level(
         for profile in ("compact", "full", "diagnostics")
     }
     assert set(served.values()) == {prominence.contract(level).capture}, served
+
+
+# ------------------------------------------------------------- engagement context
+
+
+@pytest.fixture
+def saved():
+    """Install a request preference snapshot the way `request_scope` would."""
+    tokens = []
+
+    def install(stored=None, contexts=None, **extra):
+        tokens.append(
+            prominence._REQUEST_PREFERENCE.set(
+                {
+                    "vault_root": Path("/nonexistent"),
+                    "preference": {
+                        "stored": stored,
+                        "contexts": dict(contexts or {}),
+                        "revision": "missing",
+                        **extra,
+                    },
+                }
+            )
+        )
+
+    yield install
+    for token in reversed(tokens):
+        prominence._REQUEST_PREFERENCE.reset(token)
+
+
+@pytest.mark.parametrize("surface", sorted(prominence.HOOKLESS_SURFACES))
+def test_every_hookless_surface_is_the_conversation_context(surface):
+    assert prominence.context_for_surface(surface) == "conversation"
+
+
+@pytest.mark.parametrize(
+    "surface", ["codex", "claude-code", "vscode", "some-new-client", "", "   ", None]
+)
+def test_coding_and_unknown_surfaces_are_the_coding_context(surface):
+    assert prominence.context_for_surface(surface) == "coding"
+
+
+@pytest.mark.parametrize("surface", ["ChatGPT", "  Claude-AI  ", "HOSTED"])
+def test_context_detection_ignores_case_and_surrounding_space(surface):
+    assert prominence.context_for_surface(surface) == "conversation"
+
+
+def test_contexts_are_exactly_coding_and_conversation():
+    assert prominence.CONTEXTS == ("coding", "conversation")
+
+
+def test_a_context_value_beats_the_identity_wide_value(config, saved):
+    saved(stored="maximal", contexts={"coding": "balanced"})
+
+    assert prominence.resolve("codex") == "balanced"
+    assert prominence._active_source("codex") == "preference:context"
+
+
+def test_the_identity_wide_value_applies_where_that_context_is_unset(config, saved):
+    saved(stored="maximal", contexts={"coding": "balanced"})
+
+    assert prominence.resolve("claude-ai") == "maximal"
+    assert prominence._active_source("claude-ai") == "preference"
+
+
+def test_a_context_value_does_not_leak_into_the_other_context(config, saved):
+    saved(contexts={"conversation": "off"})
+
+    assert prominence.resolve("codex") == "balanced", "the coding client keeps its default"
+    assert prominence._active_source("codex") == "default"
+    assert prominence.resolve("claude-ai") == "off"
+    assert prominence._active_source("claude-ai") == "preference:context"
+
+
+def test_the_operator_override_still_beats_a_context_value(config, saved, monkeypatch):
+    saved(stored="maximal", contexts={"coding": "balanced"})
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "light")
+
+    assert prominence.resolve("codex") == "light"
+    assert prominence._active_source("codex") == "env"
+
+
+def test_a_context_value_beats_the_legacy_machine_config(config, saved):
+    config.write_text(json.dumps({"schema": 1, "prominence": "off"}), "utf-8")
+    saved(contexts={"coding": "balanced"})
+
+    assert prominence.resolve("codex") == "balanced"
+    assert prominence._active_source("codex") == "preference:context"
+
+
+def test_an_unusable_record_degrades_to_the_surface_default(config, saved):
+    saved(unavailable="PREFERENCE_STATE_UNAVAILABLE")
+
+    assert prominence.resolve("claude-ai") == "maximal"
+    assert prominence._active_source("claude-ai") == "default"
+
+
+def test_resolved_reports_the_applied_context_and_the_saved_map(config, saved):
+    saved(stored="maximal", contexts={"coding": "balanced"})
+
+    payload = prominence.resolved("codex")
+
+    assert payload["context"] == "coding"
+    assert payload["surface"] == "codex"
+    assert payload["source"] == "preference:context"
+    assert payload["level"] == "balanced"
+    assert payload["preference"]["contexts"] == {"coding": "balanced"}
+    assert payload["preference"]["stored"] == "maximal"
+    assert payload["preference"]["scope"] == "principal-and-vault"
+
+
+def test_resolved_reports_a_conversation_context_for_a_hookless_surface(config, saved):
+    saved(stored="maximal", contexts={"coding": "balanced"})
+
+    payload = prominence.resolved("claude-ai")
+
+    assert payload["context"] == "conversation"
+    assert payload["source"] == "preference"
+    assert payload["level"] == "maximal"
+
+
+def test_resolved_reports_a_context_without_any_request_scope(config):
+    payload = prominence.resolved()
+
+    assert payload["context"] == "coding"
+    assert "preference" not in payload
