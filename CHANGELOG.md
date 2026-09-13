@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.83.0](https://github.com/Artexis10/exomem/compare/v0.82.0...v0.83.0) (2026-09-13)
+
+
+### Features
+
+* **prominence:** tell hook-capable clients what their hooks actually read ([#1251](https://github.com/Artexis10/exomem/issues/1251)) ([df1dc1e](https://github.com/Artexis10/exomem/commit/df1dc1e49e3dd52b3483ed555108c74713f4d584))
+
+
+### Bug Fixes
+
+* **hosted:** accept the Job Kubernetes stores for vault fingerprinting ([#1250](https://github.com/Artexis10/exomem/issues/1250)) ([b922c71](https://github.com/Artexis10/exomem/commit/b922c7185c70062f5503f53dff23b1cbea8e3816))
+* **hosted:** migrate fenced custody whose attestation window closed ([#1254](https://github.com/Artexis10/exomem/issues/1254)) ([28ca84d](https://github.com/Artexis10/exomem/commit/28ca84d9918ad37f801cb540cc0dae2750fd575c))
+* **hosted:** select the fingerprint-proof provisioner ([#1253](https://github.com/Artexis10/exomem/issues/1253)) ([24d7bf8](https://github.com/Artexis10/exomem/commit/24d7bf8029b5917170f74c3b6af41e37c99fe573))
+* **hosted:** select the recovery-capable provisioner ([#1244](https://github.com/Artexis10/exomem/issues/1244)) ([17e4c8a](https://github.com/Artexis10/exomem/commit/17e4c8a34396292d6a7ac8ef97fa55f09ea05600))
+* **mutation:** reap dead pending receipts, name background holders, and never report a persisted preference as busy ([#1252](https://github.com/Artexis10/exomem/issues/1252)) ([618332d](https://github.com/Artexis10/exomem/commit/618332d32f05b1bc1b308fd7ae0a065cfddd6df4))
+
 ## [0.82.0](https://github.com/Artexis10/exomem/compare/v0.81.0...v0.82.0) (2026-09-13)
 
 
