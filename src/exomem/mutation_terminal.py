@@ -1476,7 +1476,7 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         # canonical prominence vocabulary. Keep the newly effective contract
         # visible so the current conversation can adopt it immediately.
         compact.update({key: leaf[key] for key in (
-            "operation", "action", "scope", "stored", "revision",
+            "operation", "action", "scope", "stored", "contexts", "context", "revision",
             "before_hash", "after_hash", "receipt_id", "engagement",
         ) if key in leaf})
     elif (

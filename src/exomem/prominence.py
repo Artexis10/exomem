@@ -23,7 +23,11 @@ There, `maximal` holds the same real-world behaviour `balanced` gets for free
 elsewhere. See `default_for_surface`.
 
 Resolution precedence: `EXOMEM_PROMINENCE` env → the current principal/vault
-preference → the shared config file (`mode.config_path()`) → the surface default.
+preference for this request's engagement context → the identity-wide
+principal/vault preference → the shared config file (`mode.config_path()`) →
+the surface default. The context — `coding` or `conversation` — is derived from
+the detected client surface, so one identity can run Balanced while coding and
+Maximal in a conversational client. See `context_for_surface`.
 
 The config file is deliberately the SAME one `mode` uses. It is a fixed, shared path
 for the same reason documented in `mode.config_path`: the MCP server and the CLI are
@@ -59,7 +63,7 @@ def _request_preference(vault_root: Path) -> dict:
     from .cli_ops import OpError
     from .governance.principal import effective_principal
 
-    preference = {"stored": None, "revision": "missing"}
+    preference = {"stored": None, "contexts": {}, "revision": "missing"}
     if effective_principal().resolved:
         try:
             preference = prominence_preferences.inspect(vault_root)
@@ -115,6 +119,14 @@ WEB_DEFAULT_PROMINENCE = "maximal"
 #: Surfaces that cannot run hooks: no filesystem to install into, no turn-level
 #: re-arming. Everything here defaults to `WEB_DEFAULT_PROMINENCE`.
 HOOKLESS_SURFACES = frozenset({"web", "hosted", "chatgpt", "claude-ai", "openai"})
+
+#: Engagement contexts. Exactly two, both derived from the detected surface: a
+#: saved level may differ between a coding client and a conversational one. The
+#: context tunes eagerness only — it never selects a principal, vault, storage
+#: path or authority ceiling.
+CODING_CONTEXT = "coding"
+CONVERSATION_CONTEXT = "conversation"
+CONTEXTS: tuple[str, ...] = (CODING_CONTEXT, CONVERSATION_CONTEXT)
 
 _PROMINENCE_ENV = "EXOMEM_PROMINENCE"
 _SURFACE_ENV = "EXOMEM_SURFACE"
@@ -414,6 +426,19 @@ def _truthy(value: str | None) -> bool:
     return bool(value) and value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
+def context_for_surface(surface: str | None) -> str:
+    """The engagement context one surface belongs to. Pure; no detection.
+
+    Hookless surfaces are conversational; Codex, Claude Code, every other named
+    surface, and an absent or unrecognized one are `coding`, which keeps today's
+    generic default for unknown clients. Callers that want the live surface pass
+    `detect_surface()`; a request argument never supplies the applied context.
+    """
+    if surface and surface.strip().lower() in HOOKLESS_SURFACES:
+        return CONVERSATION_CONTEXT
+    return CODING_CONTEXT
+
+
 def default_for_surface(surface: str | None = None) -> str:
     """The shipped default for a client surface.
 
@@ -430,11 +455,31 @@ def default_for_surface(surface: str | None = None) -> str:
     return DEFAULT_PROMINENCE
 
 
+def _saved_context_level(surface: str | None) -> str | None:
+    """The saved level for the context this request belongs to, if any.
+
+    The context is derived from the surface — the detected one when the caller
+    passes none — never from a request argument. `surface` is an internal
+    "what would this surface get?" knob and is not reachable from the public
+    MCP/REST/CLI parameter set.
+    """
+    contexts = _saved_preference().get("contexts")
+    if not isinstance(contexts, dict):
+        return None
+    applied = context_for_surface(surface if surface is not None else detect_surface())
+    return normalize(contexts.get(applied))
+
+
 def resolve(surface: str | None = None) -> str:
-    """Active level: environment → request preference → machine config → default."""
+    """Active level: environment → this context's saved value → the identity-wide
+    saved value → machine config → surface default."""
     from_env = normalize(os.environ.get(_PROMINENCE_ENV))
     if from_env:
         return from_env
+
+    by_context = _saved_context_level(surface)
+    if by_context:
+        return by_context
 
     stored = normalize(_saved_preference().get("stored"))
     if stored:
@@ -514,10 +559,12 @@ def hook_env(level: str | None = None, surface: str | None = None) -> dict[str, 
 def resolved(surface: str | None = None) -> dict:
     """Bootstrap-shaped view of the active prominence policy."""
     level = resolve(surface)
+    applied_surface = surface if surface is not None else detect_surface()
     result = {
         "level": level,
-        "source": _active_source(),
-        "surface": surface if surface is not None else detect_surface(),
+        "source": _active_source(surface),
+        "surface": applied_surface,
+        "context": context_for_surface(applied_surface),
         "contract": CONTRACTS[level].as_dict(),
         "levels": list(CANON),
         "change_with": "exomem prominence <level>",
@@ -532,14 +579,22 @@ def resolved(surface: str | None = None) -> dict:
 
 
 def configuration_route() -> str:
-    """The identity-scoped setting route for surfaces exposing configure_memory."""
-    return "configure_memory: inspect first; set prominence with expected_revision."
+    """The identity-scoped setting route for surfaces exposing configure_memory.
+
+    Deliberately terse: this string rides in the COMPACT bootstrap ahead of the
+    action catalogue, where `test_record_public_surface` pins how early `record`
+    is reachable. The full contract — levels, expected_revision, the context
+    argument — is the tool description's job, not this route hint's.
+    """
+    return "configure_memory: inspect first; set or clear."
 
 
-def _active_source() -> str:
+def _active_source(surface: str | None = None) -> str:
     """Where the active level came from — useful when a setting appears not to apply."""
     if normalize(os.environ.get(_PROMINENCE_ENV)):
         return "env"
+    if _saved_context_level(surface):
+        return "preference:context"
     if normalize(_saved_preference().get("stored")):
         return "preference"
     raw = mode.read_config().get(_CONFIG_KEY)

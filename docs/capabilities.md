@@ -37,7 +37,7 @@ See [hosted-operations.md](hosted-operations.md) and the
 
 | Command | Tier | Surfaces | Mode | Destructive | CLI positional | Routes | Parameters | Summary |
 | --- | ---: | --- | --- | --- | --- | --- | --- | --- |
-| configure_memory | 1 | MCP, REST, CLI | write | yes | - | configure_memory | action, prominence, expected_revision, response_detail | Inspect or set your saved Exomem engagement level for this vault. |
+| configure_memory | 1 | MCP, REST, CLI | write | yes | - | configure_memory | action, prominence, expected_revision, context, response_detail | Inspect, set or clear your saved Exomem engagement level for this vault. |
 | coordination_status | 1 | MCP, REST, CLI | read | no | - | coordination_status | - | Report this replica's writer-lease role and coordinator health. |
 | bootstrap | 1 | MCP, REST, CLI | read | no | - | bootstrap | profile, workflow, skill_contract | Return Exomem's versioned operating contract and live session state. |
 | ask_memory | 1 | MCP, REST, CLI | read | no | query | search, find | query, types, projects, tags, speakers, file_types, exclude_file_types, categories, kinds, source_kinds, domains, relations, relation_of, relation_direction, filters, result_level, limit, continuation, scope, mode, detail, deep, graph, rerank, rerank_max_candidates, prefer_compiled, prefer_active, prefer_used, widen_outside_kb, graph_enrich, include_timings, explain, purpose | Recall durable knowledge from Exomem with product defaults. |

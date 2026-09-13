@@ -3021,7 +3021,11 @@ _DATA_REPRESENTATION_ADAPTER: dict[str, str] = {
 }
 
 _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
-    ("configure_memory", "action"): {"inspect": "structure", "set": "mutation"},
+    ("configure_memory", "action"): {
+        "inspect": "structure",
+        "set": "mutation",
+        "clear": "mutation",
+    },
     ("connect_memory", "operation"): {
         "suggest-links": "structure",
         "suggest-relations": "structure",

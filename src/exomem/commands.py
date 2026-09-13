@@ -598,31 +598,64 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
 
 def op_configure_memory(
     vault_root: Path,
-    action: Literal["inspect", "set"] = "inspect",
+    action: Literal["inspect", "set", "clear"] = "inspect",
     prominence: str | None = None,
     expected_revision: str | None = None,
+    context: Literal["coding", "conversation"] | None = None,
 ) -> dict:
-    """Inspect or set your saved Exomem engagement level for this vault.
+    """Inspect, set or clear your saved Exomem engagement level for this vault.
 
     Inspect first, then set off, light, balanced or maximal with the returned
     revision as expected_revision. The choice follows this authenticated identity
     on later requests without a restart. It changes recall/capture eagerness, never
     compute mode or authority. Other identities and vaults remain independent.
+    Pass context "coding" or "conversation" to set a level for that kind of client
+    alone, leaving the identity-wide value untouched, and use clear with that
+    context and expected_revision to remove it again. The context that applies to
+    a request is detected from the calling client, never chosen by an argument.
     Adopt the returned engagement contract in the current conversation.
+
+    Args:
+        action: "inspect" reads the saved state, "set" writes a level, and
+            "clear" removes one context value.
+        prominence: The level to save — off, light, balanced or maximal; required
+            by set and rejected by clear.
+        expected_revision: The revision a prior inspect returned, so a stale write
+            is refused rather than overwriting a later choice.
+        context: Which saved context value to write or clear; the context applied
+            to a request is always derived from the client surface, never from
+            this argument.
     """
     from . import prominence as prominence_module
     from . import prominence_preferences
     from .cli_ops import OpError
 
-    if action not in {"inspect", "set"} or (
-        action == "inspect" and (prominence is not None or expected_revision is not None)
-    ) or (action == "set" and (prominence is None or expected_revision is None)):
-        raise OpError("INVALID_PREFERENCE_ARGUMENTS", "inspect takes no setting; set requires "
-                      "prominence and expected_revision")
+    if (
+        action not in {"inspect", "set", "clear"}
+        or (
+            action == "inspect"
+            and (prominence is not None or expected_revision is not None or context is not None)
+        )
+        or (action == "set" and (prominence is None or expected_revision is None))
+        or (
+            action == "clear"
+            and (context is None or expected_revision is None or prominence is not None)
+        )
+    ):
+        raise OpError(
+            "INVALID_PREFERENCE_ARGUMENTS",
+            "inspect takes no setting; set requires prominence and expected_revision; "
+            "clear requires context and expected_revision and no prominence",
+        )
     before = prominence_preferences.inspect(vault_root)
     saved = before
     if action == "set":
-        saved = prominence_preferences.set_preference(vault_root, prominence, expected_revision)
+        saved = prominence_preferences.set_preference(
+            vault_root, prominence, expected_revision, context=context
+        )
+    elif action == "clear":
+        saved = prominence_preferences.clear_preference(vault_root, context, expected_revision)
+    if action != "inspect":
         prominence_module.refresh_request_preference(vault_root)
         if saved.get("mutated"):
             from . import writer_lease
@@ -636,6 +669,10 @@ def op_configure_memory(
         "action": action,
         "scope": "principal-and-vault",
         **saved,
+        # The context this request resolves under, derived from the detected
+        # surface. `contexts` (from `saved`) is the saved map; this is the one
+        # that applied. They are deliberately different questions.
+        "context": engagement["context"],
         "before_hash": before["revision"],
         "after_hash": saved["revision"],
         "engagement": engagement,
