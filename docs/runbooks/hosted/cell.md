@@ -202,7 +202,7 @@ spec:
         - {name: EXOMEM_RECOVERY_DATABASE_ROLE, value: exomem_provisioner_runtime}
         - {name: EXOMEM_RECOVERY_DATABASE_LOCK_TIMEOUT_SECONDS, value: "60"}
         - {name: EXOMEM_RECOVERY_HCLOUD_LOCATION, value: fsn1}
-        - {name: EXOMEM_RECOVERY_HELM_BINARY, value: /usr/local/bin/helm}
+        - {name: EXOMEM_RECOVERY_HELM_BINARY, value: $helm_binary}
         - {name: EXOMEM_RECOVERY_HELM_VERSION, value: $helm_version}
         - {name: EXOMEM_RECOVERY_CELL_CHART_PATH, value: $cell_chart_path}
         - {name: EXOMEM_RECOVERY_CELL_CHART_VERSION, value: $cell_chart_version}
@@ -214,7 +214,21 @@ The four Helm variables name the pinned client and the chart baked into the same
 selected image, and they carry no authority of their own: recovery reads retained
 release records through the client that wrote them rather than decoding their
 stored form itself. Take the version and chart values from the running provisioner
-worker's own environment so they cannot drift from the image being used.
+worker's own environment so they cannot drift from the image being used; the
+binary and chart live inside the image, so a guessed path fails only at the
+observer's first Helm call:
+
+```bash
+worker_env() { kubectl -n exomem-platform get deployment exomem-provisioner-worker \
+  -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name=='$1')].value}"; }
+helm_binary=$(worker_env EXOMEM_PROVISIONER_HELM_BINARY)
+helm_version=$(worker_env EXOMEM_PROVISIONER_HELM_VERSION)
+cell_chart_path=$(worker_env EXOMEM_PROVISIONER_CELL_CHART_PATH)
+cell_chart_version=$(worker_env EXOMEM_PROVISIONER_CELL_CHART_VERSION)
+for value in "$helm_binary" "$helm_version" "$cell_chart_path" "$cell_chart_version"; do
+  test -n "$value" || { echo "worker environment is missing a Helm setting" >&2; exit 2; }
+done
+```
 
 `load_recovery_settings` requires the `EXOMEM_RECOVERY_*` set above **exactly** --
 it compares the set of supplied names for equality and refuses on any missing or

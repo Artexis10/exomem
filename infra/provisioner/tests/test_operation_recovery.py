@@ -41,7 +41,7 @@ def _recovery_environment(**overrides: str) -> dict[str, str]:
         "EXOMEM_RECOVERY_RUNTIME_SELECTION": "active",
         "EXOMEM_RECOVERY_HCLOUD_TOKEN": "h" * 32,
         "EXOMEM_RECOVERY_HCLOUD_LOCATION": "fsn1",
-        "EXOMEM_RECOVERY_HELM_BINARY": "/usr/local/bin/helm",
+        "EXOMEM_RECOVERY_HELM_BINARY": "/opt/exomem/bin/helm",
         "EXOMEM_RECOVERY_HELM_VERSION": "3.19.4",
         "EXOMEM_RECOVERY_CELL_CHART_PATH": "/opt/exomem/charts/cell",
         "EXOMEM_RECOVERY_CELL_CHART_VERSION": "0.1.0",
