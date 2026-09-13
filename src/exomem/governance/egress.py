@@ -2893,6 +2893,7 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
     {
         # Server/lease/health state — no vault items named.
         "coordination_status",
+        "configure_memory",
         "bootstrap",
         "connect_memory",
         # Governance inspection returns policy ids/counts only; authoring
@@ -3020,6 +3021,7 @@ _DATA_REPRESENTATION_ADAPTER: dict[str, str] = {
 }
 
 _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
+    ("configure_memory", "action"): {"inspect": "structure", "set": "mutation"},
     ("connect_memory", "operation"): {
         "suggest-links": "structure",
         "suggest-relations": "structure",

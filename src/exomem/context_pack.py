@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,15 @@ from . import (
 from . import find as find_module
 from . import vault as vault_module
 from .find_types import Hit, ParsedPage, SemanticUnitHit
+
+#: The clock the deadline check reads, named so a test can substitute one.
+_monotonic = time.monotonic
+
+#: Appended to a pack's `truncation` when the request deadline ended assembly
+#: early. A named constant rather than a phrase the caller has to match: the
+#: recall path reads it back to decide whether to name `pack` as truncated.
+DEADLINE_TRUNCATION = "pack assembly stopped at the request deadline"
+GRAPH_ENRICH_BUDGET_SKIP = "graph enrichment skipped for the request budget"
 
 # --- bounds (env-overridable at call time so tests can monkeypatch) ---
 _DEFAULT_MAX_HITS = 5
@@ -650,6 +660,9 @@ def assemble_pack(
     unit_chars: int | None = None,
     max_unit_total_chars: int | None = None,
     graph_enrich: bool = False,
+    deadline: float | None = None,
+    graph_enrich_reserve_seconds: float = 0.0,
+    timings: find_module.FindTimings | None = None,
 ) -> dict:
     """Assemble a reasoning-ready context pack over the top `hits`. Pure measurement.
 
@@ -657,6 +670,11 @@ def assemble_pack(
     contradictions, embeddings_available, truncation}``. Reads note content,
     frontmatter, wikilinks, and precomputed sidecar embeddings only — no mutation,
     no generative model, `find` ordering untouched.
+
+    `deadline` is a `time.monotonic` instant past which no further parent is
+    packed; what was packed stays a prefix of the full pack, in `find` order,
+    and `truncation` names `DEADLINE_TRUNCATION`. Reporting stays the caller's
+    job so this function keeps no side effect of its own.
     """
     max_hits = _resolve_cap(max_hits, "EXOMEM_PACK_MAX_HITS", _DEFAULT_MAX_HITS)
     max_neighbors = _resolve_cap(max_neighbors, "EXOMEM_PACK_MAX_NEIGHBORS", _DEFAULT_MAX_NEIGHBORS)
@@ -720,6 +738,9 @@ def assemble_pack(
     selected_by_path: dict[str, list[tuple[int, int, str]]] = {}
     missing = 0
     for group in packed_groups:
+        if deadline is not None and _monotonic() >= deadline:
+            truncation.append(DEADLINE_TRUNCATION)
+            break
         snapshot = _load_parent_snapshot(vault_root, str(group["path"]))
         if snapshot is None:
             missing += 1  # a packed hit whose file is gone/unreadable — surface it.
@@ -891,7 +912,13 @@ def assemble_pack(
         "truncation": truncation,
     }
     if graph_enrich:
-        result["graph"] = _graph_enrichment(vault_root, packed_pages)
+        # Parent loading can consume the reserve checked before assembly.
+        # Decide again at the actual stage entry, keeping earlier packed pages.
+        if deadline is not None and deadline - _monotonic() <= graph_enrich_reserve_seconds:
+            truncation.append(GRAPH_ENRICH_BUDGET_SKIP)
+        else:
+            with find_module._span(timings, "graph_enrich"):
+                result["graph"] = _graph_enrichment(vault_root, packed_pages)
     return result
 
 

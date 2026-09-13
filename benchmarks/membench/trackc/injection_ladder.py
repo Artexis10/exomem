@@ -6,26 +6,31 @@ that file) against an ISOLATED corpus vault:
 
 - Inject mode is a payload upgrade on the same fire gate: with
   ``EXOMEM_RETRIEVE_INJECT`` truthy the hook fetches compact routing stubs and
-  appends them under the ``KB routing stubs`` header (lines 396-408, 337-356;
-  header at line 75, 400-char cap at line 76).
-- Ladder order (``_gather_hits``, lines 320-334): REST is attempted ONLY when
-  ``EXOMEM_REST_API_KEY`` is set (lines 325-329); otherwise, with
+  appends them under the ``KB routing stubs`` header (``_format_inject_block``;
+  ``_STUB_HEADER``, whole-line bound ``_STUB_BLOCK_MAX_CHARS``).
+- Ladder order (``_gather_hits_with_lane``): REST is attempted ONLY when a key
+  resolves (``_resolve_rest_key``: the env, else the managed install's
+  ``service.env``, loopback-only for a file-sourced key); otherwise, with
   ``EXOMEM_RETRIEVE_INJECT_CLI`` truthy, the CLI rung runs.
-- CLI rung resolution (``_fetch_via_cli``, lines 289-317): the hook locates
+- CLI rung resolution (``_fetch_via_cli``): the hook locates
   the executable via ``shutil.which("exomem") or shutil.which("kb")`` (line
   295) — i.e. PATH lookup, NOT an EXOMEM_COMMAND env var — then runs
-  ``<exe> ask_memory --detail compact --limit 3 --mode keyword --json
-  <prompt>`` with a hard 5.0s timeout (lines 299-311). It accepts the shared
+  ``<exe> ask_memory --detail compact --limit 3 --mode hybrid --json
+  <prompt>`` (``INJECT_MODE``) with a wall-clock timeout of at most
+  ``CLI_TIMEOUT_SECONDS``, bounded by the shared ``INJECT_BUDGET_SECONDS``. It
+  accepts the shared
   ``{"success": true, "data": [...]}`` envelope (``_parse_hits``, lines
   243-254). ANY failure — executable missing, non-zero exit, bad JSON,
   timeout — returns None and the hook falls to the reminder-only floor
-  (lines 330-334, 404-408); it never blocks or raises.
+  (the reminder-only floor in ``main``); it never blocks or raises.
 
-Determinism note: the CLI rung queries in keyword mode, which is strict
-case-insensitive substring matching over title+body (src/exomem/find.py line
-457), so the firing probe prompt must literally appear in a corpus page — a
-corpus source TITLE satisfies both the substring requirement and the nudge
-gate (>= 20 chars, non-control).
+Determinism note: the CLI rung queries in hybrid mode (``INJECT_MODE`` in the
+hook; keyword mode's all-tokens gate never passed a real prompt). Hybrid fuses
+the lexical lanes with a vector lane, so a probe that is a corpus source TITLE
+still ranks its own page first through the lexical lanes and satisfies the
+nudge gate (>= 20 chars, non-control); the vector lane can only add candidates
+below it. The ``cited_corpus`` assertion therefore stays deterministic against
+the isolated vault, but it now exercises an embedding-capable ``ask_memory``.
 
 REST rung: intentionally NOT exercised here (loopback availability in the
 test sandbox is uncertain); see ``rest_rung_stub`` for the exact manual
@@ -35,6 +40,7 @@ command.
 from __future__ import annotations
 
 import json
+import os
 import re
 import stat
 import subprocess
@@ -51,9 +57,9 @@ from membench.trackc.hook_home import (
 )
 from membench.trackc.nudge_driver import HOOK_TIMEOUT_SECONDS, parse_fired
 
-#: Inject-block header, mirrored from exomem_retrieve_nudge.py line 75.
+#: Inject-block header, mirrored from exomem_retrieve_nudge.py ``_STUB_HEADER``.
 STUB_HEADER = "KB routing stubs"
-#: Reminder prefix, mirrored from lines 60-61.
+#: Reminder prefix, mirrored from ``REMINDER``.
 REMINDER_PREFIX = "[Exomem retrieval check]"
 
 T00_TEMPLATE = "t00_mini_smoke"
@@ -86,9 +92,9 @@ def _gate_passes(prompt: str) -> bool:
     """Check the probe prompt against the hook's OWN gate predicates."""
     from exomem._hooks import exomem_retrieve_nudge as nudge
 
-    if len(prompt.strip()) < 20:  # min-chars default, lines 373, 378
+    if len(prompt.strip()) < 20:  # min-chars default (``EXOMEM_RETRIEVE_NUDGE_MIN_CHARS``)
         return False
-    return not nudge._is_obvious_control_prompt(prompt, 180)  # lines 178-191
+    return not nudge._is_obvious_control_prompt(prompt, 180)
 
 
 def _distinctive_token(title: str) -> str:
@@ -157,9 +163,10 @@ def build_seeded_vault(workdir: Path | None = None, *, seed: int = 1) -> SeededV
 
 
 def make_exomem_shim(bin_dir: Path) -> Path:
-    """An ``exomem`` executable for the hook's PATH lookup (line 295) that runs
+    """An ``exomem`` executable for the hook's PATH lookup (``shutil.which`` in
+    ``_fetch_via_cli``) that runs
     THIS worktree's code in the test venv. Vault/profile env is inherited from
-    the hook process (``_fetch_via_cli`` passes no explicit env, line 299)."""
+    the hook process (``_fetch_via_cli`` passes no explicit env)."""
     bin_dir.mkdir(parents=True, exist_ok=True)
     shim = bin_dir / "exomem"
     shim.write_text(
@@ -184,8 +191,8 @@ def run_injection(
 
     ``break_cli=True`` degrades the CLI rung the way the hook actually
     resolves it: the shim directory is left OFF PATH so
-    ``shutil.which("exomem"/"kb")`` (line 295) finds nothing and the ladder
-    falls to the reminder-only floor (lines 330-334). (There is no
+    ``shutil.which("exomem"/"kb")`` finds nothing and the ladder
+    falls to the reminder-only floor. (There is no
     EXOMEM_COMMAND override in the shipped hook — resolution is PATH-based.)
     """
     state_home = Path(state_home)
@@ -196,12 +203,15 @@ def run_injection(
     env = home.base_env(
         EXOMEM_HOOK_HOME=str(state_home),
         PATH=path,
-        # Opt-in inject mode + CLI rung (truthy-parsed flags, lines 113-133).
+        # Opt-in inject mode + CLI rung (truthy-parsed flags, ``_env_flag``).
         EXOMEM_RETRIEVE_INJECT="1",
         EXOMEM_RETRIEVE_INJECT_CLI="1",
         **seeded.env,
     )
-    env.pop("EXOMEM_REST_API_KEY", None)  # REST rung stays un-attempted (line 325)
+    # REST rung stays un-attempted: no key in the env, and the hook's
+    # service.env fallback (`_resolve_rest_key`) is pointed at an empty file.
+    env.pop("EXOMEM_REST_API_KEY", None)
+    env["EXOMEM_SERVICE_ENV"] = os.devnull
     ensure_isolated(env)
     probe = prompt if prompt is not None else seeded.probe_prompt
     event = {
@@ -244,13 +254,13 @@ def run_injection(
 def rest_rung_stub() -> dict:
     """Documented stub for the REST rung (NOT run here: loopback availability
     in this sandbox is uncertain, and the hook only attempts REST when
-    EXOMEM_REST_API_KEY is set — lines 257-286, 325-329).
+    a key resolves — ``_fetch_via_rest`` / ``_resolve_rest_key``).
 
     To exercise it manually on a workstation with the local REST facade
     running, execute the returned ``user_command`` (single line): it starts
     from the same seeded-vault env, sets the API key, and submits the probe
     event to the installed hook; REST reachability then short-circuits the
-    CLI rung entirely (line 328: a reachable REST — even with 0 hits — means
+    CLI rung entirely (a reachable REST — even with 0 hits — means
     CLI is never tried).
     """
     return {
@@ -265,8 +275,8 @@ def rest_rung_stub() -> dict:
         ),
         "contract": (
             "REST POST http://$EXOMEM_HOST:8765/api/ask_memory with "
-            '{"query": <prompt>, "detail": "compact", "limit": 3, "mode": "keyword"} '
-            "and Authorization: Bearer $EXOMEM_REST_API_KEY (lines 263-276); any "
-            "non-200/timeout/malformed response falls through (lines 277-286)"
+            '{"query": <prompt>, "detail": "compact", "limit": 3, "mode": "hybrid"} '
+            "and Authorization: Bearer $EXOMEM_REST_API_KEY (``_fetch_via_rest``); any "
+            "non-200/timeout/malformed response falls through (``_parse_hits`` -> None)"
         ),
     }

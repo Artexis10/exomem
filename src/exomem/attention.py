@@ -19,6 +19,7 @@ sort). Cross-item synthesis/judgment would be the brain's job and is deliberatel
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,6 +68,9 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     # in the default union at all, but it is the newest and the least-evidenced of
     # them. A vault that declares no binding never sees it.
     "unreflected_outcomes",
+    "unreflected_observations",
+    "artifact_role_promotion",
+    "transient_state_review",
 )
 # Registered — selectable via `categories` — but deliberately NOT default,
 # because these read old fields that a long-lived vault can already hold a large
@@ -168,6 +172,7 @@ class AttentionReport:
     all_total: int | None = None
     state_summary: dict[str, int] | None = None
     coverage: dict[str, int] | None = None
+    meta: dict | None = None
     # At most one per family, ever: three manual dismissals in one family earn
     # the family's next surfacing a single offer to quiet it. Present only when
     # an offer was armed on THIS surfacing, so a client never has to read an
@@ -187,6 +192,8 @@ class AttentionReport:
         if self.all_total is not None:
             out["all_total"] = self.all_total
             out["state_summary"] = self.state_summary or {}
+        if self.meta is not None:
+            out["meta"] = self.meta
         if self.coverage is not None:
             out["coverage"] = self.coverage
         if self.quiet_offers:
@@ -378,6 +385,7 @@ def attention(
     categories: list[str] | None = None,
     limit: int = 25,
     today=None,
+    now: dt.datetime | None = None,
     state: str = "open",
     record_surfacing: bool = True,
 ) -> AttentionReport:
@@ -413,14 +421,34 @@ def attention(
         requested=(set(categories) if categories else None),
         state=state,
     )
-    report = audit_module.audit(vault_root, categories=sorted(resolved), today=today)
+    effective_now = now or dt.datetime.now(dt.UTC)
+    if effective_now.tzinfo is None:
+        effective_now = effective_now.replace(tzinfo=dt.UTC)
+    effective_now = effective_now.astimezone(dt.UTC)
+    today = today or effective_now.date()
+    report = audit_module.audit(
+        vault_root, categories=sorted(resolved), today=today, now=effective_now
+    )
     # BEFORE fusion, deliberately. Dropping an excluded family's reasons at the
     # report edge would leave its RRF votes in the scores, so an item flagged
     # only by a quiet family would still occupy a row with no reason on it, and
     # a doubly-flagged item would keep a rank it earned from a signal the user
     # asked not to hear about.
-    findings = [f for f in report.findings if f.category not in excluded]
+    findings = [
+        finding
+        for finding in report.findings
+        if finding.category not in excluded
+        and (
+            finding.category != "unreflected_observations"
+            or (
+                (due_at := _observation_due_at(finding)) is not None
+                and due_at <= effective_now
+            )
+        )
+    ]
     ranked = _rank(findings, categories=resolved, limit=0)
+    if (report.metadata or {}).get("coverage") is not None:
+        ranked.meta = {"coverage": report.metadata["coverage"]}
     return _apply_review_state(
         vault_root,
         ranked,
@@ -431,6 +459,17 @@ def attention(
         annotations=annotations,
         record_surfacing=record_surfacing,
     )
+
+
+def _observation_due_at(finding: AuditFinding) -> dt.datetime | None:
+    raw = (finding.meta or {}).get("due_since")
+    try:
+        parsed = dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.UTC)
+    return parsed.astimezone(dt.UTC)
 
 
 def _review_state_payload(vault_root: Path) -> dict:
@@ -965,5 +1004,6 @@ def _apply_review_state(
         all_total=len(report.items),
         state_summary=state_summary,
         coverage=report.coverage,
+        meta=report.meta,
         quiet_offers=offers or None,
     )

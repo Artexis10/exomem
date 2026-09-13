@@ -582,18 +582,30 @@ the defaults (tuned for English) can under-fire. (These tunables were renamed fr
 **Opt-in: upgrade the read-side reminder to real retrieved content.** By default
 the `UserPromptSubmit` hook only reminds Claude to run `ask_memory` — set
 `EXOMEM_RETRIEVE_INJECT=1` and it instead fetches the top 3 compact routing stubs
-(keyword mode, no embeddings) for the same gated prompt and appends them to the
-reminder, so relevant prior KB pages are already in context before Claude
-decides whether to search. It tries a short transport ladder and never blocks
-on a slow path: REST first (one `POST /api/ask_memory`, ~2s timeout) — only
-attempted when `EXOMEM_REST_API_KEY` is set **in the shell that launches the
-client** (not just the server's service environment — the hook can't read another
-process's env, so export it in the same profile Claude Code or Codex inherits from);
-then, only if you also set `EXOMEM_RETRIEVE_INJECT_CLI=1`, an `exomem ask_memory --json`
-subprocess call (~5s timeout, slower — cold Python start). If neither is
-configured or reachable, it falls straight back to the plain reminder — no
-network call is ever attempted unless `EXOMEM_RETRIEVE_INJECT` is on. (The legacy
-`KB_RETRIEVE_INJECT` / `KB_RETRIEVE_INJECT_CLI` names still work too.)
+(hybrid mode, so a pasted ticket or a sentence with punctuation still finds its
+pages; keyword mode is an all-tokens gate that real prompts never pass) for the
+same gated prompt and appends them to the reminder, so relevant prior KB pages
+are already in context before Claude decides whether to search. It tries a short
+transport ladder and never blocks on a slow path: REST first (one
+`POST /api/ask_memory`, 4s timeout) — attempted when `EXOMEM_REST_API_KEY` is set
+in the client's environment **or** persisted in the managed install's
+`service.env` (`~/.config/exomem/service.env` on Linux,
+`~/Library/Application Support/Exomem/service.env` on macOS; override the location
+with `EXOMEM_SERVICE_ENV`). A key read from that file is only ever sent to a
+loopback host: point `EXOMEM_HOST` elsewhere and the REST rung is skipped for it.
+Then, only if you also set `EXOMEM_RETRIEVE_INJECT_CLI=1`, an
+`exomem ask_memory --json` subprocess call (~5s timeout, slower — cold Python
+start). The two rungs share one 8s budget under the hook's 10s timeout, measured
+on elapsed time: a REST call that dribbles bytes past the budget is abandoned and
+the CLI rung gets what is left. If
+neither is configured or reachable, it falls straight back to the plain reminder
+— no network call is ever attempted unless `EXOMEM_RETRIEVE_INJECT` is on. The
+stub block is cut by whole lines (600 characters), never inside a path, with a
+`… N more not shown` marker when a hit was dropped. Each fired nudge writes one line to
+`~/.claude/exomem-retrieve-nudge.log` (or `~/.codex/...`) naming the lane that
+answered (`lane=rest|cli|none|off`) and the hit count, so a silent fall-through
+to the plain reminder is visible. (The legacy `KB_RETRIEVE_INJECT` /
+`KB_RETRIEVE_INJECT_CLI` names still work too.)
 
 (Hooks are local-client only — claude.ai web/mobile can't run them, so there the
 skill or `bootstrap()` contract stays best-effort: nudge it with *"save that to

@@ -309,7 +309,8 @@ def test_the_family_vocabulary_is_discoverable_rather_than_hardcoded(
         assert "dispositions" in text, carrier
         assert "registered" in text, carrier
 
-    # And neither one ships a table of family names.
+    # Neither one ships a table of family names. The compact bootstrap does
+    # name the one product workflow this contract explicitly teaches.
     view = commands.op_review_memory(vault, mode="dispositions")
     assert STRUCTURAL_FAMILY in view["registered_families"]
     for carrier, text in (("compact bootstrap", taught), ("hookless block", pasted)):
@@ -318,7 +319,8 @@ def test_the_family_vocabulary_is_discoverable_rather_than_hardcoded(
             for family in view["registered_families"]
             if family in text
         ]
-        assert listed == [], f"{carrier} hardcodes a family table: {listed}"
+        expected = ["collection_candidate"] if carrier == "compact bootstrap" else []
+        assert listed == expected, f"{carrier} hardcodes a family table: {listed}"
 
 
 def test_the_envelope_is_unmoved_by_every_family_disposition(config, vault: Path) -> None:

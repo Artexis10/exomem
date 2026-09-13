@@ -67,7 +67,7 @@ def test_contention_view_snapshots_busy_refusals_while_recording_a_refusal() -> 
     def view() -> None:
         try:
             mutation_lock_module._contention_view(state)
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - report any worker-thread failure
             failures.append(error)
 
     reader = threading.Thread(target=view)
@@ -1749,7 +1749,7 @@ def _reserved_state_hold(coordinator: VaultMutationCoordinator, **kwargs):
 
 
 def test_routine_reserved_state_holds_are_not_info_rows(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A burst of short, uncontended reserved-state holds must add no INFO rows.
 
@@ -1760,6 +1760,14 @@ def test_routine_reserved_state_holds_are_not_info_rows(
     vault = tmp_path / "vault"
     vault.mkdir()
     coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+    # This checks the short-hold log level, not runner scheduling latency.
+    # Freeze only this module's clock: a preempted real hold may legitimately
+    # cross the slow-hold threshold and must remain visible at INFO.
+    monkeypatch.setattr(
+        mutation_lock_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: 1.0, time=time.time, sleep=time.sleep),
+    )
 
     with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
         for _ in range(25):

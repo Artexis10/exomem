@@ -639,6 +639,27 @@ def _finish_adoption(outcomes: list[dict[str, object] | None]) -> dict:
     }
 
 
+def _media_commit_guard(manager, vault_root: Path):  # noqa: ANN001, ANN202
+    """The per-file media boundary, as a guard `reconcile_media` opens itself.
+
+    Built the way `commands._process_media` builds its own, and for the same
+    reason: handing the guard to `reconcile_media` instead of wrapping the call
+    in it narrows the held boundary to the sidecar write, so the index and
+    graph fan-out the sidecar triggers no longer runs inside the critical
+    section of a batch whose receipt the client is still waiting for.
+    """
+
+    def guard():  # noqa: ANN202
+        return manager.mutation_guard(
+            vault_root,
+            request_id=active_mutation_request_id(),
+            operation="preserve_artifacts_media",
+            holder_kind="command",
+        )
+
+    return guard
+
+
 def _destination(vault_root: Path, *parts: str) -> str:
     return kb_root(vault_root).joinpath(*parts).relative_to(vault_root).as_posix()
 
@@ -1197,17 +1218,13 @@ def _preserve_evidence_adoption(
                 if media_processing.classify_media(
                     vault_root / str(receipt_payload["stored_path"])
                 ) is not None:
-                    with manager.mutation_guard(
+                    media_processing.reconcile_media(
                         vault_root,
-                        request_id=active_mutation_request_id(),
-                        operation="preserve_artifacts_media",
-                        holder_kind="command",
-                    ):
-                        media_processing.reconcile_media(
-                            vault_root,
-                            vault_root / str(receipt_payload["stored_path"]),
-                            explicit=False,
-                        )
+                        vault_root / str(receipt_payload["stored_path"]),
+                        explicit=False,
+                        commit_guard=_media_commit_guard(manager, vault_root),
+                        defer_fanout_to_terminal=True,
+                    )
             except Exception:  # noqa: BLE001 - committed custody remains authoritative
                 warnings.append("media reconciliation failed; evidence remains recoverable")
             payload = dict(payload)
@@ -1478,13 +1495,13 @@ def preserve_artifacts(
                     from . import media_processing
 
                     if media_processing.classify_media(vault_root / payload["path"]) is not None:
-                        with manager.mutation_guard(
+                        media_processing.reconcile_media(
                             vault_root,
-                            request_id=active_mutation_request_id(),
-                            operation="preserve_artifacts_media",
-                            holder_kind="command",
-                        ):
-                            media_processing.reconcile_media(vault_root, vault_root / payload["path"], explicit=False)
+                            vault_root / payload["path"],
+                            explicit=False,
+                            commit_guard=_media_commit_guard(manager, vault_root),
+                            defer_fanout_to_terminal=True,
+                        )
                 except Exception:  # noqa: BLE001 - the original bytes are durable and recoverable
                     warnings.append("media reconciliation failed; evidence remains recoverable")
                 stored_path = payload.get("stored_path") or payload.get("path")

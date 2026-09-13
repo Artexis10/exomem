@@ -561,7 +561,8 @@ async def _await_graph_convergence(
     *,
     relation_ref: str,
     timeout: float,
-) -> None:
+    traversal_profile: str = "epistemic",
+) -> dict[str, Any]:
     """Poll a relation context until its graph is published, or fail saying so.
 
     Before the graph came off the write path, the write's own join meant the
@@ -583,19 +584,19 @@ async def _await_graph_convergence(
                 "operation": "context",
                 "path": relation_ref,
                 "depth": 1,
-                "traversal_profile": "epistemic",
+                "traversal_profile": traversal_profile,
             },
             timeout,
         )
         graph = context.get("graph")
         if isinstance(graph, dict) and graph.get("available") is True:
-            return
+            return context
         if time.monotonic() >= deadline:
             reason = graph.get("reason") if isinstance(graph, dict) else "no graph in response"
             raise RuntimeError(
                 f"graph did not converge within {_GRAPH_CONVERGENCE_SECONDS:.0f}s of "
-                f"the write that changed it ({reason!r}) -- a rebuild that never "
-                f"lands is exactly what this waits for. Server-side state: "
+                f"the write that changed it for {traversal_profile!r} ({reason!r}) -- "
+                "a rebuild that never lands is exactly what this waits for. Server-side state: "
                 f"{_server_side_graph_state()}. Response: {context!r}"
             )
         await asyncio.sleep(_GRAPH_POLL_SECONDS)
@@ -607,29 +608,23 @@ async def _assert_relation_contexts(
     relation_ref: str,
     timeout: float,
 ) -> None:
-    await _await_graph_convergence(client, relation_ref=relation_ref, timeout=timeout)
     expected = {
         "epistemic": ("science.replicates", "supports"),
         "provenance": ("records.traces_to", "derived_from"),
         "causal": ("systems.triggers", "causes"),
     }
     for profile, (canonical, parent) in expected.items():
-        context = await _call(
+        # A later drain can invalidate the graph between profile reads. Assert
+        # the same ready response we waited for, without another read race.
+        context = await _await_graph_convergence(
             client,
-            "connect_memory",
-            {
-                "operation": "context",
-                "path": relation_ref,
-                "depth": 1,
-                "traversal_profile": profile,
-            },
-            timeout,
+            relation_ref=relation_ref,
+            timeout=timeout,
+            traversal_profile=profile,
         )
         graph = context.get("graph", {})
         if not isinstance(graph, dict):
-            raise RuntimeError(
-                f"installed context returned no graph for {profile!r}: {context!r}"
-            )
+            raise RuntimeError(f"installed context returned no graph for {profile!r}: {context!r}")
         profile_data = graph.get("profile", {})
         if not isinstance(profile_data, dict) or profile_data.get("name") != profile:
             raise RuntimeError(

@@ -418,8 +418,10 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
             *,
             wire_protocol: str,
             selection: str | None = None,
+            action: str,
         ) -> bool:
             assert selection is None
+            assert action == "provision"
             return (
                 wire_protocol == "exomem-cell-provisioner.v1"
                 and request["provisionMode"] == "serve"
@@ -455,8 +457,10 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
             *,
             wire_protocol: str,
             selection: str | None = None,
+            action: str,
         ) -> bool:
             assert selection is None
+            assert action == "provision"
             return (
                 wire_protocol == "exomem-cell-provisioner.v1"
                 and request["provisionMode"] == "serve"
@@ -492,8 +496,10 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
             *,
             wire_protocol: str,
             selection: str | None = None,
+            action: str,
         ) -> bool:
             assert selection is None
+            assert action == "provision"
             return (
                 wire_protocol == "exomem-cell-provisioner.v1"
                 and request["provisionMode"] == "serve"
@@ -1729,6 +1735,104 @@ async def test_postgresql17_claim_uses_database_clock_without_explicit_test_time
         monkeypatch.setattr(repository_module, "datetime", SkewedDateTime)
 
         assert await repository.claim_next("clock-skewed-worker") is None
+    finally:
+        await database.dispose()
+
+
+@ASYNCIO_POSTGRESQL17
+async def test_postgresql17_governance_registering_partition_renewal_and_denial(
+    postgresql17: PostgreSQL17,
+) -> None:
+    target = _new_database(postgresql17, "binding_partition")
+    migrated = _migrate(postgresql17, target)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+    database = ProvisionerDatabase(target.settings)
+    repository = _repository(database, target.settings)
+    request = _request()
+    request.pop("protocolVersion")
+    request.pop("releaseVersion")
+    request["runtimeTarget"] = {
+        "releaseVersion": "0.22.0",
+        "protocolVersion": "exomem-hosted.v1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+    }
+    binding = "A" * 43
+    try:
+        original = await repository.submit(
+            "provision", "binding-partition", request, wire_protocol="exomem-cell-provisioner.v2"
+        )
+        routine = await repository.claim_next(
+            "routine-binding", exclude_checkpoint_prefixes=frozenset({"gpi1:registering:"})
+        )
+        assert routine is not None and routine.id == original.id
+        parked = await repository.mark_pending(
+            original.id,
+            "routine-binding",
+            claim_token=routine.claim_token,
+            claim_generation=routine.claim_generation,
+            checkpoint="gpi1:registering:" + binding,
+            retry_after_seconds=0,
+        )
+        assert parked.checkpoint == "gpi1:registering:" + binding
+        assert (
+            await repository.claim_next(
+                "routine-excluded", exclude_checkpoint_prefixes=frozenset({"gpi1:registering:"})
+            )
+            is None
+        )
+        volume = await repository.claim_next(
+            "volume-binding",
+            include_checkpoints=frozenset(),
+            include_checkpoint_prefixes=frozenset({"gpi1:registering:"}),
+        )
+        assert volume is not None and volume.id == original.id
+        renewed = await repository.renew_claim(
+            original.id,
+            "volume-binding",
+            claim_token=volume.claim_token,
+            claim_generation=volume.claim_generation,
+        )
+        assert renewed.checkpoint == parked.checkpoint
+        assert renewed.claim_generation == volume.claim_generation
+        retained = await repository.mark_pending(
+            original.id,
+            "volume-binding",
+            claim_token=renewed.claim_token,
+            claim_generation=renewed.claim_generation,
+            checkpoint="effect-applied",
+            retry_after_seconds=0,
+        )
+        assert retained.checkpoint == parked.checkpoint
+        replay = await repository.claim_next(
+            "volume-replay",
+            include_checkpoints=frozenset(),
+            include_checkpoint_prefixes=frozenset({"gpi1:registering:"}),
+        )
+        assert replay is not None and replay.id == original.id
+        failed = await repository.fail(
+            original.id,
+            "volume-replay",
+            claim_token=replay.claim_token,
+            claim_generation=replay.claim_generation,
+            code="PROVISIONER_PROVIDER_UNAVAILABLE",
+        )
+        assert failed.state is OperationState.ERROR
+        assert failed.checkpoint == parked.checkpoint
+        successor = await repository.submit(
+            "destroy",
+            "binding-denial-destroy",
+            _request(operationId="operation-binding-denial-destroy"),
+        )
+        assert (
+            await repository.claim_next(
+                "destroy-blocked", allowed_actions=frozenset({OperationAction.DESTROY})
+            )
+            is None
+        )
+        assert (await repository.get_by_id(successor.id)).state is OperationState.PENDING
     finally:
         await database.dispose()
 

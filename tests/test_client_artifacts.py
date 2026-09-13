@@ -7,6 +7,7 @@ import http.client
 import json
 import shutil
 import socket
+import sqlite3
 import tempfile
 import threading
 import time
@@ -17,6 +18,7 @@ import pytest
 from conftest import initialize_vault_state_offline
 
 from exomem import commands
+from exomem import media_processing as media_processing_module
 
 
 class _Response:
@@ -1574,3 +1576,429 @@ def test_duplicate_bytes_under_a_new_identity_are_reported_not_stored(
     assert other_family["files"][0]["state"] == "stored"
     assert other_family["summary"] == {"stored": 1, "already_stored": 0, "failed": 0}
     assert commits == ["commit", "commit", "commit"]
+
+
+# --------------------------------------------------------------------------- #
+# Media fan-out leaves the critical section
+# --------------------------------------------------------------------------- #
+
+
+class _FanoutWatch:
+    """Where each index/graph fan-out happened, relative to the two boundaries.
+
+    Recording the position rather than the count is the whole point. The defect
+    was never that the fan-out ran — it is that it ran while the preservation
+    guard was held and before the caller had its receipt, so a client that
+    timed out kept retrying a batch that had already committed.
+
+    Only the media sidecar's own fan-out is judged here. The canonical artifact
+    commit fans out too, from its own `preserve_artifacts_commit` boundary;
+    that one belongs to `shorten-mutation-critical-section` and asserting on it
+    would make this test fail for a reason it does not describe.
+    """
+
+    def __init__(self, sidecar_name: str) -> None:
+        self.sidecar_name = sidecar_name
+        self.media_guard_depth = 0
+        self.terminal_persisted = False
+        self.fanouts: list[dict[str, object]] = []
+
+    def record(self, name: str, paths) -> None:  # noqa: ANN001
+        names = [Path(str(path)).name for path in paths or ()]
+        if self.sidecar_name not in names:
+            return
+        self.fanouts.append(
+            {
+                "name": name,
+                "paths": names,
+                "inside_media_guard": self.media_guard_depth > 0,
+                "after_terminal": self.terminal_persisted,
+            }
+        )
+
+
+def _watch_media_fanout(
+    monkeypatch: pytest.MonkeyPatch, manager, sidecar_name: str  # noqa: ANN001
+) -> _FanoutWatch:
+    from contextlib import contextmanager
+
+    from exomem import index_sync, writer_lease
+    from exomem import vault as vault_module
+
+    watch = _FanoutWatch(sidecar_name)
+    real_guard = writer_lease.LeaseManager.mutation_guard
+
+    @contextmanager
+    def tracking_guard(self, vault_root, **kwargs):  # noqa: ANN001, ANN202
+        media = kwargs.get("operation") == "preserve_artifacts_media"
+        with real_guard(self, vault_root, **kwargs) as coordinator:
+            if media:
+                watch.media_guard_depth += 1
+            try:
+                yield coordinator
+            finally:
+                if media:
+                    watch.media_guard_depth -= 1
+
+    monkeypatch.setattr(writer_lease.LeaseManager, "mutation_guard", tracking_guard)
+
+    real_upsert = index_sync.upsert_after_write
+
+    def watched_upsert(vault_root, written_paths, **kwargs):  # noqa: ANN001, ANN202
+        watch.record("index_sync.upsert_after_write", written_paths)
+        return real_upsert(vault_root, written_paths, **kwargs)
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", watched_upsert)
+
+    real_fanout = vault_module.post_commit_batch_fanout
+
+    def watched_fanout(vault_root, replaced, *args, **kwargs):  # noqa: ANN001, ANN202
+        watch.record("post_commit_batch_fanout", replaced)
+        return real_fanout(vault_root, replaced, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module, "post_commit_batch_fanout", watched_fanout)
+    monkeypatch.setattr(
+        media_processing_module, "post_commit_batch_fanout", watched_fanout
+    )
+
+    def terminal_persisted() -> None:
+        watch.terminal_persisted = True
+
+    manager.idempotency.after_terminal_persisted = terminal_persisted
+    return watch
+
+
+def _png(tmp_path: Path, file_id: str, filename: str):  # noqa: ANN202
+    """A staged artifact `classify_media` recognises as media."""
+    return _staged(tmp_path, file_id, filename, b"\x89PNG\r\n\x1a\n" + file_id.encode())
+
+
+_ADOPTION = {
+    "key": "media-fanout-adoption",
+    "trigger": "selected",
+    "selected_file_id": "file-media",
+}
+
+
+@pytest.mark.parametrize("adoption", [None, _ADOPTION], ids=["batch", "adoption"])
+def test_media_fanout_never_runs_inside_the_guard_or_before_the_terminal(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adoption,  # noqa: ANN001
+) -> None:
+    """Both preservation lanes owe the same invariant, with no derived path."""
+    from exomem import client_artifacts, deferred_index, writer_lease
+
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "0")
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda file, _budget, **_kwargs: _png(tmp_path, file["file_id"], "proof.png"),
+    )
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    watch = _watch_media_fanout(monkeypatch, manager, "proof.png.md")
+
+    terminal = writer_lease.invoke_command(
+        _command("preserve_artifacts"),
+        vault,
+        scope="case",
+        category="raw",
+        files=[{"download_url": "https://files.example/p", "file_id": "file-media"}],
+        adoption=adoption,
+        idempotency_key=f"media-fanout-{adoption is not None}",
+    )
+
+    assert terminal["status"] == "committed"
+    sidecar_only = [row for row in watch.fanouts if row["paths"] == ["proof.png.md"]]
+    assert sidecar_only, "the media sidecar produced no index or graph work at all"
+    assert [row for row in sidecar_only if row["inside_media_guard"]] == []
+    assert [row for row in sidecar_only if not row["after_terminal"]] == []
+    assert terminal["derived_sync"] == "completed"
+    assert "derived_sync_components" not in terminal
+    assert [receipt.rel_path for receipt in deferred_index.snapshot_full(vault)] == [
+        next(vault.rglob("proof.png.md")).relative_to(vault).as_posix()
+    ]
+
+    replay = writer_lease.invoke_command(
+        _command("preserve_artifacts"),
+        vault,
+        scope="case",
+        category="raw",
+        files=[{"download_url": "https://files.example/p", "file_id": "file-media"}],
+        adoption=adoption,
+        idempotency_key=f"media-fanout-{adoption is not None}",
+    )
+
+    assert replay["derived_sync"] == "completed"
+    assert replay.get("derived_sync_components") == terminal.get(
+        "derived_sync_components"
+    )
+    assert [row for row in watch.fanouts if row["paths"] == ["proof.png.md"]] == sidecar_only
+
+
+@pytest.mark.parametrize("adoption", [None, _ADOPTION], ids=["batch", "adoption"])
+def test_terminal_persistence_failure_does_not_run_media_fanout(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adoption,  # noqa: ANN001
+) -> None:
+    from exomem import client_artifacts, deferred_index, writer_lease
+
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "0")
+
+    staged: list[str] = []
+
+    def stage(file, _budget, **_kwargs):  # noqa: ANN001, ANN202
+        staged.append(file["file_id"])
+        return _png(tmp_path, file["file_id"], "proof.png")
+
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        stage,
+    )
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    watch = _watch_media_fanout(monkeypatch, manager, "proof.png.md")
+
+    original_persist = manager.idempotency._persist_completed_from_canonical
+    failed = False
+
+    def fail_terminal_receipt(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise sqlite3.OperationalError("deterministic receipt write failure")
+        return original_persist(*args, **kwargs)
+
+    monkeypatch.setattr(
+        manager.idempotency, "_persist_completed_from_canonical", fail_terminal_receipt
+    )
+
+    with pytest.raises(writer_lease.OpError) as uncertain:
+        writer_lease.invoke_command(
+            _command("preserve_artifacts"),
+            vault,
+            scope="case",
+            category="raw",
+            files=[{"download_url": "https://files.example/p", "file_id": "file-media"}],
+            adoption=adoption,
+            idempotency_key=f"media-persist-failure-{adoption is not None}",
+        )
+
+    assert uncertain.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
+    assert [row for row in watch.fanouts if row["paths"] == ["proof.png.md"]] == []
+    pending = deferred_index.snapshot_full(vault)
+    assert [receipt.rel_path for receipt in pending] == [
+        next(vault.rglob("proof.png.md")).relative_to(vault).as_posix()
+    ]
+
+    replay = writer_lease.invoke_command(
+        _command("preserve_artifacts"),
+        vault,
+        scope="case",
+        category="raw",
+        files=[{"download_url": "https://files.example/p", "file_id": "file-media"}],
+        adoption=adoption,
+        idempotency_key=f"media-persist-failure-{adoption is not None}",
+    )
+
+    assert replay["derived_sync"] == "pending"
+    assert [row for row in watch.fanouts if row["paths"] == ["proof.png.md"]] == []
+    assert deferred_index.snapshot_full(vault) == pending
+    assert staged == ["file-media"]
+
+
+@pytest.mark.parametrize("adoption", [None, _ADOPTION], ids=["batch", "adoption"])
+def test_a_fast_acknowledgement_session_carries_the_media_sidecar(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adoption,  # noqa: ANN001
+) -> None:
+    """With a derived path available, no sidecar fan-out runs on the request."""
+    from exomem import client_artifacts, writer_lease
+
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda file, _budget, **_kwargs: _png(tmp_path, file["file_id"], "proof.png"),
+    )
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    watch = _watch_media_fanout(monkeypatch, manager, "proof.png.md")
+
+    terminal = writer_lease.invoke_command(
+        _command("preserve_artifacts"),
+        vault,
+        scope="case",
+        category="raw",
+        files=[{"download_url": "https://files.example/p", "file_id": "file-media"}],
+        adoption=adoption,
+        idempotency_key=f"media-derived-{adoption is not None}",
+    )
+
+    assert terminal["status"] == "committed"
+    assert watch.fanouts == []
+    assert terminal["derived_sync"] in {"pending", "completed", "failed"}
+
+
+@pytest.mark.parametrize(
+    ("component_outcome", "expected_sync", "expected_components"),
+    [
+        (
+            None,
+            "pending",
+            ["embeddings", "lexstore", "memory_refs", "resolver"],
+        ),
+        ("deferred", "pending", ["embeddings"]),
+        ("failed", "failed", ["embeddings"]),
+    ],
+)
+def test_default_media_fanout_reports_non_graph_component_outcome(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component_outcome: str | None,
+    expected_sync: str,
+    expected_components: list[str],
+) -> None:
+    from exomem import client_artifacts, index_sync, writer_lease
+
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "0")
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda file, _budget, **_kwargs: _png(tmp_path, file["file_id"], "proof.png"),
+    )
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+
+    report = (
+        index_sync.IndexSyncReport(
+            "upsert",
+            ("proof.png.md",),
+            ("proof.png.md",),
+            tuple(
+                index_sync.IndexComponentOutcome(
+                    component,
+                    component_outcome if component == "embeddings" else "completed",
+                    "test_outcome",
+                )
+                for component in (
+                    "memory_refs",
+                    "resolver",
+                    "semantic_purge",
+                    "lexstore",
+                    "epistemic_graph",
+                    "embeddings",
+                )
+            ),
+        )
+        if component_outcome is not None
+        else None
+    )
+
+    def reported_fanout(
+        _vault_root, _replaced, index_reports, _semantic_states, **_kwargs  # noqa: ANN001
+    ) -> bool:
+        assert index_reports is not None
+        if report is not None:
+            index_reports.append(report)
+        return True
+
+    monkeypatch.setattr(
+        media_processing_module, "post_commit_batch_fanout", reported_fanout
+    )
+
+    terminal = writer_lease.invoke_command(
+        _command("preserve_artifacts"),
+        vault,
+        scope="case",
+        category="raw",
+        files=[{"download_url": "https://files.example/p", "file_id": "file-media"}],
+        idempotency_key=f"media-{expected_sync}",
+    )
+
+    assert terminal["derived_sync"] == expected_sync
+    assert terminal["derived_sync_components"] == expected_components
+    if expected_sync == "failed":
+        assert terminal["derived_sync_code"] == "DERIVED_COMPONENT_FAILED"
+
+
+def test_media_fanout_does_not_retire_readded_background_demand(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts, deferred_index, index_sync, writer_lease
+
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "0")
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda file, _budget, **_kwargs: _png(tmp_path, file["file_id"], "proof.png"),
+    )
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+
+    def interleaved_fanout(
+        root, replaced, index_reports, _semantic_states, **_kwargs  # noqa: ANN001
+    ) -> bool:
+        pending = deferred_index.snapshot_full(root)
+        assert len(pending) == 1
+        deferred_index.clear_full_receipts(root, pending)
+        deferred_index.add_full(root, [pending[0].rel_path])
+        index_reports.append(
+            index_sync.IndexSyncReport(
+                "upsert",
+                tuple(path.relative_to(root).as_posix() for path in replaced),
+                tuple(path.relative_to(root).as_posix() for path in replaced),
+                tuple(
+                    index_sync.IndexComponentOutcome(component, "completed", "test_completed")
+                    for component in (
+                        "memory_refs",
+                        "resolver",
+                        "semantic_purge",
+                        "lexstore",
+                        "epistemic_graph",
+                        "embeddings",
+                    )
+                ),
+            )
+        )
+        return True
+
+    monkeypatch.setattr(
+        media_processing_module, "post_commit_batch_fanout", interleaved_fanout
+    )
+
+    terminal = writer_lease.invoke_command(
+        _command("preserve_artifacts"),
+        vault,
+        scope="case",
+        category="raw",
+        files=[{"download_url": "https://files.example/p", "file_id": "file-media"}],
+        idempotency_key="media-fanout-aba",
+    )
+
+    assert terminal["derived_sync"] == "completed"
+    assert deferred_index.snapshot_full(vault) == [
+        deferred_index.DeferredReceipt(
+            next(vault.rglob("proof.png.md")).relative_to(vault).as_posix(), 1
+        )
+    ]

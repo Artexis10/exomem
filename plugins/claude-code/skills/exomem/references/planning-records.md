@@ -67,6 +67,16 @@ field and returns a `held` reference, so fix the named field and resume by that
 reference (or `discard` it) instead of looping or preserving diagnostic
 breadcrumbs as Evidence.
 
+A committed Note or Evidence write may return `records_routing` when its authored
+terms have one clear existing Records home. Read the observation before appending
+under the active capture disposition, and resume a returned held candidate when
+needed; the advisory never writes a record by itself. A strong
+`collection_candidate` is likewise a proposal: use `record_memory(action="describe")`
+and `validate` to draft a concise schema, ask one question in the user's domain
+language, and create only after that inline confirmation. Backfill only exactly
+dated evidence units, citing each unit or artifact in `sources`; prose notes stay
+where they are.
+
 For a Planning or Records collection stored as Markdown items, YAML frontmatter
 is the sole canonical value source and the UUID remains durable identity. A
 manifest may declare `item_filename` and `item_presentation` (or the compatible

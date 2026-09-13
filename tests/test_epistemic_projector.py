@@ -495,4 +495,4 @@ def test_the_collections_section_is_versioned(tmp_path: Path) -> None:
 
     projected = VaultProjector(tmp_path).project(phase="p1", taken_at="2026-01-01T00:00:00Z")
 
-    assert projected.projector.version == "0.5.0"
+    assert projected.projector.version == "0.6.0"

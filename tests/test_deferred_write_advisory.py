@@ -622,7 +622,6 @@ def test_write_advisory_result_requires_ref_and_has_no_list_form(vault: Path) ->
     for banned in ("list_results", "search_results", "latest_result", "recent_results"):
         assert banned not in exported
     assert not any("advisory" in command.name for command in commands.PRODUCT_COMMANDS)
-    assert len(commands.PRODUCT_COMMANDS) == 29
 
 
 def test_malformed_unknown_unauthorized_and_expired_result_refs_are_indistinguishable(

@@ -374,8 +374,23 @@ def deliver_transition(transition: dict[str, Any], *, webhook_url: str, transiti
 
 
 def transition_identifier(
-    alert_state: dict[str, Any], transition: dict[str, Any], index: int
+    alert_state: dict[str, Any], transition: dict[str, Any], index: int, *, observed_at: int
 ) -> str:
+    """Identity of one alert transition, stable across retries of one evaluation.
+
+    The receiver deduplicates on this id, so it must never repeat for a *new*
+    transition. The sequence counter alone is not enough: the alert-state
+    ConfigMap's `transitions_total` fell behind the receiver's record (it stood
+    at 78 when the receiver already held sequence 79; 79 against 83 rows once
+    the run had advanced it, measured 2026-09-11), so the missed-run FIRING for
+    a twenty-hour reconcile outage carried the same id as a transition from four
+    days earlier and was dropped as a duplicate, with no email. Binding the
+    evaluation time keeps a retry within one evaluation idempotent while a later
+    firing is always new. A pass that dies after delivering and before writing
+    its state re-derives the transition under a fresh id on the next loop; the
+    receiver's redundancy check against the last delivered row is what folds
+    that resend, so it is load-bearing rather than a safety net.
+    """
     transitions_total = alert_state.get("transitions_total")
     if (
         not isinstance(transitions_total, int)
@@ -384,11 +399,14 @@ def transition_identifier(
         or not isinstance(index, int)
         or isinstance(index, bool)
         or index < 0
+        or not isinstance(observed_at, int)
+        or isinstance(observed_at, bool)
+        or observed_at <= 0
     ):
         raise RuntimeError("scheduler alert transition identity is invalid")
     return hashlib.sha256(
         json.dumps(
-            {"sequence": transitions_total + index + 1, **transition},
+            {"sequence": transitions_total + index + 1, "observed_at": observed_at, **transition},
             separators=(",", ":"),
             sort_keys=True,
         ).encode()
@@ -452,7 +470,9 @@ def evaluate_once() -> None:
         failure_threshold=int(os.environ["FAILURE_THRESHOLD"]),
     )
     for index, transition in enumerate(transitions):
-        transition_id = transition_identifier(alert_state, transition, index)
+        transition_id = transition_identifier(
+            alert_state, transition, index, observed_at=observed_at
+        )
         deliver_transition(
             transition,
             webhook_url=os.environ["ALERT_WEBHOOK_URL"],

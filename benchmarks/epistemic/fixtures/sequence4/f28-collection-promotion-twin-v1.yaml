@@ -1,0 +1,129 @@
+scenario_id: f28-collection-promotion-twin-v1
+family_id: f28
+kind: operational
+public_coverage: none
+phases:
+- phase_id: hookless-candidate
+  ops:
+  - op: configure
+    ref: hookless-maximal
+  - op: snapshot
+    ref: s-hookless-candidate-seed
+  - op: agent_turn
+    ref: t01-expense
+    at: '2026-08-18'
+    detail: On 2026-08-18, the Cedar studio licence was purchased for EUR 24.00. That
+      is the confirmed result for the studio expenses.
+  - op: agent_turn
+    ref: t02-expense
+    at: '2026-08-25'
+    detail: On 2026-08-25, the Quartz studio licence was purchased for EUR 36.00.
+      That is the confirmed result for the studio expenses.
+  - op: agent_turn
+    ref: t02-tentative
+    at: '2026-08-25'
+    detail: The next renewal might be cheaper; nothing has changed yet.
+  - op: agent_turn
+    ref: t03-expense
+    at: '2026-09-01'
+    detail: On 2026-09-01, the Amber studio licence was purchased for EUR 12.00. That
+      is the confirmed result for the studio expenses.
+  - op: agent_turn
+    ref: t04-expense
+    at: '2026-09-08'
+    detail: On 2026-09-08, the Birch studio licence was purchased for EUR 18.00. That
+      is the confirmed result for the studio expenses.
+  - op: agent_turn
+    ref: t05-elapsed
+    at: '2026-09-08'
+    detail: It has been another week since I considered a different editor.
+  - op: snapshot
+    ref: s-hookless-candidate
+  expect:
+  - assert: collection_candidate_surfaced_within_budget
+    subject: f28-collection-promotion-twin-v1
+- phase_id: hookless-confirmed
+  ops:
+  - op: snapshot
+    ref: s-hookless-confirmed-seed
+  - op: agent_turn
+    ref: t06-confirm
+    at: '2026-09-08'
+    detail: Thanks, that is all for now.
+  - op: snapshot
+    ref: s-hookless-confirmed
+  expect:
+  - assert: ledger_state_matches_expectation
+    subject: f28-collection-promotion-twin-v1
+- phase_id: hooked-candidate
+  ops:
+  - op: configure
+    ref: hooked-balanced
+  - op: snapshot
+    ref: s-hooked-candidate-seed
+  - op: agent_turn
+    ref: t01-expense
+    at: '2026-08-18'
+    detail: On 2026-08-18, the Cedar studio licence was purchased for EUR 24.00. That
+      is the confirmed result for the studio expenses.
+  - op: agent_turn
+    ref: t02-expense
+    at: '2026-08-25'
+    detail: On 2026-08-25, the Quartz studio licence was purchased for EUR 36.00.
+      That is the confirmed result for the studio expenses.
+  - op: agent_turn
+    ref: t02-tentative
+    at: '2026-08-25'
+    detail: The next renewal might be cheaper; nothing has changed yet.
+  - op: agent_turn
+    ref: t03-expense
+    at: '2026-09-01'
+    detail: On 2026-09-01, the Amber studio licence was purchased for EUR 12.00. That
+      is the confirmed result for the studio expenses.
+  - op: agent_turn
+    ref: t04-expense
+    at: '2026-09-08'
+    detail: On 2026-09-08, the Birch studio licence was purchased for EUR 18.00. That
+      is the confirmed result for the studio expenses.
+  - op: agent_turn
+    ref: t05-elapsed
+    at: '2026-09-08'
+    detail: It has been another week since I considered a different editor.
+  - op: snapshot
+    ref: s-hooked-candidate
+  expect:
+  - assert: collection_candidate_surfaced_within_budget
+    subject: f28-collection-promotion-twin-v1
+- phase_id: hooked-confirmed
+  ops:
+  - op: snapshot
+    ref: s-hooked-confirmed-seed
+  - op: agent_turn
+    ref: t06-confirm
+    at: '2026-09-08'
+    detail: Thanks, that is all for now.
+  - op: snapshot
+    ref: s-hooked-confirmed
+  expect:
+  - assert: ledger_state_matches_expectation
+    subject: f28-collection-promotion-twin-v1
+fairness:
+  why_neutral: Ordinary observed events must reach durable state without naming its
+    storage; tentative events must not.
+  public_coverage_subtraction: No public coverage is claimed for these operational
+    journeys.
+  mechanisms:
+  - provider_role: subject
+    mechanism: Documented collection and review surfaces projected into neutral snapshots.
+    verdict: satisfiable
+    evidence: benchmarks/epistemic/PREREGISTRATION.md:1
+  privileged_endpoint_matrix:
+  - driver_surface_id: state.read
+    provider: exomem
+    variant: native
+    disposition: equivalent
+    audit_scope: Read-only collection and candidate projection
+    evidence: benchmarks/epistemic/PREREGISTRATION.md:1
+    reason: Reads the same state the client can inspect.
+    competitor_surface: Documented collection and review read endpoint
+  acceptance_predicate: PREREGISTRATION.md section 4, sequence-four replay predicates.

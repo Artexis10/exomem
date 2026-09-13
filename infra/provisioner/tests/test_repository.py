@@ -137,6 +137,129 @@ async def test_fleet_operation_projection_never_returns_request_secrets(
     assert request["tenantId"] not in repr(observation)
 
 
+async def _fleet_history_row(
+    repository: OperationRepository,
+    action: str,
+    identity: str,
+    *,
+    state: OperationState = OperationState.FINAL,
+    offset: int = 0,
+    **overrides: object,
+) -> str:
+    operation = await repository.submit(
+        action, identity, _request(operationId=identity, **overrides)
+    )
+    async with repository._sessions() as session, session.begin():
+        row = await session.get(Operation, operation.id)
+        assert row is not None
+        row.state = state
+        row.created_at = datetime(2026, 8, 21, tzinfo=UTC) + timedelta(seconds=offset)
+        row.finalized_at = row.created_at if state is OperationState.FINAL else None
+    return operation.id
+
+
+@pytest.mark.parametrize("action,cell_id", [("destroy", None), ("discard", "cell-alpha")])
+@pytest.mark.parametrize("terminal_state", [OperationState.FINAL, OperationState.ERROR])
+async def test_fleet_destroy_supersedes_terminal_history_before_runtime_replay(
+    repository: OperationRepository,
+    action: str,
+    cell_id: str | None,
+    terminal_state: OperationState,
+) -> None:
+    await _fleet_history_row(repository, "provision", "old-provision", state=terminal_state)
+    await _fleet_history_row(repository, "rollback-rollforward", "orphan-rollback", offset=1)
+    await _fleet_history_row(
+        repository,
+        action,
+        "tenant-destroy",
+        cellId=cell_id,
+        fenceGeneration=8,
+        offset=2,
+    )
+
+    assert await repository.list_fleet_operation_observations() == ()
+    async with repository._sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(Operation)) == 3
+
+
+@pytest.mark.parametrize(
+    "destroy_state",
+    [
+        OperationState.PENDING,
+        OperationState.CLAIMED,
+        OperationState.ERROR,
+    ],
+)
+async def test_fleet_unfinished_or_failed_destroy_does_not_erase_desired_history(
+    repository: OperationRepository, destroy_state: OperationState
+) -> None:
+    await _fleet_history_row(repository, "provision", "old-provision")
+    await _fleet_history_row(
+        repository,
+        "destroy",
+        "tenant-destroy",
+        cellId=None,
+        fenceGeneration=8,
+        offset=1,
+        state=destroy_state,
+    )
+
+    observations = await repository.list_fleet_operation_observations()
+    assert [item.external_operation_id for item in observations] == ["old-provision"]
+
+
+@pytest.mark.parametrize("unfinished_state", [OperationState.PENDING, OperationState.CLAIMED])
+async def test_fleet_destroy_never_hides_unfinished_work(
+    repository: OperationRepository, unfinished_state: OperationState
+) -> None:
+    await _fleet_history_row(
+        repository, "provision", "unfinished-provision", state=unfinished_state
+    )
+    await _fleet_history_row(
+        repository,
+        "destroy",
+        "tenant-destroy",
+        cellId=None,
+        fenceGeneration=8,
+        offset=1,
+    )
+
+    [observation] = await repository.list_fleet_operation_observations()
+    assert observation.external_operation_id == "unfinished-provision"
+    assert observation.state is unfinished_state
+
+
+@pytest.mark.parametrize("boundary", ["tenant", "cell", "fence", "time", "null_discard"])
+async def test_fleet_destroy_cannot_supersede_uncovered_history(
+    repository: OperationRepository, boundary: str
+) -> None:
+    await _fleet_history_row(
+        repository,
+        "provision",
+        "retained-provision",
+        offset=2 if boundary == "time" else 0,
+    )
+    await _fleet_history_row(
+        repository,
+        "discard" if boundary in {"cell", "null_discard"} else "destroy",
+        "other-destroy",
+        tenantId="tenant-other" if boundary == "tenant" else "tenant-alpha",
+        cellId="cell-other" if boundary == "cell" else None,
+        fenceGeneration=7,
+        offset=1,
+    )
+    if boundary == "fence":
+        async with repository._sessions() as session, session.begin():
+            row = await session.scalar(
+                select(Operation).where(Operation.external_operation_id == "retained-provision")
+            )
+            assert row is not None
+            row.fence_generation = 8
+
+    observations = await repository.list_fleet_operation_observations()
+    assert any(item.external_operation_id == "retained-provision" for item in observations)
+
+
 @pytest.mark.asyncio
 async def test_completed_rollforward_evidence_projection_is_content_free(
     repository: OperationRepository,

@@ -60,7 +60,13 @@ def _pvc(**changes: object):
                 "exomem.io/recovery-envelope": _envelope(),
             },
         },
-        "spec": {"volumeName": "pv-alpha"},
+        "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "volumeMode": "Filesystem",
+            "storageClassName": "exomem-hcloud-encrypted-retain",
+            "resources": {"requests": {"storage": "10Gi"}},
+            "volumeName": "pv-alpha",
+        },
         "status": {"phase": "Bound"},
     }
     for path, replacement in changes.items():
@@ -129,6 +135,38 @@ async def test_authenticated_volume_uid_requires_the_signed_fixed_pvc() -> None:
     )
 
     assert await adapter.authenticated_volume_uid(METADATA) == "pvc-alpha"
+
+
+@pytest.mark.parametrize("phase", ["Pending", "Bound"])
+async def test_authenticated_volume_state_accepts_only_fixed_owned_pending_or_bound_pvc(phase):
+    cluster = Cluster()
+    cluster.pvc = _pvc(**{"status.phase": phase, "spec.volumeName": None if phase == "Pending" else "pv-alpha"})
+    adapter = KubernetesCellAdapter(core_v1=cluster, apps_v1=cluster, identity_verifier=CODEC.verifier())
+
+    assert await adapter.authenticated_volume_state(METADATA) == ("pvc-alpha", phase)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"metadata.uid": "replacement"},
+        {"metadata.deletionTimestamp": NOW.isoformat()},
+        {"spec.storageClassName": "other"},
+        {"spec.accessModes": ["ReadWriteMany"]},
+        {"spec.resources": {"requests": {"storage": "20Gi"}}},
+        {"status.phase": "Lost"},
+    ],
+)
+async def test_authenticated_volume_state_refuses_replacement_deletion_or_shape_change(change):
+    cluster = Cluster()
+    cluster.pvc = _pvc(**change)
+    adapter = KubernetesCellAdapter(core_v1=cluster, apps_v1=cluster, identity_verifier=CODEC.verifier())
+
+    if change == {"metadata.uid": "replacement"}:
+        assert await adapter.authenticated_volume_state(METADATA) == ("replacement", "Bound")
+    else:
+        with pytest.raises(MetadataConflict):
+            await adapter.authenticated_volume_state(METADATA)
 
 
 @pytest.mark.parametrize(

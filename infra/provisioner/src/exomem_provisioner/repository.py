@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import and_, case, func, or_, select, true, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from .crypto import EnvelopeCodec
 from .driver import DriverTerminal
@@ -48,7 +49,9 @@ from .wire_protocol import (
 )
 
 GOVERNANCE_PROVISION_CHECKPOINT_VERSION = "gpi1"
-GOVERNANCE_PROVISION_CHECKPOINT_PHASES = frozenset({"initializing", "complete", "drained"})
+GOVERNANCE_PROVISION_CHECKPOINT_PHASES = frozenset(
+    {"binding", "registering", "registered", "initializing", "complete", "drained"}
+)
 INITIAL_RETRY_AFTER_SECONDS = 2
 _GOVERNANCE_RECOVERY_MARKER = "_governance_recovery_v1"
 _GOVERNANCE_RECOVERY_DOMAIN = b"exomem.hosted-governance-recovery-snapshot.v1\0"
@@ -341,6 +344,8 @@ def _claim_condition(
     *,
     include_checkpoints: frozenset[str] | None = None,
     exclude_checkpoints: frozenset[str] = frozenset(),
+    include_checkpoint_prefixes: frozenset[str] = frozenset(),
+    exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
     allowed_actions: frozenset[OperationAction] | None = None,
     excluded_actions: frozenset[OperationAction] = frozenset(),
 ):
@@ -360,9 +365,14 @@ def _claim_condition(
         .scalar_subquery()
     )
     if include_checkpoints is not None:
-        claimable &= Operation.checkpoint.in_(include_checkpoints)
+        claimable &= or_(
+            Operation.checkpoint.in_(include_checkpoints),
+            *(Operation.checkpoint.startswith(prefix) for prefix in include_checkpoint_prefixes),
+        )
     if exclude_checkpoints:
         claimable &= Operation.checkpoint.not_in(exclude_checkpoints)
+    for prefix in exclude_checkpoint_prefixes:
+        claimable &= ~Operation.checkpoint.startswith(prefix)
     cell_available = or_(
         Operation.cell_id.is_(None),
         ~select(CellOperationLock.cell_id)
@@ -386,6 +396,8 @@ def _claim_candidate_statement(
     *,
     include_checkpoints: frozenset[str] | None = None,
     exclude_checkpoints: frozenset[str] = frozenset(),
+    include_checkpoint_prefixes: frozenset[str] = frozenset(),
+    exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
     allowed_actions: frozenset[OperationAction] | None = None,
     excluded_actions: frozenset[OperationAction] = frozenset(),
 ):
@@ -396,6 +408,8 @@ def _claim_candidate_statement(
                 claimed_at,
                 include_checkpoints=include_checkpoints,
                 exclude_checkpoints=exclude_checkpoints,
+                include_checkpoint_prefixes=include_checkpoint_prefixes,
+                exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                 allowed_actions=allowed_actions,
                 excluded_actions=excluded_actions,
             )
@@ -411,6 +425,8 @@ def _claim_statement(
     *,
     include_checkpoints: frozenset[str] | None = None,
     exclude_checkpoints: frozenset[str] = frozenset(),
+    include_checkpoint_prefixes: frozenset[str] = frozenset(),
+    exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
     allowed_actions: frozenset[OperationAction] | None = None,
     excluded_actions: frozenset[OperationAction] = frozenset(),
 ):
@@ -422,6 +438,8 @@ def _claim_statement(
                 claimed_at,
                 include_checkpoints=include_checkpoints,
                 exclude_checkpoints=exclude_checkpoints,
+                include_checkpoint_prefixes=include_checkpoint_prefixes,
+                exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                 allowed_actions=allowed_actions,
                 excluded_actions=excluded_actions,
             ),
@@ -963,11 +981,39 @@ class OperationRepository:
     ) -> tuple[FleetOperationSnapshot, ...]:
         """Decrypt requests internally and return no credential-bearing fields."""
 
+        destruction = aliased(Operation)
+        destroyed_history = (
+            select(destruction.id)
+            .where(
+                destruction.action.in_({OperationAction.DESTROY, OperationAction.DISCARD}),
+                destruction.state == OperationState.FINAL,
+                destruction.tenant_id == Operation.tenant_id,
+                or_(
+                    and_(
+                        destruction.action == OperationAction.DESTROY,
+                        destruction.cell_id.is_(None),
+                    ),
+                    destruction.cell_id == Operation.cell_id,
+                ),
+                destruction.fence_generation >= Operation.fence_generation,
+                destruction.created_at >= Operation.created_at,
+            )
+            .exists()
+        )
         observations: list[FleetOperationSnapshot] = []
         async with self._sessions() as session:
             operations = await session.scalars(
                 select(Operation)
-                .where(Operation.cell_id.is_not(None))
+                .where(
+                    Operation.cell_id.is_not(None),
+                    # A completed tenant-wide destroy has no cell ID. Apply its
+                    # scope before replaying obsolete runtime/rollback history,
+                    # without changing the ledger or hiding unfinished work.
+                    ~and_(
+                        Operation.state.in_({OperationState.FINAL, OperationState.ERROR}),
+                        destroyed_history,
+                    ),
+                )
                 .order_by(Operation.created_at, Operation.id)
             )
             for operation in operations:
@@ -1079,6 +1125,8 @@ class OperationRepository:
         now: datetime | None = None,
         include_checkpoints: frozenset[str] | None = None,
         exclude_checkpoints: frozenset[str] = frozenset(),
+        include_checkpoint_prefixes: frozenset[str] = frozenset(),
+        exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
         allowed_actions: frozenset[OperationAction] | None = None,
         excluded_actions: frozenset[OperationAction] = frozenset(),
     ) -> OperationSnapshot | None:
@@ -1097,6 +1145,8 @@ class OperationRepository:
                             claimed_at,
                             include_checkpoints=include_checkpoints,
                             exclude_checkpoints=exclude_checkpoints,
+                            include_checkpoint_prefixes=include_checkpoint_prefixes,
+                            exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                             allowed_actions=allowed_actions,
                             excluded_actions=excluded_actions,
                         )
@@ -1149,6 +1199,8 @@ class OperationRepository:
                         claimed_at,
                         include_checkpoints=include_checkpoints,
                         exclude_checkpoints=exclude_checkpoints,
+                        include_checkpoint_prefixes=include_checkpoint_prefixes,
+                        exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                         allowed_actions=allowed_actions,
                         excluded_actions=excluded_actions,
                     )
@@ -1164,6 +1216,8 @@ class OperationRepository:
                     claimed_at,
                     include_checkpoints=include_checkpoints,
                     exclude_checkpoints=exclude_checkpoints,
+                    include_checkpoint_prefixes=include_checkpoint_prefixes,
+                    exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                     allowed_actions=allowed_actions,
                     excluded_actions=excluded_actions,
                 )
@@ -1207,6 +1261,8 @@ class OperationRepository:
         now: datetime | None = None,
         include_checkpoints: frozenset[str] | None = None,
         exclude_checkpoints: frozenset[str] = frozenset(),
+        include_checkpoint_prefixes: frozenset[str] = frozenset(),
+        exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
         allowed_actions: frozenset[OperationAction] | None = None,
         excluded_actions: frozenset[OperationAction] = frozenset(),
     ) -> OperationSnapshot | None:
@@ -1225,9 +1281,14 @@ class OperationRepository:
                 Operation.claim_expires_at > checked_at,
             )
             if include_checkpoints is not None:
-                claim_scope &= Operation.checkpoint.in_(include_checkpoints)
+                claim_scope &= or_(
+                    Operation.checkpoint.in_(include_checkpoints),
+                    *(Operation.checkpoint.startswith(prefix) for prefix in include_checkpoint_prefixes),
+                )
             if exclude_checkpoints:
                 claim_scope &= Operation.checkpoint.not_in(exclude_checkpoints)
+            for prefix in exclude_checkpoint_prefixes:
+                claim_scope &= ~Operation.checkpoint.startswith(prefix)
             if allowed_actions is not None:
                 claim_scope &= Operation.action.in_(allowed_actions)
             if excluded_actions:
@@ -1339,6 +1400,7 @@ class OperationRepository:
         claim_generation: int,
         checkpoint: str,
         retry_after_seconds: int,
+        capacity_wait_reason: str | None = None,
         now: datetime | None = None,
     ) -> OperationSnapshot:
         async with self._sessions.begin() as session:
@@ -1390,6 +1452,11 @@ class OperationRepository:
             operation.progress = {
                 **operation.progress,
                 "pending_count": int(operation.progress.get("pending_count", 0)) + 1,
+                **(
+                    {"last_capacity_wait_reason": capacity_wait_reason}
+                    if capacity_wait_reason is not None
+                    else {}
+                ),
             }
             operation.retry_after_seconds = retry_after_seconds
             operation.available_at = pending_at + timedelta(seconds=retry_after_seconds)
