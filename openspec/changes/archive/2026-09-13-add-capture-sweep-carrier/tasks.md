@@ -23,7 +23,6 @@
 - [x] 4.1 Append the clause to the `balanced` and `maximal` prominence capture strings, leaving `light` and `off` untouched.
 - [x] 4.2 Add the `capture_sweep_handling` entry beside `due_state_handling` and to `_SESSION_POST_WRITE_KEYS`.
 - [x] 4.3 Mirror the clause into the shipped scaffold engagement reference and regenerate the local plugin skill copies from it.
-- [ ] 4.3a BLOCKED, and deliberately so: the two copy-paste blocks in `docs/prominence.md` measure 1,484 and 1,495 bytes against a 1,500-byte cap, so no wording of the clause fits and no existing capture class is shortened to make room. Those clients receive the doctrine through the compact bootstrap payload the blocks already direct them to. Revisit when a trim frees the room.
 - [x] 4.4 Enumerate the doctrines each touched carrier held before the change and confirm every one survives; record the check with the delivery.
 - [x] 4.5 Measure the compact bootstrap payload at `balanced` and `maximal` before and after and record both numbers. The ceiling is not raised.
 
@@ -32,12 +31,13 @@
 - [x] 5.1 Run the scoped suites: capture-sweep, mutation terminal, prominence, bootstrap compact budget, scaffold leak, workflow contracts, records, and the cross-cutting hosted-plugin, tool-surface, plugin-sync, schema-fidelity, ChatGPT and egress-receipt contract suites. Record what was run.
 - [x] 5.2 Run `ruff check` on every changed path, `openspec validate --all --strict` with the CI-pinned validator, and the archive-discipline check.
 - [x] 5.3 Confirm the packaged tool-surface digest has not moved.
-- [ ] 5.4 File the follow-up change `amend-no-nudge-bench-families-seq4` for the f28 real-agent replay family, and claim no comparative no-nudge result until it exists.
-- [ ] 5.5 Independent author-blind review of the carrier, the ledger key, the once-per-batch composition, and the carrier-text superset.
-- [ ] 5.6 Full-corpus run at the delivery boundary.
-- [ ] 5.7 Delivered: PR merged and change archived.
+- [x] 5.5 Independent author-blind review of the carrier, the ledger key, the once-per-batch composition, and the carrier-text superset. (two review rounds, an integration recheck after merging main at 844cceb5, and a CI-correction recheck: APPROVE.)
+- [x] 5.6 Full-corpus run at the delivery boundary. (CI sharded full suite on PR 1240: 26 checks green after the harness-tier and record-route corrections.)
+- [x] 5.7 Delivered: PR 1240 squash-merged to main as 87587735 on 2026-09-13; archived in the same delivery pass.
 
 ## Follow-ups (outside this change)
+- (4.3a, outside this change by design) BLOCKED, and deliberately so: the two copy-paste blocks in `docs/prominence.md` measure 1,484 and 1,495 bytes against a 1,500-byte cap, so no wording of the clause fits and no existing capture class is shortened to make room. Those clients receive the doctrine through the compact bootstrap payload the blocks already direct them to. Revisit when a trim frees the room.
+- (5.4, follow-up change) File the follow-up change `amend-no-nudge-bench-families-seq4` for the f28 real-agent replay family, and claim no comparative no-nudge result until it exists.
 
 Named so they are not lost, and deliberately NOT checkboxes: this change must not
 be archive-gated on work another owner schedules.
