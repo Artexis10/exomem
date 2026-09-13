@@ -531,24 +531,21 @@ def test_empty_projection_accepts_first_experiment_delta(tmp_path):
     assert due_state.served(tmp_path)["categories"]["artifact_role_promotion"] == 1
 
 
-def test_maximum_ambiguous_page_respects_actual_delta_and_serve_budget(tmp_path):
-    import time
+def test_maximum_ambiguous_page_completes_with_available_budget(tmp_path, monkeypatch):
+    from types import SimpleNamespace
 
     from test_artifact_role_review import crowded_methods
 
     from exomem import artifact_role_state as state
 
+    # Completeness is independent of host scheduling. Separate tests exercise
+    # detector work bounds and the production deadline's unknown fallback.
+    monkeypatch.setattr(state, "time", SimpleNamespace(monotonic=lambda: 0.0))
     write(tmp_path, method())
     due_state.reconcile(tmp_path)
     write(tmp_path, crowded_methods())
-    start = time.monotonic()
     due_state.apply_write_delta(tmp_path, ORIGIN)
-    delta_seconds = time.monotonic() - start
-    start = time.monotonic()
     rows, coverage = state.served(tmp_path, lambda _p: True)
-    serve_seconds = time.monotonic() - start
-    assert delta_seconds < 0.5
-    assert serve_seconds < 0.5
     assert not rows
     assert coverage == dict.fromkeys(FAMILIES, "complete")
 
