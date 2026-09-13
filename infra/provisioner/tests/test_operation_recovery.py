@@ -1318,3 +1318,57 @@ async def test_shell_observer_proves_ownership_without_a_deployed_release() -> N
     assert recovery.validate_shell_live_observation(observed) is None
     assert observed.provider_object_present and observed.claim_present
     assert not observed.claim_bound and not observed.volume_present
+
+
+def test_the_two_reopen_receipts_have_distinct_names() -> None:
+    recovery = _module()
+
+    # Both receipts share one schema and the shell resume's update no longer names
+    # the init-retry marker, so the progress key alone keeps the one-shots apart.
+    assert recovery._SHELL_RESUME_MARKER != recovery._RECOVERY_MARKER
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "invalid_marker", "failed_status", "unavailable"),
+    [
+        (
+            "_recovery_result",
+            "recovery marker is invalid",
+            "recovered-then-failed",
+            "recovery attribution is unavailable",
+        ),
+        (
+            "_shell_resume_result",
+            "shell resume marker is invalid",
+            "resumed-then-failed",
+            "shell resume attribution is unavailable",
+        ),
+    ],
+)
+def test_each_reopen_result_keeps_its_own_statuses_and_refusals(
+    wrapper: str, invalid_marker: str, failed_status: str, unavailable: str
+) -> None:
+    from types import SimpleNamespace
+
+    recovery = _module()
+    result = getattr(recovery.RecoveryService, wrapper)
+    marker = recovery.recovery_marker(
+        preflight_sha256="a" * 64,
+        helper_source_sha256="b" * 64,
+        claim_generation=1,
+        committed_at=datetime(2026, 9, 13, 5, 49, tzinfo=UTC),
+    )
+    failed = SimpleNamespace(
+        state=recovery.OperationState.ERROR, checkpoint="failed", error_code="SOME_CODE"
+    )
+    pending = SimpleNamespace(
+        state=recovery.OperationState.PENDING, checkpoint="namespace-ready", error_code=None
+    )
+    unexpected = SimpleNamespace(state=object(), checkpoint="failed", error_code=None)
+
+    assert result(failed, marker, "verified")["status"] == failed_status
+    assert result(pending, marker, "verified")["status"] == "verified"
+    with pytest.raises(recovery.RecoveryRefusal, match=unavailable):
+        result(unexpected, marker, "verified")
+    with pytest.raises(recovery.RecoveryRefusal, match=invalid_marker):
+        result(pending, {**marker, "schema": 2}, "verified")

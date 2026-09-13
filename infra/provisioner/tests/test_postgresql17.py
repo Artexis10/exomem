@@ -2185,8 +2185,14 @@ async def test_postgresql17_shell_resume_is_one_atomic_one_shot_that_preserves_o
             return wire_protocol == "exomem-cell-provisioner.v1" and request == request_value
 
     class InitRetryObserver:
+        # Records instead of refusing: the service turns any observer exception into a
+        # refusal, so a double that raised would impersonate the guard under test.
+        def __init__(self) -> None:
+            self.calls = 0
+
         async def observe(self, operation: Operation, resources: tuple[Resource, ...]):
-            raise AssertionError("the shell resume must never consult the init-retry observer")
+            self.calls += 1
+            raise AssertionError("unreachable: every init-retry call in this test refuses first")
 
     class ShellObserver:
         def __init__(self) -> None:
@@ -2229,15 +2235,18 @@ async def test_postgresql17_shell_resume_is_one_atomic_one_shot_that_preserves_o
     codec = AesGcmEnvelopeCodec.from_secret(target.settings.envelope_key.get_secret_value())
     operation_id = str(uuid.uuid4())
     observer = ShellObserver()
+    init_observer = InitRetryObserver()
     service = RecoveryService(
         sessions=database.session_factory,
         codec=codec,
         database_name=target.name,
         database_role=target.role,
         database_schema=target.schema,
-        database_lock_timeout_seconds=1,
+        # Generous: the concurrent invocations below serialize on the advisory lock,
+        # and a one-second deadline can expire under container load, not a defect.
+        database_lock_timeout_seconds=5,
         deployment_lock=Lock(),  # type: ignore[arg-type]
-        observer=InitRetryObserver(),  # type: ignore[arg-type]
+        observer=init_observer,  # type: ignore[arg-type]
         shell_observer=observer,
     )
 
@@ -2302,8 +2311,9 @@ async def test_postgresql17_shell_resume_is_one_atomic_one_shot_that_preserves_o
             )
 
         # Init-retry correctly refuses a namespace-only death, before any observation.
-        with pytest.raises(RecoveryRefusal):
+        with pytest.raises(RecoveryRefusal, match="recovery preflight failed"):
             await service.preflight(operation_id)
+        assert init_observer.calls == 0
         assert (await service.shell_resume_preflight(operation_id))["status"] == "ready"
         assert observer.seen[-1] == [ResourceKind.KUBERNETES_NAMESPACE]
 
@@ -2360,6 +2370,8 @@ async def test_postgresql17_shell_resume_is_one_atomic_one_shot_that_preserves_o
                         for c in reservation.__table__.columns
                     ),
                     "fence": tuple((c.name, getattr(fence, c.name)) for c in fence.__table__.columns),
+                    # Excluded above as retarget-changeable columns; a shell resume must keep them.
+                    "request": (current.request_ciphertext, current.canonical_request_sha256),
                 }
 
         before = await preserved()
@@ -2389,7 +2401,8 @@ async def test_postgresql17_shell_resume_is_one_atomic_one_shot_that_preserves_o
             await session.execute(text("DROP TRIGGER shell_resume_test_refusal ON operations"))
             await session.execute(text("DROP FUNCTION shell_resume_test_refusal()"))
 
-        # Two concurrent invocations spend the one-shot exactly once.
+        # Two concurrent invocations spend the one-shot exactly once. The advisory lock
+        # serializes them, so this proves the marker short-circuit, not an UPDATE race.
         first, second = await asyncio.gather(
             service.shell_resume(operation_id), service.shell_resume(operation_id)
         )
@@ -2422,9 +2435,10 @@ async def test_postgresql17_shell_resume_is_one_atomic_one_shot_that_preserves_o
         assert await preserved() == before
 
         # Once resumed, neither recovery can act on the operation again.
-        with pytest.raises(RecoveryRefusal):
+        with pytest.raises(RecoveryRefusal, match="already progressed"):
             await service.shell_resume_preflight(operation_id)
-        with pytest.raises(RecoveryRefusal):
+        with pytest.raises(RecoveryRefusal, match="already progressed"):
             await service.preflight(operation_id)
+        assert init_observer.calls == 0
     finally:
         await database.dispose()
