@@ -38,6 +38,18 @@ under the existing governed deployment authority:
    replicas. The new volume worker must understand `gpi1:registering` before
    any routine worker emits it; the old volume worker selects only its exact
    legacy checkpoint.
+
+   Staging the lock this way creates it outside Helm, and the later ordinary
+   upgrade refuses to adopt an object it did not create: it reports the
+   ConfigMap as existing and not owned by the release, and stops before writing
+   a revision, leaving the previous release deployed. Before that upgrade,
+   authenticate the staged ConfigMap's exact data digest and UID against the
+   reviewed lock, then add only Helm's ownership metadata with a JSON patch
+   guarded by `test` operations on that UID and resourceVersion:
+   `app.kubernetes.io/managed-by: Helm`, and the annotations
+   `meta.helm.sh/release-name: exomem-platform` and
+   `meta.helm.sh/release-namespace: exomem-platform`. Do not use a broad
+   take-ownership flag, and do not delete and recreate the lock.
 3. Update `deployment/exomem-provisioner-worker` last. Preserve its single
    replica and `Recreate` strategy, wait for the old Pod to disappear, and
    verify the new Pod's image digest and readiness. Then complete the ordinary
