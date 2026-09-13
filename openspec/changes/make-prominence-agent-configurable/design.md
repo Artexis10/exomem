@@ -6,6 +6,8 @@ See proposal.md for the reported failure. The canonical dispatcher already binds
 
 The normal agent surface must save a user's engagement choice and immediately report the same effective contract as bootstrap. Settings must not grant additional authority or change another principal or vault. This change does not link accounts, reconfigure compute mode, or change standalone hooks' existing machine-level inputs.
 
+Existing versioned hosted agent profiles retain their pinned command membership. The full canonical MCP/REST/CLI surface receives the control; admitting it to a hosted agent profile requires a new profile with its own mutation classification and candidate digest.
+
 ## Decisions
 
 ### One small preference file per vault and principal

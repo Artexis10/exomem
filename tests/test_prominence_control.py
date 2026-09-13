@@ -52,7 +52,7 @@ def test_saved_level_reaches_a_new_bootstrap_and_workflow_projection(vault, leve
         assert "engagement" in saved, saved
         assert saved["engagement"]["level"] == level
         assert saved["engagement"]["envelope"]["level"] == level
-        assert saved["engagement"]["change_with"]["tool"] == "configure_memory"
+        assert saved["engagement"]["change_with"].startswith("configure_memory:")
         bootstrap_command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "bootstrap")
         result = writer_lease.invoke_command(bootstrap_command, vault, profile="compact")
         assert result["engagement"]["level"] == level

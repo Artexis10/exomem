@@ -44,6 +44,9 @@ The older `exomem prominence <level>` command remains a machine-wide control.
 Standalone hooks read that legacy configuration and environment; they do not
 inherit another authenticated identity's vault preference.
 
+The versioned hosted agent profiles retain their pinned command lists and do not
+yet expose `configure_memory`. Adding it there requires a new hosted profile.
+
 ## Which level you get by default, and why
 
 **Assistants with hooks — Claude Code, Codex — default to `balanced`.** Those clients

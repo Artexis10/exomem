@@ -10951,6 +10951,18 @@ HOSTED_SURFACE_EXCLUSIONS = MappingProxyType(
         exclusion.command: exclusion
         for exclusion in (
             HostedSurfaceExclusion(
+                command="configure_memory",
+                reason=(
+                    "The existing hosted profiles pin their ordered command membership; "
+                    "v5 explicitly retains v4's membership. Adding this command would "
+                    "change the hosted command-surface digest under the same profile ID."
+                ),
+                lifted_when=(
+                    "a new hosted profile admits identity-scoped preference mutations, "
+                    "verifies principal and cell isolation, and carries its own candidate digest"
+                ),
+            ),
+            HostedSurfaceExclusion(
                 command="transfer_artifact",
                 reason=(
                     "The hosted runtime intercepts this leaf with "

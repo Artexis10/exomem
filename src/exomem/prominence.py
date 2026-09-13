@@ -531,18 +531,9 @@ def resolved(surface: str | None = None) -> dict:
     return result
 
 
-def configuration_route() -> dict:
+def configuration_route() -> str:
     """The identity-scoped setting route for surfaces exposing configure_memory."""
-    return {
-        "tool": "configure_memory",
-        "inspect": {"action": "inspect"},
-        "set": {
-            "action": "set",
-            "prominence": "<level>",
-            "expected_revision": "<revision from inspect>",
-        },
-        "scope": "same authenticated identity and vault",
-    }
+    return "configure_memory: inspect first; set prominence with expected_revision."
 
 
 def _active_source() -> str:
