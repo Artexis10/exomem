@@ -72,9 +72,13 @@ _DEFERRAL_TELEMETRY_LOCK = threading.Lock()
 
 #: Graph deferral codes that CLAIM durable per-path coverage. `graph_repair_queued`
 #: is emitted only on the branch that proved the durable queue holds the affected
-#: paths. The disabled codes record nothing and are deliberately absent, so a
-#: stale queue entry naming the same path can never bless them.
-_GRAPH_COVERAGE_CODES = frozenset({"graph_repair_queued"})
+#: paths, and `graph_repair_unreadable_predecessor` only on the branch that
+#: proved the same thing for a fenced-but-intact sidecar. The disabled codes
+#: record nothing and are deliberately absent, so a stale queue entry naming the
+#: same path can never bless them.
+_GRAPH_COVERAGE_CODES = frozenset(
+    {"graph_repair_queued", "graph_repair_unreadable_predecessor"}
+)
 
 _FAST_ACK_PENDING_STATES = frozenset({"prepared", "ready", "claimed"})
 _FAST_ACK_FAILED_STATES = frozenset(

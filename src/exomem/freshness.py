@@ -237,8 +237,32 @@ _replacement_pending: dict[
 # Watchdog records an external event here before its debounce window. Graph
 # readers can then fail closed in O(1) until that exact queued generation has
 # been published through the event-maintained corpus fan-out.
+#
+# `_external_pending` is the aggregate: root -> the latest epoch still
+# unrepaired, which is what every read-side fence and the watcher's
+# compare-and-ack consult. The two maps below say *what* is unrepaired, because
+# a mark's scope decides whether it may fence a governed write
+# (`seamless-managed-worker-handoff` D3). A mark carrying paths fences only
+# those paths; an unscoped mark -- an access-policy edit, a registry loss, an
+# unclassified publication failure -- says the affected scope is unknown and
+# fences everything, exactly as every mark did before.
 _external_pending_clock = 0
 _external_pending: dict[str, int] = {}
+_external_pending_paths: dict[str, dict[str, int]] = {}
+_external_pending_unscoped: dict[str, int] = {}
+# (root, scope) -> {a checkpoint this process did not publish: the local
+# generation it has been proven equivalent to}. A replacement worker inherits a
+# sidecar whose checkpoint carries the *previous* process's instance id, and
+# `recall_delta_since` refuses foreign history by construction -- correctly in
+# general, because a foreign checkpoint says nothing about what this registry
+# has seen. `adopt_recall_origin` is the one way to say it anyway, and only a
+# caller that has just proved every source in that snapshot against the disk
+# this registry is projecting may use it.
+_adopted_recall_origins: dict[tuple[str, str], dict[RecallFreshnessCheckpoint, int]] = {}
+#: Bounded so a long-lived process cannot accumulate origins. A process adopts
+#: once at start-up; the spare slots cover a re-proof after an offline migration
+#: and a second scope.
+ADOPTED_RECALL_ORIGIN_LIMIT = 4
 
 
 def _next_gen() -> int:
@@ -930,14 +954,48 @@ def peek_recall_publication(
         return state
 
 
-def mark_external_pending(vault_root: Path) -> int:
-    """Mark an observed out-of-band event pending before watcher debounce."""
+def _external_path_key(path: Path | str) -> str:
+    try:
+        return str(Path(path).resolve())
+    except OSError:
+        return str(path)
+
+
+def _refresh_external_aggregate_locked(root: str) -> None:
+    """Recompute one root's latest unrepaired epoch from its surviving marks."""
+    epochs = [*_external_pending_paths.get(root, {}).values()]
+    unscoped = _external_pending_unscoped.get(root)
+    if unscoped is not None:
+        epochs.append(unscoped)
+    if epochs:
+        _external_pending[root] = max(epochs)
+    else:
+        _external_pending.pop(root, None)
+
+
+def mark_external_pending(vault_root: Path, *, paths: Iterable[Path | str] = ()) -> int:
+    """Mark an observed out-of-band event pending before watcher debounce.
+
+    `paths` scopes the mark to the files the event touched. A caller that knows
+    which paths moved gives them, and only those paths fence a governed write;
+    a caller that cannot name the scope gives none, and the mark fences the
+    whole vault. Every read that requires a current projection refuses on either
+    kind (`external_pending` is unchanged), so narrowing the scope changes the
+    write path only.
+    """
     global _external_pending_clock
     with _lock:
         _external_pending_clock += 1
         epoch = _external_pending_clock
         root = _canon(vault_root)
-        _external_pending[root] = epoch
+        keys = [_external_path_key(path) for path in paths]
+        if keys:
+            marked = _external_pending_paths.setdefault(root, {})
+            for key in keys:
+                marked[key] = epoch
+        else:
+            _external_pending_unscoped[root] = epoch
+        _refresh_external_aggregate_locked(root)
         for scope in SCOPES:
             _recall_publications.pop((root, scope), None)
         return epoch
@@ -947,9 +1005,16 @@ def clear_external_pending(vault_root: Path, *, through: int) -> None:
     """Clear only the observed external generations a completed flush covered."""
     with _lock:
         root = _canon(vault_root)
-        current = _external_pending.get(root)
-        if current is not None and current <= through:
-            _external_pending.pop(root, None)
+        marked = _external_pending_paths.get(root)
+        if marked is not None:
+            for key in [key for key, epoch in marked.items() if epoch <= through]:
+                marked.pop(key, None)
+            if not marked:
+                _external_pending_paths.pop(root, None)
+        unscoped = _external_pending_unscoped.get(root)
+        if unscoped is not None and unscoped <= through:
+            _external_pending_unscoped.pop(root, None)
+        _refresh_external_aggregate_locked(root)
 
 
 def external_pending(vault_root: Path) -> bool:
@@ -958,10 +1023,130 @@ def external_pending(vault_root: Path) -> bool:
         return _canon(vault_root) in _external_pending
 
 
+def external_pending_paths(vault_root: Path) -> frozenset[str]:
+    """The path-scoped external marks still unrepaired for one vault."""
+    with _lock:
+        return frozenset(_external_pending_paths.get(_canon(vault_root), {}))
+
+
+def external_pending_for(vault_root: Path, paths: Iterable[Path | str]) -> bool:
+    """Whether an unrepaired external event covers any of `paths`.
+
+    True for an unscoped mark whatever the paths are: a mark with no named
+    scope is a statement that the affected set is unknown.
+    """
+    with _lock:
+        root = _canon(vault_root)
+        if root in _external_pending_unscoped:
+            return True
+        marked = _external_pending_paths.get(root)
+        if not marked:
+            return False
+        for path in paths:
+            if str(path) in marked or _external_path_key(path) in marked:
+                return True
+        return False
+
+
 def external_pending_epoch(vault_root: Path) -> int | None:
     """Return the latest observed unpublished generation for one vault."""
     with _lock:
         return _external_pending.get(_canon(vault_root))
+
+
+def instance_id() -> str:
+    """This process's registry instance id: what makes a checkpoint foreign."""
+    return _instance_id
+
+
+def recall_generation(vault_root: Path, scope: str) -> int | None:
+    """This registry's current recall generation, or None when the scope is cold.
+
+    The cheap half of `recall_checkpoint`: no triple, no policy projection, no
+    walk. A caller about to run a long proof samples this first, so it can adopt
+    against the corpus the proof *started* on rather than the one it ended on.
+    """
+    with _lock:
+        key = _key(vault_root, scope)
+        if not event_indexes_enabled() or key not in _recall_live:
+            return None
+        return _recall_generations.get(key, 0)
+
+
+def adopt_recall_origin(
+    vault_root: Path,
+    scope: str,
+    checkpoint: RecallFreshnessCheckpoint,
+    *,
+    sampled_generation: int | None = None,
+) -> bool:
+    """Make a checkpoint this process did not publish a valid delta origin.
+
+    A replacement worker inherits a derived sidecar stamped with the previous
+    process's instance id. Nothing in this registry has seen that checkpoint, so
+    `recall_delta_since` reports every delta from it incomplete, and the graph's
+    bounded repair -- which is a delta from exactly that point -- has no lineage
+    to advance. The first governed write after a worker replacement therefore
+    rebuilt the whole vault to get one, every time
+    (`seamless-managed-worker-handoff`, proposal "make an adopted or promoted
+    graph snapshot live for the new process").
+
+    The caller supplies the proof. `adopt_recall_origin` is reachable only from a
+    reader that has just verified every source in that snapshot against the disk
+    *this* registry is projecting, so "the snapshot is correct as of now" is
+    established before this is called; what is recorded here is only the local
+    generation that "now" was. Deltas from the adopted origin then come from the
+    ordinary event history, and anything that changes after it flows through the
+    watcher or the periodic reconcile as usual.
+
+    `sampled_generation` is the generation the caller read *before* it started
+    proving, and it is what makes this safe. The proof walks the whole corpus --
+    2.85 s on a 446-file vault -- and an unattributed edit landing inside that
+    window is published by the watcher while the proof runs. Adopting at the
+    post-proof generation would then declare that edit already accounted for:
+    the next delta would come back complete and empty, and the bounded repair
+    would advance a snapshot that never indexed the edited page. Silent drift,
+    and the reason the origin is the *minimum* of the two samples. A too-old
+    origin only widens the next delta, which the repair handles; a too-new one
+    loses a page.
+
+    A projection identity that does not match refuses outright: the proof was
+    about source bytes, and a different recall policy projects a different
+    corpus from them.
+
+    Returns whether the checkpoint is usable as an origin from here on, which is
+    trivially true when it is already this process's own.
+    """
+    if checkpoint.instance_id == _instance_id:
+        return True
+    current = recall_checkpoint(vault_root, scope)
+    if current is None:
+        return False
+    key = _key(vault_root, scope)
+    with _lock:
+        if not event_indexes_enabled() or key not in _recall_live:
+            return False
+        if (checkpoint.policy_version, checkpoint.access_policy_fingerprint) != (
+            current.policy_version,
+            current.access_policy_fingerprint,
+        ):
+            return False
+        origin = current.generation
+        if sampled_generation is not None:
+            origin = min(origin, int(sampled_generation))
+        adopted = _adopted_recall_origins.setdefault(key, {})
+        adopted[checkpoint] = min(adopted.get(checkpoint, origin), origin)
+        for stale in list(adopted)[: max(0, len(adopted) - ADOPTED_RECALL_ORIGIN_LIMIT)]:
+            adopted.pop(stale, None)
+        return True
+
+
+def adopted_recall_origin(
+    vault_root: Path, scope: str, checkpoint: RecallFreshnessCheckpoint
+) -> int | None:
+    """The local generation a foreign checkpoint has been adopted at, if any."""
+    with _lock:
+        return _adopted_recall_origins.get(_key(vault_root, scope), {}).get(checkpoint)
 
 
 def recall_delta_since(
@@ -971,19 +1156,31 @@ def recall_delta_since(
     current = recall_checkpoint(vault_root, scope)
     key = _key(vault_root, scope)
     with _lock:
-        if checkpoint.instance_id != _instance_id or checkpoint.generation > current.generation:
+        # A foreign checkpoint is bridgeable only where this process has adopted
+        # it against a proof (`adopt_recall_origin`); the origin it was adopted
+        # at is then the generation the history is read from, and everything
+        # below is the ordinary path.
+        origin = checkpoint.generation
+        adopted = False
+        if checkpoint.instance_id != _instance_id:
+            adopted_generation = _adopted_recall_origins.get(key, {}).get(checkpoint)
+            if adopted_generation is None:
+                return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
+            origin = adopted_generation
+            adopted = True
+        if origin > current.generation:
             return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
-        if checkpoint.generation == current.generation:
-            complete = checkpoint == current
+        if origin == current.generation:
+            complete = adopted or checkpoint == current
             return RecallDelta(checkpoint, current, complete, frozenset(), frozenset())
         history = _recall_history.get(key, [])
-        if not history or checkpoint.generation < history[0][0]:
+        if not history or origin < history[0][0]:
             return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
         changed: set[str] = set()
         deleted: set[str] = set()
         requires_source_proof = False
         for _before, _after, paths, event_requires_source_proof in history:
-            if _after <= checkpoint.generation:
+            if _after <= origin:
                 continue
             requires_source_proof |= event_requires_source_proof
             for path in paths:
@@ -1538,6 +1735,9 @@ def invalidate(vault_root: Path | None = None) -> None:
             _recall_history.clear()
             _recall_publications.clear()
             _external_pending.clear()
+            _external_pending_paths.clear()
+            _external_pending_unscoped.clear()
+            _adopted_recall_origins.clear()
             return
         root = _canon(vault_root)
         for scope in SCOPES:
@@ -1559,6 +1759,10 @@ def invalidate(vault_root: Path | None = None) -> None:
             _recall_live.discard(key)
             _recall_history.pop(key, None)
             _recall_publications.pop(key, None)
+            # An adopted origin is a statement about a map this is discarding.
+            # It has to go with it, or a re-seed would bridge a delta from a
+            # generation whose history no longer exists.
+            _adopted_recall_origins.pop(key, None)
 
 
 def rebaseline(vault_root: Path) -> dict[str, bool]:
@@ -1951,6 +2155,9 @@ def snapshot() -> dict:
             "live": sorted(_live),
             "counts": {k: len(v) for k, v in _maps.items()},
             "external_pending": sorted(_external_pending),
+            "external_pending_paths": {
+                root: sorted(marked) for root, marked in _external_pending_paths.items()
+            },
         }
 
 

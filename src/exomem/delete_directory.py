@@ -500,7 +500,10 @@ def delete_directory(
 
         if graph_sync.registered_checkpoint(vault_root) is not None:
             try:
-                graph_sync.wait_for_registered(vault_root)
+                if not graph_sync.join_registered_within_budget(vault_root):
+                    warnings.append(
+                        "trash succeeded; derived graph repair is still running in the background"
+                    )
             except Exception:  # noqa: BLE001 - preserve committed deletion for reconcile
                 warnings.append("trash succeeded but graph publication failed; run reconcile")
 

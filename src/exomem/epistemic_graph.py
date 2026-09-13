@@ -1808,25 +1808,41 @@ class EpistemicGraphIndex:
         freshness fully live.
 
         Note where those four live, though: all of them are inside the
-        `require_current_projection` branch below. The three maintenance
-        readers that pass `require_current_projection=False` — the graph_sync
-        predecessor probe, the incremental refresh, and its topology re-read —
-        deliberately skip them, so for those callers this guard is the *only*
-        `freshness`-side check in this method that an unobserved external event
-        has landed. That is a second reason it stays, beyond cheapness.
+        `require_current_projection` branch below, and so, now, is the
+        `external_pending` guard (`seamless-managed-worker-handoff` D1).
 
-        It stays admissible only because `external_pending` is now set
-        exclusively by Class A (registry loss) and Class C (proven-stale)
-        signals — never by a publication failure. If a future change lets a
-        Class B failure mark again, this guard becomes a liveness bug wearing a
-        safety costume and must be removed rather than relied on.
+        It used to fence the three maintenance readers that pass
+        `require_current_projection=False` — the graph_sync predecessor probe,
+        the incremental refresh, and its topology re-read — as well. That is
+        what made a replacement worker rebuild the whole vault on every write:
+        its self-attribution table starts empty, so ordinary vault traffic
+        keeps the flag armed, the predecessor probe could not read a sidecar
+        that was structurally fine, and `upsert_after_write` read the declined
+        probe as a lineage gap. A governed write does not need a *current*
+        projection to compute its own predecessor — the predecessor comes from
+        the checkpoint lineage — so those three readers now proceed, and the
+        paths an unattributed event touched fence only themselves, through
+        `freshness.external_pending_for` at the incremental entry point.
+
+        For public readers the guard is unchanged, and it stays admissible only
+        because `external_pending` is set exclusively by Class A (registry
+        loss) and Class C (proven-stale) signals — never by a publication
+        failure. If a future change lets a Class B failure mark again, this
+        guard becomes a liveness bug wearing a safety costume and must be
+        removed rather than relied on.
         """
         if (
             not graph_enabled()
-            or freshness.external_pending(self.vault_root)
+            or (require_current_projection and freshness.external_pending(self.vault_root))
             or not self.path.exists()
         ):
             return None
+        # Sampled before any proving starts. Everything below -- the marker
+        # reads, the source-bytes proof over the whole corpus -- takes time a
+        # watcher publication can land inside, and an origin adopted at the
+        # generation this *ends* on would declare that publication already
+        # accounted for.
+        sampled_generation = freshness.recall_generation(self.vault_root, "vault")
         conn: sqlite3.Connection | None = None
         registry_key = _sidecar_registry_key(self.path)
         _await_publication_hold(registry_key)
@@ -1866,12 +1882,20 @@ class EpistemicGraphIndex:
             and values.get("recall_policy_version") == policy_version
             and values.get("recall_access_fingerprint") == access_fingerprint
             and len(values.get(_RESOLVER_TOPOLOGY_KEY, "")) == 64
-            and stored_projection is not None
             # A present-but-corrupt checkpoint must fail closed.  No checkpoint
             # is valid for a sidecar published from a direct-disk rebuild while
             # the event registry was cold or known stale.
             and (stored_checkpoint_value is None or stored_checkpoint is not None)
         )
+        if require_current_projection:
+            # The availability marker is a *reader's* claim that the stored
+            # projection is current, and its absence is what every deferral
+            # leaves behind. Requiring it of the maintenance readers too meant
+            # a sidecar whose rows and lineage are intact could only be
+            # repaired by rebuilding the whole vault -- the incremental pass
+            # that exists to republish the marker could not open the sidecar to
+            # do it (`seamless-managed-worker-handoff` D2).
+            current = current and stored_projection is not None
         graph_sync_state, required_graph_sync = graph_sync.checkpoint_state(self.vault_root)
         graph_sync_current = graph_sync.status(self.vault_root)["state"] == "current"
         if graph_sync_state == "malformed":
@@ -1926,21 +1950,144 @@ class EpistemicGraphIndex:
                     conn,
                     resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
                 )
+            if current and stored_checkpoint is not None:
+                # The proof above (or the exact-live check) has just established
+                # that this sidecar describes the corpus this registry is
+                # projecting. Say so to the registry, so the *next* bounded
+                # repair has a lineage to advance from. Without this a process
+                # that did not publish the checkpoint -- a replacement worker,
+                # or a promoted standby -- proves the snapshot, serves reads
+                # from it, and then rebuilds the whole vault on its first write
+                # because `recall_delta_since` cannot bridge a foreign origin
+                # (`seamless-managed-worker-handoff`: make an adopted snapshot
+                # live for the new process).
+                freshness.adopt_recall_origin(
+                    self.vault_root,
+                    "vault",
+                    stored_checkpoint,
+                    sampled_generation=sampled_generation,
+                )
         # The `external_pending` term is the same cheap short-circuit described
         # in this method's docstring (contract D7), re-read after the proof so a
-        # Class A/C signal that landed mid-proof still fails closed.
-        if not current or freshness.external_pending(self.vault_root):
+        # Class A/C signal that landed mid-proof still fails closed. Scoped to
+        # public readers for the reason the head of this method gives.
+        if not current or (
+            require_current_projection and freshness.external_pending(self.vault_root)
+        ):
             conn.close()
             return None
         return conn
+
+    def adopt_published_snapshot(self) -> SnapshotAdoption:
+        """Prove an inherited sidecar and make its checkpoint live for this process.
+
+        The entry point a standby calls before promotion, and the one a cold
+        process calls at start-up. It runs the source-bytes proof over a
+        *maintenance* read -- not a public one -- because the state a real
+        handoff leaves behind is precisely the one a public read refuses: a
+        deferred write withdraws the availability marker, and the background
+        repair may not have republished it before the old worker stopped.
+        Requiring a current projection here made adoption fail in 23 ms on
+        exactly the vaults that needed it, and the promoted worker then paid the
+        whole-vault pass adoption exists to remove.
+
+        A bounded residue is adopted rather than refused. The proof reports the
+        paths whose canonical bytes differ from what the snapshot recorded --
+        the deferred and unrepaired ones -- and while that set fits inside one
+        drain pass this: adopts the checkpoint as the delta origin, enqueues
+        exactly those paths as graph repair demand, and leaves the availability
+        marker *withdrawn*. The marker is one value for the whole projection, so
+        republishing it would claim currency for the residue too; keeping it
+        withdrawn is what makes "reads refuse until the repair lands" true, and
+        the incremental repair republishes it when the residue drains. The write
+        path does not need it (`require_current_projection=False`), which is
+        what makes this worth doing at all.
+
+        An unbounded residue, a membership or topology difference, or a
+        structurally unusable sidecar still fails, and the caller pays the
+        whole-vault pass as before.
+
+        Needs the recall registry seeded for the vault scope, which the warm-up
+        does before any of this; it does not need a running watcher, so a
+        standby can prove and adopt while the old worker still serves.
+        """
+        from . import graph_drain
+
+        if not graph_enabled():
+            return SnapshotAdoption(False, reason="graph_disabled")
+        # Sampled before the proof: see `freshness.adopt_recall_origin`.
+        sampled_generation = freshness.recall_generation(self.vault_root, "vault")
+        conn = self._open_read_snapshot(require_current_projection=False)
+        if conn is None:
+            return SnapshotAdoption(False, reason=self._declined_snapshot_state())
+        residue: set[str] = set()
+        try:
+            stored_checkpoint = self._stored_recall_checkpoint(conn)
+            row = conn.execute(
+                "SELECT value FROM graph_meta WHERE key = ?", (_RESOLVER_TOPOLOGY_KEY,)
+            ).fetchone()
+            proven = self._snapshot_sources_match_disk(
+                conn,
+                resolver_fingerprint=str(row[0]) if row is not None else None,
+                residue_out=residue,
+            )
+        finally:
+            conn.close()
+        if not proven:
+            return SnapshotAdoption(False, reason="snapshot_proof_declined")
+        if stored_checkpoint is None:
+            return SnapshotAdoption(False, reason="stored_checkpoint_absent")
+        if len(residue) > graph_drain.DRAIN_LIMIT:
+            # One drain pass is the bound: a residue larger than that is not a
+            # handoff leaving a few deferred writes behind, it is a different
+            # corpus, and the whole-vault pass is the honest repair.
+            return SnapshotAdoption(
+                False, reason="residue_exceeds_drain_limit", residue=tuple(sorted(residue))
+            )
+        if not freshness.adopt_recall_origin(
+            self.vault_root,
+            "vault",
+            stored_checkpoint,
+            sampled_generation=sampled_generation,
+        ):
+            return SnapshotAdoption(False, reason="registry_refused_origin")
+        if residue:
+            paths = [self.vault_root / rel for rel in sorted(residue)]
+            if not _record_graph_repair_demand(self.vault_root, paths):
+                return SnapshotAdoption(
+                    False, reason="residue_enqueue_failed", residue=tuple(sorted(residue))
+                )
+            # Reads must keep refusing until that repair lands.
+            self.withdraw_availability()
+            graph_drain.note_graph_debt()
+        # Adoption is not finished until the *bounded repair* can run, and that
+        # also needs the recall resolver at this exact checkpoint.
+        # `recall_resolver_snapshot_at_checkpoint` refuses a cache miss on
+        # purpose -- a resolver rebuilt from current disk and labelled with an
+        # older checkpoint would lose the pre-delta topology that proves bounded
+        # edge repair. A process that has just proved this snapshot has no such
+        # problem: its registry sits at the adopted origin, so the resolver
+        # built now *is* the pre-delta topology. One walk at start-up, in place
+        # of a whole-vault rebuild on the first write.
+        find_module.recall_resolver_snapshot(self.vault_root)
+        return SnapshotAdoption(True, residue=tuple(sorted(residue)), reason="adopted")
 
     def _snapshot_sources_match_disk(
         self,
         conn: sqlite3.Connection,
         *,
         resolver_fingerprint: str | None,
+        residue_out: set[str] | None = None,
     ) -> bool:
         """Prove a cold/foreign sidecar against human-owned Markdown bytes.
+
+        `residue_out` turns the source-hash comparison from all-or-nothing into
+        "everything matches except these paths, and here they are". A caller
+        that can repair a bounded set -- adoption, which enqueues them -- passes
+        a set; a public reader passes nothing and keeps today's strict answer.
+        Membership differences and a moved resolver topology still decline
+        outright either way: those are a different corpus, not a repairable
+        residue.
 
         The graph's file rows atomically carry the source hash from which all
         nodes and outgoing edges were derived.  Resolver-only paths outside the
@@ -1994,7 +2141,16 @@ class EpistemicGraphIndex:
                 ).fetchall()
             }
             if stored_hashes != current_hashes:
-                return False
+                if residue_out is None or set(stored_hashes) != set(current_hashes):
+                    # A membership difference is not a residue: a page the
+                    # snapshot never indexed, or indexed and no longer admits,
+                    # is a different corpus, not a bounded repair.
+                    return False
+                residue_out.update(
+                    rel
+                    for rel, source_hash in current_hashes.items()
+                    if stored_hashes[rel] != source_hash
+                )
             resolver = vault_module.WikilinkResolver.from_entries(
                 self.vault_root,
                 resolver_entries,
@@ -2858,13 +3014,22 @@ class EpistemicGraphIndex:
                 if resolver_versions is None:
                     # The supplied freshness identity did not actually name the
                     # resolver bytes (for example after a coarse-metadata edit).
-                    # Clear both the resolver and page cache before retrying.
-                    # Class C, first admitted cause.
+                    # Clear the page cache before retrying. Class C, first
+                    # admitted cause.
                     self._mark_unavailable()
                     projection_moved = True
                     retarget = True
                     moved_cause = "the supplied freshness identity did not name the resolver bytes"
-                    find_module.unload_ram_caches()
+                    # The *recall* resolver stays. Every read of it revalidates
+                    # the projection identity and, for the graph's bounded
+                    # repair, the exact live checkpoint, so a stale entry can
+                    # only miss -- it can never be served as current. Dropping
+                    # it bought nothing and cost the next governed write a
+                    # whole-vault rebuild: `recall_resolver_snapshot_at_checkpoint`
+                    # refuses to build on a miss, so a rebuild retargeting under
+                    # concurrent writes forced the next standalone caller into a
+                    # join it had to wait out (measured: 14.7 s).
+                    find_module.unload_ram_caches(keep_recall_resolver=True)
                     continue
                 pass_started = True
                 report = self._rebuild_all_pass(resolver)
@@ -3088,19 +3253,42 @@ class EpistemicGraphIndex:
             conn.close()
 
     def _mark_unavailable(self) -> None:
+        """Withdraw the availability claim; leave the sidecar's identity intact.
+
+        This runs on every path-scoped deferral, and a path-scoped action must
+        not have a vault-scoped effect (`seamless-managed-worker-handoff` D2).
+        Deleting `schema_version` alongside the marker made the sidecar read as
+        "not this build's" to the *maintenance* readers as well, so the
+        incremental pass that exists to republish the marker could not open it
+        and the next governed write rebuilt the whole vault instead.
+
+        The stored recall checkpoint goes the same way and for the same reason:
+        it is the lineage the bounded repair advances from, and deleting it made
+        the next write bail out on `recall_checkpoint_absent_or_registry_not_live`
+        into the whole-vault path. `suspend_reads`, the watcher's lighter fence,
+        already keeps it for exactly this purpose -- "block public reads while
+        preserving an incremental repair checkpoint" -- and this is now that
+        fence plus the withdrawal of the availability claim.
+
+        Public readers are unaffected: `_open_read_snapshot` requires the
+        availability marker, which is still withdrawn here, so a reader sees
+        "marker missing, barrier set" exactly as it did before. Nothing persists
+        differently, and the registry rebind is unaffected either way: its source
+        proof (`_registry_rebind_source_proof`) demands the availability marker,
+        the stored checkpoint and an absent read barrier, so a sidecar fenced
+        here declines it whether or not `schema_version` survives. The identity
+        gate that selects a rebind candidate reads schema, registry, generation
+        and instance, and a candidate that passes it still has to pass that
+        proof.
+        """
         if not self.path.exists():
             return
         conn = self._connect_existing(readonly=False)
         try:
             with conn:
-                conn.execute("DELETE FROM graph_meta WHERE key = 'schema_version'")
                 conn.execute(
                     "DELETE FROM graph_meta WHERE key = ?",
                     (_AVAILABILITY_FRESHNESS_KEY,),
-                )
-                conn.execute(
-                    "DELETE FROM graph_meta WHERE key = ?",
-                    (_RECALL_CHECKPOINT_KEY,),
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
@@ -3469,6 +3657,63 @@ class EpistemicGraphIndex:
         ).fetchone()
         return _checkpoint_from_value(str(row[0])) if row is not None else None
 
+    def _declined_snapshot_state(self) -> str:
+        """Why a maintenance read snapshot was declined: fenced, or unusable.
+
+        Both declines look the same to `_open_read_snapshot`, and they earn
+        opposite repairs (`seamless-managed-worker-handoff` D2):
+
+        * the sidecar is structurally *this* build's -- schema, relation
+          registry, recall policy and resolver topology all agree, and any
+          stored checkpoint parses. Its lineage is intact and bounded
+          incremental repair converges it.
+        * anything else: no sidecar, a schema or registry drift, a corrupt
+          checkpoint. Nothing bounded can advance that, and a whole-vault
+          rebuild is the repair.
+
+        A whole-vault rebuild is paid only on a *proven* verdict. A sidecar that
+        exists but cannot be opened or read right now -- a publication holding
+        it, a busy lock -- has proved nothing, so it takes the bounded repair;
+        the incremental pass re-opens it and falls back on its own terms if the
+        contention persists.
+        """
+        if not graph_enabled() or not self.path.exists():
+            return "graph_sync_snapshot_unusable"
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._connect_existing(readonly=True, check_same_thread=False)
+            graph_sync.limit_graph_metadata_read(conn)
+            values = dict(
+                conn.execute(
+                    "SELECT key, value FROM graph_meta WHERE key IN "
+                    "('schema_version', 'core_registry_version', 'extension_registry_hash', "
+                    "'recall_policy_version', 'recall_access_fingerprint', "
+                    "'recall_resolver_topology', 'recall_projection_checkpoint')"
+                ).fetchall()
+            )
+        except sqlite3.Error:
+            return "graph_sync_predecessor_unreadable"
+        finally:
+            if conn is not None:
+                conn.close()
+        policy_version, access_fingerprint = recall_policy.recall_policy_identity(self.vault_root)
+        stored_checkpoint_value = values.get(_RECALL_CHECKPOINT_KEY)
+        structural = (
+            values.get("schema_version") == str(SCHEMA_VERSION)
+            and values.get("core_registry_version") == str(self.registry.core_version)
+            and values.get("extension_registry_hash") == self.registry.extension_hash
+            and values.get("recall_policy_version") == policy_version
+            and values.get("recall_access_fingerprint") == access_fingerprint
+            and len(values.get(_RESOLVER_TOPOLOGY_KEY, "")) == 64
+            and (
+                stored_checkpoint_value is None
+                or _checkpoint_from_value(stored_checkpoint_value) is not None
+            )
+        )
+        return (
+            "graph_sync_predecessor_unreadable" if structural else "graph_sync_snapshot_unusable"
+        )
+
     def _graph_sync_predecessor_state(
         self, checkpoint: graph_sync.GraphSyncCheckpoint
     ) -> str:
@@ -3482,23 +3727,26 @@ class EpistemicGraphIndex:
         emits only "graph rebuild published" and "graph rebuild finished" and
         never says which condition chose the expensive path.
 
-        The two failing states are operationally opposite and must not collapse
+        The failing states are operationally opposite and must not collapse
         into one `False`:
 
         * `graph_sync_predecessor_unreadable` -- the probe's read snapshot was
-          declined. `freshness.external_pending` alone is enough for that, and
-          `_open_read_snapshot` documents that guard as "an optimization for
-          public readers, not a correctness fence". Nothing about the sidecar's
-          lineage is known, or broken; the same sidecar answers `available` the
-          moment the flag clears. While it is set, every governed write pays a
-          whole-vault rebuild.
+          declined while the sidecar is structurally intact (see
+          `_declined_snapshot_state`). Nothing about its lineage is broken; the
+          same sidecar answers `available` again once the withdrawn marker is
+          republished. The dispatch routes this to bounded incremental repair,
+          because paying a whole-vault rebuild for it is what made every write
+          after a worker replacement cost one.
+        * `graph_sync_snapshot_unusable` -- there is no sidecar, or it is not
+          this build's, or its stored checkpoint is corrupt. The scope is
+          unknown and a rebuild is the repair.
         * `graph_sync_predecessor_mismatch` / `..._absent` -- the sidecar was
           read and its acknowledgement genuinely is not this checkpoint's
           predecessor. That is a real lineage gap and a rebuild is the repair.
         """
         snapshot = self._open_read_snapshot(require_current_projection=False)
         if snapshot is None:
-            return "graph_sync_predecessor_unreadable"
+            return self._declined_snapshot_state()
         try:
             values = dict(
                 snapshot.execute(
@@ -3754,7 +4002,26 @@ class EpistemicGraphIndex:
         with self._mutation_coordinator.hold(
             operation="epistemic_graph_refresh_paths", holder_kind="graph"
         ):
-            if freshness.external_pending(self.vault_root):
+            # Path-scoped (`seamless-managed-worker-handoff` D3): an
+            # unattributed event on *these* paths means this process cannot
+            # trust its own view of them, and the refresh defers. An
+            # unattributed event anywhere else says nothing about this write,
+            # and fencing on it is what turned every write after a worker
+            # replacement into a whole-vault rebuild. Reads still refuse on any
+            # unrepaired mark; only the write path narrows.
+            if freshness.external_pending_for(
+                self.vault_root, (*paths, *created_paths)
+            ):
+                # Content-free, like every line in this module: a count, never a
+                # path. Without it this deferral is the one bail-out that
+                # reaches a whole-vault rebuild while logging nothing at all --
+                # exactly the silence #576 was diagnosed through.
+                log.info(
+                    "graph incremental refresh deferred reason=external_event_covers_these_paths "
+                    "external_paths_pending=%d graph_checkpoint=%s",
+                    len(freshness.external_pending_paths(self.vault_root)),
+                    graph_checkpoint.checkpoint_sha256 if graph_checkpoint is not None else None,
+                )
                 self._mark_unavailable()
                 return {
                     "indexed_files": 0,
@@ -3817,9 +4084,21 @@ class EpistemicGraphIndex:
             graph_sync.start_registered(
                 self.vault_root, state_root=self._mutation_coordinator.state_root
             )
-            graph_sync.wait_for_registered(
+            if not graph_sync.join_registered_within_budget(
                 self.vault_root, state_root=self._mutation_coordinator.state_root
-            )
+            ):
+                # The second standalone join, and it takes the same budget as
+                # the first (D4): "no caller waits on graph registration without
+                # a budget" is categorical. The incremental pass this returns is
+                # already durable; the flight it could not wait out keeps
+                # running, and the terminal reports it pending from durable
+                # state rather than from this wait.
+                log.info(
+                    "standalone refresh join reached its budget graph_checkpoint=%s",
+                    graph_checkpoint.checkpoint_sha256
+                    if graph_checkpoint is not None
+                    else None,
+                )
         return report
 
     def _refresh_paths_locked(
@@ -4121,7 +4400,11 @@ class EpistemicGraphIndex:
                 != before
             ):
                 if resolver_version_result is None:
-                    find_module.unload_ram_caches()
+                    # Same reasoning as the rebuild's retarget: the recall
+                    # resolver is checkpoint-validated at every read, so keeping
+                    # it cannot serve stale topology, while dropping it sends the
+                    # next governed write down the whole-vault path.
+                    find_module.unload_ram_caches(keep_recall_resolver=True)
                 self._mark_unavailable()
                 return fallback("topology_proof_moved")
             resolver_versions = resolver_version_result
@@ -6691,8 +6974,40 @@ def cache_token(vault_root: Path) -> tuple | None:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class SnapshotAdoption:
+    """What proving an inherited graph snapshot established, and what it owes.
+
+    `residue` names the paths whose canonical bytes differ from what the
+    snapshot recorded -- the deferred writes a mid-traffic handoff leaves behind.
+    A successful adoption with a non-empty residue has enqueued exactly those
+    paths for incremental repair and has left the availability marker withdrawn,
+    so reads that require a current projection keep refusing until the repair
+    lands.
+    """
+
+    adopted: bool
+    residue: tuple[str, ...] = ()
+    reason: str = ""
+
+    def __bool__(self) -> bool:
+        return self.adopted
+
+
 _REBUILD_LOCK = threading.Lock()
 _REBUILDING: set[str] = set()
+#: `seamless-managed-worker-handoff` D5. Demand that arrives while a whole-vault
+#: rebuild is in flight cannot be served by that flight -- its snapshot predates
+#: the mutation -- and used to be dropped, leaving the next write to schedule
+#: another pass of its own. One mark per vault instead: whatever arrives during a
+#: flight coalesces into exactly one successor, so ten writes during one rebuild
+#: cost one further rebuild rather than ten.
+_REBUILD_FOLLOWUP: set[str] = set()
+
+#: D4. One definition of the standalone join bound, in the module that owns the
+#: join. Re-exported here because this module's callers reach for it by name.
+STANDALONE_JOIN_BUDGET_SECONDS = graph_sync.STANDALONE_JOIN_BUDGET_SECONDS
+_standalone_join_budget_seconds = graph_sync.standalone_join_budget_seconds
 
 
 @dataclass(frozen=True)
@@ -6934,9 +7249,20 @@ def _join_registered_standalone(
         graph_sync.start_registered(
             vault_root, state_root=mutation_coordinator.state_root
         )
-        graph_sync.wait_for_registered(
+        if not graph_sync.join_registered_within_budget(
             vault_root, state_root=mutation_coordinator.state_root
-        )
+        ):
+            # D4. The flight keeps running on its own thread and the checkpoint
+            # is durable; what expires here is only the wait. The caller is told
+            # the graph is still catching up, in the vocabulary a busy rebuild
+            # owner already uses, and carries the checkpoint it can poll.
+            log.info(
+                "standalone graph join reached its budget generation=%s",
+                result.checkpoint.generation,
+            )
+            return GraphDispatchResult(
+                "deferred", "GRAPH_SYNC_REBUILD_IN_PROGRESS", result.checkpoint
+            )
     except graph_sync.GraphRebuildRegistrationError as error:
         if isinstance(error, graph_sync.GraphRebuildInProgress):
             return GraphDispatchResult("deferred", error.code, result.checkpoint)
@@ -7000,6 +7326,10 @@ def schedule_background_rebuild(
     key = f"{Path(vault_root).resolve()}\0{mutation_coordinator.state_root.resolve(strict=False)}"
     with _REBUILD_LOCK:
         if key in _REBUILDING:
+            # D5: coalesce, do not drop. The in-flight pass sampled its corpus
+            # before this demand existed, so it cannot answer it; one successor
+            # can answer all of it.
+            _REBUILD_FOLLOWUP.add(key)
             return False
         _REBUILDING.add(key)
 
@@ -7024,9 +7354,44 @@ def schedule_background_rebuild(
         finally:
             with _REBUILD_LOCK:
                 _REBUILDING.discard(key)
+                follow_up = key in _REBUILD_FOLLOWUP
+                _REBUILD_FOLLOWUP.discard(key)
+            if follow_up:
+                # Exactly one successor for everything that arrived during this
+                # pass. It re-reads the scheduling gates, so a disabled
+                # scheduler or a live publication refusal still stops the chain.
+                schedule_background_rebuild(
+                    vault_root, mutation_coordinator=mutation_coordinator
+                )
 
     threading.Thread(target=_run, name="exomem-graph-rebuild", daemon=True).start()
     return True
+
+
+def _record_graph_repair_demand(vault_root: Path, paths: Iterable[Path]) -> bool:
+    """Put the affected paths on the durable graph queue, proving full coverage.
+
+    The same claim `_refresh_paths_locked.defer` makes: only an enqueue that
+    admitted *every* affected path may be reported as owning the repair.
+    Incomplete coverage means a path would be left stale with nothing scheduled
+    to converge it, so the caller falls back to the whole-vault repair rather
+    than reporting a queue that does not hold the work.
+    """
+    scope = sorted(
+        {
+            rel
+            for candidate in paths
+            if (rel := _vault_rel(vault_root, Path(candidate))) is not None
+        }
+    )
+    if not scope:
+        return False
+    try:
+        receipts = deferred_index.add_graph_receipts(vault_root, scope)
+    except Exception:  # noqa: BLE001 - a queue failure must not lose the repair
+        log.warning("graph repair demand enqueue failed", exc_info=True)
+        return False
+    return {receipt.rel_path for receipt in receipts} == set(scope)
 
 
 def upsert_after_write(
@@ -7066,7 +7431,23 @@ def upsert_after_write(
             return GraphDispatchResult("deferred", "graph_scheduling_disabled", required)
         if required is not None and not index.available():
             predecessor_state = index._graph_sync_predecessor_state(required)
-            if predecessor_state != "available":
+            unreadable = predecessor_state == "graph_sync_predecessor_unreadable"
+            if unreadable:
+                # `seamless-managed-worker-handoff` D2. A declined read of a
+                # structurally intact sidecar says nothing about lineage, so it
+                # takes the incremental path and, failing that, the durable
+                # repair queue. It never registers a whole-vault rebuild: doing
+                # so is what turned every write after a worker replacement into
+                # a full pass, and the state that produces it -- a withdrawn
+                # availability marker -- is left behind by every ordinary
+                # deferral.
+                log.info(
+                    "graph dispatch routed an unreadable predecessor to incremental "
+                    "repair external_pending=%s generation=%s",
+                    freshness.external_pending(vault_root),
+                    required.generation,
+                )
+            if predecessor_state != "available" and not unreadable:
                 # #576 F3, applied to the gate the incremental table does not
                 # cover. `fallback()` logs which of the nine bail-out reasons
                 # fired; this door precedes `refresh_paths` entirely, so
@@ -7100,6 +7481,26 @@ def upsert_after_write(
                     # change makes proportional, leaving the queue as overhead
                     # beside it rather than a replacement for it.
                     return GraphDispatchResult("deferred", "graph_repair_queued", required)
+                if unreadable and report.get("queued"):
+                    # D2's pending outcome, and deliberately its own code: the
+                    # doctor and the recovery alarm must be able to tell a
+                    # fenced predecessor from a lineage gap. The queue is proven
+                    # to hold the affected paths, so this reports pending even
+                    # for a standalone caller -- the one place that contract
+                    # bends, because the alternative is the whole-vault rebuild
+                    # this decision exists to remove.
+                    return GraphDispatchResult(
+                        "deferred", "graph_repair_unreadable_predecessor", required
+                    )
+                log.info(
+                    "graph dispatch registered a whole-vault rebuild reason=%s "
+                    "external_pending=%s generation=%s",
+                    "incremental_refresh_deferred_without_queue_coverage"
+                    if not report.get("queued")
+                    else "incremental_refresh_queued_for_a_caller_that_must_converge",
+                    freshness.external_pending(vault_root),
+                    required.generation,
+                )
                 if graph_sync.registered_checkpoint(
                     vault_root, state_root=mutation_coordinator.state_root
                 ) == required:

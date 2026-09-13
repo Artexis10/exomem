@@ -148,6 +148,12 @@ private graph rebuild has not published. Those registrations coalesce; they are
 not evidence of four simultaneous rebuilds. The after-change comparison retains
 the same setup and reports optional graph state separately.
 
+(Record of the run as measured. `seamless-managed-worker-handoff` phase 1 later
+changed what that state does: an unreadable predecessor no longer registers a
+whole-vault rebuild, and a sidecar that has genuinely never published reports
+`graph_sync_snapshot_unusable` instead. A rerun of this workflow will not show
+these registrations; the numbers above are not re-derivable on a current tree.)
+
 The topology discovery reproduction creates 200 source notes, only one linking
 to a newly appearing target. Calling the existing `_sources_linking_to` method
 with the current resolver returns the correct source but performs **200 body

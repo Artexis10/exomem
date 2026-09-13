@@ -1384,15 +1384,13 @@ def test_dispatch_names_the_gate_that_sent_a_write_to_a_whole_vault_rebuild(
     whose chosen branch cannot be read after the fact is not diagnosable in
     production, and this is the tenth branch.
 
-    The gate must also say *why* it could not prove the predecessor. It refuses
-    for two very different reasons: the probe's read snapshot was declined (for
-    which `freshness.external_pending` alone is enough -- an in-memory liveness
-    hint that `_open_read_snapshot` documents as "an optimization for public
-    readers, not a correctness fence"), or the sidecar was read and its
-    acknowledgement genuinely is not the predecessor. The first is a liveness
-    condition costing a whole-vault rebuild per write; the second is a real
-    lineage gap that has to rebuild. Collapsing them into one silent `False` is
-    what made this take a code read rather than a log read.
+    Every door onto that rebuild must also say *why*. `seamless-managed-worker-handoff`
+    D1/D3 removed the one that used to fire most: a *scoped* external event no
+    longer fences a write on another path at all. What remains here is the
+    watcher's fail-closed default -- an *unscoped* mark, meaning the affected set
+    is unknown -- and that still defers the incremental pass and still reaches a
+    whole-vault rebuild. The line naming it is the point: an unexplained rebuild
+    is what made the last incident take a code read rather than a log read.
     """
     from exomem import find as find_module
 
@@ -1439,10 +1437,37 @@ def test_dispatch_names_the_gate_that_sent_a_write_to_a_whole_vault_rebuild(
         "a write that registered a whole-vault rebuild must say so; the two "
         "lines it does emit report that a rebuild ran, never which gate chose it"
     )
-    assert "graph_sync_predecessor_unreadable" in caplog.text, (
-        "the gate must distinguish a declined probe from a genuine lineage gap"
+    assert "reason=external_event_covers_these_paths" in caplog.text, (
+        "the deferral that sent this write to the whole-vault path must name itself"
     )
     assert "external_pending=True" in caplog.text
+
+    # The predecessor gate's own arm. A sidecar that is not this build's is a
+    # *proven* verdict, and the one the whole-vault rebuild is actually for; it
+    # has to be distinguishable in the log from a sidecar that merely could not
+    # be read at that instant, which now takes the bounded repair instead.
+    caplog.clear()
+    freshness.clear_external_pending(tmp_path, through=freshness.external_pending_epoch(tmp_path))
+    drifted = epistemic_graph.EpistemicGraphIndex(tmp_path)
+    connection = sqlite3.connect(drifted.path)
+    try:
+        with connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES "
+                "('extension_registry_hash', 'drifted-registry')"
+            )
+    finally:
+        connection.close()
+    assert drifted._declined_snapshot_state() == "graph_sync_snapshot_unusable"
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(note, "---\ntype: insight\nstatus: active\n---\n# Drift\n")],
+        vault_root=tmp_path,
+    )
+    graph_sync.drain_active_rebuilds(timeout=60.0)
+    assert "reason=graph_sync_snapshot_unusable" in caplog.text, (
+        "the predecessor gate must name a proven-unusable sidecar, not merely "
+        "report that a rebuild ran"
+    )
 
     # The genesis arm, both ways. `generation=1` has predecessor 0, so the
     # answer is provable from the sidecar alone: a sidecar carrying no
