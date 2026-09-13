@@ -230,10 +230,11 @@ def test_schema_helpers_refuse_unproven_custody(phase, case):
         _run(source, phase, files=files, now=now)
 
 
-def test_repair_refuses_expired_or_enrolled_custody_and_completion_requires_enrollment():
+def test_repair_accepts_a_closed_window_but_still_requires_unenrolled_custody():
     source = _source(4)
-    with pytest.raises(MetadataConflict):
-        _run(source, "inspect", now=source.expires_at)
+    # A fenced generation has no replica of its own to renew the window, so repair
+    # proceeds on a closed one rather than stranding the cell.
+    _run(source, "inspect", now=source.expires_at)
     with pytest.raises(MetadataConflict):
         _run(_source(3, enrolled=True), "inspect")
     with pytest.raises(MetadataConflict):

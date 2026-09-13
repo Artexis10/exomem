@@ -715,15 +715,24 @@ def test_enrollment_rejects_missing_or_tampered_custody(enrollment_source, file)
             )
 
 
-def test_enrollment_refuses_serving_and_expired_generations(enrollment_source) -> None:
+def test_enrollment_refuses_a_serving_generation_but_accepts_a_closed_window(
+    enrollment_source,
+) -> None:
     initial, drained, identity, target = enrollment_source
-    for files, now in ((initial.files, target["now"]), (drained.files, drained.expires_at)):
-        with pytest.raises(MetadataConflict):
-            authorization_membership.enroll_hosted_governance_bundle(
-                files,
-                **identity,
-                **{**target, "now": now},
-            )
+    with pytest.raises(MetadataConflict):
+        authorization_membership.enroll_hosted_governance_bundle(
+            initial.files,
+            **identity,
+            **target,
+        )
+    # Enrollment records a drained generation and preserves its window rather than
+    # renewing it, so a closed window is the state it is meant to accept.
+    enrolled = authorization_membership.enroll_hosted_governance_bundle(
+        drained.files,
+        **identity,
+        **{**target, "now": drained.expires_at},
+    )
+    assert enrolled.governance_enrolled
 
 
 def test_enrollment_refuses_authenticated_drain_without_no_in_flight(enrollment_source) -> None:

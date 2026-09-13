@@ -319,11 +319,17 @@ class HostedGovernanceMigrationCoordinator:
             "expected_schema_version": None,
             "expected_recovery_envelope": custody_recovery_envelope,
         }
+        # The attestation window bounds what a serving replica may authorize. Only
+        # that replica can renew it, and a generation reaching migration is fenced
+        # and has no replica to do so, so requiring an open window here made every
+        # recovery slower than one attestation lifetime strand its cell forever.
+        # The signing keyring, the MAC, the issue time and the fence below are all
+        # still proven; a closed window on a fenced generation authorizes nothing.
         source = inspect_hosted_authorization_bundle(
             files,
             **identity,
             now=current,
-            _require_fresh=checkpoint.phase in {"inspect", "prepare"},
+            _require_fresh=False,
         )
         if (
             source.replica_state != "DRAINING"
@@ -339,9 +345,7 @@ class HostedGovernanceMigrationCoordinator:
             # Never prepare against enrolled custody, even when the enrollment
             # patch's acknowledgement was lost before c became durable.
             phase = "commit" if source.governance_enrolled else "prepare"
-        if phase == "prepare" and (
-            source.membership_schema_version != 3 or source.expires_at <= current
-        ):
+        if phase == "prepare" and source.membership_schema_version != 3:
             raise _refuse()
         request = MigrationJobRequest(
             metadata=metadata,
