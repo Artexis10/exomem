@@ -121,9 +121,6 @@ _RETARGET_SUCCESSOR_MARKER_KEYS = frozenset(
         "committed_at",
     }
 )
-_SHELL_RESUME_MARKER_KEYS = frozenset(
-    {"schema", "preflight_sha256", "helper_source_sha256", "claim_generation", "committed_at"}
-)
 _OUTPUT_KEYS = frozenset(
     {
         "status",
@@ -264,17 +261,6 @@ class RetargetSuccessorPreState:
 
 
 @dataclass(frozen=True, slots=True)
-class ShellResumePreState:
-    action: str
-    state: str
-    checkpoint: str
-    error_code: str | None
-    has_claim: bool
-    has_result: bool
-    finalized: bool
-
-
-@dataclass(frozen=True, slots=True)
 class ShellLiveObservation:
     """What a provision interrupted before its storage apply must still look like.
 
@@ -408,12 +394,25 @@ def validate_shell_live_observation(observation: ShellLiveObservation) -> None:
         raise RecoveryRefusal("live shell resume preflight failed")
 
 
-def shell_resume_transition_values(before: ShellResumePreState) -> dict[str, object]:
+def shell_resume_transition_values(before: OperationPreState) -> dict[str, object]:
     """Return the operation to the checkpoint immediately before the storage apply.
 
     `namespace-ready` is where the walk applies the non-waiting storage shell,
     and the namespace it names is the one resource this operation already owns,
     so the resumed attempt repeats no committed effect.
+    """
+    return _reopen_transition_values(
+        before, checkpoint="namespace-ready", refusal="shell resume preflight failed"
+    )
+
+
+def _reopen_transition_values(
+    before: OperationPreState, *, checkpoint: str, refusal: str
+) -> dict[str, object]:
+    """Admit only the terminal metadata-conflict provision both reopens recover.
+
+    One statement of admissibility for both reopens, so a guard added for one
+    cannot silently stay missing from the other.
     """
     if (
         before.action != "provision"
@@ -426,78 +425,22 @@ def shell_resume_transition_values(before: ShellResumePreState) -> dict[str, obj
     ):
         if before.state in {"pending", "claimed", "final"}:
             raise RecoveryRefusal("already progressed")
-        raise RecoveryRefusal("shell resume preflight failed")
+        raise RecoveryRefusal(refusal)
     return {
         "state": OperationState.PENDING,
-        "checkpoint": "namespace-ready",
+        "checkpoint": checkpoint,
         "error_code": None,
         "claim_owner": None,
         "claim_token": None,
         "claim_expires_at": None,
         "finalized_at": None,
     }
-
-
-def shell_resume_marker(
-    *,
-    preflight_sha256: str,
-    helper_source_sha256: str,
-    claim_generation: int,
-    committed_at: datetime,
-) -> dict[str, object]:
-    marker = {
-        "schema": 1,
-        "preflight_sha256": preflight_sha256,
-        "helper_source_sha256": helper_source_sha256,
-        "claim_generation": claim_generation,
-        "committed_at": _json_value(committed_at),
-    }
-    return parse_shell_resume_marker(marker)
-
-
-def parse_shell_resume_marker(value: object) -> dict[str, object]:
-    if not isinstance(value, dict) or set(value) != _SHELL_RESUME_MARKER_KEYS:
-        raise RecoveryRefusal("shell resume marker is invalid")
-    if (
-        value.get("schema") != 1
-        or not isinstance(value.get("claim_generation"), int)
-        or value["claim_generation"] < 0
-        or not isinstance(value.get("committed_at"), str)
-        or any(
-            not isinstance(value.get(key), str) or len(value[key]) != 64
-            for key in ("preflight_sha256", "helper_source_sha256")
-        )
-    ):
-        raise RecoveryRefusal("shell resume marker is invalid")
-    try:
-        datetime.fromisoformat(value["committed_at"].replace("Z", "+00:00"))
-    except ValueError as error:
-        raise RecoveryRefusal("shell resume marker is invalid") from error
-    return dict(value)
 
 
 def recovery_transition_values(before: OperationPreState) -> dict[str, object]:
-    if (
-        before.action != "provision"
-        or before.state != "error"
-        or before.checkpoint != "failed"
-        or before.error_code != "PROVISIONER_PROVIDER_METADATA_CONFLICT"
-        or before.has_claim
-        or before.has_result
-        or not before.finalized
-    ):
-        if before.state in {"pending", "claimed", "final"}:
-            raise RecoveryRefusal("already progressed")
-        raise RecoveryRefusal("recovery preflight failed")
-    return {
-        "state": OperationState.PENDING,
-        "checkpoint": "volume-owned",
-        "error_code": None,
-        "claim_owner": None,
-        "claim_token": None,
-        "claim_expires_at": None,
-        "finalized_at": None,
-    }
+    return _reopen_transition_values(
+        before, checkpoint="volume-owned", refusal="recovery preflight failed"
+    )
 
 
 def retarget_transition_values(before: RetargetPreState, *, now: datetime) -> dict[str, object]:
@@ -694,26 +637,26 @@ def request_targets_selected_runtime(
     return False
 
 
-def recovery_marker(
+def _reopen_marker_fields(
     *,
     preflight_sha256: str,
     helper_source_sha256: str,
     claim_generation: int,
     committed_at: datetime,
 ) -> dict[str, object]:
-    marker = {
+    return {
         "schema": 1,
         "preflight_sha256": preflight_sha256,
         "helper_source_sha256": helper_source_sha256,
         "claim_generation": claim_generation,
         "committed_at": _json_value(committed_at),
     }
-    return parse_recovery_marker(marker)
 
 
-def parse_recovery_marker(value: object) -> dict[str, object]:
+def _parse_reopen_marker(value: object, *, invalid: str) -> dict[str, object]:
+    """One schema for both reopen receipts; only the refusal names which one."""
     if not isinstance(value, dict) or set(value) != _RECOVERY_MARKER_KEYS:
-        raise RecoveryRefusal("recovery marker is invalid")
+        raise RecoveryRefusal(invalid)
     if (
         value.get("schema") != 1
         or not isinstance(value.get("claim_generation"), int)
@@ -724,12 +667,54 @@ def parse_recovery_marker(value: object) -> dict[str, object]:
             for key in ("preflight_sha256", "helper_source_sha256")
         )
     ):
-        raise RecoveryRefusal("recovery marker is invalid")
+        raise RecoveryRefusal(invalid)
     try:
         datetime.fromisoformat(value["committed_at"].replace("Z", "+00:00"))
     except ValueError as error:
-        raise RecoveryRefusal("recovery marker is invalid") from error
+        raise RecoveryRefusal(invalid) from error
     return dict(value)
+
+
+def recovery_marker(
+    *,
+    preflight_sha256: str,
+    helper_source_sha256: str,
+    claim_generation: int,
+    committed_at: datetime,
+) -> dict[str, object]:
+    return parse_recovery_marker(
+        _reopen_marker_fields(
+            preflight_sha256=preflight_sha256,
+            helper_source_sha256=helper_source_sha256,
+            claim_generation=claim_generation,
+            committed_at=committed_at,
+        )
+    )
+
+
+def shell_resume_marker(
+    *,
+    preflight_sha256: str,
+    helper_source_sha256: str,
+    claim_generation: int,
+    committed_at: datetime,
+) -> dict[str, object]:
+    return parse_shell_resume_marker(
+        _reopen_marker_fields(
+            preflight_sha256=preflight_sha256,
+            helper_source_sha256=helper_source_sha256,
+            claim_generation=claim_generation,
+            committed_at=committed_at,
+        )
+    )
+
+
+def parse_recovery_marker(value: object) -> dict[str, object]:
+    return _parse_reopen_marker(value, invalid="recovery marker is invalid")
+
+
+def parse_shell_resume_marker(value: object) -> dict[str, object]:
+    return _parse_reopen_marker(value, invalid="shell resume marker is invalid")
 
 
 def retarget_marker(
@@ -1183,8 +1168,16 @@ class RecoveryService:
                     raise RecoveryRefusal("database clock is unavailable")
                 before = snapshot.operation
                 evidence_digest = self._preflight_evidence_digest(snapshot, first, second)
+                # The failure budget is cleared so the resumed attempt is not one
+                # transient error from an exhausted terminal state that neither
+                # recovery admits. The pending counter and the last capacity-wait
+                # reason drive nothing and stay as diagnostic history.
                 progress = {
-                    **before.progress,
+                    **{
+                        key: value
+                        for key, value in before.progress.items()
+                        if key != "failure_attempts"
+                    },
                     _SHELL_RESUME_MARKER: shell_resume_marker(
                         preflight_sha256=evidence_digest,
                         helper_source_sha256=self._helper_source_sha256,
@@ -1212,8 +1205,11 @@ class RecoveryService:
                         Operation.claim_generation == before.claim_generation,
                         Operation.updated_at == before.updated_at,
                         cast(Operation.progress, JSONB) == cast(before.progress, JSONB),
+                        # No init-retry marker clause: an init-retry reopen requires
+                        # all four resource kinds, and _shell_preflight above has just
+                        # locked this operation's resources and proven it owns only its
+                        # namespace, so the preflight and this commit prove one thing.
                         ~cast(Operation.progress, JSONB).has_key(_SHELL_RESUME_MARKER),
-                        ~cast(Operation.progress, JSONB).has_key(_RECOVERY_MARKER),
                     )
                     .values(
                         state=OperationState.PENDING,
@@ -1256,7 +1252,7 @@ class RecoveryService:
                 if marker is not None:
                     return self._shell_resume_result(operation, marker, "verified")
                 try:
-                    shell_resume_transition_values(self._shell_resume_pre_state(operation))
+                    shell_resume_transition_values(self._operation_pre_state(operation))
                 except RecoveryRefusal as error:
                     raise RecoveryRefusal("shell resume attribution is unavailable") from error
                 return {
@@ -2276,7 +2272,7 @@ class RecoveryService:
         if marker == _RECOVERY_MARKER:
             transition = recovery_transition_values(self._operation_pre_state(operation))
         else:
-            transition = shell_resume_transition_values(self._shell_resume_pre_state(operation))
+            transition = shell_resume_transition_values(self._operation_pre_state(operation))
         if marker in operation.progress:
             raise RecoveryRefusal("already progressed")
         if (
@@ -2346,32 +2342,17 @@ class RecoveryService:
         )
 
     @staticmethod
-    def _shell_resume_pre_state(operation: Operation) -> ShellResumePreState:
-        return ShellResumePreState(
-            action=operation.action.value,
-            state=operation.state.value,
-            checkpoint=operation.checkpoint,
-            error_code=operation.error_code,
-            has_claim=any(
-                value is not None
-                for value in (
-                    operation.claim_owner,
-                    operation.claim_token,
-                    operation.claim_expires_at,
-                )
-            ),
-            has_result=(operation.result_ciphertext is not None or operation.result_redacted != {}),
-            finalized=operation.finalized_at is not None,
-        )
-
-    @staticmethod
-    def _shell_resume_result(
-        operation: Operation, marker_value: object, status: str
+    def _reopen_result(
+        operation: Operation,
+        marker: dict[str, object],
+        status: str,
+        *,
+        failed_status: str,
+        unavailable: str,
     ) -> dict[str, object]:
-        marker = parse_shell_resume_marker(marker_value)
         if operation.state is OperationState.ERROR:
             return {
-                "status": "resumed-then-failed",
+                "status": failed_status,
                 "state": operation.state.value,
                 "checkpoint": operation.checkpoint,
                 "error_code": operation.error_code,
@@ -2382,13 +2363,25 @@ class RecoveryService:
             OperationState.CLAIMED,
             OperationState.FINAL,
         }:
-            raise RecoveryRefusal("shell resume attribution is unavailable")
+            raise RecoveryRefusal(unavailable)
         return {
             "status": status,
             "state": operation.state.value,
             "checkpoint": operation.checkpoint,
             "recovery_digest": canonical_sha256(marker),
         }
+
+    @staticmethod
+    def _shell_resume_result(
+        operation: Operation, marker_value: object, status: str
+    ) -> dict[str, object]:
+        return RecoveryService._reopen_result(
+            operation,
+            parse_shell_resume_marker(marker_value),
+            status,
+            failed_status="resumed-then-failed",
+            unavailable="shell resume attribution is unavailable",
+        )
 
     @staticmethod
     def _retarget_pre_state(operation: Operation) -> RetargetPreState:
@@ -2730,27 +2723,13 @@ class RecoveryService:
     def _recovery_result(
         operation: Operation, marker_value: object, status: str
     ) -> dict[str, object]:
-        marker = parse_recovery_marker(marker_value)
-        if operation.state is OperationState.ERROR:
-            return {
-                "status": "recovered-then-failed",
-                "state": operation.state.value,
-                "checkpoint": operation.checkpoint,
-                "error_code": operation.error_code,
-                "recovery_digest": canonical_sha256(marker),
-            }
-        if operation.state not in {
-            OperationState.PENDING,
-            OperationState.CLAIMED,
-            OperationState.FINAL,
-        }:
-            raise RecoveryRefusal("recovery attribution is unavailable")
-        return {
-            "status": status,
-            "state": operation.state.value,
-            "checkpoint": operation.checkpoint,
-            "recovery_digest": canonical_sha256(marker),
-        }
+        return RecoveryService._reopen_result(
+            operation,
+            parse_recovery_marker(marker_value),
+            status,
+            failed_status="recovered-then-failed",
+            unavailable="recovery attribution is unavailable",
+        )
 
     @staticmethod
     def _retarget_result(
@@ -3014,13 +2993,16 @@ class _ProductionShellResumeObserver:
         if references != {ResourceKind.KUBERNETES_NAMESPACE: metadata.resource_name}:
             raise RecoveryRefusal("live shell resume preflight failed")
         snapshot = await self.registry.inspect(metadata, metadata)  # type: ignore[attr-defined]
-        registry_digest = await self.registry.authenticate_recovery_record(metadata)  # type: ignore[attr-defined]
+        registry_digest = await self.registry.authenticate_shell_recovery_record(metadata)  # type: ignore[attr-defined]
         claim_present = False
         claim_bound = False
         claim_uid = ""
         try:
             claim_uid, phase = await self.cell.authenticated_volume_state(metadata)  # type: ignore[attr-defined]
-        except MetadataConflict:  # an unauthenticated or absent claim is not this one
+        except MetadataConflict:
+            # Covers an absent, terminating, resized, foreign-class or
+            # unauthenticated claim alike. Each refuses through claim_present,
+            # so none can be misread as the admissible unbound claim.
             claim_uid, phase = "", ""
         else:
             claim_present = True

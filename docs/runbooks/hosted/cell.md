@@ -371,15 +371,16 @@ matching operation and provider fences and identities; the namespace ownership
 record and nothing else; a live namespace and retained provider object carrying
 this operation's envelope and digests; the fixed claim present, unbound and with
 no provider volume; no binder Job, admitted runtime or route; and a retained
-release history under one chart whose abandoned record carries this operation's
-identity. Any mismatch refuses, changes nothing, and leaves the one-shot unspent.
+release history under one chart whose abandoned record satisfies the apply's own
+position and structural rules and carries this operation's identity. Any mismatch refuses, changes nothing, and leaves the one-shot unspent.
 
 `shell-resume` returns the operation to `namespace-ready` -- the checkpoint
 immediately before the storage apply, naming the one resource it already owns --
 and records its own one-shot marker. It preserves the operation identity, fence,
 request, namespace ownership, claim, capacity reservation and tenant invite. It
-clears only the terminal state, the finalization, the error code and the retry
-counters. A second call returns `already-resumed` rather than acting again.
+clears only the terminal state, the finalization, the error code and the
+failure-attempt budget; the diagnostic pending counter and last capacity-wait
+reason stay as history. A second call returns `already-resumed` rather than acting again.
 
 Exact target equality is not the preflight's test: the resumed apply compares the
 recorded target against the one it computes, under the guard immediately before

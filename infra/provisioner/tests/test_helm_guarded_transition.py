@@ -856,3 +856,55 @@ async def test_recovery_accepts_a_release_that_was_never_recorded(tmp_path):
     h.history[:] = []
 
     assert await h.adapter.retained_records_are_own(_metadata(), identity=_identity()) is True
+
+
+@pytest.mark.asyncio
+async def test_recovery_refuses_retained_records_whose_init_operation_differs(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+    h.leave_pending(
+        "pending-upgrade",
+        revision=4,
+        values={**_owned_values(), "initOperationId": "other-operation"},
+    )
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.adapter.retained_records_are_own(_metadata(), identity=_identity())
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "history",
+    [
+        # A pending install may never sit on top of any other retained revision.
+        [
+            {"revision": 1, "status": "failed", "chart": CHART},
+            {"revision": 2, "status": "pending-install", "chart": CHART},
+        ],
+        # A deployed predecessor, when one exists, must be exactly one.
+        [
+            {"revision": 1, "status": "deployed", "chart": CHART},
+            {"revision": 2, "status": "deployed", "chart": CHART},
+            {"revision": 3, "status": "pending-upgrade", "chart": CHART},
+        ],
+    ],
+)
+async def test_recovery_refuses_every_history_the_apply_refuses_on_structure(tmp_path, history):
+    h = HelmTransport(tmp_path)
+    h.history[:] = [dict(item) for item in history]
+    newest = history[-1]["revision"]
+    # Carries this operation's identity, so only the structural rule can refuse it.
+    h.revision_values[newest] = _owned_values()
+
+    with pytest.raises(MetadataConflict) as preflight:
+        await h.adapter.retained_records_are_own(_metadata(), identity=_identity())
+    assert preflight.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+
+    # Matches the target exactly, so only the structural rule can refuse the apply.
+    h.revision_values[newest] = dict(TARGET)
+    with pytest.raises(MetadataConflict) as applied:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+    assert applied.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == [] and _upgrades(h) == 0

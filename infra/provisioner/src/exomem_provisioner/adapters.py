@@ -3374,6 +3374,34 @@ class HelmCliAdapter:
             raise self._pending_release_is_foreign()
         return record
 
+    def _require_structural_ownership(
+        self,
+        history: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+        record: dict[str, Any],
+    ) -> None:
+        """Refuse an abandoned record whose surrounding history it cannot own.
+
+        Shared by the clearing path and the read-only recovery preflight: a
+        preflight that skipped any of these would admit a history the resumed
+        apply then refuses, spending the recovery on a guaranteed failure.
+        """
+        if record["status"] == "pending-install":
+            if len(history) != 1:
+                raise self._pending_release_is_foreign()
+            return
+        deployed = [item for item in history if item.get("status") == "deployed"]
+        if deployed:
+            if len(deployed) != 1 or deployed[0].get("chart") != record.get("chart"):
+                raise self._pending_release_is_foreign()
+        elif any(item.get("chart") != record.get("chart") for item in history):
+            # A first provision whose every attempt failed retains no deployed
+            # predecessor to compare, so demanding one makes its own abandoned
+            # record permanently unclearable. Absence is not evidence of a
+            # foreign writer: require instead that the whole retained history
+            # belong to this chart, and let the exact recorded target carry the
+            # ownership proof.
+            raise self._pending_release_is_foreign()
+
     @staticmethod
     def _pending_release_is_foreign() -> MetadataConflict:
         return MetadataConflict(
@@ -3455,13 +3483,14 @@ class HelmCliAdapter:
     ) -> bool:
         """Answer read-only whether the retained records belong to this operation.
 
-        Recovery asks this before it reopens an operation, and asks it of the
-        identity a target carries rather than of the whole target: the session
-        revision a full comparison would need is not the recovery observer's to
-        read. Exact target equality stays the apply's own refusal, reached under
-        the guard immediately before the effect. The structural rules -- one
-        chart throughout, at most one pending record and only as the newest --
-        are the same ones the apply applies, through the same helper.
+        Recovery asks this before it reopens an operation. It applies the apply
+        path's own position and structural rules through the same two helpers,
+        adds one stricter rule -- the whole retained history under the pinned
+        chart even when nothing is abandoned -- and defers exactly one test:
+        target equality, because the session revision a full comparison needs is
+        not the recovery observer's to read. It checks the identity the recorded
+        target carries instead, and the apply refuses any remaining difference
+        under the guard immediately before the effect.
         """
         environment = dict(self._HELM_ENVIRONMENT)
         await self._require_version(environment)
@@ -3474,6 +3503,7 @@ class HelmCliAdapter:
         record = self._own_pending_record(history, chart)
         if record is None:
             return True
+        self._require_structural_ownership(history, record)
         recorded = await self._revision_values(metadata, environment, record["revision"])
         if recorded.get("providerIdentity") != identity or recorded.get("initOperationId") != (
             identity.get("operationId")
@@ -3499,23 +3529,7 @@ class HelmCliAdapter:
         record = self._own_pending_record(history, await self._chart_reference(environment))
         if record is None:
             return None
-        pending_install = record["status"] == "pending-install"
-        if pending_install:
-            if len(history) != 1:
-                raise self._pending_release_is_foreign()
-        else:
-            deployed = [item for item in history if item.get("status") == "deployed"]
-            if deployed:
-                if len(deployed) != 1 or deployed[0].get("chart") != record.get("chart"):
-                    raise self._pending_release_is_foreign()
-            elif any(item.get("chart") != record.get("chart") for item in history):
-                # A first provision whose every attempt failed retains no deployed
-                # predecessor to compare, so demanding one makes its own abandoned
-                # record permanently unclearable. Absence is not evidence of a
-                # foreign writer: require instead that the whole retained history
-                # belong to this chart, and let the exact recorded target below
-                # carry the ownership proof.
-                raise self._pending_release_is_foreign()
+        self._require_structural_ownership(history, record)
         try:
             recorded = await self._revision_values(metadata, environment, record["revision"])
         except MetadataConflict as error:

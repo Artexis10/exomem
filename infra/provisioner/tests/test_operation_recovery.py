@@ -1160,7 +1160,7 @@ def _shell_observation(module, **overrides):
 
 def test_shell_resume_returns_the_operation_to_the_checkpoint_before_its_apply() -> None:
     recovery = _module()
-    before = recovery.ShellResumePreState(
+    before = recovery.OperationPreState(
         action="provision",
         state="error",
         checkpoint="failed",
@@ -1249,8 +1249,72 @@ def test_shell_resume_marker_is_content_free_exact_and_one_way() -> None:
             recovery.parse_shell_resume_marker(broken)
 
 
-def test_shell_resume_marker_is_distinct_from_the_init_retry_receipt() -> None:
-    recovery = _module()
+@pytest.mark.asyncio
+async def test_shell_observer_proves_ownership_without_a_deployed_release() -> None:
+    """Regression: the shell resume once demanded the deployed release a first provision lacks."""
+    from types import SimpleNamespace
 
-    assert recovery._SHELL_RESUME_MARKER != recovery._RECOVERY_MARKER
-    assert recovery._SHELL_RESUME_MARKER not in recovery._RECOVERY_MARKER_KEYS
+    recovery = _module()
+    from exomem_provisioner.conflict_reason import ConflictReason
+    from exomem_provisioner.lifecycle import MetadataConflict, OpaqueProviderMetadata
+    from exomem_provisioner.models import ResourceKind
+
+    metadata = OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "provider-alpha", 7)
+
+    class Codec:
+        def decrypt_json(self, ciphertext, *, purpose):
+            return {"reference": metadata.resource_name}
+
+    class Registry:
+        async def inspect(self, current, owned):
+            return SimpleNamespace(
+                namespace=True,
+                init_job_present=False,
+                runtime_admitted=False,
+                routes=(False, False),
+            )
+
+        async def authenticate_recovery_record(self, current):
+            # Exactly what the live cell answers: no deployed release record exists.
+            raise MetadataConflict(
+                "deployed Helm release record is not exact",
+                reason=ConflictReason.HELM_RELEASE_RECORD_NOT_EXACT,
+            )
+
+        async def authenticate_shell_recovery_record(self, current):
+            return "a" * 64
+
+    class Cell:
+        async def authenticated_volume_state(self, current):
+            return ("pvc-uid", "Pending")
+
+    class Volumes:
+        async def observe_recovery_bound_volume(self, current):
+            return None
+
+    class Helm:
+        async def retained_records_are_own(self, current, *, identity):
+            return identity["operationId"] == "provider-alpha"
+
+    observer = recovery._ProductionShellResumeObserver(
+        Registry(), Cell(), Volumes(), Helm(), Codec()
+    )
+    operation = SimpleNamespace(
+        cell_id="cell-alpha",
+        tenant_id="tenant-alpha",
+        external_operation_id="provider-alpha",
+        fence_generation=7,
+    )
+    resources = (
+        SimpleNamespace(
+            kind=ResourceKind.KUBERNETES_NAMESPACE,
+            reference_ciphertext="namespace",
+            operation_id="internal",
+        ),
+    )
+
+    observed = await observer.observe_shell(operation, resources)
+
+    assert recovery.validate_shell_live_observation(observed) is None
+    assert observed.provider_object_present and observed.claim_present
+    assert not observed.claim_bound and not observed.volume_present
