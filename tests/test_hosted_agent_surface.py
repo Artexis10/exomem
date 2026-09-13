@@ -389,3 +389,29 @@ def test_agent_bootstrap_advertises_only_the_active_profile(
         for action in ("adopt", "maintain"):
             assert payload["simple_actions"][action]["available"] is False
             assert "route" not in payload["simple_actions"][action]
+
+
+@pytest.mark.parametrize(
+    "profile",
+    ["hosted-alpha-agent-v1", "hosted-alpha-agent-v2", "hosted-alpha-agent-v4", "hosted-alpha-agent-v5"],
+)
+def test_every_hosted_profile_is_taught_a_prominence_route_it_can_take(
+    tmp_path: Path, profile: str
+) -> None:
+    """No hosted profile serves `configure_memory`, and none has a command line.
+
+    The payload named `exomem prominence <level>` anyway -- a command a
+    connector-only user has no machine to type it on. The custom-instructions
+    block is the route that surface actually has.
+    """
+    from exomem import prominence
+
+    descriptor = gateway.hosted_agent_surface_descriptor(profile)
+    assert "configure_memory" not in descriptor.product_commands
+
+    with active_surface(descriptor):
+        payload = commands.op_bootstrap(tmp_path, profile="compact")
+
+    change_with = payload["engagement"]["change_with"]
+    assert change_with == prominence.custom_instructions_route()
+    assert "exomem prominence" not in json.dumps(payload["engagement"], ensure_ascii=False)
