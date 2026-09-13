@@ -438,7 +438,7 @@ _DECLARED_UNBOUNDED_JOINS = {
         "service_ingress.py",
         "ServiceIngress._queue",
         "self._ready.wait",
-    ): "enclosed by asyncio.wait_for with the remaining 45-second admission budget",
+    ): "enclosed by asyncio.timeout with the remaining 45-second admission budget",
     (
         "service_ingress.py",
         "ServiceIngress.detach_streams",
