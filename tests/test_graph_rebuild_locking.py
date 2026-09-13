@@ -634,3 +634,84 @@ def test_graph_swap_waits_for_a_real_lease_manager_writer(
     assert not rebuilder.is_alive()
     assert publish_entered.is_set()
     assert rebuilt
+
+
+def test_rebuild_demand_during_one_flight_coalesces_into_one_follow_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ten demands arriving during one rebuild cost one further pass, not ten.
+
+    The in-flight pass sampled its corpus before any of them existed, so it
+    cannot answer them; dropping the demand left the next write to schedule
+    another rebuild of its own, which is how a busy vault produced a rebuild per
+    write (`seamless-managed-worker-handoff` D5).
+    """
+    from exomem import epistemic_graph
+
+    vault_root = tmp_path / "vault"
+    (vault_root / "Knowledge Base").mkdir(parents=True)
+    coordinator = SimpleNamespace(state_root=tmp_path / "state")
+    entered = threading.Event()
+    release = threading.Event()
+    passes: list[float] = []
+
+    def rebuild(_self) -> dict[str, int]:  # noqa: ANN001
+        passes.append(time.monotonic())
+        if len(passes) == 1:
+            entered.set()
+            assert release.wait(_OBSERVE_SECONDS)
+        return {"indexed_files": 0, "nodes": 0, "edges": 0}
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "rebuild_all", rebuild)
+
+    assert epistemic_graph.schedule_background_rebuild(
+        vault_root, mutation_coordinator=coordinator
+    )
+    assert entered.wait(_OBSERVE_SECONDS)
+    for _ in range(10):
+        assert (
+            epistemic_graph.schedule_background_rebuild(
+                vault_root, mutation_coordinator=coordinator
+            )
+            is False
+        ), "a second flight must not start while one is running"
+    release.set()
+
+    deadline = time.monotonic() + _OBSERVE_SECONDS
+    while (
+        epistemic_graph._REBUILDING or epistemic_graph._REBUILD_FOLLOWUP
+    ) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not epistemic_graph._REBUILDING
+    assert not epistemic_graph._REBUILD_FOLLOWUP
+    assert len(passes) == 2, (
+        f"ten demands during one flight ran {len(passes)} whole-vault passes"
+    )
+
+
+def test_rebuild_demand_before_a_flight_starts_needs_no_follow_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Coalescing adds a pass only when demand could not be served by the one running."""
+    from exomem import epistemic_graph
+
+    vault_root = tmp_path / "vault"
+    (vault_root / "Knowledge Base").mkdir(parents=True)
+    coordinator = SimpleNamespace(state_root=tmp_path / "state")
+    passes: list[float] = []
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "rebuild_all",
+        lambda _self: passes.append(time.monotonic()) or {},
+    )
+
+    assert epistemic_graph.schedule_background_rebuild(
+        vault_root, mutation_coordinator=coordinator
+    )
+    deadline = time.monotonic() + _OBSERVE_SECONDS
+    while (
+        epistemic_graph._REBUILDING or epistemic_graph._REBUILD_FOLLOWUP
+    ) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(passes) == 1

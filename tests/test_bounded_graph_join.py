@@ -238,11 +238,13 @@ _DECLARED_JOIN_SITES = {
     # Unbounded by design: `reconcile`'s terminal exists to prove the graph is
     # readable, so it must not return before the rebuild lands.
     "reconcile.py": "reconcile opt-in; its terminal asserts graph currency",
-    # Unbounded by design: the standalone library path, gated on
-    # `active_mutation_request_id() is None` and no active direct guard, so it
-    # is unreachable while any request is being served. It has no envelope to
-    # carry `pending` and its contract is a converged result.
-    "epistemic_graph.py": "standalone library join, no request boundary held",
+    # Bounded by `_standalone_join_budget_seconds`: the standalone library
+    # path, gated on `active_mutation_request_id() is None` and no active
+    # direct guard, so it is unreachable while any request is being served. It
+    # has no envelope to carry `pending`, so it joins -- within the request
+    # deadline when one is in scope and a module default otherwise, past which
+    # it reports the rebuild as still running.
+    "epistemic_graph.py": "standalone library join, bounded by its own budget",
     "delete_file.py": "standalone library join, no request boundary held",
     "delete_directory.py": "standalone library join, no request boundary held",
     "recover_from_trash.py": "standalone library join, no request boundary held",
@@ -319,7 +321,12 @@ def test_parent_receipted_handoff_does_not_join_registered_rebuild(
     monkeypatch.setattr(
         EpistemicGraphIndex,
         "_graph_sync_predecessor_state",
-        lambda _self, _required: "graph_sync_predecessor_unreadable",
+        # A proven lineage gap: the state that still registers a whole-vault
+        # rebuild. An unreadable predecessor no longer does
+        # (`seamless-managed-worker-handoff` D2), and this test is about what
+        # the parent handoff does with a registration, not about which gate
+        # produced one.
+        lambda _self, _required: "graph_sync_predecessor_mismatch",
     )
     detached: list[Path] = []
     monkeypatch.setattr(
@@ -851,3 +858,112 @@ def test_the_cli_drains_before_it_exits(monkeypatch: pytest.MonkeyPatch) -> None
     cli.main(["--version", "--json"])
 
     assert drained == [True], "the CLI exited without draining in-flight rebuilds"
+
+
+# --- 4. The standalone join is bounded too ------------------------------------
+
+
+def _blocking_registration(
+    vault_root: Path,
+    state_root: Path,
+    checkpoint: graph_sync.GraphSyncCheckpoint,
+    release: threading.Event,
+) -> threading.Event:
+    entered = threading.Event()
+
+    def build(required: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
+        entered.set()
+        assert release.wait(60), "the test never released the rebuild"
+        return graph_sync.GraphBuildOutcome.covering(required)
+
+    graph_sync.register_rebuild(vault_root, checkpoint, build, state_root=state_root)
+    return entered
+
+
+def _join_standalone(
+    vault_root: Path, coordinator: Any, checkpoint: graph_sync.GraphSyncCheckpoint
+) -> tuple[Any, float]:
+    started = time.monotonic()
+    result = epistemic_graph._join_registered_standalone(
+        vault_root,
+        epistemic_graph.GraphDispatchResult(
+            "registered", "graph_rebuild_registered", checkpoint
+        ),
+        coordinator,
+    )
+    return result, time.monotonic() - started
+
+
+def test_standalone_join_returns_pending_past_its_default_budget(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A direct library caller joins its rebuild, but never without a bound.
+
+    It has no envelope to carry `pending`, which is why it joins at all; that is
+    not a reason to let a committed write wait out a whole-vault pass
+    (`seamless-managed-worker-handoff` D4).
+    """
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    state_dir = vault / "standalone-budget-state"
+    manager = LeaseManager(LeaseConfig(state_dir=state_dir))
+    coordinator = manager._mutation_coordinator_for(vault)
+    required = _checkpoint(3)
+    release = threading.Event()
+    entered = _blocking_registration(vault, coordinator.state_root, required, release)
+    monkeypatch.setattr(epistemic_graph, "STANDALONE_JOIN_BUDGET_SECONDS", 0.5)
+
+    try:
+        result, elapsed = _join_standalone(vault, coordinator, required)
+        assert entered.wait(5), "the registered rebuild must have started"
+        assert (result.outcome, result.code) == ("deferred", "GRAPH_SYNC_REBUILD_IN_PROGRESS")
+        assert result.checkpoint == required, "the pending outcome carries the poll target"
+        assert elapsed < 10.0, f"the standalone join parked {elapsed:.1f}s past its budget"
+    finally:
+        release.set()
+        graph_sync.await_active_rebuild(vault, state_root=coordinator.state_root, timeout=10)
+
+
+def test_standalone_join_takes_the_request_deadline_when_one_is_nearer(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a request in scope the wait ends before its deadline, not at the default."""
+    from exomem import request_budget
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    state_dir = vault / "standalone-deadline-state"
+    manager = LeaseManager(LeaseConfig(state_dir=state_dir))
+    coordinator = manager._mutation_coordinator_for(vault)
+    required = _checkpoint(4)
+    release = threading.Event()
+    entered = _blocking_registration(vault, coordinator.state_root, required, release)
+
+    budget = request_budget.RequestBudget(
+        seconds=request_budget.DELIVERY_RESERVE_SECONDS + 0.4
+    )
+    token = request_budget.set_current(budget)
+    try:
+        assert epistemic_graph._standalone_join_budget_seconds() < 1.0, (
+            "a nearer request deadline must win over the module default"
+        )
+        result, elapsed = _join_standalone(vault, coordinator, required)
+        assert entered.wait(5)
+        assert (result.outcome, result.code) == ("deferred", "GRAPH_SYNC_REBUILD_IN_PROGRESS")
+        assert elapsed < 10.0
+    finally:
+        request_budget.reset_current(token)
+        release.set()
+        graph_sync.await_active_rebuild(vault, state_root=coordinator.state_root, timeout=10)
+
+
+def test_standalone_join_budget_defaults_without_a_request(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import request_budget
+
+    monkeypatch.setattr(request_budget, "current", lambda: None)
+
+    assert (
+        epistemic_graph._standalone_join_budget_seconds()
+        == epistemic_graph.STANDALONE_JOIN_BUDGET_SECONDS
+    )

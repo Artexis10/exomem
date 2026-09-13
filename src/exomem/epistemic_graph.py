@@ -1808,22 +1808,32 @@ class EpistemicGraphIndex:
         freshness fully live.
 
         Note where those four live, though: all of them are inside the
-        `require_current_projection` branch below. The three maintenance
-        readers that pass `require_current_projection=False` — the graph_sync
-        predecessor probe, the incremental refresh, and its topology re-read —
-        deliberately skip them, so for those callers this guard is the *only*
-        `freshness`-side check in this method that an unobserved external event
-        has landed. That is a second reason it stays, beyond cheapness.
+        `require_current_projection` branch below, and so, now, is the
+        `external_pending` guard (`seamless-managed-worker-handoff` D1).
 
-        It stays admissible only because `external_pending` is now set
-        exclusively by Class A (registry loss) and Class C (proven-stale)
-        signals — never by a publication failure. If a future change lets a
-        Class B failure mark again, this guard becomes a liveness bug wearing a
-        safety costume and must be removed rather than relied on.
+        It used to fence the three maintenance readers that pass
+        `require_current_projection=False` — the graph_sync predecessor probe,
+        the incremental refresh, and its topology re-read — as well. That is
+        what made a replacement worker rebuild the whole vault on every write:
+        its self-attribution table starts empty, so ordinary vault traffic
+        keeps the flag armed, the predecessor probe could not read a sidecar
+        that was structurally fine, and `upsert_after_write` read the declined
+        probe as a lineage gap. A governed write does not need a *current*
+        projection to compute its own predecessor — the predecessor comes from
+        the checkpoint lineage — so those three readers now proceed, and the
+        paths an unattributed event touched fence only themselves, through
+        `freshness.external_pending_for` at the incremental entry point.
+
+        For public readers the guard is unchanged, and it stays admissible only
+        because `external_pending` is set exclusively by Class A (registry
+        loss) and Class C (proven-stale) signals — never by a publication
+        failure. If a future change lets a Class B failure mark again, this
+        guard becomes a liveness bug wearing a safety costume and must be
+        removed rather than relied on.
         """
         if (
             not graph_enabled()
-            or freshness.external_pending(self.vault_root)
+            or (require_current_projection and freshness.external_pending(self.vault_root))
             or not self.path.exists()
         ):
             return None
@@ -1866,12 +1876,20 @@ class EpistemicGraphIndex:
             and values.get("recall_policy_version") == policy_version
             and values.get("recall_access_fingerprint") == access_fingerprint
             and len(values.get(_RESOLVER_TOPOLOGY_KEY, "")) == 64
-            and stored_projection is not None
             # A present-but-corrupt checkpoint must fail closed.  No checkpoint
             # is valid for a sidecar published from a direct-disk rebuild while
             # the event registry was cold or known stale.
             and (stored_checkpoint_value is None or stored_checkpoint is not None)
         )
+        if require_current_projection:
+            # The availability marker is a *reader's* claim that the stored
+            # projection is current, and its absence is what every deferral
+            # leaves behind. Requiring it of the maintenance readers too meant
+            # a sidecar whose rows and lineage are intact could only be
+            # repaired by rebuilding the whole vault -- the incremental pass
+            # that exists to republish the marker could not open the sidecar to
+            # do it (`seamless-managed-worker-handoff` D2).
+            current = current and stored_projection is not None
         graph_sync_state, required_graph_sync = graph_sync.checkpoint_state(self.vault_root)
         graph_sync_current = graph_sync.status(self.vault_root)["state"] == "current"
         if graph_sync_state == "malformed":
@@ -1928,8 +1946,11 @@ class EpistemicGraphIndex:
                 )
         # The `external_pending` term is the same cheap short-circuit described
         # in this method's docstring (contract D7), re-read after the proof so a
-        # Class A/C signal that landed mid-proof still fails closed.
-        if not current or freshness.external_pending(self.vault_root):
+        # Class A/C signal that landed mid-proof still fails closed. Scoped to
+        # public readers for the reason the head of this method gives.
+        if not current or (
+            require_current_projection and freshness.external_pending(self.vault_root)
+        ):
             conn.close()
             return None
         return conn
@@ -3469,6 +3490,63 @@ class EpistemicGraphIndex:
         ).fetchone()
         return _checkpoint_from_value(str(row[0])) if row is not None else None
 
+    def _declined_snapshot_state(self) -> str:
+        """Why a maintenance read snapshot was declined: fenced, or unusable.
+
+        Both declines look the same to `_open_read_snapshot`, and they earn
+        opposite repairs (`seamless-managed-worker-handoff` D2):
+
+        * the sidecar is structurally *this* build's -- schema, relation
+          registry, recall policy and resolver topology all agree, and any
+          stored checkpoint parses. Its lineage is intact and bounded
+          incremental repair converges it.
+        * anything else: no sidecar, a schema or registry drift, a corrupt
+          checkpoint. Nothing bounded can advance that, and a whole-vault
+          rebuild is the repair.
+
+        A whole-vault rebuild is paid only on a *proven* verdict. A sidecar that
+        exists but cannot be opened or read right now -- a publication holding
+        it, a busy lock -- has proved nothing, so it takes the bounded repair;
+        the incremental pass re-opens it and falls back on its own terms if the
+        contention persists.
+        """
+        if not graph_enabled() or not self.path.exists():
+            return "graph_sync_snapshot_unusable"
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._connect_existing(readonly=True, check_same_thread=False)
+            graph_sync.limit_graph_metadata_read(conn)
+            values = dict(
+                conn.execute(
+                    "SELECT key, value FROM graph_meta WHERE key IN "
+                    "('schema_version', 'core_registry_version', 'extension_registry_hash', "
+                    "'recall_policy_version', 'recall_access_fingerprint', "
+                    "'recall_resolver_topology', 'recall_projection_checkpoint')"
+                ).fetchall()
+            )
+        except sqlite3.Error:
+            return "graph_sync_predecessor_unreadable"
+        finally:
+            if conn is not None:
+                conn.close()
+        policy_version, access_fingerprint = recall_policy.recall_policy_identity(self.vault_root)
+        stored_checkpoint_value = values.get(_RECALL_CHECKPOINT_KEY)
+        structural = (
+            values.get("schema_version") == str(SCHEMA_VERSION)
+            and values.get("core_registry_version") == str(self.registry.core_version)
+            and values.get("extension_registry_hash") == self.registry.extension_hash
+            and values.get("recall_policy_version") == policy_version
+            and values.get("recall_access_fingerprint") == access_fingerprint
+            and len(values.get(_RESOLVER_TOPOLOGY_KEY, "")) == 64
+            and (
+                stored_checkpoint_value is None
+                or _checkpoint_from_value(stored_checkpoint_value) is not None
+            )
+        )
+        return (
+            "graph_sync_predecessor_unreadable" if structural else "graph_sync_snapshot_unusable"
+        )
+
     def _graph_sync_predecessor_state(
         self, checkpoint: graph_sync.GraphSyncCheckpoint
     ) -> str:
@@ -3482,23 +3560,26 @@ class EpistemicGraphIndex:
         emits only "graph rebuild published" and "graph rebuild finished" and
         never says which condition chose the expensive path.
 
-        The two failing states are operationally opposite and must not collapse
+        The failing states are operationally opposite and must not collapse
         into one `False`:
 
         * `graph_sync_predecessor_unreadable` -- the probe's read snapshot was
-          declined. `freshness.external_pending` alone is enough for that, and
-          `_open_read_snapshot` documents that guard as "an optimization for
-          public readers, not a correctness fence". Nothing about the sidecar's
-          lineage is known, or broken; the same sidecar answers `available` the
-          moment the flag clears. While it is set, every governed write pays a
-          whole-vault rebuild.
+          declined while the sidecar is structurally intact (see
+          `_declined_snapshot_state`). Nothing about its lineage is broken; the
+          same sidecar answers `available` again once the withdrawn marker is
+          republished. The dispatch routes this to bounded incremental repair,
+          because paying a whole-vault rebuild for it is what made every write
+          after a worker replacement cost one.
+        * `graph_sync_snapshot_unusable` -- there is no sidecar, or it is not
+          this build's, or its stored checkpoint is corrupt. The scope is
+          unknown and a rebuild is the repair.
         * `graph_sync_predecessor_mismatch` / `..._absent` -- the sidecar was
           read and its acknowledgement genuinely is not this checkpoint's
           predecessor. That is a real lineage gap and a rebuild is the repair.
         """
         snapshot = self._open_read_snapshot(require_current_projection=False)
         if snapshot is None:
-            return "graph_sync_predecessor_unreadable"
+            return self._declined_snapshot_state()
         try:
             values = dict(
                 snapshot.execute(
@@ -3754,7 +3835,24 @@ class EpistemicGraphIndex:
         with self._mutation_coordinator.hold(
             operation="epistemic_graph_refresh_paths", holder_kind="graph"
         ):
-            if freshness.external_pending(self.vault_root):
+            # Path-scoped (`seamless-managed-worker-handoff` D3): an
+            # unattributed event on *these* paths means this process cannot
+            # trust its own view of them, and the refresh defers. An
+            # unattributed event anywhere else says nothing about this write,
+            # and fencing on it is what turned every write after a worker
+            # replacement into a whole-vault rebuild. Reads still refuse on any
+            # unrepaired mark; only the write path narrows.
+            if freshness.external_pending_for(self.vault_root, paths):
+                # Content-free, like every line in this module: a count, never a
+                # path. Without it this deferral is the one bail-out that
+                # reaches a whole-vault rebuild while logging nothing at all --
+                # exactly the silence #576 was diagnosed through.
+                log.info(
+                    "graph incremental refresh deferred reason=external_event_covers_these_paths "
+                    "external_paths_pending=%d graph_checkpoint=%s",
+                    len(freshness.external_pending_paths(self.vault_root)),
+                    graph_checkpoint.checkpoint_sha256 if graph_checkpoint is not None else None,
+                )
                 self._mark_unavailable()
                 return {
                     "indexed_files": 0,
@@ -6693,6 +6791,40 @@ def cache_token(vault_root: Path) -> tuple | None:
 
 _REBUILD_LOCK = threading.Lock()
 _REBUILDING: set[str] = set()
+#: `seamless-managed-worker-handoff` D5. Demand that arrives while a whole-vault
+#: rebuild is in flight cannot be served by that flight -- its snapshot predates
+#: the mutation -- and used to be dropped, leaving the next write to schedule
+#: another pass of its own. One mark per vault instead: whatever arrives during a
+#: flight coalesces into exactly one successor, so ten writes during one rebuild
+#: cost one further rebuild rather than ten.
+_REBUILD_FOLLOWUP: set[str] = set()
+
+#: D4. The bound on a standalone caller's join. It has no response envelope to
+#: carry `pending`, so it joins rather than returning early -- but joining
+#: without a bound is how a committed write ended up waiting out a whole-vault
+#: rebuild. Sized well above a small-vault pass, so the library contract's
+#: "converged result" still holds for the ordinary case, and well below the
+#: 20-175 s a production whole-vault pass costs. A request deadline in scope
+#: wins whenever it is nearer.
+STANDALONE_JOIN_BUDGET_SECONDS = 15.0
+
+
+def _standalone_join_budget_seconds() -> float:
+    """How long a standalone post-commit join may wait, on the monotonic clock.
+
+    Two bounds, and the earlier one wins, exactly as
+    `writer_lease.acknowledgement_budget_deadline` composes them: the module's
+    own bound, and what is left of the request budget minus its delivery
+    reserve when a request is in scope at all. Past either, the canonical bytes
+    are durable and the caller is told the graph is still catching up.
+    """
+    from . import request_budget
+
+    budget = request_budget.current()
+    if budget is None:
+        return STANDALONE_JOIN_BUDGET_SECONDS
+    remaining = budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS
+    return max(0.0, min(STANDALONE_JOIN_BUDGET_SECONDS, remaining))
 
 
 @dataclass(frozen=True)
@@ -6935,7 +7067,21 @@ def _join_registered_standalone(
             vault_root, state_root=mutation_coordinator.state_root
         )
         graph_sync.wait_for_registered(
-            vault_root, state_root=mutation_coordinator.state_root
+            vault_root,
+            timeout=_standalone_join_budget_seconds(),
+            state_root=mutation_coordinator.state_root,
+        )
+    except TimeoutError:
+        # D4. The flight keeps running on its own thread and the checkpoint is
+        # durable; what expires here is only the wait. The caller is told the
+        # graph is still catching up, in the vocabulary a busy rebuild owner
+        # already uses, and carries the checkpoint it can poll.
+        log.info(
+            "standalone graph join reached its budget generation=%s",
+            result.checkpoint.generation,
+        )
+        return GraphDispatchResult(
+            "deferred", "GRAPH_SYNC_REBUILD_IN_PROGRESS", result.checkpoint
         )
     except graph_sync.GraphRebuildRegistrationError as error:
         if isinstance(error, graph_sync.GraphRebuildInProgress):
@@ -7000,6 +7146,10 @@ def schedule_background_rebuild(
     key = f"{Path(vault_root).resolve()}\0{mutation_coordinator.state_root.resolve(strict=False)}"
     with _REBUILD_LOCK:
         if key in _REBUILDING:
+            # D5: coalesce, do not drop. The in-flight pass sampled its corpus
+            # before this demand existed, so it cannot answer it; one successor
+            # can answer all of it.
+            _REBUILD_FOLLOWUP.add(key)
             return False
         _REBUILDING.add(key)
 
@@ -7024,6 +7174,15 @@ def schedule_background_rebuild(
         finally:
             with _REBUILD_LOCK:
                 _REBUILDING.discard(key)
+                follow_up = key in _REBUILD_FOLLOWUP
+                _REBUILD_FOLLOWUP.discard(key)
+            if follow_up:
+                # Exactly one successor for everything that arrived during this
+                # pass. It re-reads the scheduling gates, so a disabled
+                # scheduler or a live publication refusal still stops the chain.
+                schedule_background_rebuild(
+                    vault_root, mutation_coordinator=mutation_coordinator
+                )
 
     threading.Thread(target=_run, name="exomem-graph-rebuild", daemon=True).start()
     return True
@@ -7066,7 +7225,23 @@ def upsert_after_write(
             return GraphDispatchResult("deferred", "graph_scheduling_disabled", required)
         if required is not None and not index.available():
             predecessor_state = index._graph_sync_predecessor_state(required)
-            if predecessor_state != "available":
+            unreadable = predecessor_state == "graph_sync_predecessor_unreadable"
+            if unreadable:
+                # `seamless-managed-worker-handoff` D2. A declined read of a
+                # structurally intact sidecar says nothing about lineage, so it
+                # takes the incremental path and, failing that, the durable
+                # repair queue. It never registers a whole-vault rebuild: doing
+                # so is what turned every write after a worker replacement into
+                # a full pass, and the state that produces it -- a withdrawn
+                # availability marker -- is left behind by every ordinary
+                # deferral.
+                log.info(
+                    "graph dispatch routed an unreadable predecessor to incremental "
+                    "repair external_pending=%s generation=%s",
+                    freshness.external_pending(vault_root),
+                    required.generation,
+                )
+            if predecessor_state != "available" and not unreadable:
                 # #576 F3, applied to the gate the incremental table does not
                 # cover. `fallback()` logs which of the nine bail-out reasons
                 # fired; this door precedes `refresh_paths` entirely, so
@@ -7100,6 +7275,26 @@ def upsert_after_write(
                     # change makes proportional, leaving the queue as overhead
                     # beside it rather than a replacement for it.
                     return GraphDispatchResult("deferred", "graph_repair_queued", required)
+                if unreadable and report.get("queued"):
+                    # D2's pending outcome, and deliberately its own code: the
+                    # doctor and the recovery alarm must be able to tell a
+                    # fenced predecessor from a lineage gap. The queue is proven
+                    # to hold the affected paths, so this reports pending even
+                    # for a standalone caller -- the one place that contract
+                    # bends, because the alternative is the whole-vault rebuild
+                    # this decision exists to remove.
+                    return GraphDispatchResult(
+                        "deferred", "graph_repair_unreadable_predecessor", required
+                    )
+                log.info(
+                    "graph dispatch registered a whole-vault rebuild reason=%s "
+                    "external_pending=%s generation=%s",
+                    "incremental_refresh_deferred_without_queue_coverage"
+                    if not report.get("queued")
+                    else "incremental_refresh_queued_for_a_caller_that_must_converge",
+                    freshness.external_pending(vault_root),
+                    required.generation,
+                )
                 if graph_sync.registered_checkpoint(
                     vault_root, state_root=mutation_coordinator.state_root
                 ) == required:

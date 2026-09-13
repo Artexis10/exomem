@@ -1384,15 +1384,13 @@ def test_dispatch_names_the_gate_that_sent_a_write_to_a_whole_vault_rebuild(
     whose chosen branch cannot be read after the fact is not diagnosable in
     production, and this is the tenth branch.
 
-    The gate must also say *why* it could not prove the predecessor. It refuses
-    for two very different reasons: the probe's read snapshot was declined (for
-    which `freshness.external_pending` alone is enough -- an in-memory liveness
-    hint that `_open_read_snapshot` documents as "an optimization for public
-    readers, not a correctness fence"), or the sidecar was read and its
-    acknowledgement genuinely is not the predecessor. The first is a liveness
-    condition costing a whole-vault rebuild per write; the second is a real
-    lineage gap that has to rebuild. Collapsing them into one silent `False` is
-    what made this take a code read rather than a log read.
+    Every door onto that rebuild must also say *why*. `seamless-managed-worker-handoff`
+    D1/D3 removed the one that used to fire most: a *scoped* external event no
+    longer fences a write on another path at all. What remains here is the
+    watcher's fail-closed default -- an *unscoped* mark, meaning the affected set
+    is unknown -- and that still defers the incremental pass and still reaches a
+    whole-vault rebuild. The line naming it is the point: an unexplained rebuild
+    is what made the last incident take a code read rather than a log read.
     """
     from exomem import find as find_module
 
@@ -1439,8 +1437,8 @@ def test_dispatch_names_the_gate_that_sent_a_write_to_a_whole_vault_rebuild(
         "a write that registered a whole-vault rebuild must say so; the two "
         "lines it does emit report that a rebuild ran, never which gate chose it"
     )
-    assert "graph_sync_predecessor_unreadable" in caplog.text, (
-        "the gate must distinguish a declined probe from a genuine lineage gap"
+    assert "reason=external_event_covers_these_paths" in caplog.text, (
+        "the deferral that sent this write to the whole-vault path must name itself"
     )
     assert "external_pending=True" in caplog.text
 
