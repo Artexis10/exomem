@@ -497,6 +497,56 @@ def test_cancelled_queued_get_releases_stream_slot() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("method", ["GET", "POST"])
+@pytest.mark.parametrize("phase", ["body", "ready"])
+def test_queue_cancellation_wins_when_wait_completes(method: str, phase: str) -> None:
+    async def scenario() -> None:
+        calls: list[str] = []
+        sent: list[dict] = []
+        waiting = asyncio.Event()
+
+        class ObservedReady(asyncio.Event):
+            async def wait(self) -> bool:
+                waiting.set()
+                return await super().wait()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.method)
+            return httpx.Response(204)
+
+        async def receive() -> dict:
+            if phase == "body":
+                # Cancel the outer request in the same event-loop turn as
+                # body completion, before its completed wait resumes.
+                asyncio.get_running_loop().call_soon(first.cancel)
+            return {"type": "http.request", "body": b"payload", "more_body": False}
+
+        async def send(message: dict) -> None:
+            sent.append(message)
+
+        async with _client(handler) as client:
+            ingress = ServiceIngress(IngressLimits(stream_requests=1, queue_timeout=0.1))
+            ingress._ready = ObservedReady()
+            ingress.resume(client)
+            ingress.pause()
+            first = asyncio.create_task(ingress(_scope(method), receive, send))
+            if phase == "ready":
+                await waiting.wait()
+                ingress.resume()
+                first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            assert calls == []
+            assert sent == []
+            assert ingress.stats["queued"] == ingress.stats["queued_bytes"] == 0
+            ingress.resume()
+            assert (await _call(ingress, scope=_scope(method)))[0]["status"] == 204
+            assert calls == [method]
+            await ingress.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_upstream_redirect_is_not_followed_even_if_client_default_is_enabled() -> None:
     async def scenario() -> None:
         calls: list[str] = []

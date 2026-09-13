@@ -285,7 +285,10 @@ class ServiceIngress:
                     await _undispatched(send, 408, "body read timed out")
                     return None, b""
                 try:
-                    message = await asyncio.wait_for(receive(), remaining)
+                    # Keep cancellation on this task: Python 3.11 wait_for can
+                    # swallow it when the child finishes in the same turn.
+                    async with asyncio.timeout(remaining):
+                        message = await receive()
                 except TimeoutError:
                     await _undispatched(send, 408, "body read timed out")
                     return None, b""
@@ -310,7 +313,8 @@ class ServiceIngress:
                 await _undispatched(send, 503, "queue wait timed out", bytes(body))
                 return None, b""
             try:
-                await asyncio.wait_for(self._ready.wait(), remaining)
+                async with asyncio.timeout(remaining):
+                    await self._ready.wait()
             except TimeoutError:
                 await _undispatched(send, 503, "queue wait timed out", bytes(body))
                 return None, b""
