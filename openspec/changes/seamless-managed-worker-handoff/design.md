@@ -53,6 +53,28 @@ Non-goals: session persistence (none is needed), changing the MCP transport, the
 - Path-scoped marks change what "current" means for reads → reads still refuse while any external path is unrepaired; only the write path changes.
 - A standby doubles memory briefly (two workers, two model copies) → bounded by the warm budget; the standby is discarded, not the serving worker, when the host cannot afford it.
 - Skipping the migrator is a correctness risk → it is skipped only when the target release declares no migration; the declaration is part of the staged target and is verified by the existing target check.
+- **Named residue (phase 1, not closed by it).** One governed write in six can
+  still pay 7-12 s in the reproduction, and the trigger is neither the fence, the
+  marks, the join budget nor the coalescing. Traced on 2026-09-14: the first
+  governed write after a graph built by a direct `rebuild_all()` -- what
+  `harness.build()`, `exomem index` and a reconcile all do -- registers a
+  whole-vault rebuild through the pre-existing genesis gate, because generation
+  1's predecessor is genesis while the sidecar already carries a `graph_sync`
+  acknowledgement: `graph dispatch registered a whole-vault rebuild
+  reason=graph_sync_predecessor_present_at_genesis generation=1`. Under
+  continuous writes that rebuild cannot stabilize -- `graph rebuild
+  stabilization exhausted attempts=3 elapsed_ms=12422.7 class=C cause=the recall
+  projection identity moved across the pass` -- and a standalone caller, which
+  has no envelope to carry `pending`, joins it (bounded at 15 s) and reports the
+  re-raised `GraphProjectionMoved` as `failed` before its own successor rebuild
+  publishes and the write returns. Pinned by running the same shape twice on one
+  vault: the first run pays it, the second -- identical except that its
+  checkpoint sequence is past genesis -- is six writes at 0.41-0.83 s with zero
+  joins. Both mechanisms predate this change (the genesis gate in
+  `_graph_sync_predecessor_state`, the stabilization contract in
+  `REBUILD_STABILIZATION_*`); closing it means either admitting a
+  direct-rebuild lineage at genesis or letting a standalone caller carry
+  `pending`, and both are their own decisions.
 - The 314 s non-response remains unexplained → D4 removes the only unbounded join found; the acknowledgement path is instrumented (ledger spans already exist for recall) so a recurrence names its stage.
 
 ## Migration Plan
