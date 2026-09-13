@@ -59,10 +59,10 @@
 - [x] 3.3 Run `tests/test_mcp_schema_fidelity.py` (green — no tool schema or
       description changed, so the tool-surface digest does not move).
 - [x] 3.4 `uvx ruff@0.15.21 check` on changed paths (clean).
-- [ ] 3.5 `openspec validate --all --strict` (CI-pinned version) — run at
+- [x] 3.5 `openspec validate --all --strict` (CI-pinned version) — run at
       delivery.
-- [ ] 3.6 `scripts/check_openspec_archive_discipline.py` — run at delivery.
+- [x] 3.6 `scripts/check_openspec_archive_discipline.py` — run at delivery (OK on the merged tree; CI archive-discipline job green on PR 1239).
 
 ## 4. Delivery
 
-- [ ] Delivered: PR merged and change archived.
+- [x] Delivered: PR 1239 squash-merged to main as ac00562f on 2026-09-13 (CI 27 checks green); archived in the same delivery pass.
