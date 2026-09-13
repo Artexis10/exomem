@@ -153,7 +153,10 @@ lock_key="$(kubectl -n exomem-platform get configmap "$lock_name" -o json | jq -
 [[ "$lock_key" =~ ^exomem-hosted-deployment-lock-v[23]\.json$ ]] || exit 1
 lock_json="$(kubectl -n exomem-platform get configmap "$lock_name" -o json | \
   jq -r --arg key "$lock_key" '.data[$key]')"
-test "$(printf %s "$lock_json" | sha256sum | awk '{print $1}')" = "$lock_digest"
+# Hash the stored bytes directly: the lock ends in a newline that the digest
+# covers, and command substitution strips it from "$lock_json".
+test "$(kubectl -n exomem-platform get configmap "$lock_name" -o json | \
+  jq -j --arg key "$lock_key" '.data[$key]' | sha256sum | awk '{print $1}')" = "$lock_digest"
 helm_manifest="$(helm -n "$helm_release" get manifest "$helm_release")"
 printf '%s\n' "$helm_manifest" | yq -e --arg name "$lock_name" --arg digest "$lock_digest" \
   'select(.kind == "ConfigMap" and .metadata.name == $name and
