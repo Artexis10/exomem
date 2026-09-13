@@ -4715,3 +4715,50 @@ def test_startup_sweep_counts_stay_content_free_in_coordination_status(
         "retained",
         "limit_reached",
     }
+
+
+def test_startup_sweep_leaves_an_executing_row_for_its_evidence_bearing_retry(
+    tmp_path: Path,
+) -> None:
+    """A dead owner's `executing` row can still be PROVEN committed.
+
+    Only the retry path carries `commit_evidence`, and only with it can
+    `_abandon_if_dead` promote such a row to `canonically_committed` and replay
+    its terminal. A sweep reaping it first would resolve the same row to
+    outcome-unknown, destroying that proof and sending the caller off to resend
+    a write that already landed.
+    """
+    database = tmp_path / "state" / "idempotency.sqlite"
+    IdempotencyStore(database)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO mutations(key, digest, state, result, updated_at, owner, "
+            "attempt_id, commit_token, commit_secret) "
+            "VALUES ('proved:one', 'digest', 'executing', NULL, 1.0, ?, ?, 'token', ?)",
+            ("4246:deadbeefdeadbeef", "4246:deadbeefdeadbeef", sqlite3.Binary(b"s" * 32)),
+        )
+
+    swept = IdempotencyStore(database)
+
+    # Untouched by the sweep, and not counted as work it declined either --
+    # `executing` is outside the swept set entirely.
+    assert _row_state(database, "proved:one")[0] == "executing"
+    assert swept.status_summary()["start_sweep"] == {
+        "ran": True,
+        "examined": 0,
+        "resolved": 0,
+        "retained": 0,
+        "limit_reached": False,
+    }
+
+    # The retry that CAN read the commit receipt still promotes and replays it.
+    replayed = swept.run(
+        "proved:one",
+        "digest",
+        lambda: pytest.fail("a proven canonical commit must never re-run its leaf"),
+        commit_evidence=lambda *_args: True,
+        resume_canonically_committed=lambda _stored: {"canonical": "resumed"},
+    )
+
+    assert replayed == {"canonical": "resumed"}
+    assert _row_state(database, "proved:one")[0] == "completed"

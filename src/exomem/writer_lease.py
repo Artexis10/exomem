@@ -173,15 +173,17 @@ _IDEMPOTENCY_LEGACY_OWNER_GRACE_SECONDS = 600.0
 #: How many non-terminal receipt rows one process start may examine.
 #:
 #: `_prune_expired` removes only terminal rows and `_abandon_if_dead` runs only
-#: when the identical identity is retried, so a `pending`/`reserved`/`executing`
-#: row left by a process that died had no resolver at all. The sweep below is
-#: that resolver, and this is its per-start budget: each examined row costs one
-#: owner-lock probe (open, try-lock, close) and at most one UPDATE, inside the
-#: same write transaction `_claim_or_inspect` already takes, so an unbounded
-#: scan would put a pathological store on the critical path of every process
-#: start. 64 clears the thirteen-row backlog measured on the personal cell with
-#: five times the headroom; anything past it is drained by the next start and
-#: stays visible in `oldest_pending_age_seconds`, which this never resets.
+#: when the identical identity is retried, so a `pending`/`reserved` row left
+#: by a process that died had no resolver at all. The sweep below is that
+#: resolver, and this is its per-start budget: it runs once at the end of
+#: `IdempotencyStore.__init__` under its own `BEGIN IMMEDIATE`, and each
+#: examined row costs one owner-lock probe (open, try-lock, close) plus at most
+#: one UPDATE while that write transaction is open -- so an unbounded scan
+#: would hold the store's write lock, on the critical path of every process
+#: start, for as long as a pathological store is large. 64 clears the
+#: thirteen-row backlog measured on the personal cell with five times the
+#: headroom; anything past it is drained by the next start and stays visible in
+#: `oldest_pending_age_seconds`, which this never resets.
 _IDEMPOTENCY_START_SWEEP_LIMIT = 64
 _OUTCOME_UNKNOWN_TERMINAL = ("exomem.outcome-unknown", 1)
 _OUTCOME_UNKNOWN_PAYLOAD = pickle.dumps(_OUTCOME_UNKNOWN_TERMINAL)
@@ -2314,21 +2316,34 @@ class IdempotencyStore:
         self.start_sweep = self._sweep_dead_non_terminal_rows()
 
     def _sweep_dead_non_terminal_rows(self) -> dict[str, Any]:
-        """Resolve non-terminal rows whose owner is provably dead, oldest first.
+        """Resolve `pending`/`reserved` rows whose owner is provably dead.
 
-        Every other resolver for a `pending`/`reserved`/`executing` row needs
-        the identical identity to be retried. A client that never retries
-        therefore leaves its row behind forever, which is how a live cell
-        reached thirteen pending receipts with the oldest fourteen days old.
+        Every other resolver for a non-terminal row needs the identical
+        identity to be retried. A client that never retries therefore leaves
+        its row behind forever, which is how a live cell reached thirteen
+        pending receipts with the oldest fourteen days old.
 
-        This resolves such a row EXACTLY the way an on-demand abandonment does
-        -- it calls `_abandon_if_dead` itself, with no commit evidence and no
-        legacy graph proof, so a reclaimed reservation is deleted and anything
-        that may have started a leaf becomes `completed` +
-        `_OUTCOME_UNKNOWN_PAYLOAD`. That probe is fail-closed: an owner whose
-        lock is held, or whose liveness cannot be determined, counts as ALIVE
-        and its row is left exactly as it was. The sweep never widens what may
-        be abandoned; it only stops requiring a retry to trigger it.
+        `executing` is DELIBERATELY EXCLUDED. Only the retry path can supply
+        `commit_evidence`, and only with it can `_abandon_if_dead` promote a
+        dead-owner `executing` row to `canonically_committed` and replay its
+        terminal. A sweep has no such evidence to offer, so it would resolve
+        exactly those rows to `completed` + `_OUTCOME_UNKNOWN_PAYLOAD` --
+        destroying recoverable proof of a commit whose process died before
+        persisting its terminal, and then telling the caller to resend under a
+        new key, duplicating a write that already landed. The cost of leaving
+        one is a row that waits for its retry, which is what it did before;
+        the cost of reaping one is a duplicated committed mutation.
+
+        What remains cannot carry that evidence. A `reserved` row provably
+        predates any leaf, so `_abandon_if_dead` reclaims it by deletion. A
+        `pending` row is the legacy/ownerless class, whose branch never
+        consults evidence at all. For both states the sweep's outcome is
+        therefore identical to an on-demand abandonment's, evidence or not --
+        it only stops requiring a retry to trigger it.
+
+        The liveness probe stays fail-closed either way: an owner whose lock is
+        held, or whose liveness cannot be determined, counts as ALIVE and its
+        row is left exactly as it was.
 
         Returns content-free counts for `coordination_status`/`doctor`: how
         many rows were examined, resolved and retained, and whether the budget
@@ -2345,7 +2360,7 @@ class IdempotencyStore:
                 rows = conn.execute(
                     "SELECT key, digest, state, result, updated_at, owner, attempt_id, "
                     "commit_token, commit_secret FROM mutations "
-                    "WHERE state IN ('pending', 'reserved', 'executing') "
+                    "WHERE state IN ('pending', 'reserved') "
                     "ORDER BY updated_at ASC LIMIT ?",
                     (_IDEMPOTENCY_START_SWEEP_LIMIT,),
                 ).fetchall()
@@ -2356,7 +2371,6 @@ class IdempotencyStore:
                     if disposition is None or disposition[1] not in {
                         "pending",
                         "reserved",
-                        "executing",
                     }:
                         resolved += 1
                     else:
