@@ -341,16 +341,21 @@ async def test_expired_enrollment_resume_does_not_prepare_or_renew_the_bound_win
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["inspect", "prepare", "enroll"])
-async def test_expired_unenrolled_custody_refuses_before_job_creation(phase):
+async def test_unenrolled_custody_whose_window_closed_still_migrates(phase):
+    # Superseded the refusal this used to assert: only this generation's own
+    # replica could renew the window, a fenced generation has none, so refusing
+    # here stranded every cell whose recovery outlived one attestation lifetime.
     scenario = Scenario()
     while (await scenario.step()).phase != phase:
         pass
     scenario.now = NOW + 4000
     jobs_before = len(scenario.jobs.requests)
-    with pytest.raises(MetadataConflict):
-        await scenario.step()
-    assert len(scenario.jobs.requests) == jobs_before
-    assert not json.loads(scenario.cell.files["control.json"])["governance_enrolled"]
+    assert (await scenario.step()).phase == {
+        "inspect": "prepare",
+        "prepare": "enroll",
+        "enroll": "enroll",
+    }[phase]
+    assert len(scenario.jobs.requests) == jobs_before + 1
 
 
 @pytest.mark.asyncio
@@ -407,3 +412,58 @@ async def test_claim_loss_after_enrollment_publication_keeps_durable_enrollment_
     scenario.context = replace(scenario.context, effect_guard=scenario.guard)
     assert (await scenario.step()).phase == "commit"
     assert len(scenario.cell.writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_migration_advances_after_the_fenced_generation_window_closed():
+    # A drained, issuance-stopped, never-enrolled generation cannot authorize
+    # anything, and only its own running replica could renew the window. Recovery
+    # that takes longer than one attestation lifetime must still migrate the cell.
+    scenario = Scenario()
+    scenario.now = NOW + membership.DEFAULT_ATTESTATION_TTL_SECONDS + 60
+    control = json.loads(scenario.cell.files["control.json"])
+    assert control["expires_at"] < scenario.now
+    assert not control["governance_enrolled"]
+
+    for phase in ["inspect", "prepare", "enroll", "enroll", "commit", "complete"]:
+        assert (await scenario.step()).phase == phase
+    assert json.loads(scenario.cell.files["control.json"])["governance_enrolled"]
+
+
+@pytest.mark.asyncio
+async def test_closed_window_recovery_still_refuses_a_control_issued_in_the_future():
+    scenario = Scenario()
+    # The first advance only records the inspect checkpoint; the bundle is read next.
+    assert (await scenario.step()).phase == "inspect"
+    # Renew the drained generation inside its window so the control is issued later
+    # than the clock we then run at, while the keyring stays valid at that clock.
+    # Winding the clock back instead would trip the keyring's own not_before check,
+    # and the test would pass with the guard it names deleted.
+    scenario.cell.files = membership.transition_hosted_authorization_bundle(
+        scenario.cell.files,
+        **identity(3),
+        target_state="DRAINING",
+        target_no_in_flight=True,
+        now=NOW + 1_800,
+        renew=True,
+    ).files
+    scenario.now = NOW + 10
+    keyring = json.loads(scenario.cell.files["keyring.json"])
+    assert keyring["accepted_keys"][0]["not_before"] <= scenario.now
+    assert json.loads(scenario.cell.files["control.json"])["issued_at"] > scenario.now
+    jobs_before = len(scenario.jobs.requests)
+    with pytest.raises(MetadataConflict):
+        await scenario.step()
+    # It must refuse before creating a Job; a later refusal would leave a migration
+    # Job running against custody the coordinator never accepted.
+    assert len(scenario.jobs.requests) == jobs_before
+    assert not scenario.cell.writes
+
+
+@pytest.mark.asyncio
+async def test_closed_window_recovery_still_refuses_an_expired_signing_key():
+    scenario = Scenario()
+    assert (await scenario.step()).phase == "inspect"
+    scenario.now = NOW + membership._KEY_TTL_SECONDS + 60
+    with pytest.raises(MetadataConflict):
+        await scenario.step()

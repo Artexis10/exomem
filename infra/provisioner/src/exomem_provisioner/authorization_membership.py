@@ -749,7 +749,18 @@ def enroll_hosted_governance_bundle(
         "expected_recovery_envelope": expected_recovery_envelope,
         "now": now,
     }
-    source = inspect_hosted_authorization_bundle(files, **identity)
+    # Enrollment records a drained generation; it never serves one. The fence
+    # proven immediately below is the authority here, not an open window, which
+    # only a running replica of this generation could have renewed.
+    source = inspect_hosted_authorization_bundle(files, **identity, _require_fresh=False)
+    # Tolerating a closed window removes the only in-function bound on the issue
+    # time, so refuse a control dated ahead of the clock here rather than trusting
+    # every caller to have checked it.
+    if json.loads(source.control)["issued_at"] > _required_time(now):
+        raise MetadataConflict(
+            "authorization control is invalid",
+            reason=ConflictReason.AUTHORIZATION_CONTROL_IS_INVALID,
+        )
     if source.replica_state != "DRAINING" or not source.issuance_stopped or not source.no_in_flight:
         raise MetadataConflict(
             "authorization membership is not fully drained",
@@ -784,9 +795,12 @@ def enroll_hosted_governance_bundle(
         activation_state_digest=activation_state_digest,
     )
     control["mac"] = _mac(key, _control_mac_input(control))
+    # Enrollment preserves the window it was given rather than renewing it, so this
+    # self-check reads back the same window and must accept it as written.
     return inspect_hosted_authorization_bundle(
         {**source.files, "control.json": _canonical(control)},
         **identity,
+        _require_fresh=False,
     )
 
 
