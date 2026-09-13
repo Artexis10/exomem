@@ -15,6 +15,7 @@ import pytest
 
 from membench.judge import (
     ClaudeCliBackend,
+    HandshakeRequest,
     LeakageError,
     NoneBackend,
     OpenAICompatBackend,
@@ -25,9 +26,11 @@ from membench.judge import (
     leakage_scan,
     load_requests,
     make_judge_item,
+    normalize_for_judge,
+    structural_leakage_scan,
     write_requests,
 )
-from membench.judge.blinding import BlindingMap
+from membench.judge.blinding import NEUTRAL_SYSTEM_TOKEN, BlindingMap
 from membench.reporting import (
     GATE_CONFLICT_NOTE,
     build_comparison_report,
@@ -35,6 +38,8 @@ from membench.reporting import (
 )
 from membench.runner import MembenchResultManifest
 from protocol.contracts import derive_preregistration_identity
+
+from exomem.vault import yaml_scalar
 
 _DIMENSIONS_OK = {
     "factual_qa": {"pass": 1, "fail": 0, "not_applicable": 0, "unsupported": 0},
@@ -253,6 +258,304 @@ def test_leakage_scan_catches_leaks_and_writer_refuses(tmp_path: Path) -> None:
         write_requests(run_dir, "judge", [leaky], samples=2, seed="s")
     assert "Q-0001" in str(excinfo.value)
     assert not (run_dir / "judge-requests").exists(), "refusal must write nothing"
+
+
+# --------------------------------------------- structural blinding (task 4b.18)
+#
+# Token blinding alone loses to schema shape: a human recognised the vendor at a
+# glance across 84 documents while `leakage_scan` returned zero hits, because the
+# frontmatter KEY SET names the product even when every value is neutral. The two
+# shapes below are copied key-for-key, in order, from the producers that actually
+# emit them in this repo -- no invented convenience shape.
+
+_SWAP_TITLE = "Quarterly deadline moved"
+#: A title that splits its own frontmatter line. `SourceRecord.title` is an
+#: unconstrained `str` (`membench/schema.py:229`) and `basic_memory.py:158`
+#: interpolates it unescaped, so this reaches a rendered note as written.
+_NEWLINE_TITLE = "Quarterly deadline\nmoved to week nine"
+_SWAP_BODY = (
+    "The deadline moved to week nine after the review board met.\n"
+    "Two teams confirmed the new date in writing.\n"
+)
+
+
+def _exomem_shaped(title: str = _SWAP_TITLE, body: str = _SWAP_BODY) -> str:
+    """One payload in exomem's native metadata shape.
+
+    Producer: ``src/exomem/add.py`` source-page writer (:639-671) -- the key run
+    ``type / exomem_id / title / source_type / captured / tags / ingested_into``
+    inside a ``---`` fence. This is exactly the key list task 4b.18 names.
+    """
+
+    return (
+        "---\n"
+        "type: source\n"
+        "exomem_id: 6b0f2a41-6f0e-4a1a-9a2e-2c9b7f5d1e33\n"
+        # `add.py:642` renders the title through `yaml_scalar`, so a title
+        # carrying YAML-special characters arrives quoted here while the other
+        # producer writes it bare. Called, not imitated -- the fixture has to be
+        # what the producer emits.
+        f"title: {yaml_scalar(title.strip())}\n"
+        "source_type: other\n"
+        "captured: 2026-01-14\n"
+        "tags: [bench]\n"
+        "ingested_into: []\n"
+        "---\n"
+        "\n"
+        f"{body}"
+    )
+
+
+def _basic_memory_shaped(title: str = _SWAP_TITLE, body: str = _SWAP_BODY) -> str:
+    """The same payload in the other contender's native metadata shape.
+
+    Producer: ``benchmarks/membench/native/basic_memory.py`` (:78-84 conclusion
+    notes, :135-141 entity notes, :155-161 source notes) -- the key run
+    ``title / type / permalink / tags`` inside a ``---`` fence.
+    """
+
+    return (
+        "---\n"
+        f"title: {title}\n"
+        "type: note\n"
+        "permalink: quarterly-deadline-moved\n"
+        "tags: [bench]\n"
+        "---\n"
+        "\n"
+        f"{body}"
+    )
+
+
+def _scrubbed_exomem_shaped(title: str = _SWAP_TITLE, body: str = _SWAP_BODY) -> str:
+    """The exomem shape as it survives today's TOKEN scrubber.
+
+    ``normalize_for_judge`` rewrites the product name inside the ``exomem_id:``
+    key, so the key reaches the judge as ``[system]_id:``. That residue carries
+    zero token hits while still advertising both the vendor key run and the fact
+    that a product-named field was scrubbed -- 4b.18's second sentence.
+    """
+
+    return _exomem_shaped(title, body).replace(
+        "exomem_id:", f"{NEUTRAL_SYSTEM_TOKEN}_id:"
+    )
+
+
+_TOKEN_LEAK_NEEDLES = (
+    "exomem",
+    "basic-memory",
+    "basic memory",
+    "basic_memory",
+    "mem0",
+    "graybox",
+    "[ref:",
+    "src-",
+    "knowledge base/",
+    ".md",
+)
+
+
+def test_frontmatter_structure_swap_is_byte_identical_after_normalization() -> None:
+    """The failure predicate of the structure-swap test, on the key-run axis.
+
+    One identical semantic payload, each vendor's native FRONTMATTER KEY RUN:
+    the frontmatter bytes that reach the judge must be identical. Byte identity
+    is what proves "no classifier distinguishes them" on this axis -- a sampled
+    classifier could only fail to find the tell.
+
+    Scope is the key run, and the fixtures hold the body constant to say so
+    honestly. The producers also differ in body scaffolding (`## Capture` vs
+    `## Observations`), which this module does not normalize; that axis is the
+    named remainder in `blinding.py`'s docstring, not something this test
+    quietly claims to have closed.
+    """
+
+    from_exomem = normalize_for_judge(_exomem_shaped())
+    from_basic_memory = normalize_for_judge(_basic_memory_shaped())
+
+    assert from_exomem == from_basic_memory, (
+        "structure swap is attributable: identical content in two native shapes "
+        f"reaches the judge as different bytes\n--- exomem ---\n{from_exomem!r}\n"
+        f"--- basic-memory ---\n{from_basic_memory!r}"
+    )
+
+    # ... and the shape both collapsed into is the ONE canonical block: fence,
+    # the fixed neutral key set in its fixed order, fence. Dropping the fences
+    # would still be "identical", and identically wrong -- a bare `title:` line
+    # left in running prose is not a normalized frontmatter block.
+    assert from_exomem.splitlines()[:3] == ["---", f"title: {_SWAP_TITLE}", "---"], (
+        f"canonical block is not fence-delimited: {from_exomem.splitlines()[:3]!r}"
+    )
+
+    # ... and normalization must not have achieved identity by deleting the
+    # payload: the semantic content the judge grades survives.
+    assert _SWAP_TITLE in from_exomem
+    assert "The deadline moved to week nine" in from_exomem
+    assert "Two teams confirmed the new date in writing." in from_exomem
+
+    # ... and it must hold for a title the two producers spell differently.
+    # `yaml_scalar` quotes a title containing YAML-special characters; the
+    # other producer never quotes. Real corpus titles do contain colons, so
+    # quoting is a shape the swap has to survive, not an edge case.
+    # A title that itself carries quotes is DOUBLE-wrapped by `yaml_scalar` and
+    # written bare by the other producer, so one unwrap is not enough: it leaves
+    # exomem still quoted and basic-memory bare, which is a one-way tell.
+    # `"Quarterly"` is the load-bearing one: it is wholly wrapped, so
+    # `yaml_scalar` double-wraps it and a single unwrap leaves exomem at
+    # `"Quarterly"` while basic-memory reaches `Quarterly`.
+    for quoted_title in ("Deadline: moved to week nine", '"Quarterly"'):
+        from_exomem = normalize_for_judge(_exomem_shaped(quoted_title))
+        from_basic_memory = normalize_for_judge(_basic_memory_shaped(quoted_title))
+        assert f"title: {quoted_title}" in _basic_memory_shaped(quoted_title)
+        assert f"title: {quoted_title}\n" not in _exomem_shaped(quoted_title), (
+            f"{quoted_title!r} is not a case yaml_scalar quotes; it proves nothing"
+        )
+        assert from_exomem == from_basic_memory, (
+            "producer-specific quoting of one title is still an attributable "
+            f"shape\n--- exomem ---\n{from_exomem!r}\n"
+            f"--- basic-memory ---\n{from_basic_memory!r}"
+        )
+
+    # ... and unwrapping stops at a fixed point rather than eating quotes that
+    # are content: this title is not surrounded by a matched pair.
+    content_quotes = 'He said "go": deadline moved'
+    assert content_quotes in normalize_for_judge(_exomem_shaped(content_quotes))
+
+
+def test_leakage_scan_flags_vendor_frontmatter_structure() -> None:
+    """Structure is a leak with zero token hits -- the whole of 4b.18."""
+
+    for label, shaped in (
+        ("basic-memory", _basic_memory_shaped()),
+        ("exomem (token-scrubbed)", _scrubbed_exomem_shaped()),
+        # `basic_memory.py:158` writes `title: {source.title}` unescaped over an
+        # unconstrained `SourceRecord.title` (`schema.py:229`), so a newline in
+        # a title splits the key run. Bounded by the fence, the run survives it.
+        ("basic-memory (title carries a newline)", _basic_memory_shaped(_NEWLINE_TITLE)),
+    ):
+        lowered = shaped.lower()
+        for needle in _TOKEN_LEAK_NEEDLES:
+            assert needle not in lowered, (
+                f"{label} fixture must carry ZERO token hits, found {needle!r}"
+            )
+        assert leakage_scan(shaped), (
+            f"{label} frontmatter key run identifies the vendor and went undetected"
+        )
+
+
+def test_every_registered_structural_signature_is_load_bearing() -> None:
+    """Each registered signature catches a key run no other signature covers.
+
+    On a whole page the registry overlaps on purpose -- an exomem source block
+    satisfies several entries at once -- so a whole-page fixture cannot show
+    that any one entry earns its place. A quoted excerpt can, and an excerpt is
+    what a candidate answer quoting part of a page actually contains. Each run
+    below is a contiguous slice of its producer's block, and the assertion is
+    exact equality: one marker, so exactly one registered signature fired.
+    """
+
+    cases = (
+        # `src/exomem/add.py` :640, :643-648 -- the block minus its id/title/tags
+        (
+            "exomem-source-frontmatter",
+            "type: source\n"
+            "source_type: other\n"
+            "captured: 2026-01-14\n"
+            "ingested_into: []\n",
+        ),
+        # `src/exomem/add.py` :641 alone
+        ("exomem-id-key", "exomem_id: 6b0f2a41-6f0e-4a1a-9a2e-2c9b7f5d1e33\n"),
+        # ... and the same line once the token scrubber has been over it
+        (
+            "system-id-residue",
+            f"{NEUTRAL_SYSTEM_TOKEN}_id: 6b0f2a41-6f0e-4a1a-9a2e-2c9b7f5d1e33\n",
+        ),
+        # `benchmarks/membench/native/basic_memory.py` :135-140, fences dropped
+        (
+            "basic-memory-note-frontmatter",
+            "title: Quarterly deadline moved\n"
+            "type: note\n"
+            "permalink: quarterly-deadline-moved\n"
+            "tags: [bench]\n",
+        ),
+        # ... and the same excerpt indented, which is how a candidate answer
+        # quoting a document normally carries it. A key-line rule anchored hard
+        # at column 0 would miss every indented quotation of a vendor block.
+        (
+            "basic-memory-note-frontmatter",
+            "    title: Quarterly deadline moved\n"
+            "    type: note\n"
+            "    permalink: quarterly-deadline-moved\n"
+            "    tags: [bench]\n",
+        ),
+    )
+    for signature, excerpt in cases:
+        assert structural_leakage_scan(excerpt) == [f"structure:{signature}"], (
+            f"{signature} is not the one signature this excerpt matches: "
+            f"{structural_leakage_scan(excerpt)}"
+        )
+        assert not structural_leakage_scan(normalize_for_judge(excerpt)), (
+            f"{signature} survives normalization"
+        )
+
+
+def test_system_id_residue_cannot_survive() -> None:
+    """`[system]_id:` is itself a fingerprint; the fix removes the key, not the token."""
+
+    out = normalize_for_judge(_exomem_shaped())
+    assert "exomem_id" not in out
+    assert f"{NEUTRAL_SYSTEM_TOKEN}_id" not in out
+    for key in ("source_type:", "captured:", "ingested_into:", "permalink:"):
+        assert key not in out, f"vendor-identifying key {key!r} reached the judge"
+    assert leakage_scan(out) == [], f"normalized output still leaks: {leakage_scan(out)}"
+
+    # D4 binds on every vendor-identifying key, so a title that splits its own
+    # key run must not carry `permalink:` past the gate either. Reachable:
+    # `basic_memory.py:158` interpolates an unconstrained title unescaped.
+    split = normalize_for_judge(_basic_memory_shaped(_NEWLINE_TITLE))
+    for key in ("permalink:", "tags:", "type:"):
+        assert key not in split, (
+            f"a newline in a title let {key!r} walk past the gate:\n{split!r}"
+        )
+    assert leakage_scan(split) == [], f"normalized output still leaks: {leakage_scan(split)}"
+
+
+def test_write_requests_refuses_structural_leak_before_writing(tmp_path: Path) -> None:
+    """The gate binds at the writer: a structural leak is refused fail-closed."""
+
+    run_dir = _make_run_dir(tmp_path, "run-structural")
+    leaky = RequestItem(
+        item_id="Q-0002",
+        blinded_provider_token="system-A",
+        payload={"prompt": "grade this excerpt:\n\n" + _scrubbed_exomem_shaped()},
+    )
+    with pytest.raises(LeakageError) as excinfo:
+        write_requests(run_dir, "judge", [leaky], samples=2, seed="s")
+    assert "Q-0002" in str(excinfo.value)
+    assert not (run_dir / "judge-requests").exists(), "refusal must write nothing"
+
+
+def test_structural_scan_runs_on_serialized_request_bytes() -> None:
+    """Pin: the structural check reads the EXACT serialized line, escapes and all.
+
+    ``write_requests`` scans ``json.dumps(request.model_dump(), ...)`` -- one
+    physical line in which every document newline is the two-character escape
+    ``\\n``. A structural check that only understands real newlines would see no
+    key run there and the gate would pass a leak through.
+    """
+
+    request = HandshakeRequest(
+        request_id="Q-0003",
+        sample_index=0,
+        blinded_provider_token="system-A",
+        payload={"prompt": "grade this excerpt:\n\n" + _scrubbed_exomem_shaped()},
+    )
+    line = json.dumps(request.model_dump(), ensure_ascii=False, sort_keys=True)
+    assert "\n" not in line, "the writer scans one serialized line, not raw text"
+    assert "\\n" in line, "document newlines reach the scan JSON-escaped"
+
+    assert leakage_scan(line), (
+        "structural scan missed the vendor key run in the serialized request line"
+    )
 
 
 # -------------------------------------------------------------- order shuffle
