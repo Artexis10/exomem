@@ -33,10 +33,10 @@ executing a repair. Keep private identifiers and credentials out of this map.
 - [ ] A.6 On the frozen deployed candidate, complete the consolidated service report, including genuine elapsed renewal windows and isolated recovery. Perform real Claude and ChatGPT acceptance as the final host-specific checks, checkpointing irreducible consent once. Do not mark the alpha ready, or archive this change, while required safety, usefulness, continuity, recovery, performance or deployment evidence is pending. Marketplace publication remains a separate claim under the existing design.
 
 Tasks A.1–A.6 are refinements of sections 2–4, not an alternate launch gate.
-The storage ordering decision in A.2 is unresolved: this map is ready to guide
-diagnosis and test preparation, but is not an implementation-ready delegation
-packet for that repair. Settle consequentially coupled design centrally, then
-delegate bounded ready work with independent review. Keep Neon migration,
+The storage ordering decision in A.2 is settled by design section 3b and the
+independently reproduced no-mount dynamic-binding test. Bounded implementation
+may proceed with independent review; full lifecycle, admission, production CSI
+and ingress evidence remain open. Keep Neon migration,
 the deferred v5 profile, a second infrastructure stack and authentication
 bypasses outside this tranche.
 
