@@ -9,9 +9,9 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from lme.native_agent import AgentLimits, EnvelopeExhausted, NativeBroker, RunEnvelope, run_agent_phase
+from lme.native_agent import AgentLimits, run_agent_phase
 
-from tests.test_lme_native_agent import Backend, Cell, broker, tool
+from tests.test_lme_native_agent import Backend, broker, tool
 
 
 def _run(b, tmp_path, name="run"):

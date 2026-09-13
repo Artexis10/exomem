@@ -199,7 +199,6 @@ def test_common_tools_are_identical_for_both_arms() -> None:
 
 
 def test_correct_target_with_other_project_damage_is_not_success() -> None:
-    from membench.utility.action_world import grade_snapshot
 
     episode = generate_episode(1, "self_contained")
     world = _world(1, "self_contained", "memory")

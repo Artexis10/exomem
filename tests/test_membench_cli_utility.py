@@ -83,7 +83,6 @@ def test_approval_token_help_states_it_is_not_a_credential(capsys):
 
 
 def test_reader_subcommand_refuses_a_pending_family(tmp_path, capsys):
-    import sys
     from pathlib import Path
 
     from tests.test_membench_utility_report import _make_run
@@ -109,7 +108,6 @@ def test_run_subcommand_refuses_real_pending_family_without_a_traceback(tmp_path
 
 
 def test_reader_subcommand_reports_recomputed_outcomes(tmp_path, capsys, monkeypatch):
-    from pathlib import Path
 
     import membench.utility.runner as runner
     from tests.test_membench_utility_report import _make_run

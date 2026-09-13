@@ -113,7 +113,7 @@ def _phase_views(variant: str, oracle: EpisodeOracle) -> tuple[PhaseView, ...]:
         )
         action = f"Apply the current configuration for project {target}."
     elif variant == "self_contained":
-        experience = f"You opened a new workspace. No prior configuration work has happened yet."
+        experience = "You opened a new workspace. No prior configuration work has happened yet."
         change = (
             f"Unrelated note: project {oracle.other_project} also has a configuration "
             f"procedure ({_steps_sentence(oracle.other_state)}). It does not apply to "
