@@ -359,7 +359,7 @@ def test_an_unknown_context_is_an_input_error_without_writing(vault, context):
         assert _invoke(vault)["revision"] == "missing"
 
 
-def test_the_operator_override_refuses_a_context_set_and_a_clear(vault, monkeypatch):
+def test_the_operator_override_refuses_a_conflicting_context_set(vault, monkeypatch):
     from exomem.cli_ops import OpError
 
     with request_scope(RequestPrincipal("principal:person-a", surface="mcp")):
@@ -380,14 +380,36 @@ def test_the_operator_override_refuses_a_context_set_and_a_clear(vault, monkeypa
                 expected_revision=saved["revision"],
                 context="coding",
             )
-        with pytest.raises(OpError) as on_clear:
-            _invoke(
-                vault, action="clear", context="coding", expected_revision=saved["revision"]
-            )
         assert on_set.value.code == "PREFERENCE_OPERATOR_OVERRIDE"
-        assert on_clear.value.code == "PREFERENCE_OPERATOR_OVERRIDE"
         monkeypatch.delenv("EXOMEM_PROMINENCE")
         assert _invoke(vault)["contexts"] == {"coding": "off"}
+
+
+def test_a_clear_proceeds_under_an_operator_override_and_reports_it(vault, monkeypatch):
+    """A pinned deployment must still be able to remove a saved context value."""
+    with request_scope(RequestPrincipal("principal:person-a", surface="mcp")):
+        before = _invoke(vault)
+        identity_wide = _invoke(
+            vault, action="set", prominence="maximal", expected_revision=before["revision"]
+        )
+        saved = _invoke(
+            vault,
+            action="set",
+            prominence="balanced",
+            expected_revision=identity_wide["revision"],
+            context="coding",
+        )
+        monkeypatch.setenv("EXOMEM_PROMINENCE", "light")
+        cleared = _invoke(
+            vault, action="clear", context="coding", expected_revision=saved["revision"]
+        )
+
+    assert cleared["mutated"] is True
+    assert cleared["contexts"] == {}
+    assert cleared["stored"] == "maximal", "clear must not touch the identity-wide value"
+    assert cleared["engagement"]["preference"]["operator_override"] == "light"
+    assert cleared["engagement"]["level"] == "light"
+    assert cleared["engagement"]["source"] == "env"
 
 
 def test_rest_context_set_and_cli_clear_share_the_local_owner_preference(

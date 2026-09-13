@@ -241,14 +241,14 @@ def clear_preference(vault_root: Path, context: str, expected_revision: str) -> 
     """Remove one context's saved level, leaving the identity-wide value alone.
 
     Clearing a context that holds nothing is a no-op that reports no mutation and
-    writes nothing. An operator override is refused before any write, as for set:
-    the pinned level would keep applying, so reporting a change would be a lie.
+    writes nothing. Unlike a conflicting set, a clear PROCEEDS under an operator
+    override and the caller is told the override is active: removing a saved value
+    cannot contradict the operator's level, and refusing would leave saved context
+    values unremovable on a pinned deployment while protecting nothing.
     """
     audience = _identity()
     context = _require_context(context)
     _require_revision(expected_revision)
-    if _operator_override() is not None:
-        raise OpError("PREFERENCE_OPERATOR_OVERRIDE", "operator prominence override is active")
 
     # Same locked compare-and-swap as `set_preference`, including creating the
     # state directory: reading the record outside the lock would let a write that

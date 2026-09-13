@@ -420,16 +420,27 @@ def test_set_rejects_an_unknown_context_before_state_creation(tmp_path, principa
     assert not list(tmp_path.iterdir())
 
 
-def test_operator_override_refuses_a_clear_without_mutation(tmp_path, principal, monkeypatch):
+def test_operator_override_does_not_block_a_clear(tmp_path, principal, monkeypatch):
+    """Refusing would leave saved context values unremovable on a pinned deployment,
+    and removing a saved value cannot contradict the operator's level."""
+    first = _call(principal, preferences.set_preference, tmp_path, "maximal", "missing")
     saved = _call(
-        principal, preferences.set_preference, tmp_path, "balanced", "missing", context="coding"
+        principal,
+        preferences.set_preference,
+        tmp_path,
+        "balanced",
+        first["revision"],
+        context="coding",
     )
     monkeypatch.setenv("EXOMEM_PROMINENCE", "light")
 
-    with pytest.raises(OpError, match="PREFERENCE_OPERATOR_OVERRIDE"):
-        _call(principal, preferences.clear_preference, tmp_path, "coding", saved["revision"])
+    cleared = _call(principal, preferences.clear_preference, tmp_path, "coding", saved["revision"])
+
+    assert cleared["mutated"] is True
+    assert cleared["contexts"] == {}
+    assert cleared["stored"] == "maximal", "clear must not touch the identity-wide value"
     monkeypatch.delenv("EXOMEM_PROMINENCE")
-    assert _call(principal, preferences.inspect, tmp_path)["contexts"] == {"coding": "balanced"}
+    assert _call(principal, preferences.inspect, tmp_path)["contexts"] == {}
 
 
 def test_unresolved_identity_refuses_clear_without_creating_state(tmp_path):

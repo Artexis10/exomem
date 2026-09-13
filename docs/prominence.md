@@ -58,6 +58,11 @@ it again; clearing a context that holds nothing changes nothing and says so.
 A set without a `context` keeps its original meaning and writes the identity-wide
 value.
 
+A clear still goes through when an operator has pinned `EXOMEM_PROMINENCE`, and the
+response reports that the pin is active and still decides the effective level —
+removing a saved value cannot contradict the pin, and refusing would leave saved
+context values stuck. A *set* that conflicts with the pin is still refused.
+
 The context that applies to a request is **detected from the calling client**, or
 from an operator's explicit `EXOMEM_SURFACE`. No argument selects it, and it is an
 eagerness knob only: it never picks an identity, a vault, a storage path, or an
