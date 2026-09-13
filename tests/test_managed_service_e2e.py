@@ -35,6 +35,26 @@ async def control(root: Path, command: str):
         await writer.wait_closed()
 
 
+async def transition(root, *, command="upgrade", timeout=60):
+    """Acknowledge an upgrade, then poll the supervisor for its outcome.
+
+    The supervisor answers `upgrade` immediately and runs the transition in the
+    background, because a standby warm is minutes long and holding the control
+    connection open for it turns any client read timeout into a false failure.
+    """
+    accepted = await control(root, command)
+    assert accepted["accepted"] is True, accepted
+    async with asyncio.timeout(timeout):
+        while True:
+            status = await control(root, "status")
+            recorded = status.get("last_transition")
+            if isinstance(recorded, dict) and recorded.get("transition") == accepted[
+                "transition"
+            ]:
+                return recorded
+            await asyncio.sleep(0.05)
+
+
 def events(root):
     return [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
 
@@ -129,8 +149,8 @@ def test_same_authenticated_context_survives_real_worker_handoff(tmp_path, mode)
                         for e in events(tmp_path)
                     )
                 )
-                handoff = asyncio.create_task(control(tmp_path, "upgrade"))
-                async with asyncio.timeout(5):
+                handoff = asyncio.create_task(transition(tmp_path))
+                async with asyncio.timeout(10):
                     while (await control(tmp_path, "status"))["phase"] != "upgrading":
                         await asyncio.sleep(0.01)
                 during = asyncio.create_task(client.call_tool("counted", {"marker": "during"}))
@@ -162,14 +182,14 @@ def test_same_client_recovers_after_failed_candidate_without_reauthorizing(tmp_p
             async with Client(url, auth=token, timeout=20) as client:
                 await client.call_tool("counted", {"marker": "before-failure"})
                 (tmp_path / "fail-start").touch()
-                result = await control(tmp_path, "upgrade")
+                result = await transition(tmp_path)
                 assert not result["ok"]
                 assert (await control(tmp_path, "status"))["phase"] == "recovery-required"
                 with pytest.raises(MCPError):
                     await client.call_tool("counted", {"marker": "refused"})
                 assert not any(e.get("marker") == "refused" for e in events(tmp_path))
                 (tmp_path / "fail-start").unlink()
-                assert (await control(tmp_path, "resume"))["ok"]
+                assert (await transition(tmp_path, command="resume"))["ok"]
                 after = await client.call_tool("counted", {"marker": "after-recovery"})
                 assert after.data["marker"] == "after-recovery"
 
@@ -192,7 +212,7 @@ def test_standalone_authenticated_stream_survives_and_disconnect_releases_it(tmp
                     assert stream.status_code == 200
                     chunks = stream.aiter_raw()
                     assert (await anext(chunks)).startswith(b":")
-                    upgrade = asyncio.create_task(control(tmp_path, "upgrade"))
+                    upgrade = asyncio.create_task(transition(tmp_path))
                     received = []
                     while not upgrade.done():
                         received.append(await anext(chunks))
@@ -406,9 +426,7 @@ def test_a_standby_warms_beside_the_serving_worker_and_is_promoted(tmp_path):
             async with Client(url, auth=token, mode="auto", timeout=20) as client:
                 before = await client.call_tool("counted", {"marker": "before"})
                 serving = before.data["pid"]
-                started = asyncio.get_running_loop().time()
-                result = await control(tmp_path, "upgrade")
-                unavailable = asyncio.get_running_loop().time() - started
+                result = await transition(tmp_path)
                 assert result["ok"] is True, result
                 handoff = result["handoff"]
                 assert handoff["standby"] == "ready"
@@ -422,8 +440,6 @@ def test_a_standby_warms_beside_the_serving_worker_and_is_promoted(tmp_path):
             # and the migrator never runs because the target declares none.
             assert kinds.index("standby-start") < kinds.index("promoted")
             assert "migrate" not in kinds
-            # The whole cutover, not just the gap, stays well inside the budget.
-            assert unavailable < 20, unavailable
             # The record carries the window nobody was served in, which is what
             # an operator compares across releases.
             assert 0 < handoff["unavailable_ms"] < 20_000, handoff
@@ -439,7 +455,7 @@ def test_a_declared_migration_still_runs_between_the_two_workers(tmp_path):
         async with live_fixture(tmp_path) as (url, token, _):
             async with Client(url, auth=token, mode="auto", timeout=20) as client:
                 await client.call_tool("counted", {"marker": "before"})
-                result = await control(tmp_path, "upgrade")
+                result = await transition(tmp_path)
                 assert result["ok"] is True, result
                 assert result["handoff"]["migration"] == {
                     "state": "ran",
@@ -464,20 +480,7 @@ def test_a_stalled_standby_is_discarded_and_the_old_worker_keeps_serving(tmp_pat
             async with Client(url, auth=token, mode="auto", timeout=20) as client:
                 before = await client.call_tool("counted", {"marker": "before"})
                 serving = before.data["pid"]
-                reader, writer = await asyncio.open_unix_connection(
-                    str(tmp_path / "managed/control.sock")
-                )
-                request = {
-                    "command": "upgrade",
-                    "target": {"python": sys.executable, "version": version("exomem")},
-                }
-                writer.write(json.dumps(request).encode() + b"\n")
-                await writer.drain()
-                try:
-                    result = json.loads(await asyncio.wait_for(reader.readline(), 60))
-                finally:
-                    writer.close()
-                    await writer.wait_closed()
+                result = await transition(tmp_path)
                 # The candidate never reaches cutover readiness, so the upgrade
                 # falls back to the one-worker sequence with the waiting
                 # component recorded; the endpoint is never left unserved.
@@ -504,7 +507,7 @@ def test_a_standby_is_spawned_with_the_current_service_environment_file(tmp_path
                 # The operator edits the unit's environment file after the
                 # supervisor has already read it through systemd.
                 env_file.write_text("EXOMEM_FIXTURE_MARK=after\n")
-                result = await control(tmp_path, "upgrade")
+                result = await transition(tmp_path)
                 assert result["ok"] is True, result
                 await client.call_tool("counted", {"marker": "after"})
             entries = events(tmp_path)

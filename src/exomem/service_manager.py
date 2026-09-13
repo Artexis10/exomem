@@ -15,6 +15,7 @@ import signal
 import stat
 import tempfile
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -288,6 +289,11 @@ class Supervisor:
         self.lock = asyncio.Lock()
         self.phase = "unavailable"
         self.transition_task: asyncio.Task | None = None
+        #: Identifies the in-flight transition an operator is polling, and
+        #: retains the finished one's outcome so a client that acknowledged and
+        #: went away can still read what happened.
+        self.transition_id: str | None = None
+        self.last_transition: dict[str, Any] | None = None
 
     async def start(self) -> None:
         if self.records.pending() is not None:
@@ -314,6 +320,8 @@ class Supervisor:
             "unit": self.identity.get("unit"),
             "ingress": self.ingress.stats,
             "port": getattr(self.runtime, "port", None),
+            "transition": self.transition_id,
+            "last_transition": self.last_transition,
         }
 
     async def _warm_standby(
@@ -351,7 +359,11 @@ class Supervisor:
                 "reason": "candidate could not warm",
                 "waiting": getattr(self.runtime, "standby_waiting", None),
             }, None
-        return {"standby": "ready"}, standby
+        handoff: dict[str, Any] = {"standby": "ready"}
+        warnings = getattr(self.runtime, "environment_warnings", None)
+        if warnings:
+            handoff["environment"] = list(warnings)
+        return handoff, standby
 
     async def _discard_standby(self, candidate: Any) -> None:
         """Stop a candidate without ever signalling the worker that is serving.
@@ -399,9 +411,12 @@ class Supervisor:
                     "ok": False,
                     "error": "target interpreter verification failed; current admission unchanged",
                 }
+            # A standby warm is minutes long and runs while the old worker is
+            # still serving. The transition is in progress from here, which is
+            # what a polling operator has to be able to see.
+            self.phase = "upgrading"
             handoff, standby = await self._warm_standby(target, resume=resume)
             deadline = Deadline(self.transition_timeout)
-            self.phase = "upgrading"
             # The window operators care about: nobody is served between here and
             # the resume below.
             paused_at = time.monotonic()
@@ -555,12 +570,21 @@ def verify_systemd_identity(
         "cgroup": group,
         "boot": (proc_root / "sys/kernel/random/boot_id").read_text().strip(),
     }
-    # systemd renders this as `path (ignore_errors=...)`, one entry per file.
-    # Only the path is retained; the file's values never enter this process.
-    entry = properties.get("EnvironmentFiles", "").strip().split("\n")[0].strip()
-    rendered = re.sub(r"\s*\(ignore_errors=[^)]*\)$", "", entry).strip().lstrip("-")
-    if rendered and Path(rendered).is_absolute():
-        identity["environment_file"] = rendered
+    # systemd renders this as `path (ignore_errors=...)` per file, and a unit may
+    # declare several. Match every entry rather than anchoring on one, or two
+    # files collapse into a single unusable path. Only paths are retained; the
+    # files' values never enter this process.
+    rendered = [
+        path.lstrip("-")
+        for path in re.findall(
+            r"(\S+)\s*\(ignore_errors=[^)]*\)", properties.get("EnvironmentFiles", "")
+        )
+    ]
+    files = [path for path in rendered if path and Path(path).is_absolute()]
+    if files:
+        identity["environment_files"] = files
+        # Retained for the single-file case every managed unit renders today.
+        identity["environment_file"] = files[0]
     return identity
 
 
@@ -602,6 +626,7 @@ class WorkerRuntime:
         host: str,
         port: int,
         environment_file: Path | str | None = None,
+        environment_files: Any = None,
     ):
         self.socket_path = socket_path
         self.host = host
@@ -615,7 +640,12 @@ class WorkerRuntime:
         )
         self.standby_capable = False
         self.standby_waiting: str | None = None
-        self.environment_file = Path(environment_file) if environment_file else None
+        self.promotion_record: dict[str, Any] | None = None
+        declared = environment_files if environment_files else (
+            [environment_file] if environment_file else []
+        )
+        self.environment_files = tuple(Path(entry) for entry in declared)
+        self.environment_warnings: list[str] = []
 
     @property
     def pid(self) -> int:
@@ -637,14 +667,27 @@ class WorkerRuntime:
         file is re-read at spawn time and applied to the child's environment;
         this process's own environment is never changed and no value is logged.
         """
-        path = self.environment_file
-        if path is None:
+        if not self.environment_files:
             return None
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            log.warning("managed service environment file could not be read; child inherits")
+        self.environment_warnings = []
+        values: dict[str, str] = {}
+        for path in self.environment_files:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                # An operator has to see this: the child silently inheriting a
+                # stale environment is what this read exists to prevent.
+                self.environment_warnings.append(f"unreadable: {path.name}")
+                log.warning("managed service environment file could not be read")
+                continue
+            values.update(self._parse_environment(text))
+        if not values:
             return None
+        return {**os.environ, **values}
+
+    @staticmethod
+    def _parse_environment(text: str) -> dict[str, str]:
+        """Read systemd `KEY=value` assignments; never log a value."""
         values: dict[str, str] = {}
         for line in text.splitlines():
             entry = line.strip()
@@ -660,9 +703,7 @@ class WorkerRuntime:
             if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                 value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
             values[name] = value
-        if not values:
-            return None
-        return {**os.environ, **values}
+        return values
 
     async def inspect(self, target: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(target, dict) or not {"python", "version"} <= set(target):
@@ -989,7 +1030,10 @@ class WorkerRuntime:
             )
         if response.status_code != 200:
             raise RuntimeError("standby refused promotion")
+        # Ownership has already changed hands. Record that before waiting on
+        # readiness so an exhausted wait cannot lose the fact that it happened.
         record = response.json()
+        self.promotion_record = record
         while True:
             if self.standby.returncode is not None:
                 raise RuntimeError("promoted worker exited before readiness")
@@ -1041,13 +1085,43 @@ async def control_server(path: Path, supervisor: Supervisor) -> asyncio.Server:
                 if supervisor.transition_task is not None and not supervisor.transition_task.done():
                     result = {"ok": False, "error": "an upgrade is already in progress"}
                 else:
-                    supervisor.transition_task = asyncio.create_task(
+                    # A standby warm is minutes long, so the transition is
+                    # acknowledged rather than awaited: holding the control
+                    # connection open for it turns any client read timeout into
+                    # a false failure while promotion proceeds regardless. The
+                    # client polls `status` for the outcome.
+                    transition = uuid.uuid4().hex
+                    supervisor.transition_id = transition
+                    supervisor.last_transition = None
+                    task = asyncio.create_task(
                         supervisor.upgrade(
                             request.get("target"),
                             resume=command == "resume",
                         )
                     )
-                    result = await asyncio.shield(supervisor.transition_task)
+
+                    def _record(finished: asyncio.Task, identifier: str = transition) -> None:
+                        if finished.cancelled():
+                            outcome: dict[str, Any] = {
+                                "ok": False,
+                                "error": "the transition was cancelled",
+                            }
+                        elif finished.exception() is not None:
+                            # Error text from a transition can carry
+                            # configuration or vault content; keep the shape.
+                            outcome = {"ok": False, "error": "the transition failed"}
+                        else:
+                            outcome = finished.result()
+                        supervisor.last_transition = {"transition": identifier, **outcome}
+
+                    task.add_done_callback(_record)
+                    supervisor.transition_task = task
+                    result = {
+                        "ok": True,
+                        "accepted": True,
+                        "transition": transition,
+                        "phase": supervisor.phase,
+                    }
             else:
                 result = {"ok": False, "error": "unknown control command"}
         except (ValueError, TimeoutError, ConnectionError):
@@ -1169,7 +1243,7 @@ def main(argv: list[str] | None = None) -> int:
                 directory / "worker.sock",
                 host=host,
                 port=args.port,
-                environment_file=identity.get("environment_file"),
+                environment_files=identity.get("environment_files"),
             )
             supervisor = Supervisor(
                 directory,

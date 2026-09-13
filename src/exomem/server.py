@@ -472,8 +472,14 @@ def _find_call_summary(message) -> str:
     return f' query="{query}" mode={mode} scope={scope}'
 
 
-def build_server(*, require_auth: bool) -> FastMCP:
-    """Construct and return the FastMCP app, ready to run."""
+def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> FastMCP:
+    """Construct and return the FastMCP app, ready to run.
+
+    ``worker_socket`` is the supervisor-owned private socket a managed worker
+    binds. The promotion control route is registered only for such a worker: it
+    is reachable exactly where `/health` already is, and never on a process that
+    serves a public bind.
+    """
     from . import runtime_resources, service_standby
 
     standby = service_standby.in_standby()
@@ -532,7 +538,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
         register_asset_routes(
             mcp,
             on_liveness=runtime_activation.start,
-            vault_root=runtime.vault_root,
+            vault_root=runtime.vault_root if worker_socket is not None else None,
         )
         if standby:
             service_standby.start_warm(runtime.vault_root)
@@ -870,7 +876,7 @@ def run(
             "and the GitHub OAuth block for a remote connector.",
             resolved_host,
         )
-    mcp = build_server(require_auth=require_auth)
+    mcp = build_server(require_auth=require_auth, worker_socket=worker_socket)
 
     if transport == "stdio":
         log.info("exomem starting on stdio")

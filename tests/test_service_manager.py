@@ -582,3 +582,170 @@ def test_systemd_identity_reports_the_units_environment_file(tmp_path, monkeypat
         cgroup_root=tmp_path / "cgroup",
     )
     assert identity["environment_file"] == str(tmp_path / "service.env")
+
+
+def test_an_upgrade_is_acknowledged_immediately_and_polled_to_its_outcome(tmp_path):
+    """A minutes-long standby warm must not be held on the control connection.
+
+    The operator client read-timeout is seconds; the supervisor's warm budget is
+    minutes. Awaiting the transition on that connection turned any slow warm into
+    a false failure while promotion proceeded regardless.
+    """
+    import threading
+
+    from exomem import service_upgrade
+
+    module = _manager()
+
+    async def scenario():
+        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
+        warming = asyncio.Event()
+
+        async def slow_standby(candidate, timeout):
+            runtime.events.append("start-standby")
+            warming.set()
+            await asyncio.sleep(0.6)
+            return "standby-upstream"
+
+        runtime.start_standby = slow_standby
+        directory = tmp_path / "managed"
+        async with await module.control_server(directory / "control.sock", manager):
+            request = {"command": "upgrade", "target": target}
+            accepted = await asyncio.to_thread(service_upgrade.control, directory, request)
+            # Acknowledged, not awaited: the warm has not even finished.
+            assert accepted["accepted"] is True
+            assert isinstance(accepted["transition"], str)
+            assert manager.records.active() is None
+            await asyncio.wait_for(warming.wait(), 2)
+
+            done = threading.Event()
+            outcome: dict = {}
+
+            def poll():
+                try:
+                    outcome["result"] = service_upgrade._wait_for_target(
+                        directory, target, accepted, budget=20, interval=0.05
+                    )
+                except Exception as error:  # noqa: BLE001 - surfaced by the assertion
+                    outcome["error"] = error
+                finally:
+                    done.set()
+
+            worker = threading.Thread(target=poll, daemon=True)
+            worker.start()
+            await asyncio.wait_for(asyncio.to_thread(done.wait), 20)
+            assert "error" not in outcome, outcome["error"]
+            result = outcome["result"]
+            assert result["phase"] == "ready"
+            assert result["active"] == target
+            assert result["last_transition"]["transition"] == accepted["transition"]
+            assert result["last_transition"]["handoff"]["standby"] == "ready"
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_transition_is_reported_to_the_polling_client(tmp_path):
+    import threading
+
+    from exomem import service_upgrade
+
+    module = _manager()
+
+    async def scenario():
+        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
+        runtime.failure = "start"
+        runtime.standby_capable = False
+        directory = tmp_path / "managed"
+        async with await module.control_server(directory / "control.sock", manager):
+            accepted = await asyncio.to_thread(
+                service_upgrade.control, directory, {"command": "upgrade", "target": target}
+            )
+            assert accepted["accepted"] is True
+            done = threading.Event()
+            outcome: dict = {}
+
+            def poll():
+                try:
+                    service_upgrade._wait_for_target(
+                        directory, target, accepted, budget=20, interval=0.05
+                    )
+                except Exception as error:  # noqa: BLE001 - the assertion is the error
+                    outcome["error"] = error
+                finally:
+                    done.set()
+
+            worker = threading.Thread(target=poll, daemon=True)
+            worker.start()
+            await asyncio.wait_for(asyncio.to_thread(done.wait), 20)
+            assert "error" in outcome
+            assert "resume" in str(outcome["error"])
+
+    asyncio.run(scenario())
+
+
+def test_a_unit_with_two_environment_files_overlays_both_in_order(tmp_path, monkeypatch):
+    module = _manager()
+    first, second = tmp_path / "a.env", tmp_path / "b.env"
+    first.write_text("EXOMEM_FIRST=1\nEXOMEM_SHARED=from-first\n")
+    second.write_text("EXOMEM_SHARED=from-second\n")
+    runtime = module.WorkerRuntime(
+        tmp_path / "worker.sock",
+        host="127.0.0.1",
+        port=1,
+        environment_files=[first, second],
+    )
+    environment = runtime._child_environment()
+    assert environment["EXOMEM_FIRST"] == "1"
+    # Later files win, as systemd applies them.
+    assert environment["EXOMEM_SHARED"] == "from-second"
+    assert runtime.environment_warnings == []
+
+
+def test_an_unreadable_environment_file_is_surfaced_not_only_logged(tmp_path):
+    module = _manager()
+    present = tmp_path / "a.env"
+    present.write_text("EXOMEM_FIRST=1\n")
+    runtime = module.WorkerRuntime(
+        tmp_path / "worker.sock",
+        host="127.0.0.1",
+        port=1,
+        environment_files=[present, tmp_path / "absent.env"],
+    )
+    environment = runtime._child_environment()
+    assert environment["EXOMEM_FIRST"] == "1"
+    assert runtime.environment_warnings == ["unreadable: absent.env"]
+
+
+def test_systemd_identity_reports_every_environment_file(tmp_path):
+    module = _manager()
+    proc = tmp_path / "proc"
+    (proc / "self").mkdir(parents=True)
+    (proc / "self" / "cgroup").write_text("0::/user.slice/sample.service\n")
+    (proc / "sys/kernel/random").mkdir(parents=True)
+    (proc / "sys/kernel/random/boot_id").write_text("test-boot")
+    cgroup = tmp_path / "cgroup/user.slice/sample.service"
+    cgroup.mkdir(parents=True)
+    (cgroup / "cgroup.procs").write_text(f"{os.getpid()}\n")
+    os.environ["INVOCATION_ID"] = "a" * 32
+    properties = {
+        "MainPID": str(os.getpid()),
+        "ControlGroup": "/user.slice/sample.service",
+        "InvocationID": "a" * 32,
+        "KillMode": "control-group",
+        "SendSIGKILL": "yes",
+        "TimeoutStopUSec": "30s",
+        "EnvironmentFiles": (
+            f"{tmp_path}/one.env (ignore_errors=no) {tmp_path}/two.env (ignore_errors=yes)"
+        ),
+    }
+    identity = module.verify_systemd_identity(
+        "sample.service",
+        properties=properties,
+        proc_root=proc,
+        cgroup_root=tmp_path / "cgroup",
+    )
+    assert identity["environment_files"] == [
+        str(tmp_path / "one.env"),
+        str(tmp_path / "two.env"),
+    ]
+    assert identity["environment_file"] == str(tmp_path / "one.env")
