@@ -178,3 +178,46 @@ def test_help_does_not_require_a_running_manager(tmp_path: Path) -> None:
     result = _operator(tmp_path, "--help")
     assert result.returncode == 0
     assert "--status" in result.stdout and "--resume" in result.stdout
+
+
+def test_a_release_without_the_descriptor_probe_still_stages(tmp_path: Path) -> None:
+    """Rollback to a pre-change release must not fail at staging.
+
+    The probe reads the target's state-migration declaration. A release that
+    predates it has no `declared_descriptor_ids`, and an unguarded import made
+    `_staged_identity` exit non-zero, so every downgrade failed before it began.
+    An empty declaration is the right answer: the supervisor then runs the
+    offline migrator.
+    """
+    import os
+    import subprocess
+    import sys
+
+    from exomem import service_upgrade
+
+    legacy = tmp_path / "legacy"
+    (legacy / "exomem").mkdir(parents=True)
+    (legacy / "exomem" / "__init__.py").write_text("", encoding="utf-8")
+    # The pre-change module: no `declared_descriptor_ids` to import.
+    (legacy / "exomem" / "state_migration.py").write_text("", encoding="utf-8")
+
+    interpreter = tmp_path / "legacy-python"
+    interpreter.write_text(
+        f'#!/bin/sh\nPYTHONPATH="{legacy}" exec "{sys.executable}" -c "$3"\n',
+        encoding="utf-8",
+    )
+    interpreter.chmod(0o700)
+
+    probe = subprocess.run(
+        [str(interpreter), "-I", "-c", service_upgrade._TARGET_PROBE],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(legacy)},
+    )
+    assert probe.returncode == 0, probe.stderr[-2000:]
+
+    identity = service_upgrade._staged_identity(interpreter)
+    assert identity["state_descriptors"] == []
+    assert identity["version"]
