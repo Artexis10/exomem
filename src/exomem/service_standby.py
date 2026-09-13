@@ -380,7 +380,7 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
     advanced is recorded as such; a proof that now fails is recorded and
     promotion proceeds anyway, leaving the repair to the coalesced rebuild path.
     """
-    global _promoted, _standby
+    global _promoted, _standby, _adoption
     with _lock:
         if _promoted:
             return {"ok": True, "already_promoted": True}
@@ -397,6 +397,10 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
         # it ran. Re-run the whole proof rather than compare a checkpoint pair
         # that describes state it may have rewritten.
         adoption = _reprove(Path(vault_root))
+        with _lock:
+            # The re-proof supersedes the warm's: `adoption_record()` must
+            # report the residue this process actually owes.
+            _adoption = adoption
         record["reproved"] = True
         record["snapshot"] = "current" if adoption.adopted else "rebuild-after-promotion"
     else:
@@ -408,10 +412,11 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
             record["snapshot"] = "advanced"
         else:
             record["snapshot"] = "current"
-    # Ownership of the repair the adoption owes transfers here, with ownership
-    # of everything else: not one moment before promotion is accepted.
-    record["residue_applied"] = _apply_residue(Path(vault_root), adoption)
+    # The writer lease is what makes this process the owner, so it comes first:
+    # enqueueing the repair the adoption owes is a write, and this process has
+    # no standing to make it until the lease says the vault is its own.
     _acquire_ownership()
+    record["residue_applied"] = _apply_residue(Path(vault_root), adoption)
     with _lock:
         _promoted = True
         _standby = False

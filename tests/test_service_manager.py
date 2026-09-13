@@ -820,3 +820,82 @@ def test_environment_warnings_reach_a_discarded_handoff_record(tmp_path):
         assert result["handoff"]["environment"] == ["unreadable: service.env"]
 
     asyncio.run(scenario())
+
+
+class _FakeResponse:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _PromotingClient:
+    """A standby whose promotion call takes as long as a real source proof."""
+
+    def __init__(self, delay=0.0):
+        self.delay = delay
+        self.posted = []
+
+    async def post(self, path, json=None):
+        self.posted.append((path, json))
+        await asyncio.sleep(self.delay)
+        return _FakeResponse(200, {"ok": True, "snapshot": "current", "reproved": True})
+
+    async def get(self, path):
+        if path == "/health":
+            return _FakeResponse(200, {"version": "1.2.3"})
+        return _FakeResponse(200, {"status": "ready"})
+
+    async def aclose(self):
+        pass
+
+
+class _FakeChild:
+    pid = 4242
+    returncode = None
+
+
+def test_a_migrated_promotion_gets_the_cutover_budget_not_a_ten_second_cap(
+    tmp_path, monkeypatch
+):
+    """The migrated promotion POST runs a whole-vault source proof server-side.
+
+    That proof costs about 3 s at 2,000 notes and grows with the corpus, so a
+    fixed ten-second cap times out the request while the promotion it asked for
+    is still running, and discards a standby that was about to succeed.
+    """
+    module = _manager()
+    granted: list[float] = []
+    real_timeout = asyncio.timeout
+
+    def recording_timeout(delay):
+        granted.append(delay)
+        return real_timeout(delay)
+
+    monkeypatch.setattr(module.asyncio, "timeout", recording_timeout)
+    monkeypatch.setattr(module, "_descendants", lambda **kwargs: {})
+
+    async def scenario(migrated):
+        granted.clear()
+        runtime = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
+        runtime.standby = _FakeChild()
+        runtime.standby_client = _PromotingClient(delay=0.05)
+        client, record = await runtime.promote_standby(migrated=migrated, timeout=30)
+        assert record["snapshot"] == "current"
+        # The promoted tree becomes the serving one.
+        assert runtime.child is not None and runtime.standby is None
+        assert client is not None
+        return granted[0]
+
+    migrated_budget = asyncio.run(scenario(True))
+    assert migrated_budget > 10, (
+        f"a migrated promotion was capped at {migrated_budget}s; the re-proof needs "
+        "the cutover budget"
+    )
+
+    plain_budget = asyncio.run(scenario(False))
+    # Without a migration the call only acquires ownership, so it keeps the
+    # tight cap that surfaces an unresponsive candidate quickly.
+    assert plain_budget <= 10

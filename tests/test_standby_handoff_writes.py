@@ -190,16 +190,39 @@ root = Path(sys.argv[1])
 state = state_paths.vault_state_dir(root)
 
 
+def checkpoint_wals():
+    """Fold every WAL into its main database before hashing.
+
+    Without this a write that landed only in `.graph.sqlite-wal` would never
+    move a content hash, and the probe would report "wrote nothing" for exactly
+    the writes it exists to catch. FULL copies the log into the database and
+    leaves the log file alone, which is all the hash below needs.
+    """
+    import sqlite3
+
+    for path in sorted(state.glob("*.sqlite")):
+        try:
+            connection = sqlite3.connect(path)
+        except sqlite3.Error:
+            continue
+        try:
+            connection.execute("PRAGMA wal_checkpoint(FULL)")
+        except sqlite3.Error:
+            pass
+        finally:
+            connection.close()
+
+
 def fingerprint():
     import hashlib
 
     prints = {{}}
     if not state.exists():
         return prints
+    checkpoint_wals()
     for path in sorted(state.rglob("*")):
-        # `-wal`/`-shm` are SQLite journal artifacts that even a read creates,
-        # including this probe's own. Durable content is what matters, and a
-        # write parked in the WAL is still visible to the row count below.
+        # Safe to skip only because the WAL was just folded in: `-wal`/`-shm`
+        # are journal artifacts that even a read creates, including this probe's.
         if path.is_file() and not path.name.endswith(("-wal", "-shm")):
             prints[str(path.relative_to(state))] = hashlib.sha256(path.read_bytes()).hexdigest()
     return prints

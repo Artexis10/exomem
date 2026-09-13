@@ -1040,7 +1040,13 @@ class WorkerRuntime:
         ):
             raise RuntimeError("previous owned process exit has not been proven")
         deadline = Deadline(timeout)
-        async with asyncio.timeout(deadline.remaining(10)):
+        # A migrated promotion re-runs the whole source proof inside this POST
+        # -- seconds on a large vault, and it grows with the corpus -- so the
+        # call gets the cutover budget rather than a fixed ten seconds. Capping
+        # it lower would time out the request while the promotion it asked for
+        # was still running, and discard a standby that was about to succeed.
+        promote_budget = deadline.remaining(timeout if migrated else 10)
+        async with asyncio.timeout(promote_budget):
             response = await self.standby_client.post(
                 "/control/promote", json={"migrated": bool(migrated)}
             )

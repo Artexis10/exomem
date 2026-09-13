@@ -357,3 +357,63 @@ def test_the_standby_owns_its_adoption_so_the_warm_does_not_pay_it_twice(
     # The standby's own step is the one that runs, and it reports the residue.
     assert service_standby.prove_graph_snapshot(tmp_path) is True
     assert service_standby.adoption_record() == {"residue": 0, "reason": "adopted"}
+
+
+def test_the_lease_is_acquired_before_the_residue_is_enqueued(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Enqueueing the repair is a write, so the lease has to come first.
+
+    Until the lease says this vault is this process's own, it has no standing to
+    schedule work on it -- the previous worker may still be relinquishing.
+    """
+    order: list[str] = []
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    monkeypatch.setattr(
+        service_standby, "_acquire_ownership", lambda: order.append("lease")
+    )
+    monkeypatch.setattr(
+        service_standby,
+        "_apply_residue",
+        lambda root, adoption: order.append("residue") or 1,
+    )
+    _stub_adoption(monkeypatch, residue=("Knowledge Base/Notes/a.md",))
+    service_standby.enter_standby()
+    service_standby.register_activation(_Activation())
+    service_standby.prove_graph_snapshot(tmp_path)
+
+    record = service_standby.promote(tmp_path, migrated=False)
+
+    assert order == ["lease", "residue"]
+    assert record["residue_applied"] == 1
+    # Still exactly once, and a second call short-circuits.
+    assert service_standby.promote(tmp_path, migrated=False)["already_promoted"] is True
+    assert order == ["lease", "residue"]
+
+
+def test_a_migrated_promotion_reports_the_residue_the_reproof_found(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """`adoption_record()` must describe what this process owes, not the warm."""
+    from exomem import epistemic_graph
+
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    monkeypatch.setattr(service_standby, "_apply_residue", lambda root, adoption: 2)
+    _stub_adoption(monkeypatch)
+    service_standby.enter_standby()
+    service_standby.register_activation(_Activation())
+    service_standby.prove_graph_snapshot(tmp_path)
+    assert service_standby.adoption_record()["residue"] == 0
+
+    monkeypatch.setattr(
+        service_standby,
+        "_reprove",
+        lambda root: epistemic_graph.SnapshotAdoption(
+            True, residue=("a.md", "b.md"), reason="adopted"
+        ),
+    )
+    service_standby.promote(tmp_path, migrated=True)
+    assert service_standby.adoption_record() == {"residue": 2, "reason": "adopted"}
