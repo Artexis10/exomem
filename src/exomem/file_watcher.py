@@ -837,6 +837,37 @@ def _graph_incompleteness_fields(vault_root: Path) -> str:
     return " ".join(f"{name}={value}" for name, value in fields.items())
 
 
+def _graph_incompleteness_scope(
+    vault_root: Path, rels: Iterable[str]
+) -> list[Path] | None:
+    """The paths an unclassified fan-out incompleteness affects, or None for the vault.
+
+    `_graph_incompleteness_fields` reports the same judgement as `scope=paths` or
+    `scope=full`; this returns it as a value, so the external mark the drain
+    raises can carry its scope (`seamless-managed-worker-handoff` D3).
+
+    The scope is *this drain's own batch* -- the paths whose fan-out just failed
+    to converge -- and deliberately not the durable repair queue. The queue is a
+    backlog, not an observation: it only grows while repair is outstanding, so
+    marking it makes the fenced set grow monotonically until it covers whatever
+    the next write touches, which is the same self-sustaining loop in a narrower
+    costume.
+
+    None means "whole vault", and it is also what every failure and every
+    whole-vault repair answers: a mark whose scope cannot be established has to
+    fence everything, because that is what this branch exists to be.
+    """
+    from . import deferred_index
+
+    try:
+        if deferred_index.graph_full_rebuild_pending(vault_root) is not None:
+            return None
+    except Exception:  # noqa: BLE001 - an unreadable marker is an unknown scope
+        return None
+    paths = [vault_root / rel for rel in rels]
+    return paths or None
+
+
 class FileWatcher:
     """Watch Knowledge Base/ for `.md` changes and re-embed them, debounced."""
 
@@ -1838,10 +1869,24 @@ class FileWatcher:
                     # branch cannot name. That is the branch a diagnosis
                     # actually lands on, so it carries the state instead of
                     # asserting the outcome.
-                    freshness.mark_external_pending(self._vault_root)
+                    # Scoped to the repair the queue is actually holding. This
+                    # branch fires on every drain that leaves the graph behind,
+                    # and an unscoped mark here fenced the *next* governed write
+                    # into a whole-vault rebuild, whose deferral queued more
+                    # paths, which left the next fan-out incomplete: the loop
+                    # `seamless-managed-worker-handoff` exists to break. A scope
+                    # this helper cannot establish still fences the whole vault.
+                    scope = _graph_incompleteness_scope(
+                        self._vault_root, (*up_rels, *del_rels)
+                    )
+                    freshness.mark_external_pending(
+                        self._vault_root, paths=scope if scope is not None else ()
+                    )
                     log.warning(
-                        "file watcher: graph fan-out incomplete; periodic recovery re-armed %s",
+                        "file watcher: graph fan-out incomplete; periodic recovery re-armed %s "
+                        "mark_scope=%s",
                         _graph_incompleteness_fields(self._vault_root),
+                        "paths" if scope is not None else "full",
                     )
         return admitted_semantic
 
