@@ -89,12 +89,9 @@ needlessly contended ordinary reads against long-running writes.
 
 ### Requirement: Tenant-Scoped Retry And Idempotency Semantics
 
-Hosted mutations SHALL preserve caller-supplied idempotency keys and bounded
-implicit MCP retry replay through the existing common invocation boundary.
-Retry identity MUST include the resolved tenant, authenticated principal
-scope, command, and canonical arguments; a key or implicit retry from one
-tenant MUST NOT replay or suppress a mutation for another tenant. Failed
-mutations MUST remain retryable.
+All MCP mutations, including hosted mutations, SHALL preserve caller-supplied idempotency keys and bounded implicit retry replay through the existing common invocation boundary. Retry identity MUST include the resolved vault or tenant, authenticated principal scope, command, and canonical arguments. An identical pending retry MUST inspect or wait on its receipt outside the exclusive vault mutation boundary, while different identities remain subject to normal serialization. Failed precommit mutations MUST become retryable, and committed terminal outcomes MUST replay without executing the leaf again.
+
+A replay identity REQUIRES either an explicit caller-supplied idempotency key or a retry scope that is stable across the retry. Where neither resolves — an unauthenticated caller, or a stateless transport whose session identifier changes per request — the repeat carries no replay identity, and the system SHALL treat the two requests as distinct by definition: no shared receipt is created, no replay is offered, and normal serialization applies, up to and including `MUTATION_BUSY` for the second request. The replay guarantee above is therefore explicitly out of scope for that configuration rather than silently unmet.
 
 A `pending` idempotency row whose owning process is provably no longer alive
 (an exclusive per-process OS lock file under the state directory is not held)
@@ -109,11 +106,21 @@ rule for up to 600 seconds before it, too, ages into `abandoned`.
 
 #### Scenario: Gateway retries a completed hosted mutation
 
-- **WHEN** the gateway repeats an identical successful mutation for the same
-  tenant and authenticated principal with the same idempotency identity
-- **THEN** the original result is replayed without executing the mutation
-  leaf again
+- **WHEN** the gateway repeats the same successful mutation for the same tenant, principal, command, canonical arguments, and idempotency identity after losing the acknowledgement
+- **THEN** the original result is replayed without executing the mutation leaf again
 - **AND** only one durable vault change exists
+
+#### Scenario: Identical retry overlaps in-flight mutation
+
+- **WHEN** an identical retry arrives while the first worker still owns the mutation boundary
+- **THEN** it waits on or inspects the matching pending receipt outside the boundary
+- **AND** it returns the terminal replay or bounded `MUTATION_ACKNOWLEDGEMENT_PENDING`, never `MUTATION_BUSY` caused by competing with itself
+
+#### Scenario: Retry arrives with no key and no stable scope
+
+- **WHEN** a caller repeats a mutation with no explicit idempotency key while no stable retry scope resolves for it
+- **THEN** the repeat resolves no replay identity, creates no shared receipt, and is not offered the first request's result
+- **AND** it contends for the vault mutation boundary like any other distinct mutation, up to and including `MUTATION_BUSY`
 
 #### Scenario: Same key is presented for another tenant
 
@@ -122,6 +129,12 @@ rule for up to 600 seconds before it, too, ages into `abandoned`.
 - **THEN** each tenant resolves an independent idempotency record
 - **AND** neither tenant receives the other's result or suppresses the
   other's mutation
+
+#### Scenario: First attempt fails before commit
+
+- **WHEN** a mutation raises during structural or semantic preflight before successful completion and the caller retries it
+- **THEN** the pending receipt is removed or records a retryable precommit outcome
+- **AND** the retry can acquire the boundary and execute normally
 
 #### Scenario: First attempt fails
 
@@ -149,9 +162,10 @@ rule for up to 600 seconds before it, too, ages into `abandoned`.
 The process-safe boundary SHALL not leave a vault permanently unwritable
 after process termination, request cancellation, or an exception. Authority
 MUST be released automatically when the owning process exits and in a
-`finally`-equivalent path for handled cancellation or failure; a successor
-MUST still pass normal readiness and transactional integrity checks before
-writing.
+`finally`-equivalent path for handled cancellation or failure. Transport
+cancellation MUST NOT erase or misclassify the terminal state of underlying
+synchronous work that continues in a worker thread. A successor MUST still
+pass normal readiness and transactional integrity checks before writing.
 
 A writer-lease holder that is not configured as the preferred writer MUST
 also release its lease authority after a configurable idle period
@@ -177,6 +191,12 @@ if the lease has moved on by the time it reaches the atomic-write boundary.
 - **WHEN** a command leaf raises while the current process owns the boundary
 - **THEN** the boundary is released after rollback and error handling finish
 - **AND** a later valid mutation is not permanently blocked
+
+#### Scenario: Transport response is cancelled while worker continues
+
+- **WHEN** the client disconnects or cancels after a synchronous mutation worker has started
+- **THEN** the worker finishes or fails under the same boundary and records its terminal receipt before releasing ownership
+- **AND** an identical retry observes that receipt rather than executing a duplicate mutation
 
 #### Scenario: A non-preferred holder sits idle
 
