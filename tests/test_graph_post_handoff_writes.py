@@ -37,6 +37,14 @@ GENERATED = "Knowledge Base/Notes/Generated"
 #: one incremental write, small enough to seed inside a test.
 NOTE_COUNT = 200
 WRITE_COUNT = 10
+#: Small enough that the watcher's own repair of each unattributed edit lands
+#: inside the settle window, which is what makes a live-watcher test finish.
+LIVE_NOTE_COUNT = 60
+#: The reproduction's own count for the live-watcher shape. Every write there
+#: waits for the watcher to finish with an edit, so a ten-write run is minutes
+#: on a loaded host and dies on the suite's per-test timeout; the deterministic
+#: test below keeps the full count, with no watcher to wait for.
+LIVE_WRITE_COUNT = 6
 #: Measured on this fixture (246 markdown files): an incremental governed write
 #: acknowledges in 0.36-0.76 s, and 1.08 s worst observed on a host running other
 #: suites at the same time. A whole-vault rebuild of the same fixture costs
@@ -85,14 +93,12 @@ def _seed_live_freshness(root: Path) -> None:
     )
 
 
-@pytest.fixture
-def handoff_vault(vault: Path) -> Iterator[Path]:
-    """A seeded vault with a published graph, as a replacement worker inherits it."""
+def _build_vault(vault: Path, note_count: int) -> Iterator[Path]:
     generated = vault / GENERATED
     generated.mkdir(parents=True, exist_ok=True)
-    names = [f"generated-note-{i:04d}" for i in range(NOTE_COUNT)]
+    names = [f"generated-note-{i:04d}" for i in range(note_count)]
     for i, name in enumerate(names):
-        links = [names[(i + offset) % NOTE_COUNT] for offset in (1, 7, 23)]
+        links = [names[(i + offset) % note_count] for offset in (1, 7, 23)]
         (generated / f"{name}.md").write_text(_note(i, links), encoding="utf-8")
     _seed_live_freshness(vault)
     EpistemicGraphIndex(vault).rebuild_all()
@@ -100,6 +106,26 @@ def handoff_vault(vault: Path) -> Iterator[Path]:
     yield vault
     graph_sync.drain_active_rebuilds(timeout=30.0)
     epistemic_graph.clear_publication_memos()
+
+
+@pytest.fixture
+def handoff_vault(vault: Path) -> Iterator[Path]:
+    """A seeded vault with a published graph, as a replacement worker inherits it."""
+    yield from _build_vault(vault, NOTE_COUNT)
+
+
+@pytest.fixture
+def live_handoff_vault(vault: Path) -> Iterator[Path]:
+    """The same vault, sized for a test that waits on a real watcher.
+
+    A running watcher repairs each unattributed edit itself, and that repair
+    costs what a whole-vault pass costs; at 246 files a six-write run spends
+    minutes waiting for it and dies on the suite's per-test timeout. The live
+    test's assertions are about which reasons appear and what the write costs,
+    neither of which needs a large corpus -- the tests that do need one (the
+    rebuild counts) have no second writer and keep the full fixture.
+    """
+    yield from _build_vault(vault, LIVE_NOTE_COUNT)
 
 
 class _RebuildSpy:
@@ -145,6 +171,31 @@ def _governed_write(root: Path, path: Path, marker: str) -> float:
     return time.monotonic() - started
 
 
+def _observe_and_settle(root: Path, *, deadline_seconds: float = 5.0) -> bool:
+    """Wait for the observer to deliver an unattributed edit and the watcher to ack it.
+
+    The reproduction spaces its governed writes the same way (`exp5.py` sleeps
+    0.6 s after each external edit). Settling is not a workaround: on a defective
+    tree the mark never clears, because the drain's fan-out finds the graph
+    unavailable and re-arms it -- so "the mark cleared" is itself part of what
+    this test is asserting, and a write that lands mid-drain would measure the
+    watcher's own lineage races instead of the fence.
+    """
+    deadline = time.monotonic() + deadline_seconds
+    observed = False
+    while time.monotonic() < deadline:
+        if freshness.external_pending(root):
+            observed = True
+        elif observed and EpistemicGraphIndex(root).available():
+            # The mark is retired *and* the fan-out republished the graph: the
+            # watcher is done with this edit. Writing before that measures a
+            # lineage race between two writers of the same vault, which is a
+            # different question from the fence this test is about.
+            return True
+        time.sleep(0.02)
+    return False
+
+
 def _assert_incremental_latency(acknowledgements: list[float]) -> None:
     rendered = [round(seconds, 2) for seconds in acknowledgements]
     slowest = max(acknowledgements)
@@ -169,36 +220,183 @@ def _drain_repair_queue(root: Path, watcher: file_watcher.FileWatcher) -> int:
     return len(deferred_index.list_graph_paths(root))
 
 
+@pytest.fixture
+def live_watcher(live_handoff_vault: Path) -> Iterator[file_watcher.FileWatcher]:
+    """A watcher running for real: observer, dispatch loop and fan-out recovery.
+
+    Driving `_record` on an unstarted watcher tests the debounce logic and
+    nothing else. The defect this suite exists for is produced *by the running
+    watcher*: its fan-out recovery raises an external mark between writes, and a
+    mark raised there with no scope fences the next governed write into a
+    whole-vault rebuild, whose deferral queues more paths, which leaves the next
+    fan-out incomplete. Only a started watcher can close that loop, so the
+    regression test runs one.
+    """
+    watcher = file_watcher.FileWatcher(live_handoff_vault, debounce_seconds=0.2)
+    started = watcher.start()
+    assert started, "the reproduction requires a running watcher"
+    # The seed pass publishes the registry before events are dispatched.
+    watcher._seed_complete.wait(30)
+    try:
+        yield watcher
+    finally:
+        watcher.stop()
+
+
 def test_writes_after_a_worker_replacement_stay_incremental(
+    live_handoff_vault: Path,
+    live_watcher: file_watcher.FileWatcher,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`exp5.py external`, as a test: six writes, each behind one unattributed edit.
+
+    The oracle is the reproduction's, and it is about the *write path*: every
+    acknowledgement stays inside the incremental bound (3.4-7.9 s per write on
+    the defective tree, because each one waited out a whole-vault rebuild it had
+    been fenced into), no write is fenced by an unattributed event at all, and
+    the repair queue drains to zero.
+
+    Whole-vault passes are deliberately NOT counted here. A running watcher
+    repairs the unattributed edits itself, and on a fixture this size its own
+    incremental pass legitimately bails to a full one; counting process-wide
+    passes would measure the watcher's repair of the edits this test invents
+    rather than what the governed writes cost. The rebuild *count* is pinned by
+    `test_a_write_dispatched_behind_an_unrepaired_mark_stays_incremental` and by
+    the cross-process test, which have no second writer.
+    """
+    root = live_handoff_vault
+    generated = root / GENERATED
+    caplog.set_level("INFO", logger="exomem.epistemic_graph")
+
+    acknowledgements: list[float] = []
+    observed_marks = 0
+    for i in range(LIVE_WRITE_COUNT):
+        # Disjoint from the written notes, and inside this fixture's range.
+        external = generated / f"generated-note-{LIVE_NOTE_COUNT // 2 + i:04d}.md"
+        external.write_text(
+            external.read_text(encoding="utf-8") + f"\n- external editor touch {i}\n",
+            encoding="utf-8",
+        )
+        # Let the observer deliver the event and the watcher finish with it, the
+        # way the reproduction spaces its writes.
+        if _observe_and_settle(root):
+            observed_marks += 1
+        acknowledgements.append(
+            _governed_write(root, generated / f"generated-note-{i:04d}.md", f"governed {i}")
+        )
+
+    rendered = [round(seconds, 2) for seconds in acknowledgements]
+    assert observed_marks >= LIVE_WRITE_COUNT - 1, (
+        "the running watcher must observe each unattributed edit and then retire "
+        f"its mark; only {observed_marks} of {LIVE_WRITE_COUNT} edits completed "
+        "that cycle, which on a defective tree is what never happens"
+    )
+    assert "external_event_covers_these_paths" not in caplog.text, (
+        f"an unattributed edit fenced a governed write: {rendered}"
+    )
+    assert "graph_sync_predecessor_unreadable" not in caplog.text, (
+        f"a governed write could not read a sidecar it should have: {rendered}"
+    )
+    _assert_incremental_latency(acknowledgements)
+    assert _drain_repair_queue(root, live_watcher) == 0, "the graph repair queue never drained"
+
+
+def test_a_write_dispatched_behind_an_unrepaired_mark_stays_incremental(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Ten governed writes, each preceded by one unattributed edit, rebuild nothing."""
+    """The same shape with the mark still outstanding at dispatch, deterministically.
+
+    The live-watcher test above lets the watcher retire each mark, which is the
+    production cycle; this one never does, so every write dispatches while an
+    unattributed event is unrepaired -- the exact condition that used to answer
+    `graph_sync_predecessor_unreadable` and rebuild the vault.
+    """
     root = handoff_vault
     generated = root / GENERATED
     watcher = file_watcher.FileWatcher(root, debounce_seconds=0.2)
     spy = _RebuildSpy(monkeypatch)
 
     acknowledgements: list[float] = []
-    fenced_at_dispatch = 0
+    per_write_rebuilds: list[int] = []
     for i in range(WRITE_COUNT):
         _external_edit(watcher, generated / f"generated-note-{100 + i:04d}.md", f"external {i}")
-        if freshness.external_pending(root):
-            fenced_at_dispatch += 1
+        assert freshness.external_pending(root) is True
+        before = spy.count
         acknowledgements.append(
             _governed_write(root, generated / f"generated-note-{i:04d}.md", f"governed {i}")
         )
+        per_write_rebuilds.append(spy.count - before)
 
-    assert fenced_at_dispatch == WRITE_COUNT, (
-        "the reproduction requires every write to dispatch with an unrepaired "
-        "external event outstanding"
-    )
     assert spy.count == 0, (
         f"{spy.count} whole-vault rebuild(s) ran for {WRITE_COUNT} governed writes: "
-        f"passes={[round(seconds, 2) for seconds in spy.passes]} "
+        f"per_write={per_write_rebuilds} "
         f"acknowledgements={[round(seconds, 2) for seconds in acknowledgements]}"
     )
     _assert_incremental_latency(acknowledgements)
     assert _drain_repair_queue(root, watcher) == 0, "the graph repair queue never drained"
+
+
+def test_an_unscoped_fan_out_mark_is_the_only_one_that_fences_a_write(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The watcher's fan-out recovery marks the scope it can prove, not the vault.
+
+    This branch fires on every drain that leaves the graph behind. An unscoped
+    mark here fenced the *next* governed write into a whole-vault rebuild, whose
+    deferral queued more paths, which left the next fan-out incomplete: a loop
+    that sustains itself for as long as the vault is written to.
+    """
+    root = handoff_vault
+    batch = [f"{GENERATED}/generated-note-{i:04d}.md" for i in range(3)]
+    # The durable queue is a backlog, not an observation: a scope taken from it
+    # grows for as long as repair is outstanding, which is how a narrower mark
+    # still ends up fencing the next write.
+    deferred_index.add_graph(root, [f"{GENERATED}/generated-note-{i:04d}.md" for i in range(50, 60)])
+
+    scope = file_watcher._graph_incompleteness_scope(root, batch)
+
+    assert scope is not None, "a batch with a known path list is not a whole-vault scope"
+    assert {path.name for path in scope} == {Path(rel).name for rel in batch}
+
+    freshness.mark_external_pending(root, paths=scope)
+    assert freshness.external_pending(root) is True
+    assert (
+        freshness.external_pending_for(root, [root / GENERATED / "generated-note-0100.md"])
+        is False
+    ), "a write outside the queued repair must not be fenced by it"
+
+    spy = _RebuildSpy(monkeypatch)
+    elapsed = _governed_write(root, root / GENERATED / "generated-note-0100.md", "unfenced")
+
+    assert spy.count == 0
+    assert elapsed < ACK_BOUND_SECONDS
+
+
+def test_a_fan_out_scope_that_cannot_be_established_still_fences_everything(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed: an unknown scope is a whole-vault scope."""
+    root = handoff_vault
+    batch = [f"{GENERATED}/generated-note-{i:04d}.md" for i in range(3)]
+    deferred_index.mark_graph_full_rebuild(root, generation=1)
+
+    assert file_watcher._graph_incompleteness_scope(root, batch) is None, (
+        "whole-vault repair outstanding is a whole-vault scope"
+    )
+
+    deferred_index.clear_graph_full_rebuild(root)
+    assert file_watcher._graph_incompleteness_scope(root, ()) is None, (
+        "a drain that can name no path has not established a scope"
+    )
+
+    monkeypatch.setattr(
+        deferred_index,
+        "graph_full_rebuild_pending",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("marker unreadable")),
+    )
+    assert file_watcher._graph_incompleteness_scope(root, batch) is None, (
+        "an unreadable marker is an unknown scope"
+    )
 
 
 def test_an_unrelated_external_edit_does_not_fence_a_write(
@@ -231,53 +429,41 @@ def test_an_unrelated_external_edit_does_not_fence_a_write(
 def test_a_withdrawn_availability_marker_is_repaired_incrementally(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A sidecar whose rows and lineage are intact is advanced, not rebuilt.
+    """The state every fence leaves behind is repaired by the next write, not rebuilt.
 
-    The availability marker is a reader's claim, and every deferral drops it.
-    While the maintenance readers demanded it too, the only way to get it back
-    was a whole-vault pass -- the incremental refresh that exists to republish
-    it could not open the sidecar to do so.
+    Reached through the production call the watcher's drain makes before its
+    compare-and-ack (`_suspend_reads_for_acknowledgement` ->
+    `withdraw_availability`), not by editing the sidecar, because a state that
+    only hand SQL can produce proves nothing about the path that produces it.
+
+    The withdrawal used to drop `schema_version` and the stored recall
+    checkpoint along with the marker. A per-path deferral thereby took a
+    vault-wide action: the sidecar read as "not this build's" to the maintenance
+    readers, and with no stored checkpoint the bounded repair had no lineage to
+    advance, so the next governed write on any path bailed out on
+    `recall_checkpoint_absent_or_registry_not_live` and rebuilt the whole vault.
     """
-    import sqlite3
-
     root = handoff_vault
+    watcher = file_watcher.FileWatcher(root, debounce_seconds=0.2)
     index = EpistemicGraphIndex(root)
-    connection = sqlite3.connect(index.path)
-    try:
-        with connection:
-            connection.execute(
-                "DELETE FROM graph_meta WHERE key = 'recall_projection_identity'"
-            )
-    finally:
-        connection.close()
-    assert index.available() is False, "the withdrawn marker must fence public readers"
+    assert index.available() is True
+
+    index.withdraw_availability()
+
+    assert index.available() is False, "the withdrawal must fence public readers"
+    assert index._declined_snapshot_state() == "graph_sync_predecessor_unreadable", (
+        "a withdrawn marker is a fenced sidecar, not an unusable one"
+    )
 
     spy = _RebuildSpy(monkeypatch)
-    states: list[str] = []
-    real_state = EpistemicGraphIndex._graph_sync_predecessor_state
+    elapsed = _governed_write(root, root / GENERATED / "generated-note-0003.md", "after withdrawal")
 
-    def observed(
-        inner_self: EpistemicGraphIndex, checkpoint: graph_sync.GraphSyncCheckpoint
-    ) -> str:
-        state = real_state(inner_self, checkpoint)
-        states.append(state)
-        return state
-
-    monkeypatch.setattr(
-        EpistemicGraphIndex, "_graph_sync_predecessor_state", observed, raising=True
-    )
-
-    elapsed = _governed_write(root, root / GENERATED / "generated-note-0003.md", "withdrawn")
-
-    assert states == ["available"], (
-        "the maintenance probe must read a fenced-but-intact sidecar and prove its "
-        f"lineage, got {states}"
-    )
-    assert spy.count == 0, "a withdrawn availability marker scheduled a whole-vault rebuild"
+    assert spy.count == 0, "the write after a withdrawal scheduled a whole-vault rebuild"
     assert elapsed < ACK_BOUND_SECONDS
     assert EpistemicGraphIndex(root).available() is True, (
         "the incremental pass must republish the availability marker"
     )
+    assert _drain_repair_queue(root, watcher) == 0
 
 
 def test_an_unreadable_predecessor_is_queued_repair_not_a_lineage_gap(

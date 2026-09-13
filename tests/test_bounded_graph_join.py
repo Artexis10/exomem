@@ -227,44 +227,116 @@ def test_a_direct_mutation_guard_also_returns_while_its_rebuild_runs(
     assert outcome is not None and outcome.covers(required)
 
 
-#: Every `wait_for_registered` caller in `src/exomem/`, and why it is or is not
-#: bounded. The first pass at #576 bounded one site and left an identical
-#: unbounded join two hundred lines away in the same file, which then produced
-#: the worst case in production. An enumeration is the only thing that makes a
-#: *third* site fail loudly instead of surviving another analysis.
-_DECLARED_JOIN_SITES = {
-    # Poll-only: held while serving a request.
-    "writer_lease.py": "polled via join_registered_if_settled, plus the reconcile opt-out",
+#: Every `wait_for_registered` call in `src/exomem/` that waits WITHOUT a bound,
+#: keyed by module and enclosing function, and why that is allowed. The first
+#: pass at #576 bounded one site and left an identical unbounded join two hundred
+#: lines away in the same file, which then produced the worst case in production;
+#: the second pass declared whole *files* bounded, which hid a second unbounded
+#: join inside a file whose declaration said it had none. Per call site, derived
+#: from the source, is the only granularity that catches either.
+_DECLARED_UNBOUNDED_JOINS = {
     # Unbounded by design: `reconcile`'s terminal exists to prove the graph is
-    # readable, so it must not return before the rebuild lands.
-    "reconcile.py": "reconcile opt-in; its terminal asserts graph currency",
-    # Bounded by `_standalone_join_budget_seconds`: the standalone library
-    # path, gated on `active_mutation_request_id() is None` and no active
-    # direct guard, so it is unreachable while any request is being served. It
-    # has no envelope to carry `pending`, so it joins -- within the request
-    # deadline when one is in scope and a module default otherwise, past which
-    # it reports the rebuild as still running.
-    "epistemic_graph.py": "standalone library join, bounded by its own budget",
-    "delete_file.py": "standalone library join, no request boundary held",
-    "delete_directory.py": "standalone library join, no request boundary held",
-    "recover_from_trash.py": "standalone library join, no request boundary held",
+    # readable, so it must not return before the rebuild lands. Both the
+    # reconcile pass itself and the handoff it finalizes make that same claim.
+    "reconcile.py::reconcile": "reconcile opt-in; its terminal asserts graph currency",
+    "reconcile.py::finalize_graph_rebuild_handoff": (
+        "reconcile handoff; its terminal asserts graph currency"
+    ),
+    # Unbounded by design, and gated on `joins_unbounded_graph`: the one
+    # request-serving site that opts back in, for the same reconcile terminal.
+    "writer_lease.py::LeaseManager::invoke::wait_for_graph_sync": (
+        "reconcile opt-in inside the lease; every other write polls"
+    ),
 }
 
 
-def test_every_graph_join_site_is_bounded_or_declared() -> None:
-    source = Path(epistemic_graph.__file__).parent
-    found = {
-        path.name
-        for path in sorted(source.glob("*.py"))
-        if "wait_for_registered(" in path.read_text(encoding="utf-8")
-        and path.name != "graph_sync.py"  # the definition and the helper itself
-    }
+def _wait_for_registered_calls() -> dict[str, bool]:
+    """Every call in `src/exomem/`, keyed by site, mapped to whether it is bounded.
 
-    assert found == set(_DECLARED_JOIN_SITES), (
-        "a graph rebuild join site appeared or moved: route it through the "
-        "poll-only seam (graph_sync.join_registered_if_settled) or declare "
-        "why it may block"
+    Read out of the source rather than from a hand list, and attributed to the
+    enclosing function so a site that moves within its file keeps its identity
+    while a *new* site cannot inherit one.
+    """
+    import ast
+
+    source_root = Path(epistemic_graph.__file__).parent
+    found: dict[str, bool] = {}
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self, module: str) -> None:
+            self.module = module
+            self.stack: list[str] = []
+
+        def _scoped(self, node: Any) -> None:
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_FunctionDef = _scoped
+        visit_AsyncFunctionDef = _scoped
+        visit_ClassDef = _scoped
+
+        def visit_Call(self, node: ast.Call) -> None:
+            function = node.func
+            name = (
+                function.attr
+                if isinstance(function, ast.Attribute)
+                else getattr(function, "id", None)
+            )
+            if name == "wait_for_registered":
+                bounded = len(node.args) > 1 or any(
+                    keyword.arg == "timeout" for keyword in node.keywords
+                )
+                found[f"{self.module}::{'::'.join(self.stack)}"] = bounded
+            self.generic_visit(node)
+
+    for path in sorted(source_root.glob("*.py")):
+        module = path.name
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if module == "graph_sync.py":
+            # The definition's own module: the two seams here are the bound.
+            continue
+        Visitor(module).visit(tree)
+    return found
+
+
+def test_every_graph_join_site_is_bounded_or_declared() -> None:
+    unbounded = {site for site, bounded in _wait_for_registered_calls().items() if not bounded}
+
+    assert unbounded == set(_DECLARED_UNBOUNDED_JOINS), (
+        "an unbounded graph rebuild join appeared or moved: route it through a "
+        "seam (graph_sync.join_registered_if_settled while a request is held, "
+        "graph_sync.join_registered_within_budget otherwise) or declare why it "
+        "may block"
     )
+
+
+def test_both_join_seams_are_bounded() -> None:
+    """The two seams themselves: one polls, one waits within a budget."""
+    import ast
+
+    source = Path(graph_sync.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    seams = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"join_registered_if_settled", "join_registered_within_budget"}
+    }
+    assert set(seams) == {"join_registered_if_settled", "join_registered_within_budget"}
+    for name, node in seams.items():
+        calls = [
+            call
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+            and getattr(call.func, "id", getattr(call.func, "attr", None))
+            == "wait_for_registered"
+        ]
+        assert calls, f"{name} must join"
+        for call in calls:
+            assert len(call.args) > 1 or any(
+                keyword.arg == "timeout" for keyword in call.keywords
+            ), f"{name} joins without a bound"
 
 
 def test_the_settled_helper_never_waits(
@@ -911,14 +983,16 @@ def test_standalone_join_returns_pending_past_its_default_budget(
     required = _checkpoint(3)
     release = threading.Event()
     entered = _blocking_registration(vault, coordinator.state_root, required, release)
-    monkeypatch.setattr(epistemic_graph, "STANDALONE_JOIN_BUDGET_SECONDS", 0.5)
+    monkeypatch.setattr(graph_sync, "STANDALONE_JOIN_BUDGET_SECONDS", 0.5)
 
     try:
         result, elapsed = _join_standalone(vault, coordinator, required)
         assert entered.wait(5), "the registered rebuild must have started"
         assert (result.outcome, result.code) == ("deferred", "GRAPH_SYNC_REBUILD_IN_PROGRESS")
         assert result.checkpoint == required, "the pending outcome carries the poll target"
-        assert elapsed < 10.0, f"the standalone join parked {elapsed:.1f}s past its budget"
+        assert elapsed < 3.0, (
+            f"the standalone join parked {elapsed:.1f}s on a 0.5s budget"
+        )
     finally:
         release.set()
         graph_sync.await_active_rebuild(vault, state_root=coordinator.state_root, timeout=10)
@@ -943,13 +1017,15 @@ def test_standalone_join_takes_the_request_deadline_when_one_is_nearer(
     )
     token = request_budget.set_current(budget)
     try:
-        assert epistemic_graph._standalone_join_budget_seconds() < 1.0, (
+        assert graph_sync.standalone_join_budget_seconds() < 1.0, (
             "a nearer request deadline must win over the module default"
         )
         result, elapsed = _join_standalone(vault, coordinator, required)
         assert entered.wait(5)
         assert (result.outcome, result.code) == ("deferred", "GRAPH_SYNC_REBUILD_IN_PROGRESS")
-        assert elapsed < 10.0
+        assert elapsed < 3.0, (
+            f"the standalone join parked {elapsed:.1f}s on a sub-second request deadline"
+        )
     finally:
         request_budget.reset_current(token)
         release.set()
@@ -964,6 +1040,6 @@ def test_standalone_join_budget_defaults_without_a_request(
     monkeypatch.setattr(request_budget, "current", lambda: None)
 
     assert (
-        epistemic_graph._standalone_join_budget_seconds()
-        == epistemic_graph.STANDALONE_JOIN_BUDGET_SECONDS
+        graph_sync.standalone_join_budget_seconds()
+        == graph_sync.STANDALONE_JOIN_BUDGET_SECONDS
     )

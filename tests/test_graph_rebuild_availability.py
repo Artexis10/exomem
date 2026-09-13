@@ -1442,6 +1442,33 @@ def test_dispatch_names_the_gate_that_sent_a_write_to_a_whole_vault_rebuild(
     )
     assert "external_pending=True" in caplog.text
 
+    # The predecessor gate's own arm. A sidecar that is not this build's is a
+    # *proven* verdict, and the one the whole-vault rebuild is actually for; it
+    # has to be distinguishable in the log from a sidecar that merely could not
+    # be read at that instant, which now takes the bounded repair instead.
+    caplog.clear()
+    freshness.clear_external_pending(tmp_path, through=freshness.external_pending_epoch(tmp_path))
+    drifted = epistemic_graph.EpistemicGraphIndex(tmp_path)
+    connection = sqlite3.connect(drifted.path)
+    try:
+        with connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES "
+                "('extension_registry_hash', 'drifted-registry')"
+            )
+    finally:
+        connection.close()
+    assert drifted._declined_snapshot_state() == "graph_sync_snapshot_unusable"
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(note, "---\ntype: insight\nstatus: active\n---\n# Drift\n")],
+        vault_root=tmp_path,
+    )
+    graph_sync.drain_active_rebuilds(timeout=60.0)
+    assert "reason=graph_sync_snapshot_unusable" in caplog.text, (
+        "the predecessor gate must name a proven-unusable sidecar, not merely "
+        "report that a rebuild ran"
+    )
+
     # The genesis arm, both ways. `generation=1` has predecessor 0, so the
     # answer is provable from the sidecar alone: a sidecar carrying no
     # `graph_sync` acknowledgement can take it, and one that already carries an
