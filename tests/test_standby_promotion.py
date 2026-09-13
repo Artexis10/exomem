@@ -49,6 +49,7 @@ def test_embeddings_join_the_cutover_set_only_when_preload_is_allowed(monkeypatc
 def test_cutover_becomes_ready_once_every_component_lands(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
     monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
     service_standby.enter_standby()
     readiness.mark_ready("lexical")
     assert service_standby.prove_graph_snapshot(tmp_path) is True
@@ -61,10 +62,25 @@ def test_cutover_becomes_ready_once_every_component_lands(monkeypatch, tmp_path:
 def test_an_unprovable_snapshot_leaves_the_component_waiting(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
     monkeypatch.setattr(service_standby, "snapshot_token", lambda root: None)
+    _stub_adoption(monkeypatch, adopted=False, reason="snapshot_proof_declined")
     service_standby.enter_standby()
     readiness.mark_ready("lexical")
     assert service_standby.prove_graph_snapshot(tmp_path) is False
     assert service_standby.readiness_payload()["cutover_ready"] is False
+
+
+def _stub_adoption(monkeypatch, *, adopted=True, residue=(), reason="adopted"):
+    """Stand in for the graph adoption; its own proof is covered by the graph suite."""
+    from exomem import epistemic_graph
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "adopt_published_snapshot",
+        lambda self: epistemic_graph.SnapshotAdoption(
+            adopted, residue=tuple(residue), reason=reason
+        ),
+        raising=True,
+    )
 
 
 class _Activation:
@@ -82,6 +98,7 @@ def test_a_standby_takes_no_lease_and_starts_no_scheduler_until_promotion(
     monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
     leases: list[str] = []
     monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: leases.append("lease"))
+    _stub_adoption(monkeypatch)
     activation = _Activation()
     service_standby.enter_standby()
     service_standby.register_activation(activation)
@@ -102,6 +119,7 @@ def test_promotion_records_an_advanced_checkpoint(monkeypatch, tmp_path: Path) -
     monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
     tokens = iter(["checkpoint-1", "checkpoint-2"])
     monkeypatch.setattr(service_standby, "snapshot_token", lambda root: next(tokens))
+    _stub_adoption(monkeypatch)
     service_standby.enter_standby()
     service_standby.register_activation(_Activation())
     service_standby.prove_graph_snapshot(tmp_path)
@@ -117,6 +135,7 @@ def test_a_failed_reproof_promotes_anyway_and_records_the_rebuild(
     monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
     tokens = iter(["checkpoint-1", None])
     monkeypatch.setattr(service_standby, "snapshot_token", lambda root: next(tokens))
+    _stub_adoption(monkeypatch)
     activation = _Activation()
     service_standby.enter_standby()
     service_standby.register_activation(activation)
@@ -131,6 +150,7 @@ def test_promotion_is_idempotent(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
     calls: list[str] = []
     monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: calls.append("lease"))
+    _stub_adoption(monkeypatch)
     monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
     service_standby.enter_standby()
     service_standby.register_activation(_Activation())
@@ -153,6 +173,7 @@ def test_readiness_payload_is_absent_outside_standby_and_present_after_promotion
     monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
     monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
     monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
     assert service_standby.readiness_payload()["standby"] is False
     service_standby.enter_standby()
     readiness.mark_ready("lexical")
@@ -237,3 +258,58 @@ def test_the_catalog_proof_never_schedules_a_repair(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(lexstore, "runtime_retrieval_catalog_current", _current)
     assert service_standby.prove_retrieval_catalog(tmp_path) is True
     assert seen == [{"schedule_repair": False}]
+
+
+def test_the_cutover_block_reports_an_adoption_that_owes_a_drain(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """An adoption with a residue is not the same event as a clean one."""
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch, residue=("Knowledge Base/Notes/a.md",), reason="adopted")
+    service_standby.enter_standby()
+    readiness.mark_ready("lexical")
+    assert service_standby.prove_graph_snapshot(tmp_path) is True
+    payload = service_standby.readiness_payload()
+    assert payload["components"]["graph_snapshot"] == "ready"
+    assert payload["adoption"] == {"residue": 1, "reason": "adopted"}
+
+
+def test_a_refused_adoption_is_named_in_the_cutover_block(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    _stub_adoption(monkeypatch, adopted=False, reason="residue_exceeds_drain_limit")
+    service_standby.enter_standby()
+    readiness.mark_ready("lexical")
+    assert service_standby.prove_graph_snapshot(tmp_path) is False
+    payload = service_standby.readiness_payload()
+    assert payload["components"]["graph_snapshot"] == "waiting"
+    assert payload["adoption"] == {"residue": 0, "reason": "residue_exceeds_drain_limit"}
+    assert service_standby.waiting_component() == "graph_snapshot"
+
+
+def test_the_standby_owns_its_adoption_so_the_warm_does_not_pay_it_twice(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """`warm_caches` adopts for an ordinary worker; a standby adopts itself."""
+    from exomem import warmup
+
+    durations: dict[str, float] = {}
+    calls: list[str] = []
+    monkeypatch.setattr(
+        service_standby, "snapshot_token", lambda root: calls.append("token") or "c1"
+    )
+    _stub_adoption(monkeypatch)
+
+    # An ordinary worker adopts through the warm and records what it owed.
+    assert warmup._adopt_graph_snapshot(tmp_path, durations) is True
+    assert durations == {"graph_snapshot_residue": 0.0}
+
+    service_standby.enter_standby()
+    standby_durations: dict[str, float] = {}
+    assert warmup._adopt_graph_snapshot(tmp_path, standby_durations) is False
+    assert standby_durations == {}
+    # The standby's own step is the one that runs, and it reports the residue.
+    assert service_standby.prove_graph_snapshot(tmp_path) is True
+    assert service_standby.adoption_record() == {"residue": 0, "reason": "adopted"}

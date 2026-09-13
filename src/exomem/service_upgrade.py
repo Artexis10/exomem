@@ -155,10 +155,9 @@ def _transition_budget() -> float:
     pauses anything, so the operator's patience has to cover that warm budget as
     well as the cutover budget, with room for a busy host.
     """
-    from .service_manager import DEFAULT_STANDBY_WARM_SECONDS, standby_warm_budget
+    from .service_manager import standby_warm_budget
 
-    warm = standby_warm_budget() if DEFAULT_STANDBY_WARM_SECONDS else 0.0
-    return warm + 120.0
+    return standby_warm_budget() + 120.0
 
 
 def _wait_for_target(

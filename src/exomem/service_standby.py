@@ -41,6 +41,7 @@ _lock = threading.Lock()
 _standby = False
 _promoted = False
 _proved_token: str | None = None
+_adoption: Any = None
 _activation: Any = None
 
 
@@ -120,24 +121,27 @@ def readiness_payload() -> dict[str, Any]:
         "components": components,
         "cutover_ready": all(state == "ready" for state in components.values()),
         "standby": in_standby(),
+        # An adoption that succeeded but owes a bounded drain is not the same
+        # event as a clean one, and the operator needs to see which happened.
+        "adoption": adoption_record(),
     }
 
 
 def snapshot_token(vault_root: Path) -> str | None:
-    """Prove the published graph snapshot read-only and name the checkpoint.
+    """Name the checkpoint of the inherited snapshot, over a maintenance read.
 
-    This is the graph module's own validated read transaction: it runs the cold
-    source-bytes and resolver-topology proof for a process that did not publish
-    the sidecar, and declines rather than repair.  Nothing is written, opened for
-    write, or published; the connection is closed before returning.
+    Deliberately ``require_current_projection=False``: an adoption that took on
+    a bounded residue leaves the availability marker withdrawn until the repair
+    drains, so a public read refuses exactly the snapshot this has to identify.
+    Nothing is written, opened for write, or published.
     """
     from . import epistemic_graph
 
     try:
         index = epistemic_graph.EpistemicGraphIndex(Path(vault_root))
-        conn = index._open_read_snapshot()
+        conn = index._open_read_snapshot(require_current_projection=False)
     except Exception:  # noqa: BLE001 - an unprovable snapshot is a waiting component
-        log.warning("standby graph snapshot proof failed", exc_info=True)
+        log.warning("standby graph snapshot read failed", exc_info=True)
         return None
     if conn is None:
         return None
@@ -165,12 +169,49 @@ def snapshot_token(vault_root: Path) -> str | None:
 
 
 def prove_graph_snapshot(vault_root: Path) -> bool:
-    """Run the read-only cold proof and retain the checkpoint it proved."""
-    global _proved_token
-    token = snapshot_token(vault_root)
+    """Prove and adopt the inherited snapshot, retaining what it established.
+
+    Adoption is what makes the promoted worker's first governed write
+    incremental: it proves the sidecar against disk over a maintenance read and
+    makes that checkpoint this process's delta origin. A bounded residue -- the
+    deferred writes the outgoing worker left behind -- is adopted too, enqueued
+    as incremental repair with the availability marker left withdrawn, and
+    reported so an operator sees an adoption that still owes a drain.
+
+    Must run after the recall registry is seeded and after the resolver step:
+    `adopt_recall_origin` refuses a cold scope, and the bounded repair needs the
+    resolver at this exact checkpoint.
+    """
+    global _proved_token, _adoption
+    from . import epistemic_graph
+
+    try:
+        adoption = epistemic_graph.EpistemicGraphIndex(
+            Path(vault_root)
+        ).adopt_published_snapshot()
+    except Exception:  # noqa: BLE001 - an unadopted snapshot is a waiting component
+        log.warning("standby graph snapshot adoption failed", exc_info=True)
+        adoption = epistemic_graph.SnapshotAdoption(False, reason="adoption_raised")
+    token = snapshot_token(vault_root) if adoption.adopted else None
     with _lock:
+        _adoption = adoption
         _proved_token = token
-    return token is not None
+    log.info(
+        "standby snapshot adoption adopted=%s residue=%d reason=%s",
+        adoption.adopted,
+        len(adoption.residue),
+        adoption.reason,
+    )
+    return bool(adoption.adopted and token is not None)
+
+
+def adoption_record() -> dict[str, Any]:
+    """What the snapshot adoption established, for the cutover readiness block."""
+    with _lock:
+        adoption = _adoption
+    if adoption is None:
+        return {"residue": 0, "reason": "not_attempted"}
+    return {"residue": len(adoption.residue), "reason": adoption.reason}
 
 
 def proved_checkpoint() -> str | None:
@@ -237,11 +278,20 @@ def warm(vault_root: Path) -> None:
     unready component stays ``waiting`` and the supervisor's warm budget decides
     what happens next.
     """
-    from . import mode, readiness
+    from . import freshness, mode, readiness
 
     vault_root = Path(vault_root)
     readiness.begin_warm()
     try:
+        # Seed this process's recall registry before anything reads it. The
+        # registry is process-local module state, so a standby seeding it
+        # publishes nothing; without it `adopt_recall_origin` refuses a cold
+        # scope and the promoted worker pays the whole-vault pass adoption
+        # exists to remove.
+        try:
+            freshness.rebaseline(vault_root)
+        except Exception:  # noqa: BLE001 - an unseeded scope only costs adoption
+            log.warning("standby recall registry seed failed", exc_info=True)
         if prove_retrieval_catalog(vault_root):
             readiness.mark_ready("retrieval_catalog")
             try:
@@ -258,15 +308,14 @@ def warm(vault_root: Path) -> None:
                 "standby retrieval catalog is not current; the serving worker's "
                 "repair owner has to publish one before this candidate can cut over"
             )
+        # After the seed and after the resolver `warm_caches` built: the
+        # ordering is what makes the adoption's origin acceptable.
+        prove_graph_snapshot(vault_root)
         _preload_models()
     except Exception:  # noqa: BLE001 - a standby warm must never die loudly
         log.warning("standby warm-up crashed", exc_info=True)
     finally:
         readiness.finish_warm()
-    try:
-        prove_graph_snapshot(vault_root)
-    except Exception:  # noqa: BLE001 - an unproven snapshot is a waiting component
-        log.warning("standby graph snapshot proof crashed", exc_info=True)
 
 
 def start_warm(vault_root: Path) -> threading.Thread:
@@ -330,9 +379,10 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
 
 def reset_for_tests() -> None:
     """Clear process-local standby state; intentionally public for tests."""
-    global _standby, _promoted, _proved_token, _activation
+    global _standby, _promoted, _proved_token, _adoption, _activation
     with _lock:
         _standby = False
         _promoted = False
         _proved_token = None
+        _adoption = None
         _activation = None

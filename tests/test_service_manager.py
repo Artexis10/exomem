@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -749,3 +750,73 @@ def test_systemd_identity_reports_every_environment_file(tmp_path):
         str(tmp_path / "two.env"),
     ]
     assert identity["environment_file"] == str(tmp_path / "one.env")
+
+
+def test_a_client_that_disconnects_after_the_acknowledgement_does_not_stop_the_transition(
+    tmp_path,
+):
+    """The transition outlives its control connection.
+
+    Acknowledging rather than awaiting only helps if the work survives the
+    client going away, and the recorded outcome has to be there for whoever
+    polls next.
+    """
+    from exomem import service_upgrade
+
+    module = _manager()
+
+    async def scenario():
+        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
+        released = asyncio.Event()
+
+        async def slow_standby(candidate, timeout):
+            runtime.events.append("start-standby")
+            await released.wait()
+            return "standby-upstream"
+
+        runtime.start_standby = slow_standby
+        directory = tmp_path / "managed"
+        async with await module.control_server(directory / "control.sock", manager):
+            reader, writer = await asyncio.open_unix_connection(
+                str(directory / "control.sock")
+            )
+            request = {"command": "upgrade", "target": target}
+            writer.write(json.dumps(request).encode() + b"\n")
+            await writer.drain()
+            accepted = json.loads(await asyncio.wait_for(reader.readline(), 5))
+            assert accepted["accepted"] is True
+            # The operator's terminal goes away mid-transition.
+            writer.close()
+            await writer.wait_closed()
+
+            released.set()
+            async with asyncio.timeout(10):
+                while True:
+                    status = await asyncio.to_thread(
+                        service_upgrade.control, directory, {"command": "status"}
+                    )
+                    recorded = status.get("last_transition")
+                    if isinstance(recorded, dict):
+                        break
+                    await asyncio.sleep(0.02)
+            assert recorded["transition"] == accepted["transition"]
+            assert recorded["ok"] is True
+            assert recorded["handoff"]["standby"] == "ready"
+            assert manager.records.active() == target
+
+    asyncio.run(scenario())
+
+
+def test_environment_warnings_reach_a_discarded_handoff_record(tmp_path):
+    async def scenario():
+        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
+        runtime.standby_failure = "budget"
+        runtime.environment_warnings = ["unreadable: service.env"]
+        result = await manager.upgrade(target)
+        assert result["ok"] is True
+        # A stale inherited environment is exactly what the fallback path has to
+        # report; it must not be visible only on the path that promoted.
+        assert result["handoff"]["standby"] == "discarded"
+        assert result["handoff"]["environment"] == ["unreadable: service.env"]
+
+    asyncio.run(scenario())

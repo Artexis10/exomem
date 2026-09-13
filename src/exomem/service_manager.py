@@ -324,6 +324,18 @@ class Supervisor:
             "last_transition": self.last_transition,
         }
 
+    def _environment_notes(self, handoff: dict[str, Any]) -> dict[str, Any]:
+        """Carry an unreadable environment file into every handoff record.
+
+        A child that silently inherited a stale environment is the failure this
+        read exists to prevent, so the note belongs on the discarded and
+        unsupported paths as much as on the one that promoted.
+        """
+        warnings = getattr(self.runtime, "environment_warnings", None)
+        if warnings:
+            handoff["environment"] = list(warnings)
+        return handoff
+
     async def _warm_standby(
         self, target: dict[str, Any], *, resume: bool
     ) -> tuple[dict[str, Any], Any]:
@@ -338,32 +350,36 @@ class Supervisor:
         if resume:
             # A recorded transition has already stopped its worker; there is
             # nothing left to warm beside.
-            return {"standby": "unsupported", "reason": "resuming a recorded transition"}, None
+            return self._environment_notes(
+                {"standby": "unsupported", "reason": "resuming a recorded transition"}
+            ), None
         if not getattr(self.runtime, "standby_capable", False):
-            return {"standby": "unsupported", "reason": "target release has no standby mode"}, None
+            return self._environment_notes(
+                {"standby": "unsupported", "reason": "target release has no standby mode"}
+            ), None
         try:
             standby = await self.runtime.start_standby(
                 target, timeout=self.standby_warm_timeout
             )
         except TimeoutError:
             await self._discard_standby("pending")
-            return {
-                "standby": "discarded",
-                "reason": "warm budget expired",
-                "waiting": getattr(self.runtime, "standby_waiting", None),
-            }, None
+            return self._environment_notes(
+                {
+                    "standby": "discarded",
+                    "reason": "warm budget expired",
+                    "waiting": getattr(self.runtime, "standby_waiting", None),
+                }
+            ), None
         except Exception:  # noqa: BLE001 - a candidate failure never touches the serving worker
             await self._discard_standby("pending")
-            return {
-                "standby": "discarded",
-                "reason": "candidate could not warm",
-                "waiting": getattr(self.runtime, "standby_waiting", None),
-            }, None
-        handoff: dict[str, Any] = {"standby": "ready"}
-        warnings = getattr(self.runtime, "environment_warnings", None)
-        if warnings:
-            handoff["environment"] = list(warnings)
-        return handoff, standby
+            return self._environment_notes(
+                {
+                    "standby": "discarded",
+                    "reason": "candidate could not warm",
+                    "waiting": getattr(self.runtime, "standby_waiting", None),
+                }
+            ), None
+        return self._environment_notes({"standby": "ready"}), standby
 
     async def _discard_standby(self, candidate: Any) -> None:
         """Stop a candidate without ever signalling the worker that is serving.
