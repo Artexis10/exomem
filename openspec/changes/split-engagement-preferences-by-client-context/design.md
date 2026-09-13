@@ -22,7 +22,7 @@ The one-way upgrade is safe for the 0.81.0 reader: its strict shape check raises
 
 ### Context tier in precedence
 
-Effective prominence resolves from a valid operator environment override, then the saved value for the request's context, then the saved identity-wide value, then legacy machine configuration, then the surface default. The resolved payload reports the context and a distinct `preference:context` source so bootstrap, workflow capture and the envelope can show which value applied. A conflicting set or clear under an operator override is refused before writing, as today.
+Effective prominence resolves from a valid operator environment override, then the saved value for the request's context, then the saved identity-wide value, then legacy machine configuration, then the surface default. The resolved payload reports the context and a distinct `preference:context` source so bootstrap, workflow capture and the envelope can show which value applied. A conflicting set under an operator override is refused before writing, as today. A clear proceeds under an override and reports it: refusing it would leave saved context values unremovable on a pinned deployment while protecting nothing, since the operator level wins regardless.
 
 ### Canonical operation
 
