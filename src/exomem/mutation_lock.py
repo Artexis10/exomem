@@ -1955,6 +1955,23 @@ class VaultMutationCoordinator:
             raise ValueError(
                 "metadata-free holds are limited to reserved-state coordination"
             )
+        if request_id is None:
+            # Every background holder -- the file watcher's guard sites, the
+            # media worker's commits, startup media reconciliation -- has no
+            # request to correlate with, and used to publish the shared literal
+            # `untracked` through `_safe_label`. Two concurrent background
+            # holders were then indistinguishable, and a long-holder warning
+            # named none of them. Mint one opaque id PER ACQUISITION instead:
+            # content-free by construction (a random hex string identifies
+            # nothing about the vault, the caller, or the work), and minted
+            # here rather than at a dozen call sites so a background holder
+            # added later cannot silently rejoin the shared label. A re-entrant
+            # hold returns through the depth fast path below without publishing
+            # anything, so the outer acquisition's id stands -- correct, since
+            # that is one acquisition of the boundary.
+            # `untracked` survives as what it should always have meant -- a
+            # holder record whose label could not be read at all.
+            request_id = uuid.uuid4().hex
         timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         if timeout < 0:
             raise ValueError("mutation lock timeout must be non-negative")

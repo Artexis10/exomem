@@ -4555,3 +4555,210 @@ def test_terminal_persistence_failure_precedes_the_derived_acknowledgement(
     assert replay["status"] == "committed"
     assert calls == [1]
     assert target.read_text(encoding="utf-8") == "# Ack\n"
+
+
+# --- Bounded startup sweep of never-retried pending receipts -----------------
+#
+# `_prune_expired` deletes only terminal rows, and `_abandon_if_dead` is reached
+# only when the identical identity is retried. A `pending`/`reserved`/`executing`
+# row left by a process that died therefore has no resolver at all: the personal
+# cell accumulated thirteen of them, the oldest fourteen days old. These pin the
+# bounded start-of-process sweep that resolves exactly the provably dead ones.
+
+
+def _seed_idempotency_row(
+    database: Path,
+    key: str,
+    *,
+    state: str = "pending",
+    owner: str | None,
+    updated_at: float,
+) -> None:
+    """Write one non-terminal row straight into an existing receipt store."""
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO mutations(key, digest, state, result, updated_at, owner, "
+            "attempt_id, commit_token, commit_secret) "
+            "VALUES (?, 'digest', ?, NULL, ?, ?, ?, 'token', NULL)",
+            (key, state, updated_at, owner, owner),
+        )
+
+
+def _row_state(database: Path, key: str) -> tuple[str, object] | None:
+    with sqlite3.connect(database) as conn:
+        return conn.execute(
+            "SELECT state, result FROM mutations WHERE key = ?", (key,)
+        ).fetchone()
+
+
+def test_startup_sweep_resolves_pending_rows_whose_owner_is_provably_dead(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state" / "idempotency.sqlite"
+    IdempotencyStore(database)
+    # No owner lock file was ever written for this owner, so the existing
+    # liveness probe proves it dead without guessing.
+    _seed_idempotency_row(database, "dead:one", owner="4242:deadbeefdeadbeef", updated_at=1.0)
+
+    swept = IdempotencyStore(database)
+
+    state, result = _row_state(database, "dead:one")
+    assert state == "completed"
+    assert result == writer_lease_module._OUTCOME_UNKNOWN_PAYLOAD
+    sweep = swept.status_summary()["start_sweep"]
+    assert sweep == {
+        "ran": True,
+        "examined": 1,
+        "resolved": 1,
+        "retained": 0,
+        "limit_reached": False,
+    }
+
+
+def test_startup_sweep_never_touches_a_row_whose_owner_may_be_alive(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state" / "idempotency.sqlite"
+    IdempotencyStore(database)
+    owner = "4243:livelivelivelive"
+    handle = writer_lease_module._acquire_own_owner_lock(database.parent, owner)
+    assert handle is not None, "the fixture needs a genuinely held owner lock"
+    _seed_idempotency_row(database, "live:one", owner=owner, updated_at=1.0)
+
+    try:
+        swept = IdempotencyStore(database)
+    finally:
+        handle.close()
+
+    assert _row_state(database, "live:one")[0] == "pending"
+    sweep = swept.status_summary()["start_sweep"]
+    assert sweep["resolved"] == 0
+    assert sweep["retained"] == 1
+    # The stale-age diagnostic stays honest about what was left behind.
+    assert swept.status_summary()["pending"] == 1
+
+
+def test_startup_sweep_is_bounded_and_takes_the_oldest_rows_first(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state" / "idempotency.sqlite"
+    IdempotencyStore(database)
+    bound = writer_lease_module._IDEMPOTENCY_START_SWEEP_LIMIT
+    for index in range(bound + 3):
+        _seed_idempotency_row(
+            database,
+            f"dead:{index:04d}",
+            owner=f"42{index:02d}:deadbeefdeadbeef",
+            updated_at=float(index),
+        )
+
+    swept = IdempotencyStore(database)
+
+    sweep = swept.status_summary()["start_sweep"]
+    assert sweep["examined"] == bound
+    assert sweep["resolved"] == bound
+    assert sweep["limit_reached"] is True
+    # Oldest first: the three youngest rows are the ones still waiting.
+    assert _row_state(database, "dead:0000")[0] == "completed"
+    for index in range(bound, bound + 3):
+        assert _row_state(database, f"dead:{index:04d}")[0] == "pending"
+    assert swept.status_summary()["pending"] == 3
+
+
+def test_startup_sweep_reads_a_released_store_without_changing_its_schema(
+    tmp_path: Path,
+) -> None:
+    """A 0.82.0 store carries every column the sweep reads; nothing migrates."""
+    database = tmp_path / "state" / "idempotency.sqlite"
+    released = IdempotencyStore(database)
+    with sqlite3.connect(database) as conn:
+        before = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'mutations'").fetchone()
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(mutations)").fetchall()}
+    assert columns == {
+        "key",
+        "digest",
+        "state",
+        "result",
+        "updated_at",
+        "owner",
+        "attempt_id",
+        "commit_token",
+        "commit_secret",
+    }
+    del released
+    _seed_idempotency_row(database, "dead:legacy", owner="4244:deadbeefdeadbeef", updated_at=1.0)
+
+    IdempotencyStore(database)
+
+    with sqlite3.connect(database) as conn:
+        after = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'mutations'").fetchone()
+    assert after == before
+    assert _row_state(database, "dead:legacy")[0] == "completed"
+
+
+def test_startup_sweep_counts_stay_content_free_in_coordination_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "state" / "idempotency.sqlite"
+    IdempotencyStore(database)
+    _seed_idempotency_row(
+        database, "explicit:secret-note-title", owner="4245:deadbeefdeadbeef", updated_at=1.0
+    )
+
+    summary = IdempotencyStore(database).status_summary()
+
+    assert "secret-note-title" not in json.dumps(summary)
+    assert set(summary["start_sweep"]) == {
+        "ran",
+        "examined",
+        "resolved",
+        "retained",
+        "limit_reached",
+    }
+
+
+def test_startup_sweep_leaves_an_executing_row_for_its_evidence_bearing_retry(
+    tmp_path: Path,
+) -> None:
+    """A dead owner's `executing` row can still be PROVEN committed.
+
+    Only the retry path carries `commit_evidence`, and only with it can
+    `_abandon_if_dead` promote such a row to `canonically_committed` and replay
+    its terminal. A sweep reaping it first would resolve the same row to
+    outcome-unknown, destroying that proof and sending the caller off to resend
+    a write that already landed.
+    """
+    database = tmp_path / "state" / "idempotency.sqlite"
+    IdempotencyStore(database)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO mutations(key, digest, state, result, updated_at, owner, "
+            "attempt_id, commit_token, commit_secret) "
+            "VALUES ('proved:one', 'digest', 'executing', NULL, 1.0, ?, ?, 'token', ?)",
+            ("4246:deadbeefdeadbeef", "4246:deadbeefdeadbeef", sqlite3.Binary(b"s" * 32)),
+        )
+
+    swept = IdempotencyStore(database)
+
+    # Untouched by the sweep, and not counted as work it declined either --
+    # `executing` is outside the swept set entirely.
+    assert _row_state(database, "proved:one")[0] == "executing"
+    assert swept.status_summary()["start_sweep"] == {
+        "ran": True,
+        "examined": 0,
+        "resolved": 0,
+        "retained": 0,
+        "limit_reached": False,
+    }
+
+    # The retry that CAN read the commit receipt still promotes and replays it.
+    replayed = swept.run(
+        "proved:one",
+        "digest",
+        lambda: pytest.fail("a proven canonical commit must never re-run its leaf"),
+        commit_evidence=lambda *_args: True,
+        resume_canonically_committed=lambda _stored: {"canonical": "resumed"},
+    )
+
+    assert replayed == {"canonical": "resumed"}
+    assert _row_state(database, "proved:one")[0] == "completed"

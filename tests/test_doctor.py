@@ -98,6 +98,18 @@ def test_observability_check_warns_on_unparseable_jsonl_tail(
     assert "queries.jsonl" in check.message
 
 
+#: The start-of-process receipt sweep's report for a store that opened on an
+#: empty table -- what every store in these tests opens on, because the rows
+#: below are seeded after construction.
+_NOTHING_SWEPT = {
+    "ran": True,
+    "examined": 0,
+    "resolved": 0,
+    "retained": 0,
+    "limit_reached": False,
+}
+
+
 @pytest.fixture()
 def _isolated_lease_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from exomem import writer_lease as writer_lease_module
@@ -147,6 +159,9 @@ def test_idempotency_store_check_warns_on_stale_live_receipt(_isolated_lease_man
         "pending": 3,
         "abandoned": 0,
         "oldest_pending_age_seconds": pytest.approx(time.time(), abs=1.0),
+        # The store was constructed before these rows were seeded, so its
+        # start-of-process sweep found nothing to reap.
+        "start_sweep": _NOTHING_SWEPT,
     }
     assert "live-key-secret" not in json.dumps(check.details)
     assert "live-digest-secret" not in json.dumps(check.details)
@@ -173,6 +188,7 @@ def test_idempotency_store_check_warns_on_completed_outcome_unknown(
         "pending": 0,
         "abandoned": 1,
         "oldest_pending_age_seconds": None,
+        "start_sweep": _NOTHING_SWEPT,
     }
     assert "unknown-key-secret" not in json.dumps(check.details)
     assert "unknown-digest-secret" not in json.dumps(check.details)
