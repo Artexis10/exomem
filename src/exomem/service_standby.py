@@ -179,25 +179,92 @@ def proved_checkpoint() -> str | None:
         return _proved_token
 
 
+def prove_retrieval_catalog(vault_root: Path) -> bool:
+    """Prove the maintained lexical catalog current, read-only.
+
+    A standby must never reconcile or repair the catalog: ``ensure_fresh``
+    discards verified state and mutates the live sidecar under the per-vault
+    publication barrier, and ``request_repair`` schedules a publication — both
+    belong to the worker that is still serving, which is the single repair owner
+    for this vault. The standby therefore only asks whether the catalog is
+    already current, with repair scheduling explicitly off. An uncurrent catalog
+    leaves ``lexical`` waiting; the serving worker's own repair owner is the only
+    thing allowed to fix it, and the warm budget covers the wait.
+    """
+    from . import freshness, lexstore
+
+    try:
+        if not lexstore.maintained_content_index_enabled():
+            # No maintained content index to prove; nothing gates retrieval.
+            return True
+        return lexstore.runtime_retrieval_catalog_current(
+            Path(vault_root),
+            require_live_projection=freshness.event_indexes_enabled(),
+            schedule_repair=False,
+        )
+    except Exception:  # noqa: BLE001 - an unprovable catalog is a waiting component
+        log.warning("standby retrieval catalog proof failed", exc_info=True)
+        return False
+
+
+def _preload_models() -> None:
+    """Load the models a promoted worker would otherwise fault in per request."""
+    from . import readiness
+
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") or not _preload_allowed():
+        # Nothing to load, or this mode keeps models lazy. Mark the component so
+        # a promoted process does not defer on a preload that never runs.
+        readiness.mark_ready("embeddings")
+        return
+    from . import embeddings
+
+    try:
+        embeddings.get_model().encode(["warm"])
+    except Exception:  # noqa: BLE001 - a failed preload leaves the component waiting
+        log.warning("standby embedding preload failed", exc_info=True)
+        return
+    readiness.mark_ready("embeddings")
+
+
 def warm(vault_root: Path) -> None:
     """Warm a standby to cutover readiness without owning any state.
 
-    Order follows the product contract: the catalog and the optional model
-    preloads run through the ordinary warm, then the graph snapshot is proved
-    against disk.  Never raises; an unready component stays ``waiting`` and the
-    supervisor's warm budget decides what happens next.
+    Deliberately not :func:`warmup.warm_all`: that path reconciles or schedules
+    repair of the lexical catalog, which is a publication this process must not
+    make while another worker owns the vault. Everything here reads: the catalog
+    is proved, the rebuildable caches are populated in memory, the models are
+    loaded, and the graph snapshot is proved against disk. Never raises; an
+    unready component stays ``waiting`` and the supervisor's warm budget decides
+    what happens next.
     """
-    from . import readiness
+    from . import mode, readiness
 
+    vault_root = Path(vault_root)
     readiness.begin_warm()
     try:
-        warmup.warm_all(Path(vault_root))
+        if prove_retrieval_catalog(vault_root):
+            readiness.mark_ready("retrieval_catalog")
+            try:
+                warmup.warm_caches(
+                    vault_root,
+                    preload_models=_preload_allowed(),
+                    preload_cpu_caches=mode.preload_cpu_caches(),
+                )
+            except Exception:  # noqa: BLE001 - caches are rebuildable on demand
+                log.warning("standby cache warm-up failed", exc_info=True)
+            readiness.mark_ready("lexical")
+        else:
+            log.info(
+                "standby retrieval catalog is not current; the serving worker's "
+                "repair owner has to publish one before this candidate can cut over"
+            )
+        _preload_models()
     except Exception:  # noqa: BLE001 - a standby warm must never die loudly
         log.warning("standby warm-up crashed", exc_info=True)
     finally:
         readiness.finish_warm()
     try:
-        prove_graph_snapshot(Path(vault_root))
+        prove_graph_snapshot(vault_root)
     except Exception:  # noqa: BLE001 - an unproven snapshot is a waiting component
         log.warning("standby graph snapshot proof crashed", exc_info=True)
 

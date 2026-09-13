@@ -162,3 +162,78 @@ def test_readiness_payload_is_absent_outside_standby_and_present_after_promotion
     payload = service_standby.readiness_payload()
     assert payload["standby"] is False
     assert payload["cutover_ready"] is True
+
+
+def test_the_real_standby_warm_never_publishes_index_state(monkeypatch, tmp_path: Path) -> None:
+    """A standby proves the catalog; it never reconciles or repairs it.
+
+    `ensure_fresh` discards verified state and mutates the live sidecar under
+    the per-vault publication barrier, and `request_repair` schedules a
+    publication. Both belong to the worker still serving. This runs the real
+    `warm()` and pins that neither is reached and no sidecar byte changes.
+    """
+    from exomem import lexstore, state_paths
+
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base" / "Notes").mkdir(parents=True)
+    (vault / "Knowledge Base" / "Notes" / "one.md").write_text(
+        "---\ntype: note\n---\n\n# One\n\nBody.\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+
+    forbidden: list[str] = []
+    monkeypatch.setattr(
+        lexstore, "ensure_fresh", lambda root: forbidden.append("ensure_fresh")
+    )
+    monkeypatch.setattr(
+        lexstore, "request_repair", lambda root: forbidden.append("request_repair")
+    )
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: None)
+
+    def _fingerprint() -> dict[str, bytes]:
+        import hashlib
+
+        state = state_paths.vault_state_dir(vault)
+        prints: dict[str, bytes] = {}
+        if not state.exists():
+            return prints
+        for path in sorted(state.rglob("*")):
+            if path.is_file():
+                prints[str(path.relative_to(state))] = hashlib.sha256(
+                    path.read_bytes()
+                ).digest()
+        return prints
+
+    before = _fingerprint()
+    service_standby.enter_standby()
+    service_standby.warm(vault)
+
+    assert forbidden == [], forbidden
+    assert _fingerprint() == before, "a standby must not publish index state"
+
+
+def test_an_uncurrent_catalog_leaves_lexical_as_the_waiting_component(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "prove_retrieval_catalog", lambda root: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    service_standby.enter_standby()
+    service_standby.warm(tmp_path)
+    assert service_standby.waiting_component() == "lexical"
+    assert service_standby.readiness_payload()["cutover_ready"] is False
+
+
+def test_the_catalog_proof_never_schedules_a_repair(monkeypatch, tmp_path: Path) -> None:
+    from exomem import lexstore
+
+    seen: list[dict] = []
+
+    def _current(root, *, require_live_projection=True, schedule_repair=True):
+        seen.append({"schedule_repair": schedule_repair})
+        return True
+
+    monkeypatch.setattr(lexstore, "maintained_content_index_enabled", lambda: True)
+    monkeypatch.setattr(lexstore, "runtime_retrieval_catalog_current", _current)
+    assert service_standby.prove_retrieval_catalog(tmp_path) is True
+    assert seen == [{"schedule_repair": False}]
