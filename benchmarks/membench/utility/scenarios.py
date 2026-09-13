@@ -95,7 +95,7 @@ def _steps_sentence(state: ProjectState) -> str:
     ordered = ", then ".join(state.steps)
     return (
         f"Project {state.project} configuration procedure: {ordered}. "
-        f"Constraint: {state.constraint} must be satisfied first."
+        f"Constraint: {state.constraint}. This prerequisite must be satisfied first."
     )
 
 
