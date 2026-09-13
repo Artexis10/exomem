@@ -119,6 +119,27 @@ other agents. The optional custom-instruction blocks below help the assistant
 follow the policy, or provide instructions when that tool is unavailable; they
 do not persist a server preference.
 
+### The nudge hooks read your own machine, not the server
+
+A level saved through `configure_memory` is stored on the **server**, per
+identity. The capture and retrieve nudge hooks are standalone copies installed
+into a hook directory on your **client** machine, and they resolve from
+`EXOMEM_PROMINENCE` and that machine's exomem configuration file only. They
+cannot ask the service: they do not import the package, and a client talking to
+a service on another box has no credential to ask with.
+
+So on Claude Code and Codex the two can disagree. Saving `off` through the agent
+makes every response say "never write on your own initiative" while the Stop
+hook on your laptop keeps injecting the capture reminder on its own timer. That
+is why `bootstrap()` and `configure_memory` serve a `hook_cadence` block to
+those two clients and to no others: it says what the hooks read and that the
+saved level is not it.
+
+Run `exomem prominence <level>` **on the machine running the hooks** to change
+the nudge cadence. Where the server and the client are the same machine, that
+one command settles both, because the CLI writes the file the hooks read and the
+server resolves that file as its last rung before the client default.
+
 ---
 
 ## Copy-paste blocks

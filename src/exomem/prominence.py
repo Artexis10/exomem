@@ -29,6 +29,17 @@ the surface default. The context — `coding` or `conversation` — is derived f
 the detected client surface, so one identity can run Balanced while coding and
 Maximal in a conversational client. See `context_for_surface`.
 
+One exception sits at the last rung: when the preference record exists but cannot
+be READ, the fallback is the generic default rather than the surface default, and
+`capture_gate` withholds proactive writes for as long as that holds. An unreadable
+record is not consent, and the surface default is `maximal` on exactly the clients
+where the user has no hook to notice it. See `_unreadable_preference_applies`.
+
+Note what this module does NOT do: it never promises that a saved level reaches the
+standalone nudge hooks. Those run on the client machine and read only the operator
+environment and that machine's config file, which a server has no way to write. A
+hook-capable client is told so instead — see `hook_cadence`.
+
 The config file is deliberately the SAME one `mode` uses. It is a fixed, shared path
 for the same reason documented in `mode.config_path`: the MCP server and the CLI are
 often different OS users, and `bootstrap` serves the active level from the server. A
@@ -119,6 +130,12 @@ WEB_DEFAULT_PROMINENCE = "maximal"
 #: Surfaces that cannot run hooks: no filesystem to install into, no turn-level
 #: re-arming. Everything here defaults to `WEB_DEFAULT_PROMINENCE`.
 HOOKLESS_SURFACES = frozenset({"web", "hosted", "chatgpt", "claude-ai", "openai"})
+
+#: Surfaces that ship standalone nudge hooks onto the CLIENT machine. These are
+#: the only ones where the saved preference and the actual nudge cadence can
+#: disagree, because the hooks run where the client is and the preference lives
+#: where the server is. See `hook_cadence`.
+HOOK_CAPABLE_SURFACES = frozenset({"claude-code", "codex"})
 
 #: Engagement contexts. Exactly two, both derived from the detected surface: a
 #: saved level may differ between a coding client and a conversational one. The
@@ -516,6 +533,15 @@ def resolve(surface: str | None = None) -> str:
     if raw not in (None, ""):
         log.warning("ignoring invalid %s=%r in config; using default", _CONFIG_KEY, raw)
 
+    if _saved_preference().get("unavailable"):
+        # An unreadable record must never hand a user MORE proactivity than they
+        # last chose. The client default is `maximal` on hookless surfaces, so
+        # falling through to it turned an identity that may well have saved `off`
+        # into the eagerest level Exomem has. The generic default is the honest
+        # floor: the record is gone, so the client's own default cannot be the
+        # thing that widens it. `capture_gate` withholds proactive writes on top.
+        return DEFAULT_PROMINENCE
+
     return default_for_surface(surface)
 
 
@@ -525,17 +551,43 @@ def contract(level: str | None = None, surface: str | None = None) -> Prominence
     return CONTRACTS[resolved_level]
 
 
-def capture_gate(level: str | None = None, surface: str | None = None) -> dict:
-    """Return one level's detached capture gate for workflow-contract consumers."""
-    resolved_level = normalize(level) or resolve(surface)
+def _gate_for(level: str) -> dict:
+    """One level's capture gate, straight from the template and nothing else."""
     return {
         kind: {
             "authored_explicit": rule["authored_explicit"],
             "proactive_permitted": rule["proactive_permitted"],
             "proactive_requires": list(rule["proactive_requires"]),
         }
-        for kind, rule in _CAPTURE_EFFECTIVE_TEMPLATE[resolved_level].items()
+        for kind, rule in _CAPTURE_EFFECTIVE_TEMPLATE[level].items()
     }
+
+
+def _unreadable_preference_applies(surface: str | None = None) -> bool:
+    """True when an unreadable record is what this request actually resolved on.
+
+    Cheap first: a request whose record read fine carries no `unavailable`
+    diagnostic at all, so the common path never touches the config file.
+    """
+    if not _saved_preference().get("unavailable"):
+        return False
+    return _active_source(surface) == "preference:unavailable"
+
+
+def capture_gate(level: str | None = None, surface: str | None = None) -> dict:
+    """Return the capture gate this request is actually under.
+
+    Normally that is one level's detached gate. The exception is an unreadable
+    preference record: the level resolves to the generic default so the recall
+    and narration contract stays usable, but proactive WRITES are withheld,
+    because the identity behind the missing record may be one that saved `off`
+    and an unreadable record is not consent to start writing on its behalf.
+    `capture_policy_projection` documents the levels and is left alone.
+    """
+    resolved_level = normalize(level) or resolve(surface)
+    if _unreadable_preference_applies(surface):
+        resolved_level = "off"
+    return _gate_for(resolved_level)
 
 
 def effective_capture(authored_capture: dict[str, str], prominence_level: str) -> dict:
@@ -571,7 +623,7 @@ def effective_capture(authored_capture: dict[str, str], prominence_level: str) -
 
 def capture_policy_projection() -> dict:
     """Return the complete, detached level-to-effective-capture table."""
-    return {level: capture_gate(level) for level in CANON}
+    return {level: _gate_for(level) for level in CANON}
 
 
 def hook_env(level: str | None = None, surface: str | None = None) -> dict[str, str]:
@@ -593,6 +645,9 @@ def resolved(surface: str | None = None) -> dict:
         "levels": list(CANON),
         "change_with": "exomem prominence <level>",
     }
+    cadence = hook_cadence(applied_surface)
+    if cadence is not None:
+        result["hook_cadence"] = cadence
     if _REQUEST_PREFERENCE.get() is not None:
         result["preference"] = {
             "scope": "principal-and-vault",
@@ -600,6 +655,35 @@ def resolved(surface: str | None = None) -> dict:
             "operator_override": normalize(os.environ.get(_PROMINENCE_ENV)),
         }
     return result
+
+
+def hook_cadence(surface: str | None) -> dict | None:
+    """What the standalone nudge hooks read, for a client that runs them.
+
+    The saved preference lives on the SERVER, per identity. The capture and
+    retrieve nudges are standalone copies deployed into a hook directory on the
+    CLIENT machine, and they resolve from `EXOMEM_PROMINENCE` and that machine's
+    exomem configuration file only — they cannot import this package, and on a
+    remote client there is no credential with which to ask the service. So a user
+    who saves `off` through the agent is told never to write unasked while the
+    Stop hook on their own machine keeps injecting the capture reminder.
+
+    Mirroring the saved level into the client's config file is not the fix: the
+    server writes its own machine's file, which is the client's file only when
+    the two are the same box. What IS available is honesty, so a hook-capable
+    client is told what its hooks read and how to change it where they run.
+
+    Returns None for every other surface: a client with no hooks has no cadence
+    to be out of step with, and silence is cheaper than a block saying "not
+    applicable" in a payload that is already the whole contract.
+    """
+    if not surface or surface.strip().lower() not in HOOK_CAPABLE_SURFACES:
+        return None
+    return {
+        "reads": "operator environment, then this client machine's exomem configuration file",
+        "saved_preference_reaches_hooks": False,
+        "change_with": "exomem prominence <level> on the client machine",
+    }
 
 
 def configuration_route() -> str:
@@ -613,6 +697,21 @@ def configuration_route() -> str:
     return "configure_memory: inspect first; set or clear."
 
 
+def custom_instructions_route() -> str:
+    """The setting route for a surface that serves no preference control.
+
+    A connector-only client has neither `configure_memory` nor a machine to type
+    `exomem prominence` on, so naming either is naming a route that user cannot
+    take. The copy-paste level blocks in `docs/prominence.md` are what is left,
+    and they are the route that surface was always meant to be given.
+
+    Names no agent-callable command on purpose: `_filter_bootstrap_payload`
+    deletes any served string that mentions one the active surface lacks, and a
+    route that vanished on the surface it exists for would be no route at all.
+    """
+    return "Paste the level block from the Exomem prominence guide into this client's custom instructions."
+
+
 def _active_source(surface: str | None = None) -> str:
     """Where the active level came from — useful when a setting appears not to apply."""
     if normalize(os.environ.get(_PROMINENCE_ENV)):
@@ -624,6 +723,8 @@ def _active_source(surface: str | None = None) -> str:
     raw = mode.read_config().get(_CONFIG_KEY)
     if isinstance(raw, str) and normalize(raw):
         return "config"
+    if _saved_preference().get("unavailable"):
+        return "preference:unavailable"
     return "default"
 
 

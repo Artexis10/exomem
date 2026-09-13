@@ -402,6 +402,25 @@ def test_compact_clears_the_warning_headroom(payloads):
     assert COMPACT_BYTE_CEILING - _size(payloads["compact"]) >= HEADROOM_WARNING_BYTES
 
 
+def test_a_hook_capable_client_still_clears_the_ceiling(monkeypatch):
+    """The largest compact payload is the one a Claude Code or Codex client gets.
+
+    `engagement.hook_cadence` is served only to those two, so the module fixture
+    above never measures it. Measure the worst case here instead of discovering
+    it on a laptop.
+    """
+    monkeypatch.setenv("EXOMEM_SURFACE", "claude-code")
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "Knowledge Base").mkdir()
+    size = _size(commands.op_bootstrap(root, profile="compact"))
+
+    assert "hook_cadence" in commands.op_bootstrap(root, profile="compact")["engagement"]
+    assert COMPACT_BYTE_CEILING - size >= HEADROOM_WARNING_BYTES, (
+        f"compact bootstrap for a hook-capable client is {size:,} bytes, within "
+        f"{COMPACT_BYTE_CEILING - size:,} of the {COMPACT_BYTE_CEILING:,} ceiling"
+    )
+
+
 def test_compact_is_materially_smaller_than_full(payloads):
     compact, full = _size(payloads["compact"]), _size(payloads["full"])
     saving = (full - compact) / full

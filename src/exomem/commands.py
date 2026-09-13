@@ -753,8 +753,16 @@ def op_bootstrap(
     )
     active_descriptor = _active_bootstrap_descriptor()
     active_product_names = frozenset(active_descriptor.product_commands)
-    if "configure_memory" in active_product_names:
-        engagement_policy["change_with"] = prominence_module.configuration_route()
+    # `change_with` is seeded from the CLI string, which is right for a local
+    # install and wrong for every served surface. Take it from what this surface
+    # actually offers: the agent-accessible control when it is served, and
+    # otherwise the custom-instructions block — never the command line, which a
+    # connector-only user has no machine to type on.
+    engagement_policy["change_with"] = (
+        prominence_module.configuration_route()
+        if "configure_memory" in active_product_names
+        else prominence_module.custom_instructions_route()
+    )
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     workflow_inventory = workflow_contracts_module.inventory_contracts(vault_root)

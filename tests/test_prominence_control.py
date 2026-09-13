@@ -749,3 +749,99 @@ def test_busy_boundary_refuses_a_clear_before_the_preference_is_written(
     assert refused.value.details["committed"] is False
     with request_scope(caller):
         assert prominence_preferences.inspect(vault) == settled
+
+
+# ------------------------------------------------- hook cadence and the served route
+
+
+@pytest.mark.parametrize("action", ["inspect", "set", "clear"])
+def test_configure_memory_tells_a_hook_capable_client_what_its_hooks_read(
+    vault, monkeypatch, action
+):
+    """Every arm of the control answers it, not only the one that writes.
+
+    A user asks "is it off?" as often as they set it, and the honest answer to
+    both is the same: the level you are reading is the server's, and the nudge
+    cadence on this machine is not.
+    """
+    monkeypatch.setenv("EXOMEM_SURFACE", "claude-code")
+    caller = RequestPrincipal("principal:person-a", surface="mcp")
+    with request_scope(caller):
+        before = _invoke(vault)
+        saved = _invoke(
+            vault, action="set", prominence="off", expected_revision=before["revision"]
+        )
+        if action == "inspect":
+            result = _invoke(vault)
+        elif action == "set":
+            result = saved
+        else:
+            _invoke(
+                vault,
+                action="set",
+                prominence="light",
+                expected_revision=saved["revision"],
+                context="coding",
+            )
+            latest = _invoke(vault)
+            result = _invoke(
+                vault,
+                action="clear",
+                context="coding",
+                expected_revision=latest["revision"],
+            )
+
+    assert result["engagement"]["hook_cadence"] == {
+        "reads": "operator environment, then this client machine's exomem configuration file",
+        "saved_preference_reaches_hooks": False,
+        "change_with": "exomem prominence <level> on the client machine",
+    }
+
+
+def test_configure_memory_stays_silent_about_hooks_on_a_hookless_client(vault, monkeypatch):
+    monkeypatch.setenv("EXOMEM_SURFACE", "claude-ai")
+    with request_scope(RequestPrincipal("principal:person-a", surface="mcp")):
+        result = _invoke(vault)
+
+    assert "hook_cadence" not in result["engagement"]
+
+
+def test_bootstrap_carries_the_cadence_to_a_hook_capable_client(vault, monkeypatch):
+    monkeypatch.setenv("EXOMEM_SURFACE", "codex")
+    bootstrap_command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "bootstrap")
+    with request_scope(RequestPrincipal("principal:person-a", surface="mcp")):
+        payload = writer_lease.invoke_command(bootstrap_command, vault, profile="compact")
+
+    assert payload["engagement"]["hook_cadence"]["saved_preference_reaches_hooks"] is False
+
+
+def test_a_surface_without_the_preference_control_is_taught_a_route_it_can_take(vault):
+    """The hookless surface is exactly the one that cannot run the CLI either.
+
+    Serving `exomem prominence <level>` to a claude.ai or ChatGPT connector names
+    a command that user has no machine to type it on, so the only honest route
+    left is the custom-instructions block.
+    """
+    from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
+
+    descriptor = ActiveSurfaceDescriptor(
+        surface="rest",
+        profile="hosted-alpha-agent-test",
+        tier2_enabled=False,
+        product_commands=("bootstrap", "ask_memory", "remember"),
+    )
+    with active_surface(descriptor):
+        payload = commands.op_bootstrap(vault, profile="compact")
+
+    change_with = payload["engagement"]["change_with"]
+    assert change_with == prominence.custom_instructions_route()
+    assert "custom instructions" in change_with
+    assert "exomem prominence" not in change_with
+    assert "configure_memory" not in change_with
+
+
+def test_a_surface_that_serves_the_control_still_names_it(vault):
+    payload = commands.op_bootstrap(vault, profile="compact")
+
+    assert payload["engagement"]["change_with"] == prominence.configuration_route()
+    assert payload["engagement"]["change_with"].startswith("configure_memory:")

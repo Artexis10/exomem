@@ -497,6 +497,63 @@ def saved():
         prominence._REQUEST_PREFERENCE.reset(token)
 
 
+# ------------------------------------------------------------------ hook cadence
+
+
+#: What a hook-capable client must be told, verbatim. Pinned here rather than
+#: compared to the module constant, because the point of the block is the words
+#: the agent reads out to its user: a test that asserts `X == X` would pass
+#: through any rewording, including one that stopped being true.
+EXPECTED_HOOK_CADENCE = {
+    "reads": "operator environment, then this client machine's exomem configuration file",
+    "saved_preference_reaches_hooks": False,
+    "change_with": "exomem prominence <level> on the client machine",
+}
+
+
+@pytest.mark.parametrize("surface", sorted(prominence.HOOK_CAPABLE_SURFACES))
+def test_a_hook_capable_surface_is_told_what_its_hooks_actually_read(config, surface):
+    """The saved preference lives on the SERVER; the hooks run on the client.
+
+    A user who saves `off` through the agent is told by the same response never to
+    write unasked -- while the Stop hook on their own machine keeps injecting the
+    capture reminder, because it reads a config file the server never wrote to.
+    """
+    assert prominence.resolved(surface)["hook_cadence"] == EXPECTED_HOOK_CADENCE
+
+
+@pytest.mark.parametrize(
+    "surface", [*sorted(prominence.HOOKLESS_SURFACES), "vscode", "some-new-client", None]
+)
+def test_a_surface_with_no_hooks_is_told_nothing_about_hook_cadence(config, surface):
+    """Silence is the honest answer where there are no hooks to be out of step."""
+    assert "hook_cadence" not in prominence.resolved(surface)
+
+
+def test_hook_capable_surfaces_are_exactly_the_two_clients_that_ship_hooks():
+    assert prominence.HOOK_CAPABLE_SURFACES == frozenset({"claude-code", "codex"})
+    assert not prominence.HOOK_CAPABLE_SURFACES & prominence.HOOKLESS_SURFACES
+
+
+def test_the_cadence_block_names_no_agent_callable_command(config):
+    """It rides through `_filter_bootstrap_payload`, which drops command mentions."""
+    block = prominence.resolved("claude-code")["hook_cadence"]
+
+    assert "configure_memory" not in json.dumps(block)
+
+
+@pytest.mark.parametrize("surface", sorted(prominence.HOOK_CAPABLE_SURFACES))
+def test_the_cadence_block_is_told_even_when_the_saved_level_won(config, saved, surface):
+    """The mismatch is worst exactly when a preference IS in force."""
+    saved(stored="off")
+
+    payload = prominence.resolved(surface)
+
+    assert payload["level"] == "off"
+    assert payload["source"] == "preference"
+    assert payload["hook_cadence"]["saved_preference_reaches_hooks"] is False
+
+
 @pytest.mark.parametrize("surface", sorted(prominence.HOOKLESS_SURFACES))
 def test_every_hookless_surface_is_the_conversation_context(surface):
     assert prominence.context_for_surface(surface) == "conversation"
@@ -557,11 +614,71 @@ def test_a_context_value_beats_the_legacy_machine_config(config, saved):
     assert prominence._active_source("codex") == "preference:context"
 
 
-def test_an_unusable_record_degrades_to_the_surface_default(config, saved):
+def test_an_unusable_record_resolves_to_the_generic_default(config, saved):
+    """An unreadable record must not hand a user MORE proactivity than they chose.
+
+    The hookless surface default is `maximal`, so falling through to it turned an
+    identity that may well have saved `off` into the eagerest level Exomem has.
+    The generic default is the honest floor: the record is gone, so the client's
+    own preference cannot be the thing that widens it.
+    """
     saved(unavailable="PREFERENCE_STATE_UNAVAILABLE")
 
+    assert prominence.resolve("claude-ai") == "balanced"
+    assert prominence._active_source("claude-ai") == "preference:unavailable"
+
+
+def test_an_unusable_record_never_grants_proactive_capture(config, saved):
+    saved(unavailable="PREFERENCE_STATE_UNAVAILABLE")
+
+    gate = prominence.capture_gate(surface="claude-ai")
+
+    assert gate["durable_intent"]["proactive_permitted"] is False
+    assert gate["observed_outcomes"]["proactive_permitted"] is False
+    assert gate["durable_intent"]["authored_explicit"] == "explicit-user-request"
+    assert gate["observed_outcomes"]["authored_explicit"] == "explicit-user-request"
+
+
+def test_an_unusable_record_keeps_its_diagnostic_and_caps_the_served_contract(config, saved):
+    saved(unavailable="PREFERENCE_STATE_UNAVAILABLE")
+
+    payload = prominence.resolved("claude-ai")
+
+    assert payload["level"] == "balanced"
+    assert payload["source"] == "preference:unavailable"
+    assert payload["preference"]["unavailable"] == "PREFERENCE_STATE_UNAVAILABLE"
+    effective = payload["contract"]["effective_capture"]
+    assert effective["observed_outcomes"]["proactive_permitted"] is False
+    assert effective["durable_intent"]["proactive_permitted"] is False
+
+
+def test_an_unusable_record_leaves_the_detached_level_table_alone(config, saved):
+    """`capture_policy_projection` documents the levels, not this request."""
+    saved(unavailable="PREFERENCE_STATE_UNAVAILABLE")
+
+    table = prominence.capture_policy_projection()
+
+    assert table["balanced"]["observed_outcomes"]["proactive_permitted"] is True
+    assert table["maximal"]["durable_intent"]["proactive_permitted"] is True
+    assert table["off"]["observed_outcomes"]["proactive_permitted"] is False
+
+
+def test_explicit_machine_config_still_beats_an_unusable_record(config, saved):
+    """The unreadable-record floor replaces the CLIENT default, not a real choice."""
+    config.write_text(json.dumps({"schema": 1, "prominence": "light"}), "utf-8")
+    saved(unavailable="PREFERENCE_STATE_UNAVAILABLE")
+
+    assert prominence.resolve("claude-ai") == "light"
+    assert prominence._active_source("claude-ai") == "config"
+
+
+def test_the_operator_override_still_beats_an_unusable_record(config, saved, monkeypatch):
+    saved(unavailable="PREFERENCE_STATE_UNAVAILABLE")
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+
     assert prominence.resolve("claude-ai") == "maximal"
-    assert prominence._active_source("claude-ai") == "default"
+    assert prominence._active_source("claude-ai") == "env"
+    assert prominence.capture_gate()["observed_outcomes"]["proactive_permitted"] is True
 
 
 def test_resolved_reports_the_applied_context_and_the_saved_map(config, saved):

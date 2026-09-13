@@ -138,6 +138,24 @@ def test_compact_bootstrap_puts_record_route_before_semantic_authoring() -> None
     # to weigh the failure against. One budget, in the file that explains it.
 
 
+def test_the_hook_cadence_block_does_not_push_record_past_the_proxy(monkeypatch) -> None:
+    """The cadence block lands inside `engagement`, which is in FRONT of the catalogue.
+
+    That is the same place the last two re-cuts of the proxy came from, so the
+    block is measured here rather than assumed to be small. It is served only to
+    a hook-capable client, so it never appears in the measurement above.
+    """
+    monkeypatch.setenv("EXOMEM_SURFACE", "claude-code")
+    root = Path(tempfile.mkdtemp())
+    (root / "Knowledge Base").mkdir()
+    payload = commands.op_bootstrap(root, profile="compact")
+    serialized = json.dumps(payload, ensure_ascii=False).encode()
+
+    assert payload["engagement"]["hook_cadence"]["saved_preference_reaches_hooks"] is False
+    assert serialized.find(b'"record"') < 12_288
+    assert serialized.find(b'"record"') < serialized.find(b'"semantic_authoring"')
+
+
 def test_hosted_records_v2_is_additive_and_v1_remains_unchanged() -> None:
     v1 = commands.product_commands_for_profile("hosted-alpha-agent-v1", "rest")
     v2 = commands.product_commands_for_profile("hosted-alpha-agent-v2", "rest")
