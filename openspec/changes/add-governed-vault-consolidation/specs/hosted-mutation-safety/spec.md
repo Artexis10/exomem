@@ -94,7 +94,7 @@ its own human review and token reservation have committed.
 
 #### Scenario: Apply seals without waiting on itself
 
-- **WHEN** Hosted v3 admits apply as a control mutation and begins seal drain
+- **WHEN** Hosted v5 admits apply as a control mutation and begins seal drain
 - **THEN** its own exact operation has been converted out of the ordinary active counter while all other participants must drain
 - **AND** apply cannot deadlock on `active_mutations == 0` or exclude another mutation
 

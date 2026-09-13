@@ -103,7 +103,7 @@ transport work drained.
 
 For a Hosted exact cell, the transport basis SHALL also bind the validated
 signed `HostedProfileSelection/v1` record and its current verifier-registry
-generation, including the selected v3 descriptor hash and the record's bound
+generation, including the selected v5 descriptor hash and the record's bound
 owner-entitlement-verifier and exact-cell transport-supervisor readiness
 digests. The release gate SHALL revalidate the selection signature, signer
 status/validity/revocation, and both readiness components before transport-stop
@@ -149,9 +149,9 @@ consolidation seal or retain owner-only recovery with rollback reachable.
 
 #### Scenario: Hosted transport supervisor readiness drifts
 
-- **WHEN** the selected v3 record's signer is revoked or its bound owner-entitlement or transport-supervisor readiness digest changes before routing-open
+- **WHEN** the selected v5 record's signer is revoked or its bound owner-entitlement or transport-supervisor readiness digest changes before routing-open
 - **THEN** exact-cell transport verification fails closed and public routing remains stopped
-- **AND** v1/v2 behavior is not widened or promoted as a fallback
+- **AND** v1 through v4 behavior is not widened or promoted as a fallback
 
 ### Requirement: Seal coverage is registered, closed-world, and restart-safe
 

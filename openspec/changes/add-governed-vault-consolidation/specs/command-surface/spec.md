@@ -19,18 +19,18 @@ Unknown actions and arguments from a different action's schema SHALL be refused
 rather than ignored.
 
 Hosted SHALL expose the product command only through a new additive
-`hosted-alpha-agent-v3` profile whose ordered command surface is exactly the v2
-profile plus `consolidate_memory`. V1 and v2 profile membership, descriptors,
+`hosted-alpha-agent-v5` profile whose ordered command surface is exactly the v4
+profile plus `consolidate_memory`. V1 through v4 profile membership, descriptors,
 hashes, generated plugins/manifests, locks, clients, and registered evidence
-SHALL remain byte-identical. V3 SHALL have its own versioned descriptor and hash,
+SHALL remain byte-identical. V5 SHALL have its own versioned descriptor and hash,
 generated plugin/manifest fixtures, compatibility/promotion evidence, and
-explicit deployment selection; defining v3 SHALL NOT auto-promote an active
-deployment. A cell not explicitly configured for v3 SHALL not advertise or
+explicit deployment selection; defining v5 SHALL NOT auto-promote an active
+deployment. A cell not explicitly configured for v5 SHALL not advertise or
 admit consolidation. Private artifact and trusted-confirmation routes SHALL
-remain operator/control-plane seams beneath the v3 product command and SHALL
+remain operator/control-plane seams beneath the v5 product command and SHALL
 not become public command parameters.
 
-V3 selection SHALL require a closed signed private
+V5 selection SHALL require a closed signed private
 `HostedProfileSelection/v1` control-plane record binding typed cell/vault,
 installation id/generation/active fence, profile id
 and descriptor hash, release/protocol, Records reader version, identity schema,
@@ -41,8 +41,8 @@ owner-entitlement-verifier readiness, exact-cell transport-supervisor readiness,
 rollback/recovery closure, operation id, validity, signer, and record digest. Startup
 SHALL validate the whole tuple against the running image/dependencies before
 advertise/admit. Missing, partial, stale, unknown, incompatible, inferred, or
-caller-made selection SHALL not choose v3 and SHALL leave an explicitly selected
-v1/v2 surface byte-identical.
+caller-made selection SHALL not choose v5 and SHALL leave an explicitly selected
+v1 through v4 surface byte-identical.
 
 Its exact fields SHALL be `schema`, `cell_id`, `vault_id`, `installation_id`,
 `installation_generation`, `active_fence_digest`, `profile_id`,
@@ -74,7 +74,7 @@ exactly `schema`, `algorithm`, `key_id`, `public_key`, `purpose`,
 `revoked_at` plus `revocation_reason_digest` exactly when `status=revoked`.
 `algorithm=Ed25519`; `public_key` is the raw 32-byte key in unpadded base64url;
 `key_id` is its derived `ed25519-sha256:` id; `purpose` is
-`hosted-profile-selection`; `profile_id` is `hosted-alpha-agent-v3`; `status`
+`hosted-profile-selection`; `profile_id` is `hosted-alpha-agent-v5`; `status`
 is `active|inactive|revoked`; registry generation is an integer in
 `0..2^53-1`; and `not_before < not_after` SHALL hold. The issuer and deployment
 audience digests SHALL bind the configured control plane and cell deployment.
@@ -83,25 +83,25 @@ at issue and startup time; rotation SHALL permit only an explicit bounded
 two-key overlap. Unknown/caller-supplied, premature, expired, revoked,
 wrong-purpose/issuer/audience/profile keys SHALL fail. Fixed signing, rotation,
 and revocation vectors SHALL be generated across supported runtimes. Unknown
-fields, digest/signature mismatch, or non-v3 profile SHALL fail closed.
+fields, digest/signature mismatch, or non-v5 profile SHALL fail closed.
 
 #### Scenario: One registry entry generates every selected surface
 
-- **WHEN** the command registry and selected v3 artifacts are built
-- **THEN** MCP, REST, OpenAPI, CLI, v3 Hosted, and capability documentation expose the same eleven actions and parameter semantics
+- **WHEN** the command registry and selected v5 artifacts are built
+- **THEN** MCP, REST, OpenAPI, CLI, v5 Hosted, and capability documentation expose the same eleven actions and parameter semantics
 - **AND** no surface-specific consolidation action list or implementation exists
 
 #### Scenario: Existing Hosted profiles remain closed
 
-- **WHEN** v3 is added and a cell is configured for v1 or v2
+- **WHEN** v5 is added and a cell is configured for any profile from v1 through v4
 - **THEN** its command membership, descriptor/hash, generated plugin/manifest, client contract, and registered evidence remain byte-identical and omit `consolidate_memory`
-- **AND** only explicit selection of a compatible v3 deployment makes the product command available
+- **AND** only explicit selection of a compatible v5 deployment makes the product command available
 
-#### Scenario: V3 selection readiness tuple is incomplete
+#### Scenario: V5 selection readiness tuple is incomplete
 
 - **WHEN** the private selection record lacks any reader, artifact, source-export/control-receipt verifier, archive-custodian verifier, owner confirmation, owner-entitlement verifier, transport-supervisor, or rollback/recovery readiness binding, has invalid signer trust, or mismatches the running image
-- **THEN** startup does not advertise or admit v3
-- **AND** it neither infers promotion nor changes configured v1/v2 behavior
+- **THEN** startup does not advertise or admit v5
+- **AND** it neither infers promotion nor changes configured v1 through v4 behavior
 
 #### Scenario: Unknown action is invoked
 
@@ -668,15 +668,15 @@ Schema-fidelity tests SHALL intentionally add only the new
 copy changes to the committed generated baselines. Contract tests SHALL prove
 identical action validation, normalized result fields, stable error codes,
 content-free sealed outcomes, idempotent retry terminals, and trusted-context
-handling across MCP, REST, CLI, and v3 Hosted. OpenAPI and generated capability
+handling across MCP, REST, CLI, and v5 Hosted. OpenAPI and generated capability
 documentation SHALL describe the same finite schemas, owner-inclusive seal,
 three distinct approvals, and Exomem-mediated enforcement boundary.
 
 #### Scenario: Generated schema changes are reviewed
 
 - **WHEN** schema, OpenAPI, Hosted manifest, bootstrap, and capability fixtures are regenerated
-- **THEN** the gate reports an explicit bounded diff attributable to consolidation and the new v3 artifacts
-- **AND** unrelated command schemas/descriptions and all v1/v2 artifacts remain byte-identical
+- **THEN** the gate reports an explicit bounded diff attributable to consolidation and the new v5 artifacts
+- **AND** unrelated command schemas/descriptions and all v1 through v4 artifacts remain byte-identical
 
 #### Scenario: Success wrapper fixtures are exact
 
