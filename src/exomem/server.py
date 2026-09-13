@@ -830,6 +830,7 @@ def run(
     host: str | None = None,
     port: int = 8765,
     log_dir: Path | None = None,
+    worker_socket: Path | None = None,
 ) -> None:
     """CLI entry: configure logging, build the server, run it."""
     from .logging_config import configure_logging, resolve_log_dir
@@ -859,6 +860,13 @@ def run(
     else:
         host = resolved_host
         log.info("exomem starting on %s host=%s port=%s", transport, host, port)
+        # A managed worker binds privately, but its authentication decision
+        # above must still use the public bind intent. UDS is not permission
+        # to turn a remote endpoint into unauthenticated local MCP.
+        worker_options = (
+            {"uvicorn_config": {"uds": str(worker_socket)}}
+            if worker_socket is not None else {}
+        )
         mcp.run(
             transport=transport,
             host=host,
@@ -877,4 +885,5 @@ def run(
             # independently authenticated request, so use FastMCP's transport
             # mode designed for horizontally scaled/restartable servers.
             stateless_http=True,
+            **worker_options,
         )
