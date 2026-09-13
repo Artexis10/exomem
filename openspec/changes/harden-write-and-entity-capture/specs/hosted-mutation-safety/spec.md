@@ -26,6 +26,8 @@ Upload finalization, media extraction that writes canonical or derived artifacts
 
 All MCP mutations, including hosted mutations, SHALL preserve caller-supplied idempotency keys and bounded implicit retry replay through the existing common invocation boundary. Retry identity MUST include the resolved vault or tenant, authenticated principal scope, command, and canonical arguments. An identical pending retry MUST inspect or wait on its receipt outside the exclusive vault mutation boundary, while different identities remain subject to normal serialization. Failed precommit mutations MUST become retryable, and committed terminal outcomes MUST replay without executing the leaf again.
 
+A replay identity REQUIRES either an explicit caller-supplied idempotency key or a retry scope that is stable across the retry. Where neither resolves — an unauthenticated caller, or a stateless transport whose session identifier changes per request — the repeat carries no replay identity, and the system SHALL treat the two requests as distinct by definition: no shared receipt is created, no replay is offered, and normal serialization applies, up to and including `MUTATION_BUSY` for the second request. The replay guarantee above is therefore explicitly out of scope for that configuration rather than silently unmet.
+
 #### Scenario: Gateway retries a completed hosted mutation
 
 - **WHEN** the gateway repeats the same successful mutation for the same tenant, principal, command, canonical arguments, and idempotency identity after losing the acknowledgement
@@ -37,6 +39,12 @@ All MCP mutations, including hosted mutations, SHALL preserve caller-supplied id
 - **WHEN** an identical retry arrives while the first worker still owns the mutation boundary
 - **THEN** it waits on or inspects the matching pending receipt outside the boundary
 - **AND** it returns the terminal replay or bounded `MUTATION_ACKNOWLEDGEMENT_PENDING`, never `MUTATION_BUSY` caused by competing with itself
+
+#### Scenario: Retry arrives with no key and no stable scope
+
+- **WHEN** a caller repeats a mutation with no explicit idempotency key while no stable retry scope resolves for it
+- **THEN** the repeat resolves no replay identity, creates no shared receipt, and is not offered the first request's result
+- **AND** it contends for the vault mutation boundary like any other distinct mutation, up to and including `MUTATION_BUSY`
 
 #### Scenario: Same key is presented for another tenant
 

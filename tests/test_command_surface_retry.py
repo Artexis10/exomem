@@ -1468,3 +1468,128 @@ def test_reviewed_transition_commits_when_the_clock_ticks_between_calls(
     assert "After" in written
     # The committed bytes carry the reviewed instant, not the commit instant.
     assert "updated: 2026-03-01T12:00:00Z" in written
+
+
+# --- Replay identity needs a key or a stable scope ---------------------------
+#
+# `mcp_retry_scope()` returns `None` outside an MCP call and `session:<id>` when
+# nothing stronger is available; a stateless HTTP transport mints a fresh
+# session per request, so that value is not stable across a retry. The two
+# tests below pin what the delta spec now states outright: without an explicit
+# idempotency key AND without a stable scope there is no replay identity, so
+# two requests are distinct by definition and normal serialization applies --
+# including `MUTATION_BUSY` for the second one.
+
+
+def test_no_key_and_no_scope_resolves_no_replay_identity(tmp_path: Path) -> None:
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    command = SimpleNamespace(name="edit_memory", leaf=lambda: None, read_only=False)
+
+    assert writer_lease._effective_idempotency_key(
+        manager,
+        command=command,
+        mutation_subject=tmp_path / "vault",
+        digest="d" * 64,
+        idempotency_key=None,
+        principal_scope=None,
+        implicit_idempotency_scope=None,
+    ) == (None, None, None)
+
+    # A stateless transport's per-request session id is a *changing* scope, and
+    # a changing scope is not a replay identity either: the keys differ.
+    first, _, _ = writer_lease._effective_idempotency_key(
+        manager,
+        command=command,
+        mutation_subject=tmp_path / "vault",
+        digest="d" * 64,
+        idempotency_key=None,
+        principal_scope=None,
+        implicit_idempotency_scope="session:stateless-1",
+    )
+    second, _, _ = writer_lease._effective_idempotency_key(
+        manager,
+        command=command,
+        mutation_subject=tmp_path / "vault",
+        digest="d" * 64,
+        idempotency_key=None,
+        principal_scope=None,
+        implicit_idempotency_scope="session:stateless-2",
+    )
+    assert first != second
+
+    # An explicit key is a replay identity regardless of transport.
+    explicit_first, _, _ = writer_lease._effective_idempotency_key(
+        manager,
+        command=command,
+        mutation_subject=tmp_path / "vault",
+        digest="d" * 64,
+        idempotency_key="caller-supplied",
+        principal_scope="principal:alice",
+        implicit_idempotency_scope="session:stateless-1",
+    )
+    explicit_second, _, _ = writer_lease._effective_idempotency_key(
+        manager,
+        command=command,
+        mutation_subject=tmp_path / "vault",
+        digest="d" * 64,
+        idempotency_key="caller-supplied",
+        principal_scope="principal:alice",
+        implicit_idempotency_scope="session:stateless-2",
+    )
+    assert explicit_first == explicit_second is not None
+
+
+def test_identical_retry_without_replay_identity_contends_normally(
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    results: list[dict] = []
+    errors: list[BaseException] = []
+
+    def leaf(vault: Path, *, value: int) -> dict:  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        entered.set()
+        assert release.wait(_HOLD_SECONDS)
+        return {"value": value}
+
+    # `add` holds the WIDE boundary around its leaf, so a second request that
+    # is not a replay of the first meets it there. (`edit_memory` narrows the
+    # boundary into its own leaf and would prove nothing about serialization.)
+    command = SimpleNamespace(name="add", leaf=leaf, read_only=False)
+    (tmp_path / "vault" / "Knowledge Base").mkdir(parents=True)
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
+        mutation_timeout_seconds=0.05,
+    )
+
+    def invoke() -> None:
+        try:
+            # No explicit key, and no scope at all -- what an unauthenticated
+            # or stateless caller resolves to.
+            results.append(manager.invoke(command, (tmp_path / "vault",), {"value": 7}))
+        except BaseException as error:  # noqa: BLE001 - assertion captures worker outcome
+            errors.append(error)
+
+    first = threading.Thread(target=invoke)
+    retry = threading.Thread(target=invoke)
+    first.start()
+    assert entered.wait(_OBSERVE_SECONDS)
+    retry.start()
+    retry.join(timeout=_HOLD_SECONDS)
+    assert not retry.is_alive(), "a request with no replay identity must not wait on a receipt"
+    release.set()
+    first.join(timeout=_HOLD_SECONDS)
+    assert not first.is_alive()
+
+    # Normal serialization, stated plainly: the second request is a different
+    # request, so it contends for the boundary and is refused -- it does not
+    # inspect or wait on the first one's receipt, because there isn't one.
+    assert results == [{"value": 7}]
+    assert calls == 1
+    assert [error.code for error in errors] == ["MUTATION_BUSY"]
+    assert errors[0].details["committed"] is False
