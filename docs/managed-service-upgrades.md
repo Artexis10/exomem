@@ -145,10 +145,15 @@ start an older release over migrated state.
 
 A worker release is no longer replaced cold. The supervisor first spawns the
 candidate as a **standby** beside the worker that is still serving. The standby
-binds its own private socket, warms the lexical catalog, loads models when
-preload is allowed, and proves the published graph snapshot read-only. It takes
-no writer lease, publishes nothing, schedules no drain, media or watcher work,
-and owns no descendants. The old worker serves throughout.
+binds its own private socket, **proves** the maintained lexical catalog current
+read-only, warms the rebuildable in-memory caches, loads models when preload is
+allowed, and proves the published graph snapshot read-only. It takes no writer
+lease, publishes nothing, schedules no drain, media or watcher work, and owns no
+descendants. In particular it never reconciles or requests repair of the lexical
+catalog: that is a publication, and the worker still serving is this vault's
+single repair owner. A catalog that is not current leaves `lexical` waiting until
+that owner publishes one — which the warm budget covers and its expiry records.
+The old worker serves throughout.
 
 Only when the standby reports cutover readiness does the supervisor pause
 ingress, drain, stop the old worker and prove its descendants exited, run the
@@ -190,6 +195,17 @@ existing worker keeps serving. The upgrade then falls back to the one-worker
 sequence — reported in the handoff record, never silent. A release that predates
 standby mode reports `"standby": "unsupported"` and takes the same path.
 
+### Polling a transition
+
+`upgrade` is acknowledged, not awaited: the supervisor answers immediately with
+`{"ok": true, "accepted": true, "transition": "<id>"}` and runs the sequence in
+the background, because a standby warm is minutes long and holding the control
+connection open for it would turn any client read timeout into a false failure
+while promotion proceeded regardless. Poll `--status` for the outcome: it
+carries `transition` (in flight) and `last_transition` (the finished record,
+including the handoff). `scripts/upgrade.sh` does this for you, with a deadline
+covering the warm plus the cutover budgets.
+
 ### The migration record
 
 The offline state migrator runs only when the staged target declares a state
@@ -213,14 +229,15 @@ the repair.
 
 ### The service environment file
 
-A worker child is spawned with the unit's `EnvironmentFile=` re-read at spawn
-time and overlaid on the inherited environment. systemd reads that file once,
+A worker child is spawned with every `EnvironmentFile=` the unit declares,
+re-read at spawn time and overlaid in order on the inherited environment. systemd reads that file once,
 when the supervisor starts, so without this an edited service environment would
 reach a worker only after a full supervisor restart — which is exactly what a
 seamless upgrade avoids. The supervisor's own environment is never changed.
 This is how `EXOMEM_PRELOAD_MODELS=1` and `EXOMEM_STANDBY_WARM_SECONDS` reach
 the next worker: edit `service.env`, then run the ordinary
-`scripts/upgrade.sh`.
+`scripts/upgrade.sh`. A file that cannot be read is reported in the handoff
+record as `environment: ["unreadable: <name>"]`, not just logged.
 
 ### Streams through promotion
 
