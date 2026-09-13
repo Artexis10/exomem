@@ -11,7 +11,10 @@ only prompt to check, so read it as standing instruction rather than advice.)
 **Prominence level.** How strongly the two behaviours below apply is tunable.
 `bootstrap()` reports the active level under `engagement`; the user changes it with
 `exomem prominence <level>`, or by editing the level block in their assistant's
-custom instructions. The section below describes **balanced**, the default where
+custom instructions. When `engagement` carries a `hook_cadence` block, this client
+runs nudge hooks that read only its own machine, so after setting a level tell the
+user that the nudge cadence changes separately, with `exomem prominence <level>` run
+on their machine. The section below describes **balanced**, the default where
 hooks exist. The other levels shift it:
 
 | Level | Shift from the baseline below |
