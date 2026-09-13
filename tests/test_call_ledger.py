@@ -629,6 +629,121 @@ def test_a_derived_phase_is_recorded_on_the_calls_ledger_row(
     assert isinstance(spans["derived.acknowledgement"]["ms"], float)
 
 
+def test_a_recall_row_attributes_its_time_by_stage(
+    ledger_dir: Path, vault: Path
+) -> None:
+    """A slow recall row must say which stage was slow, without a second call."""
+    from exomem import commands
+
+    marker = "zzledgerprobetokenzz"
+
+    async def leaf(_context):
+        return commands.op_ask_memory(vault, query=marker, limit=5)
+
+    result = _drive("ask_memory", {"query": marker, "limit": 5}, leaf)
+
+    row = _rows(ledger_dir)[-1]
+    recall = [span for span in row["spans"] if span["name"].startswith("recall.")]
+    assert recall, row["spans"]
+    for span in recall:
+        assert set(span) == {"name", "count", "ms"}
+        assert isinstance(span["ms"], float)
+        # Stage names only: no path, no query, no excerpt can ride in one.
+        assert "/" not in span["name"] and " " not in span["name"]
+    written = json.dumps(row)
+    assert marker not in written
+    assert ".md" not in written.replace('"target_paths": []', "")
+    # Collected, but not returned: response inclusion stays opt-in.
+    assert "timings" not in (result if isinstance(result, dict) else {})
+
+
+def test_a_cli_find_records_no_spans(vault: Path) -> None:
+    """Outside an MCP call the instrumentation reports nothing at all."""
+    from exomem import call_spans, commands
+
+    call_spans.reset()
+    commands.op_find(vault, query="metabolism", limit=5)
+
+    # No token was minted, so nothing may have been keyed under any token.
+    assert call_spans._SPANS == {}
+
+
+def test_nested_recall_stages_reach_the_ledger(
+    ledger_dir: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands, embeddings
+
+    monkeypatch.setattr(
+        embeddings, "rerank_pairs", lambda _query, passages: [0.0] * len(passages)
+    )
+
+    async def leaf(_context):
+        return commands.op_ask_memory(
+            vault, query="metabolism", rerank=True, deep=True, graph_enrich=True, limit=5
+        )
+
+    result = _drive("ask_memory", {"query": "metabolism", "rerank": True}, leaf)
+    spans = {span["name"] for span in _rows(ledger_dir)[-1]["spans"]}
+    assert {
+        "recall.semantic.search", "recall.bm25", "recall.rerank", "recall.graph_enrich"
+    } <= spans
+    assert "timings" not in result
+
+
+def test_a_budgeted_row_records_what_the_budget_did(
+    ledger_dir: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands, request_budget
+
+    monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "0.001")
+    request_budget.reset_resolution_cache()
+
+    async def leaf(_context):
+        return commands.op_ask_memory(vault, query="metabolism", rerank=True, limit=5)
+
+    _drive("ask_memory", {"query": "metabolism", "rerank": True}, leaf)
+
+    row = _rows(ledger_dir)[-1]
+    assert row["budget"] == {
+        "seconds": 0.001,
+        "remaining_ms": 0,
+        "skipped": ["rerank"],
+    }
+
+
+def test_every_budgeted_row_records_the_budget_even_when_nothing_was_skipped(
+    ledger_dir: Path,
+) -> None:
+    """The row is an operator instrument, not a message to a client.
+
+    "50 seconds, 49 left, nothing skipped" is the reading that says a reserve
+    is not yet costing calls — which is exactly what the PROVISIONAL reserves
+    have to be tuned against.
+    """
+    from exomem import request_budget
+
+    async def leaf(_context):
+        return {"ok": True}
+
+    _drive("remember", {"content": "x"}, leaf)
+
+    budget = _rows(ledger_dir)[-1]["budget"]
+    assert budget["seconds"] == request_budget.MCP_REQUEST_BUDGET_SECONDS
+    assert budget["skipped"] == []
+    assert budget["remaining_ms"] > 0
+
+
+def test_a_reconcile_class_row_carries_no_budget_block(ledger_dir: Path) -> None:
+    """No budget applied, so there is nothing for the row to report."""
+
+    async def leaf(_context):
+        return {"ok": True}
+
+    _drive("maintain_memory", {"mode": "reconcile"}, leaf)
+
+    assert _rows(ledger_dir)[-1]["budget"] is None
+
+
 def test_derived_counters_are_closed_named_and_reset_able() -> None:
     call_ledger.reset_derived_counters()
     assert call_ledger.derived_counters() == dict.fromkeys(

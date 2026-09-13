@@ -1,0 +1,62 @@
+scenario_id: f31-different-trial-v1
+family_id: f31
+kind: operational
+public_coverage: none
+phases:
+- phase_id: hookless-control
+  ops:
+  - op: configure
+    ref: hookless-maximal
+  - op: snapshot
+    ref: s-hookless-control-seed
+  - op: agent_turn
+    ref: t01-other-trial
+    detail: Trial B's tasting result is in the log; trial A still has no taste result.
+  - op: agent_turn
+    ref: t02-elapsed
+    detail: A week has passed since trial B.
+  - op: snapshot
+    ref: s-hookless-control-end
+  expect:
+  - assert: transient_signal_delivered_after_write
+    subject: f31-different-trial-v1
+  - assert: transient_state_settled_without_dismissal
+    subject: f31-different-trial-v1
+- phase_id: hooked-control
+  ops:
+  - op: configure
+    ref: hooked-balanced
+  - op: snapshot
+    ref: s-hooked-control-seed
+  - op: agent_turn
+    ref: t01-other-trial
+    detail: Trial B's tasting result is in the log; trial A still has no taste result.
+  - op: agent_turn
+    ref: t02-elapsed
+    detail: A week has passed since trial B.
+  - op: snapshot
+    ref: s-hooked-control-end
+  expect:
+  - assert: transient_signal_delivered_after_write
+    subject: f31-different-trial-v1
+  - assert: transient_state_settled_without_dismissal
+    subject: f31-different-trial-v1
+fairness:
+  why_neutral: Ordinary work language tests delivered advice and represented state
+    without naming a store.
+  public_coverage_subtraction: No public suite covers these operational journeys.
+  mechanisms:
+  - provider_role: subject
+    mechanism: Documented client carrier and canonical page projection
+    verdict: satisfiable
+    evidence: benchmarks/epistemic/PREREGISTRATION.md:1
+  privileged_endpoint_matrix:
+  - driver_surface_id: state.read
+    provider: exomem
+    variant: native
+    disposition: equivalent
+    audit_scope: Read-only canonical pages and delivered client responses
+    evidence: benchmarks/epistemic/PREREGISTRATION.md:1
+    reason: Both surfaces are visible to the client.
+    competitor_surface: Documented file and client response
+  acceptance_predicate: PREREGISTRATION.md section 4, sequence-five replay predicates.

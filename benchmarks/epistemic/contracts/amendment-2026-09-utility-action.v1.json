@@ -1,0 +1,20 @@
+{
+  "acknowledged_on": "2026-09-13",
+  "affected_sections": [
+    "§1 Scenario families",
+    "§2 Assertion registry",
+    "§4 Acceptance predicates",
+    "§7 Amendments"
+  ],
+  "amended_on": "2026-09-13",
+  "artifact_type": "preregistration-amendment-receipt.v1",
+  "contract_path": "benchmarks/epistemic/PREREGISTRATION.md",
+  "contract_sha256": "7512190cf75c7fa5ec6e4ac80fef1eaf294fbc8de30ef219349d4adb0f2d7a41",
+  "effective_policy": "Applies after founder acknowledgment of the merged contract revision. Until then f32 cannot support comparative runs, scores or claims. Model-free instrument checks and isolated runtime preflight are development evidence only.",
+  "parent_contract_sha256": "c88ac441aa61a3bb8ef5cce177ef8335fd5f0d29170fff786e627fded657dab6",
+  "ratifier": "Hugo Ander Kivi",
+  "rationale": "Register f32 downstream action utility with paired controls, observed-state grading, visible harm and damage, full lifecycle costs, isolated agent-authored memory and a bounded opt-in six-episode pilot. No catastrophic assertion or other-family denominator changes.",
+  "repository_revision": "5a7915ba0333ec379609d86d508f90341a5df7cd",
+  "schema_version": 1,
+  "sequence": 6
+}

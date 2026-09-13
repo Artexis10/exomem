@@ -490,7 +490,9 @@ def append_record(
         _release_held_file(root, resumed, warnings)
         committed = _with_warnings(committed, warnings)
     # Outside the guard on purpose -- see `_due_state_carrier`.
-    advisory = _due_state_carrier(root, manifest, path=committed_path, key=key, values=values)
+    advisory = _due_state_carrier(
+        root, after_manifest, path=committed_path, key=key, values=values
+    )
     return {"due_state": advisory, **committed} if advisory else committed
 
 
@@ -974,7 +976,7 @@ def update_record(
     # Outside the guard on purpose -- see `_due_state_carrier`.
     advisory = _due_state_carrier(
         root,
-        manifest,
+        after_manifest,
         path=committed_path,
         key=item_key,
         values=values,

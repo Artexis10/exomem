@@ -50,6 +50,7 @@ from . import append_to_file as append_to_file_module
 from . import attention as attention_module
 from . import audit as audit_module
 from . import audit_fix as audit_fix_module
+from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
@@ -98,6 +99,7 @@ from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
 from . import relation_vocabulary as relation_vocabulary_module
 from . import replace as replace_module
+from . import request_budget as request_budget_module
 from . import reserved_paths as reserved_paths_module
 from . import retrieval_explain as retrieval_explain_module
 from . import review_context as review_context_module
@@ -594,6 +596,52 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
     return projection
 
 
+def op_configure_memory(
+    vault_root: Path,
+    action: Literal["inspect", "set"] = "inspect",
+    prominence: str | None = None,
+    expected_revision: str | None = None,
+) -> dict:
+    """Inspect or set your saved Exomem engagement level for this vault.
+
+    Inspect first, then set off, light, balanced or maximal with the returned
+    revision as expected_revision. The choice follows this authenticated identity
+    on later requests without a restart. It changes recall/capture eagerness, never
+    compute mode or authority. Other identities and vaults remain independent.
+    Adopt the returned engagement contract in the current conversation.
+    """
+    from . import prominence as prominence_module
+    from . import prominence_preferences
+    from .cli_ops import OpError
+
+    if action not in {"inspect", "set"} or (
+        action == "inspect" and (prominence is not None or expected_revision is not None)
+    ) or (action == "set" and (prominence is None or expected_revision is None)):
+        raise OpError("INVALID_PREFERENCE_ARGUMENTS", "inspect takes no setting; set requires "
+                      "prominence and expected_revision")
+    before = prominence_preferences.inspect(vault_root)
+    saved = before
+    if action == "set":
+        saved = prominence_preferences.set_preference(vault_root, prominence, expected_revision)
+        prominence_module.refresh_request_preference(vault_root)
+        if saved.get("mutated"):
+            from . import writer_lease
+
+            writer_lease.mark_active_mutation_committed()
+    engagement = prominence_module.resolved()
+    engagement["change_with"] = prominence_module.configuration_route()
+    engagement["envelope"] = envelope_module.resolved(level=engagement["level"])
+    return {
+        "operation": "configure_memory",
+        "action": action,
+        "scope": "principal-and-vault",
+        **saved,
+        "before_hash": before["revision"],
+        "after_hash": saved["revision"],
+        "engagement": engagement,
+    }
+
+
 def op_bootstrap(
     vault_root: Path,
     profile: str = "compact",
@@ -668,6 +716,8 @@ def op_bootstrap(
     )
     active_descriptor = _active_bootstrap_descriptor()
     active_product_names = frozenset(active_descriptor.product_commands)
+    if "configure_memory" in active_product_names:
+        engagement_policy["change_with"] = prominence_module.configuration_route()
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     workflow_inventory = workflow_contracts_module.inventory_contracts(vault_root)
@@ -1487,6 +1537,21 @@ def op_bootstrap(
                 "structure_suggestion": "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': captures keep landing in the 'other' fallback within one domain, so a real kind probably exists",
                 "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then manage_memory_file(operation='reclassify', reason=...).",
                 "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
+                "records_routing": (
+                    "a committed compiled note or Evidence write may name one existing "
+                    "Records collection whose claims match the observation; this is advisory "
+                    "and never appends from the advisory alone"
+                ),
+                "records_routing_handling": (
+                    "read the observation, then route it into the named collection under the "
+                    "served capture disposition; resume a held candidate when one exists"
+                ),
+                "collection_candidate": (
+                    "a strong collection_candidate is a proposal: draft its schema through "
+                    "record_memory describe and validate, ask one question in domain language, "
+                    "and create only after that inline confirmation. Backfill only exactly dated "
+                    "evidence units, citing each unit or artifact in sources"
+                ),
                 "accepted_links": "persist only through edit_memory/remember/replace_memory; never auto-write suggestions",
                 # Deliberately command-free, exactly like the epistemic
                 # commitments: `_filter_bootstrap_payload` deletes any string
@@ -1495,6 +1560,15 @@ def op_bootstrap(
                 # would silently vanish.
                 "due_state": "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due",
                 "due_state_handling": "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy",
+                "artifact_role_state_handling": (
+                    "read supporting units for role/state review; choose a home by role, "
+                    "preserve exact source-unit provenance and history, and route observed "
+                    "state through Records claims. Extraction needs restructure_execution "
+                    "confirmation; already-authorized local corrections need no new approval. "
+                    "Signals grant no authority; compact omission proves no clean coverage. "
+                    "Handle visible role transitions before writing; "
+                    "MCP cannot observe tool-free turns"
+                ),
                 "due_state_authority": "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering",
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
@@ -1873,6 +1947,7 @@ _SESSION_POST_WRITE_KEYS = (
     "due_state",
     "due_state_handling",
     "due_state_authority",
+    "artifact_role_state_handling",
     "review_reason",
     "family_disposition",
     "family_disposition_reading",
@@ -2291,7 +2366,13 @@ def op_find(
         if explain
         else None
     )
-    timings = find_module.FindTimings() if include_timings and projection_runtime is None else None
+    # Collected for every MCP call, returned only when asked for. The stage
+    # table is what makes a slow row attributable, and a diagnostic nobody
+    # turned on is a diagnostic that is never there for the call that needed
+    # it; the cost is a few microseconds of bookkeeping per stage, which the
+    # existing `unattributed_ms` accounting already shows is negligible.
+    collect_timings = include_timings or call_spans_module.MCP_CALL_TOKEN.get() is not None
+    timings = find_module.FindTimings() if collect_timings and projection_runtime is None else None
     timings_suppressed = (
         {"status": "governed_projection"} if projection_runtime is not None else None
     )
@@ -2433,13 +2514,50 @@ def op_find(
                 except Exception:  # noqa: BLE001 - optional enrichment soft-fails
                     referents = None
     pack_obj: dict | None = None
+    active_budget = request_budget_module.current()
     if pack:
-        with find_module._span(timings, "pack"):
-            pack_obj = context_pack_module.assemble_pack(
-                vault_root, hits, graph_enrich=graph_enrich
-            )
-            if release.active:
-                pack_obj = egress_module.annotate_pack(pack_obj, release)
+        # Two decisions, one point. `graph_enrich` runs only inside the pack, so
+        # what has to be left on the clock to start it is the pack's reserve
+        # plus its own — checking it against its reserve alone would admit an
+        # enrichment the pack it rides in cannot pay for.
+        if active_budget is not None and not active_budget.can_afford(
+            request_budget_module.PACK_RESERVE_SECONDS
+        ):
+            active_budget.note_skipped("pack")
+            if graph_enrich:
+                # It cannot run without the pack it rides in, so reporting it
+                # as having run would be a lie the caller cannot check.
+                active_budget.note_skipped("graph_enrich")
+        else:
+            if (
+                graph_enrich
+                and active_budget is not None
+                and not active_budget.can_afford(
+                    request_budget_module.PACK_RESERVE_SECONDS
+                    + request_budget_module.GRAPH_ENRICH_RESERVE_SECONDS
+                )
+            ):
+                active_budget.note_skipped("graph_enrich")
+                graph_enrich = False
+            with find_module._span(timings, "pack"):
+                pack_obj = context_pack_module.assemble_pack(
+                    vault_root,
+                    hits,
+                    graph_enrich=graph_enrich,
+                    deadline=None if active_budget is None else active_budget.deadline,
+                    graph_enrich_reserve_seconds=request_budget_module.GRAPH_ENRICH_RESERVE_SECONDS,
+                    timings=timings,
+                )
+                if active_budget is not None and context_pack_module.DEADLINE_TRUNCATION in (
+                    pack_obj.get("truncation") or []
+                ):
+                    active_budget.note_truncated("pack")
+                if active_budget is not None and context_pack_module.GRAPH_ENRICH_BUDGET_SKIP in (
+                    pack_obj.get("truncation") or []
+                ):
+                    active_budget.note_skipped("graph_enrich")
+                if release.active:
+                    pack_obj = egress_module.annotate_pack(pack_obj, release)
     with find_module._span(timings, "serialize"):
         # `project` is the ONLY serializer to a wire dict (design D3): the raw
         # `Hit.as_dict`/`as_compact_dict` calls that used to sit here are gone
@@ -2469,7 +2587,9 @@ def op_find(
             retrieval_explain_module.attach_hit_explanations(retrieval_trace, hit_dicts)
         # Notices occupy only the slots the over-fetch pool could not backfill.
         hit_dicts.extend(release.notices)
-    timings_dict = timings.as_dict() if timings is not None else None
+    timings_dict = (
+        timings.as_dict() if timings is not None and include_timings else None
+    )
     # Durable structured log → feeds the offline retrieval feedback loop.
     # Best-effort; never affects the returned result.
     if projection_runtime is None:
@@ -2504,6 +2624,13 @@ def op_find(
     # window; `degraded` means a lane broke (e.g. a corrupt embedding sidecar or
     # a crashing model) and the fallback should be investigated, not waited out.
     degraded_marker: list[str] | None = sorted(set(failed)) if failed else None
+    # Advisory, and present only when the budget actually cost the caller
+    # something: a block that always appeared would be a response-shape change
+    # for every client, to report that nothing happened. Read at return so
+    # `remaining_ms_at_return` is what the caller is being told it is.
+    budget_block = (
+        active_budget.as_response_block() if active_budget is not None else None
+    )
     if (
         timings_dict is None
         and timings_suppressed is None
@@ -2511,6 +2638,7 @@ def op_find(
         and degraded_marker is None
         and retrieval_trace is None
         and projected_continuation is None
+        and budget_block is None
     ):
         if not pack and referents is None:
             return hit_dicts
@@ -2537,6 +2665,8 @@ def op_find(
         out["retrieval_profile"] = retrieval_trace.profile()
     if referents is not None:
         out["referents"] = referents
+    if budget_block is not None:
+        out["budget"] = budget_block
     return out
 
 
@@ -4397,6 +4527,34 @@ def op_preserve(
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     payload = result.as_dict()
     _note_committed_artifact_targets(payload)
+    from . import semantic_writes
+
+    routing_terms = [
+        f"Evidence: {Path(result.path).name}",
+        "evidence",
+        scope.lower().replace(" ", "-"),
+        category.lower().replace(" ", "-"),
+        description.strip() if description and description.strip() else "",
+    ]
+    routing = semantic_writes._records_routing_from_terms(vault_root, routing_terms)
+    try:
+        from . import due_state
+
+        due_state.apply_observation_write_delta(
+            vault_root,
+            path=str(result.sidecar_path or ""),
+            observation_ref=str(result.ref or ""),
+            terms=routing_terms,
+            routing=routing,
+            observation_aliases=(str(result.path or ""),),
+        )
+    except Exception:  # noqa: BLE001 -- due-state advice never breaks Evidence custody
+        log.debug("Evidence observation due-state delta failed (non-fatal)", exc_info=True)
+    delivered_routing = semantic_writes._records_routing_for_delivery(
+        vault_root, routing
+    )
+    if delivered_routing is not None:
+        payload["records_routing"] = delivered_routing
     return payload
 
 
@@ -10114,6 +10272,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "safety": "read-only by default; write-capable fixes require explicit flags",
         "advanced": [
             "doctor",
+            "configure_memory",
             "govern_memory",
             "schema_memory",
             "manage_memory_file",
@@ -10191,6 +10350,7 @@ _RC = frozenset({"rest", "cli"})
 # meaningless through the REST/CLI JSON envelopes, so it is mcp-only.
 _M = frozenset({"mcp"})
 _SPEC: tuple[tuple, ...] = (
+    ("configure_memory", op_configure_memory, 1, True, False, None, _MCRC),
     ("coordination_status", op_coordination_status, 1, False, False, None, _MCRC),
     ("bootstrap", op_bootstrap, 1, False, False, None, _MCRC),
     ("search", op_search, 1, False, False, "query", _MCRC),
@@ -10278,6 +10438,11 @@ egress_module.assert_projectors_registered({command.name: command for command in
 egress_module.assert_outcomes_registered({command.name: command for command in COMMANDS})
 
 _PRODUCT_SPEC: tuple[tuple, ...] = (
+    (
+        "configure_memory", op_configure_memory, 1, True, False, None, _MCRC,
+        ("configure_memory",),
+        {"surface": "primary", "actions": (), "first_run_safe": False},
+    ),
     (
         "coordination_status",
         op_coordination_status,
@@ -10785,6 +10950,18 @@ HOSTED_SURFACE_EXCLUSIONS = MappingProxyType(
     {
         exclusion.command: exclusion
         for exclusion in (
+            HostedSurfaceExclusion(
+                command="configure_memory",
+                reason=(
+                    "The existing hosted profiles pin their ordered command membership; "
+                    "v5 explicitly retains v4's membership. Adding this command would "
+                    "change the hosted command-surface digest under the same profile ID."
+                ),
+                lifted_when=(
+                    "a new hosted profile admits identity-scoped preference mutations, "
+                    "verifies principal and cell isolation, and carries its own candidate digest"
+                ),
+            ),
             HostedSurfaceExclusion(
                 command="transfer_artifact",
                 reason=(

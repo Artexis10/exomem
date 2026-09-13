@@ -25,6 +25,10 @@ ENV_FILE=""
 LEGACY_MCP_COMPAT=0
 RESUME_STOPPED_TRANSITION=0
 REBIND_VAULT=0
+SEAMLESS=0
+ENV_FILE_EXPLICIT=0
+BIND_HOST_EXPLICIT=0
+PORT_EXPLICIT=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -45,6 +49,7 @@ Options:
                             hybrid, served by ONNX Runtime, no CUDA torch wheel
   --service-root PATH       Override release state/venv location
   --package-version VERSION Pin the PyPI release version
+  --seamless                Enable the managed Linux/WSL release service
   --env-file PATH           Dotenv file (default: <repo>/.env)
   --bind-host HOST          Service bind host (default: 127.0.0.1)
   --port PORT               Service port (default: 8765)
@@ -100,20 +105,27 @@ while [[ $# -gt 0 ]]; do
         --env-file)
             require_value "$@"
             ENV_FILE="$2"
+            ENV_FILE_EXPLICIT=1
             shift 2
             ;;
         --bind-host)
             require_value "$@"
             BIND_HOST="$2"
+            BIND_HOST_EXPLICIT=1
             shift 2
             ;;
         --port)
             require_value "$@"
             PORT="$2"
+            PORT_EXPLICIT=1
             shift 2
             ;;
         --legacy-mcp-compat)
             LEGACY_MCP_COMPAT=1
+            shift
+            ;;
+        --seamless)
+            SEAMLESS=1
             shift
             ;;
         --resume-stopped-transition)
@@ -176,6 +188,11 @@ case "$OS" in
         die "unsupported platform $OS; on Windows use scripts/install-service.ps1"
         ;;
 esac
+if [[ "$SEAMLESS" == 1 ]]; then
+    [[ "$OS" == "Linux" && "$MODE" == "release" ]] \
+        || die "--seamless is supported only for Linux/WSL --release installs"
+    UNIT_SRC="$SCRIPT_DIR/exomem-managed.service"
+fi
 
 SERVICE_DEFINITION="${PLIST_DEST:-${UNIT_DEST:-}}"
 EXISTING_SERVICE=0
@@ -188,6 +205,14 @@ if [[ "$EXISTING_SERVICE" == 1 ]]; then
 else
     SERVICE_ID="$EXPECTED_SERVICE_ID"
 fi
+MANAGED_BOOTSTRAP_RESUME=0
+if [[ "$EXISTING_SERVICE" == 1 ]] && exomem_service_is_managed "$SERVICE_DEFINITION"; then
+    if [[ "$SEAMLESS" == 1 && "$RESUME_STOPPED_TRANSITION" == 1 ]]; then
+        MANAGED_BOOTSTRAP_RESUME=1
+    else
+        die "existing managed service must be upgraded with scripts/upgrade.sh; only an explicit failed-bootstrap --seamless --resume-stopped-transition may enter the installer"
+    fi
+fi
 if [[ "$MODE" == "release" && -z "$SERVICE_ROOT" && "$EXISTING_SERVICE" == 1 ]]; then
     EXISTING_PYTHON="$(exomem_service_python "$SERVICE_DEFINITION" || true)"
     if [[ "$EXISTING_PYTHON" == */.venv/bin/python ]]; then
@@ -195,8 +220,18 @@ if [[ "$MODE" == "release" && -z "$SERVICE_ROOT" && "$EXISTING_SERVICE" == 1 ]];
     fi
 fi
 SERVICE_ROOT="${SERVICE_ROOT:-$DEFAULT_SERVICE_ROOT}"
-ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
+if [[ "$SEAMLESS" == 1 ]]; then
+    [[ "$SERVICE_ROOT" == /* ]] || die "--seamless service root must be absolute"
+fi
 SERVICE_ENV_FILE="$CONFIG_ROOT/service.env"
+if [[ "$SEAMLESS" == 1 && "$EXISTING_SERVICE" == 1 ]]; then
+    [[ "$ENV_FILE_EXPLICIT" == 0 && "$LEGACY_MCP_COMPAT" == 0 && "$REBIND_VAULT" == 0 ]] \
+        || die "--seamless bootstrap preserves installed service.env; configuration changes require maintenance"
+    [[ -f "$SERVICE_ENV_FILE" ]] || die "installed service.env is required for --seamless bootstrap"
+    ENV_FILE="$SERVICE_ENV_FILE"
+else
+    ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
+fi
 LAUNCHD_ENV_FILE="$CONFIG_ROOT/launchd-environment.xml"
 
 [[ -f "$ENV_FILE" ]] || die "dotenv file not found: $ENV_FILE"
@@ -208,6 +243,9 @@ if [[ "$MODE" == "release" ]]; then
     VENV_PYTHON="$VENV_DIR/bin/python"
     LOG_DIR="$SERVICE_ROOT/logs"
     WORKING_DIRECTORY="$SERVICE_ROOT"
+    if [[ "$MANAGED_BOOTSTRAP_RESUME" == 1 && ! -x "$VENV_PYTHON" ]]; then
+        die "failed-bootstrap resume requires the existing launcher interpreter; refusing venv recreation"
+    fi
     mkdir -p "$SERVICE_ROOT" "$LOG_DIR" "$CONFIG_ROOT"
 
     if [[ ! -x "$VENV_PYTHON" ]]; then
@@ -257,8 +295,40 @@ else
 fi
 
 [[ -x "$VENV_PYTHON" ]] || die "service python is not executable: $VENV_PYTHON"
+if [[ "$SEAMLESS" == 1 ]]; then
+    if [[ "$EXISTING_SERVICE" == 1 ]]; then
+        [[ "$(exomem_service_python "$SERVICE_DEFINITION")" == "$VENV_PYTHON" ]] \
+            || die "--seamless bootstrap must use the installed service interpreter"
+        INSTALLED_ENV_BINDING="$(exomem_service_binding_path "$SERVICE_DEFINITION" "$VENV_PYTHON")" \
+            || die "could not resolve the installed service environment binding"
+        [[ "$INSTALLED_ENV_BINDING" == "$(realpath -m "$SERVICE_ENV_FILE")" ]] \
+            || die "--seamless bootstrap requires the installed service.env authority"
+    fi
+    "$VENV_PYTHON" - "$SERVICE_ROOT/managed" <<'PY' \
+        || die "managed service socket path is too long"
+import os
+import sys
+from pathlib import Path
+
+runtime = Path(sys.argv[1])
+if any(len(os.fsencode(runtime / name)) >= 108 for name in ("control.sock", "worker.sock")):
+    raise SystemExit(1)
+PY
+fi
 
 OLD_PORT="$(exomem_service_port "$SERVICE_DEFINITION")"
+if [[ "$SEAMLESS" == 1 && "$EXISTING_SERVICE" == 1 ]]; then
+    if [[ "$PORT_EXPLICIT" == 1 && "$PORT" != "$OLD_PORT" ]]; then
+        die "--seamless bootstrap cannot change the service port"
+    fi
+    PORT="$OLD_PORT"
+    EXISTING_HOST="$(sed -n 's|^ExecStart=.*--host \([^[:space:]]*\).*|\1|p' "$SERVICE_DEFINITION" | head -n1)"
+    [[ -n "$EXISTING_HOST" ]] || die "could not resolve the installed service host"
+    if [[ "$BIND_HOST_EXPLICIT" == 1 && "$BIND_HOST" != "$EXISTING_HOST" ]]; then
+        die "--seamless bootstrap cannot change the service host"
+    fi
+    BIND_HOST="$EXISTING_HOST"
+fi
 VAULT="$(exomem_dotenv_file_value "$ENV_FILE" EXOMEM_VAULT_PATH)"
 [[ -n "$VAULT" ]] || die "EXOMEM_VAULT_PATH is required in $ENV_FILE"
 
@@ -282,6 +352,9 @@ PREFERRED_STATE_ROOT="${EXOMEM_STATE_ROOT:-${DOTENV_STATE_ROOT:-$(exomem_platfor
 [[ "$PREFERRED_STATE_ROOT" == /* ]] \
     || die "managed EXOMEM_STATE_ROOT must be absolute"
 PERSISTED_STATE_ROOT="$(exomem_dotenv_file_value "$SERVICE_ENV_FILE" EXOMEM_STATE_ROOT)"
+if [[ "$SEAMLESS" == 1 && "$EXISTING_SERVICE" == 1 && -z "$PERSISTED_STATE_ROOT" ]]; then
+    die "--seamless bootstrap requires the installed service.env state-root binding"
+fi
 if [[ -n "$PERSISTED_STATE_ROOT" ]]; then
     [[ "$PERSISTED_STATE_ROOT" == /* ]] \
         || die "managed EXOMEM_STATE_ROOT must be absolute"
@@ -298,6 +371,9 @@ if [[ "$EXISTING_SERVICE" == 1 ]]; then
     TRANSITION_RECEIPT="$(exomem_transition_receipt_path "$SERVICE_ID")" \
         || die "could not resolve an outside-vault transition receipt path"
     WORKER_BEFORE="$(exomem_service_worker_pid "$SERVICE_ID")"
+    if [[ "$MANAGED_BOOTSTRAP_RESUME" == 1 && "$WORKER_BEFORE" =~ ^[1-9][0-9]*$ ]]; then
+        die "failed-bootstrap resume requires a stopped managed unit; refusing installer rewrite"
+    fi
     if [[ "$WORKER_BEFORE" =~ ^[1-9][0-9]*$ ]]; then
         LISTENER_PIDS_BEFORE="$(exomem_listener_pids "$OLD_PORT")" \
             || die "could not capture the full configured listener pid set"
@@ -310,6 +386,59 @@ if [[ "$EXISTING_SERVICE" == 1 ]]; then
             "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
             "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" worker_pid)"
         RESUMING=1
+        if [[ "$MANAGED_BOOTSTRAP_RESUME" == 1 ]]; then
+            ACTIVE_VERSION="$("$VENV_PYTHON" - "$SERVICE_ROOT/managed" "$VENV_PYTHON" <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+runtime = Path(sys.argv[1])
+launcher = sys.argv[2]
+try:
+    directory = runtime.lstat()
+except FileNotFoundError:
+    raise SystemExit(0)
+if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.getuid() or directory.st_mode & 0o077:
+    raise SystemExit("managed runtime directory is not owner-only")
+
+def private_record(name):
+    path = runtime / name
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 16384:
+        raise SystemExit("managed release record is not private and bounded")
+    return path
+
+if private_record("transition.json") is not None:
+    raise SystemExit("manager has a pending worker transition; installer recovery refused")
+active = private_record("active.json")
+if active is not None:
+    target = json.loads(active.read_text(encoding="utf-8"))
+    if not isinstance(target, dict) or set(target) != {"python", "version"}:
+        raise SystemExit("managed active release record has an invalid shape")
+    version = target["version"]
+    if target["python"] != launcher or not isinstance(version, str) or not re.fullmatch(r"[0-9][A-Za-z0-9.!+_-]{0,79}", version):
+        raise SystemExit("managed active release does not identify the launcher")
+    print(version)
+PY
+)" || die "could not validate the managed active release before bootstrap resume"
+            if [[ -n "$ACTIVE_VERSION" ]]; then
+                [[ -z "$PACKAGE_VERSION" || "$PACKAGE_VERSION" == "$ACTIVE_VERSION" ]] \
+                    || die "bootstrap resume must keep the manager-recorded active version $ACTIVE_VERSION"
+                INSTALLED_VERSION_BEFORE="$(exomem_installed_version "$VENV_PYTHON" || true)"
+                [[ "$INSTALLED_VERSION_BEFORE" == "$ACTIVE_VERSION" ]] \
+                    || die "launcher version differs from the manager-recorded active release"
+                if [[ -z "$PACKAGE_VERSION" ]]; then
+                    PACKAGE_VERSION="$ACTIVE_VERSION"
+                    PACKAGE_REQUIREMENT="$PACKAGE_REQUIREMENT==$PACKAGE_VERSION"
+                fi
+            fi
+        fi
     else
         die "existing service must be running with a capturable worker for first entry; use --resume-stopped-transition only after a failed transition"
     fi
@@ -491,6 +620,10 @@ export EXOMEM_STATE_ROOT="$MANAGED_STATE_ROOT"
 if [[ "$MODE" == "release" ]]; then
     echo "Installing $PACKAGE_REQUIREMENT into the release service venv..."
     uv pip install --upgrade --python "$VENV_PYTHON" "$PACKAGE_REQUIREMENT"
+    if [[ "$SEAMLESS" == 1 ]]; then
+        "$VENV_PYTHON" -c 'import exomem.service_manager' \
+            || die "installed release does not provide the managed service launcher"
+    fi
 fi
 if [[ "$EXISTING_SERVICE" == 1 ]]; then
     exomem_update_transition_receipt \
@@ -580,7 +713,9 @@ for path in (systemd_path, process_path, xml_path):
     os.chmod(path, 0o600)
 PY
 
-durable_publish_service_env "$SERVICE_ENV_STAGING_FILE"
+if [[ "$SEAMLESS" != 1 || "$EXISTING_SERVICE" != 1 ]]; then
+    durable_publish_service_env "$SERVICE_ENV_STAGING_FILE"
+fi
 rm -f "$SERVICE_ENV_STAGING_FILE"
 SERVICE_ENV_STAGING_FILE=""
 
@@ -685,6 +820,7 @@ text = Path(src).read_text(encoding="utf-8")
 replacements = {
     "__VENV_PYTHON__": exec_path(python),
     "__WORKING_DIRECTORY__": scalar_path(working_dir),
+    "__MANAGED_RUNTIME_DIR__": exec_path(str(Path(working_dir) / "managed")),
     "__SERVICE_ENV_FILE__": scalar_path(env_file),
     "__BIND_HOST__": host,
     "__PORT__": port,
@@ -811,7 +947,11 @@ echo "  version:    $SERVED_VERSION (from $HEALTH_URL)"
 echo "  status:     $STATUS_COMMAND"
 echo "  logs:       $LOG_COMMAND"
 if [[ "$MODE" == "release" ]]; then
-    echo "  update:     re-run this --release command after package or .env changes"
+    if [[ "$SEAMLESS" == 1 ]]; then
+        echo "  update:     bash scripts/upgrade.sh for worker releases"
+    else
+        echo "  update:     re-run this --release command after package or .env changes"
+    fi
 else
     echo "  update:     re-run this --repo-dev command after .env changes"
 fi

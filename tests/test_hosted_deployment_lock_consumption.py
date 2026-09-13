@@ -54,26 +54,27 @@ def test_historical_rollback_manifest_remains_strict_release_evidence() -> None:
     assert (manifest["release"], manifest["hostedProtocol"]) == ("0.39.2", "1")
 
 
-def test_canonical_lock_pair_is_exact_0770_with_one_live_legacy_dependency() -> None:
+def test_canonical_lock_pair_is_exact_0770_without_live_legacy_dependencies() -> None:
     pair = json.loads(LOCK_PAIR.read_text(encoding="utf-8"))
     forward_contract = json.loads(FORWARD_CONTRACT.read_text(encoding="utf-8"))
     authority = json.loads(AUTHORITATIVE_LEGACY_SET.read_text(encoding="utf-8"))
     trust = json.loads(SUBSTRATE_TRUST.read_text(encoding="utf-8"))
     legacy_contract = json.loads(LEGACY_CONTRACT_0731.read_text(encoding="utf-8"))
-    legacy_contract_sha256 = hashlib.sha256(LEGACY_CONTRACT_0731.read_bytes()).hexdigest()
 
     assert forward_contract["releaseVersion"] == "0.77.0"
     assert legacy_contract["releaseVersion"] == "0.73.1"
-    assert [unit["releaseVersion"] for unit in authority["units"]] == ["0.73.1"]
+    assert authority["units"] == []
     assert len(pair["locks"]) == 2
     expand, contract = pair["locks"]
     assert (expand["admissionMode"], contract["admissionMode"]) == ("expand", "contract")
     assert {**expand, "admissionMode": None} == {**contract, "admissionMode": None}
 
     for member in (expand, contract):
-        catalog = member["composition"]["legacyCatalog"]
-        assert [unit["contractSha256"] for unit in catalog] == [legacy_contract_sha256]
-        assert catalog[0]["contract"] == legacy_contract
+        assert member["composition"]["legacyCatalog"] == []
+        assert (
+            member["composition"]["authoritativeLegacyReleaseSetSha256"]
+            == hashlib.sha256(AUTHORITATIVE_LEGACY_SET.read_bytes()).hexdigest()
+        )
         assert member["runtimeTarget"] == {
             key: forward_contract[key]
             for key in (

@@ -45,11 +45,15 @@ data:
 {{- end }}
 {{- $stateName := printf "exomem-hosted-scheduler-state-%s" $job.name -}}
 {{- $initialState := printf `{"schema_version":1,"job":%q,"cadence_seconds":%d,"attempts_total":0,"failures_total":0,"consecutive_failures":0,"last_attempt_unixtime":0,"last_success_unixtime":0,"duration_seconds":{"buckets":{"1":0,"5":0,"20":0,"+Inf":0},"count":0,"sum":0.0}}` $job.name $cadenceSeconds -}}
+{{- /*
+The runtime owns this state after first creation. Re-rendering it from a
+`lookup` snapshot is a read-modify-write across the whole upgrade: anything the
+job recorded between render and apply was erased, and a stale cadence was carried
+forward verbatim. So the chart seeds the ConfigMap only when it does not exist;
+`helm.sh/resource-policy: keep` then leaves it alone on every later upgrade.
+*/ -}}
 {{- $existingState := lookup "v1" "ConfigMap" $.Release.Namespace $stateName -}}
-{{- $persistedState := $initialState -}}
-{{- if and $existingState $existingState.data (hasKey $existingState.data "state.json") -}}
-{{- $persistedState = index $existingState.data "state.json" -}}
-{{- end }}
+{{- if not $existingState }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -62,15 +66,19 @@ metadata:
     helm.sh/resource-policy: keep
 immutable: false
 data:
-  state.json: {{ $persistedState | quote }}
+  state.json: {{ $initialState | quote }}
+{{- end }}
 {{- end }}
 {{- $alertStateName := "exomem-hosted-scheduler-alert-state" -}}
 {{- $initialAlertState := `{"schema_version":1,"baselines":{},"active":{},"transitions_total":0,"last_evaluated_unixtime":0}` -}}
+{{- /*
+Seeded once, then owned by the evaluator. Re-rendering it from a `lookup`
+snapshot rolled `transitions_total`, `baselines` and `active` back to whatever
+the render saw, so a transition committed while the upgrade ran was erased and
+its sequence number reused: the receiver deduplicated the next real alert.
+*/ -}}
 {{- $existingAlertState := lookup "v1" "ConfigMap" .Release.Namespace $alertStateName -}}
-{{- $persistedAlertState := $initialAlertState -}}
-{{- if and $existingAlertState $existingAlertState.data (hasKey $existingAlertState.data "state.json") -}}
-{{- $persistedAlertState = index $existingAlertState.data "state.json" -}}
-{{- end }}
+{{- if not $existingAlertState }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -83,7 +91,8 @@ metadata:
     helm.sh/resource-policy: keep
 immutable: false
 data:
-  state.json: {{ $persistedAlertState | quote }}
+  state.json: {{ $initialAlertState | quote }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount

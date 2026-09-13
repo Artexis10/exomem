@@ -53,6 +53,12 @@ def _fake_python(path: Path) -> None:
             sys.argv = sys.argv[1:]
             runpy.run_path(script, run_name="__main__")
 
+        if len(sys.argv) == 4 and sys.argv[1] == "-":
+            program = sys.stdin.read()
+            sys.argv = sys.argv[1:]
+            exec(compile(program, "<managed_bootstrap_record>", "exec"), {"__name__": "__main__"})
+            raise SystemExit(0)
+
         if len(sys.argv) == 5 and sys.argv[1] == "-":
             # Run the installer's real publisher rather than a paraphrase of
             # it. This program is plain stdlib and it owns the invariants that
@@ -168,6 +174,7 @@ def _fake_python(path: Path) -> None:
             replacements = {
                 "__VENV_PYTHON__": python.replace("\\", "\\\\").replace('"', '\\"'),
                 "__WORKING_DIRECTORY__": scalar_path(working_dir),
+                "__MANAGED_RUNTIME_DIR__": str(Path(working_dir) / "managed").replace("\\", "\\\\").replace('"', '\\"'),
                 "__SERVICE_ENV_FILE__": scalar_path(env_file),
                 "__BIND_HOST__": host,
                 "__PORT__": port,
@@ -382,6 +389,7 @@ def _fixture(tmp_path: Path, *, os_name: str = "Linux", arch: str = "x86_64") ->
 
     env = os.environ.copy()
     env.pop("EXOMEM_STATE_ROOT", None)
+    env.pop("XDG_STATE_HOME", None)
     env.update(
         {
             "HOME": str(home),
@@ -1181,6 +1189,270 @@ def test_existing_install_stops_binds_then_rolls_forward(tmp_path: Path) -> None
     assert f'EXOMEM_STATE_ROOT="{original_state_root}"' in service_env.read_text(
         encoding="utf-8"
     )
+
+
+def test_seamless_bootstrap_keeps_installed_environment_authoritative(tmp_path: Path) -> None:
+    require_posix_executable_scripts()
+    env, service_root, env_file = _fixture(tmp_path)
+    first = _invoke(env, service_root, env_file, "--profile", "lean")
+    assert first.returncode == 0, first.stderr
+    service_env = Path(env["FAKE_SERVICE_ENV_FILE"])
+    original = service_env.read_bytes() + b'FASTMCP_HOME="/isolated/issuer"\nEXOMEM_AUTO_QUIET="1"\n'
+    service_env.write_bytes(original)
+    env_file.write_text("EXOMEM_VAULT_PATH=/stale/checkout/vault\n", encoding="utf-8")
+
+    enabled = subprocess.run(
+        ["bash", str(INSTALL_SH), "--release", "--seamless", "--profile", "lean", "--service-root", str(service_root)],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert enabled.returncode == 0, enabled.stderr
+    assert service_env.read_bytes() == original
+    unit = Path(env["XDG_CONFIG_HOME"]) / "systemd" / "user" / "exomem.service"
+    unit_text = unit.read_text(encoding="utf-8")
+    assert "-m exomem.service_manager serve" in unit_text
+    assert "KillMode=control-group" in unit_text
+    assert "SendSIGKILL=yes" in unit_text
+    assert "TimeoutStopSec=30" in unit_text
+    if shutil.which("systemd-analyze"):
+        verified = subprocess.run(["systemd-analyze", "verify", str(unit)], capture_output=True, text=True, check=False)
+        assert verified.returncode == 0, verified.stderr
+
+    trace = Path(env["TRACE_FILE"])
+    trace.write_text("", encoding="utf-8")
+    rejected = _invoke(env, service_root, env_file, "--profile", "lean")
+    assert rejected.returncode != 0
+    assert "managed" in rejected.stderr.lower()
+    assert trace.read_text(encoding="utf-8") == ""
+
+
+def test_failed_seamless_bootstrap_resumes_only_with_stopped_receipt(tmp_path: Path) -> None:
+    require_posix_executable_scripts()
+    env, service_root, env_file = _fixture(tmp_path)
+    first = _invoke(env, service_root, env_file, "--profile", "lean")
+    assert first.returncode == 0, first.stderr
+    service_env = Path(env["FAKE_SERVICE_ENV_FILE"])
+    original = service_env.read_bytes()
+    env["FAKE_HTTP_STATUS"] = "200"
+    command = ["bash", str(INSTALL_SH), "--release", "--seamless", "--profile", "lean", "--service-root", str(service_root)]
+    failed = subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True, check=False)
+    assert failed.returncode != 0
+    unit = Path(env["XDG_CONFIG_HOME"]) / "systemd" / "user" / "exomem.service"
+    assert "-m exomem.service_manager serve" in unit.read_text(encoding="utf-8")
+    assert Path(env["FAKE_SERVICE_STATE_FILE"]).read_text(encoding="ascii").strip() == "inactive"
+    assert service_env.read_bytes() == original
+    runtime = service_root / "managed"
+    runtime.mkdir(mode=0o700)
+    active = runtime / "active.json"
+    active.write_text(
+        json.dumps({"python": str(service_root / ".venv" / "bin" / "python"), "version": "9.9.9"}),
+        encoding="utf-8",
+    )
+    active.chmod(0o600)
+
+    trace = Path(env["TRACE_FILE"])
+    trace.write_text("", encoding="utf-8")
+    refused = subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True, check=False)
+    assert refused.returncode != 0
+    assert "uv pip install" not in trace.read_text(encoding="utf-8")
+
+    trace.write_text("", encoding="utf-8")
+    mismatched = subprocess.run(
+        [*command, "--resume-stopped-transition", "--package-version", "9.9.8"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert mismatched.returncode != 0
+    assert "uv pip install" not in trace.read_text(encoding="utf-8")
+
+    pending = runtime / "transition.json"
+    pending.write_text(json.dumps({"target": {"python": str(active), "version": "9.9.9"}}), encoding="utf-8")
+    pending.chmod(0o600)
+    trace.write_text("", encoding="utf-8")
+    mixed = subprocess.run(
+        [*command, "--resume-stopped-transition"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert mixed.returncode != 0
+    assert "uv pip install" not in trace.read_text(encoding="utf-8")
+    pending.unlink()
+
+    active.write_text(
+        json.dumps({"python": str(service_root / "releases" / "other" / "bin" / "python"), "version": "9.9.9"}),
+        encoding="utf-8",
+    )
+    trace.write_text("", encoding="utf-8")
+    misbound = subprocess.run(
+        [*command, "--resume-stopped-transition"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert misbound.returncode != 0
+    assert "uv pip install" not in trace.read_text(encoding="utf-8")
+    active.write_text(
+        json.dumps({"python": str(service_root / ".venv" / "bin" / "python"), "version": "9.9.9"}),
+        encoding="utf-8",
+    )
+
+    active.chmod(0o644)
+    trace.write_text("", encoding="utf-8")
+    exposed = subprocess.run(
+        [*command, "--resume-stopped-transition"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert exposed.returncode != 0
+    assert "uv pip install" not in trace.read_text(encoding="utf-8")
+    active.chmod(0o600)
+
+    env.pop("FAKE_HTTP_STATUS")
+    trace.write_text("", encoding="utf-8")
+    resumed = subprocess.run(
+        [*command, "--resume-stopped-transition"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert service_env.read_bytes() == original
+    assert "exomem==9.9.9" in trace.read_text(encoding="utf-8")
+
+
+def test_managed_resume_refuses_a_running_unit_before_mutation(tmp_path: Path) -> None:
+    require_posix_executable_scripts()
+    env, service_root, env_file = _fixture(tmp_path)
+    assert _invoke(env, service_root, env_file, "--profile", "lean").returncode == 0
+    command = ["bash", str(INSTALL_SH), "--release", "--seamless", "--profile", "lean", "--service-root", str(service_root)]
+    enabled = subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True, check=False)
+    assert enabled.returncode == 0, enabled.stderr
+    trace = Path(env["TRACE_FILE"])
+    trace.write_text("", encoding="utf-8")
+    refused = subprocess.run(
+        [*command, "--resume-stopped-transition"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "systemctl --user stop" not in trace.read_text(encoding="utf-8")
+    assert "uv pip install" not in trace.read_text(encoding="utf-8")
+
+
+def test_managed_resume_refuses_stopped_unit_without_bootstrap_receipt(tmp_path: Path) -> None:
+    require_posix_executable_scripts()
+    env, service_root, env_file = _fixture(tmp_path)
+    assert _invoke(env, service_root, env_file, "--profile", "lean").returncode == 0
+    command = ["bash", str(INSTALL_SH), "--release", "--seamless", "--profile", "lean", "--service-root", str(service_root)]
+    enabled = subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True, check=False)
+    assert enabled.returncode == 0, enabled.stderr
+    subprocess.run(["systemctl", "--user", "stop", "exomem"], env=env, check=True, capture_output=True)
+    trace = Path(env["TRACE_FILE"])
+    trace.write_text("", encoding="utf-8")
+    refused = subprocess.run(
+        [*command, "--resume-stopped-transition"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "receipt" in refused.stderr.lower()
+    assert "uv pip install" not in trace.read_text(encoding="utf-8")
+
+
+def test_legacy_upgrade_refuses_managed_unit_before_stop(tmp_path: Path) -> None:
+    require_posix_executable_scripts()
+    env, _, _ = _fixture(tmp_path)
+    unit = Path(env["XDG_CONFIG_HOME"]) / "systemd" / "user" / "exomem.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_text('ExecStart="/fake/bin/python" -m exomem.service_manager serve --runtime-dir /tmp/managed --port 8765\n', encoding="utf-8")
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "upgrade.sh"), "--resume-stopped-transition"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "managed" in result.stderr.lower()
+    assert "systemctl --user stop" not in Path(env["TRACE_FILE"]).read_text(encoding="utf-8")
+
+
+def test_managed_upgrade_routes_without_stopping_or_mutating_launcher(tmp_path: Path) -> None:
+    require_posix_executable_scripts()
+    env, service_root, _ = _fixture(tmp_path)
+    python = service_root / ".venv" / "bin" / "python"
+    _write_executable(
+        python,
+        f'''\
+        #!/bin/sh
+        if [ "$1" = -m ] && [ "$2" = exomem.service_upgrade ]; then
+            echo "managed operator $*" >> "$TRACE_FILE"
+            printf '%s\\n' '{{"ok":true,"phase":"ready","active":{{"python":"/candidate/bin/python","version":"0.80.0"}}}}'
+            exit 0
+        fi
+        exec "{sys.executable}" "$@"
+        ''',
+    )
+    unit = Path(env["XDG_CONFIG_HOME"]) / "systemd" / "user" / "exomem.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_text(
+        f'ExecStart="{python}" -m exomem.service_manager serve --runtime-dir "{service_root / "managed"}" '
+        '--worker-python "/candidate/bin/python" --host 127.0.0.1 --port 8765 --unit-name exomem.service\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "upgrade.sh"), "--profile", "lean", "--cli-sync", "never"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    trace = Path(env["TRACE_FILE"]).read_text(encoding="utf-8")
+    assert "managed operator -m exomem.service_upgrade" in trace
+    assert "systemctl --user stop" not in trace
+    assert "uv pip install" not in trace
+    assert "Managed serving version: 0.80.0" in result.stdout
+
+
+def test_managed_runtime_dir_decodes_unit_quoting(tmp_path: Path) -> None:
+    unit = tmp_path / "exomem.service"
+    unit.write_text(
+        'ExecStart="/venv/bin/python" -m exomem.service_manager serve --runtime-dir "/tmp/a\\"b/managed"\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["bash", "-c", '. "$1"; exomem_managed_runtime_dir "$2" "$3"', "bash", str(COMMON_SH), str(unit), sys.executable],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == '/tmp/a"b/managed'
 
 
 def test_stopped_existing_install_requires_the_exact_failed_transition_receipt(

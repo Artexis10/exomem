@@ -4235,6 +4235,88 @@ def test_derived_acknowledgement_budget_bounds_the_waiting_only(
     assert target.read_text(encoding="utf-8") == "# Ack\n"
 
 
+def test_the_acknowledgement_deadline_is_the_lease_budget_when_no_request_budget() -> None:
+    """Off the connector path nothing changes: the lease keeps its own clock."""
+    from exomem import request_budget
+
+    entry = writer_lease_module._fast_ack_monotonic()
+
+    assert request_budget.current() is None
+    assert writer_lease_module.acknowledgement_budget_deadline(entry) == pytest.approx(
+        entry
+        + writer_lease_module._MUTATION_REQUEST_BUDGET_SECONDS
+        - writer_lease_module._TERMINAL_DELIVERY_RESERVE_SECONDS
+    )
+
+
+def test_the_acknowledgement_deadline_follows_a_tighter_request_deadline() -> None:
+    """20 seconds of request budget leaves the wait 15, not the lease's 55."""
+    from exomem import request_budget
+
+    entry = writer_lease_module._fast_ack_monotonic()
+    budget = request_budget.RequestBudget(seconds=20.0, entry=entry)
+    token = request_budget.set_current(budget)
+    try:
+        derived = writer_lease_module.acknowledgement_budget_deadline(entry)
+    finally:
+        request_budget.reset_current(token)
+
+    assert derived == pytest.approx(
+        entry + 20.0 - request_budget.DELIVERY_RESERVE_SECONDS
+    )
+    assert derived < entry + writer_lease_module._MUTATION_REQUEST_BUDGET_SECONDS
+
+
+def test_a_looser_request_deadline_never_extends_the_lease_budget() -> None:
+    """The earlier of the two wins in both directions; a budget cannot relax."""
+    from exomem import request_budget
+
+    entry = writer_lease_module._fast_ack_monotonic()
+    budget = request_budget.RequestBudget(seconds=600.0, entry=entry)
+    token = request_budget.set_current(budget)
+    try:
+        derived = writer_lease_module.acknowledgement_budget_deadline(entry)
+    finally:
+        request_budget.reset_current(token)
+
+    assert derived == pytest.approx(
+        entry
+        + writer_lease_module._MUTATION_REQUEST_BUDGET_SECONDS
+        - writer_lease_module._TERMINAL_DELIVERY_RESERVE_SECONDS
+    )
+
+
+def test_a_spent_request_budget_still_commits_and_persists_its_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget bounds waiting. A commit under way is never interrupted."""
+    from exomem import request_budget
+
+    manager, command, root, target, calls = _fast_ack_derived_batch(
+        tmp_path, monkeypatch, claimed_component="embeddings"
+    )
+    expired = request_budget.RequestBudget(
+        seconds=50.0, entry=writer_lease_module._fast_ack_monotonic() - 600.0
+    )
+    token = request_budget.set_current(expired)
+    try:
+        terminal = manager.invoke(
+            command,
+            (root,),
+            {"response_detail": "full"},
+            idempotency_key="spent-request-budget",
+            idempotency_principal_scope="principal:alice",
+            mutation_request_id="66666666-6666-4666-8666-666666666666",
+        )
+    finally:
+        request_budget.reset_current(token)
+
+    assert terminal["status"] == "committed"
+    assert terminal["derived_sync"] == "pending"
+    assert calls == [1]
+    assert target.read_text(encoding="utf-8") == "# Ack\n"
+
+
 def test_a_commit_that_registers_no_derived_batch_owes_no_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

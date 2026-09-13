@@ -102,7 +102,8 @@ CONFIRM_SHORTCUT: str = (
 FOUNDER_GATE: str = (
     "standing delegation of restructure execution would be an envelope cell above "
     "the current ceiling. It does not exist in v1, and only a deliberate founder "
-    "ratification may ever create one"
+    "ratification may ever create one; requests to create collections automatically "
+    "are refused by this rule"
 )
 
 #: The confirm-required contract, served rather than implied.
@@ -119,8 +120,8 @@ FOUNDER_GATE: str = (
 #: active surface cannot call, and a ceiling that vanished on a reduced surface
 #: would be a ceiling nobody was told about.
 CONFIRM_REQUIRED: str = (
-    "the confirm-required surfaces are restructure application, supersession commit, "
-    "entity creation and deletion. Deletion has a server-side confirm parameter and "
+    "the confirm-required surfaces are restructure application, collection creation, "
+    "supersession commit, entity creation and deletion. Deletion has a server-side confirm parameter and "
     "adoption apply is preview-first; supersession and entity creation have no "
     "server-side gate today — named future work, not an implied one"
 )

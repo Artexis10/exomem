@@ -298,6 +298,10 @@ bash scripts/install-service.sh --release
 
 **Linux (systemd --user):**
 
+Add `--seamless` to a release install to preserve existing client connections
+during later worker upgrades. First enablement requires one reconnect; see
+[managed service upgrades](managed-service-upgrades.md) for setup and recovery.
+
 ```bash
 bash scripts/install-service.sh --release
 # The installer attempts to enable user linger so the service survives logout.
@@ -954,6 +958,12 @@ Pick the strongest option that fits the situation:
 | Want a clean uninstall | Stop + remove service, turn off the tunnel/Funnel, delete the connector in claude.ai, delete the GitHub OAuth App. |
 
 ## Deploying a new version
+
+For an opt-in managed Linux/WSL service, `bash scripts/upgrade.sh` stages a new
+worker environment and replaces the worker while the public endpoint stays up.
+The supervisor's interpreter stays fixed; the private managed status command
+identifies the active worker release. Follow the
+[managed upgrade procedure](managed-service-upgrades.md) for this mode.
 
 **The service interpreter is the source of truth — not the checkout you are standing in.**
 A service can run from a standalone venv while its `AppDirectory` points at a checkout, so

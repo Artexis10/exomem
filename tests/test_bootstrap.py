@@ -577,6 +577,7 @@ def test_session_bootstrap_projects_filtered_compact_live_state(vault: Path) -> 
             "due_state",
             "due_state_handling",
             "due_state_authority",
+            "artifact_role_state_handling",
             "review_reason",
             "family_disposition",
             "family_disposition_reading",

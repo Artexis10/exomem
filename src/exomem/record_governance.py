@@ -11,7 +11,16 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote, unquote
 
-from . import access, memory_refs, mutation_terminal, query_data, record_formats, vault
+from . import (
+    access,
+    collection_claims,
+    memory_refs,
+    mutation_terminal,
+    query_data,
+    record_formats,
+    structure_promotion,
+    vault,
+)
 from . import structured_collections as collections
 from .governance import egress
 from .governance.principal import OWNER_AUDIENCE, effective_principal
@@ -26,6 +35,10 @@ _MAX_LINK_INDEX_ENTRY_BYTES = 256 * 1024
 _PRESENTATION_FINDING_LIMIT = 128
 #: Held references are a route back to a blocked candidate, not a listing of one.
 _HELD_REFERENCE_LIMIT = 20
+MAX_DERIVED_VALUES = 12  # PROVISIONAL
+MIN_CLAIM_TERMS = 2  # PROVISIONAL
+_CLAIM_LISTS = frozenset({"tags", "terms", "entity_types", "evidence_kinds"})
+_GENERIC_CLAIM_TERMS = frozenset({"other", "unknown"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +213,57 @@ def _inspection_observed_values(value: Any) -> dict[str, dict[str, Any]] | None:
             entries.append({"value": observed, "count": count, "value_truncated": cut})
         normalized[field] = {"values": entries, "truncated": summary["truncated"]}
     return normalized
+
+
+def _inspection_claims(value: Any) -> dict[str, list[str]] | None:
+    if not isinstance(value, Mapping) or set(value) - _CLAIM_LISTS:
+        return None
+    claims: dict[str, list[str]] = {}
+    for name, raw in value.items():
+        if not isinstance(raw, list) or len(raw) > 24:
+            return None
+        entries = [_inspection_string(entry, maximum=512, nonempty=False) for entry in raw]
+        if any(entry is None for entry in entries):
+            return None
+        claims[str(name)] = [entry for entry in entries if entry is not None]
+    return claims
+
+
+def effective_claims(
+    manifest: collections.CollectionManifest,
+    observed: Mapping[str, Mapping[Any, Any]] | None,
+) -> frozenset[str]:
+    """Return declared plus recurring observed claim terms from complete values."""
+    terms: set[str] = set()
+    for values in (manifest.claims or {}).values():
+        terms.update(collection_claims.normalize_terms(values))
+    if observed is None:
+        return frozenset(terms - structure_promotion.BREADTH_TAGS - _GENERIC_CLAIM_TERMS)
+
+    for name, spec in manifest.schema.fields.items():
+        counts = observed.get(name)
+        if not isinstance(counts, Mapping) or "values" in counts or "truncated" in counts:
+            continue
+        eligible = spec.type == "enum" or spec.type == "string"
+        eligible = eligible or (
+            name == "tags"
+            and spec.type == "array"
+            and spec.items is not None
+            and spec.items.type == "string"
+        )
+        if not eligible or (spec.type == "string" and len(counts) > MAX_DERIVED_VALUES):
+            continue
+        for value, count in counts.items():
+            if type(count) is not int or count < 2 or type(value) not in {str, int, float, bool}:
+                continue
+            terms.update(collection_claims.normalize_terms([value]))
+    return frozenset(terms - structure_promotion.BREADTH_TAGS - _GENERIC_CLAIM_TERMS)
+
+
+def is_routing_target(
+    manifest: collections.CollectionManifest, claims: Iterable[str]
+) -> bool:
+    return manifest.lifecycle == "active" and len(frozenset(claims)) >= MIN_CLAIM_TERMS
 
 
 def _inspection_legacy_identifier(value: Any) -> str | None:
@@ -531,7 +595,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
     if kind == "collection":
         if legacy is not None or not isinstance(contract, Mapping):
             return None
-        if set(contract) != {
+        if set(contract) - {
             "collection_id",
             "path",
             "title",
@@ -539,7 +603,16 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "schema_version",
             "storage",
             "plans",
-        }:
+            "claims",
+        } or not {
+            "collection_id",
+            "path",
+            "title",
+            "semantic_profile",
+            "schema_version",
+            "storage",
+            "plans",
+        } <= set(contract):
             return None
         collection_id = _inspection_identifier(contract.get("collection_id"))
         path, title = (
@@ -582,6 +655,9 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         normalized_plans = [_inspection_plan_descriptor(plan) for plan in plans]
         if any(plan is None for plan in normalized_plans):
             return None
+        claims = _inspection_claims(contract.get("claims")) if "claims" in contract else None
+        if "claims" in contract and claims is None:
+            return None
         normalized_contract: dict[str, Any] | None = {
             "collection_id": collection_id,
             "path": path,
@@ -590,6 +666,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "schema_version": version,
             "storage": {"strategy": strategy, "source": source, "format_version": format_version},
             "plans": [plan for plan in normalized_plans if plan is not None],
+            **({"claims": claims} if claims is not None else {}),
         }
         normalized_legacy: dict[str, Any] | None = None
         if status == "not_applicable":
@@ -684,10 +761,17 @@ def _inspection_coverage(value: Any) -> dict[str, Any] | None:
         "held",
         "held_refs",
         "unreadable",
+        "unreflected",
+        "unreflected_refs",
+        "pending",
+        "pending_refs",
+        "state",
     }:
         return None
     committed, held, references = value["committed"], value["held"], value["held_refs"]
     unreadable = value["unreadable"]
+    unreflected, pending = value["unreflected"], value["pending"]
+    unreflected_refs, pending_refs = value["unreflected_refs"], value["pending_refs"]
     if (
         type(committed) is not int
         or committed < 0
@@ -698,6 +782,21 @@ def _inspection_coverage(value: Any) -> dict[str, Any] | None:
         or not isinstance(references, list)
         or len(references) > _HELD_REFERENCE_LIMIT
         or len(references) > held
+        or type(unreflected) is not int
+        or unreflected < 0
+        or type(pending) is not int
+        or pending < 0
+        or not isinstance(unreflected_refs, list)
+        or not isinstance(pending_refs, list)
+        or len(unreflected_refs) > 20
+        or len(pending_refs) > 20
+        or len(unreflected_refs) > unreflected
+        or len(pending_refs) > pending
+        or value.get("state") not in {"complete", "partial", "blocked", "unknown"}
+        or not all(
+            isinstance(ref, str) and ref.startswith("exomem://") and len(ref) <= 256
+            for ref in [*unreflected_refs, *pending_refs]
+        )
     ):
         return None
     normalized: list[dict[str, Any]] = []
@@ -732,6 +831,11 @@ def _inspection_coverage(value: Any) -> dict[str, Any] | None:
         "held": held,
         "unreadable": unreadable,
         "held_refs": normalized,
+        "unreflected": unreflected,
+        "unreflected_refs": list(unreflected_refs),
+        "pending": pending,
+        "pending_refs": list(pending_refs),
+        "state": value["state"],
     }
 
 
@@ -1392,12 +1496,32 @@ def _collection_coverage(
     counted or named, so a blocked ledger is visible to exactly the audiences
     allowed to see what is blocking it.
     """
-    from . import records
+    from . import due_state, records
 
     # A count-only surface opens nothing: it answers "how many", and a held
     # payload is the caller's own refused observation.
     census = records.held_census(root, manifest, authorize_path=authorize, load=references)
-    coverage: dict[str, Any] = {"committed": committed, "held": census.held}
+    observations = due_state.collection_observation_coverage(
+        root, str(manifest.path), authorize_path=authorize
+    )
+    unreflected_refs = list(observations["unreflected"])
+    pending_refs = list(observations["pending"])
+    state = (
+        "blocked"
+        if census.held
+        else (
+            "unknown"
+            if committed is None or observations["complete"] is not True
+            else ("partial" if unreflected_refs else "complete")
+        )
+    )
+    coverage: dict[str, Any] = {
+        "committed": committed,
+        "held": census.held,
+        "unreflected": len(unreflected_refs),
+        "pending": len(pending_refs),
+        "state": state,
+    }
     if references:
         coverage["unreadable"] = census.unreadable
         coverage["held_refs"] = [
@@ -1409,6 +1533,8 @@ def _collection_coverage(
             }
             for candidate in census.candidates[:_HELD_REFERENCE_LIMIT]
         ]
+        coverage["unreflected_refs"] = unreflected_refs[:20]
+        coverage["pending_refs"] = pending_refs[:20]
     return coverage
 
 
@@ -1446,9 +1572,12 @@ def _inventory_coverage(
         committed: int | None = len(snapshot.records)
     except collections.CollectionError:
         committed = None
-    return _collection_coverage(
+    coverage = _collection_coverage(
         root, manifest, committed=committed, authorize=authorize, references=False
     )
+    return {
+        key: coverage[key] for key in ("committed", "held", "unreflected")
+    }
 
 
 def _presentation_inspection(
@@ -1609,6 +1738,11 @@ def _inspection_contract(manifest: collections.CollectionManifest) -> dict[str, 
             "format_version": manifest.storage.format_version,
         },
         "plans": [],
+        **(
+            {"claims": {name: list(values) for name, values in manifest.claims.items()}}
+            if manifest.claims is not None
+            else {}
+        ),
     }
 
 

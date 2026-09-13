@@ -3151,6 +3151,10 @@ def test_exact_k3s_governance_migration_admission(k3s: str) -> None:
         if item.get("kind") in {"ServiceAccount", "ClusterRole", "ClusterRoleBinding"}
         and item["metadata"]["name"] == "exomem-cell-provisioner"
     ]
+    runtime_class = next(
+        item for item in platform
+        if item.get("kind") == "RuntimeClass" and item["metadata"]["name"] == "exomem-storage-init"
+    )
     _kubectl(
         k3s,
         ["apply", "--filename=-"],
@@ -3199,6 +3203,7 @@ def test_exact_k3s_governance_migration_admission(k3s: str) -> None:
             },
             *access,
             *policies,
+            runtime_class,
         ],
     )
     for name in ("exomem-tenant-boundary", "exomem-provisioner-scope"):
@@ -3220,6 +3225,73 @@ def test_exact_k3s_governance_migration_admission(k3s: str) -> None:
 
     provisioner = "system:serviceaccount:exomem-platform:exomem-cell-provisioner"
     controller = "system:serviceaccount:kube-system:job-controller"
+    from exomem_provisioner.governance_storage_binding import (
+        KubernetesGovernanceStorageBindingAdapter,
+    )
+
+    binder = KubernetesGovernanceStorageBindingAdapter(
+        core_v1=None, batch_v1=None, apps_v1=None,
+        identity_verifier=None,
+        runtime_image="ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+        cell=None,
+    )._job_body(metadata, "signed-binding-envelope")
+    binder.update(apiVersion="batch/v1", kind="Job")
+    assert admit(binder, provisioner).returncode == 0
+    binder_pod = {"apiVersion": "v1", "kind": "Pod", **copy.deepcopy(binder["spec"]["template"])}
+    binder_pod["metadata"].update(
+        name=namespace + "-init-binding", namespace=namespace,
+        ownerReferences=[{
+            "apiVersion": "batch/v1", "kind": "Job", "name": namespace + "-init",
+            "uid": "11111111-1111-4111-8111-111111111111", "controller": True,
+        }],
+    )
+    binder_pod["metadata"]["labels"].update(
+        {"job-name": namespace + "-init", "batch.kubernetes.io/job-name": namespace + "-init"}
+    )
+    assert admit(binder_pod, controller).returncode == 0
+    scheduled_elsewhere = copy.deepcopy(binder_pod)
+    scheduled_elsewhere["spec"]["schedulerName"] = "untrusted-scheduler"
+    rejected_scheduler = admit(scheduled_elsewhere, controller)
+    assert rejected_scheduler.returncode != 0
+    assert "Storage binding" in rejected_scheduler.stderr
+    for mutation in (
+        "deadline", "ttl", "mount", "env", "nodeName", "schedulerName",
+        "tolerations", "priorityClassName", "topologySpreadConstraints", "sidecar", "init",
+    ):
+        wrong = copy.deepcopy(binder)
+        spec = wrong["spec"]
+        pod_spec = spec["template"]["spec"]
+        container = pod_spec["containers"][0]
+        if mutation == "deadline":
+            spec["activeDeadlineSeconds"] = 3600
+        elif mutation == "ttl":
+            spec["ttlSecondsAfterFinished"] = 300
+        elif mutation == "mount":
+            container["volumeMounts"] = [{"name": "data", "mountPath": "/var/lib/exomem"}]
+        elif mutation == "env":
+            container["env"] = [{"name": "EXOMEM_HOSTED_CELL", "value": "1"}]
+        elif mutation == "nodeName":
+            pod_spec["nodeName"] = "k3s-node"
+        elif mutation == "schedulerName":
+            pod_spec["schedulerName"] = "untrusted-scheduler"
+        elif mutation == "tolerations":
+            pod_spec["tolerations"] = [{"key": "restricted-node", "operator": "Exists"}]
+        elif mutation == "priorityClassName":
+            pod_spec["priorityClassName"] = "system-node-critical"
+        elif mutation == "topologySpreadConstraints":
+            pod_spec["topologySpreadConstraints"] = [{
+                "maxSkew": 1, "topologyKey": "kubernetes.io/hostname",
+                "whenUnsatisfiable": "ScheduleAnyway",
+                "labelSelector": {"matchLabels": {"exomem.io/storage-binding": "true"}},
+            }]
+        elif mutation == "sidecar":
+            pod_spec["containers"].append(copy.deepcopy(container))
+        else:
+            pod_spec["initContainers"] = [copy.deepcopy(container)]
+        refused = admit(wrong, provisioner)
+        assert refused.returncode != 0, mutation + refused.stdout
+        if mutation in {"schedulerName", "tolerations", "priorityClassName", "topologySpreadConstraints"}:
+            assert "Storage binding" in refused.stderr, mutation + refused.stderr
     for phase in ("inspect", "prepare", "commit"):
         request = MigrationJobRequest(
             metadata,

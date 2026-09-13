@@ -94,6 +94,29 @@ case-insensitive; the numeric ID is the durable trust anchor.
 is required: claude.ai connects over HTTP and passes no environment of its
 own, so the service resolves the vault solely from `.env` at startup.
 
+#### Request deadlines
+
+The origin budget must leave time before either the client or the ingress gives up:
+
+| Bound | Where it is set | Default |
+| --- | --- | --- |
+| Origin request budget | `EXOMEM_MCP_REQUEST_BUDGET_SECONDS` in `.env` | 50 s |
+| Edge tool-call timeout | `MCP_TOOL_TIMEOUT_MS` on the Cloudflare worker | 60000 ms |
+| Client tool timeout | the connector's own, not yours to set | ~60 s |
+
+Keep the origin budget below both transport timeouts. The reference worker's
+60-second timeout is separate from the Cloudflare Tunnel's roughly 100-second
+cap; with a roughly 60-second client timeout, the client may give up first.
+Where the worker timeout is configurable, keep it below the client's timeout
+as well so its timeout response can arrive. The origin stops
+optional work early — a reranker pass, a deep context pack, graph enrichment —
+so the answer leaves before the edge and the client give up. A response that had
+to leave something out carries a `budget` block naming exactly which stages; it
+is a success, not an error, and the agent may re-ask with a narrower option set.
+Raising the origin budget above either transport timeout risks finishing work
+after its response can be delivered. Lower it if your edge or client is stricter.
+Local CLI calls and reconcile-class maintenance carry no budget at all.
+
 Validate:
 
 ```bash
