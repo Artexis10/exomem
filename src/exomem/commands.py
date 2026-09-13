@@ -663,7 +663,14 @@ def op_configure_memory(
             writer_lease.mark_active_mutation_committed()
     engagement = prominence_module.resolved()
     engagement["change_with"] = prominence_module.configuration_route()
-    engagement["envelope"] = envelope_module.resolved(level=engagement["level"])
+    # The gate this request already resolved, not the level. Under the
+    # unreadable-record floor the level says `balanced` while capture is
+    # withheld, and an envelope derived from the level alone would hand the
+    # withheld write authority straight back one key over.
+    engagement["envelope"] = envelope_module.resolved(
+        level=engagement["level"],
+        capture_gate=engagement["contract"]["effective_capture"],
+    )
     return {
         "operation": "configure_memory",
         "action": action,
@@ -749,12 +756,21 @@ def op_bootstrap(
     # a command the active surface cannot call, and a ceiling that vanished on a
     # reduced surface would be a ceiling nobody was told about.
     engagement_policy["envelope"] = envelope_module.resolved(
-        level=engagement_policy["level"]
+        level=engagement_policy["level"],
+        capture_gate=engagement_policy["contract"]["effective_capture"],
     )
     active_descriptor = _active_bootstrap_descriptor()
     active_product_names = frozenset(active_descriptor.product_commands)
-    if "configure_memory" in active_product_names:
-        engagement_policy["change_with"] = prominence_module.configuration_route()
+    # `change_with` is seeded from the CLI string, which is right for a local
+    # install and wrong for every served surface. Take it from what this surface
+    # actually offers: the agent-accessible control when it is served, and
+    # otherwise the custom-instructions block — never the command line, which a
+    # connector-only user has no machine to type on.
+    engagement_policy["change_with"] = (
+        prominence_module.configuration_route()
+        if "configure_memory" in active_product_names
+        else prominence_module.custom_instructions_route()
+    )
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     workflow_inventory = workflow_contracts_module.inventory_contracts(vault_root)
@@ -9483,8 +9499,13 @@ def _workflow_contract_schema_operation(
 
                 active_prominence = prominence_module.resolve()
                 result["active_prominence"] = active_prominence
+                # Capped by the capture level, not the served one. They differ
+                # only under the unreadable-record floor, and that is exactly
+                # the case where reporting the served level's gate here would
+                # grant proactive writes the request had already refused.
                 result["effective_capture"] = prominence_module.effective_capture(
-                    result["decision"]["capture"], active_prominence
+                    result["decision"]["capture"],
+                    prominence_module.effective_capture_level(),
                 )
             return result
         if operation == "preview":

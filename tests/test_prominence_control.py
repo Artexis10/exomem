@@ -749,3 +749,171 @@ def test_busy_boundary_refuses_a_clear_before_the_preference_is_written(
     assert refused.value.details["committed"] is False
     with request_scope(caller):
         assert prominence_preferences.inspect(vault) == settled
+
+
+# ------------------------------------------------- hook cadence and the served route
+
+
+@pytest.mark.parametrize("action", ["inspect", "set", "clear"])
+def test_configure_memory_tells_a_hook_capable_client_what_its_hooks_read(
+    vault, monkeypatch, action
+):
+    """Every arm of the control answers it, not only the one that writes.
+
+    A user asks "is it off?" as often as they set it, and the honest answer to
+    both is the same: the level you are reading is the server's, and the nudge
+    cadence on this machine is not.
+    """
+    monkeypatch.setenv("EXOMEM_SURFACE", "claude-code")
+    caller = RequestPrincipal("principal:person-a", surface="mcp")
+    with request_scope(caller):
+        before = _invoke(vault)
+        saved = _invoke(
+            vault, action="set", prominence="off", expected_revision=before["revision"]
+        )
+        if action == "inspect":
+            result = _invoke(vault)
+        elif action == "set":
+            result = saved
+        else:
+            _invoke(
+                vault,
+                action="set",
+                prominence="light",
+                expected_revision=saved["revision"],
+                context="coding",
+            )
+            latest = _invoke(vault)
+            result = _invoke(
+                vault,
+                action="clear",
+                context="coding",
+                expected_revision=latest["revision"],
+            )
+
+    assert result["engagement"]["hook_cadence"] == {
+        "reads": "operator environment, then this client machine's exomem configuration file",
+        "saved_preference_reaches_hooks": False,
+        "change_with": (
+            "exomem prominence <level> on the client machine "
+            "(changes hook cadence only; a saved preference still decides what is served)"
+        ),
+    }
+
+
+def test_configure_memory_stays_silent_about_hooks_on_a_hookless_client(vault, monkeypatch):
+    monkeypatch.setenv("EXOMEM_SURFACE", "claude-ai")
+    with request_scope(RequestPrincipal("principal:person-a", surface="mcp")):
+        result = _invoke(vault)
+
+    assert "hook_cadence" not in result["engagement"]
+
+
+def test_bootstrap_carries_the_cadence_to_a_hook_capable_client(vault, monkeypatch):
+    monkeypatch.setenv("EXOMEM_SURFACE", "codex")
+    bootstrap_command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "bootstrap")
+    with request_scope(RequestPrincipal("principal:person-a", surface="mcp")):
+        payload = writer_lease.invoke_command(bootstrap_command, vault, profile="compact")
+
+    assert payload["engagement"]["hook_cadence"]["saved_preference_reaches_hooks"] is False
+
+
+def test_a_surface_without_the_preference_control_is_taught_a_route_it_can_take(vault):
+    """The hookless surface is exactly the one that cannot run the CLI either.
+
+    Serving `exomem prominence <level>` to a claude.ai or ChatGPT connector names
+    a command that user has no machine to type it on, so the only honest route
+    left is the custom-instructions block.
+    """
+    from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
+
+    descriptor = ActiveSurfaceDescriptor(
+        surface="rest",
+        profile="hosted-alpha-agent-test",
+        tier2_enabled=False,
+        product_commands=("bootstrap", "ask_memory", "remember"),
+    )
+    with active_surface(descriptor):
+        payload = commands.op_bootstrap(vault, profile="compact")
+
+    change_with = payload["engagement"]["change_with"]
+    assert change_with == prominence.custom_instructions_route()
+    assert "custom instructions" in change_with
+    assert "exomem prominence" not in change_with
+    assert "configure_memory" not in change_with
+
+
+def test_a_surface_that_serves_the_control_still_names_it(vault):
+    payload = commands.op_bootstrap(vault, profile="compact")
+
+    assert payload["engagement"]["change_with"] == prominence.configuration_route()
+    assert payload["engagement"]["change_with"].startswith("configure_memory:")
+
+
+@pytest.mark.parametrize("level", prominence.CANON)
+def test_the_served_engagement_never_contradicts_itself_about_proactive_capture(vault, level):
+    """`contract.effective_capture` and `envelope.classes.proactive_capture` ship together.
+
+    They are two keys of one block and they answer the same question -- may this
+    agent write without being asked. An agent handed "no" in one and "silent:
+    act" in the other has to guess, and the authority surface is the one it will
+    believe.
+    """
+    caller = RequestPrincipal("principal:person-a", surface="mcp")
+    with request_scope(caller):
+        before = _invoke(vault)
+        saved = _invoke(vault, action="set", prominence=level, expected_revision=before["revision"])
+        bootstrap_command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "bootstrap")
+        served = writer_lease.invoke_command(bootstrap_command, vault, profile="compact")
+
+    for payload in (saved["engagement"], served["engagement"]):
+        permitted = payload["contract"]["effective_capture"]["observed_outcomes"][
+            "proactive_permitted"
+        ]
+        assert permitted is (level in {"balanced", "maximal"})
+        assert payload["envelope"]["classes"]["proactive_capture"]["disposition"] == (
+            "silent" if permitted else "off"
+        )
+
+
+def test_an_unreadable_record_withholds_proactive_capture_in_every_projection(
+    vault, monkeypatch
+):
+    """The floor has to hold in the envelope and the workflow contract too.
+
+    It held in the gate alone once, and the envelope next to it went on saying
+    `silent` -- the same fail-open, moved one key over.
+    """
+    from exomem import prominence_preferences
+    from exomem.cli_ops import OpError
+
+    caller = RequestPrincipal("principal:person-a", surface="mcp")
+    with request_scope(caller):
+        before = _invoke(vault)
+        _invoke(vault, action="set", prominence="off", expected_revision=before["revision"])
+
+        def unreadable(*args, **kwargs):
+            raise OpError("PREFERENCE_STATE_UNAVAILABLE", "preference state is unavailable")
+
+        monkeypatch.setattr(prominence_preferences, "inspect", unreadable)
+        bootstrap_command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "bootstrap")
+        served = writer_lease.invoke_command(bootstrap_command, vault, profile="compact")
+        schema_command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "schema_memory")
+        workflow = writer_lease.invoke_command(
+            schema_command,
+            vault,
+            subject="workflow-contracts",
+            operation="resolve",
+            context={"project": None, "domain": None, "activity": None},
+        )
+
+    engagement = served["engagement"]
+    assert engagement["level"] == "balanced"
+    assert engagement["source"] == "preference:unavailable"
+    assert (
+        engagement["contract"]["effective_capture"]["observed_outcomes"]["proactive_permitted"]
+        is False
+    )
+    assert engagement["envelope"]["classes"]["proactive_capture"]["disposition"] == "off"
+    assert workflow["effective_capture"]["observed_outcomes"]["proactive_permitted"] is False
+    assert workflow["effective_capture"]["durable_intent"]["proactive_permitted"] is False
