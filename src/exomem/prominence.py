@@ -579,11 +579,14 @@ def resolved(surface: str | None = None) -> dict:
 
 
 def configuration_route() -> str:
-    """The identity-scoped setting route for surfaces exposing configure_memory."""
-    return (
-        "configure_memory: inspect first; set prominence with expected_revision, "
-        "optionally for one context; clear removes a context value."
-    )
+    """The identity-scoped setting route for surfaces exposing configure_memory.
+
+    Deliberately terse: this string rides in the COMPACT bootstrap ahead of the
+    action catalogue, where `test_record_public_surface` pins how early `record`
+    is reachable. The full contract — levels, expected_revision, the context
+    argument — is the tool description's job, not this route hint's.
+    """
+    return "configure_memory: inspect first; set or clear."
 
 
 def _active_source(surface: str | None = None) -> str:
