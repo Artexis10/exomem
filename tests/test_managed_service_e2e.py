@@ -429,7 +429,7 @@ def test_a_standby_warms_beside_the_serving_worker_and_is_promoted(tmp_path):
                 result = await transition(tmp_path)
                 assert result["ok"] is True, result
                 handoff = result["handoff"]
-                assert handoff["standby"] == "ready"
+                assert handoff["standby"] == "ready", handoff
                 assert handoff["migration"] == {"state": "skipped", "reason": "declared_none"}
                 assert handoff["promotion"]["snapshot"] == "current"
                 after = await client.call_tool("counted", {"marker": "after"})

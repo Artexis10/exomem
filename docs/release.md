@@ -94,6 +94,12 @@ The script prints the handoff record. Check three things in it:
   disk at promotion. `rebuild-after-promotion` means the re-proof failed and the
   coalesced rebuild path is repairing it; expect slower first writes.
 
+A non-zero `adoption.residue` in `/health/ready`'s `cutover` block is normal for
+an upgrade during traffic: the standby adopted the pages the outgoing worker
+left deferred and queued them for incremental repair. Reads that require a
+current projection keep refusing until that repair drains, which it does in the
+background without a client call.
+
 Then confirm `/health/ready` reports `status: ready` with `cutover.standby` false.
 The budgets and the full sequence are in
 [managed-service-upgrades.md](managed-service-upgrades.md#the-standby-sequence).

@@ -57,9 +57,23 @@ def worker(root, socket_path, standby=False):
     if (root / "fail-start").exists():
         raise SystemExit(2)
     if standby:
-        # The graph proof itself is unit-tested against a real vault; this
-        # fixture owns the supervisor lifecycle, so it supplies a checkpoint and
-        # exercises the real readiness, budget and promotion paths.
+        # Snapshot adoption is measured against a real vault in
+        # tests/test_standby_handoff_writes.py; this fixture owns the supervisor
+        # lifecycle, so it supplies the adoption result and exercises the real
+        # readiness, budget and promotion paths.
+        from exomem import epistemic_graph
+
+        class _AdoptedIndex:
+            """Stand in for the graph index: this root is not a real vault, so
+            the real constructor refuses it before adoption could run."""
+
+            def __init__(self, _vault_root):
+                pass
+
+            def adopt_published_snapshot(self):
+                return epistemic_graph.SnapshotAdoption(True, reason="adopted")
+
+        epistemic_graph.EpistemicGraphIndex = _AdoptedIndex
         service_standby.snapshot_token = lambda _root: "fixture-checkpoint"
         service_standby.enter_standby()
         (root / "standby.pid").write_text(str(os.getpid()))
