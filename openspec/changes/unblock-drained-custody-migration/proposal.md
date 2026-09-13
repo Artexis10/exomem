@@ -23,4 +23,5 @@ The window exists to bound what a *serving* replica may authorize. A fenced, iss
 
 - Affected code: `governance_migration_coordinator.py`, `governance_migration_membership.py`, `authorization_membership.py`.
 - Affected tests: the three suites that asserted the refusal now assert the fenced-state acceptance and the refusals that remain.
+- Replay window: a rolled-back custody Secret is now accepted for as long as its signing keyring is valid (366 days) rather than one attestation lifetime. Rolling one back needs write access to the tenant's authorization Secret, and read access to that Secret already yields the recovery envelope, which is enough to mint an authentic bundle outright; replaying a pre-migration bundle against an already-migrated store is refused independently by the Job's own `actualSchema` evidence.
 - Operational: cells stranded by a closed window become recoverable through the existing same-operation governance requeue, with no new operator mechanism and no change to invites, volumes or fences.

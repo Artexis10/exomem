@@ -9,7 +9,7 @@
 
 - [x] 2.1 Scoped suites green: governance migration coordinator, governance migration membership, governance provision membership, governance live readiness, governance target coordinator, authorization membership.
 - [x] 2.2 Wider provisioner suites green: live provider, governance effect guards, rollforward live, provision live, target recovery, operation recovery, Helm guarded transition.
-- [ ] 2.3 Author-independent review of the relaxation, specifically that no remaining path lets a serving or unauthenticated generation through.
+- [x] 2.3 Author-independent review of the relaxation: no path lets a serving or unauthenticated generation through. Forged bundles, serving and partially-drained generations, double enrollment and activation-target substitution were all constructed and all refused. Its three requested changes are delivered: the coordinator's issue-time guard and the custody-revision binding are now pinned by tests that fail when each guard is deleted, and enrollment bounds the issue time itself rather than trusting its caller.
 - [ ] 2.4 Full applicable suite run at the delivery boundary.
 
 ## 3. Delivery

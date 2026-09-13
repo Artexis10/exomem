@@ -350,7 +350,11 @@ async def test_unenrolled_custody_whose_window_closed_still_migrates(phase):
         pass
     scenario.now = NOW + 4000
     jobs_before = len(scenario.jobs.requests)
-    assert (await scenario.step()).phase in {"prepare", "enroll", "commit"}
+    assert (await scenario.step()).phase == {
+        "inspect": "prepare",
+        "prepare": "enroll",
+        "enroll": "enroll",
+    }[phase]
     assert len(scenario.jobs.requests) == jobs_before + 1
 
 
@@ -431,9 +435,29 @@ async def test_closed_window_recovery_still_refuses_a_control_issued_in_the_futu
     scenario = Scenario()
     # The first advance only records the inspect checkpoint; the bundle is read next.
     assert (await scenario.step()).phase == "inspect"
-    scenario.now = NOW - 5
+    # Renew the drained generation inside its window so the control is issued later
+    # than the clock we then run at, while the keyring stays valid at that clock.
+    # Winding the clock back instead would trip the keyring's own not_before check,
+    # and the test would pass with the guard it names deleted.
+    scenario.cell.files = membership.transition_hosted_authorization_bundle(
+        scenario.cell.files,
+        **identity(3),
+        target_state="DRAINING",
+        target_no_in_flight=True,
+        now=NOW + 1_800,
+        renew=True,
+    ).files
+    scenario.now = NOW + 10
+    keyring = json.loads(scenario.cell.files["keyring.json"])
+    assert keyring["accepted_keys"][0]["not_before"] <= scenario.now
+    assert json.loads(scenario.cell.files["control.json"])["issued_at"] > scenario.now
+    jobs_before = len(scenario.jobs.requests)
     with pytest.raises(MetadataConflict):
         await scenario.step()
+    # It must refuse before creating a Job; a later refusal would leave a migration
+    # Job running against custody the coordinator never accepted.
+    assert len(scenario.jobs.requests) == jobs_before
+    assert not scenario.cell.writes
 
 
 @pytest.mark.asyncio
