@@ -41,6 +41,6 @@
 
 ## 8. Verify
 
-- [ ] 8.1 Obtain an independent code review of the diff.
+- [x] 8.1 Obtain an independent code review of the diff.
 - [ ] 8.2 Confirm on a real claude.ai project and a real ChatGPT custom-instructions field that the maximal block still drives recall and capture past turn 30, and that pasting the light block visibly quiets it.
-- [ ] 8.3 Run the full test suite, lint, and strict OpenSpec validation, then open a ready pull request.
+- [x] 8.3 Run the full test suite, lint, and strict OpenSpec validation, then open a ready pull request.
