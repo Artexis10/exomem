@@ -18,7 +18,7 @@
 - [x] 3.2 Build the f21 recurrence corpus with the incidental-mention twin and lowercase/non-Latin referents; the f22 pair corpus with the concordant twin.
 - [x] 3.3 Build the f24 seed-and-decoy corpus and the f25 restructure fixture.
 - [x] 3.4 Script the f26 track-D journey against the installed CLI envelope, discovered first, with compact response detail. Executed end to end against `exomem 0.52.3` on a throwaway copy of the product's sample vault: both steps return `success: true`, and the family is red because no compact response carries a due-state block — the family's own finding, not a scripting failure.
-- [ ] 3.5 Run the calibration study: three expert annotators label the emergence corpora for the intervention point; freeze the medians into the amendment; ship protocol and labels in the judge-agreement assets. Founder decision on staffing and on the small-cohort fallback precedes this task.
+- [ ] 3.5 Run the calibration study: three expert annotators label the emergence corpora for the intervention point; freeze the medians into the amendment; ship protocol and labels in the judge-agreement assets. Founder decision on staffing and on the small-cohort fallback precedes this task. Decision taken 2026-09-13: the small-cohort fallback (founder-vault-derived planted corpora with published rationale), recorded in the architecture note as the design requires; the study itself is still to run.
 - [x] 3.6 Define the AT-1 agent-track rubric (blind, randomized, at least three samples) and its judge-agreement calibration set.
 
 ## 4. Verification
