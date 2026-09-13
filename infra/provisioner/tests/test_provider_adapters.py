@@ -21,6 +21,7 @@ from exomem_provisioner.adapters import (
     PrivateCellApiAdapter,
     TraefikRoutingAdapter,
 )
+from exomem_provisioner.conflict_reason import ConflictReason
 from exomem_provisioner.lifecycle import (
     HealthObservation,
     LifecycleConfig,
@@ -1321,6 +1322,68 @@ async def test_fingerprint_preserves_foreign_succeeded_fixed_slot() -> None:
             phase="before",
             recovery_envelope="signed",
         )
+
+
+def test_fingerprint_job_proof_accepts_the_job_kubernetes_stores() -> None:
+    """Kubernetes 1.34 and later default podReplacementPolicy on every stored Job."""
+    metadata = _metadata()
+    adapter = KubernetesVaultFingerprintAdapter(
+        core_v1=object(),
+        batch_v1=object(),
+        image="registry.example/exomem-provisioner@sha256:" + "a" * 64,
+        sleep=lambda _seconds: None,
+    )
+    job = adapter._wire(
+        _fingerprint_job(
+            adapter,
+            metadata,
+            operation_id="rollforward-alpha",
+            phase="before",
+            envelope="signed-init-job-envelope",
+        )
+    )
+    name = metadata.resource_name + "-init"
+    job["spec"].update(
+        {
+            "completionMode": "NonIndexed",
+            "manualSelector": False,
+            "suspend": False,
+            "podReplacementPolicy": "TerminatingOrFailed",
+            "selector": {"matchLabels": {"batch.kubernetes.io/controller-uid": "fingerprint-job"}},
+        }
+    )
+    job["spec"]["template"]["metadata"]["labels"].update(
+        {
+            "controller-uid": "fingerprint-job",
+            "batch.kubernetes.io/controller-uid": "fingerprint-job",
+            "job-name": name,
+            "batch.kubernetes.io/job-name": name,
+        }
+    )
+    job["spec"]["template"]["spec"].update(
+        {
+            "dnsPolicy": "ClusterFirst",
+            "schedulerName": "default-scheduler",
+            "terminationGracePeriodSeconds": 30,
+            "serviceAccount": metadata.resource_name,
+        }
+    )
+
+    def prove() -> None:
+        adapter._require_job(
+            job,
+            metadata,
+            operation_id="rollforward-alpha",
+            phase="before",
+            recovery_envelope="signed-init-job-envelope",
+        )
+
+    prove()
+    for wrong_policy in ("Failed", "Unknown"):
+        job["spec"]["podReplacementPolicy"] = wrong_policy
+        with pytest.raises(MetadataConflict) as refused:
+            prove()
+        assert refused.value.reason == ConflictReason.VAULT_FINGERPRINT_JOB_RUNTIME_DIFFERS
 
 
 @pytest.mark.asyncio
