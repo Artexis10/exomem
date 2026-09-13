@@ -237,8 +237,19 @@ _replacement_pending: dict[
 # Watchdog records an external event here before its debounce window. Graph
 # readers can then fail closed in O(1) until that exact queued generation has
 # been published through the event-maintained corpus fan-out.
+#
+# `_external_pending` is the aggregate: root -> the latest epoch still
+# unrepaired, which is what every read-side fence and the watcher's
+# compare-and-ack consult. The two maps below say *what* is unrepaired, because
+# a mark's scope decides whether it may fence a governed write
+# (`seamless-managed-worker-handoff` D3). A mark carrying paths fences only
+# those paths; an unscoped mark -- an access-policy edit, a registry loss, an
+# unclassified publication failure -- says the affected scope is unknown and
+# fences everything, exactly as every mark did before.
 _external_pending_clock = 0
 _external_pending: dict[str, int] = {}
+_external_pending_paths: dict[str, dict[str, int]] = {}
+_external_pending_unscoped: dict[str, int] = {}
 
 
 def _next_gen() -> int:
@@ -930,14 +941,48 @@ def peek_recall_publication(
         return state
 
 
-def mark_external_pending(vault_root: Path) -> int:
-    """Mark an observed out-of-band event pending before watcher debounce."""
+def _external_path_key(path: Path | str) -> str:
+    try:
+        return str(Path(path).resolve())
+    except OSError:
+        return str(path)
+
+
+def _refresh_external_aggregate_locked(root: str) -> None:
+    """Recompute one root's latest unrepaired epoch from its surviving marks."""
+    epochs = [*_external_pending_paths.get(root, {}).values()]
+    unscoped = _external_pending_unscoped.get(root)
+    if unscoped is not None:
+        epochs.append(unscoped)
+    if epochs:
+        _external_pending[root] = max(epochs)
+    else:
+        _external_pending.pop(root, None)
+
+
+def mark_external_pending(vault_root: Path, *, paths: Iterable[Path | str] = ()) -> int:
+    """Mark an observed out-of-band event pending before watcher debounce.
+
+    `paths` scopes the mark to the files the event touched. A caller that knows
+    which paths moved gives them, and only those paths fence a governed write;
+    a caller that cannot name the scope gives none, and the mark fences the
+    whole vault. Every read that requires a current projection refuses on either
+    kind (`external_pending` is unchanged), so narrowing the scope changes the
+    write path only.
+    """
     global _external_pending_clock
     with _lock:
         _external_pending_clock += 1
         epoch = _external_pending_clock
         root = _canon(vault_root)
-        _external_pending[root] = epoch
+        keys = [_external_path_key(path) for path in paths]
+        if keys:
+            marked = _external_pending_paths.setdefault(root, {})
+            for key in keys:
+                marked[key] = epoch
+        else:
+            _external_pending_unscoped[root] = epoch
+        _refresh_external_aggregate_locked(root)
         for scope in SCOPES:
             _recall_publications.pop((root, scope), None)
         return epoch
@@ -947,15 +992,47 @@ def clear_external_pending(vault_root: Path, *, through: int) -> None:
     """Clear only the observed external generations a completed flush covered."""
     with _lock:
         root = _canon(vault_root)
-        current = _external_pending.get(root)
-        if current is not None and current <= through:
-            _external_pending.pop(root, None)
+        marked = _external_pending_paths.get(root)
+        if marked is not None:
+            for key in [key for key, epoch in marked.items() if epoch <= through]:
+                marked.pop(key, None)
+            if not marked:
+                _external_pending_paths.pop(root, None)
+        unscoped = _external_pending_unscoped.get(root)
+        if unscoped is not None and unscoped <= through:
+            _external_pending_unscoped.pop(root, None)
+        _refresh_external_aggregate_locked(root)
 
 
 def external_pending(vault_root: Path) -> bool:
     """Whether watchdog has observed unpublished external vault changes."""
     with _lock:
         return _canon(vault_root) in _external_pending
+
+
+def external_pending_paths(vault_root: Path) -> frozenset[str]:
+    """The path-scoped external marks still unrepaired for one vault."""
+    with _lock:
+        return frozenset(_external_pending_paths.get(_canon(vault_root), {}))
+
+
+def external_pending_for(vault_root: Path, paths: Iterable[Path | str]) -> bool:
+    """Whether an unrepaired external event covers any of `paths`.
+
+    True for an unscoped mark whatever the paths are: a mark with no named
+    scope is a statement that the affected set is unknown.
+    """
+    with _lock:
+        root = _canon(vault_root)
+        if root in _external_pending_unscoped:
+            return True
+        marked = _external_pending_paths.get(root)
+        if not marked:
+            return False
+        for path in paths:
+            if str(path) in marked or _external_path_key(path) in marked:
+                return True
+        return False
 
 
 def external_pending_epoch(vault_root: Path) -> int | None:
@@ -1538,6 +1615,8 @@ def invalidate(vault_root: Path | None = None) -> None:
             _recall_history.clear()
             _recall_publications.clear()
             _external_pending.clear()
+            _external_pending_paths.clear()
+            _external_pending_unscoped.clear()
             return
         root = _canon(vault_root)
         for scope in SCOPES:
@@ -1951,6 +2030,9 @@ def snapshot() -> dict:
             "live": sorted(_live),
             "counts": {k: len(v) for k, v in _maps.items()},
             "external_pending": sorted(_external_pending),
+            "external_pending_paths": {
+                root: sorted(marked) for root, marked in _external_pending_paths.items()
+            },
         }
 
 

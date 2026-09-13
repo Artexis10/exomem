@@ -579,7 +579,7 @@ def abort_publication_intents(
         with _WATCHERS_LOCK:
             watchers = tuple(_WATCHERS.get(root, ()))
         if not watchers:
-            freshness.mark_external_pending(Path(root))
+            freshness.mark_external_pending(Path(root), paths=paths)
             continue
         for watcher in watchers:
             for path in paths:
@@ -904,9 +904,15 @@ class FileWatcher:
         else:
             self._pending_delete.discard(path)
             self._pending_upsert.add(path)
+        # Path-scoped (`seamless-managed-worker-handoff` D3). The scope this
+        # method already knows -- one file -- is the scope the mark now
+        # carries, so a governed write elsewhere is not fenced by it. Reads
+        # that require a current projection still refuse on any unrepaired
+        # mark; the compare-and-ack below is unchanged and retires the epoch,
+        # and with it every path marked at or before it.
         self._pending_external_epoch = max(
             self._pending_external_epoch,
-            freshness.mark_external_pending(self._vault_root),
+            freshness.mark_external_pending(self._vault_root, paths=(path,)),
         )
         self._last_change = time.monotonic()
 
