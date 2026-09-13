@@ -622,3 +622,130 @@ def test_the_operator_surface_override_decides_the_context(vault, monkeypatch, s
     assert result["context"] == context
     assert result["level"] == "light"
     assert result["source"] == "preference:context"
+
+
+# --- A busy refusal never follows a persisted preference write ---------------
+#
+# A live 0.82.0 cell returned `MUTATION_BUSY` (`committed: false`, with a
+# retry-after) from a `configure_memory` set while a concurrent `observe_memory`
+# commit held the vault boundary, and the next inspect showed the new value.
+# `configure_memory` is not a narrow-boundary command: it holds the WIDE vault
+# boundary around its whole leaf, so the refusal happens strictly before the
+# preference record is touched. These pin that ordering for set and clear, so a
+# later narrowing cannot reintroduce a write that precedes the refusal.
+#
+# (The live observation is the two-distinct-requests case instead: without an
+# explicit idempotency key or a stable retry scope the repeat has no replay
+# identity, so it is serialized against the first request rather than replaying
+# it -- see `tests/test_command_surface_retry.py` and the
+# `hosted-mutation-safety` delta requirement that states it outright.)
+
+
+@pytest.fixture
+def _busy_boundary(vault, monkeypatch):
+    """Park the vault mutation boundary on another thread for the whole test."""
+    import threading
+
+    manager = writer_lease.get_manager()
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with manager.mutation_guard(
+            vault, operation="observe_memory", holder_kind="command"
+        ):
+            held.set()
+            release.wait(45.0)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert held.wait(15.0), "the fixture needs the boundary genuinely held"
+    try:
+        yield
+    finally:
+        release.set()
+        holder.join(timeout=45.0)
+        assert not holder.is_alive()
+
+
+def test_busy_boundary_refuses_a_set_before_the_preference_is_written(
+    vault, _busy_boundary
+):
+    from exomem import prominence_preferences
+    from exomem.cli_ops import OpError
+
+    caller = RequestPrincipal("principal:person-a", surface="mcp")
+    with request_scope(caller):
+        with pytest.raises(OpError) as refused:
+            _invoke(
+                vault,
+                action="set",
+                prominence="maximal",
+                expected_revision="missing",
+                context="coding",
+            )
+
+    assert refused.value.code == "MUTATION_BUSY"
+    assert refused.value.details["committed"] is False
+    with request_scope(caller):
+        after = prominence_preferences.inspect(vault)
+    assert after == {
+        "stored": None,
+        "contexts": {},
+        "revision": "missing",
+        "receipt_id": None,
+    }
+
+
+def test_busy_boundary_refuses_a_clear_before_the_preference_is_written(
+    vault, monkeypatch
+):
+    from exomem import prominence_preferences
+    from exomem.cli_ops import OpError
+
+    caller = RequestPrincipal("principal:person-a", surface="mcp")
+    with request_scope(caller):
+        before = _invoke(vault)
+        saved = _invoke(
+            vault,
+            action="set",
+            prominence="light",
+            expected_revision=before["revision"],
+            context="coding",
+        )
+        settled = prominence_preferences.inspect(vault)
+    assert settled["contexts"] == {"coding": "light"}
+
+    import threading
+
+    manager = writer_lease.get_manager()
+    held, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with manager.mutation_guard(
+            vault, operation="observe_memory", holder_kind="command"
+        ):
+            held.set()
+            release.wait(45.0)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert held.wait(15.0)
+    try:
+        with request_scope(caller):
+            with pytest.raises(OpError) as refused:
+                _invoke(
+                    vault,
+                    action="clear",
+                    context="coding",
+                    expected_revision=saved["revision"],
+                )
+    finally:
+        release.set()
+        holder.join(timeout=45.0)
+        assert not holder.is_alive()
+
+    assert refused.value.code == "MUTATION_BUSY"
+    assert refused.value.details["committed"] is False
+    with request_scope(caller):
+        assert prominence_preferences.inspect(vault) == settled
