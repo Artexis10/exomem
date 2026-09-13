@@ -2273,3 +2273,109 @@ def test_the_default_acquire_threshold_keeps_the_tens_of_milliseconds_band(
         )
         == logging.INFO
     )
+
+
+# --- Background holders are distinguishable from one another -----------------
+#
+# Every background acquisition used to publish the literal `untracked`, so two
+# concurrent background holders, and a long-holder warning naming one of them,
+# were indistinguishable in exactly the incident where telling them apart is
+# the whole point.
+
+
+def test_background_acquisitions_publish_distinct_opaque_identifiers(
+    tmp_path: Path,
+) -> None:
+    from exomem.mutation_lock import _SAFE_LABEL
+
+    first_vault = tmp_path / "vault-a"
+    second_vault = tmp_path / "vault-b"
+    first_vault.mkdir()
+    second_vault.mkdir()
+    first = VaultMutationCoordinator(tmp_path / "state", first_vault)
+    second = VaultMutationCoordinator(tmp_path / "state", second_vault)
+
+    # Two background holders, concurrently, each on its own vault boundary --
+    # the shape a media worker and a file watcher reconciliation actually take.
+    with first.hold(
+        operation="background_media_extraction_commit", holder_kind="background"
+    ):
+        with second.hold(
+            operation="watcher_reconcile_freshness", holder_kind="background"
+        ):
+            first_holder = first.snapshot()
+            second_holder = second.snapshot()
+
+    for holder in (first_holder, second_holder):
+        assert holder["state"] == "held"
+        assert holder["holder_kind"] == "background"
+        assert holder["request_id"] != "untracked"
+        assert _SAFE_LABEL.fullmatch(holder["request_id"])
+    assert first_holder["request_id"] != second_holder["request_id"]
+
+    # And two SEQUENTIAL acquisitions by the same holder are distinguishable too.
+    with first.hold(
+        operation="background_media_extraction_commit", holder_kind="background"
+    ):
+        again = first.snapshot()["request_id"]
+    assert again != first_holder["request_id"]
+
+
+def test_background_long_holder_warning_names_its_own_acquisition(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(
+        tmp_path / "state", vault, long_holder_seconds=0.01
+    )
+
+    with caplog.at_level(logging.WARNING, logger="exomem.mutation_lock"):
+        with coordinator.hold(
+            operation="background_media_clip_commit", holder_kind="background"
+        ):
+            acquisition = coordinator.snapshot()["request_id"]
+            time.sleep(0.02)
+
+    human = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("vault mutation boundary held too long")
+    ]
+    assert len(human) == 1
+    assert acquisition in human[0]
+    assert "request_id=untracked" not in human[0]
+
+
+def test_readiness_still_withholds_pid_from_a_background_holder(
+    tmp_path: Path,
+) -> None:
+    from exomem.runtime_readiness import build_runtime_readiness
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+    with coordinator.hold(
+        operation="background_media_failure_commit", holder_kind="background"
+    ):
+        boundary = coordinator.snapshot()
+    # A released hold leaves the last-known holder behind, pid included.
+    released = coordinator.snapshot()
+    assert released["contention"]["last_holder"]["pid"] == os.getpid()
+
+    snapshot = build_runtime_readiness(
+        coordination={
+            "enabled": False,
+            "role": "standalone",
+            "replica_id": None,
+            "coordinator_healthy": True,
+            "mutation_boundary": boundary,
+        },
+        release="1.2.3",
+        mcp_tool_surface_sha256="a" * 64,
+    )
+
+    public = snapshot["coordination"]["mutation_boundary"]
+    assert public["request_id"] == boundary["request_id"] != "untracked"
+    assert "pid" not in public
+    assert "pid" not in json.dumps(public)
