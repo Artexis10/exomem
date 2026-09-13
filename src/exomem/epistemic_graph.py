@@ -1837,6 +1837,12 @@ class EpistemicGraphIndex:
             or not self.path.exists()
         ):
             return None
+        # Sampled before any proving starts. Everything below -- the marker
+        # reads, the source-bytes proof over the whole corpus -- takes time a
+        # watcher publication can land inside, and an origin adopted at the
+        # generation this *ends* on would declare that publication already
+        # accounted for.
+        sampled_generation = freshness.recall_generation(self.vault_root, "vault")
         conn: sqlite3.Connection | None = None
         registry_key = _sidecar_registry_key(self.path)
         _await_publication_hold(registry_key)
@@ -1955,7 +1961,12 @@ class EpistemicGraphIndex:
                 # because `recall_delta_since` cannot bridge a foreign origin
                 # (`seamless-managed-worker-handoff`: make an adopted snapshot
                 # live for the new process).
-                freshness.adopt_recall_origin(self.vault_root, "vault", stored_checkpoint)
+                freshness.adopt_recall_origin(
+                    self.vault_root,
+                    "vault",
+                    stored_checkpoint,
+                    sampled_generation=sampled_generation,
+                )
         # The `external_pending` term is the same cheap short-circuit described
         # in this method's docstring (contract D7), re-read after the proof so a
         # Class A/C signal that landed mid-proof still fails closed. Scoped to
@@ -3181,9 +3192,13 @@ class EpistemicGraphIndex:
         Public readers are unaffected: `_open_read_snapshot` requires the
         availability marker, which is still withdrawn here, so a reader sees
         "marker missing, barrier set" exactly as it did before. Nothing persists
-        differently and no other reader treats what remains as sufficient -- the
-        registry-rebind proof additionally requires the marker and an absent read
-        barrier, both of which this still leaves refused.
+        differently, and the registry rebind is unaffected either way: its source
+        proof (`_registry_rebind_source_proof`) demands the availability marker,
+        the stored checkpoint and an absent read barrier, so a sidecar fenced
+        here declines it whether or not `schema_version` survives. The identity
+        gate that selects a rebind candidate reads schema, registry, generation
+        and instance, and a candidate that passes it still has to pass that
+        proof.
         """
         if not self.path.exists():
             return

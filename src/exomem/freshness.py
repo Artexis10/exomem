@@ -1059,8 +1059,26 @@ def instance_id() -> str:
     return _instance_id
 
 
+def recall_generation(vault_root: Path, scope: str) -> int | None:
+    """This registry's current recall generation, or None when the scope is cold.
+
+    The cheap half of `recall_checkpoint`: no triple, no policy projection, no
+    walk. A caller about to run a long proof samples this first, so it can adopt
+    against the corpus the proof *started* on rather than the one it ended on.
+    """
+    with _lock:
+        key = _key(vault_root, scope)
+        if not event_indexes_enabled() or key not in _recall_live:
+            return None
+        return _recall_generations.get(key, 0)
+
+
 def adopt_recall_origin(
-    vault_root: Path, scope: str, checkpoint: RecallFreshnessCheckpoint
+    vault_root: Path,
+    scope: str,
+    checkpoint: RecallFreshnessCheckpoint,
+    *,
+    sampled_generation: int | None = None,
 ) -> bool:
     """Make a checkpoint this process did not publish a valid delta origin.
 
@@ -1081,11 +1099,20 @@ def adopt_recall_origin(
     ordinary event history, and anything that changes after it flows through the
     watcher or the periodic reconcile as usual.
 
-    Conservative in both directions. The generation is sampled before the lock,
-    so a concurrent event can only make the recorded origin *older* than the
-    truth, which widens the next delta rather than narrowing it. A projection
-    identity that does not match refuses outright: the proof was about source
-    bytes, and a different recall policy projects a different corpus from them.
+    `sampled_generation` is the generation the caller read *before* it started
+    proving, and it is what makes this safe. The proof walks the whole corpus --
+    2.85 s on a 446-file vault -- and an unattributed edit landing inside that
+    window is published by the watcher while the proof runs. Adopting at the
+    post-proof generation would then declare that edit already accounted for:
+    the next delta would come back complete and empty, and the bounded repair
+    would advance a snapshot that never indexed the edited page. Silent drift,
+    and the reason the origin is the *minimum* of the two samples. A too-old
+    origin only widens the next delta, which the repair handles; a too-new one
+    loses a page.
+
+    A projection identity that does not match refuses outright: the proof was
+    about source bytes, and a different recall policy projects a different
+    corpus from them.
 
     Returns whether the checkpoint is usable as an origin from here on, which is
     trivially true when it is already this process's own.
@@ -1104,10 +1131,11 @@ def adopt_recall_origin(
             current.access_policy_fingerprint,
         ):
             return False
+        origin = current.generation
+        if sampled_generation is not None:
+            origin = min(origin, int(sampled_generation))
         adopted = _adopted_recall_origins.setdefault(key, {})
-        adopted[checkpoint] = min(
-            adopted.get(checkpoint, current.generation), current.generation
-        )
+        adopted[checkpoint] = min(adopted.get(checkpoint, origin), origin)
         for stale in list(adopted)[: max(0, len(adopted) - ADOPTED_RECALL_ORIGIN_LIMIT)]:
             adopted.pop(stale, None)
         return True
