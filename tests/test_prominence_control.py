@@ -566,3 +566,37 @@ def test_the_context_never_selects_the_stored_record(vault):
         records = sorted(path.name for path in directory.glob("*.json"))
 
     assert len(records) == 1, records
+
+
+@pytest.mark.parametrize(
+    "surface,context", [("hosted", "conversation"), ("chatgpt", "conversation"), ("codex", "coding")]
+)
+def test_the_operator_surface_override_decides_the_context(vault, monkeypatch, surface, context):
+    """`EXOMEM_SURFACE` is authoritative over the client's own name."""
+    caller = RequestPrincipal("principal:person-a", surface="mcp")
+    monkeypatch.setattr(
+        "exomem.command_surface.mcp_caller_identity",
+        lambda: {
+            "client_name": "Claude-Code",
+            "transport": "http",
+            "client_version": None,
+            "session_id": None,
+        },
+    )
+    with request_scope(caller):
+        before = _invoke(vault)
+        _invoke(
+            vault,
+            action="set",
+            prominence="light",
+            expected_revision=before["revision"],
+            context=context,
+        )
+        monkeypatch.setenv("EXOMEM_SURFACE", surface)
+        with prominence.request_scope(vault):
+            result = prominence.resolved()
+
+    assert result["surface"] == surface
+    assert result["context"] == context
+    assert result["level"] == "light"
+    assert result["source"] == "preference:context"
