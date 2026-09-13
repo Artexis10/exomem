@@ -40,6 +40,35 @@ key use the local owner identity; OAuth identities remain distinct. The generate
 a fresh inspect; an operator's conflicting `EXOMEM_PROMINENCE` override is reported
 instead of claiming that the requested change took effect.
 
+## One level while coding, another in chat
+
+You can hold two levels at once. Every request lands in one of two **engagement
+contexts**, and a saved level can belong to a context rather than to you as a
+whole:
+
+- `conversation` — claude.ai, ChatGPT, the hosted service, and every other client
+  that cannot run hooks.
+- `coding` — Codex, Claude Code, and any client the server does not recognise.
+
+Add `context` to a set and the level applies only to clients of that context:
+`configure_memory(action="set", prominence="balanced", expected_revision=..., context="coding")`
+leaves your identity-wide value untouched and quiets coding clients alone.
+`configure_memory(action="clear", context="coding", expected_revision=...)` removes
+it again; clearing a context that holds nothing changes nothing and says so.
+A set without a `context` keeps its original meaning and writes the identity-wide
+value.
+
+The context that applies to a request is **detected from the calling client**, or
+from an operator's explicit `EXOMEM_SURFACE`. No argument selects it, and it is an
+eagerness knob only: it never picks an identity, a vault, a storage path, or an
+authority ceiling. An unrecognised client is treated as `coding`, so it keeps the
+generic default.
+
+`inspect` reports the identity-wide value, every saved context value, the context
+this request resolved under, and the effective level. All of it lives in one record
+under one revision, so a set and a clear cannot interleave behind each other's back:
+whichever lands second is asked to inspect again.
+
 The older `exomem prominence <level>` command remains a machine-wide control.
 Standalone hooks read that legacy configuration and environment; they do not
 inherit another authenticated identity's vault preference.
@@ -73,10 +102,12 @@ exomem prominence maximal      # set it
 exomem prominence --hook-env   # print the nudge tunables this level implies
 ```
 
-Precedence is `EXOMEM_PROMINENCE` (env) → the saved identity/vault preference → the
-legacy machine config → the known client default. The legacy command stores its
-level beside `mode`, so setting one never clears the other. `bootstrap()` reports
-the effective level and its source under `engagement`.
+Precedence is `EXOMEM_PROMINENCE` (env) → the saved value for this request's
+engagement context → the saved identity-wide value → the legacy machine config →
+the known client default. The legacy command stores its level beside `mode`, so
+setting one never clears the other. `bootstrap()` reports the effective level, the
+applied context and the source under `engagement` — `preference:context` when a
+context value won, `preference` when the identity-wide value did.
 
 Connected web clients save their choice through `configure_memory`, just like
 other agents. The optional custom-instruction blocks below help the assistant

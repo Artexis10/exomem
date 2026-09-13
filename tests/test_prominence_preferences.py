@@ -337,12 +337,23 @@ def test_clearing_an_absent_context_reports_no_mutation(tmp_path, principal):
     }
 
 
-def test_clearing_an_absent_context_on_missing_state_creates_nothing(tmp_path, principal):
+def test_clearing_an_absent_context_on_missing_state_writes_no_record(tmp_path, principal):
     cleared = _call(principal, preferences.clear_preference, tmp_path, "coding", "missing")
 
     assert cleared["mutated"] is False
     assert cleared["revision"] == "missing"
-    assert not list(tmp_path.iterdir())
+    assert cleared["receipt_id"] is None
+    assert not preferences._preference_path(tmp_path, principal.audience_id).exists()
+
+
+def test_a_clear_cannot_miss_a_write_that_landed_since_the_caller_inspected(
+    tmp_path, principal
+):
+    """The stale read the unlocked fast path would have allowed."""
+    _call(principal, preferences.set_preference, tmp_path, "balanced", "missing", context="coding")
+
+    with pytest.raises(OpError, match="PREFERENCE_CONFLICT"):
+        _call(principal, preferences.clear_preference, tmp_path, "coding", "missing")
 
 
 def test_clear_rejects_a_stale_revision(tmp_path, principal):

@@ -1079,7 +1079,7 @@
     }
   },
   "configure_memory": {
-    "description": "Inspect or set your saved Exomem engagement level for this vault.\n\nInspect first, then set off, light, balanced or maximal with the returned\nrevision as expected_revision. The choice follows this authenticated identity\non later requests without a restart. It changes recall/capture eagerness, never\ncompute mode or authority. Other identities and vaults remain independent.\nAdopt the returned engagement contract in the current conversation.",
+    "description": "Inspect, set or clear your saved Exomem engagement level for this vault.\n\nInspect first, then set off, light, balanced or maximal with the returned\nrevision as expected_revision. The choice follows this authenticated identity\non later requests without a restart. It changes recall/capture eagerness, never\ncompute mode or authority. Other identities and vaults remain independent.\nPass context \"coding\" or \"conversation\" to set a level for that kind of client\nalone, leaving the identity-wide value untouched, and use clear with that\ncontext and expected_revision to remove it again. The context that applies to\na request is detected from the calling client, never chosen by an argument.\nAdopt the returned engagement contract in the current conversation.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1087,7 +1087,8 @@
           "default": "inspect",
           "enum": [
             "inspect",
-            "set"
+            "set",
+            "clear"
           ],
           "type": "string"
         },
@@ -1105,6 +1106,21 @@
         "expected_revision": {
           "anyOf": [
             {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "context": {
+          "anyOf": [
+            {
+              "enum": [
+                "coding",
+                "conversation"
+              ],
               "type": "string"
             },
             {

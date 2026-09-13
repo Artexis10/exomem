@@ -494,3 +494,75 @@ def test_two_clients_of_one_identity_split_by_engagement_context(vault, monkeypa
             assert result.data["engagement"]["source"] == "default"
 
     asyncio.run(scenario())
+
+
+def test_the_client_name_never_widens_authority(vault, monkeypatch):
+    """Context tunes eagerness. Ceilings are product law and do not move with it."""
+    from exomem import envelope as envelope_module
+
+    def present(client):
+        monkeypatch.setattr(
+            "exomem.command_surface.mcp_caller_identity",
+            lambda: {
+                "client_name": client,
+                "transport": "http",
+                "client_version": None,
+                "session_id": None,
+            },
+        )
+
+    caller = RequestPrincipal("principal:person-a", surface="mcp")
+    with request_scope(caller):
+        before = _invoke(vault)
+        identity_wide = _invoke(
+            vault, action="set", prominence="off", expected_revision=before["revision"]
+        )
+        _invoke(
+            vault,
+            action="set",
+            prominence="maximal",
+            expected_revision=identity_wide["revision"],
+            context="coding",
+        )
+        seen = {}
+        for client in ("Claude-Code", "codex-mcp-client", "claude.ai", "ChatGPT", "nobody-knows"):
+            present(client)
+            with prominence.request_scope(vault):
+                engagement = prominence.resolved()
+                served = envelope_module.resolved(level=engagement["level"])
+            seen[client] = (
+                engagement["level"],
+                json.dumps(
+                    {name: entry["ceiling"] for name, entry in served["classes"].items()},
+                    sort_keys=True,
+                ),
+                json.dumps(served["confirm_required"], sort_keys=True),
+            )
+
+    assert {value[0] for value in seen.values()} == {"maximal", "off"}, seen
+    assert len({value[1] for value in seen.values()}) == 1, "a ceiling moved with the client name"
+    assert len({value[2] for value in seen.values()}) == 1
+
+
+def test_the_context_never_selects_the_stored_record(vault):
+    """Both contexts live in one record under one identity — no second storage path."""
+    from exomem import prominence_preferences
+
+    caller = RequestPrincipal("principal:person-a", surface="mcp")
+    with request_scope(caller):
+        first = _invoke(
+            vault, action="set", prominence="off", expected_revision="missing", context="coding"
+        )
+        _invoke(
+            vault,
+            action="set",
+            prominence="maximal",
+            expected_revision=first["revision"],
+            context="conversation",
+        )
+        directory = prominence_preferences._preference_path(
+            vault, caller.audience_id
+        ).parent
+        records = sorted(path.name for path in directory.glob("*.json"))
+
+    assert len(records) == 1, records

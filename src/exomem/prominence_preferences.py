@@ -250,13 +250,10 @@ def clear_preference(vault_root: Path, context: str, expected_revision: str) -> 
     if _operator_override() is not None:
         raise OpError("PREFERENCE_OPERATOR_OVERRIDE", "operator prominence override is active")
 
-    path = _preference_path(vault_root, audience)
-    if not os.path.lexists(path):
-        stored, contexts, revision, change_id = _read(path)
-        if revision != expected_revision:
-            raise OpError("PREFERENCE_CONFLICT", "preference changed; inspect again")
-        return _unchanged(stored, contexts, revision, change_id)
-
+    # Same locked compare-and-swap as `set_preference`, including creating the
+    # state directory: reading the record outside the lock would let a write that
+    # landed since the caller inspected be reported as "nothing to clear".
+    path = _preference_path(vault_root, audience, create=True)
     lock = FileLock(str(path.parent / ".lock"), timeout=_LOCK_TIMEOUT)
     try:
         with lock:
