@@ -614,6 +614,11 @@ def op_configure_memory(
     context and expected_revision to remove it again. The context that applies to
     a request is detected from the calling client, never chosen by an argument.
     Adopt the returned engagement contract in the current conversation.
+
+    Args:
+        context: Which saved context value to write or clear; the context applied
+            to a request is always derived from the client surface, never from
+            this argument.
     """
     from . import prominence as prominence_module
     from . import prominence_preferences
