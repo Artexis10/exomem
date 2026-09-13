@@ -397,6 +397,7 @@ def test_surface_normalization_keeps_primary_shape_for_adapter_validation() -> N
     assert nested == {
         "path": "Knowledge Base/Notes/Insights/example.md",
         "why": "update",
+        "validate_only": False,
         "operation": {
             "kind": "replace_string",
             "old_string": "Before",
@@ -417,6 +418,51 @@ def test_surface_normalization_keeps_primary_shape_for_adapter_validation() -> N
             }
         )
     assert legacy["operation"] == nested["operation"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param({"validate_only": True}, id="top-level-only"),
+        pytest.param({"operation": {"validate_only": True}}, id="nested-only"),
+        pytest.param(
+            {"validate_only": True, "operation": {"validate_only": True}}, id="both"
+        ),
+        pytest.param({}, id="neither"),
+    ],
+)
+def test_surface_normalization_is_a_fixed_point_for_every_modifier_form(
+    arguments: dict,
+) -> None:
+    """Adapters normalize once and the shared dispatcher normalizes again after
+    the published signature has defaulted the top-level flag; the first output
+    must re-normalize to itself so that second pass never sees a phantom
+    conflict between a defaulted top-level value and the explicit nested one.
+    """
+    base = {
+        "path": "Knowledge Base/Notes/Insights/example.md",
+        "why": "update",
+        "operation": {
+            "kind": "replace_string",
+            "old_string": "Before",
+            "new_string": "After",
+            **arguments.get("operation", {}),
+        },
+    }
+    if "validate_only" in arguments:
+        base["validate_only"] = arguments["validate_only"]
+    expected = "validate_only" in arguments or "validate_only" in arguments.get(
+        "operation", {}
+    )
+
+    first = normalize_edit_surface_arguments(base)
+
+    assert first["validate_only"] is expected
+    assert first["operation"]["validate_only"] is expected
+    assert normalize_edit_surface_arguments(first) == first
+    # The published signature defaults the top-level flag when it is absent;
+    # the fixed point must survive that defaulting because the flag is present.
+    assert "validate_only" in first
 
 
 def test_product_metadata_and_bound_signature_advertise_only_primary_form() -> None:

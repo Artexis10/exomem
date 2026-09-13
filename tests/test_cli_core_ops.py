@@ -620,6 +620,7 @@ def test_edit_memory_cli_primary_operation_is_normalized_before_invocation(
         {
             "path": _INSIGHT,
             "why": "primary operation",
+            "validate_only": False,
             "operation": {
                 "kind": "replace_string",
                 "old_string": "Before",

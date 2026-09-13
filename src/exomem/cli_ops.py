@@ -86,8 +86,10 @@ _REMEDIATION: dict[str, str] = {
         "only with the same identity."
     ),
     "MUTATION_OUTCOME_UNKNOWN": (
-        "Verify whether the mutation actually landed before retrying; an identical retry "
-        "is safe again after the abandonment grace period."
+        "Read the target to verify whether the mutation actually landed. This "
+        "identity stays outcome-unknown and every identical retry returns this "
+        "code, so if the change is still wanted, send it again under a new "
+        "idempotency key."
     ),
     "MUTATION_LOCK_UNAVAILABLE": (
         "Check that the runtime state root is writable and supports host file locking."

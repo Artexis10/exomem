@@ -211,6 +211,7 @@ def test_call_trace_translates_legacy_edit_on_copied_context() -> None:
     assert seen[0].message.params.arguments == {
         "path": original_arguments["path"],
         "why": "legacy",
+        "validate_only": False,
         "operation": {
             "kind": "replace_string",
             "old_string": "Before",
@@ -262,6 +263,7 @@ def test_equivalent_nested_and_legacy_calls_share_digest_and_execute_once(
         {
             "path": "Knowledge Base/Notes/Insights/example.md",
             "why": "update",
+            "validate_only": False,
             "operation": {
                 "kind": "batch_replace",
                 "edits": [{"old_string": "Before", "new_string": "After"}],
@@ -573,7 +575,11 @@ def test_bound_validate_only_edit_bypasses_live_mutation_boundary(
         vault: Path,
         *,
         operation: dict,
+        validate_only: bool = False,
     ) -> dict:  # noqa: ARG001
+        # The dispatcher hands the leaf the resolved modifier in both places,
+        # exactly as the real `op_edit_memory` signature accepts it.
+        assert validate_only is operation["validate_only"]
         return {"validate_only": operation["validate_only"]}
 
     command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False)
