@@ -396,16 +396,19 @@ def test_agent_bootstrap_advertises_only_the_active_profile(
     ["hosted-alpha-agent-v1", "hosted-alpha-agent-v2", "hosted-alpha-agent-v4", "hosted-alpha-agent-v5"],
 )
 def test_every_hosted_profile_is_taught_a_prominence_route_it_can_take(
-    tmp_path: Path, profile: str
+    tmp_path: Path, profile: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No hosted profile serves `configure_memory`, and none has a command line.
 
     The payload named `exomem prominence <level>` anyway -- a command a
     connector-only user has no machine to type it on. The custom-instructions
-    block is the route that surface actually has.
+    block is the route that surface actually has, and the hook-cadence block
+    must not reach here either: there are no hooks in a cell, so naming a CLI
+    that moves them would name the same unreachable machine twice.
     """
     from exomem import prominence
 
+    monkeypatch.setenv("EXOMEM_HOSTED_CELL", "1")
     descriptor = gateway.hosted_agent_surface_descriptor(profile)
     assert "configure_memory" not in descriptor.product_commands
 
@@ -414,4 +417,5 @@ def test_every_hosted_profile_is_taught_a_prominence_route_it_can_take(
 
     change_with = payload["engagement"]["change_with"]
     assert change_with == prominence.custom_instructions_route()
+    assert "hook_cadence" not in payload["engagement"]
     assert "exomem prominence" not in json.dumps(payload["engagement"], ensure_ascii=False)

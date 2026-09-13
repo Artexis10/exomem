@@ -31,14 +31,18 @@ Maximal in a conversational client. See `context_for_surface`.
 
 One exception sits at the last rung: when the preference record exists but cannot
 be READ, the fallback is the generic default rather than the surface default, and
-`capture_gate` withholds proactive writes for as long as that holds. An unreadable
-record is not consent, and the surface default is `maximal` on exactly the clients
-where the user has no hook to notice it. See `_unreadable_preference_applies`.
+capture drops to `off` for as long as that holds. An unreadable record is not
+consent, and the surface default is `maximal` on exactly the clients where the
+user has no hook to notice it. `effective_capture_level` is that rule, and every
+projection of capture authority — the gate, the served contract, the delegation
+envelope's `proactive_capture`, the workflow contract — asks it rather than
+`resolve`, because a floor honoured by only some of them grants back in one key
+what the others withheld.
 
 Note what this module does NOT do: it never promises that a saved level reaches the
 standalone nudge hooks. Those run on the client machine and read only the operator
 environment and that machine's config file, which a server has no way to write. A
-hook-capable client is told so instead — see `hook_cadence`.
+client that may run them is told so instead — see `hook_cadence`.
 
 The config file is deliberately the SAME one `mode` uses. It is a fixed, shared path
 for the same reason documented in `mode.config_path`: the MCP server and the CLI are
@@ -130,12 +134,6 @@ WEB_DEFAULT_PROMINENCE = "maximal"
 #: Surfaces that cannot run hooks: no filesystem to install into, no turn-level
 #: re-arming. Everything here defaults to `WEB_DEFAULT_PROMINENCE`.
 HOOKLESS_SURFACES = frozenset({"web", "hosted", "chatgpt", "claude-ai", "openai"})
-
-#: Surfaces that ship standalone nudge hooks onto the CLIENT machine. These are
-#: the only ones where the saved preference and the actual nudge cadence can
-#: disagree, because the hooks run where the client is and the preference lives
-#: where the server is. See `hook_cadence`.
-HOOK_CAPABLE_SURFACES = frozenset({"claude-code", "codex"})
 
 #: Engagement contexts. Exactly two, both derived from the detected surface: a
 #: saved level may differ between a coding client and a conversational one. The
@@ -276,14 +274,23 @@ class ProminenceContract:
     narration: str
     summary: str
 
-    def as_dict(self) -> dict:
+    def as_dict(self, effective_capture: dict | None = None) -> dict:
+        """The contract as served. Pass the request's gate when there is one.
+
+        Without one this reports the LEVEL's gate, which is the right answer for
+        "what does maximal look like?" and the wrong one for a live request
+        under the unreadable-record floor, where the level is `balanced` and
+        capture is withheld.
+        """
         return {
             "level": self.level,
             "recall": self.recall,
             "capture": self.capture,
             "narration": self.narration,
             "summary": self.summary,
-            "effective_capture": capture_gate(self.level),
+            "effective_capture": (
+                effective_capture if effective_capture is not None else capture_gate(self.level)
+            ),
         }
 
 
@@ -539,7 +546,8 @@ def resolve(surface: str | None = None) -> str:
         # falling through to it turned an identity that may well have saved `off`
         # into the eagerest level Exomem has. The generic default is the honest
         # floor: the record is gone, so the client's own default cannot be the
-        # thing that widens it. `capture_gate` withholds proactive writes on top.
+        # thing that widens it. `effective_capture_level` withholds proactive
+        # writes on top, in every projection that speaks about capture authority.
         return DEFAULT_PROMINENCE
 
     return default_for_surface(surface)
@@ -574,19 +582,35 @@ def _unreadable_preference_applies(surface: str | None = None) -> bool:
     return _active_source(surface) == "preference:unavailable"
 
 
+def effective_capture_level(surface: str | None = None) -> str:
+    """The level whose CAPTURE authority this request is under.
+
+    Usually the resolved level. It diverges in one case: an unreadable
+    preference record resolves to the generic default so the recall and
+    narration contract stays usable, while capture drops to `off`, because the
+    identity behind the missing record may be one that saved `off` and an
+    unreadable record is not consent to start writing on its behalf.
+
+    Every projection of capture authority -- the gate, the delegation envelope's
+    `proactive_capture`, the workflow contract's effective capture -- must ask
+    this rather than `resolve`, or one of them grants back what the others
+    withheld and the agent is handed a contradiction instead of a policy.
+    """
+    if _unreadable_preference_applies(surface):
+        return "off"
+    return resolve(surface)
+
+
 def capture_gate(level: str | None = None, surface: str | None = None) -> dict:
     """Return the capture gate this request is actually under.
 
-    Normally that is one level's detached gate. The exception is an unreadable
-    preference record: the level resolves to the generic default so the recall
-    and narration contract stays usable, but proactive WRITES are withheld,
-    because the identity behind the missing record may be one that saved `off`
-    and an unreadable record is not consent to start writing on its behalf.
-    `capture_policy_projection` documents the levels and is left alone.
+    An explicit `level` asks the detached question -- "what would this level
+    give?" -- and is answered from the table untouched, so the payload's own
+    level documentation cannot be rewritten by one request's floor. Passing no
+    level asks about THIS request, which is where `effective_capture_level`
+    applies.
     """
-    resolved_level = normalize(level) or resolve(surface)
-    if _unreadable_preference_applies(surface):
-        resolved_level = "off"
+    resolved_level = normalize(level) or effective_capture_level(surface)
     return _gate_for(resolved_level)
 
 
@@ -636,12 +660,16 @@ def resolved(surface: str | None = None) -> dict:
     """Bootstrap-shaped view of the active prominence policy."""
     level = resolve(surface)
     applied_surface = surface if surface is not None else detect_surface()
+    # One gate, computed once, and everything downstream that speaks about
+    # capture authority is handed THIS object -- the served contract here, and
+    # the delegation envelope at the call site that attaches it.
+    gate = capture_gate(surface=surface)
     result = {
         "level": level,
         "source": _active_source(surface),
         "surface": applied_surface,
         "context": context_for_surface(applied_surface),
-        "contract": CONTRACTS[level].as_dict(),
+        "contract": CONTRACTS[level].as_dict(gate),
         "levels": list(CANON),
         "change_with": "exomem prominence <level>",
     }
@@ -658,7 +686,7 @@ def resolved(surface: str | None = None) -> dict:
 
 
 def hook_cadence(surface: str | None) -> dict | None:
-    """What the standalone nudge hooks read, for a client that runs them.
+    """What the standalone nudge hooks read, for a client that may run them.
 
     The saved preference lives on the SERVER, per identity. The capture and
     retrieve nudges are standalone copies deployed into a hook directory on the
@@ -673,16 +701,28 @@ def hook_cadence(surface: str | None) -> dict | None:
     the two are the same box. What IS available is honesty, so a hook-capable
     client is told what its hooks read and how to change it where they run.
 
-    Returns None for every other surface: a client with no hooks has no cadence
-    to be out of step with, and silence is cheaper than a block saying "not
-    applicable" in a payload that is already the whole contract.
+    Gated on the CODING context rather than a two-name allowlist. The hookless
+    set is the thing actually known here -- a web connector has no filesystem to
+    install a hook into -- and everything else is a client that may well run
+    them. `detect_surface` already returns None for an unrecognized client and
+    `context_for_surface` already calls that coding, so an allowlist would have
+    silenced exactly the hooked clients nobody has named yet: a new CLI, a fork,
+    a local install driving the CLI directly. Silence on a hookless surface
+    stays, because there is genuinely no cadence there to be out of step with.
     """
-    if not surface or surface.strip().lower() not in HOOK_CAPABLE_SURFACES:
+    if context_for_surface(surface) != CODING_CONTEXT:
         return None
     return {
         "reads": "operator environment, then this client machine's exomem configuration file",
         "saved_preference_reaches_hooks": False,
-        "change_with": "exomem prominence <level> on the client machine",
+        # Scoped deliberately. Without the parenthesis an agent reads the CLI as
+        # THE way to set the level and starts telling users to run it for
+        # everything, which would undo the identity-scoped preference the
+        # agent-accessible control exists to offer.
+        "change_with": (
+            "exomem prominence <level> on the client machine "
+            "(changes hook cadence only; a saved preference still decides what is served)"
+        ),
     }
 
 

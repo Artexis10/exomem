@@ -794,7 +794,10 @@ def test_configure_memory_tells_a_hook_capable_client_what_its_hooks_read(
     assert result["engagement"]["hook_cadence"] == {
         "reads": "operator environment, then this client machine's exomem configuration file",
         "saved_preference_reaches_hooks": False,
-        "change_with": "exomem prominence <level> on the client machine",
+        "change_with": (
+            "exomem prominence <level> on the client machine "
+            "(changes hook cadence only; a saved preference still decides what is served)"
+        ),
     }
 
 
@@ -845,3 +848,72 @@ def test_a_surface_that_serves_the_control_still_names_it(vault):
 
     assert payload["engagement"]["change_with"] == prominence.configuration_route()
     assert payload["engagement"]["change_with"].startswith("configure_memory:")
+
+
+@pytest.mark.parametrize("level", prominence.CANON)
+def test_the_served_engagement_never_contradicts_itself_about_proactive_capture(vault, level):
+    """`contract.effective_capture` and `envelope.classes.proactive_capture` ship together.
+
+    They are two keys of one block and they answer the same question -- may this
+    agent write without being asked. An agent handed "no" in one and "silent:
+    act" in the other has to guess, and the authority surface is the one it will
+    believe.
+    """
+    caller = RequestPrincipal("principal:person-a", surface="mcp")
+    with request_scope(caller):
+        before = _invoke(vault)
+        saved = _invoke(vault, action="set", prominence=level, expected_revision=before["revision"])
+        bootstrap_command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "bootstrap")
+        served = writer_lease.invoke_command(bootstrap_command, vault, profile="compact")
+
+    for payload in (saved["engagement"], served["engagement"]):
+        permitted = payload["contract"]["effective_capture"]["observed_outcomes"][
+            "proactive_permitted"
+        ]
+        assert permitted is (level in {"balanced", "maximal"})
+        assert payload["envelope"]["classes"]["proactive_capture"]["disposition"] == (
+            "silent" if permitted else "off"
+        )
+
+
+def test_an_unreadable_record_withholds_proactive_capture_in_every_projection(
+    vault, monkeypatch
+):
+    """The floor has to hold in the envelope and the workflow contract too.
+
+    It held in the gate alone once, and the envelope next to it went on saying
+    `silent` -- the same fail-open, moved one key over.
+    """
+    from exomem import prominence_preferences
+    from exomem.cli_ops import OpError
+
+    caller = RequestPrincipal("principal:person-a", surface="mcp")
+    with request_scope(caller):
+        before = _invoke(vault)
+        _invoke(vault, action="set", prominence="off", expected_revision=before["revision"])
+
+        def unreadable(*args, **kwargs):
+            raise OpError("PREFERENCE_STATE_UNAVAILABLE", "preference state is unavailable")
+
+        monkeypatch.setattr(prominence_preferences, "inspect", unreadable)
+        bootstrap_command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "bootstrap")
+        served = writer_lease.invoke_command(bootstrap_command, vault, profile="compact")
+        schema_command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "schema_memory")
+        workflow = writer_lease.invoke_command(
+            schema_command,
+            vault,
+            subject="workflow-contracts",
+            operation="resolve",
+            context={"project": None, "domain": None, "activity": None},
+        )
+
+    engagement = served["engagement"]
+    assert engagement["level"] == "balanced"
+    assert engagement["source"] == "preference:unavailable"
+    assert (
+        engagement["contract"]["effective_capture"]["observed_outcomes"]["proactive_permitted"]
+        is False
+    )
+    assert engagement["envelope"]["classes"]["proactive_capture"]["disposition"] == "off"
+    assert workflow["effective_capture"]["observed_outcomes"]["proactive_permitted"] is False
+    assert workflow["effective_capture"]["durable_intent"]["proactive_permitted"] is False

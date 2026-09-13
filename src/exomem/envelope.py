@@ -173,7 +173,9 @@ def parse_envelope_ref(value: str) -> str:
     return _normalize_class(raw[len(ENVELOPE_PREFIX) :])
 
 
-def derive_envelope(level: str) -> dict[str, str]:
+def derive_envelope(
+    level: str, *, proactive_capture_permitted: bool | None = None
+) -> dict[str, str]:
     """``action class -> disposition`` for one prominence level. Pure; no I/O.
 
     The design's derivation table, and the only place it exists. `disclosure`
@@ -189,9 +191,20 @@ def derive_envelope(level: str) -> dict[str, str]:
     prominence axis it already is. Tightening it would turn every routine
     capture into a question, which is a nag increase inside the programme that
     exists to remove nags.
+
+    `proactive_capture_permitted` overrides the level's own answer for that one
+    row. The level is not always the whole story about capture authority: an
+    unreadable preference record resolves to `balanced` for recall and
+    narration while capture drops to `off` (`prominence.effective_capture_level`).
+    Deriving this row from the level alone put the withheld write authority back
+    one key over, next to the gate that had just refused it. Callers with a
+    request in hand pass what that request's gate decided; a caller asking what
+    a level would give passes nothing and gets the table.
     """
     resolved = str(level or "").strip().lower()
-    proactive = "silent" if resolved in {"balanced", "maximal"} else "off"
+    if proactive_capture_permitted is None:
+        proactive_capture_permitted = resolved in {"balanced", "maximal"}
+    proactive = "silent" if proactive_capture_permitted else "off"
     advisory = "off" if resolved == "off" else "advisory"
     return {
         "hygiene_writes": FIXED["hygiene_writes"],
@@ -245,24 +258,56 @@ def stored_overrides() -> tuple[dict[str, str], list[dict]]:
 def active(level: str | None = None) -> dict[str, str]:
     """``action class -> the disposition in force``, overrides applied."""
     resolved_level = level or _active_level()
-    derived = derive_envelope(resolved_level)
+    derived = derive_envelope(
+        resolved_level, proactive_capture_permitted=_proactive_permitted(level)
+    )
     overrides, _ignored = stored_overrides()
     derived.update(overrides)
     return derived
 
 
-def resolved(level: str | None = None, surface: str | None = None) -> dict:
+def _proactive_permitted(
+    level: str | None = None, surface: str | None = None, gate: dict | None = None
+) -> bool | None:
+    """Whether this request may capture proactively, or None to use the table.
+
+    An explicit `level` is a "what would this level give?" question and keeps
+    the table's answer. Everything else asks `prominence` about the request in
+    hand, so a caller with no `engagement` payload to take a gate from --
+    `capture_sweep` through `active()`, most importantly -- still picks up a
+    floor it was never handed.
+    """
+    from . import prominence as prominence_module
+
+    if gate is None:
+        if level is not None:
+            return None
+        gate = prominence_module.capture_gate(surface=surface)
+    return any(bool(rule.get("proactive_permitted")) for rule in gate.values())
+
+
+def resolved(
+    level: str | None = None, surface: str | None = None, *, capture_gate: dict | None = None
+) -> dict:
     """Bootstrap-shaped view: every class, its ceiling, disposition and provenance.
 
     `disclosure` appears with a null disposition and `governance-owned`
     provenance rather than being omitted: a client that cannot see the class at
     all would have no way to learn that the class exists and is somebody else's
     to decide.
+
+    `capture_gate` is the gate the caller already computed for this request.
+    Pass it whenever the envelope is served BESIDE that gate -- both keys of one
+    `engagement` block then come from one object, so they cannot drift apart in
+    the payload an agent actually reads.
     """
     from . import prominence as prominence_module
 
     resolved_level = prominence_module.normalize(level) or prominence_module.resolve(surface)
-    derived = derive_envelope(resolved_level)
+    derived = derive_envelope(
+        resolved_level,
+        proactive_capture_permitted=_proactive_permitted(level, surface, capture_gate),
+    )
     overrides, ignored = stored_overrides()
 
     classes: dict[str, dict] = {}

@@ -142,8 +142,10 @@ def test_the_hook_cadence_block_does_not_push_record_past_the_proxy(monkeypatch)
     """The cadence block lands inside `engagement`, which is in FRONT of the catalogue.
 
     That is the same place the last two re-cuts of the proxy came from, so the
-    block is measured here rather than assumed to be small. It is served only to
-    a hook-capable client, so it never appears in the measurement above.
+    block is measured rather than assumed to be small. The surfaceless fixture
+    above already carries it -- the block rides on the coding context and an
+    undetected client is coding -- so this pins the named client, whose longer
+    surface string is the larger of the two.
     """
     monkeypatch.setenv("EXOMEM_SURFACE", "claude-code")
     root = Path(tempfile.mkdtemp())

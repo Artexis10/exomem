@@ -8,9 +8,9 @@ What is available on every deployment is honesty. A client that runs hooks can b
 
 ## What Changes
 
-- Serve a `hook_cadence` block inside `engagement` to hook-capable clients only (Claude Code and Codex): what the hooks resolve from, that the saved preference is not among it, and the command that changes the cadence on the client machine. Bootstrap and every arm of `configure_memory` carry it; every other surface carries nothing, because a client with no hooks has no cadence to be out of step with.
+- Serve a `hook_cadence` block inside `engagement` to every client in the coding context: what the hooks resolve from, that the saved preference is not among it, and the command that changes the cadence on the client machine and nothing else. Bootstrap and every arm of `configure_memory` carry it; the conversation context carries nothing, because a client with no filesystem has no hooks to be out of step with. The gate is the context rather than a list of client names, so an unrecognized hooked client -- a new CLI, a fork, a local install -- is not silently excluded.
 - When `configure_memory` is absent from the served command set, make the bootstrap `change_with` guidance name the custom-instructions path instead of the CLI.
-- When the preference record cannot be read, resolve to the conservative `balanced` default rather than the client default, name `preference:unavailable` as the source, and withhold proactive capture in that state.
+- When the preference record cannot be read, resolve to the conservative `balanced` default rather than the client default, name `preference:unavailable` as the source, and withhold proactive capture in every projection of capture authority: the capture gate, the served contract, the delegation envelope's `proactive_capture` class, and the workflow contract's effective capture. The envelope is the authority surface an agent acts on, so a floor that held only in the gate beside it would be the same fail-open one key over.
 - Tell the agent, in the scaffold engagement reference, to pass the cadence caveat on to the user after a set on a hook-capable client.
 - Add the precedence, projection and byte-budget tests that prove each behaviour through the real bootstrap projection and the real preference control.
 
@@ -19,4 +19,4 @@ What is available on every deployment is honesty. A client that runs hooks can b
 - Affected specs: `agent-prominence-control` (modified: precedence and defaults; consistent contract projection and guidance).
 - Affected code: `src/exomem/prominence.py`, `src/exomem/commands.py` (`configure_memory`, bootstrap `change_with`), `docs/prominence.md`, `src/exomem/_scaffold/_Schema/references/engagement.md` and the skill-contract digest it re-stamps.
 - No change to write scope, authority, or compute mode. The nudge hooks themselves are unchanged: this change makes the discrepancy visible rather than pretending to close it.
-- The compact bootstrap absorbs the block: measured 62,354 bytes for a Claude Code client against a 63,300 ceiling, with the `record` route at offset 10,868 against a 12,288 proxy. Clients that are not hook-capable are unchanged byte for byte.
+- The compact bootstrap absorbs the block: measured 62,431 bytes for a Claude Code client against a 63,300 ceiling, with the `record` route at offset 10,945 against a 12,288 proxy. The largest compact payload remains the conversational one at 62,511 bytes, which this change does not touch.
