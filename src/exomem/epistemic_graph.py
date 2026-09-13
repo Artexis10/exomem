@@ -2922,13 +2922,22 @@ class EpistemicGraphIndex:
                 if resolver_versions is None:
                     # The supplied freshness identity did not actually name the
                     # resolver bytes (for example after a coarse-metadata edit).
-                    # Clear both the resolver and page cache before retrying.
-                    # Class C, first admitted cause.
+                    # Clear the page cache before retrying. Class C, first
+                    # admitted cause.
                     self._mark_unavailable()
                     projection_moved = True
                     retarget = True
                     moved_cause = "the supplied freshness identity did not name the resolver bytes"
-                    find_module.unload_ram_caches()
+                    # The *recall* resolver stays. Every read of it revalidates
+                    # the projection identity and, for the graph's bounded
+                    # repair, the exact live checkpoint, so a stale entry can
+                    # only miss -- it can never be served as current. Dropping
+                    # it bought nothing and cost the next governed write a
+                    # whole-vault rebuild: `recall_resolver_snapshot_at_checkpoint`
+                    # refuses to build on a miss, so a rebuild retargeting under
+                    # concurrent writes forced the next standalone caller into a
+                    # join it had to wait out (measured: 14.7 s).
+                    find_module.unload_ram_caches(keep_recall_resolver=True)
                     continue
                 pass_started = True
                 report = self._rebuild_all_pass(resolver)
@@ -4295,7 +4304,11 @@ class EpistemicGraphIndex:
                 != before
             ):
                 if resolver_version_result is None:
-                    find_module.unload_ram_caches()
+                    # Same reasoning as the rebuild's retarget: the recall
+                    # resolver is checkpoint-validated at every read, so keeping
+                    # it cannot serve stale topology, while dropping it sends the
+                    # next governed write down the whole-vault path.
+                    find_module.unload_ram_caches(keep_recall_resolver=True)
                 self._mark_unavailable()
                 return fallback("topology_proof_moved")
             resolver_versions = resolver_version_result

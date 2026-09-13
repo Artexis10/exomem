@@ -746,3 +746,62 @@ def test_a_replacement_process_serves_its_first_writes_incrementally(
         f"nothing; rebuilds per write were {per_write}"
     )
     _assert_incremental_latency(report["acknowledgements"][1:])
+
+
+def test_a_rebuild_retarget_keeps_the_recall_resolver(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rebuild that retargets must not leave the next write without a resolver.
+
+    A whole-vault rebuild whose projection moves under it drops every
+    rebuildable cache and retries. Dropping the *recall* resolver there bought
+    nothing -- every read of it revalidates the projection identity, and the
+    graph's bounded repair revalidates the exact live checkpoint, so a stale
+    entry can only miss -- while costing the next governed write a whole-vault
+    rebuild of its own: `recall_resolver_snapshot_at_checkpoint` refuses to
+    build on a miss by design. Measured in the reproduction: one coalesced
+    follow-up rebuild running under later writes turned the next standalone
+    write into a 14.7 s join.
+    """
+    root = handoff_vault
+    find_module.recall_resolver_snapshot(root)
+    assert root in find_module._RECALL_RESOLVER_CACHE, "the resolver must start warm"
+
+    # Observed at the moment of the eviction. The rebuild's next attempt warms
+    # the resolver again at the top of its loop, so a check after `rebuild_all`
+    # returns would pass either way -- what costs the next governed write is the
+    # window in between, which is where a concurrent write lands.
+    survived: list[bool] = []
+    real_unload = find_module.unload_ram_caches
+
+    def observed_unload(*args: object, **kwargs: object) -> object:
+        result = real_unload(*args, **kwargs)
+        survived.append(root in find_module._RECALL_RESOLVER_CACHE)
+        return result
+
+    monkeypatch.setattr(find_module, "unload_ram_caches", observed_unload, raising=True)
+
+    calls: list[int] = []
+    real = EpistemicGraphIndex._resolver_source_versions
+
+    def retarget_once(
+        inner_self: EpistemicGraphIndex, resolver: object, membership: object, **kwargs: object
+    ):
+        calls.append(1)
+        if len(calls) == 1:
+            # Class C, first admitted cause: the supplied freshness identity did
+            # not name the resolver bytes.
+            return None
+        return real(inner_self, resolver, membership, **kwargs)
+
+    monkeypatch.setattr(
+        EpistemicGraphIndex, "_resolver_source_versions", retarget_once, raising=True
+    )
+
+    EpistemicGraphIndex(root).rebuild_all()
+
+    assert len(calls) >= 2, "the rebuild must have retargeted and retried"
+    assert survived and all(survived), (
+        "the retarget evicted the recall resolver, which sends the next governed "
+        f"write down the whole-vault path (survived={survived})"
+    )
