@@ -253,6 +253,7 @@ DESTRUCTIVE_OPS: frozenset[str] = frozenset(
         "manage_memory_file",
         "maintain_memory",
         "schema_memory",
+        "configure_memory",
         "record_memory",
         "plan_memory",
         *({"govern_memory"} if governance_tool_is_destructive() else set()),

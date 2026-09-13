@@ -5394,8 +5394,22 @@ def _fixed_projected_command_completion(
     return wrapped
 
 
+def _request_prominence_context(func):
+    @wraps(func)
+    def wrapped(command, *injected, **kwargs):
+        from . import prominence
+
+        if injected and isinstance(injected[0], Path):
+            with prominence.request_scope(injected[0]):
+                return func(command, *injected, **kwargs)
+        return func(command, *injected, **kwargs)
+
+    return wrapped
+
+
 @_foreground_command_activity
 @_fixed_projected_command_completion
+@_request_prominence_context
 def invoke_command(
     command: Any,
     *injected: Any,

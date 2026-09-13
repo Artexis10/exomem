@@ -596,6 +596,52 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
     return projection
 
 
+def op_configure_memory(
+    vault_root: Path,
+    action: Literal["inspect", "set"] = "inspect",
+    prominence: str | None = None,
+    expected_revision: str | None = None,
+) -> dict:
+    """Inspect or set your saved Exomem engagement level for this vault.
+
+    Inspect first, then set off, light, balanced or maximal with the returned
+    revision as expected_revision. The choice follows this authenticated identity
+    on later requests without a restart. It changes recall/capture eagerness, never
+    compute mode or authority. Other identities and vaults remain independent.
+    Adopt the returned engagement contract in the current conversation.
+    """
+    from . import prominence as prominence_module
+    from . import prominence_preferences
+    from .cli_ops import OpError
+
+    if action not in {"inspect", "set"} or (
+        action == "inspect" and (prominence is not None or expected_revision is not None)
+    ) or (action == "set" and (prominence is None or expected_revision is None)):
+        raise OpError("INVALID_PREFERENCE_ARGUMENTS", "inspect takes no setting; set requires "
+                      "prominence and expected_revision")
+    before = prominence_preferences.inspect(vault_root)
+    saved = before
+    if action == "set":
+        saved = prominence_preferences.set_preference(vault_root, prominence, expected_revision)
+        prominence_module.refresh_request_preference(vault_root)
+        if saved.get("mutated"):
+            from . import writer_lease
+
+            writer_lease.mark_active_mutation_committed()
+    engagement = prominence_module.resolved()
+    engagement["change_with"] = prominence_module.configuration_route()
+    engagement["envelope"] = envelope_module.resolved(level=engagement["level"])
+    return {
+        "operation": "configure_memory",
+        "action": action,
+        "scope": "principal-and-vault",
+        **saved,
+        "before_hash": before["revision"],
+        "after_hash": saved["revision"],
+        "engagement": engagement,
+    }
+
+
 def op_bootstrap(
     vault_root: Path,
     profile: str = "compact",
@@ -670,6 +716,8 @@ def op_bootstrap(
     )
     active_descriptor = _active_bootstrap_descriptor()
     active_product_names = frozenset(active_descriptor.product_commands)
+    if "configure_memory" in active_product_names:
+        engagement_policy["change_with"] = prominence_module.configuration_route()
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     workflow_inventory = workflow_contracts_module.inventory_contracts(vault_root)
@@ -10224,6 +10272,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "safety": "read-only by default; write-capable fixes require explicit flags",
         "advanced": [
             "doctor",
+            "configure_memory",
             "govern_memory",
             "schema_memory",
             "manage_memory_file",
@@ -10301,6 +10350,7 @@ _RC = frozenset({"rest", "cli"})
 # meaningless through the REST/CLI JSON envelopes, so it is mcp-only.
 _M = frozenset({"mcp"})
 _SPEC: tuple[tuple, ...] = (
+    ("configure_memory", op_configure_memory, 1, True, False, None, _MCRC),
     ("coordination_status", op_coordination_status, 1, False, False, None, _MCRC),
     ("bootstrap", op_bootstrap, 1, False, False, None, _MCRC),
     ("search", op_search, 1, False, False, "query", _MCRC),
@@ -10388,6 +10438,11 @@ egress_module.assert_projectors_registered({command.name: command for command in
 egress_module.assert_outcomes_registered({command.name: command for command in COMMANDS})
 
 _PRODUCT_SPEC: tuple[tuple, ...] = (
+    (
+        "configure_memory", op_configure_memory, 1, True, False, None, _MCRC,
+        ("configure_memory",),
+        {"surface": "primary", "actions": (), "first_run_safe": False},
+    ),
     (
         "coordination_status",
         op_coordination_status,
@@ -10895,6 +10950,18 @@ HOSTED_SURFACE_EXCLUSIONS = MappingProxyType(
     {
         exclusion.command: exclusion
         for exclusion in (
+            HostedSurfaceExclusion(
+                command="configure_memory",
+                reason=(
+                    "The existing hosted profiles pin their ordered command membership; "
+                    "v5 explicitly retains v4's membership. Adding this command would "
+                    "change the hosted command-surface digest under the same profile ID."
+                ),
+                lifted_when=(
+                    "a new hosted profile admits identity-scoped preference mutations, "
+                    "verifies principal and cell isolation, and carries its own candidate digest"
+                ),
+            ),
             HostedSurfaceExclusion(
                 command="transfer_artifact",
                 reason=(

@@ -1471,6 +1471,14 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
     elif valid_planning_receipt(leaf):
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
+    elif isinstance(leaf, Mapping) and leaf.get("operation") == "configure_memory":
+        # The configuration contract is metadata-only and bounded by the
+        # canonical prominence vocabulary. Keep the newly effective contract
+        # visible so the current conversation can adopt it immediately.
+        compact.update({key: leaf[key] for key in (
+            "operation", "action", "scope", "stored", "revision",
+            "before_hash", "after_hash", "receipt_id", "engagement",
+        ) if key in leaf})
     elif (
         isinstance(leaf, Mapping)
         and isinstance(leaf.get("run_id"), str)

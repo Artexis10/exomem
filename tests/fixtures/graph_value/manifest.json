@@ -101,6 +101,7 @@
   "operation_inventory": {
     "exomem": {
       "mcp": {
+        "configure_memory": {"classification": "excluded", "reason": "engagement preferences control agent participation and do not change the knowledge graph measured by this benchmark"},
         "coordination_status": {"classification": "excluded", "reason": "process coordination is harness preflight, not knowledge behavior"},
         "bootstrap": {"classification": "probe", "probe": "assistant-bootstrap"},
         "ask_memory": {"classification": "probe", "probe": "retrieval-matrix"},
@@ -132,6 +133,7 @@
         "read_media": {"classification": "probe", "probe": "media-video"}
       },
       "cli": {
+        "configure_memory": {"classification": "excluded", "reason": "engagement preferences control agent participation and do not change the knowledge graph measured by this benchmark"},
         "coordination_status": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
         "bootstrap": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
         "ask_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},

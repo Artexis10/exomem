@@ -1078,6 +1078,67 @@
       "type": "object"
     }
   },
+  "configure_memory": {
+    "description": "Inspect or set your saved Exomem engagement level for this vault.\n\nInspect first, then set off, light, balanced or maximal with the returned\nrevision as expected_revision. The choice follows this authenticated identity\non later requests without a restart. It changes recall/capture eagerness, never\ncompute mode or authority. Other identities and vaults remain independent.\nAdopt the returned engagement contract in the current conversation.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "default": "inspect",
+          "enum": [
+            "inspect",
+            "set"
+          ],
+          "type": "string"
+        },
+        "prominence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
+        }
+      },
+      "type": "object"
+    }
+  },
   "connect_memory": {
     "description": "Connect memory through links, typed graph context, or entities.\n\nProposal modes are read-only. `operation=\"create-entity\"` is an explicit\nadditive write that creates a typed graph node through the canonical entity\nwriter. `operation=\"accept-relation\"` is a governed additive write that\nauthors one reviewed relation-queue candidate.",
     "inputSchema": {
