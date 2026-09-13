@@ -283,7 +283,12 @@ def _proactive_permitted(
         if level is not None:
             return None
         gate = prominence_module.capture_gate(surface=surface)
-    return any(bool(rule.get("proactive_permitted")) for rule in gate.values())
+    # `all`, not `any`: the envelope row is one disposition covering both
+    # capture kinds, so it may only say "act" when the gate permits both. The
+    # table agrees at every canonical level today; if a level ever permits
+    # one kind and withholds the other, the envelope must take the withheld
+    # side, or it grants back exactly what this row exists to refuse.
+    return all(bool(rule.get("proactive_permitted")) for rule in gate.values())
 
 
 def resolved(
