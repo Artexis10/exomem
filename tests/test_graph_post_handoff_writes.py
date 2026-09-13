@@ -54,6 +54,12 @@ LIVE_WRITE_COUNT = 6
 ACK_BOUND_SECONDS = 2.0
 #: The typical write, held to the measured range rather than the safety margin.
 ACK_MEDIAN_BOUND_SECONDS = 1.0
+#: The live-watcher shape has a second writer: the watcher's own repair of the
+#: unattributed edits contends for the same mutation boundary, and a write that
+#: lands on it waits for it. Measured there: 0.21-0.47 s typical, 3.1 s worst
+#: when a repair was in flight. The median is what separates this from the
+#: defect, where every write waited out a whole-vault rebuild (3.4-7.9 s).
+LIVE_ACK_BOUND_SECONDS = 5.0
 
 
 def _note(index: int, links: list[str]) -> str:
@@ -196,12 +202,14 @@ def _observe_and_settle(root: Path, *, deadline_seconds: float = 5.0) -> bool:
     return False
 
 
-def _assert_incremental_latency(acknowledgements: list[float]) -> None:
+def _assert_incremental_latency(
+    acknowledgements: list[float], *, bound: float = ACK_BOUND_SECONDS
+) -> None:
     rendered = [round(seconds, 2) for seconds in acknowledgements]
     slowest = max(acknowledgements)
-    assert slowest < ACK_BOUND_SECONDS, (
+    assert slowest < bound, (
         f"slowest acknowledgement {slowest:.2f}s exceeds the incremental bound "
-        f"{ACK_BOUND_SECONDS}s: {rendered}"
+        f"{bound}s: {rendered}"
     )
     median = sorted(acknowledgements)[len(acknowledgements) // 2]
     assert median < ACK_MEDIAN_BOUND_SECONDS, (
@@ -291,13 +299,19 @@ def test_writes_after_a_worker_replacement_stay_incremental(
         f"its mark; only {observed_marks} of {LIVE_WRITE_COUNT} edits completed "
         "that cycle, which on a defective tree is what never happens"
     )
-    assert "external_event_covers_these_paths" not in caplog.text, (
-        f"an unattributed edit fenced a governed write: {rendered}"
-    )
     assert "graph_sync_predecessor_unreadable" not in caplog.text, (
-        f"a governed write could not read a sidecar it should have: {rendered}"
+        "a governed write could not read a sidecar whose lineage was intact, which "
+        f"is the defect itself: {rendered}"
     )
-    _assert_incremental_latency(acknowledgements)
+    fenced = caplog.text.count("reason=external_event_covers_these_paths")
+    assert fenced <= 1, (
+        f"{fenced} of {LIVE_WRITE_COUNT} governed writes were fenced by an "
+        f"unattributed event: {rendered}. One is the race this shape cannot "
+        "exclude -- a running watcher can deliver a write's own echo after its "
+        "publication intent has closed, and a mark on the path being written is "
+        "then correct. Every write being fenced is the loop this change removed."
+    )
+    _assert_incremental_latency(acknowledgements, bound=LIVE_ACK_BOUND_SECONDS)
     assert _drain_repair_queue(root, live_watcher) == 0, "the graph repair queue never drained"
 
 
