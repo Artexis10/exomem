@@ -130,7 +130,9 @@ def test_sequence_five_receipt_and_all_prior_identity_bytes() -> None:
         if json.loads(receipt_bytes).get("ratifier") is None:
             assert hashlib.sha256(receipt_bytes).hexdigest() == expected
     chain = working_amendment_receipts(ROOT)
-    assert [row.sequence for row in chain] == [1, 2, 3, 4, 5]
+    # This historical contract remains present when later amendments land.
+    # The current complete chain is pinned by amendment-governance tests.
+    assert [row.sequence for row in chain[:5]] == [1, 2, 3, 4, 5]
     assert chain[-1].parent_contract_sha256 == chain[-2].contract_sha256
     assert (
         chain[-1].contract_sha256
@@ -138,7 +140,7 @@ def test_sequence_five_receipt_and_all_prior_identity_bytes() -> None:
             (ROOT / "benchmarks/epistemic/PREREGISTRATION.md").read_bytes()
         ).hexdigest()
     )
-    assert chain[-1].acknowledgment_status == "pending"
+    assert chain[4].acknowledgment_status == "pending"
     assert {"f30", "f31"} <= withheld_family_ids()
     assert {"f30", "f31"} <= PREREGISTERED_FAMILY_IDS
     assert {family: AMENDMENT_INTRODUCED_FAMILIES[family] for family in ("f30", "f31")} == {
