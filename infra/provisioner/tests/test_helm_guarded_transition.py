@@ -791,3 +791,68 @@ async def test_an_unreadable_revision_in_a_failed_only_history_stays_retryable(t
 
     assert h.core.deletes == []
     assert _upgrades(h) == 0
+
+
+def _identity() -> dict:
+    from exomem_provisioner.lifecycle import provider_identity_values
+
+    return provider_identity_values(_metadata())
+
+
+def _owned_values() -> dict:
+    identity = _identity()
+    return {**TARGET, "providerIdentity": identity, "initOperationId": identity["operationId"]}
+
+
+@pytest.mark.asyncio
+async def test_recovery_reads_retained_records_as_its_own_from_their_identity(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+    h.leave_pending("pending-upgrade", revision=4, values=_owned_values())
+
+    assert await h.adapter.retained_records_are_own(_metadata(), identity=_identity()) is True
+    # Read-only: nothing was deleted and no upgrade was attempted.
+    assert h.core.deletes == [] and _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_recovery_refuses_retained_records_carrying_another_identity(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+    foreign = {**_owned_values(), "providerIdentity": {**_identity(), "fence": "99"}}
+    h.leave_pending("pending-upgrade", revision=4, values=foreign)
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.adapter.retained_records_are_own(_metadata(), identity=_identity())
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_refuses_a_retained_history_holding_another_chart(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+    h.history[0]["chart"] = "exomem-cell-0.2.0"
+    h.leave_pending("pending-upgrade", revision=4, values=_owned_values())
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.adapter.retained_records_are_own(_metadata(), identity=_identity())
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+
+
+@pytest.mark.asyncio
+async def test_recovery_accepts_a_retained_history_with_nothing_abandoned(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+
+    assert await h.adapter.retained_records_are_own(_metadata(), identity=_identity()) is True
+
+
+@pytest.mark.asyncio
+async def test_recovery_accepts_a_release_that_was_never_recorded(tmp_path):
+    h = HelmTransport(tmp_path)
+    h.history[:] = []
+
+    assert await h.adapter.retained_records_are_own(_metadata(), identity=_identity()) is True

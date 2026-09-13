@@ -41,6 +41,10 @@ def _recovery_environment(**overrides: str) -> dict[str, str]:
         "EXOMEM_RECOVERY_RUNTIME_SELECTION": "active",
         "EXOMEM_RECOVERY_HCLOUD_TOKEN": "h" * 32,
         "EXOMEM_RECOVERY_HCLOUD_LOCATION": "fsn1",
+        "EXOMEM_RECOVERY_HELM_BINARY": "/usr/local/bin/helm",
+        "EXOMEM_RECOVERY_HELM_VERSION": "3.19.4",
+        "EXOMEM_RECOVERY_CELL_CHART_PATH": "/opt/exomem/charts/cell",
+        "EXOMEM_RECOVERY_CELL_CHART_VERSION": "0.1.0",
     }
     values.update(overrides)
     return values
@@ -1135,3 +1139,118 @@ def test_main_converts_refusals_to_content_free_json(
         "refusal": "preflight-failed",
         "status": "refused",
     }
+
+
+def _shell_observation(module, **overrides):
+    """The cluster shape a provision stopped before its storage apply still has."""
+    base = module.ShellLiveObservation(
+        namespace_present=True,
+        provider_object_present=True,
+        claim_present=True,
+        claim_bound=False,
+        volume_present=False,
+        init_job_present=False,
+        runtime_admitted=False,
+        routes_present=0,
+        terminating=False,
+        retained_records_are_own=True,
+    )
+    return replace(base, **overrides) if overrides else base
+
+
+def test_shell_resume_returns_the_operation_to_the_checkpoint_before_its_apply() -> None:
+    recovery = _module()
+    before = recovery.ShellResumePreState(
+        action="provision",
+        state="error",
+        checkpoint="failed",
+        error_code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+        has_claim=False,
+        has_result=False,
+        finalized=True,
+    )
+
+    assert recovery.shell_resume_transition_values(before) == {
+        "state": recovery.OperationState.PENDING,
+        "checkpoint": "namespace-ready",
+        "error_code": None,
+        "claim_owner": None,
+        "claim_token": None,
+        "claim_expires_at": None,
+        "finalized_at": None,
+    }
+    with pytest.raises(recovery.RecoveryRefusal, match="already progressed"):
+        recovery.shell_resume_transition_values(
+            replace(before, state="pending", checkpoint="namespace-ready")
+        )
+    for changed in (
+        {"action": "destroy"},
+        {"state": "error", "checkpoint": "volume-owned"},
+        {"error_code": "PROVISIONER_REJECTED"},
+        {"has_claim": True},
+        {"has_result": True},
+        {"finalized": False},
+    ):
+        with pytest.raises(recovery.RecoveryRefusal):
+            recovery.shell_resume_transition_values(replace(before, **changed))
+
+
+def test_shell_resume_refuses_every_cluster_state_past_the_storage_apply() -> None:
+    recovery = _module()
+
+    assert recovery.validate_shell_live_observation(_shell_observation(recovery)) is None
+    # One precondition varied per case, against the one shape that is admissible.
+    for changed in (
+        {"namespace_present": False},
+        {"provider_object_present": False},
+        {"claim_present": False},
+        {"claim_bound": True},
+        {"volume_present": True},
+        {"init_job_present": True},
+        {"runtime_admitted": True},
+        {"routes_present": 1},
+        {"terminating": True},
+        {"retained_records_are_own": False},
+        {"identity_digest": "short"},
+    ):
+        with pytest.raises(
+            recovery.RecoveryRefusal, match="live shell resume preflight failed"
+        ):
+            recovery.validate_shell_live_observation(_shell_observation(recovery, **changed))
+
+
+def test_shell_resume_marker_is_content_free_exact_and_one_way() -> None:
+    recovery = _module()
+    marker = recovery.shell_resume_marker(
+        preflight_sha256="a" * 64,
+        helper_source_sha256="b" * 64,
+        claim_generation=98,
+        committed_at=datetime(2026, 9, 13, 5, 49, tzinfo=UTC),
+    )
+
+    assert set(marker) == {
+        "schema",
+        "preflight_sha256",
+        "helper_source_sha256",
+        "claim_generation",
+        "committed_at",
+    }
+    assert marker["schema"] == 1
+    assert recovery.parse_shell_resume_marker(marker) == marker
+    for broken in (
+        {**marker, "schema": 2},
+        {**marker, "preflight_sha256": "a" * 63},
+        {**marker, "claim_generation": -1},
+        {**marker, "committed_at": "not-a-time"},
+        {key: value for key, value in marker.items() if key != "schema"},
+        {**marker, "extra": "field"},
+    ):
+        with pytest.raises(recovery.RecoveryRefusal, match="shell resume marker is invalid"):
+            recovery.parse_shell_resume_marker(broken)
+
+
+def test_shell_resume_marker_is_distinct_from_the_init_retry_receipt() -> None:
+    recovery = _module()
+
+    assert recovery._SHELL_RESUME_MARKER != recovery._RECOVERY_MARKER
+    assert recovery._SHELL_RESUME_MARKER not in recovery._RECOVERY_MARKER_KEYS

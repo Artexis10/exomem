@@ -1895,6 +1895,24 @@ def _require_complete_product_policy(request: dict[str, Any]) -> None:
         )
 
 
+def provider_identity_values(metadata: OpaqueProviderMetadata) -> dict[str, Any]:
+    """The identity a chart target carries, derived from the operation alone.
+
+    Recovery authenticates a retained target against this without recomputing
+    the whole target, so the two callers cannot disagree about what identity a
+    record must carry.
+    """
+    return {
+        "tenantId": metadata.tenant_id,
+        "cellId": metadata.subject_id,
+        "operationId": metadata.operation_id,
+        "fence": str(metadata.fence_generation),
+        "operationDigest": metadata.kubernetes_annotations["exomem.io/operation-digest"],
+        "subjectDigest": metadata.kubernetes_annotations["exomem.io/subject-digest"],
+        "tenantDigest": metadata.kubernetes_annotations["exomem.io/tenant-digest"],
+    }
+
+
 def _fixed_helm_values(
     metadata: OpaqueProviderMetadata,
     request: dict[str, Any],
@@ -1939,15 +1957,7 @@ def _fixed_helm_values(
         ),
         "pvcSize": "10Gi",
         "provisionMode": request["provisionMode"],
-        "providerIdentity": {
-            "tenantId": metadata.tenant_id,
-            "cellId": metadata.subject_id,
-            "operationId": metadata.operation_id,
-            "fence": str(metadata.fence_generation),
-            "operationDigest": metadata.kubernetes_annotations["exomem.io/operation-digest"],
-            "subjectDigest": metadata.kubernetes_annotations["exomem.io/subject-digest"],
-            "tenantDigest": metadata.kubernetes_annotations["exomem.io/tenant-digest"],
-        },
+        "providerIdentity": provider_identity_values(metadata),
         "resourceName": metadata.resource_name,
         "recordsReaderVersion": 2,
         "lifecycleActionsEnabled": False,
