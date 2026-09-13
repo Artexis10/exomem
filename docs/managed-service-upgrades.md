@@ -146,8 +146,8 @@ start an older release over migrated state.
 A worker release is no longer replaced cold. The supervisor first spawns the
 candidate as a **standby** beside the worker that is still serving. The standby
 binds its own private socket, **proves** the maintained lexical catalog current
-read-only, warms the rebuildable in-memory caches, loads models when preload is
-allowed, and proves the published graph snapshot read-only. It takes no writer
+read-only, warms the rebuildable in-memory caches, **adopts** the published graph
+snapshot, and loads models when preload is allowed. It takes no writer
 lease, publishes nothing, schedules no drain, media or watcher work, and owns no
 descendants. In particular it never reconciles or requests repair of the lexical
 catalog: that is a publication, and the worker still serving is this vault's
@@ -173,6 +173,17 @@ drain plus the promotion, not a cold start.
   }
 }
 ```
+
+Adoption is what makes the promoted worker's first governed write incremental:
+it proves the inherited sidecar against disk and makes that checkpoint this
+process's delta origin, instead of the whole-vault pass a replacement used to
+pay for a lineage it could advance. The `cutover` block reports it as
+`adoption: {"residue": N, "reason": "adopted"}`. A non-zero `residue` is an
+adoption that succeeded *and* owes the drain that many pages — the deferred
+writes the outgoing worker left behind — and reads that require a current
+projection keep refusing until that repair lands. A refused adoption names its
+reason instead (for example `residue_exceeds_drain_limit`), leaves
+`graph_snapshot` waiting, and the candidate is discarded on budget expiry.
 
 `embeddings` joins `components` only when the process's mode and overrides allow
 a model preload (`EXOMEM_PRELOAD_MODELS=1`). A standby answers its own probe as
