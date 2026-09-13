@@ -71,6 +71,7 @@ _OPTIONAL_COMMANDS = frozenset(
         "capture_source",
         "compile_source",
         "connect_memory",
+        "configure_memory",
         "coordination_status",
         "create_file",
         "delete",

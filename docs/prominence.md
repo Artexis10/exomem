@@ -24,6 +24,26 @@ save. Delivery is later and receipt-gated through an existing compatible
 Records collection; reported remote identity never proves remote byte equality.
 Off and light remain explicit-request-only.
 
+## Change the level through your agent
+
+Ask your connected agent to inspect or change your engagement level. It uses
+`configure_memory(action="inspect")`, then passes the returned `revision` as
+`expected_revision` to `configure_memory(action="set", prominence="maximal", ...)`.
+The response includes the saved level and effective contract; the agent should
+apply that contract immediately. Subsequent calls read the setting without a
+service restart.
+
+This preference belongs to the addressed vault and authenticated identity.
+Clients presenting the same identity share it. Local CLI/stdio and the shared REST
+key use the local owner identity; OAuth identities remain distinct. The generated
+`configure_memory` CLI command uses the same operation. A stale revision requires
+a fresh inspect; an operator's conflicting `EXOMEM_PROMINENCE` override is reported
+instead of claiming that the requested change took effect.
+
+The older `exomem prominence <level>` command remains a machine-wide control.
+Standalone hooks read that legacy configuration and environment; they do not
+inherit another authenticated identity's vault preference.
+
 ## Which level you get by default, and why
 
 **Assistants with hooks — Claude Code, Codex — default to `balanced`.** Those clients
@@ -50,14 +70,15 @@ exomem prominence maximal      # set it
 exomem prominence --hook-env   # print the nudge tunables this level implies
 ```
 
-Precedence is `EXOMEM_PROMINENCE` (env) → the config file → the surface default. The
-level is stored beside `mode` in the same config file, so setting one never clears the
-other. `bootstrap()` reports the active level under `engagement`.
+Precedence is `EXOMEM_PROMINENCE` (env) → the saved identity/vault preference → the
+legacy machine config → the known client default. The legacy command stores its
+level beside `mode`, so setting one never clears the other. `bootstrap()` reports
+the effective level and its source under `engagement`.
 
-After changing the level, re-run `exomem install-hook` so the nudge cadence matches.
-
-On a web client there is no filesystem, so the level lives in your assistant's custom
-instructions. Paste one of the blocks below.
+Connected web clients save their choice through `configure_memory`, just like
+other agents. The optional custom-instruction blocks below help the assistant
+follow the policy, or provide instructions when that tool is unavailable; they
+do not persist a server preference.
 
 ---
 

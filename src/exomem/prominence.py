@@ -22,8 +22,8 @@ which is exactly the "auto-save quietly never fires" failure the hooks exist to 
 There, `maximal` holds the same real-world behaviour `balanced` gets for free
 elsewhere. See `default_for_surface`.
 
-Resolution precedence mirrors `mode`: `EXOMEM_PROMINENCE` env → the `prominence` key
-in the shared config file (`mode.config_path()`) → the surface default.
+Resolution precedence: `EXOMEM_PROMINENCE` env → the current principal/vault
+preference → the shared config file (`mode.config_path()`) → the surface default.
 
 The config file is deliberately the SAME one `mode` uses. It is a fixed, shared path
 for the same reason documented in `mode.config_path`: the MCP server and the CLI are
@@ -39,6 +39,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -46,6 +48,47 @@ from types import MappingProxyType
 from . import mode
 
 log = logging.getLogger(__name__)
+
+_REQUEST_PREFERENCE: ContextVar[dict | None] = ContextVar(
+    "exomem_request_prominence", default=None
+)
+
+
+def _request_preference(vault_root: Path) -> dict:
+    from . import prominence_preferences
+    from .cli_ops import OpError
+    from .governance.principal import effective_principal
+
+    preference = {"stored": None, "revision": "missing"}
+    if effective_principal().resolved:
+        try:
+            preference = prominence_preferences.inspect(vault_root)
+        except OpError as exc:
+            preference["unavailable"] = exc.code
+    return {"vault_root": vault_root, "preference": preference}
+
+
+@contextmanager
+def request_scope(vault_root: Path):
+    """Snapshot the addressed user's preference for one canonical invocation."""
+    token = _REQUEST_PREFERENCE.set(_request_preference(vault_root))
+    try:
+        yield
+    finally:
+        _REQUEST_PREFERENCE.reset(token)
+
+
+def refresh_request_preference(vault_root: Path) -> None:
+    """Refresh the current invocation after its own committed preference change."""
+    current = _REQUEST_PREFERENCE.get()
+    if current is not None and current["vault_root"] == vault_root:
+        _REQUEST_PREFERENCE.set(_request_preference(vault_root))
+
+
+def _saved_preference() -> dict:
+    current = _REQUEST_PREFERENCE.get()
+    return current["preference"] if current is not None else {}
+
 
 CANON = ("off", "light", "balanced", "maximal")
 _ALIASES = {
@@ -338,16 +381,31 @@ def normalize(value: str | None) -> str | None:
 
 
 def detect_surface() -> str | None:
-    """Best-effort surface identity: explicit `EXOMEM_SURFACE`, else hosted detection.
+    """Detect explicit surface, hosted service, or a known current MCP client.
 
-    Returns None when this is an ordinary local install, which is the case that wants
-    the hook-backed `balanced` default.
+    Unknown clients keep the generic `balanced` default.
     """
     explicit = os.environ.get(_SURFACE_ENV, "").strip().lower()
     if explicit:
         return explicit
     if _truthy(os.environ.get(_HOSTED_CELL_ENV)):
         return "hosted"
+    if _REQUEST_PREFERENCE.get() is None:
+        return None
+    # Client names affect eagerness only, never authorization. Unknown HTTP
+    # clients can be hooked CLIs too, so transport alone is not enough.
+    from .command_surface import mcp_caller_identity
+
+    identity = mcp_caller_identity()
+    name = (identity.get("client_name") or "").strip().casefold()
+    if "codex" in name:
+        return "codex"
+    if "claude-code" in name or "claude code" in name:
+        return "claude-code"
+    if name in {"chatgpt", "openai"} or name.startswith("chatgpt/"):
+        return "chatgpt"
+    if name in {"claude.ai", "claude-ai"} or name.startswith("claude.ai/"):
+        return "claude-ai"
     return None
 
 
@@ -373,15 +431,14 @@ def default_for_surface(surface: str | None = None) -> str:
 
 
 def resolve(surface: str | None = None) -> str:
-    """Active level: `EXOMEM_PROMINENCE` env → config file → surface default.
-
-    Mirrors `mode.resolve`'s precedence exactly, including reading the config file
-    explicitly rather than injecting it into the environment, so an exported
-    `EXOMEM_PROMINENCE` always wins.
-    """
+    """Active level: environment → request preference → machine config → default."""
     from_env = normalize(os.environ.get(_PROMINENCE_ENV))
     if from_env:
         return from_env
+
+    stored = normalize(_saved_preference().get("stored"))
+    if stored:
+        return stored
 
     raw = mode.read_config().get(_CONFIG_KEY)
     from_config = normalize(raw if isinstance(raw, str) else None)
@@ -457,7 +514,7 @@ def hook_env(level: str | None = None, surface: str | None = None) -> dict[str, 
 def resolved(surface: str | None = None) -> dict:
     """Bootstrap-shaped view of the active prominence policy."""
     level = resolve(surface)
-    return {
+    result = {
         "level": level,
         "source": _active_source(),
         "surface": surface if surface is not None else detect_surface(),
@@ -465,12 +522,35 @@ def resolved(surface: str | None = None) -> dict:
         "levels": list(CANON),
         "change_with": "exomem prominence <level>",
     }
+    if _REQUEST_PREFERENCE.get() is not None:
+        result["preference"] = {
+            "scope": "principal-and-vault",
+            **_saved_preference(),
+            "operator_override": normalize(os.environ.get(_PROMINENCE_ENV)),
+        }
+    return result
+
+
+def configuration_route() -> dict:
+    """The identity-scoped setting route for surfaces exposing configure_memory."""
+    return {
+        "tool": "configure_memory",
+        "inspect": {"action": "inspect"},
+        "set": {
+            "action": "set",
+            "prominence": "<level>",
+            "expected_revision": "<revision from inspect>",
+        },
+        "scope": "same authenticated identity and vault",
+    }
 
 
 def _active_source() -> str:
     """Where the active level came from — useful when a setting appears not to apply."""
     if normalize(os.environ.get(_PROMINENCE_ENV)):
         return "env"
+    if normalize(_saved_preference().get("stored")):
+        return "preference"
     raw = mode.read_config().get(_CONFIG_KEY)
     if isinstance(raw, str) and normalize(raw):
         return "config"
