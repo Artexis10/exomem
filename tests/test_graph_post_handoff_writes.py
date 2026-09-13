@@ -614,7 +614,7 @@ def test_a_real_lineage_gap_still_rebuilds(
 #: graph, sees the outgoing worker's last writes as events it cannot attribute,
 #: and then serves ten governed writes of its own.
 _HANDOFF_CHILD = '''
-import json, sys, time
+import json, os, sys, time
 from pathlib import Path
 
 sys.path.insert(0, {tests_dir!r})
@@ -625,7 +625,7 @@ from test_graph_post_handoff_writes import (  # noqa: E402
     _seed_live_freshness,
 )
 
-from exomem import epistemic_graph, file_watcher  # noqa: E402
+from exomem import epistemic_graph, file_watcher, freshness  # noqa: E402
 from exomem.epistemic_graph import EpistemicGraphIndex  # noqa: E402
 
 root = Path(sys.argv[2])
@@ -639,6 +639,25 @@ if phase == "outgoing":
         _governed_write(root, generated / f"generated-note-{{index + 60:04d}}.md", "outgoing")
     print(json.dumps({{"available": EpistemicGraphIndex(root).available()}}))
     raise SystemExit(0)
+
+victim = generated / "generated-note-0042.md"
+if phase == "racing_edit":
+    # An unattributed event published by the watcher *while the adoption proof is
+    # walking the corpus*: a touch, which is the shape that passes the proof and
+    # still advances the registry -- a content edit is caught by the proof's own
+    # re-read and declines it. The origin must not be recorded past the event.
+    real_proof = EpistemicGraphIndex._snapshot_sources_match_disk
+
+    def racing(inner_self, conn, **kwargs):
+        if not racing.fired:
+            racing.fired = True
+            victim.write_text(victim.read_text(encoding="utf-8"), encoding="utf-8")
+            os.utime(victim, (time.time() + 1, time.time() + 1))
+            freshness.on_files_changed(root, [victim], [])
+        return real_proof(inner_self, conn, **kwargs)
+
+    racing.fired = False
+    EpistemicGraphIndex._snapshot_sources_match_disk = racing
 
 passes = []
 real = EpistemicGraphIndex._rebuild_all_off_boundary
@@ -657,7 +676,18 @@ _seed_live_freshness(root)
 # What the worker runtime's warm-up does for a replacement process, and what a
 # standby does before promotion: prove the inherited snapshot and adopt its
 # checkpoint as this process's delta origin.
-adopted = EpistemicGraphIndex(root).adopt_published_snapshot()
+stored_before = None
+index_for_adoption = EpistemicGraphIndex(root)
+opened = index_for_adoption._open_read_snapshot(require_current_projection=False)
+if opened is not None:
+    stored_before = index_for_adoption._stored_recall_checkpoint(opened)
+    opened.close()
+adopted = index_for_adoption.adopt_published_snapshot()
+victim_in_delta = bool(
+    stored_before is not None
+    and str(victim)
+    in freshness.recall_delta_since(root, "vault", stored_before).changed
+)
 watcher = file_watcher.FileWatcher(root, debounce_seconds=0.2)
 for index in range(3):
     watcher._record(generated / f"generated-note-{{index + 60:04d}}.md", deleted=False)
@@ -669,10 +699,19 @@ for index in range(WRITE_COUNT):
         _governed_write(root, generated / f"generated-note-{{index:04d}}.md", "replacement")
     )
     per_write_rebuilds.append(len(passes) - before)
+# The watcher's own compare-and-ack, run here because this child has no watcher
+# thread: `graph_drift` reads a public snapshot, and an unrepaired external mark
+# fences public reads, which would report the fence rather than any drift.
+pending_epoch = freshness.external_pending_epoch(root)
+if pending_epoch is not None:
+    freshness.clear_external_pending(root, through=pending_epoch)
+drift = epistemic_graph.graph_drift(root)
 print(
     json.dumps(
         {{
             "adopted": adopted,
+            "drift": [entry["path"] for entry in drift],
+            "victim_in_delta": victim_in_delta,
             "rebuilds": len(passes),
             "per_write_rebuilds": per_write_rebuilds,
             "acknowledgements": acknowledgements,
@@ -746,6 +785,111 @@ def test_a_replacement_process_serves_its_first_writes_incrementally(
         f"nothing; rebuilds per write were {per_write}"
     )
     _assert_incremental_latency(report["acknowledgements"][1:])
+
+
+def test_an_edit_during_the_adoption_proof_is_still_indexed(
+    handoff_vault: Path, tmp_path: Path
+) -> None:
+    """The adoption window, end to end, in a process that really did not publish.
+
+    The proof walks the whole corpus, so the watcher publishes unattributed
+    edits while it runs. An origin recorded at the generation the proof ended on
+    declares those edits accounted for, and the bounded repair then advances a
+    snapshot that never indexed the edited page -- drift that nothing reports,
+    because every later delta starts after it.
+    """
+    import json
+    import os
+    import subprocess
+    import sys
+
+    script = tmp_path / "handoff_child.py"
+    script.write_text(
+        _HANDOFF_CHILD.format(tests_dir=str(Path(__file__).parent)), encoding="utf-8"
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(Path(__file__).resolve().parents[1] / "src"), environment.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+
+    outgoing = subprocess.run(
+        [sys.executable, str(script), "outgoing", str(handoff_vault)],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=300,
+        check=False,
+    )
+    assert outgoing.returncode == 0, outgoing.stderr[-4000:]
+
+    replacement = subprocess.run(
+        [sys.executable, str(script), "racing_edit", str(handoff_vault)],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=300,
+        check=False,
+    )
+    assert replacement.returncode == 0, replacement.stderr[-4000:]
+    report = json.loads(replacement.stdout.strip().splitlines()[-1])
+
+    assert report["adopted"] is True
+    assert report["victim_in_delta"] is True, (
+        "an edit published while the proof was walking must remain in the delta "
+        "the adopted origin opens"
+    )
+    assert report["drift"] == [], (
+        f"the adopted snapshot advanced without indexing {report['drift']}"
+    )
+
+
+def test_the_warm_up_adopts_after_the_seed_and_the_resolver(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Warm-up order is load-bearing, so it is pinned rather than commented.
+
+    `adopt_recall_origin` refuses a cold scope, and the watcher's seed replaces
+    the registry maps wholesale -- an adoption recorded before that seed is
+    dropped with the map it described. The graph step therefore has to run after
+    the seed, and after the resolver step whose cache it reuses.
+    """
+    from exomem import warmup
+
+    root = handoff_vault
+    order: list[str] = []
+    live_at_call: list[bool] = []
+
+    real_resolver = find_module.recall_resolver_snapshot
+
+    def traced_resolver(*args: object, **kwargs: object) -> object:
+        order.append("resolver")
+        return real_resolver(*args, **kwargs)
+
+    real_adopt = EpistemicGraphIndex.adopt_published_snapshot
+
+    def traced_adopt(inner_self: EpistemicGraphIndex) -> bool:
+        order.append("graph_snapshot")
+        live_at_call.append(freshness.recall_is_live(inner_self.vault_root, "vault"))
+        return real_adopt(inner_self)
+
+    monkeypatch.setattr(warmup, "warmup_enabled", lambda: True, raising=True)
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", traced_resolver, raising=True)
+    monkeypatch.setattr(
+        EpistemicGraphIndex, "adopt_published_snapshot", traced_adopt, raising=True
+    )
+
+    durations = warmup.warm_caches(root, preload_models=False, preload_cpu_caches=True)
+
+    assert "graph_snapshot" in durations, "the warm-up must adopt the inherited snapshot"
+    steps = list(durations)
+    assert steps.index("resolver") < steps.index("graph_snapshot"), (
+        f"the graph step must follow the resolver step: {steps}"
+    )
+    assert order.index("resolver") < order.index("graph_snapshot"), order
+    assert live_at_call == [True], (
+        "the graph step must run against a seeded registry, or the origin it "
+        "adopts is refused"
+    )
 
 
 def test_a_rebuild_retarget_keeps_the_recall_resolver(

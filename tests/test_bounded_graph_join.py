@@ -261,6 +261,7 @@ def _wait_for_registered_calls() -> dict[str, bool]:
 
     source_root = Path(epistemic_graph.__file__).parent
     found: dict[str, bool] = {}
+    # Recursive, so a join inside a subpackage cannot hide from the enumeration.
 
     class Visitor(ast.NodeVisitor):
         def __init__(self, module: str) -> None:
@@ -284,19 +285,28 @@ def _wait_for_registered_calls() -> dict[str, bool]:
                 else getattr(function, "id", None)
             )
             if name == "wait_for_registered":
-                bounded = len(node.args) > 1 or any(
-                    keyword.arg == "timeout" for keyword in node.keywords
+                # `timeout=None` is the unbounded default spelled out, not a
+                # bound; only a value counts.
+                bounded = any(
+                    not (isinstance(argument, ast.Constant) and argument.value is None)
+                    for argument in node.args[1:2]
+                ) or any(
+                    keyword.arg == "timeout"
+                    and not (
+                        isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value is None
+                    )
+                    for keyword in node.keywords
                 )
                 found[f"{self.module}::{'::'.join(self.stack)}"] = bounded
             self.generic_visit(node)
 
-    for path in sorted(source_root.glob("*.py")):
-        module = path.name
+    for path in sorted(source_root.rglob("*.py")):
+        module = path.relative_to(source_root).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        if module == "graph_sync.py":
-            # The definition's own module: the two seams here are the bound.
-            continue
         Visitor(module).visit(tree)
+    # The definition itself is not a call site.
+    found.pop("graph_sync.py::wait_for_registered", None)
     return found
 
 
