@@ -853,6 +853,35 @@ async def test_capacity_pause_resumes_the_durable_provision_step(
 
 
 @pytest.mark.asyncio
+async def test_prefixed_registration_is_claimed_only_by_volume_worker(
+    worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],
+) -> None:
+    _, repository, _ = worker_context
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    operation = await repository.submit(
+        "provision", "prefixed-volume-lane", _v2_request(), wire_protocol=WIRE_PROTOCOL_V2
+    )
+    claimed = await repository.claim_next("preparer", now=now)
+    assert claimed is not None and claimed.claim_token
+    checkpoint = "gpi1:registering:" + "A" * 43
+    await repository.mark_pending(
+        operation.id, "preparer", claim_token=claimed.claim_token,
+        claim_generation=claimed.claim_generation, checkpoint=checkpoint,
+        retry_after_seconds=0, now=now,
+    )
+
+    assert await repository.claim_next(
+        "routine", now=now, exclude_checkpoints=frozenset({"volume-registration-required"}),
+        exclude_checkpoint_prefixes=frozenset({"gpi1:registering:"}),
+    ) is None
+    volume = await repository.claim_next(
+        "volume", now=now, include_checkpoints=frozenset({"volume-registration-required"}),
+        include_checkpoint_prefixes=frozenset({"gpi1:registering:"}),
+    )
+    assert volume is not None and volume.id == operation.id and volume.checkpoint == checkpoint
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("volume_checkpoint", [False, True])
 async def test_expected_capacity_identity_conflict_fails_closed_without_crashing_worker(
     worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],

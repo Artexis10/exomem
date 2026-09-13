@@ -52,6 +52,7 @@ from .governance_migration_checkpoint import (
 )
 from .governance_migration_coordinator import HostedGovernanceMigrationCoordinator
 from .governance_provision_membership import drain_fresh_bootstrap_bundle
+from .governance_storage_binding import KubernetesGovernanceStorageBindingAdapter
 from .governance_storage_init import KubernetesGovernanceStorageInitAdapter
 from .lifecycle import (
     HealthObservation,
@@ -62,7 +63,7 @@ from .lifecycle import (
     _digest,
     _fixed_helm_values,
 )
-from .models import CapacityReservationClass, ResourceKind
+from .models import CapacityReservationClass, OperationAction, OperationState, ResourceKind
 from .provider_identity import (
     ProviderIdentityConflict,
     ProviderRecoveryIdentityVerifier,
@@ -736,6 +737,7 @@ class LiveLifecyclePlane:
         fingerprint: KubernetesVaultFingerprintAdapter | None = None,
         governance_migration: HostedGovernanceMigrationCoordinator | None = None,
         storage_init: KubernetesGovernanceStorageInitAdapter | None = None,
+        storage_binding: KubernetesGovernanceStorageBindingAdapter | None = None,
         now: Any = time.time,
     ) -> None:
         self._repository = repository
@@ -751,6 +753,7 @@ class LiveLifecyclePlane:
         self._fingerprint = fingerprint
         self._governance_migration = governance_migration
         self._storage_init = storage_init
+        self._storage_binding = storage_binding
         self._now = now
         self._owned: dict[str, OpaqueProviderMetadata] = {}
         self._snapshots: dict[str, KubernetesProviderSnapshot] = {}
@@ -1163,6 +1166,7 @@ class LiveLifecyclePlane:
         )
         owned = current
         helm_request = request
+        owner_operation_id: str | None = None
         for resource in resources:
             if resource.kind is ResourceKind.KUBERNETES_NAMESPACE:
                 owned = OpaqueProviderMetadata(
@@ -1171,6 +1175,7 @@ class LiveLifecyclePlane:
                     operation_id=resource.provider_operation_id,
                     fence_generation=resource.provider_fence_generation,
                 )
+                owner_operation_id = resource.operation_id
                 helm_request = await self._repository.load_request(resource.operation_id)
                 break
         self._owned[self._key(current)] = owned
@@ -1184,6 +1189,66 @@ class LiveLifecyclePlane:
             and owned == current
         ):
             self._initializing_recovery.add(self._key(current))
+        if owned != current and self._storage_binding is not None and owner_operation_id:
+            original_operation = await self._repository.get_by_id(owner_operation_id)
+            if (
+                original_operation is not None
+                and original_operation.state is OperationState.FINAL
+                and original_operation.action is OperationAction.PROVISION
+            ):
+                if (
+                    original_operation.tenant_id != owned.tenant_id
+                    or original_operation.cell_id != owned.subject_id
+                    or original_operation.external_operation_id != owned.operation_id
+                    or original_operation.fence_generation != owned.fence_generation
+                    or original_operation.wire_protocol != WIRE_PROTOCOL_V2
+                ):
+                    raise MetadataConflict(
+                        "original provision authority is invalid",
+                        reason=ConflictReason.PROVIDER_RECOVERY_ENVELOPE_UNAUTHENTICATED,
+                    )
+                try:
+                    original_envelopes = authenticate_cell_provider_recovery_envelopes(
+                        self._identity_verifier,
+                        helm_request.get("_providerRecoveryEnvelopes"),
+                        tenant_id=owned.tenant_id,
+                        cell_id=owned.subject_id,
+                        operation_id=owned.operation_id,
+                        fence_generation=owned.fence_generation,
+                        resource_name=owned.resource_name,
+                        operation_resource_name=provider_operation_resource_name(
+                            owned.operation_id
+                        ),
+                    )
+                except ProviderIdentityConflict as error:
+                    raise MetadataConflict(
+                        "original provision recovery envelope did not authenticate",
+                        reason=ConflictReason.PROVIDER_RECOVERY_ENVELOPE_UNAUTHENTICATED,
+                    ) from error
+                if await self._storage_binding.wait_for_original(
+                    owned,
+                    recovery_envelope=original_envelopes["initJob"],
+                    effect_guard=context.assert_effect_authority,
+                    replacement_metadata=current,
+                    replacement_envelope=recovery_envelopes["initJob"],
+                ):
+                    return DriverPending(context.checkpoint, 30)
+        if (
+            owned == current
+            and self._storage_binding is not None
+            and self._config.migration_mode == "governance-v3-to-v4"
+            and context.wire_protocol == WIRE_PROTOCOL_V2
+            and context.checkpoint.startswith(CHECKPOINT_VERSION + ":")
+            and request.get("provisionMode") == "serve"
+        ):
+            MigrationCheckpoint.decode(context.checkpoint)
+            if not await self._storage_binding.cleanup_late(
+                owned,
+                pvc_uid=await self._cell.authenticated_volume_uid(owned),
+                recovery_envelope=recovery_envelopes["initJob"],
+                effect_guard=context.assert_effect_authority,
+            ):
+                return DriverPending(context.checkpoint, 30)
         snapshot = await self._refresh(current)
         migration_job = snapshot.governance_migration_job
         if migration_job != "absent":
@@ -1285,6 +1350,7 @@ class LiveLifecyclePlane:
         values: dict[str, Any],
         *,
         effect_guard: Callable[[], Awaitable[None]] | None = None,
+        storage_shell: bool = False,
     ) -> None:
         await self._require_capacity_reservation(metadata, request)
         owned = self._owner(metadata)
@@ -1312,11 +1378,17 @@ class LiveLifecyclePlane:
         )
         desired = dict(values)
         desired["authorizationSessionRevision"] = revision
+        if storage_shell and (effect_guard is None or desired.get("workloadMode") != "restore"):
+            raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
         await self._helm.ensure_release(
             owned,
             desired,
             **(
-                {"rollback_on_failure": False, "effect_guard": effect_guard}
+                {
+                    "rollback_on_failure": False,
+                    "effect_guard": effect_guard,
+                    **({"wait_for_ready": False} if storage_shell else {}),
+                }
                 if effect_guard is not None
                 else {}
             ),
@@ -1957,6 +2029,7 @@ class LiveLifecyclePlane:
                         original,
                         values | {"workloadMode": "restore"},
                         effect_guard=unstarted,
+                        storage_shell=True,
                     )
                     return DriverPending(
                         "release-applied",
@@ -1966,23 +2039,73 @@ class LiveLifecyclePlane:
                             DriverResource(ResourceKind.PVC, metadata.resource_name + "-data"),
                         ),
                     )
-                if not await self.volume_claim_bound(metadata):
-                    return DriverPending("csi-binding", 2)
-                return DriverPending("volume-registration-required", 1)
-            pvc_uid = await self._cell.authenticated_volume_uid(owner)
+                if context.checkpoint == "volume-registration-required":
+                    return DriverPending("volume-registration-required", 1)
+                pvc_uid, _phase = await self._cell.authenticated_volume_state(owner)
+                binding = migration_binding(
+                    context, pvc_uid=pvc_uid, runtime_image=self._config.image
+                )
+                return DriverPending("gpi1:binding:" + binding, 1)
+            if context.checkpoint.startswith("gpi1:binding:"):
+                pvc_uid, _volume_phase = await self._cell.authenticated_volume_state(owner)
+            else:
+                pvc_uid = await self._cell.authenticated_volume_uid(owner)
             binding = migration_binding(context, pvc_uid=pvc_uid, runtime_image=self._config.image)
             phase = None
             if context.checkpoint.startswith("gpi1:"):
                 parts = context.checkpoint.split(":")
                 if (
                     len(parts) != 3
-                    or parts[1] not in {"initializing", "complete", "drained"}
+                    or parts[1]
+                    not in {
+                        "binding",
+                        "registering",
+                        "registered",
+                        "initializing",
+                        "complete",
+                        "drained",
+                    }
                     or parts[2] != binding
                 ):
                     raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
                 phase = parts[1]
             elif context.checkpoint != "volume-owned":
                 raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+
+            if phase == "binding":
+                if self._storage_binding is None:
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_PROVISION_UNAVAILABLE")
+
+                async def binding_authority() -> None:
+                    await unstarted()
+                    current_uid, _ = await self._cell.authenticated_volume_state(owner)
+                    if current_uid != pvc_uid:
+                        raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+                    await context.assert_effect_authority()
+
+                ready = await self._storage_binding.reconcile(
+                    owner,
+                    pvc_uid=pvc_uid,
+                    recovery_envelope=self._recovery_envelopes[key]["initJob"],
+                    effect_guard=binding_authority,
+                )
+                return DriverPending(
+                    "gpi1:registering:" + binding if ready else context.checkpoint,
+                    1 if ready else 2,
+                )
+            if phase == "registering":
+                return DriverPending(context.checkpoint, 30)
+
+            if phase in {"registered", "initializing", "complete", "drained"}:
+                if self._storage_binding is None:
+                    raise DriverTerminal("PROVISIONER_GOVERNANCE_PROVISION_UNAVAILABLE")
+                if not await self._storage_binding.cleanup_late(
+                    owner,
+                    pvc_uid=pvc_uid,
+                    recovery_envelope=self._recovery_envelopes[key]["initJob"],
+                    effect_guard=context.assert_effect_authority,
+                ):
+                    return DriverPending(context.checkpoint, 30)
 
             async def bound() -> None:
                 await self._governance_authority(
@@ -2013,7 +2136,7 @@ class LiveLifecyclePlane:
             ):
                 return DriverPending(context.checkpoint, 2)
             await closed()
-            if phase is None:
+            if phase is None or phase == "registered":
                 return DriverPending("gpi1:initializing:" + binding, 1)
             if self._storage_init is None:
                 raise DriverTerminal("PROVISIONER_GOVERNANCE_PROVISION_UNAVAILABLE")

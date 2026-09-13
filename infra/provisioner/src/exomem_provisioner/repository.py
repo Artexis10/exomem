@@ -49,7 +49,9 @@ from .wire_protocol import (
 )
 
 GOVERNANCE_PROVISION_CHECKPOINT_VERSION = "gpi1"
-GOVERNANCE_PROVISION_CHECKPOINT_PHASES = frozenset({"initializing", "complete", "drained"})
+GOVERNANCE_PROVISION_CHECKPOINT_PHASES = frozenset(
+    {"binding", "registering", "registered", "initializing", "complete", "drained"}
+)
 INITIAL_RETRY_AFTER_SECONDS = 2
 _GOVERNANCE_RECOVERY_MARKER = "_governance_recovery_v1"
 _GOVERNANCE_RECOVERY_DOMAIN = b"exomem.hosted-governance-recovery-snapshot.v1\0"
@@ -342,6 +344,8 @@ def _claim_condition(
     *,
     include_checkpoints: frozenset[str] | None = None,
     exclude_checkpoints: frozenset[str] = frozenset(),
+    include_checkpoint_prefixes: frozenset[str] = frozenset(),
+    exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
     allowed_actions: frozenset[OperationAction] | None = None,
     excluded_actions: frozenset[OperationAction] = frozenset(),
 ):
@@ -361,9 +365,14 @@ def _claim_condition(
         .scalar_subquery()
     )
     if include_checkpoints is not None:
-        claimable &= Operation.checkpoint.in_(include_checkpoints)
+        claimable &= or_(
+            Operation.checkpoint.in_(include_checkpoints),
+            *(Operation.checkpoint.startswith(prefix) for prefix in include_checkpoint_prefixes),
+        )
     if exclude_checkpoints:
         claimable &= Operation.checkpoint.not_in(exclude_checkpoints)
+    for prefix in exclude_checkpoint_prefixes:
+        claimable &= ~Operation.checkpoint.startswith(prefix)
     cell_available = or_(
         Operation.cell_id.is_(None),
         ~select(CellOperationLock.cell_id)
@@ -387,6 +396,8 @@ def _claim_candidate_statement(
     *,
     include_checkpoints: frozenset[str] | None = None,
     exclude_checkpoints: frozenset[str] = frozenset(),
+    include_checkpoint_prefixes: frozenset[str] = frozenset(),
+    exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
     allowed_actions: frozenset[OperationAction] | None = None,
     excluded_actions: frozenset[OperationAction] = frozenset(),
 ):
@@ -397,6 +408,8 @@ def _claim_candidate_statement(
                 claimed_at,
                 include_checkpoints=include_checkpoints,
                 exclude_checkpoints=exclude_checkpoints,
+                include_checkpoint_prefixes=include_checkpoint_prefixes,
+                exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                 allowed_actions=allowed_actions,
                 excluded_actions=excluded_actions,
             )
@@ -412,6 +425,8 @@ def _claim_statement(
     *,
     include_checkpoints: frozenset[str] | None = None,
     exclude_checkpoints: frozenset[str] = frozenset(),
+    include_checkpoint_prefixes: frozenset[str] = frozenset(),
+    exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
     allowed_actions: frozenset[OperationAction] | None = None,
     excluded_actions: frozenset[OperationAction] = frozenset(),
 ):
@@ -423,6 +438,8 @@ def _claim_statement(
                 claimed_at,
                 include_checkpoints=include_checkpoints,
                 exclude_checkpoints=exclude_checkpoints,
+                include_checkpoint_prefixes=include_checkpoint_prefixes,
+                exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                 allowed_actions=allowed_actions,
                 excluded_actions=excluded_actions,
             ),
@@ -1108,6 +1125,8 @@ class OperationRepository:
         now: datetime | None = None,
         include_checkpoints: frozenset[str] | None = None,
         exclude_checkpoints: frozenset[str] = frozenset(),
+        include_checkpoint_prefixes: frozenset[str] = frozenset(),
+        exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
         allowed_actions: frozenset[OperationAction] | None = None,
         excluded_actions: frozenset[OperationAction] = frozenset(),
     ) -> OperationSnapshot | None:
@@ -1126,6 +1145,8 @@ class OperationRepository:
                             claimed_at,
                             include_checkpoints=include_checkpoints,
                             exclude_checkpoints=exclude_checkpoints,
+                            include_checkpoint_prefixes=include_checkpoint_prefixes,
+                            exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                             allowed_actions=allowed_actions,
                             excluded_actions=excluded_actions,
                         )
@@ -1178,6 +1199,8 @@ class OperationRepository:
                         claimed_at,
                         include_checkpoints=include_checkpoints,
                         exclude_checkpoints=exclude_checkpoints,
+                        include_checkpoint_prefixes=include_checkpoint_prefixes,
+                        exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                         allowed_actions=allowed_actions,
                         excluded_actions=excluded_actions,
                     )
@@ -1193,6 +1216,8 @@ class OperationRepository:
                     claimed_at,
                     include_checkpoints=include_checkpoints,
                     exclude_checkpoints=exclude_checkpoints,
+                    include_checkpoint_prefixes=include_checkpoint_prefixes,
+                    exclude_checkpoint_prefixes=exclude_checkpoint_prefixes,
                     allowed_actions=allowed_actions,
                     excluded_actions=excluded_actions,
                 )
@@ -1236,6 +1261,8 @@ class OperationRepository:
         now: datetime | None = None,
         include_checkpoints: frozenset[str] | None = None,
         exclude_checkpoints: frozenset[str] = frozenset(),
+        include_checkpoint_prefixes: frozenset[str] = frozenset(),
+        exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
         allowed_actions: frozenset[OperationAction] | None = None,
         excluded_actions: frozenset[OperationAction] = frozenset(),
     ) -> OperationSnapshot | None:
@@ -1254,9 +1281,14 @@ class OperationRepository:
                 Operation.claim_expires_at > checked_at,
             )
             if include_checkpoints is not None:
-                claim_scope &= Operation.checkpoint.in_(include_checkpoints)
+                claim_scope &= or_(
+                    Operation.checkpoint.in_(include_checkpoints),
+                    *(Operation.checkpoint.startswith(prefix) for prefix in include_checkpoint_prefixes),
+                )
             if exclude_checkpoints:
                 claim_scope &= Operation.checkpoint.not_in(exclude_checkpoints)
+            for prefix in exclude_checkpoint_prefixes:
+                claim_scope &= ~Operation.checkpoint.startswith(prefix)
             if allowed_actions is not None:
                 claim_scope &= Operation.action.in_(allowed_actions)
             if excluded_actions:

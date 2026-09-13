@@ -33,12 +33,18 @@ class InitialEffects:
     async def require_active(self, **kwargs):
         self.h.effects.append("capacity")
 
-    async def ensure_release(self, metadata, values, *, rollback_on_failure, effect_guard):
+    async def ensure_release(
+        self, metadata, values, *, rollback_on_failure, effect_guard, wait_for_ready=True
+    ):
         await effect_guard()
         assert rollback_on_failure is False
         assert values["workloadMode"] in {"initialize", "restore"}
         assert values["migrationMode"] == "none"
         assert values["routes"]["enabled"] is False
+        if values["workloadMode"] == "restore":
+            assert wait_for_ready is False
+        else:
+            assert wait_for_ready is True
         self.h.helm_calls.append(values)
         self.h.effects.append(
             "initialize" if values["workloadMode"] == "initialize" else "storage-shell"
@@ -72,6 +78,12 @@ class ProvisionHarness(RollforwardHarness):
         self.init_complete = False
         self.cleanup_lost = False
         self.plane._storage_init = SimpleNamespace(completed=self.completed, cleanup=self.cleanup)
+        self.binding_ready = False
+        self.binding_calls = []
+        self.late_binding_ready = True
+        self.plane._storage_binding = SimpleNamespace(
+            reconcile=self.reconcile_binding, cleanup_late=self.cleanup_late_binding
+        )
         initial = InitialEffects(self)
         self.plane._capacity = initial
         self.plane._operation_ids[self.plane._key(self.current)] = self.context.operation_id
@@ -90,6 +102,16 @@ class ProvisionHarness(RollforwardHarness):
         await effect_guard()
         self.effects.append("init-observed")
         return self.init_complete
+
+    async def reconcile_binding(self, *args, effect_guard, **kwargs):
+        await effect_guard()
+        self.binding_calls.append(kwargs)
+        return self.binding_ready
+
+    async def cleanup_late_binding(self, *args, effect_guard, **kwargs):
+        await effect_guard()
+        self.binding_calls.append(("late", kwargs))
+        return self.late_binding_ready
 
     async def cleanup(self, *args, effect_guard, **kwargs):
         await effect_guard()
@@ -130,6 +152,58 @@ async def test_fresh_init_is_observed_without_starting_runtime_or_minting_custod
     assert result.checkpoint == h.bound_checkpoint("initializing")
     assert not h.patches and not h.helm_calls
     assert "start" not in h.effects
+
+
+@pytest.mark.asyncio
+async def test_pending_fixed_pvc_commits_binding_before_any_consumer_effect():
+    h = ProvisionHarness()
+    h.context = replace(h.context, checkpoint="release-applied")
+
+    async def pending(_owner):
+        return h.pvc_uid, "Pending"
+
+    h.plane._cell.authenticated_volume_state = pending
+
+    result = await h.step()
+    assert result.checkpoint == h.bound_checkpoint("binding")
+    assert not h.binding_calls and not h.helm_calls
+
+
+@pytest.mark.asyncio
+async def test_binding_stays_pending_until_binder_cleanup_and_then_hands_to_volume_lane():
+    h = ProvisionHarness()
+    h.context = replace(h.context, checkpoint=h.bound_checkpoint("binding"))
+
+    async def pending(_owner):
+        return h.pvc_uid, "Pending"
+
+    h.plane._cell.authenticated_volume_state = pending
+
+    assert (await h.step()).checkpoint == h.context.checkpoint
+    assert len(h.binding_calls) == 1
+    h.binding_ready = True
+    assert (await h.step()).checkpoint == h.bound_checkpoint("registering")
+    assert not h.helm_calls
+
+
+@pytest.mark.asyncio
+async def test_registered_phase_keeps_binding_until_initializer_phase_commit():
+    h = ProvisionHarness()
+    h.context = replace(h.context, checkpoint=h.bound_checkpoint("registered"))
+
+    assert (await h.step()).checkpoint == h.bound_checkpoint("initializing")
+
+
+@pytest.mark.asyncio
+async def test_registered_phase_waits_for_late_binder_before_initializer():
+    h = ProvisionHarness()
+    h.context = replace(h.context, checkpoint=h.bound_checkpoint("registered"))
+    h.late_binding_ready = False
+
+    assert (await h.step()).checkpoint == h.context.checkpoint
+    assert not h.helm_calls
+    assert h.binding_calls and h.binding_calls[-1][0] == "late"
+    assert not h.helm_calls
 
 
 @pytest.mark.asyncio

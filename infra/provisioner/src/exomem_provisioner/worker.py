@@ -132,6 +132,8 @@ class ProvisionerWorker:
         worker_id: str,
         include_checkpoints: frozenset[str] | None = None,
         exclude_checkpoints: frozenset[str] = frozenset(),
+        include_checkpoint_prefixes: frozenset[str] = frozenset(),
+        exclude_checkpoint_prefixes: frozenset[str] = frozenset(),
         allowed_actions: frozenset[OperationAction] | None = None,
         excluded_actions: frozenset[OperationAction] = frozenset(),
         resume_claim: bool = False,
@@ -150,6 +152,8 @@ class ProvisionerWorker:
         self._worker_id = worker_id
         self._include_checkpoints = include_checkpoints
         self._exclude_checkpoints = exclude_checkpoints
+        self._include_checkpoint_prefixes = include_checkpoint_prefixes
+        self._exclude_checkpoint_prefixes = exclude_checkpoint_prefixes
         self._allowed_actions = allowed_actions
         self._excluded_actions = excluded_actions
         self._resume_claim = resume_claim
@@ -166,6 +170,8 @@ class ProvisionerWorker:
             now=now,
             include_checkpoints=self._include_checkpoints,
             exclude_checkpoints=self._exclude_checkpoints,
+            include_checkpoint_prefixes=self._include_checkpoint_prefixes,
+            exclude_checkpoint_prefixes=self._exclude_checkpoint_prefixes,
             allowed_actions=self._allowed_actions,
             excluded_actions=self._excluded_actions,
         )

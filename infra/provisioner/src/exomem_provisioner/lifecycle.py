@@ -27,7 +27,7 @@ from .driver import (
     EffectContext,
     LostAcknowledgement,
 )
-from .governance_migration_checkpoint import CHECKPOINT_VERSION
+from .governance_migration_checkpoint import CHECKPOINT_VERSION, migration_binding
 from .models import ResourceKind
 from .provider_identity import (
     ProviderIdentityConflict,
@@ -621,6 +621,7 @@ class VolumeLifecycleWorker:
         metadata: OpaqueProviderMetadata,
         *,
         pvc_recovery_envelope: str = "",
+        effect_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> RecordedVolume:
         recorded = await self._kubernetes.discover_bound_volume(metadata)
         if recorded is None:
@@ -656,7 +657,11 @@ class VolumeLifecycleWorker:
                 operation_id=metadata.operation_id,
                 fence_generation=metadata.fence_generation,
             )
+            if effect_guard is not None:
+                await effect_guard()
             await self._kubernetes.label_bound_volume(recorded, pv_envelope)
+        if effect_guard is not None:
+            await effect_guard()
         await self._hcloud.label_volume(recorded.volume_handle, metadata, hcloud_envelope or None)
         if not await self._hcloud.verify_volume(
             recorded.volume_handle, metadata, recorded.location
@@ -743,9 +748,13 @@ class VolumeRegistrationDriver:
         worker: VolumeLifecycleWorker,
         *,
         identity_verifier: ProviderRecoveryIdentityVerifier,
+        binding_observer: Any | None = None,
+        runtime_image: str | None = None,
     ) -> None:
         self._worker = worker
         self._identity_verifier = identity_verifier
+        self._binding_observer = binding_observer
+        self._runtime_image = runtime_image
 
     async def observed_fence(self, tenant_id: str) -> int:
         return await self._worker.observed_fence(tenant_id)
@@ -759,7 +768,10 @@ class VolumeRegistrationDriver:
         if (
             action != "provision"
             or context.cell_id is None
-            or context.checkpoint != "volume-registration-required"
+            or not (
+                context.checkpoint == "volume-registration-required"
+                or context.checkpoint.startswith("gpi1:registering:")
+            )
         ):
             raise DriverTerminal("PROVISIONER_VOLUME_WORK_NOT_APPLICABLE")
         metadata = _metadata_from_context(context)
@@ -774,9 +786,27 @@ class VolumeRegistrationDriver:
                 resource_name=metadata.resource_name,
                 operation_resource_name=provider_operation_resource_name(metadata.operation_id),
             )
+            prefixed = context.checkpoint.startswith("gpi1:registering:")
+            if prefixed:
+                if self._binding_observer is None or self._runtime_image is None:
+                    raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+
+                async def bound_authority() -> None:
+                    await context.assert_effect_authority()
+                    uid = await self._binding_observer.authenticated_volume_uid(metadata)
+                    if context.checkpoint != "gpi1:registering:" + migration_binding(
+                        context, pvc_uid=uid, runtime_image=self._runtime_image
+                    ):
+                        raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+                    await context.assert_effect_authority()
+
+                await bound_authority()
+            else:
+                bound_authority = None
             recorded = await self._worker.register_bound_volume(
                 metadata,
                 pvc_recovery_envelope=envelopes["vaultPvc"],
+                **({"effect_guard": bound_authority} if bound_authority is not None else {}),
             )
             reference = recorded.recoverable_reference()
         except (MetadataConflict, ProviderIdentityConflict) as error:
@@ -784,7 +814,8 @@ class VolumeRegistrationDriver:
                 "PROVISIONER_PROVIDER_METADATA_CONFLICT", reason=_conflict_reason(error)
             ) from error
         return DriverPending(
-            "volume-owned",
+            "gpi1:registered:" + context.checkpoint.split(":", 2)[2]
+            if prefixed else "volume-owned",
             1,
             (DriverResource(ResourceKind.VOLUME, reference),),
         )
