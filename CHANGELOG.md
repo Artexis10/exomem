@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.82.0](https://github.com/Artexis10/exomem/compare/v0.81.0...v0.82.0) (2026-09-13)
+
+
+### Features
+
+* **capture:** carry an episode-completeness sweep on the first write after a quiet interval ([#1240](https://github.com/Artexis10/exomem/issues/1240)) ([8758773](https://github.com/Artexis10/exomem/commit/87587735e5a4930d468dd9ef7cf580087303765e))
+* **memory:** save engagement preferences per client context ([#1241](https://github.com/Artexis10/exomem/issues/1241)) ([f083ad6](https://github.com/Artexis10/exomem/commit/f083ad6f677a41dc26d9cd24ba20fd8cf8df1bea))
+
+
+### Bug Fixes
+
+* **edit:** let validate_only reach the leaf through the real MCP adapter ([#1245](https://github.com/Artexis10/exomem/issues/1245)) ([63c6b1a](https://github.com/Artexis10/exomem/commit/63c6b1a0893b45a9436075d8cc62b96a0948ded0))
+* **hosted:** recover a first provision interrupted before registration ([#1238](https://github.com/Artexis10/exomem/issues/1238)) ([7c0f2af](https://github.com/Artexis10/exomem/commit/7c0f2af659fdf7de539b84203f8f5122c5676d5e))
+* **hosted:** select verified storage-binding provisioner ([#1235](https://github.com/Artexis10/exomem/issues/1235)) ([318c835](https://github.com/Artexis10/exomem/commit/318c835cb89a11ef70156af8b682caa162434693))
+* **observe:** name the safe move when a legacy page refuses an observation ([#1239](https://github.com/Artexis10/exomem/issues/1239)) ([ac00562](https://github.com/Artexis10/exomem/commit/ac00562f7d005ce2561c6dc3cd50ec1eb505ea60))
+
 ## [0.81.0](https://github.com/Artexis10/exomem/compare/v0.80.1...v0.81.0) (2026-09-13)
 
 
