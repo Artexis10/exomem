@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Utility action smoke — 13 September 2026
 
 The first live utility smoke cost **$0.01278401** and completed six episodes / eighteen fresh sessions in **342.97 seconds**. It verified real actor execution, isolated sessions, released protocol identity, state-based grading and exact usage accounting. It also exposed ambiguous fixture wording. The agent performed no memory capture, maintenance or retrieval, so this run does **not** establish Exomem benefit, neutrality, harm, retrieval latency or coding/conversational utility.
