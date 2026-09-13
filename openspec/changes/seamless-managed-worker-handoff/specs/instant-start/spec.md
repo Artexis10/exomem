@@ -2,11 +2,15 @@
 
 ### Requirement: Governed writes are never fenced into a whole-vault rebuild by unattributed filesystem events
 
-The projection-freshness fence raised by filesystem events the process cannot attribute to itself SHALL apply only to reads that require a current projection. A governed write SHALL always compute its predecessor from the checkpoint lineage. An unreadable predecessor SHALL be reported as a distinct outcome and routed to bounded incremental repair of the affected paths, never collapsed into the lineage-gap outcome that schedules a whole-vault rebuild. External marks SHALL be recorded per path and drained by the incremental repair.
+The projection-freshness fence raised by filesystem events the process cannot attribute to itself SHALL apply only to reads that require a current projection. A governed write SHALL always compute its predecessor from the checkpoint lineage. An unreadable predecessor SHALL be reported as a distinct outcome and routed to bounded incremental repair of the affected paths, never collapsed into the lineage-gap outcome that schedules a whole-vault rebuild. External marks SHALL be recorded per path and drained by the incremental repair. A process that proves a snapshot it did not publish SHALL adopt it as its delta origin, and SHALL do so even when a bounded set of paths is found unrepaired, by queueing exactly those paths for incremental repair.
 
 #### Scenario: Writes after a worker replacement stay incremental
 - **WHEN** a replacement worker starts with an empty self-attribution table and observes filesystem events from the previous worker and the migrator, and then serves ten governed writes
 - **THEN** no write after the first schedules a whole-vault rebuild, at most one whole-vault pass runs for the fresh process's first write until standby adoption removes it, each write acknowledges within its bound, and the repair queue drains to zero
+
+#### Scenario: Adoption tolerates a bounded residue
+- **WHEN** a replacement process proves the previous snapshot and finds a bounded set of paths whose canonical bytes differ from the snapshot's recorded state
+- **THEN** it adopts the snapshot at its checkpoint, queues exactly those paths for incremental repair, reads that require a current projection keep refusing until that repair lands, and the process's first write is incremental
 
 #### Scenario: An unrelated external edit does not fence a write
 - **WHEN** an unattributed edit lands on one path while a governed write commits to another
