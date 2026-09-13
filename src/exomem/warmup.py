@@ -148,13 +148,28 @@ def warm_retrieval_catalog(vault_root: Path) -> bool:
     return True
 
 
-def _adopt_graph_snapshot(vault_root: Path) -> bool:
-    """Prove and adopt an inherited graph snapshot, if there is one to adopt."""
+def _adopt_graph_snapshot(vault_root: Path, durations: dict[str, float]) -> bool:
+    """Prove and adopt an inherited graph snapshot, if there is one to adopt.
+
+    Records `graph_snapshot_residue`: how many paths the adoption took on as
+    queued repair because the outgoing process left them deferred. Zero is a
+    clean handoff; a positive count is an adoption that succeeded *and* owes the
+    drain that many pages, which is what the operator needs to see rather than a
+    bare success.
+    """
     from . import epistemic_graph
 
     if not epistemic_graph.graph_enabled():
         return False
-    return epistemic_graph.EpistemicGraphIndex(vault_root).adopt_published_snapshot()
+    adoption = epistemic_graph.EpistemicGraphIndex(vault_root).adopt_published_snapshot()
+    durations["graph_snapshot_residue"] = float(len(adoption.residue))
+    log.info(
+        "graph snapshot adoption adopted=%s residue=%d reason=%s",
+        adoption.adopted,
+        len(adoption.residue),
+        adoption.reason,
+    )
+    return adoption.adopted
 
 
 def warm_caches(
@@ -215,7 +230,7 @@ def warm_caches(
     # this registry is already projecting -- makes that checkpoint the delta
     # origin instead (`seamless-managed-worker-handoff`). Soft-fails like every
     # other step: an unprovable snapshot simply leaves the old behaviour.
-    _step("graph_snapshot", lambda: _adopt_graph_snapshot(vault_root))
+    _step("graph_snapshot", lambda: _adopt_graph_snapshot(vault_root, durations))
     if preload_models and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         # One tiny search warms WHICHEVER backend serves vector search: the vec0
         # backend (sync check + first KNN faults in the vec tables; the numpy

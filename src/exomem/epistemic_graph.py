@@ -1978,25 +1978,88 @@ class EpistemicGraphIndex:
             return None
         return conn
 
-    def adopt_published_snapshot(self) -> bool:
+    def adopt_published_snapshot(self) -> SnapshotAdoption:
         """Prove an inherited sidecar and make its checkpoint live for this process.
 
         The entry point a standby calls before promotion, and the one a cold
-        process can call at start-up: it runs the ordinary public-reader proof
-        (schema, registry, policy, resolver topology, graph_sync lineage, and
-        the source-bytes proof for a snapshot this process did not publish), and
-        on success the snapshot's checkpoint becomes this registry's delta
-        origin. Returns whether the snapshot is now both readable and
-        incrementally advanceable here.
+        process calls at start-up. It runs the source-bytes proof over a
+        *maintenance* read -- not a public one -- because the state a real
+        handoff leaves behind is precisely the one a public read refuses: a
+        deferred write withdraws the availability marker, and the background
+        repair may not have republished it before the old worker stopped.
+        Requiring a current projection here made adoption fail in 23 ms on
+        exactly the vaults that needed it, and the promoted worker then paid the
+        whole-vault pass adoption exists to remove.
+
+        A bounded residue is adopted rather than refused. The proof reports the
+        paths whose canonical bytes differ from what the snapshot recorded --
+        the deferred and unrepaired ones -- and while that set fits inside one
+        drain pass this: adopts the checkpoint as the delta origin, enqueues
+        exactly those paths as graph repair demand, and leaves the availability
+        marker *withdrawn*. The marker is one value for the whole projection, so
+        republishing it would claim currency for the residue too; keeping it
+        withdrawn is what makes "reads refuse until the repair lands" true, and
+        the incremental repair republishes it when the residue drains. The write
+        path does not need it (`require_current_projection=False`), which is
+        what makes this worth doing at all.
+
+        An unbounded residue, a membership or topology difference, or a
+        structurally unusable sidecar still fails, and the caller pays the
+        whole-vault pass as before.
 
         Needs the recall registry seeded for the vault scope, which the warm-up
         does before any of this; it does not need a running watcher, so a
         standby can prove and adopt while the old worker still serves.
         """
-        conn = self._open_read_snapshot()
+        from . import graph_drain
+
+        if not graph_enabled():
+            return SnapshotAdoption(False, reason="graph_disabled")
+        # Sampled before the proof: see `freshness.adopt_recall_origin`.
+        sampled_generation = freshness.recall_generation(self.vault_root, "vault")
+        conn = self._open_read_snapshot(require_current_projection=False)
         if conn is None:
-            return False
-        conn.close()
+            return SnapshotAdoption(False, reason=self._declined_snapshot_state())
+        residue: set[str] = set()
+        try:
+            stored_checkpoint = self._stored_recall_checkpoint(conn)
+            row = conn.execute(
+                "SELECT value FROM graph_meta WHERE key = ?", (_RESOLVER_TOPOLOGY_KEY,)
+            ).fetchone()
+            proven = self._snapshot_sources_match_disk(
+                conn,
+                resolver_fingerprint=str(row[0]) if row is not None else None,
+                residue_out=residue,
+            )
+        finally:
+            conn.close()
+        if not proven:
+            return SnapshotAdoption(False, reason="snapshot_proof_declined")
+        if stored_checkpoint is None:
+            return SnapshotAdoption(False, reason="stored_checkpoint_absent")
+        if len(residue) > graph_drain.DRAIN_LIMIT:
+            # One drain pass is the bound: a residue larger than that is not a
+            # handoff leaving a few deferred writes behind, it is a different
+            # corpus, and the whole-vault pass is the honest repair.
+            return SnapshotAdoption(
+                False, reason="residue_exceeds_drain_limit", residue=tuple(sorted(residue))
+            )
+        if not freshness.adopt_recall_origin(
+            self.vault_root,
+            "vault",
+            stored_checkpoint,
+            sampled_generation=sampled_generation,
+        ):
+            return SnapshotAdoption(False, reason="registry_refused_origin")
+        if residue:
+            paths = [self.vault_root / rel for rel in sorted(residue)]
+            if not _record_graph_repair_demand(self.vault_root, paths):
+                return SnapshotAdoption(
+                    False, reason="residue_enqueue_failed", residue=tuple(sorted(residue))
+                )
+            # Reads must keep refusing until that repair lands.
+            self.withdraw_availability()
+            graph_drain.note_graph_debt()
         # Adoption is not finished until the *bounded repair* can run, and that
         # also needs the recall resolver at this exact checkpoint.
         # `recall_resolver_snapshot_at_checkpoint` refuses a cache miss on
@@ -2007,15 +2070,24 @@ class EpistemicGraphIndex:
         # built now *is* the pre-delta topology. One walk at start-up, in place
         # of a whole-vault rebuild on the first write.
         find_module.recall_resolver_snapshot(self.vault_root)
-        return True
+        return SnapshotAdoption(True, residue=tuple(sorted(residue)), reason="adopted")
 
     def _snapshot_sources_match_disk(
         self,
         conn: sqlite3.Connection,
         *,
         resolver_fingerprint: str | None,
+        residue_out: set[str] | None = None,
     ) -> bool:
         """Prove a cold/foreign sidecar against human-owned Markdown bytes.
+
+        `residue_out` turns the source-hash comparison from all-or-nothing into
+        "everything matches except these paths, and here they are". A caller
+        that can repair a bounded set -- adoption, which enqueues them -- passes
+        a set; a public reader passes nothing and keeps today's strict answer.
+        Membership differences and a moved resolver topology still decline
+        outright either way: those are a different corpus, not a repairable
+        residue.
 
         The graph's file rows atomically carry the source hash from which all
         nodes and outgoing edges were derived.  Resolver-only paths outside the
@@ -2069,7 +2141,16 @@ class EpistemicGraphIndex:
                 ).fetchall()
             }
             if stored_hashes != current_hashes:
-                return False
+                if residue_out is None or set(stored_hashes) != set(current_hashes):
+                    # A membership difference is not a residue: a page the
+                    # snapshot never indexed, or indexed and no longer admits,
+                    # is a different corpus, not a bounded repair.
+                    return False
+                residue_out.update(
+                    rel
+                    for rel, source_hash in current_hashes.items()
+                    if stored_hashes[rel] != source_hash
+                )
             resolver = vault_module.WikilinkResolver.from_entries(
                 self.vault_root,
                 resolver_entries,
@@ -6893,6 +6974,26 @@ def cache_token(vault_root: Path) -> tuple | None:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class SnapshotAdoption:
+    """What proving an inherited graph snapshot established, and what it owes.
+
+    `residue` names the paths whose canonical bytes differ from what the
+    snapshot recorded -- the deferred writes a mid-traffic handoff leaves behind.
+    A successful adoption with a non-empty residue has enqueued exactly those
+    paths for incremental repair and has left the availability marker withdrawn,
+    so reads that require a current projection keep refusing until the repair
+    lands.
+    """
+
+    adopted: bool
+    residue: tuple[str, ...] = ()
+    reason: str = ""
+
+    def __bool__(self) -> bool:
+        return self.adopted
+
+
 _REBUILD_LOCK = threading.Lock()
 _REBUILDING: set[str] = set()
 #: `seamless-managed-worker-handoff` D5. Demand that arrives while a whole-vault
@@ -7265,6 +7366,32 @@ def schedule_background_rebuild(
 
     threading.Thread(target=_run, name="exomem-graph-rebuild", daemon=True).start()
     return True
+
+
+def _record_graph_repair_demand(vault_root: Path, paths: Iterable[Path]) -> bool:
+    """Put the affected paths on the durable graph queue, proving full coverage.
+
+    The same claim `_refresh_paths_locked.defer` makes: only an enqueue that
+    admitted *every* affected path may be reported as owning the repair.
+    Incomplete coverage means a path would be left stale with nothing scheduled
+    to converge it, so the caller falls back to the whole-vault repair rather
+    than reporting a queue that does not hold the work.
+    """
+    scope = sorted(
+        {
+            rel
+            for candidate in paths
+            if (rel := _vault_rel(vault_root, Path(candidate))) is not None
+        }
+    )
+    if not scope:
+        return False
+    try:
+        receipts = deferred_index.add_graph_receipts(vault_root, scope)
+    except Exception:  # noqa: BLE001 - a queue failure must not lose the repair
+        log.warning("graph repair demand enqueue failed", exc_info=True)
+        return False
+    return {receipt.rel_path for receipt in receipts} == set(scope)
 
 
 def upsert_after_write(
