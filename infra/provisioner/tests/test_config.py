@@ -340,6 +340,8 @@ def test_volume_worker_requires_public_capacity_verification_settings() -> None:
     values = {
         "hcloud_token": "h" * 32,
         "provider_recovery_signing_key": "a" * 43,
+        "deployment_lock_path": "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json",
+        "runtime_selection": "active",
         "volume_encryption_secret_name": "volume-encryption",
         "volume_encryption_secret_namespace": "exomem-platform",
         "location": "fsn1",
@@ -360,6 +362,7 @@ def test_volume_worker_requires_public_capacity_verification_settings() -> None:
         "capacity_receipt_namespace",
         "capacity_receipt_config_map",
         "hcloud_server_id",
+        "deployment_lock_path",
     ):
         invalid = dict(values)
         invalid.pop(field)
@@ -367,3 +370,5 @@ def test_volume_worker_requires_public_capacity_verification_settings() -> None:
             VolumeWorkerSettings(**invalid)
     with pytest.raises(ValidationError):
         VolumeWorkerSettings(**{**values, "capacity_contract_path": "relative.json"})
+    with pytest.raises(ValidationError):
+        VolumeWorkerSettings(**{**values, "deployment_lock_path": "relative.json"})

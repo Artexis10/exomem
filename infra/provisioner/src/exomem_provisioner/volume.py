@@ -7,7 +7,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from .adapters import HCloudVolumeAdapter, KubernetesVolumeAdapter
+from .adapters import HCloudVolumeAdapter, KubernetesCellAdapter, KubernetesVolumeAdapter
 from .config import ProvisionerSettings, VolumeWorkerSettings
 from .crypto import AesGcmEnvelopeCodec
 from .database import ProvisionerDatabase
@@ -59,9 +59,17 @@ def build_volume_provider_components(
         hcloud,
         identity_codec=identity_codec,
     )
+    image = settings.deployment_lock.selected_runtime(settings.runtime_selection).image
     return VolumeProviderComponents(
         worker=volume_worker,
-        driver=VolumeRegistrationDriver(volume_worker, identity_verifier=verifier),
+        driver=VolumeRegistrationDriver(
+            volume_worker,
+            identity_verifier=verifier,
+            binding_observer=KubernetesCellAdapter(
+                core_v1=core_v1, apps_v1=None, identity_verifier=verifier
+            ),
+            runtime_image=image,
+        ),
     )
 
 
@@ -91,6 +99,7 @@ def build_volume_registration_worker(
         driver,
         worker_id=worker_id,
         include_checkpoints=frozenset({"volume-registration-required"}),
+        include_checkpoint_prefixes=frozenset({"gpi1:registering:"}),
         capacity_admission=capacity_admission,
     )
 

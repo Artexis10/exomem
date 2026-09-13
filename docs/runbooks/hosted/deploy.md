@@ -13,6 +13,53 @@ Runtime releases use the governed expand/canary/contract workflow in
 [`runtime-upgrades.md`](runtime-upgrades.md). The deployment sections below are its
 effectors, not a release checklist; do not edit their release values by hand.
 
+## First rollout of fresh-storage binding
+
+The first release that emits `gpi1:binding`, `gpi1:registering` and
+`gpi1:registered` needs an ordered platform rollout. These checkpoints retain
+the governance denial barrier while a binding-only Job makes the existing
+`WaitForFirstConsumer` PVC schedulable. The Job does not mount or initialize
+the vault; volume registration and initialization remain separate steps.
+
+Use the verified release's chart and saved values throughout. Before the
+ordinary whole-platform Helm upgrade below, perform and verify these stages
+under the existing governed deployment authority:
+
+1. Apply the reviewed tenant and provisioner admission policies and bindings.
+   Confirm the policies have observed their current generation without type
+   checking errors and that the bindings enforce denial. Exercise the exact
+   binding-only shape and its rejection cases in the disposable release drill
+   before this production step.
+2. Ensure the reviewed immutable deployment-lock ConfigMap exists, then update
+   `deployment/exomem-volume-worker` from that same rendered release. Its
+   read-only lock mount and runtime selection must match the routine worker's
+   intended release so it can verify the PVC/image checkpoint binding.
+   Wait for rollout completion and verify its observed image digest and ready
+   replicas. The new volume worker must understand `gpi1:registering` before
+   any routine worker emits it; the old volume worker selects only its exact
+   legacy checkpoint.
+3. Update `deployment/exomem-provisioner-worker` last. Preserve its single
+   replica and `Recreate` strategy, wait for the old Pod to disappear, and
+   verify the new Pod's image digest and readiness. Then complete the ordinary
+   governed Helm upgrade and verify the resulting release.
+
+Do not assume one unordered Helm apply proves this sequence. If a stage fails,
+stop before the next stage and retain the observed release, policy and workload
+identities for recovery. Once new prefixed checkpoints exist, restoring an old
+worker is not a supported way to resume them: retain the denial barrier and
+recover with a compatible verified worker. Do not clear checkpoints, reset an
+invite or bind a volume manually to bypass a failed rollout.
+
+Only binding-only Jobs have the fixed 90-second active deadline and 60-second
+finished-job TTL. A delayed Job can appear after provision finalization; a
+later operation waits on an authenticated stale binder without consuming its
+failure budget. Healthy Job/TTL controllers eventually remove the Job and its
+dependent Pods under Kubernetes' [finished-Job cleanup contract](https://v1-35.docs.kubernetes.io/docs/concepts/workloads/controllers/ttlafterfinished/).
+The TTL is not a hard deletion deadline, and controller or
+finalizer failure is not evidence of absence. Initializer and migration result
+retention is unchanged. A successful local dynamic-storage drill does not
+replace the production CSI and authenticated fresh-cell ingress checks.
+
 ## Offline machine-local state transition
 
 The first rollout containing the external state-root contract is not an

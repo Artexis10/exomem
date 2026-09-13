@@ -1006,6 +1006,10 @@ spec:
                 secretKeyRef: {name: exomem-provisioner-hcloud-token, key: token}
             - name: EXOMEM_PROVISIONER_LOCATION
               value: {{ .Values.provisioner.location | quote }}
+            - name: EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH
+              value: {{ printf "/etc/exomem/deployment-lock/%s" $lockFile | quote }}
+            - name: EXOMEM_PROVISIONER_RUNTIME_SELECTION
+              value: {{ $runtimeSelection | quote }}
             - name: EXOMEM_PROVISIONER_CAPACITY_CONTRACT_PATH
               value: /etc/exomem/capacity/private-alpha-capacity-v1.json
             - name: EXOMEM_PROVISIONER_CAPACITY_RECEIPT_NAMESPACE
@@ -1035,6 +1039,7 @@ spec:
             - {name: temporary, mountPath: /tmp}
             # subPath so the file is regular, not a ..data/ symlink; see provisioner.yaml.
             - {name: capacity-contract, mountPath: /etc/exomem/capacity/private-alpha-capacity-v1.json, subPath: private-alpha-capacity-v1.json, readOnly: true}
+            - {name: deployment-lock, mountPath: /etc/exomem/deployment-lock, readOnly: true}
       volumes:
         - name: temporary
           emptyDir: {sizeLimit: 64Mi}
@@ -1043,3 +1048,8 @@ spec:
             name: exomem-capacity-contract
             items:
               - {key: private-alpha-capacity-v1.json, path: private-alpha-capacity-v1.json}
+        - name: deployment-lock
+          configMap:
+            name: {{ $lockName }}
+            items:
+              - {key: {{ $lockFile }}, path: {{ $lockFile }} }

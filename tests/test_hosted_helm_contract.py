@@ -1317,6 +1317,18 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
         "exomem-capacity-receipt"
     )
     assert volume_env["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"] == "156895713"
+    assert volume_env["EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH"].startswith(
+        "/etc/exomem/deployment-lock/"
+    )
+    assert volume_env["EXOMEM_PROVISIONER_RUNTIME_SELECTION"] == "active"
+    assert any(
+        mount["name"] == "deployment-lock" and mount["readOnly"] is True
+        for mount in volume_pod["containers"][0]["volumeMounts"]
+    )
+    assert any(
+        volume["name"] == "deployment-lock"
+        for volume in volume_pod["volumes"]
+    )
 
     deletion_job = json.loads(
         _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"]["job-template.json"]
@@ -2108,6 +2120,9 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     variables = tenant_admission["spec"]["variables"]
     assert [variable["name"] for variable in variables] == [
         "storageInit",
+        "storageBinding",
+        "bindingSpec",
+        "bindingMeta",
         "vaultFingerprint",
         "governanceMigration",
         "lifecycleJob",
@@ -2121,12 +2136,13 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "migrationMeta",
     ]
     assert "exomem-storage-init" in variables[0]["expression"]
-    assert "exomem.io/vault-fingerprint" in variables[1]["expression"]
-    assert "storageInit" in variables[3]["expression"]
-    assert "exomem.io/tenant-cell" in variables[4]["expression"]
+    assert "exomem.io/vault-fingerprint" in variables[4]["expression"]
+    assert "storageInit" in variables[6]["expression"]
+    assert "exomem.io/tenant-cell" in variables[7]["expression"]
     assert all(
         "!variables.inScope" in validation["expression"]
         or "!variables.governanceMigration" in validation["expression"]
+        or "!variables.storageBinding" in validation["expression"]
         for validation in tenant_admission["spec"]["validations"]
     )
     admission_text = json.dumps(tenant_admission)

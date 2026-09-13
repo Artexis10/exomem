@@ -525,6 +525,15 @@ class KubernetesCellAdapter:
 
     async def authenticated_volume_uid(self, metadata: OpaqueProviderMetadata) -> str:
         """Return only a freshly authenticated fixed PVC UID for recovery guards."""
+        uid, phase = await self.authenticated_volume_state(metadata)
+        if phase != "Bound":
+            raise _governance_unavailable()
+        return uid
+
+    async def authenticated_volume_state(
+        self, metadata: OpaqueProviderMetadata
+    ) -> tuple[str, str]:
+        """Authenticate the fixed PVC before or after first-consumer binding."""
         namespace = metadata.resource_name
         name = namespace + "-data"
         try:
@@ -540,15 +549,23 @@ class KubernetesCellAdapter:
             _require_annotations(annotations, metadata)
             uid = getattr(identity, "uid", None)
             volume_name = getattr(pvc.spec, "volume_name", None)
+            phase = getattr(pvc.status, "phase", None)
+            spec = pvc.spec
+            requests = getattr(getattr(spec, "resources", None), "requests", None)
             if (
                 getattr(identity, "name", None) != name
                 or getattr(identity, "namespace", None) != namespace
                 or getattr(identity, "deletion_timestamp", None) is not None
                 or not isinstance(uid, str)
                 or not uid
-                or getattr(pvc.status, "phase", None) != "Bound"
-                or not isinstance(volume_name, str)
-                or not volume_name
+                or getattr(spec, "access_modes", None) != ["ReadWriteOnce"]
+                or getattr(spec, "volume_mode", None) != "Filesystem"
+                or getattr(spec, "storage_class_name", None) != "exomem-hcloud-encrypted-retain"
+                or not isinstance(requests, dict)
+                or requests != {"storage": "10Gi"}
+                or phase not in {"Pending", "Bound"}
+                or (phase == "Bound" and (not isinstance(volume_name, str) or not volume_name))
+                or (phase == "Pending" and volume_name not in (None, ""))
             ):
                 raise _governance_unavailable()
             if self._identity_verifier is None:
@@ -577,7 +594,7 @@ class KubernetesCellAdapter:
                     "PVC provider recovery identity did not authenticate",
                     reason=ConflictReason.PVC_RECOVERY_IDENTITY_UNAUTHENTICATED,
                 ) from error
-            return uid
+            return uid, phase
         except (ClaimConflict, StaleFence, MetadataConflict, DriverRetryable):
             raise
         except Exception as error:  # noqa: BLE001 - provider payloads must not escape
@@ -3029,6 +3046,7 @@ class HelmCliAdapter:
         *,
         rollback_on_failure: bool = True,
         effect_guard: Callable[[], Awaitable[None]] | None = None,
+        wait_for_ready: bool = True,
     ) -> None:
         """Reconcile with a caller-owned guard immediately before the Helm effect.
 
@@ -3036,6 +3054,19 @@ class HelmCliAdapter:
         outcomes then remain retryable; callers retain their durable checkpoint.
         """
         self._validate_effect_options(rollback_on_failure, effect_guard)
+        if type(wait_for_ready) is not bool or (
+            not wait_for_ready
+            and (
+                rollback_on_failure
+                or effect_guard is None
+                or values.get("workloadMode") != "restore"
+                or values.get("migrationMode") != "none"
+            )
+        ):
+            raise MetadataConflict(
+                "Helm effect options are invalid",
+                reason=ConflictReason.HELM_EFFECT_OPTIONS_INVALID,
+            )
         if self._has_secret_key(values):
             raise MetadataConflict(
                 "Helm values must not carry plaintext credentials",
@@ -3076,8 +3107,7 @@ class HelmCliAdapter:
                 metadata.resource_name,
                 "--create-namespace=false",
                 *(("--atomic",) if rollback_on_failure else ()),
-                "--wait",
-                "--wait-for-jobs",
+                *(("--wait", "--wait-for-jobs") if wait_for_ready else ()),
                 "--timeout",
                 "5m",
                 "--values",

@@ -16,6 +16,15 @@ spec:
     - name: storageInit
       expression: >-
         has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init'
+    - name: storageBinding
+      expression: >-
+        has(object.metadata.labels) &&
+        'exomem.io/storage-binding' in object.metadata.labels &&
+        object.metadata.labels['exomem.io/storage-binding'] == 'true'
+    - name: bindingSpec
+      expression: object.spec
+    - name: bindingMeta
+      expression: object.metadata
     - name: vaultFingerprint
       expression: >-
         has(object.metadata.labels) &&
@@ -63,6 +72,20 @@ spec:
     - name: migrationMeta
       expression: object.metadata
   validations:
+    - expression: >-
+        !variables.storageBinding ||
+        (variables.storageInit && variables.tenantNamespace && !variables.restoreCandidate &&
+          request.userInfo.username == 'system:serviceaccount:kube-system:job-controller' &&
+          object.metadata.name.startsWith(request.namespace + '-init-') &&
+          size(object.metadata.ownerReferences) == 1 &&
+          object.metadata.ownerReferences[0].apiVersion == 'batch/v1' &&
+          object.metadata.ownerReferences[0].kind == 'Job' &&
+          object.metadata.ownerReferences[0].name == request.namespace + '-init' &&
+          object.metadata.ownerReferences[0].uid.size() > 0 &&
+          object.metadata.ownerReferences[0].controller == true &&
+          object.metadata.labels['job-name'] == request.namespace + '-init')
+      message: Storage binding pods must belong to the fixed controller-owned Job.
+    {{- include "exomem.storageBindingPodAdmission" . | nindent 4 }}
     - expression: >-
         !variables.governanceMigration ||
         (variables.tenantNamespace && !variables.storageInit && !variables.vaultFingerprint &&
@@ -212,7 +235,7 @@ spec:
       message: Tenant pods must use the safe termination message path and policy.
     - expression: >-
         !variables.inScope ||
-        (!has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'exomem-storage-init') ||
+        (!variables.storageInit || variables.storageBinding) ||
         (
         !has(object.spec.containers[0].command) &&
         object.spec.containers[0].args == ['hosted', 'init', '--contract-version', '1', '--request-file', '/run/exomem/operator-requests/init.json'] &&
@@ -264,7 +287,7 @@ spec:
       message: Storage initialization cannot expose additional executable or interactive surfaces.
     - expression: >-
         !variables.inScope ||
-        (!has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'exomem-storage-init') ||
+        (!variables.storageInit || variables.storageBinding) ||
         (
         string(dyn(object.spec.containers[0].resources).requests['cpu']) == '100m' &&
         string(dyn(object.spec.containers[0].resources).requests['memory']) == '128Mi' &&
@@ -275,7 +298,7 @@ spec:
       message: Storage initialization must use the exact approved compute resources.
     - expression: >-
         !variables.inScope ||
-        (!has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'exomem-storage-init') ||
+        (!variables.storageInit || variables.storageBinding) ||
         (size(object.spec.volumes) == 3 && object.spec.volumes.all(volume,
           (volume.name == 'data' && has(volume.persistentVolumeClaim) &&
             volume.persistentVolumeClaim.claimName == namespaceObject.metadata.annotations['exomem.io/pvc-name']) ||
@@ -288,7 +311,7 @@ spec:
       message: Storage initialization may mount only the exact tenant PVC, credential Secret, and request ConfigMap.
     - expression: >-
         !variables.inScope ||
-        (!has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'exomem-storage-init') ||
+        (!variables.storageInit || variables.storageBinding) ||
         (size(object.spec.containers[0].volumeMounts) == 3 &&
         object.spec.containers[0].volumeMounts.exists(mount,
           mount.name == 'data' && mount.mountPath == '/var/lib/exomem' && !has(mount.subPath) &&

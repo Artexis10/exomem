@@ -163,6 +163,16 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     assert blackbox_input["type"] == "boolean"
     static_job = parsed["jobs"]["static"]
     assert static_job["name"] == "Offline static validation (not release proof)"
+    validation_step = next(
+        step
+        for step in static_job["steps"]
+        if step.get("name")
+        == "Terraform, TFLint, Checkov, Ansible, Helm, policy, SOPS, types, tests, and secret scan"
+    )
+    assert "RUN_K3S_ADMISSION_TEST=1" in validation_step["run"]
+    assert "RUN_K3S_STORAGE_BINDING_TEST=1" in validation_step["run"]
+    assert "infra/scripts/validate.sh" in validation_step["run"]
+    assert 'pytest -q "${repo_root}"/tests/test_hosted_*.py' in validator
     cache_step = next(
         step for step in static_job["steps"] if step.get("name") == "Restore exact validator bundle"
     )

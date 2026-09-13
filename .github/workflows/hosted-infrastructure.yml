@@ -210,6 +210,7 @@ jobs:
         run: |
           EXOMEM_RUN_REAL_SOPS_TESTS=1 \
           RUN_K3S_ADMISSION_TEST=1 \
+          RUN_K3S_STORAGE_BINDING_TEST=1 \
           SOPS_BIN="$(command -v sops)" \
           AGE_KEYGEN_BIN="$(command -v age-keygen)" \
           infra/scripts/validate.sh

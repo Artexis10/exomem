@@ -203,6 +203,35 @@ async def test_guard_runs_after_predecessor_reads_and_immediately_before_helm_up
 
 
 @pytest.mark.asyncio
+async def test_governance_storage_shell_apply_does_not_wait_for_first_consumer(tmp_path):
+    h = HelmTransport(tmp_path)
+    await h.adapter.ensure_release(
+        _metadata(),
+        {"workloadMode": "restore", "migrationMode": "none", "image": "target"},
+        rollback_on_failure=False,
+        effect_guard=h.guard,
+        wait_for_ready=False,
+    )
+    command = h.calls[-1]
+    assert command[1] == "upgrade"
+    assert "--wait" not in command and "--wait-for-jobs" not in command
+    assert "--atomic" not in command
+    assert h.calls[-2] == ("guard",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("values", [TARGET, {"workloadMode": "initialize", "migrationMode": "none"}])
+async def test_nonwaiting_helm_refuses_other_workload_modes(tmp_path, values):
+    h = HelmTransport(tmp_path)
+    with pytest.raises(MetadataConflict):
+        await h.adapter.ensure_release(
+            _metadata(), values, rollback_on_failure=False, effect_guard=h.guard,
+            wait_for_ready=False,
+        )
+    assert not any(len(call) > 1 and call[1] == "upgrade" for call in h.calls)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("api", ["ensure", "transition"])
 async def test_claim_loss_prevents_helm_effect_and_cleans_private_values(tmp_path, api):
     h = HelmTransport(tmp_path)
