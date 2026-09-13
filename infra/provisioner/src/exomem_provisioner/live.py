@@ -236,8 +236,17 @@ class KubernetesProviderRegistry:
             json.dumps(values, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
 
-    async def authenticate_recovery_record(self, metadata: OpaqueProviderMetadata) -> str:
-        """Read and authenticate the durable Kubernetes recovery identities once."""
+    async def _authenticate_core_recovery_objects(
+        self, metadata: OpaqueProviderMetadata
+    ) -> tuple[Any, Any, Any]:
+        """Read and authenticate the three objects every provision owns from the start.
+
+        The namespace, the fixed claim and the provider-operation record exist
+        from the first effect onward, so both recoveries can prove ownership
+        from them. Only the init-retry path may additionally demand a deployed
+        release: a provision interrupted before its first successful apply has
+        never written one, and requiring it there would be unsatisfiable.
+        """
         namespace = await asyncio.to_thread(self._core.read_namespace, metadata.resource_name)
         pvc = await asyncio.to_thread(
             self._core.read_namespaced_persistent_volume_claim,
@@ -249,36 +258,6 @@ class KubernetesProviderRegistry:
             provider_operation_resource_name(metadata.operation_id),
             metadata.resource_name,
         )
-        helm_records = tuple(
-            getattr(
-                await asyncio.to_thread(
-                    self._core.list_namespaced_config_map,
-                    metadata.resource_name,
-                    label_selector=(f"owner=helm,name={metadata.resource_name},status=deployed"),
-                ),
-                "items",
-                (),
-            )
-            or ()
-        )
-        if len(helm_records) != 1:
-            raise MetadataConflict(
-                "deployed Helm release record is not exact",
-                reason=ConflictReason.HELM_RELEASE_RECORD_NOT_EXACT,
-            )
-        helm_record = helm_records[0]
-        self._require_not_terminating(helm_record)
-        helm_labels = dict(getattr(helm_record.metadata, "labels", None) or {})
-        if (
-            getattr(helm_record.metadata, "namespace", None) != metadata.resource_name
-            or helm_labels.get("owner") != "helm"
-            or helm_labels.get("name") != metadata.resource_name
-            or helm_labels.get("status") != "deployed"
-        ):
-            raise MetadataConflict(
-                "deployed Helm release record identity differs",
-                reason=ConflictReason.HELM_RELEASE_RECORD_IDENTITY_DIFFERS,
-            )
         for resource in (namespace, pvc, operation_record):
             self._require_not_terminating(resource)
             _require_annotations(getattr(resource.metadata, "annotations", None), metadata)
@@ -318,6 +297,46 @@ class KubernetesProviderRegistry:
                 name=provider_operation_resource_name(metadata.operation_id),
             ),
         )
+        return namespace, pvc, operation_record
+
+    async def authenticate_shell_recovery_record(self, metadata: OpaqueProviderMetadata) -> str:
+        """Authenticate a provision that stopped before it ever deployed a release."""
+        namespace, pvc, operation_record = await self._authenticate_core_recovery_objects(metadata)
+        return self._recovery_digest(namespace, pvc, operation_record)
+
+    async def authenticate_recovery_record(self, metadata: OpaqueProviderMetadata) -> str:
+        """Read and authenticate the durable Kubernetes recovery identities once."""
+        namespace, pvc, operation_record = await self._authenticate_core_recovery_objects(metadata)
+        helm_records = tuple(
+            getattr(
+                await asyncio.to_thread(
+                    self._core.list_namespaced_config_map,
+                    metadata.resource_name,
+                    label_selector=(f"owner=helm,name={metadata.resource_name},status=deployed"),
+                ),
+                "items",
+                (),
+            )
+            or ()
+        )
+        if len(helm_records) != 1:
+            raise MetadataConflict(
+                "deployed Helm release record is not exact",
+                reason=ConflictReason.HELM_RELEASE_RECORD_NOT_EXACT,
+            )
+        helm_record = helm_records[0]
+        self._require_not_terminating(helm_record)
+        helm_labels = dict(getattr(helm_record.metadata, "labels", None) or {})
+        if (
+            getattr(helm_record.metadata, "namespace", None) != metadata.resource_name
+            or helm_labels.get("owner") != "helm"
+            or helm_labels.get("name") != metadata.resource_name
+            or helm_labels.get("status") != "deployed"
+        ):
+            raise MetadataConflict(
+                "deployed Helm release record identity differs",
+                reason=ConflictReason.HELM_RELEASE_RECORD_IDENTITY_DIFFERS,
+            )
         try:
             init_job = await asyncio.to_thread(
                 self._batch.read_namespaced_job,

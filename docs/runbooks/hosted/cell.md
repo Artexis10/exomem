@@ -202,8 +202,32 @@ spec:
         - {name: EXOMEM_RECOVERY_DATABASE_ROLE, value: exomem_provisioner_runtime}
         - {name: EXOMEM_RECOVERY_DATABASE_LOCK_TIMEOUT_SECONDS, value: "60"}
         - {name: EXOMEM_RECOVERY_HCLOUD_LOCATION, value: fsn1}
+        - {name: EXOMEM_RECOVERY_HELM_BINARY, value: $helm_binary}
+        - {name: EXOMEM_RECOVERY_HELM_VERSION, value: $helm_version}
+        - {name: EXOMEM_RECOVERY_CELL_CHART_PATH, value: $cell_chart_path}
+        - {name: EXOMEM_RECOVERY_CELL_CHART_VERSION, value: $cell_chart_version}
 EOF
 kubectl -n exomem-platform wait --for=condition=Ready "pod/$operator_pod" --timeout=60s
+```
+
+The four Helm variables name the pinned client and the chart baked into the same
+selected image, and they carry no authority of their own: recovery reads retained
+release records through the client that wrote them rather than decoding their
+stored form itself. Take the version and chart values from the running provisioner
+worker's own environment so they cannot drift from the image being used; the
+binary and chart live inside the image, so a guessed path fails only at the
+observer's first Helm call:
+
+```bash
+worker_env() { kubectl -n exomem-platform get deployment exomem-provisioner-worker \
+  -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name=='$1')].value}"; }
+helm_binary=$(worker_env EXOMEM_PROVISIONER_HELM_BINARY)
+helm_version=$(worker_env EXOMEM_PROVISIONER_HELM_VERSION)
+cell_chart_path=$(worker_env EXOMEM_PROVISIONER_CELL_CHART_PATH)
+cell_chart_version=$(worker_env EXOMEM_PROVISIONER_CELL_CHART_VERSION)
+for value in "$helm_binary" "$helm_version" "$cell_chart_path" "$cell_chart_version"; do
+  test -n "$value" || { echo "worker environment is missing a Helm setting" >&2; exit 2; }
+done
 ```
 
 `load_recovery_settings` requires the `EXOMEM_RECOVERY_*` set above **exactly** --
@@ -327,6 +351,67 @@ curl --fail-with-body --silent --show-error --max-redirs 0 --max-time 30 \
   -H "Idempotency-Key: ${IDEMPOTENCY_KEY}" \
   --data-binary "@${health_request}"
 ```
+
+## Interrupted first-provision resume
+
+Use this for the other shape of `PROVISION / ERROR / failed /
+PROVISIONER_PROVIDER_METADATA_CONFLICT`: an operation that failed **before it
+registered ownership of anything but its namespace**. Read the operation's owned
+`resources` rows first. Owning all four of helm-release, kubernetes-namespace,
+pvc and volume is the init-retry false negative above; owning only
+kubernetes-namespace is this one, and the init-retry preflight refuses it
+correctly without spending its one-shot.
+
+That state is what an interruption during the storage-shell apply leaves: the
+namespace and the fixed claim exist, the claim is still unbound because its class
+binds on first consumer and the binder belongs to a later phase, and the retained
+release history holds the abandoned record of the attempt that was cut short.
+
+Deploy the verified repair first. Resuming an operation whose worker still waits
+on the unconsumed claim only repeats the timeout that stranded it.
+
+Use the same operator Pod, environment and confidential-identity handling as the
+init-retry recovery above. The modes are `shell-resume-preflight`, `shell-resume`
+and `verify-shell-resume`.
+
+```bash
+for mode in shell-resume-preflight shell-resume verify-shell-resume; do
+  timeout 75s kubectl -n exomem-platform exec -i "$operator_pod" -- \
+    exomem-provisioner-recover-init-retry "$mode" --stdin < "$recovery_identity"
+done
+```
+
+Run the three modes one at a time, reading each result before the next: stop at
+any refusal, and never run `shell-resume` without a `ready` preflight from the
+same Pod.
+
+The operator Pod runs the provisioner image the deployed lock selects, so these
+modes exist only once the repaired lock is rolled out; against an older lock the
+helper rejects them as an invalid mode, which is the intended deploy-first order.
+
+The preflight proves, read-only: one provision operation for the cell, terminal
+under that code, finalized, with no live claim and no cell operation lock;
+matching operation and provider fences and identities; the namespace ownership
+record and nothing else; a live namespace and retained provider object carrying
+this operation's envelope and digests; the fixed claim present, unbound and with
+no provider volume; no binder Job, admitted runtime or route; and a retained
+release history under one chart whose abandoned record satisfies the apply's own
+position and structural rules and carries this operation's identity. Any mismatch refuses, changes nothing, and leaves the one-shot unspent.
+
+`shell-resume` returns the operation to `namespace-ready` -- the checkpoint
+immediately before the storage apply, naming the one resource it already owns --
+and records its own one-shot marker. It preserves the operation identity, fence,
+request, namespace ownership, claim, capacity reservation and tenant invite. It
+clears only the terminal state, the finalization, the error code and the
+failure-attempt budget; the diagnostic pending counter and last capacity-wait
+reason stay as history. A second call returns `already-resumed` rather than acting again.
+
+Exact target equality is not the preflight's test: the resumed apply compares the
+recorded target against the one it computes, under the guard immediately before
+the effect, and refuses there. Expect the claim to stay Pending after the resume
+until the binding phase submits its consumer; that is the phase's normal
+observation, not a failure. Then restore the worker and watch the operation walk
+`release-applied` into `gpi1:binding`.
 
 ## Governance migration recovery
 

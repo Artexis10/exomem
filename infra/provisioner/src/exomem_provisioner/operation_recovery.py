@@ -44,6 +44,9 @@ _FIXED_MODES = (
     "reopen",
     "inspect",
     "verify-recovery",
+    "shell-resume-preflight",
+    "shell-resume",
+    "verify-shell-resume",
     "retarget-preflight",
     "retarget",
     "verify-retarget",
@@ -68,6 +71,7 @@ _RETARGET_MARKER = "_runtime_retarget_recovery_v1"
 _RETARGET_RESUME_MARKER = "_runtime_retarget_resume_v1"
 _RETARGET_RETRY_MARKER = "_runtime_retarget_retry_v1"
 _RETARGET_SUCCESSOR_MARKER = "_runtime_retarget_successor_v1"
+_SHELL_RESUME_MARKER = "_storage_shell_resume_v1"
 _RECOVERY_MARKER_KEYS = frozenset(
     {"schema", "preflight_sha256", "helper_source_sha256", "claim_generation", "committed_at"}
 )
@@ -256,12 +260,42 @@ class RetargetSuccessorPreState:
     has_successor_marker: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ShellLiveObservation:
+    """What a provision interrupted before its storage apply must still look like.
+
+    The claim is deliberately unbound here: its class binds on first consumer,
+    and the binder belongs to a later phase, so a bound claim means this is not
+    the state being recovered.
+    """
+
+    namespace_present: bool
+    provider_object_present: bool
+    claim_present: bool
+    claim_bound: bool
+    volume_present: bool
+    init_job_present: bool
+    runtime_admitted: bool
+    routes_present: int
+    terminating: bool
+    retained_records_are_own: bool
+    identity_digest: str = ""
+
+
 class RecoveryLiveObserver(Protocol):
     async def observe(
         self,
         operation: Operation,
         resources: tuple[Resource, ...],
     ) -> LiveObservation: ...
+
+
+class ShellResumeLiveObserver(Protocol):
+    async def observe_shell(
+        self,
+        operation: Operation,
+        resources: tuple[Resource, ...],
+    ) -> ShellLiveObservation: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,7 +370,50 @@ def validate_live_observation(observation: LiveObservation) -> None:
         raise RecoveryRefusal("live recovery preflight failed")
 
 
-def recovery_transition_values(before: OperationPreState) -> dict[str, object]:
+def validate_shell_live_observation(observation: ShellLiveObservation) -> None:
+    """Refuse unless the cluster still shows a provision stopped before its apply.
+
+    A bound claim, a registered volume, an admitted runtime, a route or a live
+    Job all mean the provision progressed past the point this reopen resumes,
+    and a retained record that does not authenticate means the resumed apply
+    would fail terminally on its first effect.
+    """
+    if (
+        not observation.namespace_present
+        or not observation.provider_object_present
+        or not observation.claim_present
+        or observation.claim_bound
+        or observation.volume_present
+        or observation.init_job_present
+        or observation.runtime_admitted
+        or observation.routes_present != 0
+        or observation.terminating
+        or not observation.retained_records_are_own
+        or (observation.identity_digest and len(observation.identity_digest) != 64)
+    ):
+        raise RecoveryRefusal("live shell resume preflight failed")
+
+
+def shell_resume_transition_values(before: OperationPreState) -> dict[str, object]:
+    """Return the operation to the checkpoint immediately before the storage apply.
+
+    `namespace-ready` is where the walk applies the non-waiting storage shell,
+    and the namespace it names is the one resource this operation already owns,
+    so the resumed attempt repeats no committed effect.
+    """
+    return _reopen_transition_values(
+        before, checkpoint="namespace-ready", refusal="shell resume preflight failed"
+    )
+
+
+def _reopen_transition_values(
+    before: OperationPreState, *, checkpoint: str, refusal: str
+) -> dict[str, object]:
+    """Admit only the terminal metadata-conflict provision both reopens recover.
+
+    One statement of admissibility for both reopens, so a guard added for one
+    cannot silently stay missing from the other.
+    """
     if (
         before.action != "provision"
         or before.state != "error"
@@ -348,16 +425,22 @@ def recovery_transition_values(before: OperationPreState) -> dict[str, object]:
     ):
         if before.state in {"pending", "claimed", "final"}:
             raise RecoveryRefusal("already progressed")
-        raise RecoveryRefusal("recovery preflight failed")
+        raise RecoveryRefusal(refusal)
     return {
         "state": OperationState.PENDING,
-        "checkpoint": "volume-owned",
+        "checkpoint": checkpoint,
         "error_code": None,
         "claim_owner": None,
         "claim_token": None,
         "claim_expires_at": None,
         "finalized_at": None,
     }
+
+
+def recovery_transition_values(before: OperationPreState) -> dict[str, object]:
+    return _reopen_transition_values(
+        before, checkpoint="volume-owned", refusal="recovery preflight failed"
+    )
 
 
 def retarget_transition_values(before: RetargetPreState, *, now: datetime) -> dict[str, object]:
@@ -554,26 +637,26 @@ def request_targets_selected_runtime(
     return False
 
 
-def recovery_marker(
+def _reopen_marker_fields(
     *,
     preflight_sha256: str,
     helper_source_sha256: str,
     claim_generation: int,
     committed_at: datetime,
 ) -> dict[str, object]:
-    marker = {
+    return {
         "schema": 1,
         "preflight_sha256": preflight_sha256,
         "helper_source_sha256": helper_source_sha256,
         "claim_generation": claim_generation,
         "committed_at": _json_value(committed_at),
     }
-    return parse_recovery_marker(marker)
 
 
-def parse_recovery_marker(value: object) -> dict[str, object]:
+def _parse_reopen_marker(value: object, *, invalid: str) -> dict[str, object]:
+    """One schema for both reopen receipts; only the refusal names which one."""
     if not isinstance(value, dict) or set(value) != _RECOVERY_MARKER_KEYS:
-        raise RecoveryRefusal("recovery marker is invalid")
+        raise RecoveryRefusal(invalid)
     if (
         value.get("schema") != 1
         or not isinstance(value.get("claim_generation"), int)
@@ -584,12 +667,54 @@ def parse_recovery_marker(value: object) -> dict[str, object]:
             for key in ("preflight_sha256", "helper_source_sha256")
         )
     ):
-        raise RecoveryRefusal("recovery marker is invalid")
+        raise RecoveryRefusal(invalid)
     try:
         datetime.fromisoformat(value["committed_at"].replace("Z", "+00:00"))
     except ValueError as error:
-        raise RecoveryRefusal("recovery marker is invalid") from error
+        raise RecoveryRefusal(invalid) from error
     return dict(value)
+
+
+def recovery_marker(
+    *,
+    preflight_sha256: str,
+    helper_source_sha256: str,
+    claim_generation: int,
+    committed_at: datetime,
+) -> dict[str, object]:
+    return parse_recovery_marker(
+        _reopen_marker_fields(
+            preflight_sha256=preflight_sha256,
+            helper_source_sha256=helper_source_sha256,
+            claim_generation=claim_generation,
+            committed_at=committed_at,
+        )
+    )
+
+
+def shell_resume_marker(
+    *,
+    preflight_sha256: str,
+    helper_source_sha256: str,
+    claim_generation: int,
+    committed_at: datetime,
+) -> dict[str, object]:
+    return parse_shell_resume_marker(
+        _reopen_marker_fields(
+            preflight_sha256=preflight_sha256,
+            helper_source_sha256=helper_source_sha256,
+            claim_generation=claim_generation,
+            committed_at=committed_at,
+        )
+    )
+
+
+def parse_recovery_marker(value: object) -> dict[str, object]:
+    return _parse_reopen_marker(value, invalid="recovery marker is invalid")
+
+
+def parse_shell_resume_marker(value: object) -> dict[str, object]:
+    return _parse_reopen_marker(value, invalid="shell resume marker is invalid")
 
 
 def retarget_marker(
@@ -811,8 +936,10 @@ class RecoveryService:
         deployment_lock: DeploymentLock,
         source_deployment_lock: DeploymentLock | None = None,
         observer: RecoveryLiveObserver,
+        shell_observer: ShellResumeLiveObserver | None = None,
         runtime_selection: Literal["active", "rollback"] | None = None,
     ) -> None:
+        self._shell_observer = shell_observer
         self._sessions = sessions
         self._codec = codec
         self._database_name = database_name
@@ -994,6 +1121,164 @@ class RecoveryService:
             raise
         except Exception as error:
             raise RecoveryRefusal("recovery-verification-failed") from error
+
+    async def shell_resume_preflight(self, operation_id: str) -> dict[str, object]:
+        try:
+            async with self._sessions.begin() as session:
+                snapshot = await self._shell_preflight(session, operation_id)
+                observation = await self._require_shell_observer().observe_shell(
+                    snapshot.operation, snapshot.resources
+                )
+                validate_shell_live_observation(observation)
+                return {
+                    "status": "ready",
+                    "state": snapshot.operation.state.value,
+                    "checkpoint": snapshot.operation.checkpoint,
+                    "resource_kind_counts": {
+                        **{kind.value: 0 for kind in ResourceKind},
+                        ResourceKind.KUBERNETES_NAMESPACE.value: 1,
+                    },
+                    "active_reservation": True,
+                }
+        except RecoveryRefusal:
+            raise
+        except Exception as error:  # content-free boundary for database/provider failures
+            raise RecoveryRefusal("shell-resume-preflight-failed") from error
+
+    async def shell_resume(self, operation_id: str) -> dict[str, object]:
+        try:
+            async with self._sessions.begin() as session:
+                await self._require_database_identity(session)
+                current = await session.get(Operation, operation_id, with_for_update=True)
+                if current is None:
+                    raise RecoveryRefusal("operation is unavailable")
+                marker = current.progress.get(_SHELL_RESUME_MARKER)
+                if marker is not None:
+                    return self._shell_resume_result(current, marker, "already-resumed")
+                snapshot = await self._shell_preflight(session, operation_id)
+                observer = self._require_shell_observer()
+                first = await observer.observe_shell(snapshot.operation, snapshot.resources)
+                validate_shell_live_observation(first)
+                second = await observer.observe_shell(snapshot.operation, snapshot.resources)
+                validate_shell_live_observation(second)
+                if first != second:
+                    raise RecoveryRefusal("live shell resume preflight failed")
+                now = await session.scalar(select(func.clock_timestamp()))
+                if not isinstance(now, datetime):
+                    raise RecoveryRefusal("database clock is unavailable")
+                before = snapshot.operation
+                evidence_digest = self._preflight_evidence_digest(snapshot, first, second)
+                # The failure budget is cleared so the resumed attempt is not one
+                # transient error from an exhausted terminal state that neither
+                # recovery admits. The pending counter and the last capacity-wait
+                # reason drive nothing and stay as diagnostic history.
+                progress = {
+                    **{
+                        key: value
+                        for key, value in before.progress.items()
+                        if key != "failure_attempts"
+                    },
+                    _SHELL_RESUME_MARKER: shell_resume_marker(
+                        preflight_sha256=evidence_digest,
+                        helper_source_sha256=self._helper_source_sha256,
+                        claim_generation=before.claim_generation,
+                        committed_at=now,
+                    ),
+                }
+                updated = await session.scalar(
+                    update(Operation)
+                    .where(
+                        Operation.id == before.id,
+                        Operation.action == OperationAction.PROVISION,
+                        Operation.state == OperationState.ERROR,
+                        Operation.checkpoint == "failed",
+                        Operation.error_code == "PROVISIONER_PROVIDER_METADATA_CONFLICT",
+                        Operation.claim_owner.is_(None),
+                        Operation.claim_token.is_(None),
+                        Operation.claim_expires_at.is_(None),
+                        Operation.result_ciphertext.is_(None),
+                        cast(Operation.result_redacted, JSONB) == cast({}, JSONB),
+                        Operation.finalized_at.is_not(None),
+                        Operation.external_operation_id == Operation.provider_operation_id,
+                        Operation.fence_generation == Operation.provider_fence_generation,
+                        Operation.canonical_request_sha256 == before.canonical_request_sha256,
+                        Operation.claim_generation == before.claim_generation,
+                        Operation.updated_at == before.updated_at,
+                        cast(Operation.progress, JSONB) == cast(before.progress, JSONB),
+                        # No init-retry marker clause: an init-retry reopen requires
+                        # all four resource kinds, and _shell_preflight above has just
+                        # locked this operation's resources and proven it owns only its
+                        # namespace, so the preflight and this commit prove one thing.
+                        ~cast(Operation.progress, JSONB).has_key(_SHELL_RESUME_MARKER),
+                    )
+                    .values(
+                        state=OperationState.PENDING,
+                        checkpoint="namespace-ready",
+                        error_code=None,
+                        claim_owner=None,
+                        claim_token=None,
+                        claim_expires_at=None,
+                        finalized_at=None,
+                        available_at=now,
+                        updated_at=now,
+                        progress=progress,
+                    )
+                    .returning(Operation)
+                )
+                if updated is None:
+                    reread = await session.get(Operation, operation_id, with_for_update=True)
+                    if reread is not None and _SHELL_RESUME_MARKER in reread.progress:
+                        return self._shell_resume_result(
+                            reread, reread.progress[_SHELL_RESUME_MARKER], "already-resumed"
+                        )
+                    raise RecoveryRefusal("already progressed")
+                await session.flush()
+                return self._shell_resume_result(
+                    updated, progress[_SHELL_RESUME_MARKER], "resumed"
+                )
+        except RecoveryRefusal:
+            raise
+        except Exception as error:  # marker and transition roll back together
+            raise RecoveryRefusal("shell-resume-failed") from error
+
+    async def verify_shell_resume(self, operation_id: str) -> dict[str, object]:
+        try:
+            async with self._sessions.begin() as session:
+                await self._require_database_identity(session)
+                operation = await session.get(Operation, operation_id)
+                if operation is None:
+                    raise RecoveryRefusal("operation is unavailable")
+                marker = operation.progress.get(_SHELL_RESUME_MARKER)
+                if marker is not None:
+                    return self._shell_resume_result(operation, marker, "verified")
+                try:
+                    shell_resume_transition_values(self._operation_pre_state(operation))
+                except RecoveryRefusal as error:
+                    raise RecoveryRefusal("shell resume attribution is unavailable") from error
+                return {
+                    "status": "not-run",
+                    "state": operation.state.value,
+                    "checkpoint": operation.checkpoint,
+                }
+        except RecoveryRefusal:
+            raise
+        except Exception as error:
+            raise RecoveryRefusal("shell-resume-verification-failed") from error
+
+    async def _shell_preflight(
+        self, session: AsyncSession, operation_id: str
+    ) -> _RecoverySnapshot:
+        return await self._preflight(
+            session,
+            operation_id,
+            marker=_SHELL_RESUME_MARKER,
+            expected_resources=frozenset({ResourceKind.KUBERNETES_NAMESPACE}),
+        )
+
+    def _require_shell_observer(self) -> ShellResumeLiveObserver:
+        if self._shell_observer is None:
+            raise RecoveryRefusal("shell resume observation is unavailable")
+        return self._shell_observer
 
     async def retarget_preflight(self, operation_id: str) -> dict[str, object]:
         try:
@@ -1822,7 +2107,14 @@ class RecoveryService:
             target_runtime_sha256=canonical_sha256(target_runtime),
         )
 
-    async def _preflight(self, session: AsyncSession, operation_id: str) -> _RecoverySnapshot:
+    async def _preflight(
+        self,
+        session: AsyncSession,
+        operation_id: str,
+        *,
+        marker: str = _RECOVERY_MARKER,
+        expected_resources: frozenset[ResourceKind] | None = None,
+    ) -> _RecoverySnapshot:
         await self._require_database_identity(session)
         initial = await session.get(Operation, operation_id)
         if initial is None:
@@ -1836,7 +2128,9 @@ class RecoveryService:
             or fence.fence_generation != operation.fence_generation
         ):
             raise RecoveryRefusal("recovery preflight failed")
-        return await self._preflight_locked(session, operation, fence)
+        return await self._preflight_locked(
+            session, operation, fence, marker=marker, expected_resources=expected_resources
+        )
 
     async def _retarget_preflight(
         self, session: AsyncSession, operation_id: str, *, now: datetime
@@ -1962,10 +2256,24 @@ class RecoveryService:
             raise RecoveryRefusal("database identity is invalid")
 
     async def _preflight_locked(
-        self, session: AsyncSession, operation: Operation, fence: TenantFence
+        self,
+        session: AsyncSession,
+        operation: Operation,
+        fence: TenantFence,
+        *,
+        marker: str = _RECOVERY_MARKER,
+        expected_resources: frozenset[ResourceKind] | None = None,
     ) -> _RecoverySnapshot:
-        transition = recovery_transition_values(self._operation_pre_state(operation))
-        if _RECOVERY_MARKER in operation.progress:
+        # One preflight serves both reopens: they differ only in which marker is
+        # one-shot, which pre-state is admissible and which resources the
+        # interruption can have left owned. Everything else -- fence, identity,
+        # lock, request authentication, runtime selection -- is the same proof,
+        # and must not become two that agree today.
+        if marker == _RECOVERY_MARKER:
+            transition = recovery_transition_values(self._operation_pre_state(operation))
+        else:
+            transition = shell_resume_transition_values(self._operation_pre_state(operation))
+        if marker in operation.progress:
             raise RecoveryRefusal("already progressed")
         if (
             operation.cell_id is None
@@ -1995,7 +2303,7 @@ class RecoveryService:
             )
         ):
             raise RecoveryRefusal("recovery preflight failed")
-        resources = await self._resources(session, operation)
+        resources = await self._resources(session, operation, expected=expected_resources)
         reservation = await self._reservation(session, operation)
         return _RecoverySnapshot(
             operation=operation,
@@ -2031,6 +2339,48 @@ class RecoveryService:
             ),
             has_result=(operation.result_ciphertext is not None or operation.result_redacted != {}),
             finalized=operation.finalized_at is not None,
+        )
+
+    @staticmethod
+    def _reopen_result(
+        operation: Operation,
+        marker: dict[str, object],
+        status: str,
+        *,
+        failed_status: str,
+        unavailable: str,
+    ) -> dict[str, object]:
+        if operation.state is OperationState.ERROR:
+            return {
+                "status": failed_status,
+                "state": operation.state.value,
+                "checkpoint": operation.checkpoint,
+                "error_code": operation.error_code,
+                "recovery_digest": canonical_sha256(marker),
+            }
+        if operation.state not in {
+            OperationState.PENDING,
+            OperationState.CLAIMED,
+            OperationState.FINAL,
+        }:
+            raise RecoveryRefusal(unavailable)
+        return {
+            "status": status,
+            "state": operation.state.value,
+            "checkpoint": operation.checkpoint,
+            "recovery_digest": canonical_sha256(marker),
+        }
+
+    @staticmethod
+    def _shell_resume_result(
+        operation: Operation, marker_value: object, status: str
+    ) -> dict[str, object]:
+        return RecoveryService._reopen_result(
+            operation,
+            parse_shell_resume_marker(marker_value),
+            status,
+            failed_status="resumed-then-failed",
+            unavailable="shell resume attribution is unavailable",
         )
 
     @staticmethod
@@ -2202,7 +2552,9 @@ class RecoveryService:
 
     @staticmethod
     def _preflight_evidence_digest(
-        snapshot: _RecoverySnapshot, first: LiveObservation, second: LiveObservation
+        snapshot: _RecoverySnapshot,
+        first: LiveObservation | ShellLiveObservation,
+        second: LiveObservation | ShellLiveObservation,
     ) -> str:
         return canonical_sha256(
             {
@@ -2265,7 +2617,13 @@ class RecoveryService:
         if conflicts:
             raise RecoveryRefusal("recovery preflight failed")
 
-    async def _resources(self, session: AsyncSession, operation: Operation) -> tuple[Resource, ...]:
+    async def _resources(
+        self,
+        session: AsyncSession,
+        operation: Operation,
+        *,
+        expected: frozenset[ResourceKind] | None = None,
+    ) -> tuple[Resource, ...]:
         scoped = tuple(
             await session.scalars(
                 select(Resource)
@@ -2277,12 +2635,16 @@ class RecoveryService:
             )
         )
         resources = tuple(item for item in scoped if item.operation_id == operation.id)
-        expected = {
-            ResourceKind.HELM_RELEASE,
-            ResourceKind.KUBERNETES_NAMESPACE,
-            ResourceKind.PVC,
-            ResourceKind.VOLUME,
-        }
+        expected = set(
+            expected
+            if expected is not None
+            else {
+                ResourceKind.HELM_RELEASE,
+                ResourceKind.KUBERNETES_NAMESPACE,
+                ResourceKind.PVC,
+                ResourceKind.VOLUME,
+            }
+        )
         if (
             {item.kind for item in resources} != expected
             or len(resources) != len(expected)
@@ -2361,27 +2723,13 @@ class RecoveryService:
     def _recovery_result(
         operation: Operation, marker_value: object, status: str
     ) -> dict[str, object]:
-        marker = parse_recovery_marker(marker_value)
-        if operation.state is OperationState.ERROR:
-            return {
-                "status": "recovered-then-failed",
-                "state": operation.state.value,
-                "checkpoint": operation.checkpoint,
-                "error_code": operation.error_code,
-                "recovery_digest": canonical_sha256(marker),
-            }
-        if operation.state not in {
-            OperationState.PENDING,
-            OperationState.CLAIMED,
-            OperationState.FINAL,
-        }:
-            raise RecoveryRefusal("recovery attribution is unavailable")
-        return {
-            "status": status,
-            "state": operation.state.value,
-            "checkpoint": operation.checkpoint,
-            "recovery_digest": canonical_sha256(marker),
-        }
+        return RecoveryService._reopen_result(
+            operation,
+            parse_recovery_marker(marker_value),
+            status,
+            failed_status="recovered-then-failed",
+            unavailable="recovery attribution is unavailable",
+        )
 
     @staticmethod
     def _retarget_result(
@@ -2604,6 +2952,85 @@ class _ProductionRecoveryObserver:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _ProductionShellResumeObserver:
+    """Observe a provision stopped before its storage apply, mutating nothing."""
+
+    registry: object
+    cell: object
+    volumes: object
+    helm: object
+    codec: EnvelopeCodec
+
+    async def observe_shell(
+        self,
+        operation: Operation,
+        resources: tuple[Resource, ...],
+    ) -> ShellLiveObservation:
+        from .lifecycle import (
+            MetadataConflict,
+            OpaqueProviderMetadata,
+            provider_identity_values,
+        )
+
+        if operation.cell_id is None:
+            raise RecoveryRefusal("live shell resume preflight failed")
+        metadata = OpaqueProviderMetadata(
+            tenant_id=operation.tenant_id,
+            subject_id=operation.cell_id,
+            operation_id=operation.external_operation_id,
+            fence_generation=operation.fence_generation,
+        )
+        references: dict[ResourceKind, str] = {}
+        for resource in resources:
+            value = self.codec.decrypt_json(
+                resource.reference_ciphertext,
+                purpose=f"resource-reference:{resource.operation_id}:{resource.kind.value}",
+            ).get("reference")
+            if not isinstance(value, str):
+                raise RecoveryRefusal("live shell resume preflight failed")
+            references[resource.kind] = value
+        if references != {ResourceKind.KUBERNETES_NAMESPACE: metadata.resource_name}:
+            raise RecoveryRefusal("live shell resume preflight failed")
+        snapshot = await self.registry.inspect(metadata, metadata)  # type: ignore[attr-defined]
+        registry_digest = await self.registry.authenticate_shell_recovery_record(metadata)  # type: ignore[attr-defined]
+        claim_present = False
+        claim_bound = False
+        claim_uid = ""
+        try:
+            claim_uid, phase = await self.cell.authenticated_volume_state(metadata)  # type: ignore[attr-defined]
+        except MetadataConflict:
+            # Covers an absent, terminating, resized, foreign-class or
+            # unauthenticated claim alike. Each refuses through claim_present,
+            # so none can be misread as the admissible unbound claim.
+            claim_uid, phase = "", ""
+        else:
+            claim_present = True
+            claim_bound = phase == "Bound"
+        volume = await self.volumes.observe_recovery_bound_volume(metadata)  # type: ignore[attr-defined]
+        try:
+            records_are_own = await self.helm.retained_records_are_own(  # type: ignore[attr-defined]
+                metadata, identity=provider_identity_values(metadata)
+            )
+        except MetadataConflict:  # a refusal is an answer, not a failure to observe
+            records_are_own = False
+        return ShellLiveObservation(
+            namespace_present=snapshot.namespace,
+            provider_object_present=bool(registry_digest),
+            claim_present=claim_present,
+            claim_bound=claim_bound,
+            volume_present=volume is not None,
+            init_job_present=snapshot.init_job_present,
+            runtime_admitted=snapshot.runtime_admitted,
+            routes_present=sum(snapshot.routes),
+            terminating=False,
+            retained_records_are_own=bool(records_are_own),
+            identity_digest=canonical_sha256(
+                {"kubernetes": registry_digest, "claim": claim_uid}
+            ),
+        )
+
+
 async def _run_governance_recovery(
     mode: str,
     *,
@@ -2650,7 +3077,12 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     from hcloud import Client as HCloudClient
     from kubernetes import client, config
 
-    from .adapters import HCloudVolumeAdapter, KubernetesCellAdapter, KubernetesVolumeAdapter
+    from .adapters import (
+        HCloudVolumeAdapter,
+        HelmCliAdapter,
+        KubernetesCellAdapter,
+        KubernetesVolumeAdapter,
+    )
     from .crypto import AesGcmEnvelopeCodec
     from .database import ProvisionerDatabase
     from .live import KubernetesProviderRegistry
@@ -2705,6 +3137,19 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             location=settings.hcloud_location,
             codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
         )
+        shell_observer = _ProductionShellResumeObserver(
+            registry=observer.registry,
+            cell=observer.cell,
+            volumes=observer.volumes,
+            helm=HelmCliAdapter(
+                binary=settings.helm_binary,
+                expected_version=settings.helm_version,
+                chart_path=settings.cell_chart_path,
+                chart_version=settings.cell_chart_version,
+                core_v1=core,
+            ),
+            codec=observer.codec,
+        )
         service = RecoveryService(
             sessions=database.session_factory,
             codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
@@ -2716,6 +3161,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             source_deployment_lock=settings.source_deployment_lock,
             runtime_selection=settings.runtime_selection,
             observer=observer,
+            shell_observer=shell_observer,
         )
         operation_id = read_operation_identity(stdin=sys.stdin.read())
         match args.mode:
@@ -2727,6 +3173,12 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 return await service.inspect(operation_id)
             case "verify-recovery":
                 return await service.verify_recovery(operation_id)
+            case "shell-resume-preflight":
+                return await service.shell_resume_preflight(operation_id)
+            case "shell-resume":
+                return await service.shell_resume(operation_id)
+            case "verify-shell-resume":
+                return await service.verify_shell_resume(operation_id)
             case "retarget-preflight":
                 return await service.retarget_preflight(operation_id)
             case "retarget":

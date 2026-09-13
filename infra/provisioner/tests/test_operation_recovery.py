@@ -41,6 +41,10 @@ def _recovery_environment(**overrides: str) -> dict[str, str]:
         "EXOMEM_RECOVERY_RUNTIME_SELECTION": "active",
         "EXOMEM_RECOVERY_HCLOUD_TOKEN": "h" * 32,
         "EXOMEM_RECOVERY_HCLOUD_LOCATION": "fsn1",
+        "EXOMEM_RECOVERY_HELM_BINARY": "/opt/exomem/bin/helm",
+        "EXOMEM_RECOVERY_HELM_VERSION": "3.19.4",
+        "EXOMEM_RECOVERY_CELL_CHART_PATH": "/opt/exomem/charts/cell",
+        "EXOMEM_RECOVERY_CELL_CHART_VERSION": "0.1.0",
     }
     values.update(overrides)
     return values
@@ -1135,3 +1139,236 @@ def test_main_converts_refusals_to_content_free_json(
         "refusal": "preflight-failed",
         "status": "refused",
     }
+
+
+def _shell_observation(module, **overrides):
+    """The cluster shape a provision stopped before its storage apply still has."""
+    base = module.ShellLiveObservation(
+        namespace_present=True,
+        provider_object_present=True,
+        claim_present=True,
+        claim_bound=False,
+        volume_present=False,
+        init_job_present=False,
+        runtime_admitted=False,
+        routes_present=0,
+        terminating=False,
+        retained_records_are_own=True,
+    )
+    return replace(base, **overrides) if overrides else base
+
+
+def test_shell_resume_returns_the_operation_to_the_checkpoint_before_its_apply() -> None:
+    recovery = _module()
+    before = recovery.OperationPreState(
+        action="provision",
+        state="error",
+        checkpoint="failed",
+        error_code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+        has_claim=False,
+        has_result=False,
+        finalized=True,
+    )
+
+    assert recovery.shell_resume_transition_values(before) == {
+        "state": recovery.OperationState.PENDING,
+        "checkpoint": "namespace-ready",
+        "error_code": None,
+        "claim_owner": None,
+        "claim_token": None,
+        "claim_expires_at": None,
+        "finalized_at": None,
+    }
+    with pytest.raises(recovery.RecoveryRefusal, match="already progressed"):
+        recovery.shell_resume_transition_values(
+            replace(before, state="pending", checkpoint="namespace-ready")
+        )
+    for changed in (
+        {"action": "destroy"},
+        {"state": "error", "checkpoint": "volume-owned"},
+        {"error_code": "PROVISIONER_REJECTED"},
+        {"has_claim": True},
+        {"has_result": True},
+        {"finalized": False},
+    ):
+        with pytest.raises(recovery.RecoveryRefusal):
+            recovery.shell_resume_transition_values(replace(before, **changed))
+
+
+def test_shell_resume_refuses_every_cluster_state_past_the_storage_apply() -> None:
+    recovery = _module()
+
+    assert recovery.validate_shell_live_observation(_shell_observation(recovery)) is None
+    # One precondition varied per case, against the one shape that is admissible.
+    for changed in (
+        {"namespace_present": False},
+        {"provider_object_present": False},
+        {"claim_present": False},
+        {"claim_bound": True},
+        {"volume_present": True},
+        {"init_job_present": True},
+        {"runtime_admitted": True},
+        {"routes_present": 1},
+        {"terminating": True},
+        {"retained_records_are_own": False},
+        {"identity_digest": "short"},
+    ):
+        with pytest.raises(
+            recovery.RecoveryRefusal, match="live shell resume preflight failed"
+        ):
+            recovery.validate_shell_live_observation(_shell_observation(recovery, **changed))
+
+
+def test_shell_resume_marker_is_content_free_exact_and_one_way() -> None:
+    recovery = _module()
+    marker = recovery.shell_resume_marker(
+        preflight_sha256="a" * 64,
+        helper_source_sha256="b" * 64,
+        claim_generation=98,
+        committed_at=datetime(2026, 9, 13, 5, 49, tzinfo=UTC),
+    )
+
+    assert set(marker) == {
+        "schema",
+        "preflight_sha256",
+        "helper_source_sha256",
+        "claim_generation",
+        "committed_at",
+    }
+    assert marker["schema"] == 1
+    assert recovery.parse_shell_resume_marker(marker) == marker
+    for broken in (
+        {**marker, "schema": 2},
+        {**marker, "preflight_sha256": "a" * 63},
+        {**marker, "claim_generation": -1},
+        {**marker, "committed_at": "not-a-time"},
+        {key: value for key, value in marker.items() if key != "schema"},
+        {**marker, "extra": "field"},
+    ):
+        with pytest.raises(recovery.RecoveryRefusal, match="shell resume marker is invalid"):
+            recovery.parse_shell_resume_marker(broken)
+
+
+@pytest.mark.asyncio
+async def test_shell_observer_proves_ownership_without_a_deployed_release() -> None:
+    """Regression: the shell resume once demanded the deployed release a first provision lacks."""
+    from types import SimpleNamespace
+
+    recovery = _module()
+    from exomem_provisioner.conflict_reason import ConflictReason
+    from exomem_provisioner.lifecycle import MetadataConflict, OpaqueProviderMetadata
+    from exomem_provisioner.models import ResourceKind
+
+    metadata = OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "provider-alpha", 7)
+
+    class Codec:
+        def decrypt_json(self, ciphertext, *, purpose):
+            return {"reference": metadata.resource_name}
+
+    class Registry:
+        async def inspect(self, current, owned):
+            return SimpleNamespace(
+                namespace=True,
+                init_job_present=False,
+                runtime_admitted=False,
+                routes=(False, False),
+            )
+
+        async def authenticate_recovery_record(self, current):
+            # Exactly what the live cell answers: no deployed release record exists.
+            raise MetadataConflict(
+                "deployed Helm release record is not exact",
+                reason=ConflictReason.HELM_RELEASE_RECORD_NOT_EXACT,
+            )
+
+        async def authenticate_shell_recovery_record(self, current):
+            return "a" * 64
+
+    class Cell:
+        async def authenticated_volume_state(self, current):
+            return ("pvc-uid", "Pending")
+
+    class Volumes:
+        async def observe_recovery_bound_volume(self, current):
+            return None
+
+    class Helm:
+        async def retained_records_are_own(self, current, *, identity):
+            return identity["operationId"] == "provider-alpha"
+
+    observer = recovery._ProductionShellResumeObserver(
+        Registry(), Cell(), Volumes(), Helm(), Codec()
+    )
+    operation = SimpleNamespace(
+        cell_id="cell-alpha",
+        tenant_id="tenant-alpha",
+        external_operation_id="provider-alpha",
+        fence_generation=7,
+    )
+    resources = (
+        SimpleNamespace(
+            kind=ResourceKind.KUBERNETES_NAMESPACE,
+            reference_ciphertext="namespace",
+            operation_id="internal",
+        ),
+    )
+
+    observed = await observer.observe_shell(operation, resources)
+
+    assert recovery.validate_shell_live_observation(observed) is None
+    assert observed.provider_object_present and observed.claim_present
+    assert not observed.claim_bound and not observed.volume_present
+
+
+def test_the_two_reopen_receipts_have_distinct_names() -> None:
+    recovery = _module()
+
+    # Both receipts share one schema and the shell resume's update no longer names
+    # the init-retry marker, so the progress key alone keeps the one-shots apart.
+    assert recovery._SHELL_RESUME_MARKER != recovery._RECOVERY_MARKER
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "invalid_marker", "failed_status", "unavailable"),
+    [
+        (
+            "_recovery_result",
+            "recovery marker is invalid",
+            "recovered-then-failed",
+            "recovery attribution is unavailable",
+        ),
+        (
+            "_shell_resume_result",
+            "shell resume marker is invalid",
+            "resumed-then-failed",
+            "shell resume attribution is unavailable",
+        ),
+    ],
+)
+def test_each_reopen_result_keeps_its_own_statuses_and_refusals(
+    wrapper: str, invalid_marker: str, failed_status: str, unavailable: str
+) -> None:
+    from types import SimpleNamespace
+
+    recovery = _module()
+    result = getattr(recovery.RecoveryService, wrapper)
+    marker = recovery.recovery_marker(
+        preflight_sha256="a" * 64,
+        helper_source_sha256="b" * 64,
+        claim_generation=1,
+        committed_at=datetime(2026, 9, 13, 5, 49, tzinfo=UTC),
+    )
+    failed = SimpleNamespace(
+        state=recovery.OperationState.ERROR, checkpoint="failed", error_code="SOME_CODE"
+    )
+    pending = SimpleNamespace(
+        state=recovery.OperationState.PENDING, checkpoint="namespace-ready", error_code=None
+    )
+    unexpected = SimpleNamespace(state=object(), checkpoint="failed", error_code=None)
+
+    assert result(failed, marker, "verified")["status"] == failed_status
+    assert result(pending, marker, "verified")["status"] == "verified"
+    with pytest.raises(recovery.RecoveryRefusal, match=unavailable):
+        result(unexpected, marker, "verified")
+    with pytest.raises(recovery.RecoveryRefusal, match=invalid_marker):
+        result(pending, {**marker, "schema": 2}, "verified")

@@ -2158,3 +2158,287 @@ async def test_postgresql17_destructive_and_reservation_orders_linearize(
         assert "capacity_destructive_fences" in tables
     finally:
         await database.dispose()
+
+
+@ASYNCIO_POSTGRESQL17
+async def test_postgresql17_shell_resume_is_one_atomic_one_shot_that_preserves_ownership(
+    postgresql17: PostgreSQL17,
+) -> None:
+    from exomem_provisioner.operation_recovery import ShellLiveObservation
+
+    target = _new_database(postgresql17, "shell")
+    migrated = _migrate(postgresql17, target)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+    assert target.settings is not None
+    database = ProvisionerDatabase(target.settings)
+
+    class Lock:
+        def matches_runtime_request(
+            self,
+            request: dict[str, object],
+            *,
+            wire_protocol: str,
+            selection: str | None = None,
+            action: str,
+        ) -> bool:
+            assert selection is None and action == "provision"
+            return wire_protocol == "exomem-cell-provisioner.v1" and request == request_value
+
+    class InitRetryObserver:
+        # Records instead of refusing: the service turns any observer exception into a
+        # refusal, so a double that raised would impersonate the guard under test.
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def observe(self, operation: Operation, resources: tuple[Resource, ...]):
+            self.calls += 1
+            raise AssertionError("unreachable: every init-retry call in this test refuses first")
+
+    class ShellObserver:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.alternate = False
+            self.seen: list[list[ResourceKind]] = []
+
+        async def observe_shell(
+            self, operation: Operation, resources: tuple[Resource, ...]
+        ) -> ShellLiveObservation:
+            # Record rather than assert: a double that refused on its own would stand in
+            # for the database resources check this suite exists to exercise.
+            self.seen.append([item.kind for item in resources])
+            self.calls += 1
+            digest = ("a" if not self.alternate or self.calls % 2 else "b") * 64
+            return ShellLiveObservation(
+                namespace_present=True,
+                provider_object_present=True,
+                claim_present=True,
+                claim_bound=False,
+                volume_present=False,
+                init_job_present=False,
+                runtime_admitted=False,
+                routes_present=0,
+                terminating=False,
+                retained_records_are_own=True,
+                identity_digest=digest,
+            )
+
+    request_value: dict[str, object] = {
+        "operationId": "provider-shell-postgresql",
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "tenantId": "tenant-shell-postgresql",
+        "cellId": "cell-shell-postgresql",
+        "protocolVersion": "1",
+        "releaseVersion": "0.77.0",
+        "provisionMode": "serve",
+    }
+    codec = AesGcmEnvelopeCodec.from_secret(target.settings.envelope_key.get_secret_value())
+    operation_id = str(uuid.uuid4())
+    observer = ShellObserver()
+    init_observer = InitRetryObserver()
+    service = RecoveryService(
+        sessions=database.session_factory,
+        codec=codec,
+        database_name=target.name,
+        database_role=target.role,
+        database_schema=target.schema,
+        # Generous: the concurrent invocations below serialize on the advisory lock,
+        # and a one-second deadline can expire under container load, not a defect.
+        database_lock_timeout_seconds=5,
+        deployment_lock=Lock(),  # type: ignore[arg-type]
+        observer=init_observer,  # type: ignore[arg-type]
+        shell_observer=observer,
+    )
+
+    def owned_resource(kind: ResourceKind, operation: Operation) -> Resource:
+        reference = f"shell-reference-{kind.value}"
+        return Resource(
+            operation_id=operation.id,
+            tenant_id=operation.tenant_id,
+            cell_id=operation.cell_id,
+            kind=kind,
+            reference_digest=hashlib.sha256(reference.encode()).hexdigest(),
+            reference_ciphertext=codec.encrypt_json(
+                {"reference": reference},
+                purpose=f"resource-reference:{operation.id}:{kind.value}",
+            ),
+            provider_operation_id=operation.external_operation_id,
+            provider_fence_generation=operation.fence_generation,
+        )
+
+    try:
+        async with database.session_factory.begin() as session:
+            operation = Operation(
+                id=operation_id,
+                action=OperationAction.PROVISION,
+                idempotency_key="shell-postgresql-key",
+                canonical_request_sha256=repository_module.canonical_request_sha256(request_value),
+                tenant_id="tenant-shell-postgresql",
+                cell_id="cell-shell-postgresql",
+                external_operation_id="provider-shell-postgresql",
+                provider_operation_id="provider-shell-postgresql",
+                fence_generation=7,
+                provider_fence_generation=7,
+                state=OperationState.ERROR,
+                caller_checkpoint="requested",
+                checkpoint="failed",
+                request_ciphertext=codec.encrypt_json(
+                    request_value, purpose="operation-request:provision:shell-postgresql-key"
+                ),
+                error_code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+                finalized_at=datetime.now(UTC),
+                # The measured shape, plus a failure budget a resume must not inherit.
+                progress={
+                    "pending_count": 96,
+                    "last_capacity_wait_reason": "capacity-live-observation-mismatch",
+                    "failure_attempts": 5,
+                },
+            )
+            session.add(operation)
+            session.add(TenantFence(tenant_id=operation.tenant_id, fence_generation=7))
+            await session.flush()
+            session.add(owned_resource(ResourceKind.KUBERNETES_NAMESPACE, operation))
+            session.add(
+                CapacityReservation(
+                    tenant_id=operation.tenant_id,
+                    cell_id=operation.cell_id,
+                    resource_name=cell_resource_name(operation.cell_id),
+                    reservation_class=CapacityReservationClass.USER,
+                    reserving_operation_id=operation_id,
+                    reserving_provider_operation_id=operation.external_operation_id,
+                    reserving_fence_generation=operation.fence_generation,
+                )
+            )
+
+        # Init-retry correctly refuses a namespace-only death, before any observation.
+        with pytest.raises(RecoveryRefusal, match="recovery preflight failed"):
+            await service.preflight(operation_id)
+        assert init_observer.calls == 0
+        assert (await service.shell_resume_preflight(operation_id))["status"] == "ready"
+        assert observer.seen[-1] == [ResourceKind.KUBERNETES_NAMESPACE]
+
+        # A second owned resource means the provision progressed past this reopen.
+        async with database.session_factory.begin() as session:
+            current = await session.get(Operation, operation_id)
+            assert current is not None
+            extra = owned_resource(ResourceKind.HELM_RELEASE, current)
+            session.add(extra)
+            await session.flush()
+            extra_id = extra.id
+        observed_before = observer.calls
+        with pytest.raises(RecoveryRefusal, match="recovery preflight failed"):
+            await service.shell_resume_preflight(operation_id)
+        # Refused by the database resources check, before any live observation.
+        assert observer.calls == observed_before
+        async with database.session_factory.begin() as session:
+            await session.delete(await session.get(Resource, extra_id))
+
+        # An observation that changes between its two reads refuses and writes nothing.
+        observer.alternate = True
+        with pytest.raises(RecoveryRefusal, match="live shell resume preflight failed"):
+            await service.shell_resume(operation_id)
+        observer.alternate = False
+
+        async def preserved() -> dict[str, object]:
+            async with database.session_factory() as session:
+                current = await session.get(Operation, operation_id)
+                assert current is not None
+                resources = (
+                    await session.scalars(
+                        select(Resource).where(Resource.operation_id == operation_id)
+                    )
+                ).all()
+                reservation = await session.scalar(
+                    select(CapacityReservation).where(
+                        CapacityReservation.reserving_operation_id == operation_id
+                    )
+                )
+                fence = await session.get(TenantFence, current.tenant_id)
+                assert reservation is not None and fence is not None
+                return {
+                    "operation": tuple(
+                        (column.name, getattr(current, column.name))
+                        for column in current.__table__.columns
+                        if column.name not in RecoveryService._CHANGED_COLUMNS
+                    ),
+                    "resources": tuple(
+                        tuple((c.name, getattr(r, c.name)) for c in r.__table__.columns)
+                        for r in sorted(resources, key=lambda item: item.id)
+                    ),
+                    "reservation": tuple(
+                        (c.name, getattr(reservation, c.name))
+                        for c in reservation.__table__.columns
+                    ),
+                    "fence": tuple((c.name, getattr(fence, c.name)) for c in fence.__table__.columns),
+                    # Excluded above as retarget-changeable columns; a shell resume must keep them.
+                    "request": (current.request_ciphertext, current.canonical_request_sha256),
+                }
+
+        before = await preserved()
+
+        # The marker and the transition roll back together.
+        async with database.session_factory.begin() as session:
+            await session.execute(
+                text(
+                    "CREATE FUNCTION shell_resume_test_refusal() RETURNS trigger "
+                    "LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced shell rollback'; END $$"
+                )
+            )
+            await session.execute(
+                text(
+                    "CREATE TRIGGER shell_resume_test_refusal BEFORE UPDATE "
+                    "ON operations FOR EACH ROW EXECUTE FUNCTION shell_resume_test_refusal()"
+                )
+            )
+        with pytest.raises(RecoveryRefusal, match="shell-resume-failed"):
+            await service.shell_resume(operation_id)
+        async with database.session_factory() as session:
+            rolled_back = await session.get(Operation, operation_id)
+            assert rolled_back is not None and rolled_back.state is OperationState.ERROR
+            assert "_storage_shell_resume_v1" not in rolled_back.progress
+            assert rolled_back.progress["failure_attempts"] == 5
+        async with database.session_factory.begin() as session:
+            await session.execute(text("DROP TRIGGER shell_resume_test_refusal ON operations"))
+            await session.execute(text("DROP FUNCTION shell_resume_test_refusal()"))
+
+        # Two concurrent invocations spend the one-shot exactly once. The advisory lock
+        # serializes them, so this proves the marker short-circuit, not an UPDATE race.
+        first, second = await asyncio.gather(
+            service.shell_resume(operation_id), service.shell_resume(operation_id)
+        )
+        assert {first["status"], second["status"]} == {"resumed", "already-resumed"}
+        assert await service.verify_shell_resume(operation_id) == {
+            **(first if first["status"] == "resumed" else second),
+            "status": "verified",
+        }
+
+        async with database.session_factory() as session:
+            resumed = await session.get(Operation, operation_id)
+            assert resumed is not None
+            assert resumed.state is OperationState.PENDING
+            assert resumed.checkpoint == "namespace-ready"
+            assert resumed.error_code is None and resumed.finalized_at is None
+            assert resumed.claim_owner is None and resumed.claim_token is None
+            assert "failure_attempts" not in resumed.progress
+            assert resumed.progress["pending_count"] == 96
+            assert (
+                resumed.progress["last_capacity_wait_reason"]
+                == "capacity-live-observation-mismatch"
+            )
+            assert set(resumed.progress["_storage_shell_resume_v1"]) == {
+                "schema",
+                "preflight_sha256",
+                "helper_source_sha256",
+                "claim_generation",
+                "committed_at",
+            }
+        assert await preserved() == before
+
+        # Once resumed, neither recovery can act on the operation again.
+        with pytest.raises(RecoveryRefusal, match="already progressed"):
+            await service.shell_resume_preflight(operation_id)
+        with pytest.raises(RecoveryRefusal, match="already progressed"):
+            await service.preflight(operation_id)
+        assert init_observer.calls == 0
+    finally:
+        await database.dispose()

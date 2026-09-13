@@ -2543,3 +2543,75 @@ async def test_expired_enrolled_custody_is_never_reset_even_with_stopped_unadmit
 async def _no_runtime_attestation(*_args, **_kwargs):
     """The synthesized path; the runtime signature is covered by its own tests."""
     return None
+
+
+@pytest.mark.asyncio
+async def test_shell_recovery_reader_needs_no_deployed_release_but_still_authenticates() -> None:
+    """A provision interrupted before its first apply owns no deployed release record."""
+    from exomem_provisioner.conflict_reason import ConflictReason
+
+    metadata = _metadata()
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+
+    def resource(*, name: str, envelope: str, uid: str):
+        return SimpleNamespace(
+            metadata=SimpleNamespace(
+                name=name,
+                namespace=metadata.resource_name,
+                annotations={
+                    **metadata.kubernetes_annotations,
+                    "exomem.io/recovery-envelope": envelope,
+                },
+                labels={},
+                uid=uid,
+                resource_version="1",
+                deletion_timestamp=None,
+            )
+        )
+
+    class Core:
+        pvc_envelope = envelopes["vaultPvc"]
+
+        def read_namespace(self, name):
+            return resource(name=name, envelope=envelopes["namespace"], uid="namespace-one")
+
+        def read_namespaced_persistent_volume_claim(self, name, namespace):
+            return resource(name=name, envelope=self.pvc_envelope, uid="pvc-one")
+
+        def read_namespaced_config_map(self, name, namespace):
+            return resource(
+                name=name, envelope=envelopes["providerOperationConfigMap"], uid="operation-one"
+            )
+
+        def list_namespaced_config_map(self, namespace, *, label_selector):
+            # The live cell: failed and pending-upgrade records only, none deployed.
+            return SimpleNamespace(items=[])
+
+    core = Core()
+    registry = KubernetesProviderRegistry(
+        core_v1=core,
+        apps_v1=SimpleNamespace(),
+        batch_v1=SimpleNamespace(),
+        custom_objects=SimpleNamespace(),
+        identity_verifier=IDENTITY_CODEC.verifier(),
+    )
+
+    with pytest.raises(MetadataConflict) as init_retry:
+        await registry.authenticate_recovery_record(metadata)
+    assert init_retry.value.reason is ConflictReason.HELM_RELEASE_RECORD_NOT_EXACT
+
+    digest = await registry.authenticate_shell_recovery_record(metadata)
+    assert len(digest) == 64 and int(digest, 16) >= 0
+
+    # Dropping the release requirement must not drop authentication of what remains.
+    core.pvc_envelope = "forged"
+    with pytest.raises(MetadataConflict):
+        await registry.authenticate_shell_recovery_record(metadata)

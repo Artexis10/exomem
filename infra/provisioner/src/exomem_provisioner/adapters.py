@@ -3354,6 +3354,54 @@ class HelmCliAdapter:
             )
         return revisions[0]
 
+    def _own_pending_record(
+        self, history: tuple[dict[str, Any], ...] | list[dict[str, Any]], chart: str
+    ) -> dict[str, Any] | None:
+        """The single newest abandoned record of this chart, or None if there is none.
+
+        Shared by the clearing path and the read-only recovery preflight so the
+        position rules cannot be stated twice and drift apart.
+        """
+        pending = [item for item in history if item.get("status") in self._PENDING_RELEASE_STATUSES]
+        if not pending:
+            return None
+        record = pending[0]
+        if (
+            len(pending) != 1
+            or record["revision"] != max(item["revision"] for item in history)
+            or record.get("chart") != chart
+        ):
+            raise self._pending_release_is_foreign()
+        return record
+
+    def _require_structural_ownership(
+        self,
+        history: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+        record: dict[str, Any],
+    ) -> None:
+        """Refuse an abandoned record whose surrounding history it cannot own.
+
+        Shared by the clearing path and the read-only recovery preflight: a
+        preflight that skipped any of these would admit a history the resumed
+        apply then refuses, spending the recovery on a guaranteed failure.
+        """
+        if record["status"] == "pending-install":
+            if len(history) != 1:
+                raise self._pending_release_is_foreign()
+            return
+        deployed = [item for item in history if item.get("status") == "deployed"]
+        if deployed:
+            if len(deployed) != 1 or deployed[0].get("chart") != record.get("chart"):
+                raise self._pending_release_is_foreign()
+        elif any(item.get("chart") != record.get("chart") for item in history):
+            # A first provision whose every attempt failed retains no deployed
+            # predecessor to compare, so demanding one makes its own abandoned
+            # record permanently unclearable. Absence is not evidence of a
+            # foreign writer: require instead that the whole retained history
+            # belong to this chart, and let the exact recorded target carry the
+            # ownership proof.
+            raise self._pending_release_is_foreign()
+
     @staticmethod
     def _pending_release_is_foreign() -> MetadataConflict:
         return MetadataConflict(
@@ -3416,28 +3464,72 @@ class HelmCliAdapter:
         call authenticates as its own is cleared, under a fresh claim and with
         API preconditions; a foreign one stays fenced and terminal.
         """
+        record = await self._authenticate_own_pending_release(metadata, values, environment)
+        if record is None:
+            return
+        await self._delete_pending_release(metadata, record["revision"], effect_guard=effect_guard)
+        await self._prove_pending_release_cleared(
+            metadata,
+            environment,
+            record["revision"],
+            pending_install=record["status"] == "pending-install",
+        )
+
+    async def retained_records_are_own(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        identity: dict[str, Any],
+    ) -> bool:
+        """Answer read-only whether the retained records belong to this operation.
+
+        Recovery asks this before it reopens an operation. It applies the apply
+        path's own position and structural rules through the same two helpers,
+        adds one stricter rule -- the whole retained history under the pinned
+        chart even when nothing is abandoned -- and defers exactly one test:
+        target equality, because the session revision a full comparison needs is
+        not the recovery observer's to read. It checks the identity the recorded
+        target carries instead, and the apply refuses any remaining difference
+        under the guard immediately before the effect.
+        """
+        environment = dict(self._HELM_ENVIRONMENT)
+        await self._require_version(environment)
+        history = await self._release_history(metadata, environment, absent_ok=True)
+        if history is None:
+            return True
+        chart = await self._chart_reference(environment)
+        if any(item.get("chart") != chart for item in history):
+            raise self._pending_release_is_foreign()
+        record = self._own_pending_record(history, chart)
+        if record is None:
+            return True
+        self._require_structural_ownership(history, record)
+        recorded = await self._revision_values(metadata, environment, record["revision"])
+        if recorded.get("providerIdentity") != identity or recorded.get("initOperationId") != (
+            identity.get("operationId")
+        ):
+            raise self._pending_release_is_foreign()
+        return True
+
+    async def _authenticate_own_pending_release(
+        self,
+        metadata: OpaqueProviderMetadata,
+        values: dict[str, Any],
+        environment: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """Return the abandoned record this exact target owns, or None if there is none.
+
+        Every refusal is raised here, so the clearing path and the read-only
+        recovery preflight share one decision rather than two that agree today.
+        """
         history = await self._release_history(metadata, environment, absent_ok=True)
         if history is None:
             # No record yet: `upgrade --install` writes the first one.
-            return
-        pending = [item for item in history if item.get("status") in self._PENDING_RELEASE_STATUSES]
-        if not pending:
-            return
-        record = pending[0]
-        if (
-            len(pending) != 1
-            or record["revision"] != max(item["revision"] for item in history)
-            or record.get("chart") != await self._chart_reference(environment)
-        ):
-            raise self._pending_release_is_foreign()
-        pending_install = record["status"] == "pending-install"
-        if pending_install:
-            if len(history) != 1:
-                raise self._pending_release_is_foreign()
-        else:
-            deployed = [item for item in history if item.get("status") == "deployed"]
-            if len(deployed) != 1 or deployed[0].get("chart") != record.get("chart"):
-                raise self._pending_release_is_foreign()
+            return None
+        record = self._own_pending_record(history, await self._chart_reference(environment))
+        if record is None:
+            return None
+        self._require_structural_ownership(history, record)
         try:
             recorded = await self._revision_values(metadata, environment, record["revision"])
         except MetadataConflict as error:
@@ -3448,10 +3540,7 @@ class HelmCliAdapter:
             raise
         if recorded != values:
             raise self._pending_release_is_foreign()
-        await self._delete_pending_release(metadata, record["revision"], effect_guard=effect_guard)
-        await self._prove_pending_release_cleared(
-            metadata, environment, record["revision"], pending_install=pending_install
-        )
+        return record
 
     async def _delete_pending_release(
         self,
