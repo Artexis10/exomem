@@ -337,7 +337,21 @@ def normalize_edit_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_edit_surface_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    """Normalize an adapter request while retaining the nested public shape."""
+    """Normalize an adapter request while retaining the nested public shape.
+
+    The result is a fixed point of this function. Every shared modifier is
+    emitted at the top level as well as inside `operation`, both holding the
+    resolved value, because the output is validated against the published
+    signature (which defaults the top-level flag to `False`) and normalized a
+    second time by the shared dispatcher. Without the top-level copy that second
+    pass compared the signature default against the explicit nested value and
+    refused every `validate_only=true` edit on the real MCP path with a phantom
+    "conflicting values" error. Genuine disagreements are still refused by the
+    first pass, which sees exactly what the caller sent.
+    """
     raw, operation = _resolve_edit_operation(arguments)
     nested = {"kind": operation.kind, **operation_to_leaf_payload(operation)}
-    return {**raw, "operation": nested}
+    shared = {
+        name: nested[name] for name in sorted(_SHARED_EDIT_MODIFIERS) if name in nested
+    }
+    return {**raw, **shared, "operation": nested}
