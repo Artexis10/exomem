@@ -64,12 +64,12 @@ def _client(handler) -> httpx.AsyncClient:  # noqa: ANN001
     return httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://worker")
 
 
-async def _until(predicate) -> None:  # noqa: ANN001
+async def _until(predicate, timeout: float = 1) -> None:  # noqa: ANN001
     async def wait() -> None:
         while not predicate():
             await asyncio.sleep(0.001)
 
-    await asyncio.wait_for(wait(), 1)
+    await asyncio.wait_for(wait(), timeout)
 
 
 class _HeldStream(httpx.AsyncByteStream):
@@ -830,5 +830,102 @@ def test_second_upgrade_waits_for_prior_get_reattachment_handshake() -> None:
             assert ingress.stats["streams"] == 1
             await ingress.aclose()
             await call
+
+    asyncio.run(scenario())
+
+
+def test_detached_get_stream_retries_reattachment_through_promotion() -> None:
+    """A promotion the client never noticed must not close its stream.
+
+    The first reattachment lands while the standby is still being promoted, so
+    the upstream answers 503. The ingress retries inside the cutover budget
+    instead of closing on the first non-success (D11).
+    """
+
+    async def scenario() -> None:
+        old_stream = _HeldStream(b"data: old\n\n")
+        new_stream = _HeldStream(b"data: new\n\n")
+        attempts = 0
+
+        async def old(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=old_stream
+            )
+
+        async def promoting(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                return httpx.Response(503, content=b"promoting")
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=new_stream
+            )
+
+        async with _client(old) as old_client, _client(promoting) as new_client:
+            ingress = ServiceIngress(
+                IngressLimits(
+                    heartbeat_interval=0.01,
+                    reattach_budget=5.0,
+                    reattach_backoff=0.01,
+                )
+            )
+            ingress.resume(old_client)
+            sent: list[dict] = []
+            delivered = False
+
+            async def receive() -> dict:
+                nonlocal delivered
+                if not delivered:
+                    delivered = True
+                    return {"type": "http.request", "body": b"", "more_body": False}
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+            async def send(message: dict) -> None:
+                sent.append(message)
+
+            call = asyncio.create_task(ingress(_scope("GET"), receive, send))
+            await _until(lambda: b"data: old\n\n" in _body(sent))
+            ingress.pause()
+            await asyncio.wait_for(ingress.detach_streams(), 1)
+            ingress.resume(new_client)
+            await _until(lambda: b"data: new\n\n" in _body(sent), timeout=5)
+            assert attempts >= 3
+            assert ingress.stats["streams"] == 1
+            await ingress.aclose()
+            await asyncio.wait_for(call, 1)
+
+    asyncio.run(scenario())
+
+
+def test_reattachment_closes_the_stream_once_the_cutover_budget_expires() -> None:
+    async def scenario() -> None:
+        old_stream = _HeldStream(b"data: old\n\n")
+
+        async def old(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=old_stream
+            )
+
+        async def never(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, content=b"still promoting")
+
+        async with _client(old) as old_client, _client(never) as new_client:
+            ingress = ServiceIngress(
+                IngressLimits(
+                    heartbeat_interval=0.01,
+                    reattach_budget=0.2,
+                    reattach_backoff=0.01,
+                )
+            )
+            ingress.resume(old_client)
+            call = asyncio.create_task(_call(ingress, scope=_scope("GET")))
+            await _until(lambda: ingress.stats["streams"] == 1)
+            ingress.pause()
+            await ingress.detach_streams()
+            ingress.resume(new_client)
+            await asyncio.wait_for(call, 5)
+            assert ingress.stats["streams"] == 0
+            await ingress.aclose()
 
     asyncio.run(scenario())

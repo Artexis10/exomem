@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -125,6 +126,7 @@ class LocalRuntimeActivation:
         self.media_worker: Any | None = None
         self.file_watcher: Any | None = None
         self.derived_drain: Any | None = None
+        self.vocabulary_recovery: Any | None = None
 
     def release(self) -> None:
         """Hand this process the ownership a standby refused, then activate."""
@@ -189,6 +191,7 @@ class LocalRuntimeActivation:
         starters = (
             ("graph drain", _start_graph_drain),
             ("media", self._start_media_worker),
+            ("vocabulary recovery", self._start_vocabulary_recovery),
         )
         for label, starter in starters:
             if self._shutdown.is_set():
@@ -288,6 +291,17 @@ class LocalRuntimeActivation:
 
     def _start_derived_drain(self, vault_root: Path) -> None:
         self.derived_drain = _start_derived_drain(vault_root)
+
+    def _start_vocabulary_recovery(self, vault_root: Path) -> None:
+        """Drain queued recovery in the background, not on a client review call."""
+        thread = threading.Thread(
+            target=drain_vocabulary_recovery,
+            args=(vault_root, self._shutdown),
+            name="exomem-vocabulary-recovery",
+            daemon=True,
+        )
+        self.vocabulary_recovery = thread
+        thread.start()
 
     def _start_file_watcher(self, vault_root: Path) -> None:
         self.file_watcher = _start_file_watcher(vault_root)
@@ -572,6 +586,63 @@ def probe_hosted_mutation_authority(vault_root: Path) -> tuple[bool, str]:
         )
         return False, "HOSTED_MUTATION_AUTHORITY_UNAVAILABLE"
     return True, "HOSTED_READY"
+
+
+#: How long the activation sequence waits for the graph projection to become
+#: current before giving up on this pass, and how many bounded recovery passes
+#: it will run (`seamless-managed-worker-handoff` D12).
+VOCABULARY_DRAIN_WAIT_SECONDS = 120.0
+VOCABULARY_DRAIN_PASSES = 256
+
+
+def drain_vocabulary_recovery(
+    vault_root: Path,
+    shutdown: threading.Event,
+    *,
+    wait_seconds: float = VOCABULARY_DRAIN_WAIT_SECONDS,
+    max_passes: int = VOCABULARY_DRAIN_PASSES,
+) -> int:
+    """Drain queued vocabulary recovery once the graph projection is current.
+
+    Rows queue while the projection warms, and until now only an explicit client
+    review call emptied them — on the personal service thirty accumulated across
+    one upgrade. Each pass is the existing bounded four-job window; the loop
+    stops as soon as a pass processes nothing, when the projection never becomes
+    current, or when the runtime shuts down. Returns the number of jobs drained.
+    """
+    from . import graph_sync, vocabulary_delivery
+    from .governance.principal import library_scope
+
+    deadline = time.monotonic() + wait_seconds
+    while not shutdown.is_set():
+        try:
+            current = graph_sync.status(vault_root)["state"] == "current"
+        except Exception:  # noqa: BLE001 - a background drain never breaks activation
+            current = False
+        if current:
+            break
+        if time.monotonic() >= deadline:
+            log.info("vocabulary recovery drain skipped; graph projection is not current")
+            return 0
+        shutdown.wait(0.25)
+    drained = 0
+    for _ in range(max_passes):
+        if shutdown.is_set():
+            break
+        try:
+            with library_scope():
+                result = vocabulary_delivery.recover(vault_root)
+        except Exception:  # noqa: BLE001 - recovery retries on the next activation
+            log.warning("vocabulary recovery pass failed", exc_info=True)
+            break
+        processed = result.get("processed")
+        processed = processed if isinstance(processed, int) and processed > 0 else 0
+        drained += processed
+        if not processed:
+            break
+    if drained:
+        log.info("drained %d queued vocabulary recovery job(s)", drained)
+    return drained
 
 
 def _start_metrics_persistence() -> None:

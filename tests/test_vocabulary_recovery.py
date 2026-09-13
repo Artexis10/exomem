@@ -41,3 +41,65 @@ def test_empty_recovery_does_not_create_a_store(tmp_path):
     with library_scope():
         assert vocabulary_recovery.page(tmp_path, limit=4) == ()
     assert not vocabulary_recovery.deferred_index.store_path(tmp_path).exists()
+
+
+def test_activation_drains_queued_recovery_once_the_projection_is_current(tmp_path, monkeypatch):
+    """Queued rows drain in the background, with no client review call (D12)."""
+    import threading
+
+    from exomem import graph_sync, server_runtime, vocabulary_review
+
+    with library_scope():
+        for index in range(9):
+            vocabulary_recovery.enqueue(tmp_path, str(index), f"Knowledge Base/Notes/{index}.md")
+        assert len(vocabulary_recovery.page(tmp_path, limit=4)) == 4
+
+    reviews = []
+    monkeypatch.setattr(
+        vocabulary_review, "review", lambda *a, **k: reviews.append(a) or {}
+    )
+    monkeypatch.setattr(vocabulary_delivery.vocabulary_review, "_visible", lambda root, item: True)
+    monkeypatch.setattr(
+        vocabulary_delivery,
+        "_project",
+        lambda root, path, continuation: {
+            "sync": {"state": "current"},
+            "continuation": None,
+            "items": [],
+        },
+    )
+    monkeypatch.setattr(graph_sync, "status", lambda root: {"state": "current"})
+
+    drained = server_runtime.drain_vocabulary_recovery(tmp_path, threading.Event())
+
+    assert drained == 9
+    assert reviews == []
+    with library_scope():
+        assert vocabulary_recovery.page(tmp_path, limit=4) == ()
+
+
+def test_the_drain_gives_up_when_the_projection_never_becomes_current(tmp_path, monkeypatch):
+    import threading
+
+    from exomem import graph_sync, server_runtime
+
+    with library_scope():
+        vocabulary_recovery.enqueue(tmp_path, "0", "Knowledge Base/Notes/0.md")
+    monkeypatch.setattr(graph_sync, "status", lambda root: {"state": "stale"})
+    drained = server_runtime.drain_vocabulary_recovery(
+        tmp_path, threading.Event(), wait_seconds=0.05
+    )
+    assert drained == 0
+    with library_scope():
+        assert len(vocabulary_recovery.page(tmp_path, limit=4)) == 1
+
+
+def test_a_shutdown_stops_the_drain(tmp_path, monkeypatch):
+    import threading
+
+    from exomem import graph_sync, server_runtime
+
+    monkeypatch.setattr(graph_sync, "status", lambda root: {"state": "current"})
+    shutdown = threading.Event()
+    shutdown.set()
+    assert server_runtime.drain_vocabulary_recovery(tmp_path, shutdown) == 0
