@@ -1270,3 +1270,133 @@ def test_mutation_response_detail_is_declared_once_for_every_shared_surface() ->
     assert cli_ops.coerce(command.params, {"response_detail": "full"}) == {
         "response_detail": "full"
     }
+
+
+# --------------------------------------------------------- capture-sweep advisory
+
+
+CAPTURE_SWEEP_LEAF = {
+    "boundary": "quiet-interval",
+    "rule": "one bounded pass over the recent exchange; stay silent when nothing qualifies",
+    "consider": ["conclusion", "outcome or state change", "entity facet"],
+    "written_recently": ["exomem://memory/11111111-1111-4111-8111-111111111111"],
+    "unpaged_mentions": ["Venue booking system"],
+}
+
+
+def _committed_terminal_with_leaf(leaf: dict):
+    mutation_terminal = _terminal_module()
+    terminal = mutation_terminal.committed_terminal(
+        leaf,
+        request_id="22222222-2222-4222-8222-222222222222",
+        receipt_id="receipt-sweep",
+        idempotency_key="sweep-key",
+    )
+    terminal["warnings_count"] = 0
+    return mutation_terminal, terminal
+
+
+def _sweep_leaf(container: str | None = None, **overrides):
+    block = {**CAPTURE_SWEEP_LEAF, **overrides}
+    leaf = {
+        "path": "Knowledge Base/Notes/Insights/sweep.md",
+        "warnings": [],
+        "mutated": True,
+    }
+    if container is None:
+        leaf["capture_sweep"] = block
+    else:
+        leaf[container] = {"capture_sweep": block}
+    return leaf
+
+
+@pytest.mark.parametrize("container", (None, "creation", "semantic", "source"))
+def test_capture_sweep_is_lifted_from_every_write_container(container) -> None:
+    mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(container))
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert compact["capture_sweep"] == CAPTURE_SWEEP_LEAF
+
+
+def test_capture_sweep_is_absent_rather_than_null_when_the_leaf_has_none() -> None:
+    mutation_terminal, terminal = _committed_terminal_with_leaf(
+        {"path": "Knowledge Base/Notes/Insights/sweep.md", "warnings": [], "mutated": True}
+    )
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert "capture_sweep" not in compact
+
+
+def test_capture_sweep_is_stripped_from_the_legacy_detail() -> None:
+    for container in (None, "creation", "semantic", "source"):
+        mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(container))
+
+        legacy = mutation_terminal.project_terminal(terminal, "legacy")
+
+        assert "capture_sweep" not in legacy
+        if container is not None:
+            assert "capture_sweep" not in legacy[container]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"boundary": "whenever-it-feels-right"},
+        {"boundary": 7},
+        {"consider": []},
+        {"consider": "conclusion"},
+        {"rule": ""},
+        {"rule": "x" * 4096},
+        {"written_recently": ["https://example.invalid/page"]},
+        {"written_recently": ["exomem://memory/" + "a" * 4096]},
+        {"written_recently": ["exomem://memory/1"] * 9},
+        {"unpaged_mentions": ["x" * 4096]},
+        {"unpaged_mentions": ["a", "b", "c", "d", "e", "f"]},
+        {"unpaged_mentions": [{"name": "a"}]},
+    ),
+)
+def test_an_out_of_bounds_capture_sweep_is_dropped_rather_than_widening_the_wire(
+    overrides,
+) -> None:
+    mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(None, **overrides))
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert "capture_sweep" not in compact
+
+
+def test_capture_sweep_is_not_a_key_a_client_branches_on() -> None:
+    mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(None))
+
+    with_block = mutation_terminal.project_terminal(terminal, "compact")
+    plain_terminal = mutation_terminal.committed_terminal(
+        {"path": "Knowledge Base/Notes/Insights/sweep.md", "warnings": [], "mutated": True},
+        request_id="22222222-2222-4222-8222-222222222222",
+        receipt_id="receipt-sweep",
+        idempotency_key="sweep-key",
+    )
+    plain_terminal["warnings_count"] = 0
+    without_block = mutation_terminal.project_terminal(plain_terminal, "compact")
+
+    assert {k: v for k, v in with_block.items() if k != "capture_sweep"} == without_block
+
+
+def test_one_invocation_carries_at_most_one_capture_sweep_block() -> None:
+    """A leaf that somehow carries the block twice still projects one, and the
+    container precedence is the one every other advisory already uses."""
+    mutation_terminal, terminal = _committed_terminal_with_leaf(
+        {
+            "path": "Knowledge Base/Notes/Insights/sweep.md",
+            "warnings": [],
+            "mutated": True,
+            "capture_sweep": CAPTURE_SWEEP_LEAF,
+            "semantic": {"capture_sweep": {**CAPTURE_SWEEP_LEAF, "unpaged_mentions": ["Other"]}},
+        }
+    )
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert isinstance(compact["capture_sweep"], dict)
+    assert compact["capture_sweep"]["unpaged_mentions"] == ["Other"]

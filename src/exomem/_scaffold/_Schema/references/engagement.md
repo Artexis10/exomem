@@ -127,6 +127,18 @@ landing, not during the flight.
 Do not wait to be asked. "Did you save that?" arriving after a result already
 landed is the failure, not the prompt.
 
+**One capture is rarely the whole episode.** After any capture, make one bounded
+episode-completeness pass over the recent exchange for anything else that passes
+the same reuse-value test — would it materially improve a later decision, lookup,
+repeated task, comparison or continuation? For example: a conclusion, an outcome
+or state change, a stable preference, a method or parameter, an entity facet, an
+operational or vendor quirk, evidence worth preserving, a relation, a planning
+implication, a record implication. That list is examples rather than a boundary.
+One pass, not a loop: never re-write what a write response lists as written
+recently, and stay silent when nothing qualifies. A write response may carry a
+`capture_sweep` block saying this is the first write after a quiet interval; it
+is the prompt for the pass, never a demand that something be written.
+
 ## Generated artifact adoption
 
 Generated drafts stay ephemeral. Generation, preview, filename, MIME type,

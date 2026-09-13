@@ -947,6 +947,11 @@ class CreationCommit:
     # a second one would be a second thing to keep fail-open; it does not share
     # the seam's licence to skip a disclosure decision, and does not get one.
     due_state: dict[str, Any] | None = None
+    # Advisory only, and a THIRD kind again: the two above describe the page and
+    # the vault, while this one describes the EPISODE this write sits in -- it
+    # asks the agent for one bounded pass over the recent exchange after a quiet
+    # interval. Same seam, same fail-open guard, its own governance.
+    capture_sweep: dict[str, Any] | None = None
     # Server-internal point-lookup context. The mutation terminal consumes and
     # strips it; no response detail exposes a local vault path.
     relation_advisory_context: dict[str, str] | None = None
@@ -969,6 +974,8 @@ class CreationCommit:
             value["records_routing"] = self.records_routing
         if self.due_state is not None:
             value["due_state"] = self.due_state
+        if self.capture_sweep is not None:
+            value["capture_sweep"] = self.capture_sweep
         if self.relation_advisory_context is not None:
             value["_relation_advisory_context"] = self.relation_advisory_context
         return value
@@ -1046,6 +1053,9 @@ class ExistingCommit:
     # a second one would be a second thing to keep fail-open; it does not share
     # the seam's licence to skip a disclosure decision, and does not get one.
     due_state: dict[str, Any] | None = None
+    # Advisory only, and a THIRD kind again: the two above describe the page and
+    # the vault, while this one describes the EPISODE this write sits in.
+    capture_sweep: dict[str, Any] | None = None
     relation_advisory_context: dict[str, str] | None = None
     # Exact canonical write bytes, not the normalized semantic source hash.
     # Absent on legacy/replay results without an exact byte proof.
@@ -1070,6 +1080,8 @@ class ExistingCommit:
             value["records_routing"] = self.records_routing
         if self.due_state is not None:
             value["due_state"] = self.due_state
+        if self.capture_sweep is not None:
+            value["capture_sweep"] = self.capture_sweep
         if self.relation_advisory_context is not None:
             value["_relation_advisory_context"] = self.relation_advisory_context
         if self.after_hash is not None:
@@ -2419,6 +2431,56 @@ def _due_state_block(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
         return None
 
 
+def _capture_sweep_block(
+    vault_root: Path,
+    state: Any,
+    corpus: semantic_contract.SemanticCorpusContext | None,
+) -> dict[str, Any] | None:
+    """The episode-completeness advisory this write may carry.
+
+    Shares `_structure_suggestion`'s placement and its fail-open guard. Unlike
+    `_due_state_block` it costs one digest-cached file read and nothing else: the
+    wikilinks come from the page state the preflight already built and their
+    resolution runs against the corpus context that same preflight already holds,
+    and the one file is the entity-type extension registry the hint's registry
+    filter needs. No writer lease is taken and no vault-wide read happens here.
+
+    It also records the write in the carrier's own ledger, which is why it is
+    called even when it returns None: the quiet interval is measured from the
+    latest WRITE, not from the latest advisory.
+
+    A fault here costs the caller an advisory, never the write.
+    """
+    try:
+        from . import capture_sweep
+
+        return capture_sweep.block(
+            vault_root,
+            page_state=state,
+            corpus=corpus,
+            ref=_page_reference(state),
+        )
+    except Exception:  # noqa: BLE001 — an episode advisory never breaks a commit
+        log.debug("capture-sweep advisory failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _page_reference(state: Any) -> str | None:
+    """The canonical `exomem://memory/<id>` reference for a committed page state.
+
+    None when the page carries no stable identity: the dedupe list is a
+    convenience for the agent, and a path is not a reference.
+    """
+    try:
+        if getattr(state, "identity_kind", None) != "exomem_id":
+            return None
+        from . import memory_refs
+
+        return memory_refs.memory_ref(state.identity)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def commit_existing(
     vault_root: Path,
     *,
@@ -2446,6 +2508,7 @@ def commit_existing(
     _observation_delta(vault_root, preflight.after, routing)
     delivered_routing = _records_routing_for_delivery(vault_root, routing)
     due = _due_state_block(vault_root, preflight.path)
+    sweep = _capture_sweep_block(vault_root, preflight.after, preflight.after_corpus)
     context = {
         "vault": str(Path(vault_root)),
         "registry_hash": preflight.after.relation_registry_hash,
@@ -2455,6 +2518,7 @@ def commit_existing(
         structure_suggestion=suggestion,
         records_routing=delivered_routing,
         due_state=due,
+        capture_sweep=sweep,
         relation_advisory_context=context,
     )
 
@@ -3939,6 +4003,7 @@ def commit_creation(
     _observation_delta(vault_root, preflight.semantic_state, routing)
     delivered_routing = _records_routing_for_delivery(vault_root, routing)
     due = _due_state_block(vault_root, preflight.destination)
+    sweep = _capture_sweep_block(vault_root, preflight.semantic_state, preflight.corpus)
     context = {
         "vault": str(Path(vault_root)),
         "registry_hash": preflight.semantic_state.relation_registry_hash,
@@ -3948,6 +4013,7 @@ def commit_creation(
         structure_suggestion=suggestion,
         records_routing=delivered_routing,
         due_state=due,
+        capture_sweep=sweep,
         relation_advisory_context=context,
     )
 

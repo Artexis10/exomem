@@ -902,6 +902,98 @@ def _due_state_projection(leaf: Any) -> tuple[dict[str, Any] | None, str]:
     return None, ""
 
 
+#: Wire bounds on the advisory capture-sweep block. This module's own numbers
+#: rather than an import of the producer's, for the reason stated above the
+#: due-state bounds: the terminal re-validates what a leaf attached instead of
+#: trusting it, and a bound that came from the producer would validate nothing.
+#: The boundary vocabulary IS restated here, unlike the due-state categories,
+#: because it is closed by design and three tokens long -- a drifting copy of it
+#: would be visible, while an unbounded token would let the leaf name anything.
+_CAPTURE_SWEEP_BOUNDARIES = frozenset({"quiet-interval"})
+_MAX_CAPTURE_SWEEP_RULE_CHARS = 400
+_MAX_CAPTURE_SWEEP_CLASSES = 12
+_MAX_CAPTURE_SWEEP_CLASS_CHARS = 64
+_MAX_CAPTURE_SWEEP_REFS = 8
+_MAX_CAPTURE_SWEEP_MENTIONS = 5
+_MAX_CAPTURE_SWEEP_MENTION_CHARS = 64
+
+
+def _capture_sweep_projection(leaf: Any) -> dict[str, Any] | None:
+    """Lift one advisory capture-sweep block out of a write leaf.
+
+    Same posture as the two projections above, and dropped rather than truncated
+    for the same reason: a malformed or oversized advisory is a bug or an
+    untrusted leaf, and silently repairing one would make the wire contract
+    whatever the producer happened to send.
+
+    What it describes is neither of the other two: `structure_suggestion` is
+    evidence about the page just written and `due_state` is a count of what the
+    vault owes, while this is a prompt about the EPISODE the write sits in. It
+    carries no emission decision here -- the producer's quiet-interval ledger
+    already made it -- so unlike `due_state` there is no `_vault` hint to strip.
+    """
+    if not isinstance(leaf, Mapping):
+        return None
+    for container_key in ("creation", "semantic", "source", None):
+        container = leaf if container_key is None else leaf.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        value = container.get("capture_sweep")
+        if not isinstance(value, Mapping):
+            continue
+        boundary = value.get("boundary")
+        rule = value.get("rule")
+        consider = value.get("consider")
+        if boundary not in _CAPTURE_SWEEP_BOUNDARIES:
+            continue
+        if not isinstance(rule, str) or not 0 < len(rule) <= _MAX_CAPTURE_SWEEP_RULE_CHARS:
+            continue
+        if not isinstance(consider, (list, tuple)) or not (
+            0 < len(consider) <= _MAX_CAPTURE_SWEEP_CLASSES
+        ):
+            continue
+        if not all(
+            isinstance(item, str) and 0 < len(item) <= _MAX_CAPTURE_SWEEP_CLASS_CHARS
+            for item in consider
+        ):
+            continue
+        projected: dict[str, Any] = {
+            "boundary": boundary,
+            "rule": rule,
+            "consider": list(consider),
+        }
+        written = value.get("written_recently")
+        if written is not None:
+            if not isinstance(written, (list, tuple)) or len(written) > _MAX_CAPTURE_SWEEP_REFS:
+                continue
+            if not all(
+                isinstance(ref, str)
+                and ref.startswith(_ADVISORY_REF_SCHEME)
+                and len(ref) <= _MAX_DUE_STATE_REF_CHARS
+                for ref in written
+            ):
+                continue
+            if written:
+                projected["written_recently"] = list(written)
+        mentions = value.get("unpaged_mentions")
+        if mentions is not None:
+            if (
+                not isinstance(mentions, (list, tuple))
+                or len(mentions) > _MAX_CAPTURE_SWEEP_MENTIONS
+            ):
+                continue
+            if not all(
+                isinstance(name, str)
+                and 0 < len(name) <= _MAX_CAPTURE_SWEEP_MENTION_CHARS
+                for name in mentions
+            ):
+                continue
+            if mentions:
+                projected["unpaged_mentions"] = list(mentions)
+        return projected
+    return None
+
+
 def _admit_due_state(block: dict[str, Any], vault_hint: str) -> bool:
     """Decide, at the point of DELIVERY, whether this response carries the block.
 
@@ -957,32 +1049,44 @@ def _iso_date(value: Any) -> bool:
     )
 
 
-def _without_advisory_due_state(result: Any) -> Any:
-    """Strip the due-state block from the leaf the legacy detail and diagnostics see.
+def _without_leaf_advisory(result: Any, advisory_key: str) -> Any:
+    """Strip one advisory block from the leaf the legacy detail and diagnostics see.
 
-    The legacy detail returns the leaf verbatim, so leaving the block there would
+    The legacy detail returns the leaf verbatim, so leaving a block there would
     put an advisory on exactly the response shape the spec says omits it. Mirrors
     `_without_graph_rebuild_handoff`: the leaf attaches, the terminal decides who
     sees it.
+
+    Parameterised by key rather than copied per advisory, because "which shapes
+    omit an advisory" is one rule and a second copy of it would drift the day a
+    third carrier lands on this seam.
     """
     if not isinstance(result, Mapping):
         return result
     changed = False
     stripped: dict[str, Any] = {}
     for key, value in result.items():
-        if key == "due_state":
+        if key == advisory_key:
             changed = True
             continue
         if (
             key in ("creation", "semantic", "source")
             and isinstance(value, Mapping)
-            and ("due_state" in value)
+            and (advisory_key in value)
         ):
-            stripped[key] = {inner: value[inner] for inner in value if inner != "due_state"}
+            stripped[key] = {inner: value[inner] for inner in value if inner != advisory_key}
             changed = True
             continue
         stripped[key] = value
     return stripped if changed else result
+
+
+def _without_advisory_due_state(result: Any) -> Any:
+    return _without_leaf_advisory(result, "due_state")
+
+
+def _without_advisory_capture_sweep(result: Any) -> Any:
+    return _without_leaf_advisory(result, "capture_sweep")
 
 
 def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
@@ -1413,13 +1517,16 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         return result
     raw_leaf = result["leaf_result"]
     due_state, due_state_vault = _due_state_projection(raw_leaf)
+    capture_sweep = _capture_sweep_projection(raw_leaf)
     relation_advisory = (
         _relation_advisory_projection(raw_leaf)
         if result.get("state") == "committed"
         else None
     )
     leaf = _without_relation_advisory_context(
-        _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
+        _without_advisory_capture_sweep(
+            _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
+        )
     )
     if detail == "legacy":
         return leaf
@@ -1567,6 +1674,12 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact["records_routing"] = records_routing
     if due_state is not None and _admit_due_state(due_state, due_state_vault):
         compact["due_state"] = due_state
+    if capture_sweep is not None:
+        # No admission step, unlike due-state. This carrier's governor is its own
+        # quiet-interval ledger and it already ran at the seam, where the write it
+        # measures actually happened. See `capture_sweep`'s module docstring on
+        # why this ledger records writes rather than deliveries.
+        compact["capture_sweep"] = capture_sweep
     if relation_advisory is not None:
         compact["relation_advisory"] = relation_advisory
     if "vocabulary_sync" in result or "vocabulary_advisory" in result:

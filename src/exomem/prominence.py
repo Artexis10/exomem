@@ -143,6 +143,28 @@ _ARTIFACT_ADOPTION_CAPTURE = (
     "relations use link_acceptance."
 )
 
+#: The episode-completeness pass, appended to `balanced` and `maximal` only.
+#: `light` and `off` capture on request, so asking them to sweep would be asking
+#: them to capture proactively, which is the thing those levels exist to refuse.
+#:
+#: The class list is EXAMPLES and says so twice — "for example" opening it and no
+#: "only" anywhere. An agent reads a closed list inside a capture contract as a
+#: boundary, so an enumeration here would narrow capture rather than complete it,
+#: which is the opposite of the point.
+#: Cut to the minimum that carries the whole rule, because this text sits inside
+#: `engagement` and therefore in FRONT of the action catalogue in the compact
+#: payload. The full class list is not lost: the wire block's `consider` key
+#: carries all ten, and a client that receives this contract receives that block
+#: on its next durable write. What must survive here is the rule, not the roster.
+_EPISODE_SWEEP_CAPTURE = (
+    " After any capture, make one bounded episode pass over the recent exchange for "
+    "anything else that would materially improve a later decision, lookup, repeated "
+    "task, comparison or continuation — for example an outcome, a stable preference, "
+    "a method, an entity facet or an operational quirk; examples, not a closed set. "
+    "Never re-write what the response lists as written recently, and stay silent "
+    "when nothing qualifies."
+)
+
 _CAPTURE_EFFECTIVE_TEMPLATE = MappingProxyType(
     {
         "off": MappingProxyType(
@@ -296,7 +318,8 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "Transition only on explicit user intent; otherwise leave Planning "
             "unchanged or, under the resolved posture, propose a bounded review."
         )
-        + _ARTIFACT_ADOPTION_CAPTURE,
+        + _ARTIFACT_ADOPTION_CAPTURE
+        + _EPISODE_SWEEP_CAPTURE,
         narration=(
             "Stay quiet; cite useful recall and report a write in one line."
         ),
@@ -329,7 +352,8 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "Transition only on explicit user intent; otherwise leave Planning "
             "unchanged or, under the resolved posture, propose a bounded review."
         )
-        + _ARTIFACT_ADOPTION_CAPTURE,
+        + _ARTIFACT_ADOPTION_CAPTURE
+        + _EPISODE_SWEEP_CAPTURE,
         narration=(
             "Say what you did. Name what you recalled and cite it; state one line "
             "after every write. The user should be able to see memory working "

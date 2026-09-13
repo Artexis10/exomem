@@ -1607,6 +1607,11 @@ def op_bootstrap(
                     "MCP cannot observe tool-free turns"
                 ),
                 "due_state_authority": "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering",
+                # Command-free for the same reason as the due-state lines above,
+                # and it matters MOST here: the block arrives unasked on a
+                # hookless client's ordinary write response, and that client has
+                # no detector-aware skill behind it.
+                "capture_sweep_handling": "a `capture_sweep` block on a write response means this is the first durable write after a quiet interval: make one bounded pass over the recent exchange for anything else worth keeping, judged by whether it would materially improve a later decision, lookup, repeated task, comparison or continuation. Its `consider` list is examples, not a closed set; `written_recently` is what not to write again, and `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does",
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
                 "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
@@ -1984,6 +1989,7 @@ _SESSION_POST_WRITE_KEYS = (
     "due_state",
     "due_state_handling",
     "due_state_authority",
+    "capture_sweep_handling",
     "artifact_role_state_handling",
     "review_reason",
     "family_disposition",
@@ -6560,7 +6566,7 @@ def op_preserve_artifacts(
     # a projected category (design D3). The carriage value is the session
     # channel — a first qualifying response, and change-only deltas from
     # elsewhere in the conversation.
-    return _carrying_due_state(vault_root, result)
+    return _carrying_batch_advisories(vault_root, result)
 
 
 def op_transfer_artifact(
@@ -6636,7 +6642,7 @@ def op_process_media(
     # `retry` re-enqueues in the machine-local job store and commits nothing, so
     # the commit gate inside the carrier keeps it silent — that is the contract,
     # not an omission.
-    return _carrying_due_state(vault_root, result)
+    return _carrying_batch_advisories(vault_root, result)
 
 
 def _process_media(
@@ -7413,6 +7419,55 @@ def _carrying_due_state(vault_root: Path, result: Any) -> Any:
     return {**result, "due_state": {**block, "_vault": str(vault_root)}}
 
 
+def _carrying_capture_sweep(vault_root: Path, result: Any) -> Any:
+    """Attach the post-batch capture-sweep advisory, at most once for the batch.
+
+    The mirror of `_carrying_due_state`, and it exists for the same structural
+    reason: an operation leaf commits many governed writes behind one response,
+    so the advisory belongs at the end of the batch rather than once per write.
+
+    It is also the ONLY place a batch's sweep can be decided. Inside
+    `due_state.batch_scope` the page and structured seams deliberately neither
+    produce nor record (see `capture_sweep.block`), because a batch is one
+    episode boundary: letting the first of twelve writes consume the quiet
+    interval would leave this carrier with nothing to report about the batch it
+    is reporting on.
+
+    Gated on an actual commit for the same reason `_carrying_due_state` is: a
+    clean-vault repair pass, already-valid media, a `retry` re-enqueue and a
+    verified replay all commit nothing and have no terminal to carry a block on.
+
+    A failure here costs the caller an advisory and never the committed batch.
+    """
+    from .writer_lease import active_mutation_committed
+
+    if not isinstance(result, dict) or "capture_sweep" in result:
+        return result
+    if not active_mutation_committed():
+        return result
+    try:
+        from . import capture_sweep as capture_sweep_module
+
+        block = capture_sweep_module.block(vault_root)
+    except Exception:  # noqa: BLE001 — an advisory never breaks a committed batch
+        log.debug("capture-sweep batch block failed (non-fatal)", exc_info=True)
+        return result
+    if not block:
+        return result
+    return {**result, "capture_sweep": block}
+
+
+def _carrying_batch_advisories(vault_root: Path, result: Any) -> Any:
+    """Both post-batch advisories, in one place, for every operation leaf.
+
+    One seam rather than two call chains: the two carriers answer different
+    questions but they attach at exactly the same moment — after the batch scope
+    has exited and the deltas have been applied — and a leaf that acquired one
+    but not the other would be a silent coverage gap rather than a visible one.
+    """
+    return _carrying_capture_sweep(vault_root, _carrying_due_state(vault_root, result))
+
+
 def _set_family_disposition(
     vault_root: Path,
     *,
@@ -8150,7 +8205,7 @@ def op_adopt_vault(
             semantic_example_limit=semantic_example_limit,
         )
         _apply_batch_deltas(vault_root, _adopted_paths(result))
-    return _carrying_due_state(vault_root, result)
+    return _carrying_batch_advisories(vault_root, result)
 
 
 _ADOPTION_STUDIO_ACTIONS = (
@@ -8295,7 +8350,7 @@ def op_adoption_studio(
                     only_paths=only_paths,
                 )
                 _apply_batch_deltas(vault_root, _adoption_run_paths(applied))
-            return _carrying_due_state(vault_root, applied)
+            return _carrying_batch_advisories(vault_root, applied)
         if action == "cancel":
             return adoption_run_module.cancel(vault_root, run_id=run_id, why=why)
         if action == "finish":
@@ -8327,7 +8382,7 @@ def op_adoption_studio(
                 why=why,
                 expected_hash=expected_hash,
             )
-        return _carrying_due_state(vault_root, applied_proposal)
+        return _carrying_batch_advisories(vault_root, applied_proposal)
     except adoption_run_module.AdoptionRunError as exc:
         raise ValueError(f"{exc.code}: {exc.reason}") from exc
     except Exception as exc:  # structured proposal errors carry code/reason
@@ -8567,7 +8622,7 @@ def op_maintain_memory(
             return invoke_curation()
         with due_state_module.batch_scope(vault_root):
             curated = invoke_curation()
-        return _carrying_due_state(vault_root, curated)
+        return _carrying_batch_advisories(vault_root, curated)
     if mode == "structured-files":
         if (
             not isinstance(collection, str)
@@ -8603,7 +8658,7 @@ def op_maintain_memory(
         # Renames and rendered bodies, not authored obligations, so no batch
         # deltas. A verified replay commits nothing and the carrier's commit
         # gate keeps its closed receipt shape untouched.
-        return _carrying_due_state(vault_root, migrated)
+        return _carrying_batch_advisories(vault_root, migrated)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -8628,7 +8683,7 @@ def op_maintain_memory(
             # carries would describe the vault as it was BEFORE the pass that
             # just rewrote it (design D3, task 1.5).
             _apply_batch_deltas(vault_root, _audit_fix_paths(report))
-        return _carrying_due_state(vault_root, report)
+        return _carrying_batch_advisories(vault_root, report)
     if mode == "reconcile":
         with due_state_module.batch_scope(vault_root):
             # No batch deltas here on purpose: `op_reconcile` already runs
@@ -8639,14 +8694,14 @@ def op_maintain_memory(
                 dry_run=False if dry_run is None else dry_run,
                 rebuild_graph=rebuild_graph,
             )
-        return _carrying_due_state(vault_root, report)
+        return _carrying_batch_advisories(vault_root, report)
     if mode == "backfill-ids":
         with due_state_module.batch_scope(vault_root):
             report = memory_refs_module.backfill_ids(
                 vault_root, dry_run=True if dry_run is None else dry_run
             )
             _apply_batch_deltas(vault_root, list(report.get("updated") or []))
-        return _carrying_due_state(vault_root, report)
+        return _carrying_batch_advisories(vault_root, report)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
         "backfill-ids, structured-files, or curation"
