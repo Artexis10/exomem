@@ -8,6 +8,17 @@ from typing import Any
 
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,511}\Z")
 
+# Job-spec fields a Kubernetes API server fills in when the manifest omits them.
+# Every closed-set Job proof tolerates exactly these, and
+# tests/test_kubernetes_defaulting_conformance.py checks the list against a real
+# API server, so the proofs cannot silently fall behind the cluster.
+JOB_SPEC_SERVER_DEFAULTS: dict[str, Any] = {
+    "completionMode": "NonIndexed",
+    "suspend": False,
+    "manualSelector": False,
+    "podReplacementPolicy": "TerminatingOrFailed",
+}
+
 
 def metadata_matches(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
     try:

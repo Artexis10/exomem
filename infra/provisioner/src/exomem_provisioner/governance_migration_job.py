@@ -21,7 +21,7 @@ from kubernetes.client import ApiClient
 from .adapters import _retryable_kubernetes_error
 from .conflict_reason import ConflictReason
 from .driver import DriverRetryable, DriverTerminal
-from .job_execution import metadata_matches, pod_spec_matches
+from .job_execution import JOB_SPEC_SERVER_DEFAULTS, metadata_matches, pod_spec_matches
 from .lifecycle import MetadataConflict, OpaqueProviderMetadata
 from .repository import ClaimConflict, StaleFence
 
@@ -475,14 +475,15 @@ class KubernetesGovernanceMigrationAdapter:
         for key, value in body["spec"].items():
             if key != "template" and (type(spec.get(key)) is not type(value) or spec[key] != value):
                 raise _refuse()
-        defaults = {
-            "completionMode": "NonIndexed",
-            "suspend": False,
-            "manualSelector": False,
-        }
+        defaults = JOB_SPEC_SERVER_DEFAULTS
         if set(spec) - set(body["spec"]) - set(defaults) - {"selector"}:
             raise _refuse()
-        if any(key in spec and spec[key] != default for key, default in defaults.items()):
+        # Fields the manifest sets are already compared exactly above; a default
+        # only applies where the manifest omitted the field.
+        if any(
+            key in spec and key not in body["spec"] and spec[key] != default
+            for key, default in defaults.items()
+        ):
             raise _refuse()
         self._metadata(spec["template"]["metadata"], body["spec"]["template"]["metadata"])
         self._pod_spec(spec["template"]["spec"], body["spec"]["template"]["spec"])

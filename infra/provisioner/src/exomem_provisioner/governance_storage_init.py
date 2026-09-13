@@ -14,7 +14,7 @@ from kubernetes.client import ApiClient
 from .adapters import _retryable_kubernetes_error
 from .conflict_reason import ConflictReason
 from .driver import DriverRetryable, LostAcknowledgement
-from .job_execution import metadata_matches, pod_spec_matches
+from .job_execution import JOB_SPEC_SERVER_DEFAULTS, metadata_matches, pod_spec_matches
 from .lifecycle import MetadataConflict, OpaqueProviderMetadata
 from .provider_identity import ProviderIdentityConflict, ProviderReference
 from .repository import ClaimConflict, StaleFence
@@ -492,12 +492,9 @@ class KubernetesGovernanceStorageInitAdapter:
             ):
                 raise _refuse()
         defaults = {
-            "completionMode": "NonIndexed",
+            **JOB_SPEC_SERVER_DEFAULTS,
             "completions": 1,
             "parallelism": 1,
-            "suspend": False,
-            "manualSelector": False,
-            "podReplacementPolicy": "TerminatingOrFailed",
         }
         if set(spec) - set(body["spec"]) - set(defaults) - {"selector"}:
             raise _refuse()
