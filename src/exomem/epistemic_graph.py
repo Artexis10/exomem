@@ -3109,19 +3109,38 @@ class EpistemicGraphIndex:
             conn.close()
 
     def _mark_unavailable(self) -> None:
+        """Withdraw the availability claim; leave the sidecar's identity intact.
+
+        This runs on every path-scoped deferral, and a path-scoped action must
+        not have a vault-scoped effect (`seamless-managed-worker-handoff` D2).
+        Deleting `schema_version` alongside the marker made the sidecar read as
+        "not this build's" to the *maintenance* readers as well, so the
+        incremental pass that exists to republish the marker could not open it
+        and the next governed write rebuilt the whole vault instead.
+
+        The stored recall checkpoint goes the same way and for the same reason:
+        it is the lineage the bounded repair advances from, and deleting it made
+        the next write bail out on `recall_checkpoint_absent_or_registry_not_live`
+        into the whole-vault path. `suspend_reads`, the watcher's lighter fence,
+        already keeps it for exactly this purpose -- "block public reads while
+        preserving an incremental repair checkpoint" -- and this is now that
+        fence plus the withdrawal of the availability claim.
+
+        Public readers are unaffected: `_open_read_snapshot` requires the
+        availability marker, which is still withdrawn here, so a reader sees
+        "marker missing, barrier set" exactly as it did before. Nothing persists
+        differently and no other reader treats what remains as sufficient -- the
+        registry-rebind proof additionally requires the marker and an absent read
+        barrier, both of which this still leaves refused.
+        """
         if not self.path.exists():
             return
         conn = self._connect_existing(readonly=False)
         try:
             with conn:
-                conn.execute("DELETE FROM graph_meta WHERE key = 'schema_version'")
                 conn.execute(
                     "DELETE FROM graph_meta WHERE key = ?",
                     (_AVAILABILITY_FRESHNESS_KEY,),
-                )
-                conn.execute(
-                    "DELETE FROM graph_meta WHERE key = ?",
-                    (_RECALL_CHECKPOINT_KEY,),
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
@@ -3842,7 +3861,9 @@ class EpistemicGraphIndex:
             # and fencing on it is what turned every write after a worker
             # replacement into a whole-vault rebuild. Reads still refuse on any
             # unrepaired mark; only the write path narrows.
-            if freshness.external_pending_for(self.vault_root, paths):
+            if freshness.external_pending_for(
+                self.vault_root, (*paths, *created_paths)
+            ):
                 # Content-free, like every line in this module: a count, never a
                 # path. Without it this deferral is the one bail-out that
                 # reaches a whole-vault rebuild while logging nothing at all --
@@ -3915,9 +3936,21 @@ class EpistemicGraphIndex:
             graph_sync.start_registered(
                 self.vault_root, state_root=self._mutation_coordinator.state_root
             )
-            graph_sync.wait_for_registered(
+            if not graph_sync.join_registered_within_budget(
                 self.vault_root, state_root=self._mutation_coordinator.state_root
-            )
+            ):
+                # The second standalone join, and it takes the same budget as
+                # the first (D4): "no caller waits on graph registration without
+                # a budget" is categorical. The incremental pass this returns is
+                # already durable; the flight it could not wait out keeps
+                # running, and the terminal reports it pending from durable
+                # state rather than from this wait.
+                log.info(
+                    "standalone refresh join reached its budget graph_checkpoint=%s",
+                    graph_checkpoint.checkpoint_sha256
+                    if graph_checkpoint is not None
+                    else None,
+                )
         return report
 
     def _refresh_paths_locked(
@@ -6799,32 +6832,10 @@ _REBUILDING: set[str] = set()
 #: cost one further rebuild rather than ten.
 _REBUILD_FOLLOWUP: set[str] = set()
 
-#: D4. The bound on a standalone caller's join. It has no response envelope to
-#: carry `pending`, so it joins rather than returning early -- but joining
-#: without a bound is how a committed write ended up waiting out a whole-vault
-#: rebuild. Sized well above a small-vault pass, so the library contract's
-#: "converged result" still holds for the ordinary case, and well below the
-#: 20-175 s a production whole-vault pass costs. A request deadline in scope
-#: wins whenever it is nearer.
-STANDALONE_JOIN_BUDGET_SECONDS = 15.0
-
-
-def _standalone_join_budget_seconds() -> float:
-    """How long a standalone post-commit join may wait, on the monotonic clock.
-
-    Two bounds, and the earlier one wins, exactly as
-    `writer_lease.acknowledgement_budget_deadline` composes them: the module's
-    own bound, and what is left of the request budget minus its delivery
-    reserve when a request is in scope at all. Past either, the canonical bytes
-    are durable and the caller is told the graph is still catching up.
-    """
-    from . import request_budget
-
-    budget = request_budget.current()
-    if budget is None:
-        return STANDALONE_JOIN_BUDGET_SECONDS
-    remaining = budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS
-    return max(0.0, min(STANDALONE_JOIN_BUDGET_SECONDS, remaining))
+#: D4. One definition of the standalone join bound, in the module that owns the
+#: join. Re-exported here because this module's callers reach for it by name.
+STANDALONE_JOIN_BUDGET_SECONDS = graph_sync.STANDALONE_JOIN_BUDGET_SECONDS
+_standalone_join_budget_seconds = graph_sync.standalone_join_budget_seconds
 
 
 @dataclass(frozen=True)
@@ -7066,23 +7077,20 @@ def _join_registered_standalone(
         graph_sync.start_registered(
             vault_root, state_root=mutation_coordinator.state_root
         )
-        graph_sync.wait_for_registered(
-            vault_root,
-            timeout=_standalone_join_budget_seconds(),
-            state_root=mutation_coordinator.state_root,
-        )
-    except TimeoutError:
-        # D4. The flight keeps running on its own thread and the checkpoint is
-        # durable; what expires here is only the wait. The caller is told the
-        # graph is still catching up, in the vocabulary a busy rebuild owner
-        # already uses, and carries the checkpoint it can poll.
-        log.info(
-            "standalone graph join reached its budget generation=%s",
-            result.checkpoint.generation,
-        )
-        return GraphDispatchResult(
-            "deferred", "GRAPH_SYNC_REBUILD_IN_PROGRESS", result.checkpoint
-        )
+        if not graph_sync.join_registered_within_budget(
+            vault_root, state_root=mutation_coordinator.state_root
+        ):
+            # D4. The flight keeps running on its own thread and the checkpoint
+            # is durable; what expires here is only the wait. The caller is told
+            # the graph is still catching up, in the vocabulary a busy rebuild
+            # owner already uses, and carries the checkpoint it can poll.
+            log.info(
+                "standalone graph join reached its budget generation=%s",
+                result.checkpoint.generation,
+            )
+            return GraphDispatchResult(
+                "deferred", "GRAPH_SYNC_REBUILD_IN_PROGRESS", result.checkpoint
+            )
     except graph_sync.GraphRebuildRegistrationError as error:
         if isinstance(error, graph_sync.GraphRebuildInProgress):
             return GraphDispatchResult("deferred", error.code, result.checkpoint)

@@ -537,7 +537,14 @@ def delete_file(
 
         if graph_sync.registered_checkpoint(vault_root) is not None:
             try:
-                graph_sync.wait_for_registered(vault_root)
+                if not graph_sync.join_registered_within_budget(vault_root):
+                    # Bounded like every other standalone join (D4). The
+                    # deletion is committed and the rebuild is still running;
+                    # saying so is not the same as saying it failed, and only
+                    # the second earns a reconcile.
+                    warnings.append(
+                        "trash succeeded; derived graph repair is still running in the background"
+                    )
             except Exception:  # noqa: BLE001 - preserve committed deletion for reconcile
                 warnings.append("trash succeeded but graph publication failed; run reconcile")
 

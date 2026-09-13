@@ -3066,6 +3066,57 @@ def join_registered_if_settled(
     return True
 
 
+#: `seamless-managed-worker-handoff` D4. The bound on a *standalone* join -- a
+#: caller with no response envelope to carry `pending`, which is why it joins at
+#: all rather than polling like every request-serving site. Sized well above a
+#: small-vault pass, so the library contract's "converged result" still holds for
+#: the ordinary case, and well below the 20-175 s a production whole-vault pass
+#: costs. A request deadline in scope wins whenever it is nearer.
+STANDALONE_JOIN_BUDGET_SECONDS = 15.0
+
+
+def standalone_join_budget_seconds() -> float:
+    """How long a standalone join may wait, in seconds from now.
+
+    Two bounds, and the earlier one wins, exactly as
+    `writer_lease.acknowledgement_budget_deadline` composes them: this module's
+    own bound, and what is left of the request budget minus its delivery reserve
+    when a request is in scope at all.
+    """
+    from . import request_budget
+
+    budget = request_budget.current()
+    if budget is None:
+        return STANDALONE_JOIN_BUDGET_SECONDS
+    remaining = budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS
+    return max(0.0, min(STANDALONE_JOIN_BUDGET_SECONDS, remaining))
+
+
+def join_registered_within_budget(
+    vault_root: Path, *, state_root: Path | None = None
+) -> bool:
+    """Join a registered rebuild under the standalone budget.
+
+    The second seam beside `join_registered_if_settled`, and the reason there are
+    exactly two: a request-serving caller polls and never waits, a standalone
+    caller waits but never without a bound. Returns True when the flight
+    converged, False when the budget expired -- in which case the canonical bytes
+    are durable, the flight keeps running on its own thread, and the caller owes
+    its own caller an honest "the derived graph is still catching up". Every
+    other failure still raises, so a real rebuild failure is not laundered into
+    "still pending".
+    """
+    try:
+        wait_for_registered(
+            vault_root,
+            timeout=standalone_join_budget_seconds(),
+            state_root=state_root,
+        )
+    except TimeoutError:
+        return False
+    return True
+
+
 def start_registered(vault_root: Path, *, state_root: Path | None = None) -> GraphRebuildStart | None:
     """Start captured work without joining it, for standalone post-commit fanout."""
     item = (_PENDING_WAITERS.get() or {}).get(_registration_key(vault_root, state_root))
