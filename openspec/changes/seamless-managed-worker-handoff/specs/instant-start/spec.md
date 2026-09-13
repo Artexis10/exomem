@@ -6,7 +6,7 @@ The projection-freshness fence raised by filesystem events the process cannot at
 
 #### Scenario: Writes after a worker replacement stay incremental
 - **WHEN** a replacement worker starts with an empty self-attribution table and observes filesystem events from the previous worker and the migrator, and then serves ten governed writes
-- **THEN** no write after the first schedules a whole-vault rebuild, at most one whole-vault pass runs for the fresh process's first write until standby adoption removes it, each write acknowledges within its bound, and the repair queue drains to zero
+- **THEN** no write schedules a whole-vault rebuild on its own account: an adopted snapshot makes the first write incremental, at most one coalesced rebuild runs per proven lineage divergence between watcher repairs and governed writes, no write joins a rebuild past its budget, each write acknowledges within its bound, and the repair queue drains to zero
 
 #### Scenario: Adoption tolerates a bounded residue
 - **WHEN** a replacement process proves the previous snapshot and finds a bounded set of paths whose canonical bytes differ from the snapshot's recorded state
