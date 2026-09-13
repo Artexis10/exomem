@@ -13,9 +13,10 @@ from protocol.contracts import AmendmentAcknowledgmentPendingError, ContractIden
 from tests.test_utility_runner_integrity import _Backend, _CellCM, _product_root
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+PENDING_UTILITY_REVISION = "5a7915ba0333ec379609d86d508f90341a5df7cd"
 
 
-def _make_run(tmp_path, variants=("helpful_history",)):
+def _make_run(tmp_path, variants=("helpful_history",), *, contract_revision=None):
     from membench.utility.runner import run_utility
 
     product_root = _product_root(tmp_path)
@@ -24,7 +25,8 @@ def _make_run(tmp_path, variants=("helpful_history",)):
         tokenizer_path=product_root / "src" / "exomem" / "_scaffold" / "_Schema" / "SKILL.md",
         profile="fixture", cap_usd=2.0, paid=True, approval_token="operator-approved",
         phase_seconds=5, variants=variants,
-        identity_provider=lambda root: derive_preregistration_identity(REPO_ROOT),
+        identity_provider=lambda root: derive_preregistration_identity(
+            REPO_ROOT, contract_revision=contract_revision),
         family_gate=lambda identity, families: None,
         cell_factory=lambda root, **kw: _CellCM(root),
         backend_factory=lambda root, cap, token: _Backend(root, cap, token),
@@ -117,13 +119,12 @@ def test_unrelated_pending_family_does_not_block(tmp_path):
 
 
 def test_real_gates_refuse_while_f32_acknowledgment_is_pending(tmp_path):
-    """No injection: the shipped gate functions against this repository."""
+    """The real pre-acknowledgment Git identity stays blocked after release."""
     from membench.utility.runner import load_report
 
-    run_dir, _product_root = _make_run(tmp_path)
+    run_dir, _product_root = _make_run(tmp_path, contract_revision=PENDING_UTILITY_REVISION)
     with pytest.raises(AmendmentAcknowledgmentPendingError):
-        load_report(run_dir, REPO_ROOT, allow_synthetic=True,
-                    identity_validator=lambda identity, root: None)
+        load_report(run_dir, REPO_ROOT, allow_synthetic=True)
 
 
 def test_tampered_observed_evidence_is_refused(tmp_path):
