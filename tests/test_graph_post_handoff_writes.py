@@ -625,18 +625,29 @@ from test_graph_post_handoff_writes import (  # noqa: E402
     _seed_live_freshness,
 )
 
-from exomem import epistemic_graph, file_watcher, freshness  # noqa: E402
+from exomem import deferred_index, epistemic_graph, file_watcher, freshness  # noqa: E402
 from exomem.epistemic_graph import EpistemicGraphIndex  # noqa: E402
 
 root = Path(sys.argv[2])
 phase = sys.argv[1]
 generated = root / GENERATED
 
-if phase == "outgoing":
+if phase in {{"outgoing", "outgoing_fenced"}}:
     _seed_live_freshness(root)
     EpistemicGraphIndex(root).rebuild_all()
     for index in range(3):
         _governed_write(root, generated / f"generated-note-{{index + 60:04d}}.md", "outgoing")
+    if phase == "outgoing_fenced":
+        # What a mid-traffic handoff leaves behind: a page whose canonical bytes
+        # the graph never took, and a withdrawn availability marker, because the
+        # write that deferred withdrew it and the repair did not land before the
+        # worker stopped.
+        deferred = generated / "generated-note-0090.md"
+        deferred.write_text(
+            deferred.read_text(encoding="utf-8") + chr(10) + "- deferred, unrepaired" + chr(10),
+            encoding="utf-8",
+        )
+        EpistemicGraphIndex(root).withdraw_availability()
     print(json.dumps({{"available": EpistemicGraphIndex(root).available()}}))
     raise SystemExit(0)
 
@@ -682,7 +693,8 @@ opened = index_for_adoption._open_read_snapshot(require_current_projection=False
 if opened is not None:
     stored_before = index_for_adoption._stored_recall_checkpoint(opened)
     opened.close()
-adopted = index_for_adoption.adopt_published_snapshot()
+adoption = index_for_adoption.adopt_published_snapshot()
+adopted = bool(adoption)
 victim_in_delta = bool(
     stored_before is not None
     and str(victim)
@@ -702,6 +714,13 @@ for index in range(WRITE_COUNT):
 # The watcher's own compare-and-ack, run here because this child has no watcher
 # thread: `graph_drift` reads a public snapshot, and an unrepaired external mark
 # fences public reads, which would report the fence rather than any drift.
+from exomem import index_sync  # noqa: E402
+
+for _ in range(12):
+    if not deferred_index.list_graph_paths(root):
+        break
+    index_sync.drain_graph_work(root, limit=64)
+queue_after_drain = len(deferred_index.list_graph_paths(root))
 pending_epoch = freshness.external_pending_epoch(root)
 if pending_epoch is not None:
     freshness.clear_external_pending(root, through=pending_epoch)
@@ -710,6 +729,9 @@ print(
     json.dumps(
         {{
             "adopted": adopted,
+            "residue": list(adoption.residue),
+            "adoption_reason": adoption.reason,
+            "queue_after_drain": queue_after_drain,
             "drift": [entry["path"] for entry in drift],
             "victim_in_delta": victim_in_delta,
             "rebuilds": len(passes),
@@ -843,6 +865,120 @@ def test_an_edit_during_the_adoption_proof_is_still_indexed(
     )
 
 
+def _run_child(
+    vault: Path, tmp_path: Path, phases: list[str]
+) -> dict[str, object]:
+    import json
+    import os
+    import subprocess
+    import sys
+
+    script = tmp_path / "handoff_child.py"
+    script.write_text(
+        _HANDOFF_CHILD.format(tests_dir=str(Path(__file__).parent)), encoding="utf-8"
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(Path(__file__).resolve().parents[1] / "src"), environment.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+    report: dict[str, object] = {}
+    for phase in phases:
+        completed = subprocess.run(
+            [sys.executable, str(script), phase, str(vault)],
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=300,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr[-4000:]
+        report = json.loads(completed.stdout.strip().splitlines()[-1])
+    return report
+
+
+def test_a_handoff_that_left_deferred_work_is_still_adopted(
+    handoff_vault: Path, tmp_path: Path
+) -> None:
+    """The state a real mid-traffic handoff leaves, and the one adoption refused.
+
+    A write that defers withdraws the availability marker, and the background
+    repair does not always republish it before the old worker stops. Adoption
+    ran the *public* proof, so it failed in 23 ms on exactly the vaults that
+    needed it, and the promoted worker paid the whole-vault pass anyway.
+
+    Now the proof reports that residue and, while it fits inside one drain pass,
+    the adoption takes it on: the checkpoint becomes the delta origin, the
+    residue paths are queued for incremental repair, and the marker stays
+    withdrawn so reads keep refusing until that repair lands.
+    """
+    report = _run_child(handoff_vault, tmp_path, ["outgoing_fenced", "replacement"])
+
+    assert report["adopted"] is True, (
+        f"adoption refused a bounded residue: {report['adoption_reason']}"
+    )
+    assert len(report["residue"]) >= 1, (
+        "the outgoing process left a page the graph never took; adoption must say so"
+    )
+    assert report["per_write_rebuilds"] == [0] * WRITE_COUNT, (
+        f"the promoted process rebuilt: {report['per_write_rebuilds']}"
+    )
+    assert report["queue_after_drain"] == 0, "the residue never drained"
+    assert report["drift"] == [], f"the residue was adopted but never repaired: {report['drift']}"
+
+
+def test_an_unbounded_residue_still_refuses_adoption(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A residue larger than one drain pass is a different corpus, not a repair."""
+    from exomem import graph_drain
+
+    root = handoff_vault
+    generated = root / GENERATED
+    for i in range(3):
+        page = generated / f"generated-note-{80 + i:04d}.md"
+        page.write_text(
+            page.read_text(encoding="utf-8") + "\n- unattributed\n", encoding="utf-8"
+        )
+    monkeypatch.setattr(graph_drain, "DRAIN_LIMIT", 2, raising=True)
+
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot()
+
+    assert adoption.adopted is False
+    assert adoption.reason == "residue_exceeds_drain_limit"
+    assert len(adoption.residue) == 3
+
+
+def test_a_residue_adoption_keeps_reads_refusing_until_the_repair_lands(
+    handoff_vault: Path,
+) -> None:
+    """The marker is one value for the whole projection, so it stays withdrawn."""
+    from exomem import index_sync
+
+    root = handoff_vault
+    page = root / GENERATED / "generated-note-0091.md"
+    page.write_text(page.read_text(encoding="utf-8") + "\n- unattributed\n", encoding="utf-8")
+
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot()
+
+    assert adoption.adopted is True
+    assert list(adoption.residue) == [f"{GENERATED}/generated-note-0091.md"]
+    assert EpistemicGraphIndex(root).available() is False, (
+        "a snapshot that owes repair must not answer reads that require currency"
+    )
+    assert set(deferred_index.list_graph_paths(root)) == set(adoption.residue)
+
+    for _ in range(12):
+        if not deferred_index.list_graph_paths(root):
+            break
+        index_sync.drain_graph_work(root, limit=64)
+
+    assert deferred_index.list_graph_paths(root) == []
+    assert EpistemicGraphIndex(root).available() is True, (
+        "the repair must republish the marker it kept withdrawn"
+    )
+    assert epistemic_graph.graph_drift(root) == []
+
+
 def test_the_warm_up_adopts_after_the_seed_and_the_resolver(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -867,7 +1003,7 @@ def test_the_warm_up_adopts_after_the_seed_and_the_resolver(
 
     real_adopt = EpistemicGraphIndex.adopt_published_snapshot
 
-    def traced_adopt(inner_self: EpistemicGraphIndex) -> bool:
+    def traced_adopt(inner_self: EpistemicGraphIndex) -> object:
         order.append("graph_snapshot")
         live_at_call.append(freshness.recall_is_live(inner_self.vault_root, "vault"))
         return real_adopt(inner_self)
