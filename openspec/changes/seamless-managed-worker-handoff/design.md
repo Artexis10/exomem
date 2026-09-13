@@ -29,7 +29,7 @@ Non-goals: session persistence (none is needed), changing the MCP transport, the
 
 **D5 Rebuild demand coalesces.** Demand arriving while a rebuild is in flight sets one follow-up mark; at most one further whole-vault pass runs after the current one, never one per write. The single-flight owner stays as it is.
 
-**D6 Regression evidence is the reproduction.** The `exp5.py external` shape becomes a test: a live watcher, one unattributed edit before each of ten writes, and the assertions are zero whole-vault rebuilds, incremental acknowledgement latency within a stated bound, and the repair queue draining to zero. A second test replays a real worker handoff through the supervisor harness and makes the same assertions for the first ten writes after promotion.
+**D6 Regression evidence is the reproduction.** Measured residue after D1 to D5: a fresh interpreter cannot derive a delta from a checkpoint another instance published, so its first write still pays one whole-vault pass (`recall_delta_incomplete`); every later write is incremental. D7 removes that pass by proving the snapshot in the standby before promotion. The `exp5.py external` shape becomes a test: a live watcher, one unattributed edit before each of ten writes, and the assertions are zero whole-vault rebuilds, incremental acknowledgement latency within a stated bound, and the repair queue draining to zero. A second test replays a real worker handoff through the supervisor harness and makes the same assertions for the first ten writes after promotion.
 
 ### Phase 2: the replacement warms as a standby, then is promoted
 

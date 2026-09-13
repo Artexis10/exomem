@@ -6,7 +6,7 @@ The projection-freshness fence raised by filesystem events the process cannot at
 
 #### Scenario: Writes after a worker replacement stay incremental
 - **WHEN** a replacement worker starts with an empty self-attribution table and observes filesystem events from the previous worker and the migrator, and then serves ten governed writes
-- **THEN** none of those writes schedules a whole-vault rebuild, each acknowledges within the incremental bound, and the repair queue drains to zero
+- **THEN** no write after the first schedules a whole-vault rebuild, at most one whole-vault pass runs for the fresh process's first write until standby adoption removes it, each write acknowledges within its bound, and the repair queue drains to zero
 
 #### Scenario: An unrelated external edit does not fence a write
 - **WHEN** an unattributed edit lands on one path while a governed write commits to another
