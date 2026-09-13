@@ -14,4 +14,11 @@
 
 - [x] 3.1 Obtain an author-independent review of the actual diff covering the migration, the clear/set race under one revision, context derivation for unknown clients, the override precedence and every path the context string travels; resolve blocking findings and recheck.
 - [x] 3.2 Run the scoped suites during rounds and the full CI shard suite on the pull request head, strict OpenSpec validation and the public-artifact privacy gate; open a ready pull request with the evidence.
-- [ ] 3.3 Deliver under the standing release authority, save Balanced for `coding` on the personal service, verify a fresh coding client resolves Balanced from `preference:context` and a fresh conversational client resolves Maximal, confirm the unrelated service instance is unchanged, then synchronize and archive this change.
+- [x] 3.3 Deliver under the standing release authority, save Balanced for `coding` on the personal service, verify a fresh coding client resolves Balanced from `preference:context` and a fresh conversational client resolves Maximal, confirm the unrelated service instance is unchanged, then synchronize and archive this change.
+
+## Delivery evidence
+
+- Implementation merged in PR #1241 (`f083ad6f`) and published in v0.82.0.
+- Independent review: APPROVE after one correction round (clear under an operator override); recheck APPROVE. CI green on the PR head (35 checks); release-evidence full run green at `e5400402`.
+- Managed deployment 2026-09-13: worker 1697388 replaced by 727132 under supervisor 445696 at idle; one TCP connection survived; 164 dependency pins and the service configuration unchanged; the unrelated instance untouched.
+- Live verification on the personal service: the existing 0.81.0 record (Maximal, revision `e63e5e8a…`) read as identity-wide Maximal with no contexts; a coding client saved Balanced for `coding` (receipt `f75c72dc-2be5-4e6d-9f36-7a355037e4e1`, revision `8d8b1504…`), and the response resolved Balanced from `preference:context` with the identity-wide Maximal retained for conversational clients.
