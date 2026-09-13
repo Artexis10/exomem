@@ -1,6 +1,9 @@
 """membench CLI `utility` subcommand: no spend without --paid."""
 from __future__ import annotations
 
+import json
+
+import pytest
 from membench.cli import main
 
 
@@ -31,10 +34,6 @@ def test_utility_run_requires_product_root_and_python(tmp_path):
     assert excinfo.value.code != 0
     assert not (tmp_path / "run").exists()
 
-
-import json
-
-import pytest
 
 
 @pytest.fixture(autouse=True)
@@ -100,6 +99,7 @@ def test_run_subcommand_refuses_real_pending_family_without_a_traceback(tmp_path
     root = Path(__file__).resolve().parents[1]
     import membench.utility.runner as runner
     from protocol.contracts import derive_preregistration_identity
+
     from tests.test_membench_utility_report import PENDING_UTILITY_REVISION
 
     pending = derive_preregistration_identity(root, contract_revision=PENDING_UTILITY_REVISION)
@@ -116,6 +116,7 @@ def test_run_subcommand_refuses_real_pending_family_without_a_traceback(tmp_path
 def test_reader_subcommand_reports_recomputed_outcomes(tmp_path, capsys, monkeypatch):
 
     import membench.utility.runner as runner
+
     from tests.test_membench_utility_report import _make_run
 
     run_dir, product_root = _make_run(tmp_path)

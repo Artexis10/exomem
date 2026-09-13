@@ -1057,7 +1057,11 @@ def test_every_execution_path_now_reaches_an_amended_family() -> None:
 
 def test_utility_acknowledgment_releases_both_gates_and_preserves_frozen_contract():
     from epistemic.amendments import require_family_released
-    from protocol.contracts import derive_preregistration_identity, require_amended_families_released, working_amendment_receipts
+    from protocol.contracts import (
+        derive_preregistration_identity,
+        require_amended_families_released,
+        working_amendment_receipts,
+    )
 
     receipt = working_amendment_receipts(ROOT)[5]
     assert receipt.ratifier == FOUNDER

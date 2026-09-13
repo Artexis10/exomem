@@ -8,7 +8,11 @@ import sys
 from pathlib import Path
 
 import pytest
-from protocol.contracts import AmendmentAcknowledgmentPendingError, ContractIdentityError, derive_preregistration_identity
+from protocol.contracts import (
+    AmendmentAcknowledgmentPendingError,
+    ContractIdentityError,
+    derive_preregistration_identity,
+)
 
 from tests.test_utility_runner_integrity import _Backend, _CellCM, _product_root
 
@@ -105,7 +109,11 @@ def test_mismatched_identity_blocks_the_reader(tmp_path):
 
 def test_unrelated_pending_family_does_not_block(tmp_path):
     """Only f32's own amendment withholds this instrument."""
-    from protocol.contracts import AmendmentIdentity, PreregistrationIdentity, require_amended_families_released
+    from protocol.contracts import (
+        AmendmentIdentity,
+        PreregistrationIdentity,
+        require_amended_families_released,
+    )
 
     amendment = AmendmentIdentity.model_construct(
         sequence=3, acknowledgment_status="pending", introduced_family_ids=("f19",))
