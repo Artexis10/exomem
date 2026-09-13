@@ -726,6 +726,8 @@ class VolumeWorkerSettings(BaseSettings):
     )
 
     hcloud_token: SecretStr = Field(min_length=32, max_length=4096)
+    deployment_lock_path: str = Field(min_length=1, max_length=4096)
+    runtime_selection: Literal["active", "rollback"] | None = None
     provider_recovery_signing_key: SecretStr = Field(
         min_length=43,
         max_length=43,
@@ -757,6 +759,19 @@ class VolumeWorkerSettings(BaseSettings):
         pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
     )
     hcloud_server_id: int = Field(gt=0)
+
+    @field_validator("deployment_lock_path")
+    @classmethod
+    def validate_deployment_lock_path(cls, value: str) -> str:
+        if not Path(value).is_absolute():
+            raise ValueError("deployment lock path must be absolute")
+        return value
+
+    @property
+    def deployment_lock(self) -> DeploymentLock:
+        lock = load_deployment_lock(self.deployment_lock_path)
+        lock.selected_runtime(self.runtime_selection)
+        return lock
 
     @field_validator("provider_recovery_signing_key")
     @classmethod

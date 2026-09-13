@@ -422,6 +422,21 @@ def test_adapter_requires_a_digest_pinned_runtime_image() -> None:
         )
 
 
+def test_initializer_job_proof_accepts_only_kubernetes_default_replacement_policy() -> None:
+    adapter = _adapter(Cluster())
+    job = ApiClient().sanitize_for_serialization(_job())
+    job["spec"]["podReplacementPolicy"] = "TerminatingOrFailed"
+    assert adapter._prove_job(job, METADATA, JOB_ENVELOPE, allow_deleting=False) == (
+        "init-job-uid",
+        "17",
+        True,
+    )
+    for wrong_policy in ("Failed", "Unknown"):
+        job["spec"]["podReplacementPolicy"] = wrong_policy
+        with pytest.raises(MetadataConflict):
+            adapter._prove_job(job, METADATA, JOB_ENVELOPE, allow_deleting=False)
+
+
 def _arguments(guard: Guard | None = None) -> dict[str, object]:
     return {
         "recovery_envelope": JOB_ENVELOPE,

@@ -497,6 +497,7 @@ class KubernetesGovernanceStorageInitAdapter:
             "parallelism": 1,
             "suspend": False,
             "manualSelector": False,
+            "podReplacementPolicy": "TerminatingOrFailed",
         }
         if set(spec) - set(body["spec"]) - set(defaults) - {"selector"}:
             raise _refuse()

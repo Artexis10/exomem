@@ -28,6 +28,7 @@ from .durability_driver import DurabilityActionDriver
 from .entrypoint import help_requested
 from .governance_migration_coordinator import HostedGovernanceMigrationCoordinator
 from .governance_migration_job import KubernetesGovernanceMigrationAdapter
+from .governance_storage_binding import KubernetesGovernanceStorageBindingAdapter
 from .governance_storage_init import KubernetesGovernanceStorageInitAdapter
 from .lifecycle import CellLifecycleDriver, LifecycleConfig
 from .live import (
@@ -96,6 +97,7 @@ def build_routine_operation_worker(
         driver,
         worker_id=worker_id,
         exclude_checkpoints=frozenset({"volume-registration-required"}),
+        exclude_checkpoint_prefixes=frozenset({"gpi1:registering:"}),
         allowed_actions=ROUTINE_OPERATION_ACTIONS,
         capacity_admission=capacity_admission,
     )
@@ -215,6 +217,14 @@ def build_live_provider_components(
             apps_v1=apps_v1,
             identity_verifier=identity_verifier,
             runtime_image=lifecycle_config.image,
+        ),
+        storage_binding=KubernetesGovernanceStorageBindingAdapter(
+            core_v1=core_v1,
+            batch_v1=batch_v1,
+            apps_v1=apps_v1,
+            identity_verifier=identity_verifier,
+            runtime_image=lifecycle_config.image,
+            cell=cell,
         ),
         governance_migration=HostedGovernanceMigrationCoordinator(
             cell=cell,
