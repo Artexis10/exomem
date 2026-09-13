@@ -8,12 +8,13 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from . import (
     access,
     edit,
+    kbdir,
     semantic_contract,
     semantic_index,
     semantic_language_registry,
@@ -69,9 +70,32 @@ class ObserveMemoryError(ValueError):
     code: str
     reason: str
     remediation: str | None = None
+    resolution: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         ValueError.__init__(self, f"{self.code}: {self.reason}")
+
+
+def _legacy_routing_remediation(resolution: dict[str, Any]) -> str:
+    """One-sentence remediation for a legacy-schema `observe_memory` refusal.
+
+    Built AFTER `resolution` so it names that resolution's own concrete
+    fields — the exact `suggested_path`, the `part_of` target, the in-place
+    alternative, and the migration pointer, in that order — rather than a
+    generic pointer at "resolution" the caller then has to go find. This
+    sentence is not a redundant summary: it is the ONLY place this
+    information reaches a caller today, since `observe_memory`'s refusals are
+    not yet routed into the MCP structured failure envelope (see `design.md`
+    D4) — `commands.op_observe_memory` flattens the whole error into one
+    string, and `resolution` as a JSON object never crosses that boundary.
+    """
+    return (
+        "This is a legacy page observe_memory cannot mutate structurally (no "
+        "compiled type, or no frontmatter): create "
+        f"{resolution['suggested_path']}, linked part_of "
+        f"{resolution['link']['target']}, or {resolution['in_place']}; "
+        f"migrate via {resolution['migration']}."
+    )
 
 
 def observe_memory(
@@ -148,6 +172,42 @@ def observe_memory(
     try:
         editable = edit.load_editable(vault_root, path, expected_hash=expected_hash)
     except edit.EditError as error:
+        if error.code in {"FRONTMATTER_REQUIRED", "OUTSIDE_GOVERNED_ROOT"}:
+            # `load_editable` raised before resolving a canonical `rel_path`
+            # (frontmatterless: found under Knowledge Base/ but refused before
+            # reading further; outside-governed-root: never found under
+            # Knowledge Base/ at all), so both resolutions below are derived
+            # from the caller's own path text, normalised the same way
+            # `edit._existing_page_outside_kb` normalises it (strip,
+            # backslash to slash, lstrip leading "/", ".md" suffix) — one
+            # shared normalised form for both branches. Casing is left as the
+            # caller spelled it; the true on-disk casing is only known once a
+            # governed read/edit actually succeeds against the page.
+            given = _legacy_page_given_form(path)
+            if error.code == "FRONTMATTER_REQUIRED":
+                # Reachable only for a page `load_editable` already found
+                # under Knowledge Base/, so re-root the given form the same
+                # way `kbdir.kb_page_relative_form` would.
+                rel_path = (
+                    given if given.startswith(kbdir.kb_prefix()) else kbdir.kb_prefix() + given
+                )
+            else:
+                # `_existing_page_outside_kb` never returns a hit for a given
+                # form that already starts with the KB prefix, so this is
+                # exactly the vault-relative path of the real, outside-KB page.
+                rel_path = given
+            resolution = _legacy_dated_child_resolution(
+                rel_path,
+                title_source=_legacy_title_source(content, None),
+                today=today or dt.date.today(),
+                vault_root=vault_root,
+            )
+            raise ObserveMemoryError(
+                error.code,
+                error.reason,
+                _legacy_routing_remediation(resolution),
+                resolution=resolution,
+            ) from error
         code = "STALE_PARENT_HASH" if error.code == "STALE_EDIT" else error.code
         raise ObserveMemoryError(code, error.reason) from error
 
@@ -316,13 +376,31 @@ def observe_memory(
     except semantic_writes.SemanticWriteError as error:
         raise ObserveMemoryError(error.code, error.reason) from error
 
-    if (
-        preflight.before.page_type not in _COMPILED_PAGE_TYPES
-        or access.access_tier(vault_root, editable.rel_path) != access.TIER_READ_WRITE
-    ):
+    access_tier = access.access_tier(vault_root, editable.rel_path)
+    if access_tier != access.TIER_READ_WRITE:
+        # Same refusal code as an untyped page (compatibility), but a caller
+        # cannot act on this one the way it can act on schema history: the
+        # tier itself forbids the write, whatever the page's compiled type,
+        # so no `resolution` is offered here.
         raise ObserveMemoryError(
             "OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE",
             "observe_memory only mutates writable compiled pages",
+            f"This page's access tier is {access_tier!r}, which is "
+            "policy-protected; observe_memory has no override for it, "
+            "regardless of the page's compiled type.",
+        )
+    if preflight.before.page_type not in _COMPILED_PAGE_TYPES:
+        resolution = _legacy_dated_child_resolution(
+            editable.rel_path,
+            title_source=_legacy_title_source(content, frontmatter),
+            today=today or dt.date.today(),
+            vault_root=vault_root,
+        )
+        raise ObserveMemoryError(
+            "OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE",
+            "observe_memory only mutates writable compiled pages",
+            _legacy_routing_remediation(resolution),
+            resolution=resolution,
         )
 
     proposed_unit = _unit_by_anchor(preflight.after.document, target_anchor)
@@ -416,6 +494,83 @@ def observe_memory(
             timings.as_dict() if timings is not None and write_timings_enabled() else None
         ),
     )
+
+
+def _legacy_page_given_form(path: str) -> str:
+    """The caller's path text, normalised the way `edit._existing_page_outside_kb`
+    normalises it: stripped, backslashes to slashes, leading `/` dropped, a
+    `.md` suffix supplied. Shared by both `load_editable` failure branches
+    that must build a legacy-page `resolution` before a canonical `rel_path`
+    exists (`FRONTMATTER_REQUIRED`, `OUTSIDE_GOVERNED_ROOT`), so an inside-KB
+    and an outside-KB caller path normalise through the exact same form
+    before either branch decides what it means.
+    """
+    given = path.strip().replace("\\", "/").lstrip("/")
+    return given if given.endswith(".md") else given + ".md"
+
+
+def _legacy_title_source(content: str | None, frontmatter: dict[Any, Any] | None) -> str:
+    """The best available text to slug a legacy page's dated-child suggestion.
+
+    The attempted observation names the caller's actual intent, so it wins
+    when present (frontmatterless pages never have a title to fall back on
+    anyway). A page `title` is the next-best signal; a fixed fallback keeps
+    this total so a `resolution` is always offered.
+    """
+    if content:
+        first_line = content.strip().splitlines()[0].strip()
+        if first_line:
+            return first_line
+    if frontmatter is not None:
+        title = str(frontmatter.get("title") or "").strip()
+        if title:
+            return title
+    return "legacy-entry"
+
+
+def _legacy_dated_child_resolution(
+    rel_path: str,
+    *,
+    title_source: str,
+    today: dt.date,
+    vault_root: Path,
+) -> dict[str, Any]:
+    """The safe fallback `observe_memory` offers instead of improvising.
+
+    Colocates the suggested dated child beside the legacy page when that page
+    already lives under the governed Knowledge Base root -- the common case,
+    since exomem only ever authors new pages there and every path reachable
+    through `edit.load_editable` is re-rooted under it before this runs.
+    Falls back to `Notes/Research/<parent-dir-slug>/` for a legacy page
+    outside the KB, mirroring the read-only-paths fallback in
+    `references/write-scope.md`. `link` names the legacy page so the
+    suggested child is discoverable from it via the existing `part_of`
+    relation (`core-relations.yaml`).
+
+    `suggested_path` is de-collided with `vault.unique_path` — the same
+    helper `note.py`'s creation path uses to pick a filename — so the advised
+    path is the exact one a creation call would actually produce, not one a
+    pre-existing same-dated child would silently overwrite. Reads the
+    candidate directory's listing; writes nothing.
+    """
+    date = today.isoformat()
+    slug, _warnings = vault.resolve_filename_slug(title_source, vault_root=vault_root)
+    prefix = kbdir.kb_prefix()
+    parent = PurePosixPath(rel_path).parent
+    if rel_path.startswith(prefix):
+        parent_rel = parent.as_posix()
+    else:
+        parent_slug = vault.slugify_title(parent.name or "legacy")
+        parent_rel = f"{prefix}Notes/Research/{parent_slug}"
+    candidate = vault.unique_path(vault_root / parent_rel, f"{date}-{slug}")
+    suggested_path = PurePosixPath(parent_rel, candidate.name).as_posix()
+    return {
+        "action": "create-dated-child",
+        "suggested_path": suggested_path,
+        "link": {"relation": "part_of", "target": rel_path},
+        "in_place": "edit_memory section append where the surface has body edits",
+        "migration": "adoption_studio on request",
+    }
 
 
 def _canonical_category(value: str) -> str:

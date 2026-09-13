@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from exomem import (
     index_sync,
     lexstore,
     memory_refs,
+    observe_memory,
     reconcile,
     semantic_index,
     semantic_language_registry,
@@ -19,6 +21,9 @@ from exomem import (
 
 PAGE_ID = "00000000-0000-4000-8000-000000000081"
 PAGE = "Knowledge Base/Notes/Insights/observe.md"
+UNTYPED_PAGE = "Knowledge Base/Notes/Legacy/untyped.md"
+FRONTMATTERLESS_PAGE = "Knowledge Base/Notes/Legacy/no-frontmatter.md"
+OUTSIDE_KB_PAGE = "Old Notes/Team/kickoff.md"
 
 
 def _page_source(body: str = "# Observe\n\nExisting prose.\n") -> str:
@@ -28,6 +33,19 @@ def _page_source(body: str = "# Observe\n\nExisting prose.\n") -> str:
         "type: insight\n"
         "status: active\n"
         f"exomem_id: {PAGE_ID}\n"
+        "updated: 2026-07-15\n"
+        "---\n\n"
+        f"{body.rstrip()}\n"
+    )
+
+
+def _untyped_page_source(body: str = "# Untyped\n\nExisting prose.\n") -> str:
+    """Frontmatter present, no compiled `type:` -- a legacy page by schema history."""
+    return (
+        "---\n"
+        "title: Untyped Legacy Page\n"
+        "status: active\n"
+        "exomem_id: 00000000-0000-4000-8000-000000000082\n"
         "updated: 2026-07-15\n"
         "---\n\n"
         f"{body.rstrip()}\n"
@@ -616,6 +634,219 @@ def test_validate_refuses_access_policy_boundaries(tmp_path: Path, tier: str) ->
         )
 
     assert page.read_bytes() == before
+
+
+@pytest.mark.parametrize("tier", ["readonly", "excluded"])
+def test_policy_protected_tier_names_tier_and_offers_no_resolution(
+    tmp_path: Path, tier: str
+) -> None:
+    """Distinct from the legacy-routing case: same code, no safe next step exists."""
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+    policy = tmp_path / "Knowledge Base" / "_access.yaml"
+    policy.write_text(f"{tier}:\n  - Notes/Insights\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE") as excinfo:
+        commands.op_observe_memory(
+            tmp_path,
+            path=PAGE,
+            operation="validate",
+            category="rule",
+            content="Policy refusal",
+        )
+
+    message = str(excinfo.value)
+    assert tier in message
+    assert "policy-protected" in message
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, observe_memory.ObserveMemoryError)
+    assert cause.resolution is None
+    assert page.read_bytes() == before
+
+
+def test_untyped_legacy_page_offers_dated_child_resolution(tmp_path: Path) -> None:
+    """An untyped page carries remediation + a structured resolution, code unchanged."""
+    page = _write_page(tmp_path, rel=UNTYPED_PAGE, source=_untyped_page_source())
+    before = page.read_bytes()
+    expected_slug, _ = vault.resolve_filename_slug("Legacy observation", vault_root=tmp_path)
+    today = dt.date.today().isoformat()
+
+    with pytest.raises(ValueError, match="OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE") as excinfo:
+        commands.op_observe_memory(
+            tmp_path,
+            path=UNTYPED_PAGE,
+            operation="validate",
+            category="rule",
+            content="Legacy observation",
+        )
+
+    message = str(excinfo.value)
+    assert "Remediation:" in message
+    assert "part_of" in message
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, observe_memory.ObserveMemoryError)
+    expected_suggested_path = f"Knowledge Base/Notes/Legacy/{today}-{expected_slug}.md"
+    assert cause.resolution == {
+        "action": "create-dated-child",
+        "suggested_path": expected_suggested_path,
+        "link": {"relation": "part_of", "target": UNTYPED_PAGE},
+        "in_place": "edit_memory section append where the surface has body edits",
+        "migration": "adoption_studio on request",
+    }
+    # The flattened string is what an MCP agent actually receives (see
+    # design.md D4) -- it must carry the concrete next step, not a pointer to
+    # a `resolution` object the caller never sees as structured JSON.
+    assert expected_suggested_path in message
+    assert UNTYPED_PAGE in message
+    assert page.read_bytes() == before
+
+
+def test_frontmatterless_page_offers_dated_child_resolution(tmp_path: Path) -> None:
+    """`FRONTMATTER_REQUIRED` from `load_editable` gets the same shape of answer."""
+    page = tmp_path / FRONTMATTERLESS_PAGE
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_bytes(b"# No Frontmatter\n\nJust prose, no delimiters.\n")
+    before = page.read_bytes()
+    expected_slug, _ = vault.resolve_filename_slug("Legacy note capture", vault_root=tmp_path)
+    today = dt.date.today().isoformat()
+
+    with pytest.raises(ValueError, match="FRONTMATTER_REQUIRED") as excinfo:
+        commands.op_observe_memory(
+            tmp_path,
+            path=FRONTMATTERLESS_PAGE,
+            operation="validate",
+            category="rule",
+            content="Legacy note capture",
+        )
+
+    message = str(excinfo.value)
+    assert "Remediation:" in message
+    assert "part_of" in message
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, observe_memory.ObserveMemoryError)
+    expected_suggested_path = f"Knowledge Base/Notes/Legacy/{today}-{expected_slug}.md"
+    assert cause.resolution == {
+        "action": "create-dated-child",
+        "suggested_path": expected_suggested_path,
+        "link": {"relation": "part_of", "target": FRONTMATTERLESS_PAGE},
+        "in_place": "edit_memory section append where the surface has body edits",
+        "migration": "adoption_studio on request",
+    }
+    assert expected_suggested_path in message
+    assert FRONTMATTERLESS_PAGE in message
+    assert page.read_bytes() == before
+
+
+def test_outside_kb_page_offers_dated_child_resolution(tmp_path: Path) -> None:
+    """`OUTSIDE_GOVERNED_ROOT` from `edit._resolve` gets the same shape of answer.
+
+    A real page whose file lives outside `Knowledge Base/` -- not merely the
+    pure-function branch, but the actual `commands.op_observe_memory` entry
+    point an MCP agent calls.
+    """
+    page = tmp_path / OUTSIDE_KB_PAGE
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_bytes(b"# Kickoff\n\nOld planning notes, never migrated into the KB.\n")
+    before = page.read_bytes()
+    expected_slug, _ = vault.resolve_filename_slug("Kickoff notes", vault_root=tmp_path)
+    today = dt.date.today().isoformat()
+
+    with pytest.raises(ValueError, match="OUTSIDE_GOVERNED_ROOT") as excinfo:
+        commands.op_observe_memory(
+            tmp_path,
+            path=OUTSIDE_KB_PAGE,
+            operation="validate",
+            category="rule",
+            content="Kickoff notes",
+        )
+
+    message = str(excinfo.value)
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, observe_memory.ObserveMemoryError)
+    expected_suggested_path = f"Knowledge Base/Notes/Research/team/{today}-{expected_slug}.md"
+    assert cause.resolution == {
+        "action": "create-dated-child",
+        "suggested_path": expected_suggested_path,
+        "link": {"relation": "part_of", "target": OUTSIDE_KB_PAGE},
+        "in_place": "edit_memory section append where the surface has body edits",
+        "migration": "adoption_studio on request",
+    }
+    assert expected_suggested_path in message
+    assert OUTSIDE_KB_PAGE in message
+    assert page.read_bytes() == before
+
+
+def test_module_level_untyped_page_error_carries_resolution(tmp_path: Path) -> None:
+    """Module layer, not just the command wrapper: `ObserveMemoryError` itself."""
+    _write_page(tmp_path, rel=UNTYPED_PAGE, source=_untyped_page_source())
+
+    with pytest.raises(observe_memory.ObserveMemoryError) as excinfo:
+        observe_memory.observe_memory(
+            tmp_path,
+            path=UNTYPED_PAGE,
+            operation="validate",
+            category="rule",
+            content="Legacy observation",
+        )
+
+    error = excinfo.value
+    assert error.code == "OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE"
+    assert error.resolution is not None
+    assert error.remediation == observe_memory._legacy_routing_remediation(error.resolution)
+    assert error.resolution["action"] == "create-dated-child"
+    assert error.resolution["link"] == {"relation": "part_of", "target": UNTYPED_PAGE}
+
+
+def test_legacy_dated_child_resolution_outside_kb_uses_notes_research(
+    tmp_path: Path,
+) -> None:
+    """Pure-function pin of the outside-KB branch's exact values.
+
+    Also exercised end-to-end via `test_outside_kb_page_offers_dated_child_resolution`
+    through `commands.op_observe_memory`; this direct call pins the branch's
+    values without needing a real on-disk page.
+    """
+    resolution = observe_memory._legacy_dated_child_resolution(
+        "Old Notes/Team/kickoff.md",
+        title_source="Kickoff notes",
+        today=dt.date(2026, 9, 11),
+        vault_root=tmp_path,
+    )
+
+    assert resolution["suggested_path"] == (
+        "Knowledge Base/Notes/Research/team/2026-09-11-kickoff-notes.md"
+    )
+    assert resolution["link"] == {
+        "relation": "part_of",
+        "target": "Old Notes/Team/kickoff.md",
+    }
+    assert resolution["action"] == "create-dated-child"
+
+
+def test_legacy_dated_child_resolution_avoids_a_pre_existing_collision(
+    tmp_path: Path,
+) -> None:
+    """`suggested_path` names the file creation would actually produce.
+
+    Uses `vault.unique_path`, exactly as `note.py`'s creation path does, so a
+    pre-existing same-dated child shifts the advice to the `-2` form instead
+    of silently naming a path creation would overwrite.
+    """
+    expected_slug, _ = vault.resolve_filename_slug("Kickoff notes", vault_root=tmp_path)
+    directory = tmp_path / "Knowledge Base" / "Notes" / "Legacy"
+    directory.mkdir(parents=True)
+    (directory / f"2026-09-11-{expected_slug}.md").write_text("taken\n", encoding="utf-8")
+
+    resolution = observe_memory._legacy_dated_child_resolution(
+        "Knowledge Base/Notes/Legacy/untyped.md",
+        title_source="Kickoff notes",
+        today=dt.date(2026, 9, 11),
+        vault_root=tmp_path,
+    )
+
+    assert resolution["suggested_path"] == (
+        f"Knowledge Base/Notes/Legacy/2026-09-11-{expected_slug}-2.md"
+    )
 
 
 @pytest.mark.parametrize(
