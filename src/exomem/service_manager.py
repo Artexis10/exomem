@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 import signal
@@ -18,6 +19,8 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 def private_directory(path: Path) -> Path:
@@ -141,16 +144,29 @@ class Deadline:
         return remaining
 
 
-def _descendants() -> dict[int, tuple[int, str]]:
-    """Read the current descendant tree, including subreaper-adopted children."""
+def _descendants(
+    *, ignore_sessions: frozenset[int] = frozenset()
+) -> dict[int, tuple[int, str]]:
+    """Read the current descendant tree, including subreaper-adopted children.
+
+    ``ignore_sessions`` excludes the session of a deliberately co-owned tree so
+    one worker's exit can be proven while another is still running. Every worker
+    and migrator is spawned with ``start_new_session=True``, so a session id is
+    exactly one spawned tree and nothing in it calls ``setsid`` again. A standby
+    is the only tree this supervisor ever runs beside the serving worker, and
+    each one's stop proof is still exhaustive within its own session.
+    """
     processes: dict[int, tuple[int, str]] = {}
+    sessions: dict[int, int] = {}
     for path in Path("/proc").iterdir():
         if not path.name.isdigit():
             continue
         try:
             fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
-            processes[int(path.name)] = (int(fields[1]), fields[0])
-        except (FileNotFoundError, ProcessLookupError):
+            pid = int(path.name)
+            processes[pid] = (int(fields[1]), fields[0])
+            sessions[pid] = int(fields[3])
+        except (FileNotFoundError, ProcessLookupError, IndexError, ValueError):
             continue
     owned: dict[int, tuple[int, str]] = {}
     parents = {os.getpid()}
@@ -159,9 +175,16 @@ def _descendants() -> dict[int, tuple[int, str]]:
             pid for pid, (parent, _) in processes.items() if parent in parents and pid not in owned
         }
         if not new:
-            return owned
+            break
         owned.update({pid: processes[pid] for pid in new})
         parents = new
+    if ignore_sessions:
+        owned = {
+            pid: value
+            for pid, value in owned.items()
+            if sessions.get(pid) not in ignore_sessions
+        }
+    return owned
 
 
 async def stop_owned_process(
@@ -169,6 +192,7 @@ async def stop_owned_process(
     *,
     timeout: float,
     include_adopted: bool = False,
+    ignore_sessions: frozenset[int] = frozenset(),
 ) -> None:
     """Stop an owned process tree and require observed exit before returning.
 
@@ -183,7 +207,7 @@ async def stop_owned_process(
         except ProcessLookupError:
             pass
     while True:
-        owned = _descendants() if include_adopted else {}
+        owned = _descendants(ignore_sessions=ignore_sessions) if include_adopted else {}
         for pid, (_, state) in owned.items():
             if pid == child.pid:
                 continue  # asyncio owns reaping this direct child
@@ -207,14 +231,35 @@ async def stop_owned_process(
         if (
             child.returncode is not None
             and not group_alive
-            and not _live_descendants(include_adopted)
+            and not _live_descendants(include_adopted, ignore_sessions)
         ):
             return
         await asyncio.sleep(min(0.025, deadline.remaining(0.025)))
 
 
-def _live_descendants(include_adopted: bool) -> bool:
-    return bool(_descendants()) if include_adopted else False
+def _live_descendants(
+    include_adopted: bool, ignore_sessions: frozenset[int] = frozenset()
+) -> bool:
+    return bool(_descendants(ignore_sessions=ignore_sessions)) if include_adopted else False
+
+
+#: A standby warms while the previous worker still serves, so its budget is
+#: separate from the cutover budget and is measured in minutes, not seconds.
+STANDBY_WARM_ENV = "EXOMEM_STANDBY_WARM_SECONDS"
+DEFAULT_STANDBY_WARM_SECONDS = 300.0
+
+
+def standby_warm_budget() -> float:
+    """How long a candidate may warm beside the serving worker."""
+    raw = os.environ.get(STANDBY_WARM_ENV, "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.0
+        if math.isfinite(value) and value > 0:
+            return value
+    return DEFAULT_STANDBY_WARM_SECONDS
 
 
 class Supervisor:
@@ -229,6 +274,7 @@ class Supervisor:
         runtime: Any,
         identity: dict[str, Any],
         transition_timeout: float = 40,
+        standby_warm_timeout: float | None = None,
     ):
         self.records = ReleaseRecords(directory)
         self.initial_target = initial_target
@@ -236,6 +282,9 @@ class Supervisor:
         self.runtime = runtime
         self.identity = identity
         self.transition_timeout = transition_timeout
+        self.standby_warm_timeout = (
+            standby_warm_budget() if standby_warm_timeout is None else standby_warm_timeout
+        )
         self.lock = asyncio.Lock()
         self.phase = "unavailable"
         self.transition_task: asyncio.Task | None = None
@@ -267,6 +316,66 @@ class Supervisor:
             "port": getattr(self.runtime, "port", None),
         }
 
+    async def _warm_standby(
+        self, target: dict[str, Any], *, resume: bool
+    ) -> tuple[dict[str, Any], Any]:
+        """Warm the candidate beside the serving worker under its own budget.
+
+        Nothing here pauses, drains or signals the worker that is serving. A
+        candidate that cannot reach cutover readiness inside the warm budget is
+        discarded with the component it waited on recorded, and the upgrade
+        continues through the one-worker sequence — reported, never silent
+        (`seamless-managed-worker-handoff` D7).
+        """
+        if resume:
+            # A recorded transition has already stopped its worker; there is
+            # nothing left to warm beside.
+            return {"standby": "unsupported", "reason": "resuming a recorded transition"}, None
+        if not getattr(self.runtime, "standby_capable", False):
+            return {"standby": "unsupported", "reason": "target release has no standby mode"}, None
+        try:
+            standby = await self.runtime.start_standby(
+                target, timeout=self.standby_warm_timeout
+            )
+        except TimeoutError:
+            await self._discard_standby("pending")
+            return {
+                "standby": "discarded",
+                "reason": "warm budget expired",
+                "waiting": getattr(self.runtime, "standby_waiting", None),
+            }, None
+        except Exception:  # noqa: BLE001 - a candidate failure never touches the serving worker
+            await self._discard_standby("pending")
+            return {
+                "standby": "discarded",
+                "reason": "candidate could not warm",
+                "waiting": getattr(self.runtime, "standby_waiting", None),
+            }, None
+        return {"standby": "ready"}, standby
+
+    async def _discard_standby(self, candidate: Any) -> None:
+        """Stop a candidate without ever signalling the worker that is serving.
+
+        Any truthy ``candidate`` means one may exist; discarding when none does
+        is a no-op in the runtime.
+        """
+        if not candidate:
+            return
+        discard = getattr(self.runtime, "discard_standby", None)
+        if discard is None:
+            return
+        try:
+            await discard(timeout=10)
+        except Exception:  # noqa: BLE001 - a stuck candidate must not mask the outcome
+            pass
+
+    def _migration_declared(self, target: dict[str, Any]) -> tuple[bool, str]:
+        """Whether the staged target declares a state migration."""
+        declared = getattr(self.runtime, "migration_required", None)
+        if declared is None:
+            return True, "target declaration unavailable"
+        return declared(target)
+
     async def upgrade(
         self, target: dict[str, Any] | None, *, resume: bool = False
     ) -> dict[str, Any]:
@@ -290,6 +399,7 @@ class Supervisor:
                     "ok": False,
                     "error": "target interpreter verification failed; current admission unchanged",
                 }
+            handoff, standby = await self._warm_standby(target, resume=resume)
             deadline = Deadline(self.transition_timeout)
             self.phase = "upgrading"
             self.ingress.pause()
@@ -299,6 +409,7 @@ class Supervisor:
                 except TimeoutError:
                     drained = False
                 if not drained:
+                    await self._discard_standby(standby)
                     self.ingress.resume()
                     self.phase = "ready"
                     return {
@@ -308,6 +419,7 @@ class Supervisor:
                 try:
                     self.records.begin(target, worker_pid=self.runtime.pid, identity=self.identity)
                 except OSError:
+                    await self._discard_standby(standby)
                     self.ingress.resume()
                     self.phase = "ready"
                     return {
@@ -321,10 +433,26 @@ class Supervisor:
                     # migrator or failed candidate retained by this supervisor.
                     self.records.phase("stopping")
                     await self.runtime.stop(timeout=deadline.remaining(10))
-                    self.records.phase("migrating", worker_pid=0)
-                    await self.runtime.migrate(target, timeout=deadline.remaining(15))
-                    self.records.phase("starting", worker_pid=0)
-                    client = await self.runtime.start(target, timeout=deadline.remaining(30))
+                    # The migrator is the only writer between the two workers,
+                    # and it runs only when the target declares a state
+                    # migration. A skipped step is recorded, never silent.
+                    migrate, reason = self._migration_declared(target)
+                    handoff["migration"] = {
+                        "state": "ran" if migrate else "skipped",
+                        "reason": reason,
+                    }
+                    if migrate:
+                        self.records.phase("migrating", worker_pid=0)
+                        await self.runtime.migrate(target, timeout=deadline.remaining(15))
+                    if standby is not None:
+                        self.records.phase("promoting", worker_pid=0)
+                        client, promotion = await self.runtime.promote_standby(
+                            migrated=migrate, timeout=deadline.remaining(30)
+                        )
+                        handoff["promotion"] = promotion
+                    else:
+                        self.records.phase("starting", worker_pid=0)
+                        client = await self.runtime.start(target, timeout=deadline.remaining(30))
                     self.records.phase("ready", worker_pid=self.runtime.pid)
                     self.records.accept(target)
                     self.ingress.resume(client)
@@ -334,10 +462,12 @@ class Supervisor:
                         "phase": "ready",
                         "active": target,
                         "worker_pid": self.runtime.pid,
+                        "handoff": handoff,
                     }
             except Exception:  # noqa: BLE001 - every post-stop failure must retain recovery state
                 self.phase = "recovery-required"
                 self.ingress.unavailable()
+                await self._discard_standby(standby)
                 # Error text from subprocesses can contain configuration or
                 # vault content. Retain phase and identity, not arbitrary text.
                 self.records.phase("failed", worker_pid=self.runtime.pid)
@@ -375,7 +505,8 @@ def verify_systemd_identity(
                 "--user",
                 "show",
                 unit,
-                "--property=MainPID,ControlGroup,InvocationID,KillMode,SendSIGKILL,TimeoutStopUSec",
+                "--property=MainPID,ControlGroup,InvocationID,KillMode,SendSIGKILL,"
+                "TimeoutStopUSec,EnvironmentFiles",
             ],
             capture_output=True,
             text=True,
@@ -412,12 +543,19 @@ def verify_systemd_identity(
         members.update(int(pid) for pid in path.read_text().split())
     if members != {os.getpid()}:
         raise RuntimeError("service cgroup has residual processes; prior cleanup is unproven")
-    return {
+    identity = {
         "unit": unit,
         "invocation": invocation,
         "cgroup": group,
         "boot": (proc_root / "sys/kernel/random/boot_id").read_text().strip(),
     }
+    # systemd renders this as `path (ignore_errors=...)`, one entry per file.
+    # Only the path is retained; the file's values never enter this process.
+    entry = properties.get("EnvironmentFiles", "").strip().split("\n")[0].strip()
+    rendered = re.sub(r"\s*\(ignore_errors=[^)]*\)$", "", entry).strip().lstrip("-")
+    if rendered and Path(rendered).is_absolute():
+        identity["environment_file"] = rendered
+    return identity
 
 
 def enable_subreaper() -> None:
@@ -442,22 +580,89 @@ def remove_stale_socket(path: Path) -> None:
 
 
 class WorkerRuntime:
-    """Own every state-touching child through stop, migration and readiness."""
+    """Own every state-touching child through stop, migration and readiness.
 
-    def __init__(self, socket_path: Path, *, host: str, port: int):
+    At most two owned worker trees exist at once: the one serving and, during an
+    upgrade, the standby warming beside it. Each is its own session, so each
+    one's exit proof stays exhaustive inside its session while the other runs.
+    Only one of them ever owns state, and promotion is the single moment that
+    changes.
+    """
+
+    def __init__(
+        self,
+        socket_path: Path,
+        *,
+        host: str,
+        port: int,
+        environment_file: Path | str | None = None,
+    ):
         self.socket_path = socket_path
         self.host = host
         self.port = port
         self.child: asyncio.subprocess.Process | None = None
         self.client: Any = None
+        self.standby: asyncio.subprocess.Process | None = None
+        self.standby_client: Any = None
+        self.standby_socket = socket_path.with_name(
+            f"{socket_path.stem}-standby{socket_path.suffix}"
+        )
+        self.standby_capable = False
+        self.standby_waiting: str | None = None
+        self.environment_file = Path(environment_file) if environment_file else None
 
     @property
     def pid(self) -> int:
         return self.child.pid if self.child is not None and self.child.returncode is None else 0
 
-    async def inspect(self, target: dict[str, Any]) -> dict[str, str]:
-        if not isinstance(target, dict) or set(target) != {"python", "version"}:
+    def _other_sessions(self, *, standby: bool) -> frozenset[int]:
+        """The co-owned session a stop or spawn proof must leave alone."""
+        other = self.standby if not standby else self.child
+        # ``start_new_session=True`` makes the session id the spawned pid, and it
+        # stays valid for members that outlive the direct child.
+        return frozenset({other.pid}) if other is not None else frozenset()
+
+    def _child_environment(self) -> dict[str, str] | None:
+        """Overlay the unit's current environment file for the child only.
+
+        systemd read ``EnvironmentFile=`` once, when this supervisor started, so
+        an edited service environment would otherwise reach a worker only after
+        a full restart — which is exactly what a seamless upgrade avoids. The
+        file is re-read at spawn time and applied to the child's environment;
+        this process's own environment is never changed and no value is logged.
+        """
+        path = self.environment_file
+        if path is None:
+            return None
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            log.warning("managed service environment file could not be read; child inherits")
+            return None
+        values: dict[str, str] = {}
+        for line in text.splitlines():
+            entry = line.strip()
+            if not entry or entry.startswith("#") or "=" not in entry:
+                continue
+            name, _, value = entry.partition("=")
+            name = name.strip()
+            if not name or not (name[0].isalpha() or name[0] == "_"):
+                continue
+            if not all(character.isalnum() or character == "_" for character in name):
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            values[name] = value
+        if not values:
+            return None
+        return {**os.environ, **values}
+
+    async def inspect(self, target: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(target, dict) or not {"python", "version"} <= set(target):
             raise ValueError("target must identify an interpreter and exact release")
+        if set(target) - {"python", "version", "state_descriptors"}:
+            raise ValueError("target carries fields the managed protocol does not define")
         interpreter, version = target["python"], target["version"]
         if (
             not isinstance(interpreter, str)
@@ -468,10 +673,24 @@ class WorkerRuntime:
             or len(version) > 80
         ):
             raise ValueError("invalid target interpreter or version")
+        # The probe also reports what this release can do and what its state
+        # descriptors are, so the supervisor never has to run the migrator to
+        # learn whether the target declares a migration.
         code = (
             "import json; from importlib.metadata import version; "
-            "from exomem.service_manager import WORKER_PROTOCOL; "
-            'print(json.dumps({"version":version("exomem"),"protocol":WORKER_PROTOCOL}))'
+            "from exomem.service_manager import WORKER_PROTOCOL\n"
+            "try:\n"
+            "    from exomem.service_standby import STANDBY_ENV as _s\n"
+            "    standby = True\n"
+            "except Exception:\n"
+            "    standby = False\n"
+            "try:\n"
+            "    from exomem.state_migration import declared_descriptor_ids\n"
+            "    descriptors = list(declared_descriptor_ids())\n"
+            "except Exception:\n"
+            "    descriptors = []\n"
+            'print(json.dumps({"version":version("exomem"),"protocol":WORKER_PROTOCOL,'
+            '"standby":standby,"state_descriptors":descriptors}))'
         )
         probe = await asyncio.create_subprocess_exec(
             interpreter,
@@ -492,39 +711,68 @@ class WorkerRuntime:
         if probe.returncode != 0 or len(output) > 4096:
             raise ValueError("target cannot run the managed worker protocol")
         actual = json.loads(output)
-        if actual != {"version": version, "protocol": WORKER_PROTOCOL}:
-            raise ValueError("target version or managed worker protocol differs")
-        return {"python": interpreter, "version": version}
+        if not isinstance(actual, dict) or actual.get("version") != version:
+            raise ValueError("target version differs")
+        if actual.get("protocol") != WORKER_PROTOCOL:
+            raise ValueError("target managed worker protocol differs")
+        descriptors = actual.get("state_descriptors")
+        if not isinstance(descriptors, list) or not all(
+            isinstance(entry, str) and entry for entry in descriptors
+        ):
+            raise ValueError("target did not declare its state descriptors")
+        declared = target.get("state_descriptors")
+        if declared is not None and list(declared) != descriptors:
+            raise ValueError("staged state-migration declaration does not match the target")
+        self.standby_capable = actual.get("standby") is True
+        return {
+            "python": interpreter,
+            "version": version,
+            "state_descriptors": descriptors,
+        }
 
-    async def _spawn(self, command: list[str]) -> None:
-        if self.child is not None or _descendants():
+    async def _spawn(self, command: list[str], *, standby: bool = False) -> None:
+        ignore = self._other_sessions(standby=standby)
+        occupied = self.standby if standby else self.child
+        if occupied is not None or _descendants(ignore_sessions=ignore):
             raise RuntimeError("previous owned process exit has not been proven")
         pending = asyncio.create_task(
             asyncio.create_subprocess_exec(
                 *command,
                 start_new_session=True,
+                env=self._child_environment(),
             )
         )
         try:
-            self.child = await asyncio.shield(pending)
+            spawned = await asyncio.shield(pending)
         except asyncio.CancelledError:
             # Retain ownership even if cancellation arrives between fork and
             # subprocess construction. The failure path must stop this tree.
-            self.child = await asyncio.shield(pending)
+            spawned = await asyncio.shield(pending)
+            if standby:
+                self.standby = spawned
+            else:
+                self.child = spawned
             raise
+        if standby:
+            self.standby = spawned
+        else:
+            self.child = spawned
 
     async def stop(self, timeout: float) -> None:
+        ignore = self._other_sessions(standby=False)
         if self.child is not None:
-            await stop_owned_process(self.child, timeout=timeout, include_adopted=True)
+            await stop_owned_process(
+                self.child, timeout=timeout, include_adopted=True, ignore_sessions=ignore
+            )
             self.child = None
-        elif _descendants():
+        elif _descendants(ignore_sessions=ignore):
             raise RuntimeError("untracked owned children require a service-manager cleanup")
         if self.client is not None:
             await self.client.aclose()
             self.client = None
         remove_stale_socket(self.socket_path)
 
-    async def migrate(self, target: dict[str, str], timeout: float) -> None:
+    async def migrate(self, target: dict[str, Any], timeout: float) -> None:
         vault = os.environ.get("EXOMEM_VAULT_PATH", "")
         if not vault or not Path(vault).is_absolute():
             raise ValueError("managed service requires its installed absolute vault binding")
@@ -549,7 +797,7 @@ class WorkerRuntime:
         # A completed migrator is not proof its children have stopped.
         await self.stop(timeout=deadline.remaining(timeout))
 
-    async def start(self, target: dict[str, str], timeout: float):
+    async def start(self, target: dict[str, Any], timeout: float):
         import httpx
 
         deadline = Deadline(timeout)
@@ -594,6 +842,169 @@ class WorkerRuntime:
             except (httpx.HTTPError, TimeoutError):
                 pass
             await asyncio.sleep(min(0.1, deadline.remaining(0.1)))
+
+
+    def _worker_command(self, target: dict[str, Any], socket_path: Path, *, standby: bool):
+        command = [
+            target["python"],
+            "-I",
+            "-m",
+            "exomem.service_manager",
+            "worker",
+            "--socket",
+            str(socket_path),
+            "--host",
+            self.host,
+            "--port",
+            str(self.port),
+        ]
+        if standby:
+            command.append("--standby")
+        return command
+
+    async def _probe(self, client: Any, target: dict[str, Any]) -> dict[str, Any]:
+        """Read one worker's liveness and readiness pair."""
+        health = await client.get("/health")
+        ready = await client.get("/health/ready")
+        if health.status_code == 200 and health.json().get("version") != target["version"]:
+            raise RuntimeError("candidate is serving a different release")
+        if health.status_code != 200 or ready.status_code not in {200, 503}:
+            return {}
+        payload = ready.json()
+        return payload if isinstance(payload, dict) else {}
+
+    def migration_required(self, target: dict[str, Any]) -> tuple[bool, str]:
+        """Whether the staged target declares a state migration for this vault.
+
+        Derived entirely from the state manifest the running system already
+        maintains: a manifest that is not complete needs one, and so does a
+        target whose descriptor set differs from the one the manifest was
+        published with. Nothing here runs the migrator to find out
+        (`seamless-managed-worker-handoff` D8).
+        """
+        vault = os.environ.get("EXOMEM_VAULT_PATH", "")
+        if not vault or not Path(vault).is_absolute():
+            return True, "vault binding unavailable"
+        declared = target.get("state_descriptors")
+        if not declared:
+            return True, "target declares no descriptor set"
+        from . import state_migration
+
+        try:
+            status = state_migration.migration_status(Path(vault))
+        except Exception:  # noqa: BLE001 - an unreadable manifest is the migrator's problem
+            return True, "state manifest unreadable"
+        if status != "complete":
+            return True, f"state manifest {status}"
+        recorded = state_migration.recorded_descriptor_ids(Path(vault))
+        if recorded is None:
+            return True, "state manifest records no descriptor set"
+        if tuple(declared) != tuple(recorded):
+            return True, "descriptors_changed"
+        return False, "declared_none"
+
+    async def start_standby(self, target: dict[str, Any], timeout: float):
+        """Warm a candidate beside the serving worker until it is cutover-ready.
+
+        The standby binds its own socket and owns nothing: it takes no writer
+        lease, publishes nothing and schedules no work until promotion. This
+        never signals, pauses or inspects the worker that is serving.
+        """
+        import httpx
+
+        if not self.standby_capable:
+            raise RuntimeError("target release cannot run as a standby")
+        deadline = Deadline(timeout)
+        self.standby_waiting = None
+        remove_stale_socket(self.standby_socket)
+        await self._spawn(
+            self._worker_command(target, self.standby_socket, standby=True), standby=True
+        )
+        self.standby_client = httpx.AsyncClient(
+            transport=httpx.AsyncHTTPTransport(uds=str(self.standby_socket), retries=0),
+            base_url="http://localhost",
+            trust_env=False,
+            follow_redirects=False,
+            timeout=None,
+        )
+        while True:
+            if self.standby.returncode is not None:
+                raise RuntimeError("standby worker exited before cutover readiness")
+            try:
+                async with asyncio.timeout(deadline.remaining(2)):
+                    payload = await self._probe(self.standby_client, target)
+                cutover = payload.get("cutover") or {}
+                components = cutover.get("components") or {}
+                waiting = [name for name, state in components.items() if state != "ready"]
+                if waiting:
+                    self.standby_waiting = waiting[0]
+                if cutover.get("cutover_ready") is True:
+                    self.standby_waiting = None
+                    return self.standby_client
+            except (httpx.HTTPError, TimeoutError, ValueError):
+                pass
+            await asyncio.sleep(min(0.1, deadline.remaining(0.1)))
+
+    async def discard_standby(self, timeout: float = 10) -> None:
+        """Stop the candidate's tree without touching the serving worker's."""
+        if self.standby is not None:
+            await stop_owned_process(
+                self.standby,
+                timeout=timeout,
+                include_adopted=True,
+                ignore_sessions=self._other_sessions(standby=True),
+            )
+            self.standby = None
+        if self.standby_client is not None:
+            await self.standby_client.aclose()
+            self.standby_client = None
+        remove_stale_socket(self.standby_socket)
+
+    async def promote_standby(self, *, migrated: bool, timeout: float):
+        """Hand state ownership to the warmed candidate and serve from it.
+
+        Called only after the previous worker and its descendants have provably
+        exited and after the migrator has run or been recorded as skipped.
+        """
+        import httpx
+
+        if self.standby is None or self.standby_client is None:
+            raise RuntimeError("no standby worker to promote")
+        if self.child is not None or _descendants(
+            ignore_sessions=frozenset({self.standby.pid})
+        ):
+            raise RuntimeError("previous owned process exit has not been proven")
+        deadline = Deadline(timeout)
+        async with asyncio.timeout(deadline.remaining(10)):
+            response = await self.standby_client.post(
+                "/control/promote", json={"migrated": bool(migrated)}
+            )
+        if response.status_code != 200:
+            raise RuntimeError("standby refused promotion")
+        record = response.json()
+        while True:
+            if self.standby.returncode is not None:
+                raise RuntimeError("promoted worker exited before readiness")
+            try:
+                async with asyncio.timeout(deadline.remaining(2)):
+                    health = await self.standby_client.get("/health")
+                    ready = await self.standby_client.get("/health/ready")
+                if (
+                    health.status_code == 200
+                    and ready.status_code == 200
+                    and ready.json().get("status") == "ready"
+                ):
+                    break
+            except (httpx.HTTPError, TimeoutError, ValueError):
+                pass
+            await asyncio.sleep(min(0.1, deadline.remaining(0.1)))
+        # One owner at a time: the promoted tree becomes the serving one and the
+        # standby slot empties in the same step.
+        self.child, self.standby = self.standby, None
+        self.client, self.standby_client = self.standby_client, None
+        self.socket_path, self.standby_socket = self.standby_socket, self.socket_path
+        self.standby_waiting = None
+        return self.client, record
 
 
 async def control_server(path: Path, supervisor: Supervisor) -> asyncio.Server:
@@ -687,6 +1098,12 @@ async def serve(supervisor: Supervisor, *, host: str, port: int) -> None:
                 await asyncio.wait_for(supervisor.ingress.aclose(), 10)
             except TimeoutError:
                 pass
+            discard = getattr(supervisor.runtime, "discard_standby", None)
+            if discard is not None:
+                try:
+                    await discard(timeout=5)
+                except Exception:  # noqa: BLE001 - shutdown still has to stop the worker
+                    pass
             await supervisor.runtime.stop(timeout=5)
 
 
@@ -707,6 +1124,11 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--socket", type=Path, required=True)
     worker.add_argument("--host", required=True)
     worker.add_argument("--port", type=int, required=True)
+    worker.add_argument(
+        "--standby",
+        action="store_true",
+        help="warm beside the serving worker and own no state until promoted",
+    )
     args = parser.parse_args(argv)
     if sys.platform != "linux":
         parser.error("managed services currently require Linux systemd user units")
@@ -715,12 +1137,17 @@ def main(argv: list[str] | None = None) -> int:
 
         private_directory(args.socket.parent)
         server.run(
-            transport="streamable-http", host=args.host, port=args.port, worker_socket=args.socket
+            transport="streamable-http",
+            host=args.host,
+            port=args.port,
+            worker_socket=args.socket,
+            standby=args.standby,
         )
         return 0
     try:
         directory = private_directory(args.runtime_dir)
-        if len(os.fsencode(directory / "control.sock")) >= 104:
+        # The standby socket is the longest name this directory has to hold.
+        if len(os.fsencode(directory / "worker-standby.sock")) >= 104:
             raise ValueError("managed runtime directory is too long for Unix sockets")
         if not 0 < args.port < 65536:
             raise ValueError("port must be between 1 and 65535")
@@ -730,7 +1157,12 @@ def main(argv: list[str] | None = None) -> int:
             from .service_ingress import ServiceIngress
 
             host = os.environ.get("EXOMEM_HOST") or args.host
-            runtime = WorkerRuntime(directory / "worker.sock", host=host, port=args.port)
+            runtime = WorkerRuntime(
+                directory / "worker.sock",
+                host=host,
+                port=args.port,
+                environment_file=identity.get("environment_file"),
+            )
             supervisor = Supervisor(
                 directory,
                 initial_target={"python": args.worker_python, "version": version("exomem")},

@@ -474,15 +474,19 @@ def _find_call_summary(message) -> str:
 
 def build_server(*, require_auth: bool) -> FastMCP:
     """Construct and return the FastMCP app, ready to run."""
-    from . import runtime_resources
+    from . import runtime_resources, service_standby
 
+    standby = service_standby.in_standby()
     runtime = initialize_runtime(load_dotenv_func=load_dotenv)
     from .governance.authorization_request import validate_credential_registry
     from .governance.authorization_transport import AuthorizationSessionMiddleware
     from .writer_lease import start_server_lifecycle
 
     validate_credential_registry()
-    start_server_lifecycle()
+    if not standby:
+        # The writer lease is state ownership. A standby acquires it only at
+        # promotion (`seamless-managed-worker-handoff` D7).
+        start_server_lifecycle()
     hosted = runtime.hosted_config is not None
     if hosted:
         assert runtime.hosted_config is not None
@@ -513,7 +517,8 @@ def build_server(*, require_auth: bool) -> FastMCP:
             transfer_security_authority=security_authority,
         )
     else:
-        runtime_activation = LocalRuntimeActivation(runtime.vault_root)
+        runtime_activation = LocalRuntimeActivation(runtime.vault_root, deferred=standby)
+        service_standby.register_activation(runtime_activation)
         auth = build_oauth(require_auth=require_auth, base_url=runtime.base_url)
         mcp = ExomemFastMCP(
             "exomem",
@@ -524,7 +529,13 @@ def build_server(*, require_auth: bool) -> FastMCP:
         mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
         mcp.add_middleware(CallTraceMiddleware())
 
-        register_asset_routes(mcp, on_liveness=runtime_activation.start)
+        register_asset_routes(
+            mcp,
+            on_liveness=runtime_activation.start,
+            vault_root=runtime.vault_root,
+        )
+        if standby:
+            service_standby.start_warm(runtime.vault_root)
         mcp._exomem_local_runtime_activation = runtime_activation
         register_oauth_metadata_route(mcp, base_url=runtime.base_url, auth_enabled=auth is not None)
         transfer_config = register_transfer_routes(
@@ -831,9 +842,16 @@ def run(
     port: int = 8765,
     log_dir: Path | None = None,
     worker_socket: Path | None = None,
+    standby: bool = False,
 ) -> None:
     """CLI entry: configure logging, build the server, run it."""
+    from . import service_standby
     from .logging_config import configure_logging, resolve_log_dir
+
+    if standby or service_standby.standby_requested():
+        # Declared before the server is built so every ownership decision in
+        # `build_server` sees it.
+        service_standby.enter_standby()
 
     configure_logging(
         log_dir if log_dir is not None else resolve_log_dir(), process="server"

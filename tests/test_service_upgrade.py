@@ -94,8 +94,14 @@ def test_upgrade_stages_immutable_release_before_sending_target(tmp_path: Path) 
     fake_uv.write_text(
         "#!/bin/sh\n"
         "printf '%s\\n' \"$*\" >> \"$FAKE_UV_TRACE\"\n"
-        "if [ \"$1\" = venv ]; then mkdir -p \"$4/bin\"; "
-        "printf '#!/bin/sh\\necho 0.2.0\\n' > \"$4/bin/python\"; chmod +x \"$4/bin/python\"; fi\n",
+        "if [ \"$1\" = venv ]; then\n"
+        "  mkdir -p \"$4/bin\"\n"
+        "  cat > \"$4/bin/python\" <<'STUB'\n"
+        "#!/bin/sh\n"
+        "echo '{\"version\": \"0.2.0\", \"state_descriptors\": [\"claims-store\"]}'\n"
+        "STUB\n"
+        "  chmod +x \"$4/bin/python\"\n"
+        "fi\n",
         encoding="utf-8",
     )
     fake_uv.chmod(0o700)
@@ -110,6 +116,9 @@ def test_upgrade_stages_immutable_release_before_sending_target(tmp_path: Path) 
     target = requests[1]["target"]
     assert target["python"].startswith(str(tmp_path / "releases"))
     assert target["version"] == "0.2.0"
+    # The staged target carries its state-migration declaration, so the
+    # supervisor can skip the offline migrator when nothing changed.
+    assert target["state_descriptors"] == ["claims-store"]
     assert "pip install" in trace.read_text(encoding="utf-8")
     assert str(tmp_path / "launcher") not in trace.read_text(encoding="utf-8").splitlines()[-1]
 

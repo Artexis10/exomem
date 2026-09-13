@@ -58,9 +58,23 @@ def control(runtime_dir: Path, command: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
-def _installed_version(python: Path) -> str:
+_TARGET_PROBE = (
+    "import json; import importlib.metadata as m\n"
+    "from exomem.state_migration import declared_descriptor_ids\n"
+    'print(json.dumps({"version": m.version("exomem"), '
+    '"state_descriptors": list(declared_descriptor_ids())}))'
+)
+
+
+def _staged_identity(python: Path) -> dict[str, object]:
+    """Read the staged release's version and the state descriptors it requires.
+
+    The descriptor set is the target's migration declaration: the supervisor
+    compares it with the vault's state manifest at cutover and runs the offline
+    migrator only when they differ (`seamless-managed-worker-handoff` D8).
+    """
     result = subprocess.run(
-        [str(python), "-I", "-c", "import importlib.metadata as m; print(m.version('exomem'))"],
+        [str(python), "-I", "-c", _TARGET_PROBE],
         check=True,
         capture_output=True,
         text=True,
@@ -68,7 +82,15 @@ def _installed_version(python: Path) -> str:
         errors="strict",
         timeout=10,
     )
-    return result.stdout.strip()
+    identity = json.loads(result.stdout)
+    if not isinstance(identity, dict) or not isinstance(identity.get("version"), str):
+        raise RuntimeError("staged release did not report a usable identity")
+    descriptors = identity.get("state_descriptors")
+    if not isinstance(descriptors, list) or not all(
+        isinstance(entry, str) and entry for entry in descriptors
+    ):
+        raise RuntimeError("staged release did not declare its state descriptors")
+    return {"version": identity["version"].strip(), "state_descriptors": descriptors}
 
 
 def _uv() -> str:
@@ -79,7 +101,7 @@ def _uv() -> str:
     return executable
 
 
-def stage(runtime_dir: Path, launcher_python: str, profile: str, package_version: str) -> dict[str, str]:
+def stage(runtime_dir: Path, launcher_python: str, profile: str, package_version: str) -> dict[str, Any]:
     launcher = Path(launcher_python)
     if not launcher.is_absolute() or not launcher.is_file() or not os.access(launcher, os.X_OK):
         raise RuntimeError("manager reported an invalid launcher interpreter")
@@ -102,10 +124,15 @@ def stage(runtime_dir: Path, launcher_python: str, profile: str, package_version
         result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900)
         if result.returncode:
             raise RuntimeError(f"release staging failed (uv exit {result.returncode})")
-    version = _installed_version(target_python)
+    identity = _staged_identity(target_python)
+    version = identity["version"]
     if not version or (package_version and version != package_version):
         raise RuntimeError("staged release version does not match requested version")
-    return {"python": str(target_python), "version": version}
+    return {
+        "python": str(target_python),
+        "version": version,
+        "state_descriptors": identity["state_descriptors"],
+    }
 
 
 def _wait_for_target(runtime_dir: Path, target: dict[str, str], initial: dict[str, Any]) -> dict[str, Any]:

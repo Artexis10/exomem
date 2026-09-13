@@ -282,9 +282,19 @@ def test_target_inspection_is_read_only_and_checks_worker_protocol(tmp_path, mon
 
         runtime = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=8765)
         target = {"python": sys.executable, "version": version("exomem")}
-        assert await runtime.inspect(target) == target
+        inspected = await runtime.inspect(target)
+        assert {key: inspected[key] for key in target} == target
+        # The probe reports the target's own standby capability and the state
+        # descriptors it requires; the declaration is verified, never trusted.
+        assert runtime.standby_capable is True
+        assert inspected["state_descriptors"]
+        assert await runtime.inspect(inspected) == inspected
+        with pytest.raises(ValueError, match="declaration"):
+            await runtime.inspect({**target, "state_descriptors": ["invented-descriptor"]})
         with pytest.raises(ValueError):
             await runtime.inspect({**target, "version": "not-the-installed-version"})
+        with pytest.raises(ValueError, match="does not define"):
+            await runtime.inspect({**target, "unexpected": "field"})
         assert not state.exists()
 
     asyncio.run(scenario())
@@ -351,3 +361,224 @@ def test_global_deadline_bounds_standalone_stream_detach(tmp_path, monkeypatch):
         assert runtime.events == ["inspect", "stop"]
 
     asyncio.run(scenario())
+
+
+class _StandbyRuntime(_Runtime):
+    """A runtime whose candidate can warm beside the worker still serving."""
+
+    def __init__(self):
+        super().__init__()
+        self.standby_capable = True
+        self.standby_waiting = "graph_snapshot"
+        self.standby_failure = None
+        self.migration = (False, "declared_none")
+        self.promoted = None
+
+    async def start_standby(self, target, timeout):
+        self.events.append("start-standby")
+        assert self.pid, "the standby must warm while the old worker still serves"
+        if self.standby_failure == "budget":
+            raise TimeoutError("standby warm budget expired")
+        if self.standby_failure == "spawn":
+            raise RuntimeError("standby could not be spawned")
+        return "standby-upstream"
+
+    async def discard_standby(self, timeout=10):
+        self.events.append("discard-standby")
+
+    def migration_required(self, target):
+        return self.migration
+
+    async def promote_standby(self, *, migrated, timeout):
+        self.events.append("promote")
+        assert self.pid == 0, "promotion overlapped the previous worker"
+        self.promoted = migrated
+        self.pid = 200
+        if self.standby_failure == "promote":
+            raise RuntimeError("standby refused promotion")
+        return "new-upstream", {"ok": True, "snapshot": "current", "migrated": migrated}
+
+
+def _standby_supervisor(tmp_path, **kwargs):
+    module = _manager()
+    ingress, runtime = _Ingress(), _StandbyRuntime()
+    target = {"python": sys.executable, "version": "1.2.3"}
+    manager = module.Supervisor(
+        module.private_directory(tmp_path / "managed"),
+        initial_target=target,
+        ingress=ingress,
+        runtime=runtime,
+        identity={"unit": "sample.service", "invocation": "abc", "boot": "boot"},
+        **kwargs,
+    )
+    return manager, ingress, runtime, target
+
+
+def test_standby_warms_before_ingress_pauses_and_is_promoted_after_the_stop(tmp_path):
+    async def scenario():
+        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
+        result = await manager.upgrade(target)
+        assert result["ok"] is True
+        # The standby warms first, and nothing is paused or stopped until it is
+        # cutover-ready. Migration is skipped because the target declares none.
+        assert runtime.events == ["inspect", "start-standby", "stop", "promote"]
+        assert ingress.events == ["pause", "drain", "detach", ("resume", "new-upstream")]
+        assert result["handoff"]["standby"] == "ready"
+        assert result["handoff"]["migration"] == {"state": "skipped", "reason": "declared_none"}
+        assert result["handoff"]["promotion"]["snapshot"] == "current"
+        assert runtime.promoted is False
+
+    asyncio.run(scenario())
+
+
+def test_a_declared_migration_runs_with_no_worker_owning_state(tmp_path):
+    async def scenario():
+        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
+        runtime.migration = (True, "descriptors_changed")
+        result = await manager.upgrade(target)
+        assert result["ok"] is True
+        assert runtime.events == ["inspect", "start-standby", "stop", "migrate", "promote"]
+        assert result["handoff"]["migration"] == {"state": "ran", "reason": "descriptors_changed"}
+        assert runtime.promoted is True
+
+    asyncio.run(scenario())
+
+
+def test_a_standby_that_misses_its_warm_budget_leaves_the_old_worker_serving(tmp_path):
+    async def scenario():
+        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
+        runtime.standby_failure = "budget"
+        result = await manager.upgrade(target)
+        assert result["ok"] is True
+        # The candidate is discarded with the component it waited on recorded,
+        # and the upgrade falls back to the one-worker sequence.
+        assert runtime.events == [
+            "inspect",
+            "start-standby",
+            "discard-standby",
+            "stop",
+            "start",
+        ]
+        assert result["handoff"]["standby"] == "discarded"
+        assert result["handoff"]["waiting"] == "graph_snapshot"
+        assert result["handoff"]["reason"] == "warm budget expired"
+
+    asyncio.run(scenario())
+
+
+def test_a_target_that_cannot_stand_by_reports_the_one_worker_sequence(tmp_path):
+    async def scenario():
+        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
+        runtime.standby_capable = False
+        result = await manager.upgrade(target)
+        assert result["ok"] is True
+        assert runtime.events == ["inspect", "stop", "start"]
+        assert result["handoff"]["standby"] == "unsupported"
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_drain_discards_the_standby_before_resuming(tmp_path):
+    async def scenario():
+        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
+        ingress.drained = False
+        result = await manager.upgrade(target)
+        assert result["ok"] is False
+        assert runtime.events == ["inspect", "start-standby", "discard-standby"]
+        assert ingress.events == ["pause", "drain", ("resume", None)]
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_promotion_retains_recovery_state_and_stops_every_owned_process(tmp_path):
+    async def scenario():
+        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
+        runtime.standby_failure = "promote"
+        result = await manager.upgrade(target)
+        assert result["ok"] is False
+        assert "discard-standby" in runtime.events
+        assert runtime.events[-1] == "stop"
+        assert manager.records.pending()["phase"] == "failed"
+        assert ingress.events[-1] == "unavailable"
+
+    asyncio.run(scenario())
+
+
+def test_the_standby_warm_budget_is_a_parameter_with_an_environment_override(monkeypatch):
+    module = _manager()
+    monkeypatch.delenv(module.STANDBY_WARM_ENV, raising=False)
+    assert module.standby_warm_budget() == module.DEFAULT_STANDBY_WARM_SECONDS
+    assert module.DEFAULT_STANDBY_WARM_SECONDS >= 120
+    monkeypatch.setenv(module.STANDBY_WARM_ENV, "12.5")
+    assert module.standby_warm_budget() == 12.5
+    monkeypatch.setenv(module.STANDBY_WARM_ENV, "not-a-number")
+    assert module.standby_warm_budget() == module.DEFAULT_STANDBY_WARM_SECONDS
+
+
+def test_the_supervisor_takes_the_warm_budget_as_a_parameter(tmp_path):
+    manager, _, _, _ = _standby_supervisor(tmp_path, standby_warm_timeout=7.0)
+    assert manager.standby_warm_timeout == 7.0
+
+
+def test_a_child_reads_the_current_service_environment_file(tmp_path, monkeypatch):
+    module = _manager()
+    env_file = tmp_path / "service.env"
+    env_file.write_text(
+        '# managed service environment\n'
+        'EXOMEM_PRELOAD_MODELS=1\n'
+        'EXOMEM_VAULT_PATH="/srv/vault"\n'
+        'malformed line without equals\n'
+        '9INVALID=x\n'
+    )
+    runtime = module.WorkerRuntime(
+        tmp_path / "worker.sock", host="127.0.0.1", port=1, environment_file=env_file
+    )
+    monkeypatch.setenv("EXOMEM_PRELOAD_MODELS", "0")
+    monkeypatch.setenv("EXOMEM_UNTOUCHED", "keep")
+    environment = runtime._child_environment()
+    assert environment["EXOMEM_PRELOAD_MODELS"] == "1"
+    assert environment["EXOMEM_VAULT_PATH"] == "/srv/vault"
+    assert environment["EXOMEM_UNTOUCHED"] == "keep"
+    assert "9INVALID" not in environment
+    # The supervisor's own environment is never mutated by reading the file.
+    assert os.environ["EXOMEM_PRELOAD_MODELS"] == "0"
+
+
+def test_a_missing_service_environment_file_leaves_the_child_inheriting(tmp_path):
+    module = _manager()
+    runtime = module.WorkerRuntime(
+        tmp_path / "worker.sock",
+        host="127.0.0.1",
+        port=1,
+        environment_file=tmp_path / "absent.env",
+    )
+    assert runtime._child_environment() is None
+
+
+def test_systemd_identity_reports_the_units_environment_file(tmp_path, monkeypatch):
+    module = _manager()
+    proc = tmp_path / "proc"
+    (proc / "self").mkdir(parents=True)
+    (proc / "self" / "cgroup").write_text("0::/user.slice/sample.service\n")
+    (proc / "sys/kernel/random").mkdir(parents=True)
+    (proc / "sys/kernel/random/boot_id").write_text("test-boot")
+    cgroup = tmp_path / "cgroup/user.slice/sample.service"
+    cgroup.mkdir(parents=True)
+    (cgroup / "cgroup.procs").write_text(f"{os.getpid()}\n")
+    monkeypatch.setenv("INVOCATION_ID", "a" * 32)
+    properties = {
+        "MainPID": str(os.getpid()),
+        "ControlGroup": "/user.slice/sample.service",
+        "InvocationID": "a" * 32,
+        "KillMode": "control-group",
+        "SendSIGKILL": "yes",
+        "TimeoutStopUSec": "30s",
+        "EnvironmentFiles": "/home/owner/.config/exomem/service.env (ignore_errors=no)",
+    }
+    identity = module.verify_systemd_identity(
+        "sample.service",
+        properties=properties,
+        proc_root=proc,
+        cgroup_root=tmp_path / "cgroup",
+    )
+    assert identity["environment_file"] == "/home/owner/.config/exomem/service.env"

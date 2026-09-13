@@ -100,10 +100,20 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
 class LocalRuntimeActivation:
     """Start local background workers after transport liveness is observable."""
 
-    def __init__(self, vault_root: Path, *, fallback_seconds: float = 5.0) -> None:
+    def __init__(
+        self,
+        vault_root: Path,
+        *,
+        fallback_seconds: float = 5.0,
+        deferred: bool = False,
+    ) -> None:
         from . import readiness, warmup
 
-        if warmup.warmup_enabled():
+        # A standby owns nothing until promotion, so it neither claims request
+        # admission nor arms the liveness fallback that would start schedulers
+        # beside the worker still serving (`seamless-managed-worker-handoff` D7).
+        self._deferred = deferred
+        if warmup.warmup_enabled() and not deferred:
             readiness.manage_runtime()
         self.vault_root = vault_root
         self.fallback_seconds = fallback_seconds
@@ -116,10 +126,21 @@ class LocalRuntimeActivation:
         self.file_watcher: Any | None = None
         self.derived_drain: Any | None = None
 
+    def release(self) -> None:
+        """Hand this process the ownership a standby refused, then activate."""
+        from . import readiness, warmup
+
+        with self._lock:
+            was_deferred = self._deferred
+            self._deferred = False
+        if was_deferred and warmup.warmup_enabled():
+            readiness.manage_runtime()
+        self.start()
+
     def start(self) -> None:
         """Launch local workers once; safe from health and timer races."""
         with self._lock:
-            if self._started or self._shutdown.is_set():
+            if self._started or self._shutdown.is_set() or self._deferred:
                 return
             self._started = True
             timer = self._timer
@@ -286,7 +307,7 @@ class LocalRuntimeActivation:
             timer = threading.Timer(self.fallback_seconds, self.start)
             timer.daemon = True
             with self._lock:
-                if not self._started:
+                if not self._started and not self._deferred:
                     self._timer = timer
                     timer.start()
             try:
@@ -561,6 +582,12 @@ def _start_metrics_persistence() -> None:
     failure here (an unreadable snapshot, a lease-config error) is logged and
     swallowed rather than blocking startup.
     """
+    from . import service_standby
+
+    if service_standby.in_standby():
+        # A standby publishes nothing, not even its own metrics snapshots, while
+        # the worker that owns the state directory is still serving.
+        return
     try:
         from .writer_lease import get_manager
 
