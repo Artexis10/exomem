@@ -70,7 +70,7 @@ def worker(root, socket_path, standby=False):
             def __init__(self, _vault_root):
                 pass
 
-            def adopt_published_snapshot(self):
+            def adopt_published_snapshot(self, **_kwargs):
                 return epistemic_graph.SnapshotAdoption(True, reason="adopted")
 
         epistemic_graph.EpistemicGraphIndex = _AdoptedIndex

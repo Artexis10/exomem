@@ -175,3 +175,133 @@ def test_a_promotion_after_a_deferred_write_is_still_incremental(
         f"a residue adoption must stay incremental: {report['per_write_rebuilds']}"
     )
     assert report["available"] is True
+
+
+_RESIDUE_PROBE = '''
+import json, sys
+from pathlib import Path
+
+sys.path.insert(0, {tests_dir!r})
+
+from exomem import deferred_index, service_standby, state_paths  # noqa: E402
+from exomem.epistemic_graph import EpistemicGraphIndex  # noqa: E402
+
+root = Path(sys.argv[1])
+state = state_paths.vault_state_dir(root)
+
+
+def fingerprint():
+    import hashlib
+
+    prints = {{}}
+    if not state.exists():
+        return prints
+    for path in sorted(state.rglob("*")):
+        # `-wal`/`-shm` are SQLite journal artifacts that even a read creates,
+        # including this probe's own. Durable content is what matters, and a
+        # write parked in the WAL is still visible to the row count below.
+        if path.is_file() and not path.name.endswith(("-wal", "-shm")):
+            prints[str(path.relative_to(state))] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return prints
+
+
+def queued():
+    """Graph repair rows the drain owes. Never swallow: a silent zero here
+    would make the whole probe pass vacuously."""
+    store = deferred_index.store_path(root)
+    if not store.exists():
+        return 0
+    connection = deferred_index._connect_readonly(root)
+    try:
+        return int(connection.execute("SELECT count(*) FROM graph_upserts").fetchone()[0])
+    finally:
+        connection.close()
+
+
+before_bytes, before_rows = fingerprint(), queued()
+available_before = EpistemicGraphIndex(root).available()
+
+service_standby.enter_standby()
+service_standby.warm(root)
+
+warm_bytes, warm_rows = fingerprint(), queued()
+record = service_standby.adoption_record()
+available_during_warm = EpistemicGraphIndex(root).available()
+
+promotion = service_standby.promote(root, migrated=False)
+
+print(
+    json.dumps(
+        {{
+            "residue": record["residue"],
+            "reason": record["reason"],
+            "warm_changed": sorted(
+                name
+                for name in set(before_bytes) | set(warm_bytes)
+                if before_bytes.get(name) != warm_bytes.get(name)
+            ),
+            "warm_rows_added": warm_rows - before_rows,
+            "available_before": available_before,
+            "available_during_warm": available_during_warm,
+            "promotion": promotion,
+            "rows_after_promotion": queued() - before_rows,
+            "available_after_promotion": EpistemicGraphIndex(root).available(),
+        }}
+    )
+)
+'''
+
+
+def _run_residue_probe(vault: Path, tmp_path: Path) -> dict:
+    script = tmp_path / "residue_probe.py"
+    script.write_text(
+        _RESIDUE_PROBE.format(tests_dir=str(Path(__file__).parent)), encoding="utf-8"
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(Path(__file__).resolve().parents[1] / "src"), environment.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+    completed = subprocess.run(
+        [sys.executable, str(script), str(vault)],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr[-4000:]
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+def test_a_standby_defers_every_residue_write_until_it_is_promoted(
+    handoff_vault: Path, tmp_path: Path
+) -> None:
+    """A standby owns nothing, including the repair its adoption will owe.
+
+    Adoption learns which pages the outgoing worker left deferred, and applying
+    that knowledge is two durable writes to shared state: the graph repair
+    demand and the withdrawn availability marker. Both are scheduling work and
+    publishing graph state for a vault another worker is still serving, so the
+    standby records the residue and applies none of it until promotion.
+    """
+    _run_child(handoff_vault, tmp_path, ["outgoing_fenced"])
+    report = _run_residue_probe(handoff_vault, tmp_path)
+
+    assert report["residue"] >= 1, "the fixture must leave a deferred page behind"
+    assert report["reason"] == "adopted"
+    assert report["warm_changed"] == [], (
+        f"a standby warm wrote to shared state: {report['warm_changed']}"
+    )
+    assert report["warm_rows_added"] == 0, (
+        "a standby warm queued graph repair the serving worker owns"
+    )
+    assert report["available_during_warm"] == report["available_before"], (
+        "the standby changed the availability marker the serving worker owns"
+    )
+    assert report["promotion"]["residue_applied"] == report["residue"], report
+    assert report["rows_after_promotion"] == report["residue"], (
+        "promotion must enqueue exactly the residue adoption recorded"
+    )
+    assert report["available_after_promotion"] is False, (
+        "the marker must be withdrawn once the promoted worker owns the repair"
+    )

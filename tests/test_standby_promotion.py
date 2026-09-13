@@ -76,7 +76,7 @@ def _stub_adoption(monkeypatch, *, adopted=True, residue=(), reason="adopted"):
     monkeypatch.setattr(
         epistemic_graph.EpistemicGraphIndex,
         "adopt_published_snapshot",
-        lambda self: epistemic_graph.SnapshotAdoption(
+        lambda self, **_kwargs: epistemic_graph.SnapshotAdoption(
             adopted, residue=tuple(residue), reason=reason
         ),
         raising=True,
@@ -114,7 +114,10 @@ def test_a_standby_takes_no_lease_and_starts_no_scheduler_until_promotion(
     assert record["reproved"] is True
 
 
-def test_promotion_records_an_advanced_checkpoint(monkeypatch, tmp_path: Path) -> None:
+def test_promotion_records_a_checkpoint_that_moved_under_the_standby(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """With no migration, promotion re-compares the checkpoint pair."""
     monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
     monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
     tokens = iter(["checkpoint-1", "checkpoint-2"])
@@ -123,25 +126,66 @@ def test_promotion_records_an_advanced_checkpoint(monkeypatch, tmp_path: Path) -
     service_standby.enter_standby()
     service_standby.register_activation(_Activation())
     service_standby.prove_graph_snapshot(tmp_path)
-    record = service_standby.promote(tmp_path, migrated=True)
+    record = service_standby.promote(tmp_path, migrated=False)
     assert record["snapshot"] == "advanced"
+    assert record["reproved"] is True
+
+
+def test_a_declared_migration_re_runs_the_whole_source_proof(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The migrator is the only writer between workers, so its run earns a proof.
+
+    A checkpoint pair describes state the migrator may have rewritten, so
+    comparing it would not be a re-validation at all.
+    """
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    reproofs: list[str] = []
+    real_reprove = service_standby._reprove
+
+    def traced(vault_root):
+        reproofs.append("reprove")
+        return real_reprove(vault_root)
+
+    monkeypatch.setattr(service_standby, "_reprove", traced)
+    service_standby.enter_standby()
+    service_standby.register_activation(_Activation())
+    service_standby.prove_graph_snapshot(tmp_path)
+    record = service_standby.promote(tmp_path, migrated=True)
+    assert reproofs == ["reprove"]
+    assert record["snapshot"] == "current"
     assert record["migrated"] is True
 
 
 def test_a_failed_reproof_promotes_anyway_and_records_the_rebuild(
     monkeypatch, tmp_path: Path
 ) -> None:
+    """A re-proof that fails must not strand the service unpromoted.
+
+    The coalesced rebuild path owns that repair; refusing to promote would leave
+    nobody serving at all.
+    """
+    from exomem import epistemic_graph
+
     monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
     monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
-    tokens = iter(["checkpoint-1", None])
-    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: next(tokens))
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
     _stub_adoption(monkeypatch)
+    monkeypatch.setattr(
+        service_standby,
+        "_reprove",
+        lambda root: epistemic_graph.SnapshotAdoption(False, reason="snapshot_proof_declined"),
+    )
     activation = _Activation()
     service_standby.enter_standby()
     service_standby.register_activation(activation)
     service_standby.prove_graph_snapshot(tmp_path)
     record = service_standby.promote(tmp_path, migrated=True)
     assert record["snapshot"] == "rebuild-after-promotion"
+    assert record["residue_applied"] == 0
     assert activation.released is True
     assert service_standby.promoted() is True
 

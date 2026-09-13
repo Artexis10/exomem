@@ -181,6 +181,12 @@ def prove_graph_snapshot(vault_root: Path) -> bool:
     Must run after the recall registry is seeded and after the resolver step:
     `adopt_recall_origin` refuses a cold scope, and the bounded repair needs the
     resolver at this exact checkpoint.
+
+    The residue is recorded, not applied: enqueueing the repair is scheduling a
+    drain and withdrawing the availability marker is publishing graph state, and
+    the worker still serving owns both until this one is promoted. Making the
+    checkpoint the delta origin is process-local, so the adoption still does
+    everything that removes the promoted worker's whole-vault pass.
     """
     global _proved_token, _adoption
     from . import epistemic_graph
@@ -188,7 +194,7 @@ def prove_graph_snapshot(vault_root: Path) -> bool:
     try:
         adoption = epistemic_graph.EpistemicGraphIndex(
             Path(vault_root)
-        ).adopt_published_snapshot()
+        ).adopt_published_snapshot(apply_residue=False)
     except Exception:  # noqa: BLE001 - an unadopted snapshot is a waiting component
         log.warning("standby graph snapshot adoption failed", exc_info=True)
         adoption = epistemic_graph.SnapshotAdoption(False, reason="adoption_raised")
@@ -330,6 +336,36 @@ def start_warm(vault_root: Path) -> threading.Thread:
     return thread
 
 
+def _reprove(vault_root: Path) -> Any:
+    """Re-run the source proof after the migrator wrote state."""
+    from . import epistemic_graph
+
+    try:
+        return epistemic_graph.EpistemicGraphIndex(vault_root).adopt_published_snapshot(
+            apply_residue=False
+        )
+    except Exception:  # noqa: BLE001 - a failed re-proof rebuilds after promotion
+        log.warning("standby snapshot re-proof failed", exc_info=True)
+        return epistemic_graph.SnapshotAdoption(False, reason="reproof_raised")
+
+
+def _apply_residue(vault_root: Path, adoption: Any) -> int:
+    """Enqueue the repair this adoption owes, now that this process owns it."""
+    from . import epistemic_graph
+
+    residue = getattr(adoption, "residue", ()) if adoption is not None else ()
+    if not residue or not getattr(adoption, "adopted", False):
+        return 0
+    try:
+        applied = epistemic_graph.EpistemicGraphIndex(vault_root).apply_adopted_residue(
+            residue
+        )
+    except Exception:  # noqa: BLE001 - the coalesced rebuild owns an unenqueued residue
+        log.warning("promoted worker could not enqueue its adopted residue", exc_info=True)
+        return 0
+    return len(residue) if applied else 0
+
+
 def _acquire_ownership() -> None:
     """Take the writer lease this process deliberately refused while standby."""
     from .writer_lease import start_server_lifecycle
@@ -353,8 +389,16 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
         proved = _proved_token
     record: dict[str, Any] = {"ok": True, "migrated": bool(migrated), "reproved": False}
     started = time.monotonic()
+    adoption = _adoption
     if proved is None:
         record["snapshot"] = "unproven"
+    elif migrated:
+        # The offline migrator is the only writer between the two workers, and
+        # it ran. Re-run the whole proof rather than compare a checkpoint pair
+        # that describes state it may have rewritten.
+        adoption = _reprove(Path(vault_root))
+        record["reproved"] = True
+        record["snapshot"] = "current" if adoption.adopted else "rebuild-after-promotion"
     else:
         current = snapshot_token(Path(vault_root))
         record["reproved"] = True
@@ -364,6 +408,9 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
             record["snapshot"] = "advanced"
         else:
             record["snapshot"] = "current"
+    # Ownership of the repair the adoption owes transfers here, with ownership
+    # of everything else: not one moment before promotion is accepted.
+    record["residue_applied"] = _apply_residue(Path(vault_root), adoption)
     _acquire_ownership()
     with _lock:
         _promoted = True

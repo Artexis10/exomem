@@ -180,8 +180,11 @@ process's delta origin, instead of the whole-vault pass a replacement used to
 pay for a lineage it could advance. The `cutover` block reports it as
 `adoption: {"residue": N, "reason": "adopted"}`. A non-zero `residue` is an
 adoption that succeeded *and* owes the drain that many pages — the deferred
-writes the outgoing worker left behind — and reads that require a current
-projection keep refusing until that repair lands. A refused adoption names its
+writes the outgoing worker left behind. The standby only *records* that debt:
+queueing the repair and withdrawing the availability marker are writes to state
+the serving worker still owns, so they happen at promotion, and the handoff
+record reports `residue_applied`. From then on, reads that require a current
+projection refuse until that repair lands. A refused adoption names its
 reason instead (for example `residue_exceeds_drain_limit`), leaves
 `graph_snapshot` waiting, and the candidate is discarded on budget expiry.
 
