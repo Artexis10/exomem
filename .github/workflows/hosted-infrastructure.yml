@@ -277,7 +277,13 @@ jobs:
 
   governance-migration-drill:
     name: Disposable governance migration and recovery drill
-    if: github.event_name == 'workflow_dispatch' && inputs.governance_migration_drill
+    # Dispatch-only meant it never ran on its own, and two defects that only this
+    # drill could have caught reached production instead. Run it whenever the
+    # provisioner that performs the migration changes on main, which is before any
+    # image built from that commit can be selected into a deployment lock.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.governance_migration_drill)
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     needs: static
     runs-on: ubuntu-24.04
     # The drill builds the runtime image, imports it into exact K3s, and replays
