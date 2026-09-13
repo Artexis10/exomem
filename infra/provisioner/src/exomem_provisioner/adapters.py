@@ -3436,7 +3436,16 @@ class HelmCliAdapter:
                 raise self._pending_release_is_foreign()
         else:
             deployed = [item for item in history if item.get("status") == "deployed"]
-            if len(deployed) != 1 or deployed[0].get("chart") != record.get("chart"):
+            if deployed:
+                if len(deployed) != 1 or deployed[0].get("chart") != record.get("chart"):
+                    raise self._pending_release_is_foreign()
+            elif any(item.get("chart") != record.get("chart") for item in history):
+                # A first provision whose every attempt failed retains no deployed
+                # predecessor to compare, so demanding one makes its own abandoned
+                # record permanently unclearable. Absence is not evidence of a
+                # foreign writer: require instead that the whole retained history
+                # belong to this chart, and let the exact recorded target below
+                # carry the ownership proof.
                 raise self._pending_release_is_foreign()
         try:
             recorded = await self._revision_values(metadata, environment, record["revision"])

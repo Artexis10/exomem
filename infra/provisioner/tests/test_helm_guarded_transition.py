@@ -689,3 +689,105 @@ async def test_a_reconcile_without_a_release_record_client_is_terminal(tmp_path)
     assert raised.value.reason is ConflictReason.HELM_RELEASE_RECORD_CLIENT_IS_UNAVAILABLE
     assert h.core.deletes == []
     assert _upgrades(h) == 0
+
+
+def _failed_only(h: HelmTransport, *, attempts: int, chart: str = CHART) -> None:
+    """Arm the history a first provision that never once succeeded leaves behind.
+
+    Every attempt timed out waiting on a claim no consumer could bind, so the
+    retained history holds failed revisions and no deployed predecessor at all.
+    """
+    h.history[:] = [
+        {"revision": revision, "status": "failed", "chart": chart}
+        for revision in range(1, attempts + 1)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_own_pending_upgrade_is_cleared_when_every_earlier_attempt_failed(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+    name = h.leave_pending("pending-upgrade", revision=4)
+
+    await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert [call[0] for call in h.core.deletes] == [name]
+    assert [item["status"] for item in h.history] == ["failed"] * 3
+    assert _upgrades(h) == 1
+    assert h.calls[-2] == ("guard",) and h.calls[-1][1] == "upgrade"
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_a_failed_only_history_still_refuses_a_differing_recorded_target(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+    h.leave_pending("pending-upgrade", revision=4, values={"workloadMode": "serve", "image": "x"})
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_failed_only_history_carrying_a_foreign_chart_is_refused(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=2)
+    h.history[0]["chart"] = "exomem-cell-0.2.0"
+    h.leave_pending("pending-upgrade", revision=3)
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_second_pending_record_in_a_failed_only_history_is_refused(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=2)
+    h.leave_pending("pending-upgrade", revision=3)
+    h.leave_pending("pending-upgrade", revision=4)
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_pending_record_behind_a_failed_latest_revision_is_never_cleared(tmp_path):
+    h = HelmTransport(tmp_path)
+    h.history[:] = [
+        {"revision": 1, "status": "pending-upgrade", "chart": CHART},
+        {"revision": 2, "status": "failed", "chart": CHART},
+    ]
+    h.revision_values[1] = dict(TARGET)
+
+    with pytest.raises(MetadataConflict) as raised:
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert raised.value.reason is ConflictReason.HELM_PENDING_RELEASE_IS_FOREIGN
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_revision_in_a_failed_only_history_stays_retryable(tmp_path):
+    h = HelmTransport(tmp_path)
+    _failed_only(h, attempts=3)
+    h.leave_pending("pending-upgrade", revision=4)
+    h.revision_values_failure = (1, "Error: release: not found\n")
+
+    with pytest.raises(DriverRetryable):
+        await h.transition("ensure", rollback_on_failure=False, effect_guard=h.guard)
+
+    assert h.core.deletes == []
+    assert _upgrades(h) == 0
