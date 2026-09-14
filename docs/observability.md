@@ -185,6 +185,45 @@ it with `exomem logs verify`.
 - **`target_paths`** records the page a call addresses, verbatim. A path is
   structure, not content, and it is the first thing a forensic pass needs.
 
+### Where a write's time went (`spans`)
+
+A row carries `spans`: named phases of that one call, slowest first, each with
+a `count` and a total `ms`. They exist because two boundary clocks can prove a
+call was slow and locate nothing between them — a live `edit_memory` once
+recorded `total_ms=24,394` with `boundary_hold_ms=3,348` and no account of the
+other 21 seconds.
+
+The names are stable and are the vocabulary a latency diagnosis uses:
+
+| Span | What it covers |
+| --- | --- |
+| `corpus_context.build` | Semantic corpus context for the write. |
+| `derived.canonical_commit` | Staging through canonical bytes landing on disk. |
+| `derived.canonical_to_committed` | Canonical bytes landing through the mutation row reaching `canonically_committed` — the derived fan-out and terminal bookkeeping that used to be unattributed. |
+| `derived.receipt_prepare`, `derived.receipt_proof`, `derived.acknowledgement`, `derived.pending_visibility` | The receipt and acknowledgement path. |
+| `index.upsert_after_write` | The whole derived fan-out, and the sum the per-component spans below break down. |
+| `index.memory_refs`, `index.resolver`, `index.lexstore`, `index.epistemic_graph`, `index.embeddings` | One per derived component, recorded at the shared dispatch seam. |
+| `graph.refresh_paths` | The graph's incremental pass inside `index.epistemic_graph`. |
+| `lexical.rebuild_atomic` | A whole-corpus lexical rebuild. |
+| `embeddings.model_load` | Lazy load of the embedding model weights. |
+| `embeddings.encode` | Encoding text to vectors. |
+| `embeddings.matrix_load` | A full vector-matrix load from the sidecar; the log line `embedding matrix full load: … rows=… cached_gen=…` names the reason. |
+| `embeddings.matrix_catch_up` | The bounded alternative to that full load. |
+| `delivery.vocabulary_after_commit` | Vocabulary delivery after the commit. |
+| `derived.advisory_execute`, `derived.component_dispatch`, `derived.component_completion` | The derived drain. |
+| `recall.*` | Retrieval phases, named by `find`'s own timings. |
+
+Spans are aggregated by name within a call, so a phase entered once per changed
+path reports a count and a total rather than hundreds of rows. Instrumentation
+never raises: a missing span means that path did not run, not that the call
+failed.
+
+Two log lines close loops the spans cannot: `lexical deferred upsert retry
+completed paths=… outcome=…` says what became of a lexical upsert the
+publication barrier was too busy to take, and `file watcher: startup graph
+validation …` says whether seed-time validation waited out a busy boundary or
+gave up on it.
+
 ### Integrity
 
 Rows carry a monotonic `sequence` and a `prev_hash`/`row_hash` chain (genesis =

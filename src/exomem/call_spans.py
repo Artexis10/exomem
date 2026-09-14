@@ -128,6 +128,60 @@ def timed(name: str):
     return decorate
 
 
+def mark(name: str) -> None:
+    """Stamp a monotonic point on the in-flight call for a later site to close.
+
+    `span()` needs both ends of an interval in one frame. Some intervals do not
+    have that: the gap between canonical bytes landing and the mutation row
+    reaching `canonically_committed` spans two modules and two call frames, and
+    it is exactly where the 0.83.1 deploy left ~32 s per write unattributed.
+
+    Marks live in the same token-keyed map as the spans, for the reason the
+    module docstring gives: a ContextVar set deep inside the write path is not
+    a reliable channel back out.
+    """
+    try:
+        token = MCP_CALL_TOKEN.get()
+        if token is None:
+            return
+        now = time.monotonic()
+        clean = str(name)[:NAME_MAX_CHARS]
+        with _LOCK:
+            _sweep_locked(now)
+            entry = _SPANS.get(token)
+            if entry is None:
+                if len(_SPANS) >= MAX_CALLS:
+                    _SPANS.pop(min(_SPANS, key=lambda key: _SPANS[key]["at"]), None)
+                entry = {"at": now, "names": {}}
+                _SPANS[token] = entry
+            marks: dict[str, float] = entry.setdefault("marks", {})
+            if clean not in marks and len(marks) >= MAX_NAMES_PER_CALL:
+                return
+            marks[clean] = now
+    except Exception:  # noqa: BLE001 - instrumentation must never break a call
+        pass
+
+
+def record_span_since(name: str, mark_name: str) -> None:
+    """Record the interval from `mark_name` to now as span `name`.
+
+    A no-op when the mark was never stamped: the mark's own site is soft, so a
+    missing mark means that path did not run, not that this one should guess.
+    """
+    try:
+        token = MCP_CALL_TOKEN.get()
+        if token is None:
+            return
+        with _LOCK:
+            entry = _SPANS.get(token)
+            started = (entry or {}).get("marks", {}).get(str(mark_name)[:NAME_MAX_CHARS])
+        if started is None:
+            return
+        record_span(name, (time.monotonic() - float(started)) * 1000.0)
+    except Exception:  # noqa: BLE001 - instrumentation must never break a call
+        pass
+
+
 def pop_call_spans(token: str | None) -> list[dict[str, Any]]:
     """Pop this call's phase timings, slowest first.
 

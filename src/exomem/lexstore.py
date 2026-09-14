@@ -1469,7 +1469,21 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                         outcome = "published"
                         if not paths:
                             continue
+                targeted_started = time.monotonic()
                 full_pass = rebuild or not store.retry_deferred_upsert(paths)
+                if paths and not rebuild:
+                    # The deferral above logs "retrying these paths" and, until
+                    # now, nothing ever said what became of them. A deferral
+                    # with no completion line is indistinguishable from a
+                    # deferral that never ran, which is how the 0.83.1 write
+                    # path left a VAULT_LOCK_NESTED retry unaccounted for.
+                    log.info(
+                        "lexical deferred upsert retry completed paths=%d outcome=%s "
+                        "elapsed_ms=%.1f",
+                        len(paths),
+                        "escalated_to_full" if full_pass else "applied",
+                        (time.monotonic() - targeted_started) * 1000.0,
+                    )
                 if full_pass:
                     with _REPAIRS_LOCK:
                         if full_passes >= _MAX_FULL_REBUILDS_PER_FLIGHT:

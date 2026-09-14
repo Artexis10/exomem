@@ -246,6 +246,34 @@ def test_upsert_report_marks_synchronous_legacy_callbacks_completed(
     assert all(item.code != "accepted_unverified" for item in report.components)
 
 
+def test_the_fan_out_attributes_its_time_to_each_component(tmp_path: Path) -> None:
+    """One total with nothing inside it cannot locate a slow write.
+
+    The 0.83.1 deploy recorded `index.upsert_after_write` at 14.3 s as the only
+    span covering ~32 s of a governed write; the components underneath it were
+    invisible, so the residual could not be attributed at all.
+    """
+    from exomem import call_spans
+
+    target = tmp_path / "Knowledge Base" / "Notes" / "item.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Item\n", encoding="utf-8")
+
+    call_spans.reset()
+    handle = call_spans.MCP_CALL_TOKEN.set("span-attribution-token")
+    try:
+        index_sync.upsert_after_write(tmp_path, [target])
+        recorded = {row["name"] for row in call_spans.pop_call_spans("span-attribution-token")}
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+        call_spans.reset()
+
+    assert "index.upsert_after_write" in recorded
+    assert {"index.memory_refs", "index.resolver", "index.lexstore"} <= recorded, (
+        f"the fan-out did not attribute its components: {sorted(recorded)}"
+    )
+
+
 def test_watcher_upsert_routes_full_vault_generation_only_to_lexstore(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

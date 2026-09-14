@@ -18,7 +18,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from . import index_paths, reserved_paths, semantic_index, sidecar_store, vecstore
+from . import call_spans, index_paths, reserved_paths, semantic_index, sidecar_store, vecstore
 from .vector_index_common import vec_gate
 
 log = logging.getLogger(__name__)
@@ -700,7 +700,8 @@ class EmbeddingIndex:
             # paths' rows alone, instead of paying the O(vault) SELECT + stack.
             if c is not None and c.recall_policy_identity == policy_identity:
                 try:
-                    patched = self._catch_up_cache(c)
+                    with call_spans.span("embeddings.matrix_catch_up"):
+                        patched = self._catch_up_cache(c)
                 except Exception as e:  # noqa: BLE001 — always fall back, never raise
                     log.warning(
                         "embedding matrix catch-up failed (%s); taking the full load", e
@@ -711,7 +712,8 @@ class EmbeddingIndex:
                     return patched.metadata, patched.matrix
             # Keep this call zero-argument: cache tests and production probes
             # deliberately wrap the named full-reload seam.
-            loaded = self._load_all_rows()
+            with call_spans.span("embeddings.matrix_load"):
+                loaded = self._load_all_rows()
             log.info(
                 "embedding matrix full load: reason=%s rows=%d gen=%d epoch=%d cached_gen=%d",
                 sidecar_store.reload_reason(c, loaded.epoch, loaded.generation),
