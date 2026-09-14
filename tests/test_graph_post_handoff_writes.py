@@ -279,9 +279,25 @@ def _observe_and_settle(
     return (observed, False)
 
 
+#: Fewest acknowledgements a median may be taken over. A median of one sample
+#: is that sample, so applying this helper to a single write turns a latency
+#: BUDGET into a per-request timing assertion -- exactly the premise class that
+#: has produced flakes here all along, and it produced one more: the first
+#: write after a promotion at 1.14 s on a loaded CI runner, failing a 1.0 s
+#: median bound it was never meant to be measured against. The guarantee this
+#: helper encodes is about a SERIES of writes staying incremental; a single
+#: write that legitimately pays first-request costs belongs under a structural
+#: assertion, or under a budget wide enough to be a budget.
+_MIN_LATENCY_SAMPLES = 3
+
+
 def _assert_incremental_latency(
     acknowledgements: list[float], *, bound: float = ACK_BOUND_SECONDS
 ) -> None:
+    assert len(acknowledgements) >= _MIN_LATENCY_SAMPLES, (
+        f"this asserts the shape of a series, not one request: "
+        f"{len(acknowledgements)} sample(s) given, {_MIN_LATENCY_SAMPLES} needed"
+    )
     rendered = [round(seconds, 2) for seconds in acknowledgements]
     slowest = max(acknowledgements)
     assert slowest < bound, (
@@ -2428,6 +2444,20 @@ def _trace_warm(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str]]:
     monkeypatch.setattr(semantic_contract, "build_corpus_context", traced_corpus, raising=True)
     monkeypatch.setattr(readiness, "mark_ready", traced_mark, raising=True)
     return order, marked
+
+
+def test_the_incremental_latency_oracle_refuses_a_single_sample() -> None:
+    """The helper must not be usable as a per-request timing assertion.
+
+    A median over one sample is that sample, so calling this with one write
+    silently converts a series-shaped budget into the flakiest thing a test can
+    assert. It reached CI that way once: the first write after a promotion at
+    1.14 s against a 1.0 s median bound, on a write that was admitted and
+    incremental exactly as designed. Refusing the call is cheaper than noticing
+    the next one in a failing run.
+    """
+    with pytest.raises(AssertionError, match="shape of a series"):
+        _assert_incremental_latency([0.01])
 
 
 def test_a_cold_warm_carries_nothing_and_runs_every_step(
