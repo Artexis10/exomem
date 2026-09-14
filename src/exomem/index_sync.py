@@ -550,15 +550,24 @@ def _safe_relative_path(value: str) -> str | None:
     return path.as_posix()
 
 
-def _legacy_component(component: str, callback) -> IndexComponentOutcome:
+def _legacy_component(
+    component: str, callback, *, items: int | None = None
+) -> IndexComponentOutcome:
     """Observe only what a legacy leaf actually exposes.
 
     One span per component, recorded here rather than at each leaf: the write
     path's own total was already timed as `index.upsert_after_write`, and on the
     0.83.1 deploy that single number was 14.3 s with nothing to attribute it to.
+
+    `items` is how many paths the leaf was handed. A component span that says
+    only "1.2 s" cannot separate a slow store from a large batch, and each of
+    these leaves re-enters the mutation boundary per store -- so the size of
+    what it carried is the first thing a latency read wants.
     """
     try:
-        with call_spans.span(f"index.{component}"):
+        with call_spans.span(
+            f"index.{component}", None if items is None else {"paths": items}
+        ):
             result = callback()
     except Exception:  # noqa: BLE001 - one derived index must not stop the rest
         log.warning("%s index dispatch failed", component, exc_info=True)
@@ -570,12 +579,14 @@ def _legacy_component(component: str, callback) -> IndexComponentOutcome:
     return IndexComponentOutcome(component, "completed", "dispatch_completed")
 
 
-def _graph_component(callback) -> IndexComponentOutcome:
+def _graph_component(callback, *, items: int | None = None) -> IndexComponentOutcome:
     """Preserve the graph's exact handoff outcome outside legacy best effort."""
     from .epistemic_graph import GraphDispatchResult
 
     try:
-        with call_spans.span("index.epistemic_graph"):
+        with call_spans.span(
+            "index.epistemic_graph", None if items is None else {"paths": items}
+        ):
             result = callback()
     except Exception:  # noqa: BLE001 - defensive boundary for external callers
         log.warning("epistemic graph dispatch escaped", exc_info=True)
@@ -586,9 +597,11 @@ def _graph_component(callback) -> IndexComponentOutcome:
     return IndexComponentOutcome("epistemic_graph", result.outcome, result.code)
 
 
-def _resolver_component(callback) -> IndexComponentOutcome:
+def _resolver_component(callback, *, items: int | None = None) -> IndexComponentOutcome:
     try:
-        with call_spans.span("index.resolver"):
+        with call_spans.span(
+            "index.resolver", None if items is None else {"paths": items}
+        ):
             callback()
     except Exception:  # noqa: BLE001 - resolver sync must not stop the rest
         log.warning("resolver index dispatch failed", exc_info=True)
@@ -1328,23 +1341,26 @@ def _dispatch_upsert_components(
         _legacy_component(
             "memory_refs",
             lambda: memory_refs.upsert_after_write(vault_root, identity_paths),
+            items=len(identity_paths),
         ),
     ]
     rels = _rel_md_paths(vault_root, identity_paths)
     components.append(
         _resolver_component(
-            lambda: find.on_resolver_files_changed(vault_root, rels, []) if rels else None
+            lambda: find.on_resolver_files_changed(vault_root, rels, []) if rels else None,
+            items=len(rels),
         )
     )
     # Publish all raw-Record removals before any semantic insertion/defer. The
     # identity fan-out above remains intentionally broad and has no recall body
     # egress; a purge failure is isolated and cannot stop other sidecars.
     watcher_lexical_batch = watcher_deleted_rels is not None
-    purge_succeeded = purge_semantic_only(
-        vault_root,
-        suppressed_rels,
-        include_lexstore=not watcher_lexical_batch,
-    )
+    with call_spans.span("index.semantic_purge", {"paths": len(suppressed_rels)}):
+        purge_succeeded = purge_semantic_only(
+            vault_root,
+            suppressed_rels,
+            include_lexstore=not watcher_lexical_batch,
+        )
     components.append(
         IndexComponentOutcome(
             "semantic_purge",
@@ -1373,7 +1389,9 @@ def _dispatch_upsert_components(
                 lexical_deletes,
             )
 
-    components.append(_legacy_component("lexstore", lexical_dispatch))
+    components.append(
+        _legacy_component("lexstore", lexical_dispatch, items=len(semantic_paths))
+    )
 
     def graph_upsert():
         if created_semantic_paths:
@@ -1385,17 +1403,25 @@ def _dispatch_upsert_components(
         return epistemic_graph.upsert_after_write(vault_root, semantic_paths)
 
     components.append(
-        _graph_component(graph_upsert)
+        _graph_component(graph_upsert, items=len(semantic_paths))
         if semantic_paths
         else IndexComponentOutcome("epistemic_graph", "not_required", "no_graph_input")
     )
     if defer_semantic or mode.defer_expensive_indexes():
         try:
-            semantic_count, added = _record_deferred_semantic_upserts(
-                vault_root,
-                semantic_paths,
-                omit_proven_current=defer_semantic,
-            )
+            # The durable-defer arm had no span at all, so a write that took the
+            # cheap path looked, in the ledger, like a write that did nothing:
+            # `index.embeddings` is recorded only on the direct arm below. This
+            # is a store write that re-enters the mutation boundary, and it is
+            # exactly the kind of step the 0.84.1 read could not see.
+            with call_spans.span(
+                "derived.deferred_index_store", {"paths": len(semantic_paths)}
+            ):
+                semantic_count, added = _record_deferred_semantic_upserts(
+                    vault_root,
+                    semantic_paths,
+                    omit_proven_current=defer_semantic,
+                )
         except Exception:  # noqa: BLE001 - degradation is reported, other lanes landed
             log.warning("durable semantic defer failed", exc_info=True)
             components.append(
@@ -1416,7 +1442,7 @@ def _dispatch_upsert_components(
         from . import embeddings
 
         try:
-            with call_spans.span("index.embeddings"):
+            with call_spans.span("index.embeddings", {"paths": len(semantic_paths)}):
                 status = embeddings.upsert_after_write_status(vault_root, semantic_paths)
             component = _embedding_component(status)
         except Exception:  # noqa: BLE001 - derived index must not fail a writer
@@ -1554,7 +1580,13 @@ def upsert_after_write(
         )
     from . import recall_policy
 
-    batch = recall_policy.partition_markdown_paths(vault_root, eligible)
+    # Two steps that run before any component does, and had no span: the
+    # policy partition and the corpus publication below. Together they were
+    # most of what `index.upsert_after_write` reported and none of its
+    # components explained -- 92 ms of 143 ms on the attribution fixture, and
+    # the same shape as the 46 s that had no span at all on 0.84.1.
+    with call_spans.span("index.path_partition", {"paths": len(eligible)}):
+        batch = recall_policy.partition_markdown_paths(vault_root, eligible)
     watcher_lexical_paths: list[Path] | None = None
     watcher_lexical_suppressed_rels: list[str] | None = None
     identity_items = list(batch.identity_paths)
@@ -1631,10 +1663,11 @@ def upsert_after_write(
     # disk identity it cannot prove. The wrapper keeps the warm semantic
     # corpus's freshness token in the same publication boundary; a watcher may
     # later publish the identical event harmlessly.
-    publication_current = not publish_corpus_change or publish_corpus_delta(
-        vault_root,
-        changed=identity_paths,
-    )
+    with call_spans.span("index.corpus_publish", {"paths": len(identity_paths)}):
+        publication_current = not publish_corpus_change or publish_corpus_delta(
+            vault_root,
+            changed=identity_paths,
+        )
     if not publication_current:
         _register_publication_failure_graph_handle(vault_root)
         try:
@@ -1649,18 +1682,24 @@ def upsert_after_write(
         )
     admitted_rels = {item.rel_path for item in batch.admitted_paths}
     states = {rel: state for rel, state in (semantic_states or {}).items() if rel in admitted_rels}
-    for path, rel in zip(semantic_paths, semantic_rels, strict=True):
-        if rel in states:
-            continue
-        active = semantic_index.parent_state_for_path(vault_root, path)
-        if active is not None:
-            states[rel] = active
-            continue
-        try:
-            states[rel] = semantic_index.build_parent_index_state(vault_root, path)
-        except (OSError, UnicodeError, ValueError):
-            continue
-    if not batch.revalidate(vault_root):
+    # Resolving or rebuilding one parent index state per admitted path, which
+    # reads and parses the page when the caller did not supply one. Another
+    # step that ran before any component and had no span of its own.
+    with call_spans.span("index.semantic_states", {"paths": len(semantic_paths)}):
+        for path, rel in zip(semantic_paths, semantic_rels, strict=True):
+            if rel in states:
+                continue
+            active = semantic_index.parent_state_for_path(vault_root, path)
+            if active is not None:
+                states[rel] = active
+                continue
+            try:
+                states[rel] = semantic_index.build_parent_index_state(vault_root, path)
+            except (OSError, UnicodeError, ValueError):
+                continue
+    with call_spans.span("index.policy_revalidate"):
+        current = batch.revalidate(vault_root)
+    if not current:
         return stale_report()
     token = semantic_index.set_parent_states(states)
     try:
@@ -1677,19 +1716,24 @@ def upsert_after_write(
         )
     finally:
         semantic_index.reset_parent_states(token)
-    if not batch.revalidate(vault_root):
+    with call_spans.span("index.policy_revalidate"):
+        current = batch.revalidate(vault_root)
+    if not current:
         return stale_report()
-    _apply_exact_path_custody(
-        vault_root,
-        # `batch.identity_paths` rather than `identity_items`: the latter is
-        # narrowed to the knowledge base in watcher mode so the heavier derived
-        # components stay KB-only, and the read-side caches serve both scopes.
-        # This is the batch's whole markdown path set, which is what a receipt
-        # names.
-        changed=[item.rel_path for item in batch.identity_paths],
-        deleted=watcher_deleted_rels or [],
-        reason="governed_write",
-    )
+    with call_spans.span(
+        "index.path_custody", {"paths": len(batch.identity_paths)}
+    ):
+        _apply_exact_path_custody(
+            vault_root,
+            # `batch.identity_paths` rather than `identity_items`: the latter
+            # is narrowed to the knowledge base in watcher mode so the heavier
+            # derived components stay KB-only, and the read-side caches serve
+            # both scopes. This is the batch's whole markdown path set, which
+            # is what a receipt names.
+            changed=[item.rel_path for item in batch.identity_paths],
+            deleted=watcher_deleted_rels or [],
+            reason="governed_write",
+        )
     report = IndexSyncReport(
         "upsert",
         requested_report,

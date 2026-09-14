@@ -4167,9 +4167,16 @@ def post_commit_batch_fanout(
     try:
         from . import file_watcher
 
-        registered_intents, corpus_published = file_watcher.register_self_write(
-            vault_root, replaced, return_publication_result=True
-        )
+        # The fan-out driver's own two steps, which sat between the mark and
+        # `index.upsert_after_write` with no span: registering this process's
+        # self-writes so the watcher does not re-observe them, and the graph
+        # epoch check below.
+        with call_spans.span(
+            "index.self_write_registration", {"paths": len(replaced)}
+        ):
+            registered_intents, corpus_published = file_watcher.register_self_write(
+                vault_root, replaced, return_publication_result=True
+            )
         if corpus_published:
             file_watcher.finalize_publication_intents(
                 publication_intents, succeeded=registered_intents
@@ -4217,19 +4224,20 @@ def post_commit_batch_fanout(
         if graph is not None and graph.outcome != "not_required":
             from . import graph_sync
 
-            required = graph_sync.read_checkpoint(vault_root)
-            handoff_missing = required is not None and (
-                (
-                    graph.outcome == "completed"
-                    and graph_sync.status(vault_root).get("state") != "current"
-                )
-                or (
-                    graph.outcome in {"registered", "deferred", "failed"}
-                    and not graph_sync.repair_is_provisioned(
-                        vault_root, required, outcome=graph.outcome
+            with call_spans.span("index.graph_epoch_handoff"):
+                required = graph_sync.read_checkpoint(vault_root)
+                handoff_missing = required is not None and (
+                    (
+                        graph.outcome == "completed"
+                        and graph_sync.status(vault_root).get("state") != "current"
+                    )
+                    or (
+                        graph.outcome in {"registered", "deferred", "failed"}
+                        and not graph_sync.repair_is_provisioned(
+                            vault_root, required, outcome=graph.outcome
+                        )
                     )
                 )
-            )
             if handoff_missing:
                 assert required is not None
                 graph_sync.register_failure(
@@ -5302,6 +5310,15 @@ def _batch_atomic_write_locked(
             created_paths=created_paths,
             publication_intents=publication_intents,
         )
+    # Closes the fan-out half of the umbrella and opens the terminal half. The
+    # mark is stamped whether or not the fan-out ran: when it did not -- the
+    # fast-ack route, or a caller that asked for no fan-out -- a near-zero
+    # `derived.fanout` is the honest answer and says which route the write took.
+    # Placing it outside the branch is what makes the two spans a partition of
+    # `derived.canonical_to_committed` rather than two intervals that sometimes
+    # leave a gap nobody can name.
+    call_spans.mark("derived_fanout_complete")
+    call_spans.record_span_since("derived.fanout", "canonical_files_committed")
     if cleanup_retained:
         raise BatchWriteError(
             "BATCH_CLEANUP_INCOMPLETE",

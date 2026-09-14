@@ -35,6 +35,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import call_spans
 from .kbdir import kb_prefix
 from .vault import content_hash
 
@@ -720,27 +721,38 @@ def _best_cosine_per_file(
     try:
         from . import embeddings, index_paths
 
-        chunks = embeddings.chunk_text(title, body)
-        if not chunks:
-            return {}
-        vecs = embeddings.embed_texts(chunks, is_query=False)
-        idx = embeddings.get_embedding_index(vault_root)
-        allowed_paths = {
-            rel
-            for rel in (
-                index_paths.rel_to_vault(vault_root, path)
-                for path in index_paths.iter_index_markdown(vault_root)
-            )
-            if rel is not None
-        }
-        best_per_file: dict[str, float] = {}
-        for v in vecs:
-            for fp, _cidx, _ctext, score in idx.search(
-                v, k=k, allowed_paths=allowed_paths
-            ):
-                if fp not in best_per_file or score > best_per_file[fp]:
-                    best_per_file[fp] = score
-        return best_per_file
+        # The advisory sweep runs inline on every governed edit and is where
+        # the encode it pays actually lives, so it is timed here rather than at
+        # the call sites: one definition, and every surface that reaches it --
+        # add, note, edit, pack assembly -- is attributed the same way. The
+        # fields are what the duration alone cannot say: on 0.84.1 an
+        # `embeddings.encode` of 15.6 s with `count=1` sat entirely outside
+        # `index.embeddings`, and this is the caller it belonged to.
+        with call_spans.span("advisory.best_cosine", {}) as measured:
+            chunks = embeddings.chunk_text(title, body)
+            if measured is not None:
+                measured["texts"] = len(chunks)
+                measured["chars"] = sum(len(chunk) for chunk in chunks)
+            if not chunks:
+                return {}
+            vecs = embeddings.embed_texts(chunks, is_query=False)
+            idx = embeddings.get_embedding_index(vault_root)
+            allowed_paths = {
+                rel
+                for rel in (
+                    index_paths.rel_to_vault(vault_root, path)
+                    for path in index_paths.iter_index_markdown(vault_root)
+                )
+                if rel is not None
+            }
+            best_per_file: dict[str, float] = {}
+            for v in vecs:
+                for fp, _cidx, _ctext, score in idx.search(
+                    v, k=k, allowed_paths=allowed_paths
+                ):
+                    if fp not in best_per_file or score > best_per_file[fp]:
+                        best_per_file[fp] = score
+            return best_per_file
     except ImportError as e:
         log.debug("_best_cosine_per_file unavailable (%s)", e)
         return {}
@@ -771,29 +783,37 @@ def best_cosine_per_file_for_vectors(
     try:
         from . import embeddings, index_paths
 
-        rows = list(vectors)
-        if not rows:
-            return {}
-        idx = embeddings.get_embedding_index(vault_root)
-        allowed_paths = {
-            rel
-            for rel in (
-                index_paths.rel_to_vault(vault_root, path)
-                for path in index_paths.iter_index_markdown(vault_root)
-            )
-            if rel is not None
-        }
-        self_canon = _canon(self_path) if self_path else None
-        best_per_file: dict[str, float] = {}
-        for v in rows:
-            for fp, _cidx, _ctext, score in idx.search(
-                v, k=k, allowed_paths=allowed_paths
-            ):
-                if self_canon and _canon(fp) == self_canon:
-                    continue
-                if fp not in best_per_file or score > best_per_file[fp]:
-                    best_per_file[fp] = score
-        return best_per_file
+        # The same span name as the encoding path, deliberately: both are "the
+        # advisory's cosine sweep", and a diagnosis wants to compare them. What
+        # separates them is the fields -- this one reports `texts=0`, because
+        # it encodes nothing and reuses vectors the embedding pass published.
+        with call_spans.span("advisory.best_cosine", {}) as measured:
+            rows = list(vectors)
+            if measured is not None:
+                measured["texts"] = 0
+                measured["vectors"] = len(rows)
+            if not rows:
+                return {}
+            idx = embeddings.get_embedding_index(vault_root)
+            allowed_paths = {
+                rel
+                for rel in (
+                    index_paths.rel_to_vault(vault_root, path)
+                    for path in index_paths.iter_index_markdown(vault_root)
+                )
+                if rel is not None
+            }
+            self_canon = _canon(self_path) if self_path else None
+            best_per_file: dict[str, float] = {}
+            for v in rows:
+                for fp, _cidx, _ctext, score in idx.search(
+                    v, k=k, allowed_paths=allowed_paths
+                ):
+                    if self_canon and _canon(fp) == self_canon:
+                        continue
+                    if fp not in best_per_file or score > best_per_file[fp]:
+                        best_per_file[fp] = score
+            return best_per_file
     except ImportError as e:
         log.debug("best_cosine_per_file_for_vectors unavailable (%s)", e)
         return {}

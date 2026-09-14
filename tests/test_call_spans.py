@@ -261,6 +261,38 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "embeddings.matrix_load",
         "embeddings.matrix_catch_up",
         "delivery.vocabulary_after_commit",
+        "derived.fanout",
+        "derived.terminal_persist",
+        "derived.deferred_index_store",
+        "index.path_partition",
+        "index.semantic_states",
+        "index.policy_revalidate",
+        "index.corpus_publish",
+        "index.semantic_purge",
+        "index.path_custody",
+        "index.self_write_registration",
+        "index.graph_epoch_handoff",
+        "advisory.best_cosine",
+        "advisory.overlap_groups",
+        # The write-stage collector's own names, emitted into the ledger
+        # unconditionally by `MutationTimings.emit_call_spans`. Recorded
+        # through a variable at that seam, so the source pin below finds
+        # them at the `mutation_timing_span` call sites that name each one.
+        "commit.boundary_acquire",
+        "commit.creation_lock",
+        "commit.embedding_prewarm",
+        "commit.locked_commit",
+        "commit.manifest",
+        "commit.resolver_prime",
+        "commit.revalidate",
+        "commit.stamp_check",
+        "preflight.contract_eval",
+        "preflight.corpus_context",
+        "preflight.page_states",
+        "preflight.read_guarded",
+        "preflight.registries",
+        "preflight.relation_review",
+        "preflight.validity_token",
     }
 )
 
@@ -313,3 +345,60 @@ def test_eviction_warns_once_per_window_rather_than_per_drop(caplog) -> None:
     assert lines, "an eviction that reports nothing is indistinguishable from no instrumentation"
     assert len(lines) == 1, f"one line per window, not per drop: {len(lines)}"
     assert lines[0].levelname == "WARNING"
+
+
+def test_a_path_shaped_field_key_never_reaches_a_row(token, caplog) -> None:
+    """Field keys are measurement names, so a key cannot smuggle content.
+
+    The values were bounded from the start -- coerced to int, so a string
+    cannot land -- but the KEYS were only clipped to 64 characters, which a
+    vault path fits inside comfortably. A ledger row is hash-chained and
+    operator-readable outside the vault, so a key like
+    `Knowledge Base/Notes/<title>` would put a note's identity in it.
+    """
+    caplog.set_level("WARNING", logger="exomem.call_spans")
+
+    call_spans.record_span(
+        "index.memory_refs",
+        1.0,
+        {
+            "paths": 3,
+            "Knowledge Base/Notes/Insights/secret-title.md": 1,
+            "Title With Spaces": 1,
+            "camelCase": 1,
+            "has.dot": 1,
+            "has-dash": 1,
+            "digits9": 1,
+        },
+    )
+
+    spans = {span["name"]: span for span in call_spans.pop_call_spans(token)}
+    fields = spans["index.memory_refs"].get("fields") or {}
+    assert fields == {"paths": 3}, (
+        f"a key that is not a bare measurement name reached the row: {fields}"
+    )
+    assert "secret-title" not in caplog.text, (
+        "the warning must report the rejected key's shape, never its text"
+    )
+    assert "span field key rejected" in caplog.text
+
+
+def test_the_ledger_refuses_a_path_shaped_field_key_too(token) -> None:
+    """The last seam before the hash chain enforces it independently."""
+    shaped = call_ledger._clip_spans(
+        [
+            {
+                "name": "index.memory_refs",
+                "count": 1,
+                "ms": 1.0,
+                "fields": {
+                    "paths": 2,
+                    "Knowledge Base/Notes/Insights/secret-title.md": 1,
+                },
+            }
+        ]
+    )
+
+    assert shaped == [
+        {"name": "index.memory_refs", "count": 1, "ms": 1.0, "fields": {"paths": 2}}
+    ], shaped

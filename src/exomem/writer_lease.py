@@ -3310,6 +3310,14 @@ class IdempotencyStore:
         call_spans.record_span_since(
             "derived.canonical_to_committed", "canonical_files_committed"
         )
+        # The other half of that umbrella. `derived.fanout` is stamped in
+        # `vault` when the derived work returns; what is left is the terminal
+        # bookkeeping between the leaf returning and this row transitioning --
+        # the `after_canonical_persisted` hooks. Both spans close before the
+        # UPDATE below, so neither includes this row's own write. Measured at
+        # 0.4 s per write on 0.84.1, against 46 s inside the umbrella that had
+        # no span at all, so the split is what says which half to look in.
+        call_spans.record_span_since("derived.terminal_persist", "derived_fanout_complete")
         with self._connect() as conn:
             cursor = conn.execute(
                 "UPDATE mutations SET state = 'canonically_committed', result = ?, owner = NULL, "
