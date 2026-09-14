@@ -783,3 +783,63 @@ def test_a_seed_drops_an_origin_whose_window_it_cannot_honestly_bridge(
 
     assert freshness.adopted_recall_origin(tmp_path, "vault", inherited) is None
     assert freshness.recall_delta_since(tmp_path, "vault", inherited).complete is False
+
+
+def test_a_projection_identity_change_is_not_revived_by_a_later_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The identity branch's promise has to survive the next seed.
+
+    `reconcile` clears the retained history on a projection-identity change
+    because "no checkpoint from the prior projection may be resumed through the
+    new one". Clearing the history alone does not keep that promise: the
+    adopted origin outlives it, and the next `seed` sees an empty pre-seed
+    history, reads it as a cold start, and re-floors that origin -- reviving a
+    checkpoint the transition had already ruled out. An edit made under the old
+    projection then goes missing from a delta that calls itself complete.
+
+    The origin is a statement about the projection being replaced, so it is
+    dropped with it, the way `invalidate` drops it.
+
+    Driven through the real `reconcile` rather than by hand: the defect lives
+    in what that branch forgets to do, so a hand-written wipe would be testing
+    the test.
+    """
+    from exomem import recall_policy
+
+    identity = {"fingerprint": "fingerprint-before"}
+    real_identity = recall_policy.recall_policy_identity
+    monkeypatch.setattr(
+        recall_policy,
+        "recall_policy_identity",
+        lambda root: (real_identity(root)[0], identity["fingerprint"]),
+    )
+
+    victim = _kb_file(tmp_path, "identity-revival-victim.md")
+    _seed(tmp_path, [victim])
+    inherited = _foreign(freshness.recall_checkpoint(tmp_path, "vault"))
+    assert freshness.adopt_recall_origin(tmp_path, "vault", inherited) is True
+
+    _kb_file(tmp_path, "identity-revival-victim.md", body="edited under the old projection")
+    freshness.on_files_changed(tmp_path, [victim], [])
+
+    # The projection's proof authority changes: a hard boundary.
+    identity["fingerprint"] = "fingerprint-after"
+    freshness.reconcile(
+        tmp_path, "vault", [(str(victim), freshness.stat_signature(victim))]
+    )
+    assert freshness.recall_delta_since(tmp_path, "vault", inherited).complete is False
+
+    # A later seed -- a watcher restart -- must not bring the origin back.
+    _seed(tmp_path, [victim])
+
+    delta = freshness.recall_delta_since(tmp_path, "vault", inherited)
+    assert freshness.adopted_recall_origin(tmp_path, "vault", inherited) is None, (
+        "an origin ruled out by a projection change must not be revived by the "
+        "next seed's cold-start re-floor"
+    )
+    assert not (delta.complete and str(victim) not in delta.changed), (
+        "the delta claimed to be complete while omitting an edit made under the "
+        "projection the transition replaced"
+    )
+    assert delta.complete is False

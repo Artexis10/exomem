@@ -1484,6 +1484,15 @@ def reconcile(
                 # resumed through the new one.
                 _recall_generations[key] = _next_gen()
                 _recall_history[key] = []
+                # Clearing the history alone does not keep that promise. An
+                # adopted origin outlives it, and a LATER `seed` finds an empty
+                # pre-seed history, reads it as a cold start, and re-floors the
+                # pre-transition origin -- reviving a checkpoint this branch
+                # just declared unusable, and returning a complete delta with
+                # an edit made under the old projection silently absent. The
+                # origin is a statement about the projection being replaced, so
+                # it goes with it, exactly as `invalidate` drops it.
+                _adopted_recall_origins.pop(key, None)
             elif old_recall != recall_fresh:
                 # The safety-net walk holds both complete same-policy maps, so
                 # a missed filesystem event yields a BRIDGEABLE old/new map
