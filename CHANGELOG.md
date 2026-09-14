@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.85.0](https://github.com/Artexis10/exomem/compare/v0.84.1...v0.85.0) (2026-09-14)
+
+
+### Features
+
+* **observability:** attribute a governed write's fan-out stage by stage ([#1269](https://github.com/Artexis10/exomem/issues/1269)) ([f20ccdc](https://github.com/Artexis10/exomem/commit/f20ccdcfa41ef4eda8358c77afe095c7a783c6c6))
+
+
+### Bug Fixes
+
+* **graph:** treat a receipt-covered lineage gap as covered, not as divergence ([#1266](https://github.com/Artexis10/exomem/issues/1266)) ([a92aec0](https://github.com/Artexis10/exomem/commit/a92aec0e590b88c5760e0cd57da8a33d4f7e9ece))
+* **hosted:** select the provisioner that migrates fenced custody ([#1256](https://github.com/Artexis10/exomem/issues/1256)) ([4f8825b](https://github.com/Artexis10/exomem/commit/4f8825b690edd53531ec4fa85abbc938cf3223ee))
+* **warmup:** adopt the inherited snapshot before admitting governed writes ([#1268](https://github.com/Artexis10/exomem/issues/1268)) ([06feaed](https://github.com/Artexis10/exomem/commit/06feaedb2c95ca1721842aeb368e258107cd3060))
+
 ## [0.84.1](https://github.com/Artexis10/exomem/compare/v0.84.0...v0.84.1) (2026-09-14)
 
 
