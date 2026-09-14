@@ -21,6 +21,7 @@ rather than growing.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -694,6 +695,65 @@ def test_a_cold_resolver_is_queued_repair_not_a_whole_vault_rebuild(
 
     monkeypatch.undo()
     assert _drain_graph_queue(root) == 0, "the graph repair queue never drained"
+
+
+def test_startup_graph_validation_waits_out_a_governed_write(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A held mutation boundary at seed time is contention, not incoherence.
+
+    Measured on the 0.83.1 deploy: the watcher's seed-time validation met the
+    first governed write holding `semantic_existing_edit_commit` for 10.6 s,
+    `suspend_reads()` was refused MUTATION_BUSY inside its one coordinator
+    timeout, and startup validation aborted -- leaving the graph unreadable with
+    no persisted barrier, which is the state the drain then rebuilt from.
+
+    The hold here outlasts one coordinator timeout on purpose: that is the
+    entire difference between a one-shot attempt and a bounded retry.
+    """
+    root = handoff_vault
+    watcher = file_watcher.FileWatcher(root, debounce_seconds=0.2)
+    graph = EpistemicGraphIndex(root)
+    caplog.set_level("INFO", logger="exomem.file_watcher")
+
+    # Force the cheap durable proof to decline so the expensive branch -- the
+    # one that needs the boundary -- is the branch under test.
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "durable_checkpoint_is_coherent",
+        lambda inner_self: False,
+        raising=True,
+    )
+
+    hold_seconds = 6.5
+    holding = threading.Event()
+    released = threading.Event()
+
+    def hold_the_boundary() -> None:
+        try:
+            with graph._mutation_coordinator.hold(
+                operation="semantic_existing_edit_commit", holder_kind="command"
+            ):
+                holding.set()
+                time.sleep(hold_seconds)
+        finally:
+            holding.set()
+            released.set()
+
+    writer = threading.Thread(target=hold_the_boundary, daemon=True)
+    writer.start()
+    assert holding.wait(10), "the simulated governed write never took the boundary"
+
+    admitted = watcher._validate_existing_graph_on_seed()
+
+    assert released.wait(30), "the simulated write never released the boundary"
+    writer.join(10)
+
+    assert admitted, (
+        "startup validation must wait out a governed write rather than abort; "
+        "aborting is what left the graph unreadable with no barrier"
+    )
+    assert "startup graph validation failed" not in caplog.text, caplog.text
 
 
 def test_an_unusable_snapshot_still_rebuilds(
