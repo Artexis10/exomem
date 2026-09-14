@@ -426,30 +426,67 @@ def live_watcher(live_handoff_vault: Path) -> Iterator[file_watcher.FileWatcher]
 def test_writes_after_a_worker_replacement_stay_incremental(
     live_handoff_vault: Path,
     live_watcher: file_watcher.FileWatcher,
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """`exp5.py external`, as a test: six writes, each behind one unattributed edit.
 
     The oracle is the reproduction's, and it is about the *write path*: every
-    acknowledgement stays inside the incremental bound (3.4-7.9 s per write on
-    the defective tree, because each one waited out a whole-vault rebuild it had
-    been fenced into), no write is fenced by an unattributed event beyond the
-    echo race a running watcher cannot exclude, and the repair queue drains to
-    zero.
+    governed write's own dispatch schedules no whole-vault rebuild, every write
+    the fence catches reports durable queued coverage, every acknowledgement
+    stays inside the incremental bound (3.4-7.9 s per write on the defective
+    tree, because each one waited out a whole-vault rebuild it had been fenced
+    into), and the repair queue drains to zero.
 
-    Whole-vault passes are deliberately NOT counted here. A running watcher
-    repairs the unattributed edits itself, and on a fixture this size its own
-    incremental pass legitimately bails to a full one; counting process-wide
-    passes would measure the watcher's repair of the edits this test invents
-    rather than what the governed writes cost. The rebuild *count* is pinned by
-    `test_a_write_dispatched_behind_an_unrepaired_mark_stays_incremental` and by
-    the cross-process test, which have no second writer.
+    HOW MANY writes were fenced is deliberately not asserted. It used to be,
+    as `fenced_writes <= 1 + unsettled`, and that bound is a statement about
+    the WATCHER's catch-up: a write dispatched before the watcher has retired
+    its mark is fenced by design, so the bound measures how much of its cycle a
+    second, independent actor had finished. On a contended host it fires while
+    the write path is perfectly healthy -- observed at 3 of 6 fenced with
+    acknowledgements of 0.29-0.52 s, and 15/15 green on the same commit once
+    the host was quiet. A premise a third party can satisfy or break on timing
+    is not a premise.
+
+    What replaced it is the guarantee itself, from this test's own evidence.
+    Being fenced is harmless *because* the fence queues the paths it covers
+    (task 1.12): before that it returned a bare deferral, dispatch read it as a
+    missing rebuild, and "every write fenced" and "the loop" were the same
+    statement. So the assertions are that no deferral escaped without queue
+    coverage, that every outcome the governed writes reported is one of the
+    declared coverage codes, and that their own dispatches registered no
+    whole-vault pass at all. The fenced count is still computed and reported in
+    the failure messages, as the diagnostic it always was.
+
+    Counting rebuilds is possible here now and was not when this was written.
+    A running watcher repairs the unattributed edits itself and legitimately
+    bails to a full pass on a fixture this size; process-wide counting would
+    measure that rather than what the governed writes cost. Attributing by
+    emitting thread separates the two -- the governed write dispatches
+    synchronously on the calling thread -- so the rebuild count can be asserted
+    on the writes this test is actually about.
     """
     root = live_handoff_vault
     generated = root / GENERATED
     caplog.set_level("INFO", logger="exomem.epistemic_graph")
 
+    outcomes: list[epistemic_graph.GraphDispatchResult] = []
+    real_dispatch = epistemic_graph.upsert_after_write
+    dispatching_thread = threading.current_thread().name
+
+    def recorded(vault_root: Path, paths: list[Path], **kwargs: object):
+        result = real_dispatch(vault_root, paths, **kwargs)
+        if threading.current_thread().name == dispatching_thread:
+            # The patch is module-global, so the running watcher's own repairs
+            # arrive here too. They are a different caller with a different
+            # contract; this oracle is about what the GOVERNED write chose.
+            outcomes.append(result)
+        return result
+
+    monkeypatch.setattr(epistemic_graph, "upsert_after_write", recorded, raising=True)
+
     acknowledgements: list[float] = []
+    rebuild_reasons: list[str] = []
     observed_marks = 0
     unsettled = 0
     fenced_writes = 0
@@ -474,10 +511,15 @@ def test_writes_after_a_worker_replacement_stay_incremental(
         observed_marks += int(observed)
         unsettled += int(not settled)
         deferrals_before = _fence_lines(caplog)
+        rebuilds_before = len(_messages_from_this_thread(caplog, _REBUILD_LINE))
         acknowledgements.append(
             _governed_write(root, generated / f"generated-note-{i:04d}.md", f"governed {i}")
         )
         fenced_writes += int(_fence_lines(caplog) > deferrals_before)
+        rebuild_reasons.extend(
+            message.split("reason=", 1)[1].split(" ", 1)[0]
+            for message in _messages_from_this_thread(caplog, _REBUILD_LINE)[rebuilds_before:]
+        )
 
     rendered = [round(seconds, 2) for seconds in acknowledgements]
     assert observed_marks == LIVE_WRITE_COUNT, (
@@ -489,28 +531,36 @@ def test_writes_after_a_worker_replacement_stay_incremental(
         "a governed write could not read a sidecar whose lineage was intact, which "
         f"is the defect itself: {rendered}"
     )
-    # One fenced write is the race this shape cannot exclude -- a running watcher
-    # can deliver a write's own echo after its publication intent has closed,
-    # and a mark on the path being written is then correct. Each cycle the
-    # watcher had not finished with buys one more, because a write dispatched
-    # behind an unretired mark is fenced by design; that is a contended host,
-    # not the loop.
-    assert fenced_writes <= 1 + unsettled, (
-        f"{fenced_writes} of {LIVE_WRITE_COUNT} governed writes were fenced by "
-        f"an unattributed event with {unsettled} watcher cycle(s) still in "
-        f"flight: {rendered}"
+    # How many writes were fenced is a diagnostic, not a bound: see the
+    # docstring. It is carried into every message below so a failure still says
+    # what the watcher was doing at the time.
+    context = (
+        f"{fenced_writes} of {LIVE_WRITE_COUNT} writes fenced, "
+        f"{unsettled} watcher cycle(s) in flight, acknowledgements {rendered}"
     )
-    # The count above bounds a race; this is what makes being fenced harmless.
-    # A fence used to return a bare deferral, which dispatch read as a missing
-    # rebuild and answered with a whole-vault pass, so "every write fenced" and
-    # "the loop" were the same statement. They are not any more: a path-scoped
-    # fence queues its own paths (task 1.12), so what has to stay zero is a
-    # deferral the queue does not own -- true however many writes were fenced.
+    # What makes being fenced harmless, and the thing that has to stay true
+    # however many writes were fenced: a path-scoped fence queues its own paths
+    # (task 1.12). Before that it returned a bare deferral, dispatch read it as
+    # a missing rebuild, and the loop followed.
     assert "incremental_refresh_deferred_without_queue_coverage" not in caplog.text, (
-        f"a governed write deferred without queue coverage: {rendered}"
+        f"a governed write deferred without queue coverage: {context}"
+    )
+    codes = [result.code for result in outcomes]
+    assert codes, "no governed dispatch was recorded, so this proves nothing"
+    assert set(codes) <= _QUEUED_COVERAGE_CODES, (
+        f"a governed write reported an outcome that claims no durable coverage: "
+        f"{codes}; {context}"
+    )
+    assert rebuild_reasons == [], (
+        "the governed writes' own dispatches scheduled whole-vault rebuilds "
+        f"for {rebuild_reasons}; {context}. A running watcher may legitimately "
+        "run one of its own, which is why this counts only the thread that "
+        "dispatched the write."
     )
     _assert_incremental_latency(acknowledgements, bound=LIVE_ACK_BOUND_SECONDS)
-    assert _drain_repair_queue(root, live_watcher) == 0, "the graph repair queue never drained"
+    assert _drain_repair_queue(root, live_watcher) == 0, (
+        f"the graph repair queue never drained; {context}"
+    )
 
 
 def test_a_governed_write_attributes_time_to_the_graph_incremental_pass(
