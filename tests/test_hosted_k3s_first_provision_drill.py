@@ -482,6 +482,9 @@ class _TerminationWitness:
                 {
                     "pod": pod_name,
                     "purpose": _pod_purpose(labels),
+                    "job": labels.get("batch.kubernetes.io/job-name") or labels.get("job-name"),
+                    "jobUid": labels.get("batch.kubernetes.io/controller-uid")
+                    or labels.get("controller-uid"),
                     "container": container.name,
                     "exitCode": getattr(terminated, "exit_code", None),
                     "reason": getattr(terminated, "reason", None),
@@ -758,22 +761,33 @@ def _terminal_json(message: str | None) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _job_refusal(terminations: list[dict[str, Any]]) -> tuple[str, str] | None:
-    """Name the first Job container that refused, as the governance drill does."""
+def _migration_refusal(terminations: list[dict[str, Any]]) -> str | None:
+    """A migration runner terminal that names no schema, read as the governance drill reads it."""
 
     for item in terminations:
         terminal = _terminal_json(item["message"])
         if item["purpose"] == "governance-migration" and terminal is not None:
             if "actualSchema" not in terminal:
-                return "governance-migration", f"the migration Job refused: {terminal}"
-            continue
-        if item["exitCode"] not in (0, None):
-            return (
-                item["purpose"],
-                f"the {item['purpose']} container {item['container']} in {item['pod']} exited "
-                f"{item['exitCode']} ({item['reason']}): {item['message']}",
-            )
+                return f"the migration Job refused: {terminal}"
     return None
+
+
+def _failed_attempts(terminations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Non-zero container exits whose Job outcome is still to be decided.
+
+    A Job retries a failed pod within its backoff limit, so an exit alone is not
+    a refusal. Only a Job that reaches ``Failed`` is.
+    """
+
+    return [
+        item
+        for item in terminations
+        if item["exitCode"] not in (0, None)
+        and not (
+            item["purpose"] == "governance-migration"
+            and _terminal_json(item["message"]) is not None
+        )
+    ]
 
 
 async def _pass_clock(earliest: datetime) -> datetime:
@@ -810,6 +824,8 @@ class FirstProvisionTrace:
     checkpoints: list[str] = field(default_factory=list)
     passes: list[dict[str, Any]] = field(default_factory=list)
     terminations: list[dict[str, Any]] = field(default_factory=list)
+    # Failed pod attempts the owning Job retried past: findings, not refusals.
+    retried: list[dict[str, Any]] = field(default_factory=list)
 
     def observe(self, checkpoint: str) -> None:
         if not self.checkpoints or self.checkpoints[-1] != checkpoint:
@@ -834,6 +850,7 @@ class FirstProvisionTrace:
                     "checkpoints": self.phases(),
                     "passes": self.passes,
                     "terminations": self.terminations,
+                    "retriedTerminations": self.retried,
                     **extra,
                 },
                 indent=2,
@@ -866,6 +883,7 @@ class _Drill:
     trace: FirstProvisionTrace
     operation_id: str = ""
     failures: list[dict[str, Any]] = field(default_factory=list)
+    unresolved: list[dict[str, Any]] = field(default_factory=list)
 
     def cell(self, pvc_uid: str) -> DrillCell:
         core_v1, apps_v1, batch_v1, _api = self.clients
@@ -900,6 +918,7 @@ class _Drill:
             "progress": stored.progress,
         }
         detail["receipts"] = self.collector.published[-3:]
+        detail["unsettledFailedAttempts"] = self.unresolved
         detail["driverRefusals"] = [
             {key: value for key, value in item.items() if key != "traceback"}
             for item in self.failures
@@ -933,6 +952,76 @@ class _Drill:
             )
             + await asyncio.to_thread(_namespace_evidence, self.kubeconfig, OWNER.resource_name)
         )
+
+    def _log_tail(self, item: dict[str, Any]) -> list[str]:
+        result = _host_kubectl(
+            self.kubeconfig,
+            [
+                "logs",
+                "--namespace",
+                OWNER.resource_name,
+                item["pod"],
+                "--container",
+                item["container"],
+                "--tail=20",
+            ],
+            check=False,
+        )
+        return (result.stdout + result.stderr).splitlines()[-20:]
+
+    async def _job_outcome(self, item: dict[str, Any]) -> str:
+        from kubernetes.client.exceptions import ApiException
+
+        if not item.get("job"):
+            # A bare pod has no retry: its failed exit is final.
+            return "failed"
+        _core_v1, _apps_v1, batch_v1, _api = self.clients
+        try:
+            job = await asyncio.to_thread(
+                batch_v1.read_namespaced_job, item["job"], OWNER.resource_name
+            )
+        except ApiException as error:
+            if error.status == 404:
+                return "absent"
+            raise
+        if job.metadata.uid != item.get("jobUid"):
+            return "replaced"
+        conditions = {
+            condition.type: condition.status for condition in (job.status.conditions or ())
+        }
+        if conditions.get("Failed") == "True":
+            return "failed"
+        if conditions.get("Complete") == "True":
+            return "complete"
+        return "running"
+
+    async def settle_failed_attempts(self, fresh: list[dict[str, Any]]) -> None:
+        """Keep attempts a Job retried past as findings; refuse only a Job that failed."""
+
+        for item in fresh:
+            # Capture the attempt's own output before TTL cleanup removes the pod.
+            item["logTail"] = await asyncio.to_thread(self._log_tail, item)
+            self.unresolved.append(item)
+        waiting: list[dict[str, Any]] = []
+        for item in self.unresolved:
+            outcome = await self._job_outcome(item)
+            if outcome == "failed":
+                raise await self.refusal(
+                    f"the {item['purpose']} Job {item['job']} failed: container "
+                    f"{item['container']} in {item['pod']} exited {item['exitCode']} "
+                    f"({item['reason']}): {item['message']}"
+                )
+            if outcome == "running":
+                waiting.append(item)
+                continue
+            settled = item | {"jobOutcome": outcome}
+            self.trace.retried.append(settled)
+            print(
+                "first-provision retried attempt:",
+                json.dumps(settled, sort_keys=True, default=str),
+                flush=True,
+            )
+        self.unresolved = waiting
 
     async def drive_until(self, done: Any) -> str:
         """Run whichever shipped worker owns the checkpoint until ``done`` holds."""
@@ -981,12 +1070,10 @@ class _Drill:
                 reason := after.progress.get("last_capacity_wait_reason")
             ):
                 raise await self.refusal(f"capacity admission held the pass: {reason}")
-            refused = _job_refusal(fresh)
-            if refused is not None:
-                purpose, reason = refused
-                raise await self.refusal(
-                    reason, observe_store=purpose == "governance-migration"
-                )
+            migration_refused = _migration_refusal(fresh)
+            if migration_refused is not None:
+                raise await self.refusal(migration_refused, observe_store=True)
+            await self.settle_failed_attempts(_failed_attempts(fresh))
             earliest = clock + timedelta(seconds=after.retry_after_seconds if claimed else 1)
             unchanged = unchanged + 1 if after.checkpoint == before.checkpoint else 0
             if unchanged >= STALL_PASSES:
@@ -1134,6 +1221,7 @@ def test_first_provision_reaches_governance_migration_completion_through_the_shi
                 "hcloudLabelled": [item.resource_name for item in drill.hcloud.labelled.values()],
                 "externalProbes": len(drill.probes),
                 "receiptsPublished": len(drill.collector.published),
+                "retriedTerminations": len(drill.trace.retried),
                 "custody": {
                     "governanceEnrolled": custody.governance_enrolled,
                     "membershipSchema": custody.membership_schema_version,
