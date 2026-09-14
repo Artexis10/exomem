@@ -58,6 +58,11 @@ on:
         required: false
         default: false
         type: boolean
+      first_provision_drill:
+        description: Run the disposable first hosted provision drill through the shipped workers
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -314,6 +319,51 @@ jobs:
           HELM_BIN="$(command -v helm)" \
           uv run --frozen --with-editable ./infra/provisioner \
             pytest -q -p no:cacheprovider tests/test_hosted_k3s_governance_drill.py
+
+  first-provision-drill:
+    name: Disposable first hosted provision drill
+    if: github.event_name == 'workflow_dispatch' && inputs.first_provision_drill
+    needs: static
+    runs-on: ubuntu-24.04
+    # The drill builds the runtime and provisioner images, imports both into
+    # exact K3s, and drives one PROVISION through the shipped routine and
+    # volume-registration workers until the governance migration completes.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Install the pinned Helm release binary
+        # The shipped Helm adapter refuses any CLI whose version is not exactly
+        # the pin, and a `go install` build reports only major.minor. Install
+        # the checksum-verified release archive the provisioner image uses.
+        run: |
+          source infra/tool-versions.env
+          HELM_SHA256="$(sed -n 's/^ARG HELM_SHA256=//p' infra/provisioner/Dockerfile)"
+          curl --fail --silent --show-error --location \
+            --output /tmp/helm.tar.gz \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  /tmp/helm.tar.gz" | sha256sum --check
+          tar --extract --gzip --file /tmp/helm.tar.gz --directory /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          test "$(helm version --template '{{.Version}}')" = "v${HELM_VERSION}"
+      - name: Drive a first hosted provision through the shipped workers on exact K3s
+        env:
+          RUN_K3S_FIRST_PROVISION_DRILL_TEST: "1"
+          # The reused governance-drill helpers live behind their own gate.
+          RUN_K3S_GOVERNANCE_DRILL_TEST: "1"
+        run: |
+          HELM_BIN="$(command -v helm)" \
+          uv run --frozen --with-editable ./infra/provisioner \
+            pytest -q -s -p no:cacheprovider tests/test_hosted_k3s_first_provision_drill.py
 
   external-blackbox:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.external_blackbox)
