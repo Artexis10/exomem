@@ -185,26 +185,56 @@ def _governed_write(root: Path, path: Path, marker: str) -> float:
     return time.monotonic() - started
 
 
-def _watcher_cycle_budget(watcher: file_watcher.FileWatcher) -> float:
-    """The watcher's own bound for the cycle this test waits on.
+def _watcher_settle_budget(watcher: file_watcher.FileWatcher) -> float:
+    """What one cycle may spend: the debounce window plus one lock acquisition.
 
-    Taken from the watcher rather than chosen: a cycle is the debounce window
-    plus the drain's compare-and-ack, and `file_watcher` documents that step's
-    worst case as `GRAPH_WITHDRAWAL_RETRY_SECONDS` plus one mutation-coordinator
-    timeout -- about 20 s at today's defaults, and precisely the step that
-    stalls when SQLite is contended ("sidecar WAL pragmas failed (database is
-    locked)" in the shard that flaked). A fixed few-second window is shorter
-    than the bound the code itself declares, so under load it counted cycles
-    that were legitimately still in flight and called them missing.
+    Taken from the watcher rather than chosen. A cycle is the debounce window
+    plus the drain's compare-and-ack, and the drain spends the mutation
+    coordinator's own timeout waiting for the lock. It deliberately excludes
+    `GRAPH_WITHDRAWAL_RETRY_SECONDS`: that budget is only consulted once an
+    attempt has already been refused, and `file_watcher` documents a boundary
+    that stays busy that long as sustained contention -- a different condition,
+    which it reports separately. Measured cycles on this fixture are 1.96-3.08 s,
+    so this is both the declared bound for the step and about twice its cost.
 
-    Spent as one budget across the whole loop rather than per edit, so a
-    contended host cannot push this test past the suite's per-test timeout: the
-    quiet case costs about a second an edit and never approaches it.
+    Applied per edit, not as one pot for the loop, so a slow first cycle cannot
+    spend the whole allowance and hand every cycle after it unsettled status.
+    """
+    return watcher._debounce_seconds() + mutation_lock._DEFAULT_TIMEOUT_SECONDS
+
+
+def _watcher_loop_ceiling(watcher: file_watcher.FileWatcher) -> float:
+    """What the whole loop may spend, so no host can run it past the suite's timeout.
+
+    The watcher's full declared worst case for the step that stalls when SQLite
+    is contended ("sidecar WAL pragmas failed (database is locked)" in the shard
+    that flaked): `GRAPH_WITHDRAWAL_RETRY_SECONDS` plus one coordinator timeout,
+    which `file_watcher` states as about 20 s at today's defaults. The loop as a
+    whole may spend one exhaustion budget; no single edit may. Six measured
+    cycles cost 13.7 s of it, so this is headroom rather than the common path,
+    and the fixed five-second window it replaces was shorter than the bound the
+    code itself declares -- which is why a contended shard saw cycles that were
+    legitimately still in flight and called them missing.
     """
     return (
         watcher._debounce_seconds()
         + file_watcher.GRAPH_WITHDRAWAL_RETRY_SECONDS
         + mutation_lock._DEFAULT_TIMEOUT_SECONDS
+    )
+
+
+def _fence_lines(caplog: pytest.LogCaptureFixture) -> int:
+    """Deferral lines emitted so far -- NOT a count of fenced writes.
+
+    One fenced write can emit this line more than once: the write's own dispatch
+    and the fan-out behind it each defer on the same mark, and how many of those
+    run depends on what else the watcher has in flight. So the ratio is not
+    fixed and a line count must never be compared against a write count. The
+    loop below reads this as a delta across one write and counts writes.
+    """
+    return sum(
+        "reason=external_event_covers_these_paths" in record.getMessage()
+        for record in caplog.records
     )
 
 
@@ -225,9 +255,9 @@ def _observe_and_settle(
     reasons: an edit that was never *observed* means the watcher is not running
     the cycle at all, which is the defect this test exists for; an observed edit
     that has not settled inside the budget means the host is contended, which is
-    not. So observation keeps a per-edit floor of two debounce windows even when
-    the shared budget is spent -- an exhausted budget must not turn "never
-    waited" into "never observed" -- while settling draws only on what is left.
+    not. So observation keeps a floor of two debounce windows even when the
+    loop's ceiling is reached -- an exhausted budget must not turn "never waited"
+    into "never observed" -- while settling gets only what the deadline allows.
     """
     observed = False
     delivery_floor = time.monotonic() + watcher._debounce_seconds() * 2
@@ -325,8 +355,11 @@ def test_writes_after_a_worker_replacement_stay_incremental(
     acknowledgements: list[float] = []
     observed_marks = 0
     unsettled = 0
-    # One deadline for the whole loop, derived from the watcher's own bound.
-    budget_expires = time.monotonic() + _watcher_cycle_budget(live_watcher)
+    fenced_writes = 0
+    # Both deadlines come from the watcher: one cycle's own wait per edit, under
+    # a ceiling for the loop so no host can run this past the suite's timeout.
+    settle_budget = _watcher_settle_budget(live_watcher)
+    loop_ceiling = time.monotonic() + _watcher_loop_ceiling(live_watcher)
     for i in range(LIVE_WRITE_COUNT):
         # Disjoint from the written notes, and inside this fixture's range.
         external = generated / f"generated-note-{LIVE_NOTE_COUNT // 2 + i:04d}.md"
@@ -336,12 +369,18 @@ def test_writes_after_a_worker_replacement_stay_incremental(
         )
         # Let the observer deliver the event and the watcher finish with it, the
         # way the reproduction spaces its writes.
-        observed, settled = _observe_and_settle(root, live_watcher, deadline=budget_expires)
+        observed, settled = _observe_and_settle(
+            root,
+            live_watcher,
+            deadline=min(loop_ceiling, time.monotonic() + settle_budget),
+        )
         observed_marks += int(observed)
         unsettled += int(not settled)
+        deferrals_before = _fence_lines(caplog)
         acknowledgements.append(
             _governed_write(root, generated / f"generated-note-{i:04d}.md", f"governed {i}")
         )
+        fenced_writes += int(_fence_lines(caplog) > deferrals_before)
 
     rendered = [round(seconds, 2) for seconds in acknowledgements]
     assert observed_marks == LIVE_WRITE_COUNT, (
@@ -353,20 +392,19 @@ def test_writes_after_a_worker_replacement_stay_incremental(
         "a governed write could not read a sidecar whose lineage was intact, which "
         f"is the defect itself: {rendered}"
     )
-    fenced = caplog.text.count("reason=external_event_covers_these_paths")
-    # One fence is the race this shape cannot exclude -- a running watcher can
-    # deliver a write's own echo after its publication intent has closed, and a
-    # mark on the path being written is then correct. Each cycle the watcher had
-    # not finished with buys one more, because a write dispatched behind an
-    # unretired mark is fenced by design; that is a contended host, not the
-    # loop. Every write being fenced is the loop this change removed, and no
-    # tolerance reaches that.
-    assert fenced <= 1 + unsettled, (
-        f"{fenced} of {LIVE_WRITE_COUNT} governed writes were fenced by an "
-        f"unattributed event with {unsettled} watcher cycle(s) still in flight: "
-        f"{rendered}"
+    # One fenced write is the race this shape cannot exclude -- a running watcher
+    # can deliver a write's own echo after its publication intent has closed,
+    # and a mark on the path being written is then correct. Each cycle the
+    # watcher had not finished with buys one more, because a write dispatched
+    # behind an unretired mark is fenced by design; that is a contended host,
+    # not the loop. Every write being fenced is the loop this change removed,
+    # and no tolerance reaches that.
+    assert fenced_writes <= 1 + unsettled, (
+        f"{fenced_writes} of {LIVE_WRITE_COUNT} governed writes were fenced by "
+        f"an unattributed event with {unsettled} watcher cycle(s) still in "
+        f"flight: {rendered}"
     )
-    assert fenced < LIVE_WRITE_COUNT, f"every governed write was fenced: {rendered}"
+    assert fenced_writes < LIVE_WRITE_COUNT, f"every governed write was fenced: {rendered}"
     _assert_incremental_latency(acknowledgements, bound=LIVE_ACK_BOUND_SECONDS)
     assert _drain_repair_queue(root, live_watcher) == 0, "the graph repair queue never drained"
 
