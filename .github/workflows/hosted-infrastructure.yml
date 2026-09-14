@@ -325,11 +325,20 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Install the exact pinned Helm
+      - name: Install the pinned Helm release binary
+        # The shipped Helm adapter refuses any CLI whose version is not exactly
+        # the pin, and a `go install` build reports only major.minor. Install
+        # the checksum-verified release archive the provisioner image uses.
         run: |
           source infra/tool-versions.env
-          go install helm.sh/helm/v3/cmd/helm@v${HELM_VERSION}
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          HELM_SHA256="$(sed -n 's/^ARG HELM_SHA256=//p' infra/provisioner/Dockerfile)"
+          curl --fail --silent --show-error --location \
+            --output /tmp/helm.tar.gz \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  /tmp/helm.tar.gz" | sha256sum --check
+          tar --extract --gzip --file /tmp/helm.tar.gz --directory /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          test "$(helm version --template '{{.Version}}')" = "v${HELM_VERSION}"
       - name: Build the platform chart dependencies
         run: |
           helm repo add hcloud https://charts.hetzner.cloud
