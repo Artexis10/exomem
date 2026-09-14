@@ -729,3 +729,137 @@ def test_a_stale_receipt_does_not_bless_a_fresh_batch(vault: Path, monkeypatch) 
     index_sync.reset_deferral_telemetry()
     assert index_sync.full_upsert_succeeded(root, [target], report) is True
     assert index_sync.deferral_telemetry()["covered_deferral_accepted"] == 1
+
+
+#: Every call in `src/exomem/` that records a graph receipt UNDER A GENERATION,
+#: keyed by module and enclosing function, and what path set it claims for that
+#: generation. The predecessor probe reads these rows as proof that a skipped
+#: generation's repair is already queued (`seamless-managed-worker-handoff`
+#: 1.13), and that proof rests on a convention no probe can check: **an enqueue
+#: that records generation G records G's complete path set.** A site that
+#: recorded half of G's paths under G would make the probe answer "covered" for
+#: a gap it only half owns, and the write that trusted it would publish over
+#: real divergence -- silently, and with no rebuild to catch it later.
+#:
+#: Per call site, in the style of `_DECLARED_UNBOUNDED_JOINS`: a site that moves
+#: within its file keeps its identity, and a NEW one cannot inherit the claim by
+#: living next to one that made it.
+_DECLARED_GENERATION_RECORDING_SITES = {
+    # The canonical batch's own debt, from the checkpoint it already writes.
+    # Complete by construction: the checkpoint carries every changed and every
+    # created path for that generation, and a batch too large to carry them
+    # records a whole-vault rebuild marker instead of a partial list.
+    "deferred_index.py::enqueue_graph_checkpoint": (
+        "the checkpoint's complete changed + created set for its own generation"
+    ),
+    # Every deferral that claims durable per-path coverage: the incremental
+    # bail-outs, the cold resolver, the external-pending fence. Complete because
+    # the deferred scope STARTS as the checkpoint's changed and created paths
+    # and only ever widens as the pass learns more; an enqueue that could not
+    # admit every path escalates to whole-vault debt rather than reporting a
+    # queue that does not hold the work.
+    "epistemic_graph.py::EpistemicGraphIndex::_queue_graph_repair": (
+        "the deferring write's own checkpoint scope, widened, never narrowed"
+    ),
+    # A pass-through seam, not a scope decision: it records whatever generation
+    # its caller hands it. Its callers are declared below.
+    "epistemic_graph.py::_record_graph_repair_demand": (
+        "delegates; every caller that supplies a generation is declared here too"
+    ),
+    # The one site that records a PARTIAL set, and the reason it is sound: an
+    # adopted residue is the paths whose bytes moved under the acknowledged
+    # generation, not that generation's whole delta. It is safe because it
+    # records the ACKNOWLEDGED generation, and a coverage probe only ever asks
+    # about generations strictly ABOVE the acknowledgement -- so these rows can
+    # never bless a skipped step. Recording it accurately is what keeps that
+    # true; recording it under the required generation would not be.
+    "epistemic_graph.py::EpistemicGraphIndex::apply_adopted_residue": (
+        "partial by design: the residue at the ACKNOWLEDGED generation, which "
+        "no gap probe ever asks about"
+    ),
+}
+
+#: The functions that write a generation onto a graph receipt. `add_graph` and
+#: `add_graph_receipts` are the durable writes; `_record_graph_repair_demand` is
+#: the seam that forwards to one, and is enumerated so its callers have to
+#: declare themselves rather than hide one level up.
+_GENERATION_RECORDING_CALLEES = frozenset(
+    {"add_graph", "add_graph_receipts", "_record_graph_repair_demand"}
+)
+
+
+def _generation_recording_sites() -> dict[str, str]:
+    """Every generation-recording call in `src/exomem/`, keyed by site.
+
+    Read out of the source rather than from a hand list, and attributed to the
+    enclosing function, so the declaration above is a claim about code that
+    exists rather than about code that existed once.
+    """
+    source_root = Path(deferred_index.__file__).parent
+    found: dict[str, str] = {}
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self, module: str) -> None:
+            self.module = module
+            self.stack: list[str] = []
+
+        def _scoped(self, node: Any) -> None:
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_FunctionDef = _scoped
+        visit_AsyncFunctionDef = _scoped
+        visit_ClassDef = _scoped
+
+        def visit_Call(self, node: ast.Call) -> None:
+            name = getattr(node.func, "attr", getattr(node.func, "id", None))
+            if name in _GENERATION_RECORDING_CALLEES:
+                generation = next(
+                    (kw.value for kw in node.keywords if kw.arg == "generation"), None
+                )
+                # A site that hard-codes `generation=None` claims nothing and
+                # is not a recording site; everything else is, including the
+                # conditional expressions that pass None only sometimes.
+                records = generation is not None and not (
+                    isinstance(generation, ast.Constant) and generation.value is None
+                )
+                if records:
+                    site = "::".join([self.module, *self.stack])
+                    found[site] = ast.unparse(generation)
+            self.generic_visit(node)
+
+    for path in sorted(source_root.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):  # pragma: no cover - a broken tree is CI's job
+            continue
+        Visitor(path.name).visit(tree)
+    # The definitions themselves are not call sites.
+    for definition in (
+        "deferred_index.py::add_graph",
+        "deferred_index.py::add_graph_receipts",
+    ):
+        found.pop(definition, None)
+    return found
+
+
+def test_every_generation_recording_enqueue_declares_its_path_set() -> None:
+    """A new site cannot inherit 1.13's coverage claim by staying quiet.
+
+    The whole per-generation shortcut rests on "recording G means recording all
+    of G", which is a convention, not a checked invariant -- a probe reading the
+    queue cannot tell a complete path set from half of one. So the sites are
+    enumerated from the source and matched against what each one declares.
+    """
+    assert set(_generation_recording_sites()) == set(
+        _DECLARED_GENERATION_RECORDING_SITES
+    ), (
+        "a graph receipt is being recorded under a generation from a site that "
+        "has not declared what path set it claims for it. The predecessor probe "
+        "reads these rows as proof a skipped generation is already queued "
+        "(`_lineage_gap_is_receipt_covered`), so a site recording a PARTIAL set "
+        "under a generation a probe can ask about would bless a gap it only "
+        "half owns. Declare the site and its claim, or pass generation=None -- "
+        "an unknown row never counts as coverage."
+    )

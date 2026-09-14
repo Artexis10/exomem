@@ -4762,3 +4762,48 @@ def test_startup_sweep_leaves_an_executing_row_for_its_evidence_bearing_retry(
 
     assert replayed == {"canonical": "resumed"}
     assert _row_state(database, "proved:one")[0] == "completed"
+
+
+def test_a_write_waits_for_the_graph_handoff_as_well_as_the_corpus(
+    tmp_path: Path,
+) -> None:
+    """Admission before the delta origin exists is what buys a whole-vault pass.
+
+    Measured on the 0.84.1 personal service: `warm_all` built the semantic
+    corpus first and adopted the published snapshot 36 s later, while the
+    admission gate watched only `semantic_corpus`. The first governed write was
+    therefore admitted into a process with no adopted lineage, fell back, and
+    registered the whole-vault rebuild adoption exists to remove.
+
+    Adoption is handoff correctness, not a cache: a write admitted ahead of it
+    has no delta origin to advance. So the gate that already refuses on the
+    corpus refuses on the handoff too, with the same retryable shape -- callers
+    retry it exactly as they retry the corpus, and reads are untouched.
+    """
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path))
+    calls: list[str] = []
+    command = _command(writes=True, leaf=lambda: calls.append("called"))
+    readiness.begin_warm()
+    try:
+        # Everything the old gate watched is ready; only the handoff is not.
+        for component in readiness.COMPONENTS:
+            if component != "graph_handoff":
+                readiness.mark_ready(component)
+        with pytest.raises(OpError) as warming:
+            manager.invoke(command, (), {}, mutation_request_id="handoff-request")
+        payload = error_dict(warming.value)
+        assert warming.value.code == "MUTATION_WARMING"
+        assert payload["warming_component"] == "graph_handoff"
+        assert payload["status"] == "retryable"
+        assert payload["committed"] is False
+        assert payload["retry_after_ms"] == 750
+        assert payload["request_id"] == "handoff-request"
+        assert calls == [], "a write was admitted before adoption had run"
+        assert active_mutation_snapshot()["state"] == "free"
+
+        readiness.mark_ready("graph_handoff")
+        manager.invoke(command, (), {}, mutation_request_id="handoff-request-2")
+    finally:
+        readiness.reset()
+
+    assert calls == ["called"], "the write stayed refused after adoption ran"

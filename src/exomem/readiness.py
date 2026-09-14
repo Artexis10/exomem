@@ -34,6 +34,11 @@ from pathlib import Path
 
 COMPONENTS = (
     "retrieval_catalog",
+    #: Snapshot adoption and the resolver primer. Not a cache: it is what gives
+    #: a replacement worker a lineage it may advance, so a governed write
+    #: admitted ahead of it has no delta origin and pays a whole-vault rebuild
+    #: for one. Writers defer on it exactly as they do on the semantic corpus.
+    "graph_handoff",
     "lexical",
     "semantic_corpus",
     "embeddings",

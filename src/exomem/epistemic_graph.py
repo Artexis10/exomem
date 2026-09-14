@@ -2219,6 +2219,7 @@ class EpistemicGraphIndex:
         if conn is None:
             return SnapshotAdoption(False, reason=self._declined_snapshot_state())
         residue: set[str] = set()
+        decline: list[str] = []
         try:
             stored_checkpoint = self._stored_recall_checkpoint(conn)
             row = conn.execute(
@@ -2228,11 +2229,14 @@ class EpistemicGraphIndex:
                 conn,
                 resolver_fingerprint=str(row[0]) if row is not None else None,
                 residue_out=residue,
+                reason_out=decline,
             )
         finally:
             conn.close()
         if not proven:
-            return SnapshotAdoption(False, reason="snapshot_proof_declined")
+            return SnapshotAdoption(
+                False, reason=decline[0] if decline else "snapshot_proof_declined"
+            )
         if stored_checkpoint is None:
             return SnapshotAdoption(False, reason="stored_checkpoint_absent")
         if len(residue) > graph_drain.DRAIN_LIMIT:
@@ -2272,6 +2276,7 @@ class EpistemicGraphIndex:
         *,
         resolver_fingerprint: str | None,
         residue_out: set[str] | None = None,
+        reason_out: list[str] | None = None,
     ) -> bool:
         """Prove a cold/foreign sidecar against human-owned Markdown bytes.
 
@@ -2290,12 +2295,22 @@ class EpistemicGraphIndex:
         well.  Any incomplete read fails closed; this is deliberately the cold
         path and never runs for a live reader at the exact stored checkpoint.
         """
+        def declined(reason: str) -> bool:
+            # `reason_out` is the same shape as `residue_out` above and for the
+            # same reason: a caller that reports this decline to an operator
+            # needs to say what the proof found, and "declined" is not that. A
+            # live deploy read `snapshot_proof_declined` and could not tell a
+            # corpus that had moved from a sidecar being rewritten underneath.
+            if reason_out is not None and not reason_out:
+                reason_out.append(reason)
+            return False
+
         try:
             policy_identity = recall_policy.recall_policy_identity(self.vault_root)
             resolver_membership = self._recall_membership()
             indexed_membership = self._indexed_recall_membership()
             if resolver_membership is None or indexed_membership is None:
-                return False
+                return declined("recall_membership_unreadable")
             current_hashes: dict[str, str] = {}
             captured_guards: dict[str, vault_module.PathGuard] = {}
             resolver_entries: list[tuple[str, str | None]] = []
@@ -2321,7 +2336,7 @@ class EpistemicGraphIndex:
                     resolved_relative=rel,
                 )
                 if page is None:
-                    return False
+                    return declined("source_unparseable")
                 captured_guards[rel] = source_guard
                 if rel in indexed_membership:
                     current_hashes[rel] = page.snapshot_hash
@@ -2339,7 +2354,11 @@ class EpistemicGraphIndex:
                     # A membership difference is not a residue: a page the
                     # snapshot never indexed, or indexed and no longer admits,
                     # is a different corpus, not a bounded repair.
-                    return False
+                    return declined(
+                        "indexed_membership_differs"
+                        if residue_out is not None
+                        else "indexed_sources_differ"
+                    )
                 residue_out.update(
                     rel
                     for rel, source_hash in current_hashes.items()
@@ -2354,7 +2373,7 @@ class EpistemicGraphIndex:
                 and _resolver_topology_fingerprint(resolver) == resolver_fingerprint
             )
             if not topology_matches:
-                return False
+                return declined("resolver_topology_mismatch")
 
             # Stabilize the cold proof after every parse/topology callback.  A
             # direct editor does not participate in Exomem's mutation lock and
@@ -2364,13 +2383,16 @@ class EpistemicGraphIndex:
             # snapshot merely because its first pass was internally coherent.
             for source_guard in captured_guards.values():
                 source_guard.recheck(self.vault_root)
-            return (
+            if not (
                 self._recall_membership() == resolver_membership
                 and self._indexed_recall_membership() == indexed_membership
                 and recall_policy.recall_policy_identity(self.vault_root) == policy_identity
-            )
+            ):
+                return declined("projection_moved_during_proof")
+            return True
         except Exception:  # noqa: BLE001 - an incomplete cold proof fails closed
-            return False
+            log.debug("cold snapshot proof raised", exc_info=True)
+            return declined("proof_raised")
 
     def _read_publication_epoch(self) -> tuple[Any, Any, Any]:
         epoch = graph_sync.publication_epoch(self.vault_root)
@@ -4004,19 +4026,41 @@ class EpistemicGraphIndex:
             return False
         if freshness.external_pending_unscoped(self.vault_root):
             return False
+        gap = range(acknowledged + 1, required)
         try:
-            known, unknown = deferred_index.graph_receipt_generations(self.vault_root)
+            # One read, one connection: this runs on the write path, and every
+            # open here costs a reserved-identity boundary entry.
+            known, unknown, recorded, has_debt_record = deferred_index.graph_gap_coverage(
+                self.vault_root, gap
+            )
         except Exception:  # noqa: BLE001 - an unreadable queue proves nothing
             log.warning("graph receipt generations unreadable", exc_info=True)
             return False
         if unknown:
             return False
-        missing = [
-            generation
-            for generation in range(acknowledged + 1, required)
-            if generation not in known
-        ]
+        if has_debt_record:
+            # The durable per-generation record is the proof; the receipts are
+            # only the work. A queued path carries ONE generation, so a later
+            # enqueue of the same path overwrites what an earlier one recorded
+            # -- which made this answer depend on whether anything had re-queued
+            # those paths yet, and cost a whole-vault rebuild about two writes
+            # in six under load. The record cannot be overwritten, so a gap is
+            # covered when every skipped generation's debt was recorded,
+            # whether its rows are still queued or already repaired.
+            known = known | recorded
+        missing = [generation for generation in gap if generation not in known]
         if missing:
+            # The uncovered case was silent, which left the rebuild it causes
+            # reported only as `graph_sync_predecessor_mismatch` -- true, and
+            # not enough to tell a lost best-effort enqueue from a real
+            # divergence without reading the queue by hand.
+            log.info(
+                "graph lineage gap is not covered by durable receipts "
+                "acknowledged=%d required=%d missing=%s",
+                acknowledged,
+                required,
+                ",".join(str(generation) for generation in missing),
+            )
             return False
         log.info(
             "graph lineage gap is covered by durable receipts acknowledged=%d "

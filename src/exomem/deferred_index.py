@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -522,6 +523,14 @@ def _connect_created_owned(
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS graph_debt_generations (
+            generation INTEGER PRIMARY KEY,
+            recorded_at REAL NOT NULL
+        )
+        """
+    )
     for event in ("INSERT", "UPDATE", "DELETE"):
         conn.execute(
             f"CREATE TRIGGER IF NOT EXISTS graph_upserts_generation_{event.lower()} "
@@ -913,6 +922,8 @@ def _add_plain_receipts(
                             (now, revision, rel),
                         )
                 receipts.append(DeferredReceipt(rel, revision, recorded))
+            if tracks_generation and generation is not None and rels:
+                _record_graph_debt_generation_locked(conn, int(generation), now)
         except Exception:
             conn.rollback()
             raise
@@ -963,6 +974,19 @@ def add_graph_receipts(
     durable work rather than guess it from a path name, so a caller that knows
     it must pass it; one that does not leaves the row unknown, and an unknown
     row never counts as coverage.
+
+    THE CONVENTION A RECORDED GENERATION ENTERS INTO: recording generation G
+    claims G's COMPLETE path set. `_lineage_gap_is_receipt_covered` reads one
+    present generation as "that whole step is queued" -- it cannot see how many
+    paths G was owed, so half of G recorded under G would bless a gap this
+    queue only half owns, and the write that trusted it would publish over real
+    divergence with no rebuild to catch it. A caller that cannot make that claim
+    passes `generation=None` and is honest about knowing nothing; a caller that
+    records a deliberately partial set must be sure no probe can ask about the
+    generation it records (the adopted residue is the one such site, and it
+    records the *acknowledged* generation for exactly that reason). The sites
+    are enumerated and must each declare their claim --
+    `tests/test_graph_deferred_queue.py::test_every_generation_recording_enqueue_declares_its_path_set`.
     """
     receipts, _added = _add_plain_receipts(
         vault_root, rel_paths, table="graph_upserts", generation=generation
@@ -1265,7 +1289,147 @@ def snapshot_graph(
     return _snapshot_plain(vault_root, table="graph_upserts", limit=limit, paths=paths)
 
 
-def graph_receipt_generations(vault_root: Path) -> tuple[frozenset[int], bool]:
+#: Generations kept in the durable debt record. A gap wider than this is far
+#: outside anything a path-keyed queue could cover, and pruning the oldest can
+#: only make the probe refuse coverage it might have granted -- an extra
+#: rebuild, never a blessed divergence.
+MAX_GRAPH_DEBT_GENERATIONS = 512
+
+
+def _record_graph_debt_generation_locked(conn: Any, generation: int, now: float) -> None:
+    """Record that generation `generation`'s graph debt was queued. Under the
+    caller's open transaction, so it lands with the receipts or not at all.
+
+    WHY THIS IS NOT THE RECEIPTS THEMSELVES. `graph_upserts` is keyed by
+    rel_path with ONE generation column, so a later enqueue of the same path
+    overwrites the generation an earlier one recorded -- `max(new, old)`, by
+    design, because the row does still owe the newer repair. That makes the
+    receipts a fine queue and a terrible ledger: measured under load, six
+    writes over six paths collapsed `{2,3,4,5}` into `{6}` the moment the
+    watcher re-queued those paths at its own checkpoint, and the next write's
+    predecessor probe then read a proven divergence where every generation's
+    repair was in fact queued. It cost a whole-vault rebuild about two writes
+    in six, and only under contention, which is exactly the batch-ingest
+    condition task 1.13 exists for.
+
+    So the proof gets its own append-only row per generation. Nothing
+    overwrites it, the drain does not consume it, and it is written in the same
+    durable step as the receipts and before the write acknowledges -- which is
+    what makes "a committed checkpoint implies its debt was recorded" a
+    property of the storage rather than of the timing.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO graph_debt_generations(generation, recorded_at) "
+        "VALUES (?, ?)",
+        (generation, now),
+    )
+    conn.execute(
+        "DELETE FROM graph_debt_generations WHERE generation <= ("
+        "  SELECT generation FROM graph_debt_generations "
+        "  ORDER BY generation DESC LIMIT 1 OFFSET ?"
+        ")",
+        (MAX_GRAPH_DEBT_GENERATIONS,),
+    )
+
+
+def graph_debt_generations_recorded(
+    vault_root: Path, generations: Iterable[int]
+) -> tuple[frozenset[int], bool]:
+    """Which of `generations` have a durable debt record, and whether one exists.
+
+    The second value distinguishes "this store has the record and these
+    generations are absent from it" from "this store predates the record", so a
+    caller can fall back rather than read an empty table as a proven divergence.
+    """
+    wanted = sorted({int(generation) for generation in generations})
+    if not wanted:
+        return frozenset(), True
+    path = store_path(vault_root)
+    if not path.exists():
+        return frozenset(), False
+    conn = _connect(vault_root, create=False)
+    try:
+        return _graph_debt_generations_locked(conn, wanted)
+    finally:
+        conn.close()
+
+
+def _graph_debt_generations_locked(
+    conn: Any, wanted: list[int]
+) -> tuple[frozenset[int], bool]:
+    """The debt lookup on a connection the caller already has open."""
+    available = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("graph_debt_generations",),
+        ).fetchone()
+    )
+    if not available:
+        return frozenset(), False
+    rows = conn.execute(
+        "SELECT generation FROM graph_debt_generations WHERE generation IN "
+        f"({','.join('?' for _ in wanted)})",
+        tuple(wanted),
+    ).fetchall()
+    return frozenset(int(row[0]) for row in rows), True
+
+
+def graph_gap_coverage(
+    vault_root: Path, generations: Iterable[int]
+) -> tuple[frozenset[int], bool, frozenset[int], bool]:
+    """Everything the predecessor probe needs about a gap, on ONE connection.
+
+    The probe runs on the write path, and every `_connect` here takes a
+    reserved-identity boundary entry -- the per-item re-entry that already
+    dominates the mutation-lock log. Asking two questions of the same store
+    through two connections doubled that for no reading anyone needs
+    separately, so they are asked together.
+
+    Returns the receipt generations in range, whether any queued receipt cannot
+    say what it owes, the generations with a durable debt record, and whether
+    that record exists in this store at all.
+    """
+    wanted = sorted({int(generation) for generation in generations})
+    if not wanted:
+        return frozenset(), False, frozenset(), True
+    path = store_path(vault_root)
+    if not path.exists():
+        return frozenset(), False, frozenset(), False
+    conn = _connect(vault_root, create=False)
+    try:
+        receipts = _snapshot_plain(
+            vault_root, table="graph_upserts", generations=wanted, connection=conn
+        )
+        known = frozenset(
+            receipt.graph_generation
+            for receipt in receipts
+            if receipt.graph_generation is not None
+        )
+        unknown = any(receipt.graph_generation is None for receipt in receipts)
+        recorded, has_record = _graph_debt_generations_locked(conn, wanted)
+    finally:
+        conn.close()
+    return known, unknown, recorded, has_record
+
+
+def clear_graph_debt_generations(vault_root: Path) -> int:
+    """Drop the whole debt record. Pairs with clearing the whole queue."""
+    path = store_path(vault_root)
+    if not path.exists():
+        return 0
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            return int(conn.execute("DELETE FROM graph_debt_generations").rowcount)
+    except sqlite3.OperationalError:
+        return 0
+    finally:
+        conn.close()
+
+
+def graph_receipt_generations(
+    vault_root: Path, *, generations: Iterable[int] | None = None
+) -> tuple[frozenset[int], bool]:
     """Which generations the queued graph receipts name, and whether any is unknown.
 
     The durable artifact a predecessor probe reads to decide whether a lineage
@@ -1274,8 +1438,22 @@ def graph_receipt_generations(vault_root: Path) -> tuple[frozenset[int], bool]:
     single unknown row means some queued repair cannot say what it owes -- which
     is not evidence about any generation, so the probe refuses on it rather than
     reasoning around it.
+
+    `generations` scopes the read to the gap the caller is actually asking
+    about, plus the unknown rows it must fail closed on. A probe runs on the
+    write path against a queue that holds one row per deferred page, so the
+    unscoped read this used to take grew with the backlog while the question
+    never did -- a six-generation gap needs six generations' rows, not the
+    table. The unscoped form is kept for callers reporting on the whole queue.
+
+    THE CONVENTION THIS RESTS ON, stated because a probe cannot check it: an
+    enqueue that records generation G records G's *complete* path set. A site
+    that recorded a partial set under G would make this answer "covered" for a
+    gap it only half owns. `tests/test_graph_deferred_queue.py` enumerates the
+    recording sites so a new one has to declare itself rather than inherit the
+    claim silently.
     """
-    receipts = _snapshot_plain(vault_root, table="graph_upserts")
+    receipts = _snapshot_graph_generation_rows(vault_root, generations)
     known = {
         receipt.graph_generation
         for receipt in receipts
@@ -1283,6 +1461,22 @@ def graph_receipt_generations(vault_root: Path) -> tuple[frozenset[int], bool]:
     }
     unknown = any(receipt.graph_generation is None for receipt in receipts)
     return frozenset(known), unknown
+
+
+def _snapshot_graph_generation_rows(
+    vault_root: Path, generations: Iterable[int] | None
+) -> list[DeferredReceipt]:
+    """Graph receipts for `generations`, plus every row that names none.
+
+    Same corrupt-row purge and same safety filter as `snapshot_graph`; it is
+    `_snapshot_plain` with a generation predicate rather than a path one.
+    """
+    if generations is None:
+        return _snapshot_plain(vault_root, table="graph_upserts")
+    wanted = sorted({int(generation) for generation in generations})
+    return _snapshot_plain(
+        vault_root, table="graph_upserts", generations=wanted
+    )
 
 
 def list_graph_paths(vault_root: Path, *, limit: int | None = None) -> list[str]:
@@ -1294,7 +1488,18 @@ def clear_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> i
 
 
 def clear_graph(vault_root: Path, rel_paths: list[str] | None = None) -> int:
-    return _clear(vault_root, table="graph_upserts", rel_paths=rel_paths)
+    """Drop queued graph work; a whole-queue clear drops the debt record too.
+
+    Clearing named paths leaves the debt record alone -- those generations were
+    still recorded, and their repair either landed or moved to another row.
+    Clearing the WHOLE queue is the caller saying this queue's history no longer
+    describes anything, and a proof that outlived the queue it describes would
+    bless a gap nothing is converging.
+    """
+    cleared = _clear(vault_root, table="graph_upserts", rel_paths=rel_paths)
+    if rel_paths is None:
+        clear_graph_debt_generations(vault_root)
+    return cleared
 
 
 def rotate_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
@@ -1317,11 +1522,16 @@ def _snapshot_plain(
     table: str,
     limit: int | None = None,
     paths: set[str] | None = None,
+    generations: list[int] | None = None,
+    connection: Any | None = None,
 ) -> list[DeferredReceipt]:
     path = store_path(vault_root)
     if not path.exists():
         return []
-    conn = _connect(vault_root, create=False)
+    # A caller with a connection already open lends it rather than paying a
+    # second reserved-identity boundary entry for the same store.
+    borrowed = connection is not None
+    conn = connection if borrowed else _connect(vault_root, create=False)
     try:
         columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
         if not columns:
@@ -1351,6 +1561,21 @@ def _snapshot_plain(
                 return []
             sql += f"WHERE rel_path IN ({','.join('?' for _ in wanted)}) "
             params.extend(wanted)
+        if generations is not None:
+            # The unknown rows come back too, and must: one receipt that cannot
+            # say what it owes disqualifies the whole queue as evidence, so a
+            # read scoped to the asked-about generations would answer "covered"
+            # on a queue it never looked at properly.
+            # The predicate needs the raw column, not the SELECT alias: on a
+            # store that predates the column every row is unknown, and
+            # `NULL IS NULL` is the honest way to say so.
+            column = "graph_generation" if "graph_generation" in columns else "NULL"
+            placeholders = ",".join("?" for _ in generations)
+            clause = f"{column} IS NULL"
+            if generations:
+                clause += f" OR {column} IN ({placeholders})"
+            sql += ("AND " if paths is not None else "WHERE ") + f"({clause}) "
+            params.extend(generations)
         sql += "ORDER BY updated_at, rel_path"
         if limit is not None:
             sql += " LIMIT ?"
@@ -1362,7 +1587,8 @@ def _snapshot_plain(
             for row in conn.execute(sql, tuple(params)).fetchall()
         ]
     finally:
-        conn.close()
+        if not borrowed:
+            conn.close()
     valid = [
         DeferredReceipt(rel, receipt.revision, receipt.graph_generation)
         for receipt in receipts
