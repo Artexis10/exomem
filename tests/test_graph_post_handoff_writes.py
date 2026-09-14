@@ -295,6 +295,78 @@ def _assert_incremental_latency(
     )
 
 
+_REBUILD_LINE = "graph dispatch registered a whole-vault rebuild"
+_UNCOVERED_LINE = "graph lineage gap is not covered by durable receipts"
+
+
+def _messages_from_this_thread(caplog: pytest.LogCaptureFixture, needle: str) -> list[str]:
+    """Records matching `needle` that the calling thread itself emitted.
+
+    `caplog` captures every thread in the process, and these tests run a real
+    watcher. A watcher dispatch is a standalone library caller, so
+    `_caller_can_carry_pending` is False for it and a deferral it makes must
+    converge before it returns -- it registers a rebuild of its own and says
+    `reason=incremental_refresh_queued_for_a_caller_that_must_converge`. That
+    is by design and is not what any oracle here is about; it was also making
+    the fence test fail about one full-file run in three, purely on when the
+    watcher's loop landed inside a per-write window.
+
+    The governed write dispatches synchronously on the thread that called it,
+    so the emitting thread is exact attribution rather than a heuristic.
+    """
+    current = threading.current_thread().name
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.threadName == current and needle in record.getMessage()
+    ]
+
+
+def _rebuild_reasons_this_write(root: Path, caplog: pytest.LogCaptureFixture) -> list[str]:
+    """This write's own rebuild reasons, each proven to be a genuinely uncovered gap.
+
+    A rebuild is admitted here only as the best-effort enqueue the canonical
+    batch is allowed to lose ("a lost enqueue costs a reconcile; a refused
+    write costs the user their edit"), never as an unconditional allowlist on
+    `graph_sync_predecessor_mismatch` -- which is the door task 1.13 closed and
+    would let a regression producing one mismatch rebuild in six pass. So when
+    the probe declines, read back the durable artifact it declined on and
+    require the generations it named to really have no receipts.
+
+    Read after the write rather than during it, which is sound because absence
+    is monotone across that window: the generations named are strictly older
+    than this checkpoint, nothing enqueues under an older generation than the
+    one it is owed for, and a drain only removes rows.
+    """
+    reasons = [
+        message.split("reason=", 1)[1].split(" ", 1)[0]
+        for message in _messages_from_this_thread(caplog, _REBUILD_LINE)
+    ]
+    if "graph_sync_predecessor_mismatch" not in reasons:
+        return reasons
+    declined = _messages_from_this_thread(caplog, _UNCOVERED_LINE)
+    assert declined, (
+        "a write registered a whole-vault rebuild for a mismatch without the "
+        f"probe naming the generations it could not prove covered: {reasons}"
+    )
+    for message in declined:
+        missing = [
+            int(token)
+            for token in message.split("missing=", 1)[1].split(" ", 1)[0].split(",")
+            if token
+        ]
+        assert missing, f"the probe declined but named no missing generation: {message}"
+        known, _unknown = deferred_index.graph_receipt_generations(
+            root, generations=missing
+        )
+        assert not (set(missing) & known), (
+            f"generations {sorted(set(missing) & known)} are queued as durable "
+            "repair, so the gap was covered and the rebuild is the regression "
+            f"task 1.13 closed, not a lost best-effort enqueue: {message}"
+        )
+    return reasons
+
+
 def _drain_repair_queue(root: Path, watcher: file_watcher.FileWatcher) -> int:
     """Publish the observed external events, then drain the durable graph queue."""
     watcher._flush()
@@ -721,10 +793,16 @@ def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
 
     outcomes: list[epistemic_graph.GraphDispatchResult] = []
     real_dispatch = epistemic_graph.upsert_after_write
+    dispatching_thread = threading.current_thread().name
 
     def recorded(vault_root: Path, paths: list[Path], **kwargs: object):
         result = real_dispatch(vault_root, paths, **kwargs)
-        outcomes.append(result)
+        if threading.current_thread().name == dispatching_thread:
+            # The patch is module-global, so the running watcher's own
+            # dispatches arrive here too. They are a different caller with a
+            # different contract (see `_messages_from_this_thread`), and the
+            # outcome oracle below is about what the GOVERNED write chose.
+            outcomes.append(result)
         return result
 
     monkeypatch.setattr(epistemic_graph, "upsert_after_write", recorded, raising=True)
@@ -742,6 +820,7 @@ def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
     acknowledgements: list[float] = []
     queued_after_write: list[bool] = []
     per_write_rebuilds: list[int] = []
+    registered: list[str] = []
     captured: list[str] = []
     for i in range(LIVE_WRITE_COUNT):
         target = generated / f"generated-note-{i:04d}.md"
@@ -752,16 +831,20 @@ def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
         assert freshness.external_pending_for(root, [target]), (
             "the probe's premise is a mark on the write's own path at dispatch"
         )
-        # Cleared per write so the rebuild count below is attributable to this
-        # write's own dispatch rather than to the whole run. A running watcher
-        # dispatches too, so the window is the honest bound rather than a proof
-        # of authorship -- which is why the aggregate assertions below still
-        # read the whole log.
+        # Cleared per write, and read back per write through
+        # `_rebuild_reasons_this_write`, which attributes by emitting thread:
+        # the window bounds *when*, the thread proves *who*. A running watcher
+        # registers rebuilds of its own on the same vault, and counting those
+        # against the governed write is what made this test order-dependent.
+        # The aggregate assertions below still read the whole log, deliberately
+        # -- `uncovered` and `fenced` are about the vault, not about a caller.
         caplog.clear()
         acknowledgements.append(_governed_write(root, target, f"governed {i}"))
-        per_write_rebuilds.append(
-            caplog.text.count("graph dispatch registered a whole-vault rebuild")
-        )
+        # Before the drain, so the receipt proof inside reads the queue this
+        # write's own dispatch decided against.
+        reasons = _rebuild_reasons_this_write(root, caplog)
+        registered.extend(reasons)
+        per_write_rebuilds.append(len(reasons))
         queued_after_write.append(bool(deferred_index.list_graph_paths(root)))
         # What the graph drain daemon does in production, on the same cadence.
         index_sync.drain_graph_work(root, limit=64)
@@ -769,11 +852,6 @@ def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
 
     log_text = "".join(captured)
     rendered = [round(seconds, 2) for seconds in acknowledgements]
-    registered = [
-        line.split("reason=", 1)[1].split(" ", 1)[0]
-        for line in log_text.splitlines()
-        if "graph dispatch registered a whole-vault rebuild" in line
-    ]
     # The structural oracle for "a rebuild per write", which is what the median
     # latency bound below can only infer. Timing says a write was cheap; this
     # says a whole-vault pass was not scheduled on each one's account.
@@ -782,9 +860,9 @@ def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
     # best-effort by construction ("a lost enqueue costs a reconcile; a refused
     # write costs the user their edit"), so under load one generation can go
     # unqueued and its gap is then genuinely uncovered. That rebuild is
-    # correct. What must never come back is one per write, and the reasons are
-    # pinned below so a regression names its own door rather than hiding in a
-    # count.
+    # correct -- and `_rebuild_reasons_this_write` has already proved it was
+    # that, by reading back the generations the probe named and requiring them
+    # to have no receipts, rather than allowlisting the reason.
     assert sum(per_write_rebuilds) <= 1, (
         f"whole-vault rebuilds registered per write: {per_write_rebuilds} for "
         f"reasons {registered}, acknowledgements {rendered}"
@@ -858,33 +936,52 @@ def test_writes_faster_than_the_drain_stay_incremental_on_a_covered_gap(
 
     outcomes: list[epistemic_graph.GraphDispatchResult] = []
     real_dispatch = epistemic_graph.upsert_after_write
+    dispatching_thread = threading.current_thread().name
 
     def recorded(vault_root: Path, paths: list[Path], **kwargs: object):
         result = real_dispatch(vault_root, paths, **kwargs)
-        outcomes.append(result)
+        if threading.current_thread().name == dispatching_thread:
+            # The patch is module-global, so the running watcher's own
+            # dispatches arrive here too. They are a different caller with a
+            # different contract (see `_messages_from_this_thread`), and the
+            # outcome oracle below is about what the GOVERNED write chose.
+            outcomes.append(result)
         return result
 
     monkeypatch.setattr(epistemic_graph, "upsert_after_write", recorded, raising=True)
 
     acknowledgements: list[float] = []
     per_write_rebuilds: list[int] = []
+    registered: list[str] = []
     captured: list[str] = []
     for i in range(LIVE_WRITE_COUNT):
         target = generated / f"generated-note-{i:04d}.md"
         _external_edit(live_watcher, target, f"external editor touch {i}")
         caplog.clear()
         acknowledgements.append(_governed_write(root, target, f"governed {i}"))
-        per_write_rebuilds.append(
-            caplog.text.count("graph dispatch registered a whole-vault rebuild")
-        )
+        reasons = _rebuild_reasons_this_write(root, caplog)
+        registered.extend(reasons)
+        per_write_rebuilds.append(len(reasons))
         captured.append(caplog.text)
         # Deliberately no drain: this is the rate the mitigation does not reach.
 
     log_text = "".join(captured)
     rendered = [round(seconds, 2) for seconds in acknowledgements]
-    assert per_write_rebuilds == [0] * LIVE_WRITE_COUNT, (
-        f"whole-vault rebuilds registered per write: {per_write_rebuilds}, "
-        f"acknowledgements {rendered}"
+    # Same oracle as the fenced test above, and for the same reason. Zero is
+    # what 1.13 buys and what this measured, but the canonical batch's debt
+    # enqueue is best-effort by construction, so one lost enqueue in six writes
+    # leaves one gap genuinely uncovered and one correct rebuild -- observed at
+    # about one isolated run in three. `_rebuild_reasons_this_write` has
+    # already read the durable queue back and required the generations the
+    # probe named to have no receipts, so a rebuild admitted here is a proven
+    # lost enqueue rather than the divergence 1.13 closed.
+    assert sum(per_write_rebuilds) <= 1, (
+        f"whole-vault rebuilds registered per write: {per_write_rebuilds} for "
+        f"reasons {registered}, acknowledgements {rendered}"
+    )
+    assert set(registered) <= {"graph_sync_predecessor_mismatch"}, (
+        "a write at batch-ingest rate registered a whole-vault rebuild for a "
+        f"reason other than the lost enqueue this admits: {registered}"
     )
     assert "graph lineage gap is covered by durable receipts" in log_text, (
         "no write proved its gap covered, so this shape never reached the door "
@@ -1456,6 +1553,35 @@ _seed_live_freshness(root)
 # What the worker runtime's warm-up does for a replacement process, and what a
 # standby does before promotion: prove the inherited snapshot and adopt its
 # checkpoint as this process's delta origin.
+# The warm window a replacement worker actually starts in, and the write that
+# arrives during it. Everything a writer used to wait on is ready; only the
+# handoff is not, which is exactly the 0.84.1 shape -- the corpus build finished
+# 36 s before adoption ran, so the gate let the first governed write through
+# into a process with no delta origin.
+from types import SimpleNamespace  # noqa: E402
+
+from exomem import readiness  # noqa: E402
+from exomem.cli_ops import OpError  # noqa: E402
+from exomem.writer_lease import LeaseConfig, LeaseManager  # noqa: E402
+
+_manager = LeaseManager(LeaseConfig(state_dir=root / ".exomem" / "lease-state"))
+_admitted = []
+_early = SimpleNamespace(
+    name="mutate", read_only=False, leaf=lambda: _admitted.append("ran")
+)
+readiness.begin_warm()
+for component in readiness.COMPONENTS:
+    if component != "graph_handoff":
+        readiness.mark_ready(component)
+early_refusal = None
+try:
+    _manager.invoke(_early, (), {{}}, mutation_request_id="early-write")
+except OpError as error:
+    early_refusal = {{
+        "code": error.code,
+        "component": (error.details or {{}}).get("warming_component"),
+    }}
+
 stored_before = None
 index_for_adoption = EpistemicGraphIndex(root)
 opened = index_for_adoption._open_read_snapshot(require_current_projection=False)
@@ -1464,6 +1590,12 @@ if opened is not None:
     opened.close()
 adoption = index_for_adoption.adopt_published_snapshot()
 adopted = bool(adoption)
+# The handoff has settled; the gate opens, and the write that was refused above
+# is the first one this process serves.
+readiness.mark_ready("graph_handoff")
+_manager.invoke(_early, (), {{}}, mutation_request_id="early-write-retry")
+readiness.finish_warm()
+early_admitted = _admitted == ["ran"]
 victim_in_delta = bool(
     stored_before is not None
     and str(victim)
@@ -1498,6 +1630,8 @@ print(
     json.dumps(
         {{
             "adopted": adopted,
+            "early_refusal": early_refusal,
+            "early_admitted": early_admitted,
             "residue": list(adoption.residue),
             "adoption_reason": adoption.reason,
             "queue_after_drain": queue_after_drain,
@@ -1569,6 +1703,20 @@ def test_a_replacement_process_serves_its_first_writes_incrementally(
 
     assert report["adopted"] is True, (
         "the replacement process must be able to prove the snapshot it inherited"
+    )
+    assert report["early_refusal"] == {
+        "code": "MUTATION_WARMING",
+        "component": "graph_handoff",
+    }, (
+        "a governed write arriving before adoption had run was admitted. That "
+        "is the 0.84.1 failure: the gate waited only on the semantic corpus, "
+        "the corpus finished 36 s before the handoff did, and the write it let "
+        "through had no lineage to advance -- so it registered the whole-vault "
+        f"rebuild adoption exists to remove. Got {report['early_refusal']!r}"
+    )
+    assert report["early_admitted"] is True, (
+        "the refusal must be retryable and must clear once the handoff settles; "
+        "a write held past adoption is a gate that never opens"
     )
     per_write = report["per_write_rebuilds"]
     assert per_write == [0] * WRITE_COUNT, (
@@ -1748,6 +1896,114 @@ def test_a_residue_adoption_keeps_reads_refusing_until_the_repair_lands(
     assert epistemic_graph.graph_drift(root) == []
 
 
+#: Every reason `_snapshot_sources_match_disk` may decline with, and what an
+#: operator is supposed to do about it. The 0.84.1 deploy is why this table
+#: exists: the adoption line said `reason=snapshot_proof_declined`, which is a
+#: restatement of `adopted=False` and told nobody whether the corpus had moved,
+#: the projection was mid-repair, or a concurrent whole-vault rebuild was
+#: rewriting the sidecar out from under the proof. Diagnosing it took a service
+#: log correlated by hand across three minutes.
+_DECLINE_REASONS = {
+    "recall_membership_unreadable": "the recall scope could not be read at all",
+    "source_unparseable": "a page the snapshot indexes no longer parses",
+    "indexed_membership_differs": "a different corpus, not a bounded repair",
+    "indexed_sources_differ": "same, for a caller that cannot carry a residue",
+    "resolver_topology_mismatch": "the link topology is not the one published",
+    "projection_moved_during_proof": "the projection changed under the proof",
+    "proof_raised": "the proof itself failed; treat as unproven",
+}
+
+
+def test_every_adoption_decline_has_a_name_of_its_own() -> None:
+    """`snapshot_proof_declined` is not a diagnosis, so no arm may return it."""
+    import ast
+
+    source = Path(epistemic_graph.__file__).read_text(encoding="utf-8")
+    proof = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "_snapshot_sources_match_disk"
+    )
+    reasons = {
+        literal.value
+        # Every string literal handed to `declined`, including the ones inside a
+        # conditional expression: an arm that picks between two names still owes
+        # both of them a declaration.
+        for call in ast.walk(proof)
+        if isinstance(call, ast.Call) and getattr(call.func, "id", None) == "declined"
+        for literal in ast.walk(call)
+        if isinstance(literal, ast.Constant) and isinstance(literal.value, str)
+    }
+    assert reasons == set(_DECLINE_REASONS), (
+        "an adoption decline arm appeared, moved or lost its name. Every arm "
+        "reports a distinct condition an operator acts on differently; "
+        f"declared {sorted(_DECLINE_REASONS)}, found {sorted(reasons)}"
+    )
+    assert "snapshot_proof_declined" not in reasons, (
+        "the generic reason is the fallback for a proof that returned False "
+        "without naming anything, never something an arm chooses"
+    )
+
+
+def test_a_declined_adoption_names_the_condition_it_declined_on(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The reasons reachable without racing the proof, each pinned to its cause.
+
+    Not every arm is deterministic from outside -- `projection_moved_during_proof`
+    is a race by definition -- so the arms are enumerated structurally by the
+    test above and the causes that can be produced are pinned here.
+    """
+    root = handoff_vault
+    caplog.set_level("INFO", logger="exomem.warmup")
+
+    def raises(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("the indexed membership read failed")
+
+    cases = {
+        "recall_membership_unreadable": lambda mp: mp.setattr(
+            EpistemicGraphIndex, "_recall_membership", lambda _self: None, raising=True
+        ),
+        "resolver_topology_mismatch": lambda mp: mp.setattr(
+            epistemic_graph,
+            "_resolver_topology_fingerprint",
+            lambda _resolver: "not-the-published-topology",
+            raising=True,
+        ),
+        "proof_raised": lambda mp: mp.setattr(
+            EpistemicGraphIndex, "_indexed_recall_membership", raises, raising=True
+        ),
+    }
+    for reason, arrange in cases.items():
+        with monkeypatch.context() as patched:
+            arrange(patched)
+            adoption = EpistemicGraphIndex(root).adopt_published_snapshot()
+        assert adoption.adopted is False
+        assert adoption.reason == reason, (
+            f"a decline on {reason} reported {adoption.reason!r} instead"
+        )
+
+
+def test_the_warm_up_reports_the_reason_an_adoption_declined(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The operator reads the warm-up line, not the return value."""
+    from exomem import warmup
+
+    caplog.set_level("INFO", logger="exomem.warmup")
+    monkeypatch.setattr(warmup, "warmup_enabled", lambda: True, raising=True)
+    monkeypatch.setattr(
+        EpistemicGraphIndex, "_recall_membership", lambda _self: None, raising=True
+    )
+
+    warmup.warm_graph_handoff(handoff_vault)
+
+    assert "reason=recall_membership_unreadable" in caplog.text, (
+        "the adoption line has to carry the specific decline, or a deploy is "
+        f"diagnosed by source read again: {caplog.text[-500:]}"
+    )
+
+
 def test_the_warm_up_adopts_after_the_seed_and_the_resolver(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1837,6 +2093,98 @@ def test_start_up_adopts_the_snapshot_when_the_resource_mode_skips_cpu_caches(
     assert root in find_module._RECALL_RESOLVER_CACHE, (
         "the resolver primer must run beside adoption: a process that never "
         "built one leaves every write bailing on resolver_snapshot_unavailable"
+    )
+
+
+def test_the_warm_up_adopts_before_it_builds_the_semantic_corpus(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Writers are admitted on the corpus, so adoption cannot be behind it.
+
+    Measured on the 0.84.1 personal service: `warm complete` listed the corpus
+    build at 30-36 s on 4209 pages, and the graph handoff ran *after* it. The
+    gate that admits governed writes waits on `semantic_corpus`, so the first
+    write of the replacement worker was admitted into a process with no adopted
+    lineage -- it fell back on `recall_delta_incomplete` and registered a
+    whole-vault rebuild, which was still in flight 36 s later when adoption
+    finally ran and declined its proof against the sidecar that rebuild was
+    rewriting underneath it.
+
+    Adoption is handoff correctness, not a cache, and it is sub-second to a few
+    seconds. It belongs in the first seconds of the warm, ahead of everything a
+    writer waits on, and the order is pinned here rather than commented.
+    """
+    from exomem import readiness, semantic_contract, warmup
+
+    root = handoff_vault
+    order: list[str] = []
+
+    real_adopt = EpistemicGraphIndex.adopt_published_snapshot
+
+    def traced_adopt(inner_self: EpistemicGraphIndex) -> object:
+        order.append("graph_snapshot")
+        return real_adopt(inner_self)
+
+    def traced_corpus(*_args: object, **_kwargs: object) -> None:
+        order.append("semantic_corpus")
+
+    marked: list[str] = []
+    real_mark = readiness.mark_ready
+
+    def traced_mark(component: str) -> list:
+        marked.append(component)
+        return real_mark(component)
+
+    monkeypatch.setattr(warmup, "warmup_enabled", lambda: True, raising=True)
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True, raising=True)
+    monkeypatch.setattr(warmup, "model_preload_allowed", lambda *_a: False, raising=True)
+    monkeypatch.setattr(warmup, "warm_caches", lambda *_a, **_kw: {}, raising=True)
+    monkeypatch.setattr(mode, "preload_cpu_caches", lambda: False, raising=True)
+    monkeypatch.setattr(
+        EpistemicGraphIndex, "adopt_published_snapshot", traced_adopt, raising=True
+    )
+    monkeypatch.setattr(
+        semantic_contract, "build_corpus_context", traced_corpus, raising=True
+    )
+    monkeypatch.setattr(readiness, "mark_ready", traced_mark, raising=True)
+
+    warmup.warm_all(root)
+
+    assert order == ["graph_snapshot", "semantic_corpus"], (
+        "the graph handoff must run before the corpus build that admits "
+        f"writers, not after it: {order}"
+    )
+    assert marked.index("graph_handoff") < marked.index("semantic_corpus"), (
+        "the component a writer waits on must not be marked ready before the "
+        f"one that gives its write a delta origin: {marked}"
+    )
+
+
+def test_start_up_adopts_the_snapshot_while_the_retrieval_catalog_is_repaired(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third gate that could skip adoption, and the reason it must not.
+
+    `catalog_ready` exists so the disposable recall caches do not publish beside
+    a detached repair owner rebuilding the *lexical* catalogue. The graph
+    handoff is not that: it builds a process-local resolver and proves the graph
+    sidecar, neither of which is the artifact under repair. Leaving adoption
+    behind that gate means a worker that starts during a catalog repair admits
+    writes with no delta origin -- the 0.84.1 failure, reached by a different
+    door.
+    """
+    from exomem import warmup
+
+    monkeypatch.setattr(warmup, "warmup_enabled", lambda: True, raising=True)
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: False, raising=True)
+    monkeypatch.setattr(warmup, "model_preload_allowed", lambda *_a: False, raising=True)
+    monkeypatch.setattr(mode, "preload_cpu_caches", lambda: False, raising=True)
+
+    durations = warmup.warm_all(handoff_vault)
+
+    assert "graph_snapshot" in durations, (
+        "a worker that starts while the retrieval catalog is under repair still "
+        f"has to adopt the snapshot it inherited: {sorted(durations)}"
     )
 
 
