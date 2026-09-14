@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -963,6 +964,19 @@ def add_graph_receipts(
     durable work rather than guess it from a path name, so a caller that knows
     it must pass it; one that does not leaves the row unknown, and an unknown
     row never counts as coverage.
+
+    THE CONVENTION A RECORDED GENERATION ENTERS INTO: recording generation G
+    claims G's COMPLETE path set. `_lineage_gap_is_receipt_covered` reads one
+    present generation as "that whole step is queued" -- it cannot see how many
+    paths G was owed, so half of G recorded under G would bless a gap this
+    queue only half owns, and the write that trusted it would publish over real
+    divergence with no rebuild to catch it. A caller that cannot make that claim
+    passes `generation=None` and is honest about knowing nothing; a caller that
+    records a deliberately partial set must be sure no probe can ask about the
+    generation it records (the adopted residue is the one such site, and it
+    records the *acknowledged* generation for exactly that reason). The sites
+    are enumerated and must each declare their claim --
+    `tests/test_graph_deferred_queue.py::test_every_generation_recording_enqueue_declares_its_path_set`.
     """
     receipts, _added = _add_plain_receipts(
         vault_root, rel_paths, table="graph_upserts", generation=generation
@@ -1265,7 +1279,9 @@ def snapshot_graph(
     return _snapshot_plain(vault_root, table="graph_upserts", limit=limit, paths=paths)
 
 
-def graph_receipt_generations(vault_root: Path) -> tuple[frozenset[int], bool]:
+def graph_receipt_generations(
+    vault_root: Path, *, generations: Iterable[int] | None = None
+) -> tuple[frozenset[int], bool]:
     """Which generations the queued graph receipts name, and whether any is unknown.
 
     The durable artifact a predecessor probe reads to decide whether a lineage
@@ -1274,8 +1290,22 @@ def graph_receipt_generations(vault_root: Path) -> tuple[frozenset[int], bool]:
     single unknown row means some queued repair cannot say what it owes -- which
     is not evidence about any generation, so the probe refuses on it rather than
     reasoning around it.
+
+    `generations` scopes the read to the gap the caller is actually asking
+    about, plus the unknown rows it must fail closed on. A probe runs on the
+    write path against a queue that holds one row per deferred page, so the
+    unscoped read this used to take grew with the backlog while the question
+    never did -- a six-generation gap needs six generations' rows, not the
+    table. The unscoped form is kept for callers reporting on the whole queue.
+
+    THE CONVENTION THIS RESTS ON, stated because a probe cannot check it: an
+    enqueue that records generation G records G's *complete* path set. A site
+    that recorded a partial set under G would make this answer "covered" for a
+    gap it only half owns. `tests/test_graph_deferred_queue.py` enumerates the
+    recording sites so a new one has to declare itself rather than inherit the
+    claim silently.
     """
-    receipts = _snapshot_plain(vault_root, table="graph_upserts")
+    receipts = _snapshot_graph_generation_rows(vault_root, generations)
     known = {
         receipt.graph_generation
         for receipt in receipts
@@ -1283,6 +1313,22 @@ def graph_receipt_generations(vault_root: Path) -> tuple[frozenset[int], bool]:
     }
     unknown = any(receipt.graph_generation is None for receipt in receipts)
     return frozenset(known), unknown
+
+
+def _snapshot_graph_generation_rows(
+    vault_root: Path, generations: Iterable[int] | None
+) -> list[DeferredReceipt]:
+    """Graph receipts for `generations`, plus every row that names none.
+
+    Same corrupt-row purge and same safety filter as `snapshot_graph`; it is
+    `_snapshot_plain` with a generation predicate rather than a path one.
+    """
+    if generations is None:
+        return _snapshot_plain(vault_root, table="graph_upserts")
+    wanted = sorted({int(generation) for generation in generations})
+    return _snapshot_plain(
+        vault_root, table="graph_upserts", generations=wanted
+    )
 
 
 def list_graph_paths(vault_root: Path, *, limit: int | None = None) -> list[str]:
@@ -1317,6 +1363,7 @@ def _snapshot_plain(
     table: str,
     limit: int | None = None,
     paths: set[str] | None = None,
+    generations: list[int] | None = None,
 ) -> list[DeferredReceipt]:
     path = store_path(vault_root)
     if not path.exists():
@@ -1351,6 +1398,21 @@ def _snapshot_plain(
                 return []
             sql += f"WHERE rel_path IN ({','.join('?' for _ in wanted)}) "
             params.extend(wanted)
+        if generations is not None:
+            # The unknown rows come back too, and must: one receipt that cannot
+            # say what it owes disqualifies the whole queue as evidence, so a
+            # read scoped to the asked-about generations would answer "covered"
+            # on a queue it never looked at properly.
+            # The predicate needs the raw column, not the SELECT alias: on a
+            # store that predates the column every row is unknown, and
+            # `NULL IS NULL` is the honest way to say so.
+            column = "graph_generation" if "graph_generation" in columns else "NULL"
+            placeholders = ",".join("?" for _ in generations)
+            clause = f"{column} IS NULL"
+            if generations:
+                clause += f" OR {column} IN ({placeholders})"
+            sql += ("AND " if paths is not None else "WHERE ") + f"({clause}) "
+            params.extend(generations)
         sql += "ORDER BY updated_at, rel_path"
         if limit is not None:
             sql += " LIMIT ?"
