@@ -523,6 +523,14 @@ def _connect_created_owned(
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS graph_debt_generations (
+            generation INTEGER PRIMARY KEY,
+            recorded_at REAL NOT NULL
+        )
+        """
+    )
     for event in ("INSERT", "UPDATE", "DELETE"):
         conn.execute(
             f"CREATE TRIGGER IF NOT EXISTS graph_upserts_generation_{event.lower()} "
@@ -914,6 +922,8 @@ def _add_plain_receipts(
                             (now, revision, rel),
                         )
                 receipts.append(DeferredReceipt(rel, revision, recorded))
+            if tracks_generation and generation is not None and rels:
+                _record_graph_debt_generation_locked(conn, int(generation), now)
         except Exception:
             conn.rollback()
             raise
@@ -1279,6 +1289,99 @@ def snapshot_graph(
     return _snapshot_plain(vault_root, table="graph_upserts", limit=limit, paths=paths)
 
 
+#: Generations kept in the durable debt record. A gap wider than this is far
+#: outside anything a path-keyed queue could cover, and pruning the oldest can
+#: only make the probe refuse coverage it might have granted -- an extra
+#: rebuild, never a blessed divergence.
+MAX_GRAPH_DEBT_GENERATIONS = 512
+
+
+def _record_graph_debt_generation_locked(conn: Any, generation: int, now: float) -> None:
+    """Record that generation `generation`'s graph debt was queued. Under the
+    caller's open transaction, so it lands with the receipts or not at all.
+
+    WHY THIS IS NOT THE RECEIPTS THEMSELVES. `graph_upserts` is keyed by
+    rel_path with ONE generation column, so a later enqueue of the same path
+    overwrites the generation an earlier one recorded -- `max(new, old)`, by
+    design, because the row does still owe the newer repair. That makes the
+    receipts a fine queue and a terrible ledger: measured under load, six
+    writes over six paths collapsed `{2,3,4,5}` into `{6}` the moment the
+    watcher re-queued those paths at its own checkpoint, and the next write's
+    predecessor probe then read a proven divergence where every generation's
+    repair was in fact queued. It cost a whole-vault rebuild about two writes
+    in six, and only under contention, which is exactly the batch-ingest
+    condition task 1.13 exists for.
+
+    So the proof gets its own append-only row per generation. Nothing
+    overwrites it, the drain does not consume it, and it is written in the same
+    durable step as the receipts and before the write acknowledges -- which is
+    what makes "a committed checkpoint implies its debt was recorded" a
+    property of the storage rather than of the timing.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO graph_debt_generations(generation, recorded_at) "
+        "VALUES (?, ?)",
+        (generation, now),
+    )
+    conn.execute(
+        "DELETE FROM graph_debt_generations WHERE generation <= ("
+        "  SELECT generation FROM graph_debt_generations "
+        "  ORDER BY generation DESC LIMIT 1 OFFSET ?"
+        ")",
+        (MAX_GRAPH_DEBT_GENERATIONS,),
+    )
+
+
+def graph_debt_generations_recorded(
+    vault_root: Path, generations: Iterable[int]
+) -> tuple[frozenset[int], bool]:
+    """Which of `generations` have a durable debt record, and whether one exists.
+
+    The second value distinguishes "this store has the record and these
+    generations are absent from it" from "this store predates the record", so a
+    caller can fall back rather than read an empty table as a proven divergence.
+    """
+    wanted = sorted({int(generation) for generation in generations})
+    if not wanted:
+        return frozenset(), True
+    path = store_path(vault_root)
+    if not path.exists():
+        return frozenset(), False
+    conn = _connect(vault_root, create=False)
+    try:
+        available = bool(
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                ("graph_debt_generations",),
+            ).fetchone()
+        )
+        if not available:
+            return frozenset(), False
+        rows = conn.execute(
+            "SELECT generation FROM graph_debt_generations WHERE generation IN "
+            f"({','.join('?' for _ in wanted)})",
+            tuple(wanted),
+        ).fetchall()
+    finally:
+        conn.close()
+    return frozenset(int(row[0]) for row in rows), True
+
+
+def clear_graph_debt_generations(vault_root: Path) -> int:
+    """Drop the whole debt record. Pairs with clearing the whole queue."""
+    path = store_path(vault_root)
+    if not path.exists():
+        return 0
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            return int(conn.execute("DELETE FROM graph_debt_generations").rowcount)
+    except sqlite3.OperationalError:
+        return 0
+    finally:
+        conn.close()
+
+
 def graph_receipt_generations(
     vault_root: Path, *, generations: Iterable[int] | None = None
 ) -> tuple[frozenset[int], bool]:
@@ -1340,7 +1443,18 @@ def clear_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> i
 
 
 def clear_graph(vault_root: Path, rel_paths: list[str] | None = None) -> int:
-    return _clear(vault_root, table="graph_upserts", rel_paths=rel_paths)
+    """Drop queued graph work; a whole-queue clear drops the debt record too.
+
+    Clearing named paths leaves the debt record alone -- those generations were
+    still recorded, and their repair either landed or moved to another row.
+    Clearing the WHOLE queue is the caller saying this queue's history no longer
+    describes anything, and a proof that outlived the queue it describes would
+    bless a gap nothing is converging.
+    """
+    cleared = _clear(vault_root, table="graph_upserts", rel_paths=rel_paths)
+    if rel_paths is None:
+        clear_graph_debt_generations(vault_root)
+    return cleared
 
 
 def rotate_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:

@@ -4031,11 +4031,24 @@ class EpistemicGraphIndex:
             known, unknown = deferred_index.graph_receipt_generations(
                 self.vault_root, generations=gap
             )
+            recorded, has_debt_record = deferred_index.graph_debt_generations_recorded(
+                self.vault_root, gap
+            )
         except Exception:  # noqa: BLE001 - an unreadable queue proves nothing
             log.warning("graph receipt generations unreadable", exc_info=True)
             return False
         if unknown:
             return False
+        if has_debt_record:
+            # The durable per-generation record is the proof; the receipts are
+            # only the work. A queued path carries ONE generation, so a later
+            # enqueue of the same path overwrites what an earlier one recorded
+            # -- which made this answer depend on whether anything had re-queued
+            # those paths yet, and cost a whole-vault rebuild about two writes
+            # in six under load. The record cannot be overwritten, so a gap is
+            # covered when every skipped generation's debt was recorded,
+            # whether its rows are still queued or already repaired.
+            known = known | recorded
         missing = [generation for generation in gap if generation not in known]
         if missing:
             # The uncovered case was silent, which left the rebuild it causes
