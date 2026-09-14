@@ -350,8 +350,13 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     Each stage soft-fails; a failed model preload leaves its component
     not-ready (never marked), so requests defer for the rest of the warm and
     then return to inline lazy-load semantics. Never raises.
+
+    A worker promoted from a standby subtracts the steps that standby already
+    ran in this same process and promotion re-verified (`carried_from_standby`
+    in the returned durations and the completion line). It is a subtraction, not
+    a second path: a cold start carries nothing and runs every step.
     """
-    from . import mode, readiness
+    from . import mode, readiness, service_standby
 
     mode_name = mode.resolve_mode()
     preload = model_preload_allowed(mode_name)
@@ -359,6 +364,12 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     catalog_ready = False
     catalog_started = time.perf_counter()
     managed_catalog = readiness.runtime_managed()
+    # What the standby already did and promotion re-verified. Empty on a cold
+    # start, which is the only reason this is a subtraction from a full warm
+    # rather than a second warm path: there is exactly one step list, and a
+    # cold start reads an empty set and runs all of it.
+    carried = service_standby.carried_warm_components()
+    durations["carried_from_standby"] = float(len(carried))
     try:
         catalog_ready = warm_retrieval_catalog(vault_root)
         if catalog_ready and not managed_catalog:
@@ -389,7 +400,16 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         #     rewriting, so the collision that makes `warm_caches` wait does not
         #     apply here. A proof taken against a moving projection declines and
         #     says so; a proof never taken costs the next write a whole vault.
-        durations.update(warm_graph_handoff(vault_root))
+        if "graph_handoff" in carried:
+            # Promotion re-proved this standby's adopted checkpoint against
+            # disk and found it current, so the adoption `warm_graph_handoff`
+            # would take is the one this process already holds. Re-taking it
+            # cost the 0.85.0 cutover 19.5 s of snapshot proof and a second
+            # `graph snapshot adoption` line, while the writes it was supposed
+            # to protect were being refused for want of the components below.
+            log.info("graph handoff carried from standby; adoption not repeated")
+        else:
+            durations.update(warm_graph_handoff(vault_root))
     finally:
         # Marked on every exit, including the ones where nothing ran. The
         # writers' gate waits on this component, and a component that can be
@@ -401,9 +421,17 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         readiness.mark_ready("graph_handoff")
     semantic_started = time.perf_counter()
     try:
-        from . import semantic_contract
+        if "semantic_corpus" in carried:
+            # Built in this same process while it was a standby. The context is
+            # captioned by a stat census, so pages the outgoing worker changed
+            # under it reparse on first use; what is carried is the cold build,
+            # 9.9 s on a 4271-page vault, which is what the admission gate was
+            # waiting on for ~30 s after a 1.6 s cutover.
+            log.info("semantic corpus carried from standby; build not repeated")
+        else:
+            from . import semantic_contract
 
-        semantic_contract.build_corpus_context(vault_root)
+            semantic_contract.build_corpus_context(vault_root)
         readiness.mark_ready("semantic_corpus")
     except Exception:  # noqa: BLE001 — semantic warm-up remains rebuildable
         log.warning("semantic corpus warm-up failed", exc_info=True)
@@ -412,7 +440,12 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             (time.perf_counter() - semantic_started) * 1000.0,
             1,
         )
-    if catalog_ready:
+    if catalog_ready and "lexical" in carried:
+        # Same process, same caches: `service_standby.warm` calls `warm_caches`
+        # with this process's own mode and preload policy.
+        log.info("lexical caches carried from standby; warm not repeated")
+        readiness.mark_ready("lexical")
+    elif catalog_ready:
         durations.update(
             warm_caches(
                 vault_root,
@@ -526,8 +559,34 @@ def warm_all(vault_root: Path) -> dict[str, float]:
                 log.info("CLIP model ready")
                 readiness.mark_ready("clip")
 
-    log.info("warm complete: %s", durations)
+    if carried:
+        log.info("warm complete: %s carried_from_standby=%s", durations, sorted(carried))
+    else:
+        log.info("warm complete: %s", durations)
     return durations
+
+
+def _carry_forward_standby_readiness() -> frozenset[str]:
+    """Re-mark the components a promoted standby already warmed. Returns them.
+
+    `begin_warm` clears every readiness event, so a promoted worker that did
+    nothing here would spend its second warm refusing the governed writes its
+    predecessor's users are already sending: measured on the 0.85.0 cutover as
+    ~30 s of `MUTATION_WARMING` behind a 1.6 s unavailable window, which moves
+    an outage rather than removing one.
+
+    Marked synchronously, before the warm thread starts and therefore before
+    `start_background` returns, so no request can observe the window between the
+    clear and the re-mark. Empty and a no-op on a cold start.
+    """
+    from . import readiness, service_standby
+
+    carried = service_standby.carried_warm_components()
+    for component in carried:
+        readiness.mark_ready(component)
+    if carried:
+        log.info("carried warm components forward from the standby: %s", sorted(carried))
+    return carried
 
 
 def start_background(vault_root: Path) -> threading.Thread:
@@ -541,6 +600,7 @@ def start_background(vault_root: Path) -> threading.Thread:
     from . import readiness
 
     readiness.begin_warm()
+    _carry_forward_standby_readiness()
 
     def _run() -> None:
         try:
