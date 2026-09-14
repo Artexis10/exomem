@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.85.1](https://github.com/Artexis10/exomem/compare/v0.85.0...v0.85.1) (2026-09-14)
+
+
+### Bug Fixes
+
+* **hosted:** reissue a drained source window before the migration Job reads it ([#1270](https://github.com/Artexis10/exomem/issues/1270)) ([e356b89](https://github.com/Artexis10/exomem/commit/e356b896cf1cf48df00c2415366a0696eea474ee))
+* **service:** carry the standby's warm into the promoted worker and seed the adopted recall origin ([#1274](https://github.com/Artexis10/exomem/issues/1274)) ([8077464](https://github.com/Artexis10/exomem/commit/8077464e7dd704e0457bb38136ad6c4749b6d41e))
+
 ## [0.85.0](https://github.com/Artexis10/exomem/compare/v0.84.1...v0.85.0) (2026-09-14)
 
 
