@@ -51,6 +51,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -352,9 +353,47 @@ def _clip_spans(spans: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
             count = int(entry.get("count", 1))
         except (TypeError, ValueError):
             continue
-        shaped.append({"name": _clip(name), "count": count, "ms": ms})
+        row: dict[str, Any] = {"name": _clip(name), "count": count, "ms": ms}
+        fields = _clip_span_fields(entry.get("fields"))
+        if fields:
+            # Only when something was measured. A span that carried no fields
+            # keeps the exact shape it has always had, so no row already
+            # written -- and `verify` re-hashes rows as stored -- changes.
+            row["fields"] = fields
+        shaped.append(row)
     shaped.sort(key=lambda item: item["ms"], reverse=True)
     return shaped[:_MAX_SPANS]
+
+
+#: Named integer measurements one span may carry beside its duration. Bounded
+#: like `_MAX_SPANS`, and integers only: a hash-chained row must not grow a key
+#: whose meaning a later reader has to guess.
+_MAX_SPAN_FIELDS = 4
+
+
+#: A field key is a measurement name, never a value. Enforced here as well as at
+#: the producer (`call_spans.FIELD_KEY_PATTERN`), because this is the last seam
+#: before a hash-chained row: a key shaped like a path, title or identifier
+#: cannot pass either gate, and a producer that bypassed the first still cannot
+#: write content into a row through the second.
+_SPAN_FIELD_KEY = re.compile(r"^[a-z_]{1,32}$")
+
+
+def _clip_span_fields(fields: object) -> dict[str, int]:
+    """Normalize a span's named counts into a bounded, canonical shape."""
+    if not isinstance(fields, Mapping):
+        return {}
+    shaped: dict[str, int] = {}
+    for key in sorted(str(name) for name in fields):
+        if len(shaped) >= _MAX_SPAN_FIELDS:
+            break
+        if not _SPAN_FIELD_KEY.match(key):
+            continue
+        try:
+            shaped[key] = int(fields[key])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return shaped
 
 
 #: Stage names kept in one row's budget block. Bounded for the same reason
@@ -648,6 +687,13 @@ DERIVED_PHASES: frozenset[str] = frozenset(
         # to infer it by subtracting other spans would be approximating the one
         # measurement that must not be approximate.
         "derived.post_canonical",
+        # The two halves of `derived.canonical_to_committed` (task 1.15), and
+        # the durable-defer arm of the semantic dispatch. Constants like every
+        # name above, so the vocabulary stays closed and a phase name still
+        # cannot carry a path.
+        "derived.fanout",
+        "derived.terminal_persist",
+        "derived.deferred_index_store",
     }
 )
 

@@ -29,7 +29,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import corpus_aware, derived_receipts
+from . import call_spans, corpus_aware, derived_receipts
 from .derived_receipts import (
     DerivedAdvisoryCandidate,
     DerivedBatchReceipt,
@@ -203,18 +203,25 @@ def _candidates_for(
         precomputed=scores,
         top_n=OVERLAP_TOP_N,
     )
-    emitted = corpus_aware.emitted_write_advisory_groups(
-        vault_root,
-        self_path=generation.rel_path,
-        groups=[
-            ("near-duplicate", duplicates),
-            *corpus_aware.detected_overlap_advisory_groups(overlaps),
-        ],
-        apply_declared_pair_filter=True,
-        # This set may still be refused by the store, and a refused set reached
-        # nobody. The stamp is committed after publication succeeds.
-        record_surfacing=False,
-    )
+    # Same span as the synchronous surface in `edit`, so one name covers "the
+    # advisory's grouping and emission" wherever it runs, and the candidate
+    # count says which surface produced it.
+    with call_spans.span(
+        "advisory.overlap_groups",
+        {"candidates": len(duplicates) + len(overlaps)},
+    ):
+        emitted = corpus_aware.emitted_write_advisory_groups(
+            vault_root,
+            self_path=generation.rel_path,
+            groups=[
+                ("near-duplicate", duplicates),
+                *corpus_aware.detected_overlap_advisory_groups(overlaps),
+            ],
+            apply_declared_pair_filter=True,
+            # This set may still be refused by the store, and a refused set
+            # reached nobody. The stamp is committed after publication succeeds.
+            record_surfacing=False,
+        )
 
     candidates: dict[tuple[str, str], DerivedAdvisoryCandidate] = {}
     for item in emitted:

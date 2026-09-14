@@ -474,6 +474,10 @@ def observe_memory(
 
     final = semantic_index.current_parent_index_state(vault_root, editable.rel_path)
     final_unit = _unit_by_anchor(final.document, target_anchor)
+    if timings is not None:
+        # The ledger gets the stages whatever the envelope flag says; see
+        # `MutationTimings.emit_call_spans`.
+        timings.emit_call_spans()
     return _result(
         operation=op,
         path=editable.rel_path,

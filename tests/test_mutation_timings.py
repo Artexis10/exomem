@@ -769,3 +769,260 @@ def test_publish_after_an_eviction_leaves_the_next_preflight_warm(
     assert calls == [], f"expected an event-hit with no census walk, got {len(calls)}"
     assert builds == [], f"expected an event-hit with no corpus rebuild, got {len(builds)}"
     assert preflight.census_token is not None
+
+
+# ---------------------------------------------------------------------------
+# Task 1.15: the collected stages reach the ledger, and the window they sit in
+# is accounted for.
+# ---------------------------------------------------------------------------
+
+#: The spans that do the work inside `derived.canonical_to_committed`, with no
+#: two of them nested in each other. Summing a parent and its child would count
+#: the child twice and make the coverage below look better than it is, so
+#: `index.upsert_after_write` (the parent of the components) and
+#: `graph.refresh_paths` (a child of `index.epistemic_graph`) are deliberately
+#: absent. `derived.fanout` and `derived.terminal_persist` are absent for the
+#: opposite reason: they *partition* the window by construction, so summing
+#: them would prove nothing about whether the work inside is attributed.
+_UMBRELLA_LEAF_SPANS = frozenset(
+    {
+        "index.memory_refs",
+        "index.resolver",
+        "index.lexstore",
+        "index.epistemic_graph",
+        "index.embeddings",
+        "index.path_partition",
+        "index.semantic_states",
+        "index.policy_revalidate",
+        "index.corpus_publish",
+        "index.semantic_purge",
+        "index.path_custody",
+        "index.self_write_registration",
+        "index.graph_epoch_handoff",
+        "derived.deferred_index_store",
+        "derived.terminal_persist",
+    }
+)
+
+#: What the leaf spans must account for of `derived.canonical_to_committed` on
+#: THIS fixture, which is not the same number as on a real write and is
+#: deliberately not stated as if it were. One governed write over one path
+#: completes in 70-200 ms here and varies by about a third run to run -- the
+#: same 20-40 ms of SQLite and interpreter cost lands in a different span each
+#: time -- so a high bar would be a flaky test rather than a stronger guarantee.
+#: What the bar is for is the failure this suite exists to prevent: a step
+#: inside the window with NO span at all, which is what left 46 s of a 78 s
+#: write unattributed on 0.84.1. The names below are pinned individually for
+#: that, and the ratio is the backstop that catches a newly-added unnamed step
+#: large enough to matter.
+#:
+#: Read the backstop for exactly what it is: at 0.5 it only catches an unnamed
+#: step worth more than half the window. It is sized to this fixture's variance,
+#: not to the guarantee, and should be raised on a larger fixture -- one whose
+#: window is seconds rather than tens of milliseconds -- where the fixed costs
+#: stop dominating and a real ratio becomes a stable assertion.
+_LEAF_COVERAGE_FLOOR = 0.5
+
+
+@contextmanager
+def _call_token(name: str):
+    from exomem import call_spans
+
+    call_spans.reset()
+    handle = call_spans.MCP_CALL_TOKEN.set(name)
+    try:
+        yield name
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+
+
+def test_the_write_stages_reach_the_ledger_without_the_envelope_flag(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`EXOMEM_WRITE_TIMINGS` governs the caller's envelope, not the operator's row.
+
+    The stages have existed for a year and never reached a ledger row, because
+    the one flag gated both. On the 0.84.1 personal service that left 46 s of a
+    78 s write inside `derived.canonical_to_committed` with no span and no log
+    line, while `commit.stamp_check` and its siblings had measured pieces of it
+    the whole time and threw them away.
+    """
+    from exomem import call_spans
+
+    monkeypatch.delenv("EXOMEM_WRITE_TIMINGS", raising=False)
+
+    with _call_token("stage-emission") as token:
+        payload = _run_edit(tmp_path)
+        spans = {span["name"]: span for span in call_spans.pop_call_spans(token)}
+
+    assert "timings" not in payload, (
+        "the response envelope must stay exactly as it was without the flag"
+    )
+    for name in _ALWAYS_TAKEN_STAGES:
+        assert name in spans, f"stage {name!r} never reached the ledger: {sorted(spans)}"
+        assert spans[name]["count"] >= 1
+        assert spans[name]["ms"] >= 0.0
+
+
+def test_a_governed_edit_records_the_advisory_sweep_with_what_it_encoded(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The advisory's encode was invisible, and its size is half the diagnosis.
+
+    On 0.84.1 an `embeddings.encode` of 15.6 s with `count=1` sat entirely
+    outside `index.embeddings` on one write, and 8.5 s of 30.4 s outside it on
+    the next. Nothing said which caller it belonged to. The sweep is now timed
+    where the encode happens and reports what it encoded, so a duration and a
+    whole-note body are no longer the same reading.
+
+    The encoder itself is stubbed: this asserts the instrumentation, and
+    loading bge-base to do it would make a measurement test a model test.
+    """
+    import numpy as np
+
+    from exomem import call_spans, corpus_aware, embeddings
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+
+    encoded: list[list[str]] = []
+
+    class _Index:
+        def search(self, _vector, *, k=15, allowed_paths=None):
+            return []
+
+    monkeypatch.setattr(
+        embeddings, "chunk_text", lambda title, body: [f"{title}\n{body}"[:200]], raising=True
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "embed_texts",
+        lambda texts, **_kw: (
+            encoded.append(list(texts)),
+            np.zeros((len(texts), 4), dtype=np.float32),
+        )[1],
+        raising=True,
+    )
+    monkeypatch.setattr(
+        embeddings, "get_embedding_index", lambda _root: _Index(), raising=True
+    )
+
+    with _call_token("advisory-sweep") as token:
+        _run_edit(tmp_path)
+        spans = {span["name"]: span for span in call_spans.pop_call_spans(token)}
+
+    assert encoded, "the advisory never reached the encoder, so this proves nothing"
+    sweep = spans.get("advisory.best_cosine")
+    assert sweep is not None, (
+        f"the advisory's cosine sweep is still unattributed: {sorted(spans)}"
+    )
+    assert sweep["ms"] > 0.0
+    fields = sweep.get("fields") or {}
+    assert fields.get("texts", 0) >= 1, (
+        "a duration with no text count cannot separate a cold model from a "
+        f"caller handing the encoder a whole note body: {sweep}"
+    )
+    assert fields.get("chars", 0) > 0, sweep
+    assert corpus_aware is not None  # the sweep under test lives here
+
+
+def test_the_leaf_spans_account_for_the_canonical_to_committed_window(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The attribution guarantee: the window is explained, not merely measured.
+
+    `derived.canonical_to_committed` was an umbrella with 46 s of a 78 s write
+    inside it and no span underneath. A span that only says how long something
+    took, with nothing accounting for it, is the shape of the defect this
+    instrumentation exists to remove -- so the leaves have to add up.
+    """
+    from types import SimpleNamespace
+
+    from exomem import call_spans, semantic_index
+    from exomem import vault as vault_module
+
+    # The synchronous fan-out route, deliberately: with fast durable ack on,
+    # the derived work moves out of this window and is reported under
+    # `derived.acknowledgement` instead, and the umbrella measures the route
+    # rather than the work.
+    monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
+
+    path = _seed(tmp_path)
+    after_source = path.read_text(encoding="utf-8").replace(BEFORE_LINE, AFTER_LINE)
+
+    def leaf(vault_root: Path) -> dict:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(path, after_source)],
+            vault_root=vault_root,
+            semantic_states={
+                PAGE: semantic_index.build_parent_index_state(
+                    vault_root, PAGE, source=after_source
+                )
+            },
+        )
+        return {"path": PAGE}
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "lease-state")
+    )
+    command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
+
+    # One warm-up write first: the first governed write in a process pays
+    # one-off lazy imports inside the fan-out, and they land in whichever span
+    # happens to be open rather than in the step that owns them.
+    manager.invoke(
+        command,
+        (tmp_path,),
+        {},
+        idempotency_key="attribution-warm-up",
+        mutation_request_id="44444444-4444-4444-8444-444444444444",
+    )
+    with _call_token("attribution") as token:
+        manager.invoke(
+            command,
+            (tmp_path,),
+            {},
+            idempotency_key="attribution-window",
+            mutation_request_id="33333333-3333-4333-8333-333333333333",
+        )
+        spans = {span["name"]: span for span in call_spans.pop_call_spans(token)}
+
+    umbrella = spans.get("derived.canonical_to_committed")
+    assert umbrella is not None, f"spans: {sorted(spans)}"
+    assert "derived.fanout" in spans, (
+        "the umbrella must be split, or a large number still says only that it "
+        f"was large: {sorted(spans)}"
+    )
+    assert "derived.terminal_persist" in spans, sorted(spans)
+    halves = spans["derived.fanout"]["ms"] + spans["derived.terminal_persist"]["ms"]
+    assert halves >= umbrella["ms"] * 0.9, (
+        f"the two halves do not partition the umbrella: {halves} vs {umbrella['ms']}"
+    )
+
+    # Every step inside the window is named. This is the guarantee; the ratio
+    # below is only its backstop.
+    for name in (
+        "index.upsert_after_write",
+        "index.self_write_registration",
+        "index.graph_epoch_handoff",
+        "index.path_partition",
+        "index.semantic_states",
+        "index.policy_revalidate",
+        "index.corpus_publish",
+        "index.semantic_purge",
+        "index.path_custody",
+    ):
+        assert name in spans, (
+            f"{name!r} is a step inside the fan-out with no span, which is the "
+            f"shape of the 0.84.1 defect: {sorted(spans)}"
+        )
+
+    covered = sum(
+        span["ms"] for name, span in spans.items() if name in _UMBRELLA_LEAF_SPANS
+    )
+    assert covered >= umbrella["ms"] * _LEAF_COVERAGE_FLOOR, (
+        "the leaf spans inside the window account for "
+        f"{covered:.1f} ms of {umbrella['ms']:.1f} ms. Whatever is missing is a "
+        "step with no span, which is exactly what left 46 s of a 78 s write "
+        f"unattributed on 0.84.1. Spans seen: {sorted(spans)}"
+    )

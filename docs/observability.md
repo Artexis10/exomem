@@ -217,6 +217,14 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `corpus_context.build` | Semantic corpus context for the write. |
 | `derived.canonical_commit` | Staging through canonical bytes landing on disk. |
 | `derived.canonical_to_committed` | Canonical bytes landing through the mutation row reaching `canonically_committed` — the derived fan-out and terminal bookkeeping that used to be unattributed. |
+| `derived.fanout`, `derived.terminal_persist` | The two halves of that umbrella: the derived work itself, then the hooks and the row write that follow it. They partition it, so a large `canonical_to_committed` says immediately which half to read. A near-zero `derived.fanout` means the write took the fast-ack route and its derived work is reported under `derived.acknowledgement` instead. |
+| `derived.deferred_index_store` | The durable-defer arm of the semantic/embedding dispatch, which had no span: a write that took the cheap path used to look, in a row, like a write that did nothing. |
+| `index.path_partition`, `index.semantic_states`, `index.policy_revalidate`, `index.corpus_publish`, `index.semantic_purge`, `index.path_custody` | The steps of `index.upsert_after_write` that run outside any component: the policy partition, parent-state resolution, the two policy re-proofs, the corpus publication, the raw-Record purge, and the read-side path custody. They existed unnamed, and `index.upsert_after_write` reported their cost with nothing to attribute it to. |
+| `index.self_write_registration`, `index.graph_epoch_handoff` | The fan-out driver's own two steps, between the canonical mark and `index.upsert_after_write`. |
+| `advisory.best_cosine` | The write advisory's cosine sweep. `texts`/`chars` say what was encoded; `texts=0` with a `vectors` count is the deferred surface, which reuses published vectors and encodes nothing. |
+| `advisory.overlap_groups` | Grouping and emitting that sweep's candidates — a ref batch and a review-state read per candidate. |
+| `preflight.contract_eval`, `preflight.corpus_context`, `preflight.page_states`, `preflight.read_guarded`, `preflight.registries`, `preflight.relation_review`, `preflight.validity_token` | The write's preflight stages, from the per-stage collector (`MutationTimings`). |
+| `commit.boundary_acquire`, `commit.creation_lock`, `commit.embedding_prewarm`, `commit.locked_commit`, `commit.manifest`, `commit.resolver_prime`, `commit.revalidate`, `commit.stamp_check` | Its commit stages, from the same collector. These are emitted into every row regardless of `EXOMEM_WRITE_TIMINGS`; that flag governs only whether the *caller* is handed a timing envelope on its response. |
 | `derived.receipt_prepare`, `derived.receipt_proof`, `derived.acknowledgement`, `derived.pending_visibility` | The receipt and acknowledgement path. |
 | `index.upsert_after_write` | The whole derived fan-out, and the sum the per-component spans below break down. |
 | `index.memory_refs`, `index.resolver`, `index.lexstore`, `index.epistemic_graph`, `index.embeddings` | One per derived component, recorded at the shared dispatch seam. |
@@ -234,6 +242,38 @@ Spans are aggregated by name within a call, so a phase entered once per changed
 path reports a count and a total rather than hundreds of rows. Instrumentation
 never raises: a missing span means that path did not run, not that the call
 failed.
+
+Some spans also carry `fields`: named integer counts beside the duration. A
+duration alone cannot separate a slow step from a large one — `embeddings.encode`
+at 15.6 s with `texts=1` and at 15.6 s with `texts=400` are different defects
+with different fixes — so the spans that cover per-item work report how many
+items they covered (`paths` on the `index.*` components, `texts`/`chars` on
+`embeddings.encode` and `advisory.best_cosine`, `candidates` on
+`advisory.overlap_groups`). The key is absent on a span that measured only time,
+so nothing about an existing row changes.
+
+### Mutation-lock events dominate the log under writes
+
+`mutation_lock_acquired`/`released` are logged per boundary acquisition, and the
+derived drain re-enters the boundary once per claimed `(batch, component)` pair.
+One busy write window on the personal service produced 758 of these lines —
+`reserved_identity:deferred-index-store` (400), `refs-store` (246), `gate` (62),
+`embeddings-store` (20). At the default rotation of 5 MB with 5 backups, that
+window rotated the *earlier* part of the same incident out of the live file
+within minutes, which is how a first write's evidence was lost while it was
+still being diagnosed.
+
+These lines are not per-call: they carry `operation`, `holder_kind` and
+`wait_ms`, not a request id, and the drain that produces most of them runs on a
+background thread, so a burst next to a slow write is not necessarily that
+write's. Two knobs, neither changed by default:
+
+- `EXOMEM_LOG_MAX_MB` (default `5`) and `EXOMEM_LOG_BACKUPS` (default `5`) size
+  the rotation. Raising `EXOMEM_LOG_MAX_MB` to `50` before reproducing a latency
+  incident keeps the whole window in one file.
+- Setting the `exomem.mutation_lock` logger to `WARNING` drops the routine
+  acquisitions while keeping the long-holder warnings, which is the right trade
+  when the boundary is not what you are investigating.
 
 Two log lines close loops the spans cannot: `lexical deferred upsert retry
 completed paths=… outcome=…` says what became of a lexical upsert the
