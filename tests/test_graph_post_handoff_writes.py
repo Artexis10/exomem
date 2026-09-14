@@ -21,6 +21,7 @@ rather than growing.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -34,6 +35,7 @@ from exomem import (
     freshness,
     graph_sync,
     index_sync,
+    mode,
     mutation_lock,
 )
 from exomem import find as find_module
@@ -296,6 +298,15 @@ def _assert_incremental_latency(
 def _drain_repair_queue(root: Path, watcher: file_watcher.FileWatcher) -> int:
     """Publish the observed external events, then drain the durable graph queue."""
     watcher._flush()
+    for _ in range(12):
+        if not deferred_index.list_graph_paths(root):
+            return 0
+        index_sync.drain_graph_work(root, limit=64)
+    return len(deferred_index.list_graph_paths(root))
+
+
+def _drain_graph_queue(root: Path) -> int:
+    """Drain the durable graph queue without a watcher to publish events first."""
     for _ in range(12):
         if not deferred_index.list_graph_paths(root):
             return 0
@@ -625,6 +636,124 @@ def test_an_unreadable_predecessor_is_queued_repair_not_a_lineage_gap(
         f"expected the distinct pending code, got {[result.code for result in outcomes]}"
     )
     assert {result.outcome for result in outcomes} == {"deferred"}
+
+
+def test_a_cold_resolver_is_queued_repair_not_a_whole_vault_rebuild(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resolver cache miss is a cold cache, not an unbounded graph.
+
+    Measured on the 0.83.1 deploy: the replacement worker had never built a
+    recall resolver, so `recall_resolver_snapshot_at_checkpoint` missed on every
+    governed write. That bail-out's disposition was "rebuild", which enqueues
+    nothing, so dispatch saw `deferred` without `queued`, reported
+    `incremental_refresh_deferred_without_queue_coverage`, and registered a
+    whole-vault rebuild the write then waited on.
+
+    Everything the pass needs to bound the damage is already proven when this
+    fires: the durable checkpoint matched, the acknowledgement was the
+    predecessor, and the recall delta came back complete. What is missing is the
+    pre-delta topology needed to widen the set, and the queue is exactly the
+    mechanism for repair whose scope is known but whose proof is not.
+    """
+    root = handoff_vault
+    spy = _RebuildSpy(monkeypatch)
+    monkeypatch.setattr(
+        find_module,
+        "recall_resolver_snapshot_at_checkpoint",
+        lambda *_args, **_kwargs: None,
+        raising=True,
+    )
+
+    target = root / GENERATED / "generated-note-0007.md"
+    outcomes: list[epistemic_graph.GraphDispatchResult] = []
+    real_dispatch = epistemic_graph.upsert_after_write
+
+    def recorded(vault_root: Path, paths: list[Path], **kwargs: object):
+        result = real_dispatch(vault_root, paths, **kwargs)
+        outcomes.append(result)
+        return result
+
+    monkeypatch.setattr(epistemic_graph, "upsert_after_write", recorded, raising=True)
+
+    elapsed = _governed_write(root, target, "cold resolver")
+
+    assert spy.count == 0, (
+        "a cold resolver cache scheduled a whole-vault rebuild, which is the "
+        "164.8 s write the 0.83.1 deploy measured"
+    )
+    assert [result.code for result in outcomes] == ["graph_repair_cold_resolver"], (
+        f"expected the resolver's own pending code, got "
+        f"{[result.code for result in outcomes]}"
+    )
+    assert {result.outcome for result in outcomes} == {"deferred"}
+    assert deferred_index.list_graph_paths(root), (
+        "the deferral must leave the affected paths on the durable queue, or "
+        "the pending code is a claim nothing backs"
+    )
+    assert elapsed < ACK_BOUND_SECONDS, f"the write was not incremental: {elapsed:.2f}s"
+
+    monkeypatch.undo()
+    assert _drain_graph_queue(root) == 0, "the graph repair queue never drained"
+
+
+def test_startup_graph_validation_waits_out_a_governed_write(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A held mutation boundary at seed time is contention, not incoherence.
+
+    Measured on the 0.83.1 deploy: the watcher's seed-time validation met the
+    first governed write holding `semantic_existing_edit_commit` for 10.6 s,
+    `suspend_reads()` was refused MUTATION_BUSY inside its one coordinator
+    timeout, and startup validation aborted -- leaving the graph unreadable with
+    no persisted barrier, which is the state the drain then rebuilt from.
+
+    The hold here outlasts one coordinator timeout on purpose: that is the
+    entire difference between a one-shot attempt and a bounded retry.
+    """
+    root = handoff_vault
+    watcher = file_watcher.FileWatcher(root, debounce_seconds=0.2)
+    graph = EpistemicGraphIndex(root)
+    caplog.set_level("INFO", logger="exomem.file_watcher")
+
+    # Force the cheap durable proof to decline so the expensive branch -- the
+    # one that needs the boundary -- is the branch under test.
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "durable_checkpoint_is_coherent",
+        lambda inner_self: False,
+        raising=True,
+    )
+
+    hold_seconds = 6.5
+    holding = threading.Event()
+    released = threading.Event()
+
+    def hold_the_boundary() -> None:
+        try:
+            with graph._mutation_coordinator.hold(
+                operation="semantic_existing_edit_commit", holder_kind="command"
+            ):
+                holding.set()
+                time.sleep(hold_seconds)
+        finally:
+            holding.set()
+            released.set()
+
+    writer = threading.Thread(target=hold_the_boundary, daemon=True)
+    writer.start()
+    assert holding.wait(10), "the simulated governed write never took the boundary"
+
+    admitted = watcher._validate_existing_graph_on_seed()
+
+    assert released.wait(30), "the simulated write never released the boundary"
+    writer.join(10)
+
+    assert admitted, (
+        "startup validation must wait out a governed write rather than abort; "
+        "aborting is what left the graph unreadable with no barrier"
+    )
+    assert "startup graph validation failed" not in caplog.text, caplog.text
 
 
 def test_an_unusable_snapshot_still_rebuilds(
@@ -1081,7 +1210,9 @@ def test_the_warm_up_adopts_after_the_seed_and_the_resolver(
     `adopt_recall_origin` refuses a cold scope, and the watcher's seed replaces
     the registry maps wholesale -- an adoption recorded before that seed is
     dropped with the map it described. The graph step therefore has to run after
-    the seed, and after the resolver step whose cache it reuses.
+    the seed, and after the resolver step whose cache it reuses. Both now live
+    on the unconditional start-up path rather than inside `warm_caches`, so this
+    pins the order in `warm_graph_handoff`.
     """
     from exomem import warmup
 
@@ -1108,7 +1239,7 @@ def test_the_warm_up_adopts_after_the_seed_and_the_resolver(
         EpistemicGraphIndex, "adopt_published_snapshot", traced_adopt, raising=True
     )
 
-    durations = warmup.warm_caches(root, preload_models=False, preload_cpu_caches=True)
+    durations = warmup.warm_graph_handoff(root)
 
     assert "graph_snapshot" in durations, "the warm-up must adopt the inherited snapshot"
     steps = list(durations)
@@ -1120,6 +1251,57 @@ def test_the_warm_up_adopts_after_the_seed_and_the_resolver(
         "the graph step must run against a seeded registry, or the origin it "
         "adopts is refused"
     )
+
+
+def test_start_up_adopts_the_snapshot_when_the_resource_mode_skips_cpu_caches(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Adoption is not a cache, so the cache-preload policy must not decide it.
+
+    Measured on the 0.83.1 deploy: the personal service runs `mode=normal`,
+    which leaves `preload_cpu_caches` False, so `warm_caches` returned at its
+    first gate and the adoption step inside it never ran. Warm complete listed
+    only `retrieval_catalog` and `semantic_corpus`, there was no adoption line,
+    and the replacement worker's first governed writes rebuilt the whole vault
+    (164.8 s, then 46.7 s and 46.7 s).
+    """
+    from exomem import warmup
+
+    root = handoff_vault
+    caplog.set_level("INFO", logger="exomem.warmup")
+
+    monkeypatch.setattr(warmup, "warmup_enabled", lambda: True, raising=True)
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True, raising=True)
+    monkeypatch.setattr(warmup, "model_preload_allowed", lambda *_a: False, raising=True)
+    monkeypatch.setattr(mode, "preload_cpu_caches", lambda: False, raising=True)
+
+    durations = warmup.warm_all(root)
+
+    assert "graph_snapshot" in durations, (
+        "start-up must adopt the inherited snapshot even when the resource mode "
+        f"skips CPU cache preloading: {sorted(durations)}"
+    )
+    assert "graph_snapshot_residue" in durations, (
+        f"the adoption's residue must be recorded for the operator: {sorted(durations)}"
+    )
+    assert "graph snapshot adoption adopted=" in caplog.text, (
+        "the adoption line is how a deploy is read back; without it the 0.83.1 "
+        "diagnosis needed a source read instead of a log read"
+    )
+    assert root in find_module._RECALL_RESOLVER_CACHE, (
+        "the resolver primer must run beside adoption: a process that never "
+        "built one leaves every write bailing on resolver_snapshot_unavailable"
+    )
+
+
+def test_the_cache_preload_gate_still_skips_the_disposable_caches(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hoisting adoption out of the gate must not drag the caches out with it."""
+    from exomem import warmup
+
+    monkeypatch.setattr(warmup, "warmup_enabled", lambda: True, raising=True)
+    assert warmup.warm_caches(handoff_vault, preload_cpu_caches=False) == {}
 
 
 def test_a_rebuild_retarget_keeps_the_recall_resolver(

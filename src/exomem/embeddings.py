@@ -31,6 +31,7 @@ import numpy as np
 
 from . import (
     accel,
+    call_spans,
     embedding_backend,
     index_paths,
     model_cache,
@@ -222,6 +223,7 @@ def _is_embeddable_path(path: Path) -> bool:
     return index_paths.is_embeddable_path(path)
 
 
+@call_spans.timed("embeddings.model_load")
 def get_model():
     """Lazy singleton served by the configured backend, CPU-default unless set.
 
@@ -936,6 +938,7 @@ def encode_batch_size(model) -> int:
     return embedding_backend.batch_size_for(device)
 
 
+@call_spans.timed("embeddings.encode")
 def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     """Batch-encode texts → float32 `(N, 768)`, L2-normalized for cosine."""
     if not texts:

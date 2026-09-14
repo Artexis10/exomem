@@ -3304,6 +3304,12 @@ class IdempotencyStore:
     def _persist_canonically_committed(
         self, key: str, digest: str, result: Any, attempt: _ExecutionAttempt
     ) -> None:
+        # Closes the span opened when canonical bytes landed. Everything between
+        # the two is derived fan-out and terminal bookkeeping, and the 0.83.1
+        # deploy could not attribute ~32 s of it per write.
+        call_spans.record_span_since(
+            "derived.canonical_to_committed", "canonical_files_committed"
+        )
         with self._connect() as conn:
             cursor = conn.execute(
                 "UPDATE mutations SET state = 'canonically_committed', result = ?, owner = NULL, "

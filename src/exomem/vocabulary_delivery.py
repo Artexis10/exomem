@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    call_spans,
     deferred_index,
     envelope,
     mutation_terminal,
@@ -52,6 +53,7 @@ def _project(vault_root: Path, path: str, continuation: str | None = None) -> di
     }
 
 
+@call_spans.timed("delivery.vocabulary_after_commit")
 def after_commit(vault_root: Path, result: Any) -> Any:
     """Preserve the canonical terminal even if any optional-guidance step fails."""
     if (

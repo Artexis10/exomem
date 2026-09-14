@@ -178,9 +178,9 @@ def prove_graph_snapshot(vault_root: Path) -> bool:
     as incremental repair with the availability marker left withdrawn, and
     reported so an operator sees an adoption that still owes a drain.
 
-    Must run after the recall registry is seeded and after the resolver step:
-    `adopt_recall_origin` refuses a cold scope, and the bounded repair needs the
-    resolver at this exact checkpoint.
+    Must run after the recall registry is seeded and after the resolver is
+    primed: `adopt_recall_origin` refuses a cold scope, and the bounded repair
+    needs the resolver at this exact checkpoint.
 
     The residue is recorded, not applied: enqueueing the repair is scheduling a
     drain and withdrawing the availability marker is publishing graph state, and
@@ -314,8 +314,14 @@ def warm(vault_root: Path) -> None:
                 "standby retrieval catalog is not current; the serving worker's "
                 "repair owner has to publish one before this candidate can cut over"
             )
-        # After the seed and after the resolver `warm_caches` built: the
-        # ordering is what makes the adoption's origin acceptable.
+        # After the seed and after the resolver, which is primed here rather
+        # than left to `warm_caches`: that gate is closed in every resource mode
+        # that does not preload CPU caches, and the ordering is what makes the
+        # adoption's origin acceptable.
+        try:
+            warmup.prime_recall_resolver(vault_root)
+        except Exception:  # noqa: BLE001 - an unprimed resolver only costs adoption
+            log.warning("standby recall resolver prime failed", exc_info=True)
         prove_graph_snapshot(vault_root)
         _preload_models()
     except Exception:  # noqa: BLE001 - a standby warm must never die loudly

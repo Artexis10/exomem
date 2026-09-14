@@ -71,7 +71,7 @@ the durable queue and a drain will converge them, `GRAPH_SYNC_REBUILD_IN_PROGRES
 when a whole-vault pass is running. Both are healthy. Neither requires rereading
 the written note or running maintenance.
 
-Behind that terminal the dispatch chose one of two repairs, and the log says
+Behind that terminal the dispatch chose one of three repairs, and the log says
 which:
 
 - `graph dispatch routed an unreadable predecessor to incremental repair` — the
@@ -79,6 +79,14 @@ which:
   The write takes the incremental path, and the affected pages go to the durable
   queue if it cannot finish; the dispatch outcome is
   `graph_repair_unreadable_predecessor`. No whole-vault pass runs.
+- `graph incremental refresh fell back reason=resolver_snapshot_unavailable` —
+  this process holds no resident recall resolver for the checkpoint, which is a
+  cold cache rather than evidence about the graph. The recall delta was already
+  proven complete, so the pass queues it and a later drain re-runs the same
+  repair with a resolver resident; the dispatch outcome is
+  `graph_repair_cold_resolver`. No whole-vault pass runs. A run of these means
+  start-up never primed the resolver — check for the `graph snapshot adoption`
+  line in the warm-up.
 - `graph dispatch registered a whole-vault rebuild reason=…` — a proven verdict:
   `graph_sync_predecessor_mismatch` or `…_absent` (the sidecar's acknowledgement
   is genuinely not this checkpoint's predecessor) or `graph_sync_snapshot_unusable`
@@ -176,6 +184,45 @@ it with `exomem logs verify`.
   client retrying the same call?".
 - **`target_paths`** records the page a call addresses, verbatim. A path is
   structure, not content, and it is the first thing a forensic pass needs.
+
+### Where a write's time went (`spans`)
+
+A row carries `spans`: named phases of that one call, slowest first, each with
+a `count` and a total `ms`. They exist because two boundary clocks can prove a
+call was slow and locate nothing between them — a live `edit_memory` once
+recorded `total_ms=24,394` with `boundary_hold_ms=3,348` and no account of the
+other 21 seconds.
+
+The names are stable and are the vocabulary a latency diagnosis uses:
+
+| Span | What it covers |
+| --- | --- |
+| `corpus_context.build` | Semantic corpus context for the write. |
+| `derived.canonical_commit` | Staging through canonical bytes landing on disk. |
+| `derived.canonical_to_committed` | Canonical bytes landing through the mutation row reaching `canonically_committed` — the derived fan-out and terminal bookkeeping that used to be unattributed. |
+| `derived.receipt_prepare`, `derived.receipt_proof`, `derived.acknowledgement`, `derived.pending_visibility` | The receipt and acknowledgement path. |
+| `index.upsert_after_write` | The whole derived fan-out, and the sum the per-component spans below break down. |
+| `index.memory_refs`, `index.resolver`, `index.lexstore`, `index.epistemic_graph`, `index.embeddings` | One per derived component, recorded at the shared dispatch seam. |
+| `graph.refresh_paths` | The graph's incremental pass inside `index.epistemic_graph`. |
+| `lexical.rebuild_atomic` | A whole-corpus lexical rebuild. |
+| `embeddings.model_load` | Lazy load of the embedding model weights. |
+| `embeddings.encode` | Encoding text to vectors. |
+| `embeddings.matrix_load` | A full vector-matrix load from the sidecar; the log line `embedding matrix full load: … rows=… cached_gen=…` names the reason. |
+| `embeddings.matrix_catch_up` | The bounded alternative to that full load. |
+| `delivery.vocabulary_after_commit` | Vocabulary delivery after the commit. |
+| `derived.advisory_execute`, `derived.component_dispatch`, `derived.component_completion` | The derived drain. |
+| `recall.*` | Retrieval phases, named by `find`'s own timings. |
+
+Spans are aggregated by name within a call, so a phase entered once per changed
+path reports a count and a total rather than hundreds of rows. Instrumentation
+never raises: a missing span means that path did not run, not that the call
+failed.
+
+Two log lines close loops the spans cannot: `lexical deferred upsert retry
+completed paths=… outcome=…` says what became of a lexical upsert the
+publication barrier was too busy to take, and `file watcher: startup graph
+validation …` says whether seed-time validation waited out a busy boundary or
+gave up on it.
 
 ### Integrity
 

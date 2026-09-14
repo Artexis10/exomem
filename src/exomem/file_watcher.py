@@ -1398,6 +1398,43 @@ class FileWatcher:
 
         epistemic_graph.recover_suspended_graph(self._vault_root)
 
+    def _await_admissible_graph(self, graph) -> bool:
+        """Re-prove the cheap admission while a governed mutation is still in flight.
+
+        The O(1) durable check plus `available()` is repeatable and never
+        suspends reads; the branch below it is expensive and needs the very
+        mutation boundary a governed write may be holding. Measured on the
+        0.83.1 deploy: seed-time validation met the first write holding
+        `semantic_existing_edit_commit` for 10.6 s, took the expensive branch,
+        was refused MUTATION_BUSY, and aborted -- leaving the graph unreadable
+        with no persisted barrier.
+
+        A write in flight is also the most likely thing to *publish* a coherent
+        graph, so re-proving after it releases usually removes the expensive
+        branch rather than merely delaying it. Bounded by the same budget the
+        withdrawal step uses, and a boundary that is free (or belongs to another
+        process we cannot see) is answered on the first pass exactly as before.
+        """
+        deadline = time.monotonic() + GRAPH_WITHDRAWAL_RETRY_SECONDS
+        waited = False
+        while True:
+            if graph.durable_checkpoint_is_coherent() and graph.available():
+                if waited:
+                    log.info(
+                        "file watcher: startup graph validation admitted a graph "
+                        "published while a governed mutation held the boundary"
+                    )
+                return True
+            try:
+                busy = graph._mutation_coordinator.snapshot().get("state") == "held"
+            except Exception:  # noqa: BLE001 - a probe failure must not gate startup
+                return False
+            remaining = deadline - time.monotonic()
+            if not busy or remaining <= 0:
+                return False
+            waited = True
+            time.sleep(max(0.01, min(remaining, 0.25)))
+
     def _validate_existing_graph_on_seed(self) -> bool:
         """Validate an existing graph after startup's exact disk baselines.
 
@@ -1422,6 +1459,11 @@ class FileWatcher:
         state already proves a rebuild is needed, it short-circuits ahead of
         the source-bytes proof so the expensive hashing is not paid before a
         rebuild that was already certain.
+
+        Both proofs are bounded against a busy mutation boundary rather than
+        attempted once: a governed write holding it is contention, not evidence
+        that this graph is incoherent, and treating the two the same is what
+        aborted startup validation on the 0.83.1 deploy.
         """
         from . import epistemic_graph, graph_sync
         from . import find as find_module
@@ -1433,10 +1475,14 @@ class FileWatcher:
         try:
             if not epistemic_graph.graph_enabled():
                 return True
-            if graph.durable_checkpoint_is_coherent() and graph.available():
+            if self._await_admissible_graph(graph):
                 log.info("file watcher: startup graph validation admitted a coherent graph")
                 return True
-            graph.suspend_reads()
+            self._suspend_reads_within_budget(
+                graph,
+                context="startup graph validation",
+                exhausted="the graph stays unvalidated for periodic recovery",
+            )
             find_module.evict_resolver_caches(self._vault_root)
             vault_module.evict_inbound_index(self._vault_root)
             if not index_sync.recover_full_receipt_graph_epoch(self._vault_root, build=False):
@@ -1557,16 +1603,32 @@ class FileWatcher:
         stayed pending, the flag declined the graph's read snapshot, and the
         dispatch's predecessor probe could no longer prove anything.
 
-        A non-retryable failure still propagates unchanged, and exhausting the
-        budget still leaves the epoch pending for periodic recovery -- but it
-        says so, because sustained contention is a different condition from
-        losing one race and should not look like it in a log.
+        The retry itself, and its bound, are `_suspend_reads_within_budget`;
+        exhausting it leaves the epoch pending for periodic recovery.
+        """
+        self._suspend_reads_within_budget(
+            candidate,
+            context="graph availability withdrawal",
+            exhausted="epoch stays pending for periodic recovery",
+        )
+
+    def _suspend_reads_within_budget(
+        self, candidate, *, context: str, exhausted: str
+    ) -> None:
+        """Take the read barrier, waiting out a retryable refusal inside the budget.
+
+        One attempt is not a bound, it is a coin toss against whatever holds the
+        boundary. The refusal says so itself: it carries `status: "retryable"`
+        and a `retry_after_ms` the caller is meant to honour.
 
         The wall-clock bound is `GRAPH_WITHDRAWAL_RETRY_SECONDS` plus one
         mutation-coordinator timeout, roughly 20 s at today's defaults, because
         the deadline is checked only after an attempt has already spent that
         timeout being refused. See the constant for why it is stated rather
-        than tightened.
+        than tightened. A non-retryable failure propagates unchanged, and
+        exhausting the budget still raises -- but it says so, because sustained
+        contention is a different condition from losing one race and should not
+        look like it in a log.
         """
         from .cli_ops import OpError
 
@@ -1578,8 +1640,9 @@ class FileWatcher:
                 candidate.suspend_reads()
                 if attempts > 1:
                     log.info(
-                        "file watcher: graph availability withdrawal succeeded after "
-                        "waiting out a busy boundary attempts=%s",
+                        "file watcher: %s succeeded after waiting out a busy "
+                        "boundary attempts=%s",
+                        context,
                         attempts,
                     )
                 return
@@ -1590,11 +1653,12 @@ class FileWatcher:
                 if remaining <= 0:
                     holder = error.details.get("holder") or {}
                     log.warning(
-                        "file watcher: graph availability withdrawal gave up on a busy "
-                        "boundary attempts=%s holder=%s; epoch stays pending for "
-                        "periodic recovery",
+                        "file watcher: %s gave up on a busy boundary attempts=%s "
+                        "holder=%s; %s",
+                        context,
                         attempts,
                         holder.get("operation") if isinstance(holder, dict) else None,
+                        exhausted,
                     )
                     raise
                 advised_ms = error.details.get("retry_after_ms")

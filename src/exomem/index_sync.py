@@ -72,12 +72,18 @@ _DEFERRAL_TELEMETRY_LOCK = threading.Lock()
 
 #: Graph deferral codes that CLAIM durable per-path coverage. `graph_repair_queued`
 #: is emitted only on the branch that proved the durable queue holds the affected
-#: paths, and `graph_repair_unreadable_predecessor` only on the branch that
-#: proved the same thing for a fenced-but-intact sidecar. The disabled codes
+#: paths, `graph_repair_unreadable_predecessor` only on the branch that
+#: proved the same thing for a fenced-but-intact sidecar, and
+#: `graph_repair_cold_resolver` only on the branch that queued the complete
+#: recall delta because no resident resolver could widen it. The disabled codes
 #: record nothing and are deliberately absent, so a stale queue entry naming the
 #: same path can never bless them.
 _GRAPH_COVERAGE_CODES = frozenset(
-    {"graph_repair_queued", "graph_repair_unreadable_predecessor"}
+    {
+        "graph_repair_queued",
+        "graph_repair_unreadable_predecessor",
+        "graph_repair_cold_resolver",
+    }
 )
 
 _FAST_ACK_PENDING_STATES = frozenset({"prepared", "ready", "claimed"})
@@ -539,9 +545,15 @@ def _safe_relative_path(value: str) -> str | None:
 
 
 def _legacy_component(component: str, callback) -> IndexComponentOutcome:
-    """Observe only what a legacy leaf actually exposes."""
+    """Observe only what a legacy leaf actually exposes.
+
+    One span per component, recorded here rather than at each leaf: the write
+    path's own total was already timed as `index.upsert_after_write`, and on the
+    0.83.1 deploy that single number was 14.3 s with nothing to attribute it to.
+    """
     try:
-        result = callback()
+        with call_spans.span(f"index.{component}"):
+            result = callback()
     except Exception:  # noqa: BLE001 - one derived index must not stop the rest
         log.warning("%s index dispatch failed", component, exc_info=True)
         return IndexComponentOutcome(component, "degraded", "dispatch_failed")
@@ -557,7 +569,8 @@ def _graph_component(callback) -> IndexComponentOutcome:
     from .epistemic_graph import GraphDispatchResult
 
     try:
-        result = callback()
+        with call_spans.span("index.epistemic_graph"):
+            result = callback()
     except Exception:  # noqa: BLE001 - defensive boundary for external callers
         log.warning("epistemic graph dispatch escaped", exc_info=True)
         return IndexComponentOutcome("epistemic_graph", "failed", "graph_dispatch_failed")
@@ -569,7 +582,8 @@ def _graph_component(callback) -> IndexComponentOutcome:
 
 def _resolver_component(callback) -> IndexComponentOutcome:
     try:
-        callback()
+        with call_spans.span("index.resolver"):
+            callback()
     except Exception:  # noqa: BLE001 - resolver sync must not stop the rest
         log.warning("resolver index dispatch failed", exc_info=True)
         return IndexComponentOutcome("resolver", "degraded", "dispatch_failed")
@@ -1354,7 +1368,8 @@ def _dispatch_upsert_components(
         from . import embeddings
 
         try:
-            status = embeddings.upsert_after_write_status(vault_root, semantic_paths)
+            with call_spans.span("index.embeddings"):
+                status = embeddings.upsert_after_write_status(vault_root, semantic_paths)
             component = _embedding_component(status)
         except Exception:  # noqa: BLE001 - derived index must not fail a writer
             log.warning("embeddings index dispatch failed", exc_info=True)

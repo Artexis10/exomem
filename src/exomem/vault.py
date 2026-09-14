@@ -5152,6 +5152,11 @@ def _batch_atomic_write_locked(
         if additive_guard is not None:
             additive_guard.commit()
         log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))
+        # Opens the span the writer lease closes when the mutation row reaches
+        # `canonically_committed`. On the 0.83.1 deploy that stretch was the
+        # largest unattributed piece of a governed write: ~32 s with
+        # `index.upsert_after_write` (14.3 s) the only span inside it.
+        call_spans.mark("canonical_files_committed")
         call_spans.record_span(
             "derived.canonical_commit",
             (_fast_ack_monotonic() - canonical_started_monotonic) * 1000.0,

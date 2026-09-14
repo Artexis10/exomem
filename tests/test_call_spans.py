@@ -200,3 +200,98 @@ def test_malformed_span_entries_are_dropped_not_fatal() -> None:
     )
 
     assert shaped == [{"name": "kept", "count": 1, "ms": 4.0}]
+
+
+def test_a_mark_closes_a_span_between_two_distant_sites(token) -> None:
+    """Some intervals have no single frame holding both ends."""
+    call_spans.mark("canonical_files_committed")
+    time.sleep(0.02)
+    call_spans.record_span_since("derived.canonical_to_committed", "canonical_files_committed")
+    spans = {row["name"]: row for row in call_spans.pop_call_spans(token)}
+    assert "derived.canonical_to_committed" in spans
+    assert spans["derived.canonical_to_committed"]["ms"] >= 15
+
+
+def test_a_span_since_a_mark_that_was_never_stamped_records_nothing(token) -> None:
+    """A missing mark means that path did not run, not that this one should guess."""
+    call_spans.record_span_since("derived.canonical_to_committed", "never_stamped")
+    assert call_spans.pop_call_spans(token) == []
+
+
+def test_a_mark_outside_an_mcp_call_is_a_no_op() -> None:
+    call_spans.mark("canonical_files_committed")
+    call_spans.record_span_since("derived.canonical_to_committed", "canonical_files_committed")
+    assert call_spans.pop_call_spans(None) == []
+
+
+def test_marks_cannot_grow_without_bound(token) -> None:
+    for i in range(call_spans.MAX_NAMES_PER_CALL + 10):
+        call_spans.mark(f"mark-{i}")
+    call_spans.record_span_since("late", f"mark-{call_spans.MAX_NAMES_PER_CALL + 5}")
+    assert call_spans.pop_call_spans(token) == []
+
+
+#: Every span name the write and retrieval paths record, and the documentation
+#: that has to name them. A span whose name drifts is a diagnosis that silently
+#: stops finding its number, which is exactly the failure `spans` exists to
+#: prevent -- so the source and `docs/observability.md` are pinned to each other
+#: rather than to a hand list that can rot.
+_DOCUMENTED_SPAN_NAMES = frozenset(
+    {
+        "corpus_context.build",
+        "derived.canonical_commit",
+        "derived.canonical_to_committed",
+        "derived.receipt_prepare",
+        "derived.receipt_proof",
+        "derived.acknowledgement",
+        "derived.pending_visibility",
+        "derived.advisory_execute",
+        "derived.component_dispatch",
+        "derived.component_completion",
+        "index.upsert_after_write",
+        "index.memory_refs",
+        "index.resolver",
+        "index.lexstore",
+        "index.epistemic_graph",
+        "index.embeddings",
+        "graph.refresh_paths",
+        "lexical.rebuild_atomic",
+        "embeddings.model_load",
+        "embeddings.encode",
+        "embeddings.matrix_load",
+        "embeddings.matrix_catch_up",
+        "delivery.vocabulary_after_commit",
+    }
+)
+
+
+def test_every_declared_span_name_is_documented() -> None:
+    from pathlib import Path
+
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "observability.md").read_text(
+        encoding="utf-8"
+    )
+    missing = sorted(name for name in _DOCUMENTED_SPAN_NAMES if f"`{name}`" not in doc)
+    assert not missing, (
+        "a span name the write path records is absent from docs/observability.md: "
+        f"{missing}"
+    )
+
+
+def test_every_declared_span_name_is_recorded_somewhere_in_the_source() -> None:
+    """A documented name nothing emits is a diagnosis that will never find it."""
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "src" / "exomem"
+    body = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(src.rglob("*.py"))
+    )
+    missing = sorted(
+        name
+        for name in _DOCUMENTED_SPAN_NAMES
+        if f'"{name}"' not in body
+        # `index.<component>` is recorded from one f-string seam with the
+        # component name supplied by the caller, so pin the component instead.
+        and f'"{name.removeprefix("index.")}"' not in body
+    )
+    assert not missing, f"documented span names nothing records: {missing}"
