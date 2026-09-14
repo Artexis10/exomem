@@ -58,6 +58,11 @@ on:
         required: false
         default: false
         type: boolean
+      first_provision_drill:
+        description: Run the disposable first hosted provision drill through the shipped workers
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -314,6 +319,46 @@ jobs:
           HELM_BIN="$(command -v helm)" \
           uv run --frozen --with-editable ./infra/provisioner \
             pytest -q -p no:cacheprovider tests/test_hosted_k3s_governance_drill.py
+
+  first-provision-drill:
+    name: Disposable first hosted provision drill
+    if: github.event_name == 'workflow_dispatch' && inputs.first_provision_drill
+    needs: static
+    runs-on: ubuntu-24.04
+    # The drill builds the runtime and provisioner images, imports both into
+    # exact K3s, and drives one PROVISION through the shipped routine and
+    # volume-registration workers until the governance migration completes.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Install the exact pinned Helm
+        run: |
+          source infra/tool-versions.env
+          go install helm.sh/helm/v3/cmd/helm@v${HELM_VERSION}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Drive a first hosted provision through the shipped workers on exact K3s
+        env:
+          RUN_K3S_FIRST_PROVISION_DRILL_TEST: "1"
+          # The reused governance-drill helpers live behind their own gate.
+          RUN_K3S_GOVERNANCE_DRILL_TEST: "1"
+        run: |
+          HELM_BIN="$(command -v helm)" \
+          uv run --frozen --with-editable ./infra/provisioner \
+            pytest -q -s -p no:cacheprovider tests/test_hosted_k3s_first_provision_drill.py
 
   external-blackbox:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.external_blackbox)
