@@ -7,12 +7,17 @@ from dataclasses import replace
 import pytest
 
 from exomem_provisioner import authorization_membership as membership
+from exomem_provisioner.conflict_reason import ConflictReason
 from exomem_provisioner.driver import DriverPending, DriverRetryable, DriverTerminal, EffectContext
 from exomem_provisioner.governance_migration_checkpoint import (
     MigrationCheckpoint,
     migration_binding,
 )
 from exomem_provisioner.governance_migration_job import MigrationJobEvidence
+from exomem_provisioner.governance_provision_membership import (
+    _REISSUE_BACKDATE_SECONDS,
+    refresh_drained_source_bundle,
+)
 from exomem_provisioner.lifecycle import MetadataConflict, OpaqueProviderMetadata
 from exomem_provisioner.repository import ClaimConflict
 from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2
@@ -98,6 +103,10 @@ class Jobs:
         self.requests = []
         self.failure = None
         self.plan = PLAN
+        self.slot = False
+
+    async def occupied(self, request):
+        return self.slot
 
     async def run(self, request, *, recovery_envelope, effect_guard):
         assert request.metadata == CURRENT
@@ -364,7 +373,7 @@ async def test_unenrolled_custody_whose_window_closed_is_reissued_before_its_job
     assert len(scenario.cell.writes) == writes_before + 1
     control = json.loads(scenario.cell.files["control.json"])
     replica = json.loads(scenario.cell.files["serving-membership.json"])["replicas"][0]
-    assert control["issued_at"] == scenario.now
+    assert control["issued_at"] == scenario.now - _REISSUE_BACKDATE_SECONDS
     assert control["expires_at"] > scenario.now
     assert not control["governance_enrolled"]
     assert (replica["state"], replica["issuance_stopped"]) == ("DRAINING", True)
@@ -445,7 +454,8 @@ async def test_migration_advances_after_the_fenced_generation_window_closed():
     for phase in ["inspect", "inspect", "prepare", "enroll", "enroll", "commit", "complete"]:
         assert (await scenario.step()).phase == phase
     reissued = json.loads(scenario.cell.writes[0]["control.json"])
-    assert reissued["issued_at"] == scenario.now and not reissued["governance_enrolled"]
+    assert reissued["issued_at"] == scenario.now - _REISSUE_BACKDATE_SECONDS
+    assert not reissued["governance_enrolled"]
     assert json.loads(scenario.cell.files["control.json"])["governance_enrolled"]
 
 
@@ -489,19 +499,90 @@ async def test_closed_window_recovery_still_refuses_an_expired_signing_key():
 
 
 @pytest.mark.asyncio
-async def test_a_prepared_plan_never_gets_a_reissued_window():
-    # The prepared plan binds the source window. Reissuing it after prepare would
-    # make the enrollment pass's plan differ from the one prepare recorded.
+async def test_enrollment_under_a_closed_window_returns_to_prepare_and_reissues():
+    # Enrollment re-runs the prepare Job, which refuses a closed window, and the
+    # prepared plan binds that window. With nothing enrolled yet the coordinator
+    # returns to prepare, reissues there and derives a fresh plan, instead of
+    # retrying the refused Job forever or reissuing under the old plan.
     scenario = Scenario()
     while (await scenario.step()).phase != "enroll":
         pass
     scenario.now = NOW + 4000
     jobs_before, writes_before = len(scenario.jobs.requests), len(scenario.cell.writes)
-    # The refused Job leaves the enrollment checkpoint to retry; nothing is published.
-    assert (await scenario.step()).phase == "enroll"
-    assert len(scenario.jobs.requests) == jobs_before + 1
-    assert len(scenario.cell.writes) == writes_before
-    assert not json.loads(scenario.cell.files["control.json"])["governance_enrolled"]
+    rewound = await scenario.step()
+    assert (rewound.phase, rewound.plan_digest, rewound.source_store_digest) == (
+        "prepare",
+        None,
+        SOURCE,
+    )
+    assert (len(scenario.jobs.requests), len(scenario.cell.writes)) == (
+        jobs_before,
+        writes_before,
+    )
+
+    assert (await scenario.step()).phase == "prepare"
+    reissued = json.loads(scenario.cell.writes[writes_before]["control.json"])
+    assert reissued["issued_at"] == scenario.now - _REISSUE_BACKDATE_SECONDS
+    assert not reissued["governance_enrolled"]
+    for phase in ["enroll", "enroll", "commit", "complete"]:
+        assert (await scenario.step()).phase == phase
+    assert json.loads(scenario.cell.files["control.json"])["governance_enrolled"]
+
+
+@pytest.mark.asyncio
+async def test_a_job_still_in_the_slot_is_resumed_not_reissued_under():
+    scenario = Scenario()
+    assert (await scenario.step()).phase == "inspect"
+    scenario.now = NOW + 4000
+    scenario.jobs.slot = True
+    assert (await scenario.step()).phase == "inspect"
+    assert not scenario.cell.writes
+    assert len(scenario.jobs.requests) == 1, "the Job holding the slot was not resumed"
+    scenario.jobs.slot = False
+    assert (await scenario.step()).phase == "inspect"
+    assert len(scenario.cell.writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_lost_reissue_acknowledgement_runs_the_job_without_reissuing_twice():
+    scenario = Scenario()
+    assert (await scenario.step()).phase == "inspect"
+    scenario.now = NOW + 4000
+    scenario.cell.fail_after_write = True
+    assert (await scenario.step()).phase == "inspect"
+    assert len(scenario.cell.writes) == 1
+    assert (await scenario.step()).phase == "prepare"
+    assert len(scenario.cell.writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_reissue_that_loses_its_publication_race_decides_again_on_the_stored_bytes():
+    scenario = Scenario()
+    assert (await scenario.step()).phase == "inspect"
+    scenario.now = NOW + 4000
+
+    async def lost_race(metadata, files, **kwargs):
+        raise MetadataConflict(
+            "authorization session bundle predecessor differs",
+            reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_PREDECESSOR_DIFFERS,
+        )
+
+    scenario.cell.write_authorization_session_bundle = lost_race
+    assert (await scenario.step()).phase == "inspect"
+    assert not scenario.jobs.requests
+
+
+@pytest.mark.asyncio
+async def test_a_window_capped_by_its_signing_key_is_reissued_once_then_used():
+    scenario = Scenario()
+    assert (await scenario.step()).phase == "inspect"
+    key = json.loads(scenario.cell.files["keyring.json"])["accepted_keys"][0]
+    scenario.now = key["not_after"] - 800
+    assert (await scenario.step()).phase == "inspect"
+    assert json.loads(scenario.cell.files["control.json"])["expires_at"] == key["not_after"]
+    # Still under the floor, but reissuing again cannot extend it: run the Job.
+    assert (await scenario.step()).phase == "prepare"
+    assert len(scenario.cell.writes) == 1
 
 
 @pytest.mark.asyncio
@@ -534,3 +615,30 @@ def test_reissue_refuses_a_generation_that_is_still_serving():
     assert serving.replica_state == "SERVING"
     with pytest.raises(MetadataConflict):
         refresh_drained_source_bundle(serving.files, **identity(), now=NOW + 4000)
+
+
+@pytest.mark.parametrize("shape", ["enrolled", "issued-later"])
+def test_reissue_itself_refuses_custody_outside_the_drained_unenrolled_state(shape):
+    # The coordinator gates these first; the reissue must not rely on its caller.
+    now = NOW + 4000
+    if shape == "enrolled":
+        files = membership.enroll_hosted_governance_bundle(
+            source_bundle().files,
+            **identity(3),
+            activation_store_id=TARGET["activation_store_id"],
+            activation_epoch=TARGET["activation_epoch"],
+            activation_state_digest=TARGET["activation_state_digest"],
+            now=NOW + 2,
+        ).files
+    else:
+        files = membership.transition_hosted_authorization_bundle(
+            source_bundle().files,
+            **identity(3),
+            target_state="DRAINING",
+            target_no_in_flight=True,
+            now=NOW + 1_800,
+            renew=True,
+        ).files
+        now = NOW + 10
+    with pytest.raises(MetadataConflict):
+        refresh_drained_source_bundle(files, **identity(), now=now)

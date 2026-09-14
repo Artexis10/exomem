@@ -16,9 +16,11 @@
 
 - [x] 3.1 Reproduce the requeued failure: the target-image migration Job refuses inspect and prepare under a closed window, which the coordinator suite's Job double did not model.
 - [x] 3.2 Make the Job double refuse a closed window the way the runtime Job does, and restate the tests that passed only against the double.
-- [x] 3.3 Reissue a drained, never-enrolled source window before any inspect or prepare Job, never once a plan exists, refusing a signing key that ends before a Job could finish.
+- [x] 3.3 Reissue a drained, never-enrolled source window before any inspect or prepare Job, never under a prepared plan and never while a Job holds the fixed slot, refusing a signing key that ends before a Job could finish.
 - [x] 3.4 Run the reissued bytes through the real runtime Job custody reader for inspect and prepare.
 - [ ] 3.5 Replay the closed-window case in the K3s governance drill.
+- [x] 3.6 Return an enrollment whose never-enrolled window is too short to prepare, and prove preparing again over a staged plan, enrolling and committing on the real runtime.
+- [x] 3.7 Author-independent security review: no path reissues for a serving, enrolled or foreign generation, or under a prepared plan. Its findings are delivered: the occupied-slot failure, the enrollment stall, clock-skew backdating, a bounded reissue rate, and tests for the lost acknowledgement, the key-capped window and the reissue function's own refusals.
 
 ## 4. Delivery
 

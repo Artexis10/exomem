@@ -6,7 +6,7 @@ A governance migration operating on a fenced custody generation SHALL proceed on
 
 Every other precondition remains a refusal. The migration SHALL require a signing keyring valid at the current time, an authentic control MAC, the exact expected custody revision, a control not issued in the future, and a replica proven draining, issuance-stopped and free of in-flight work.
 
-The target-image migration Job reads custody under an open window before a plan exists. Before an inspect or prepare Job, the system SHALL therefore reissue the window of a drained, never-enrolled source whose window has closed or is too short to cover the prepare and the enrollment after it, as a custody publication of its own. The reissued generation MUST stay draining with issuance stopped, MUST keep its keyring, and MUST NOT outlast its signing key. Once a plan is prepared the system MUST NOT reissue the window, because the plan binds it. Returning a drained generation to service still requires a separately authorized resume.
+The target-image migration Job reads never-enrolled custody under an open window. Before an inspect or prepare Job, the system SHALL therefore reissue the window of a drained, never-enrolled source whose window has closed or cannot cover one migration Job, as a custody publication of its own, and only while no migration Job holds the fixed Job slot. The reissued generation MUST stay draining with issuance stopped, MUST keep its keyring, and MUST NOT outlast its signing key. The prepared plan binds the window, so the system MUST NOT reissue it under a prepared plan: an enrollment that finds a never-enrolled window too short SHALL return to prepare, reissue there and derive a fresh plan. Returning a drained generation to service still requires a separately authorized resume.
 
 #### Scenario: Recovery resumes after the window closes
 
@@ -15,11 +15,21 @@ The target-image migration Job reads custody under an open window before a plan 
 - **AND** the migration inspects, prepares, enrolls and commits against that generation
 - **AND** the generation keeps its keyring and stays draining with issuance stopped
 
-#### Scenario: Prepared plan keeps its window
+#### Scenario: Enrollment under a closed window returns to prepare
 
-- **WHEN** a window closes after its plan was prepared
-- **THEN** the system does not reissue it
-- **AND** an enrolled generation still commits with the window preserved exactly as signed
+- **WHEN** the window of a never-enrolled generation closes after its plan was prepared
+- **THEN** the system returns to prepare without writing custody or starting a Job
+- **AND** reissues the window there, prepares a fresh plan, enrolls and commits it
+
+#### Scenario: Enrolled generation keeps its window
+
+- **WHEN** the window of an enrolled generation closes before commit
+- **THEN** the system does not reissue it and commits with the window preserved exactly as signed
+
+#### Scenario: Reissue waits for an occupied Job slot
+
+- **WHEN** a migration Job bound to the current custody revision still holds the fixed Job slot
+- **THEN** the system resumes that Job and reissues the window only once the slot is empty
 
 #### Scenario: Closed window does not weaken the remaining proofs
 

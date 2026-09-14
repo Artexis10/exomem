@@ -396,6 +396,13 @@ class KubernetesGovernanceMigrationAdapter:
                 return None
             raise
 
+    async def occupied(self, request: MigrationJobRequest) -> bool:
+        """Whether a Job or a candidate runner pod still holds the fixed slot."""
+
+        return await self._read(request) is not None or bool(
+            await self._candidate_pods(request, None)
+        )
+
     async def _stopped(self, request: MigrationJobRequest) -> None:
         resource = request.metadata.resource_name
         pvc = self._wire(

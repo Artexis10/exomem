@@ -879,6 +879,70 @@ def test_provider_reissued_source_window_lets_the_job_inspect_and_prepare(cell, 
     assert prepared["phase"] == "prepare" and prepared["actualSchema"] == 3
 
 
+@pytest.mark.parametrize("cell", ["provider"], indirect=True)
+def test_provider_reissue_over_a_staged_plan_prepares_again_and_commits(cell, monkeypatch):
+    # A plan prepared under one window stays staged on the volume when the window
+    # is reissued before enrollment. Preparing again must derive a fresh plan and
+    # backup, and enrollment and commit must accept that reissued lineage.
+    from exomem_provisioner.authorization_membership import enroll_hosted_governance_bundle
+    from exomem_provisioner.governance_provision_membership import (
+        refresh_drained_source_bundle,
+    )
+
+    binding, now, request = cell
+    job = _job(monkeypatch, binding)
+    _, first = _prepare(job, request, now)
+    identity = {
+        "expected_cell_id": request["cellId"],
+        "expected_logical_vault_id": request["vaultId"],
+        "expected_replica_id": request["replicaId"],
+        "expected_software_version": None,
+        "expected_recovery_envelope": "signed-envelope",
+    }
+    names = ("keyring.json", "control.json", "serving-membership.json")
+    variables = (
+        authorization_custody.KEYRING_FILE_ENV,
+        authorization_custody.CONTROL_FILE_ENV,
+        authorization_custody.MEMBERSHIP_FILE_ENV,
+    )
+
+    def publish(bundle):
+        for variable, name in zip(variables, names, strict=True):
+            Path(os.environ[variable]).write_bytes(bundle.files[name])
+        return _revision()
+
+    later = now + 3601
+    reissued = refresh_drained_source_bundle(
+        dict(zip(names, _custody_bytes(), strict=True)),
+        **identity,
+        expected_schema_version=None,
+        now=later,
+    )
+    request["custodyRevision"] = publish(reissued)
+    second_request, second = _prepare(job, request, later)
+    assert second["sourceStoreDigest"] == first["sourceStoreDigest"]
+    assert second["planDigest"] != first["planDigest"]
+
+    enrolled = enroll_hosted_governance_bundle(
+        reissued.files,
+        **identity,
+        expected_schema_version=3,
+        activation_store_id=second["activationStoreId"],
+        activation_epoch=second["activationEpoch"],
+        activation_state_digest=second["activationStateDigest"],
+        now=later,
+    )
+    commit_request = {
+        **second_request,
+        "phase": "commit",
+        "planDigest": second["planDigest"],
+        "custodyRevision": publish(enrolled),
+    }
+    committed = job.execute(_canonical(commit_request), now=later)
+    assert committed["actualSchema"] == 4
+    assert store.authorization_session_schema_version(binding.vault_root) == 4
+
+
 def _remove_sidecar(vault: Path) -> Path:
     database = store.sidecar_path(vault)
     for path in database.parent.glob(database.name + "*"):

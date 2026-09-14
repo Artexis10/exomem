@@ -66,6 +66,11 @@ def drain_fresh_bootstrap_bundle(
     )
 
 
+# A runner node whose clock trails the provisioner's must not see the reissued
+# window as issued in its future.
+_REISSUE_BACKDATE_SECONDS = 120
+
+
 def refresh_drained_source_bundle(
     files: Mapping[str, bytes],
     *,
@@ -102,13 +107,16 @@ def refresh_drained_source_bundle(
         or source.replica_state != "DRAINING"
         or not source.issuance_stopped
         or not source.no_in_flight
-        or json.loads(source.control)["issued_at"] > current
         or source.epoch >= membership._MAX_INTEGER
     ):
         raise MetadataConflict(
             "authorization source refresh is unavailable",
             reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
         )
+    # Never earlier than the source's own issue time. A source issued after `now`
+    # therefore yields a successor issued after `now`, which the authentication
+    # below refuses.
+    issued_at = max(json.loads(source.control)["issued_at"], current - _REISSUE_BACKDATE_SECONDS)
     return membership.inspect_hosted_authorization_bundle(
-        _draining_successor_files(source, issued_at=current), **identity
+        _draining_successor_files(source, issued_at=issued_at), **identity
     )
