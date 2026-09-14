@@ -4008,7 +4008,6 @@ class EpistemicGraphIndex:
                 affected.add(source_path)
         return affected, {}
 
-    @call_spans.timed("graph.refresh_paths")
     def _queue_graph_repair(
         self,
         scope: set[str],
@@ -4056,6 +4055,7 @@ class EpistemicGraphIndex:
             return False
         return True
 
+    @call_spans.timed("graph.refresh_paths")
     def refresh_paths(
         self,
         paths: list[Path],
@@ -4120,6 +4120,13 @@ class EpistemicGraphIndex:
                 # and a drain converges it either way. `drain_paths` does not
                 # pass this fence, so convergence does not depend on the mark
                 # clearing first, and the refresh is idempotent if both land.
+                # Withdrawn before the enqueue, never after. Fenced without
+                # coverage is recoverable -- the next write or periodic recovery
+                # re-derives it -- while covered but still publicly readable is
+                # not: a crash between the two would leave readers served stale
+                # edges for paths this process has already admitted it cannot
+                # vouch for.
+                self._mark_unavailable()
                 # Only a *scoped* mark. The watcher's fail-closed default marks
                 # with no scope at all when it cannot classify a fan-out
                 # incompleteness, and that is a statement that the affected set
@@ -4137,7 +4144,6 @@ class EpistemicGraphIndex:
                     reason="external_event_covers_these_paths",
                     graph_checkpoint=graph_checkpoint,
                 )
-                self._mark_unavailable()
                 report = {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
                 if queued:
                     report["queued"] = 1
@@ -4243,6 +4249,14 @@ class EpistemicGraphIndex:
             rebuild that then fails leaves durable work behind instead of
             nothing.
             """
+            if graph_checkpoint is not None:
+                # Withdrawn before the enqueue for the reason the fence gives:
+                # fenced without coverage is recoverable, covered but still
+                # publicly readable is not. A standalone caller has no
+                # checkpoint and rebuilds after release, which owns availability
+                # itself, so this is the same set of paths as before -- only the
+                # order changes.
+                self._mark_unavailable()
             if not self._queue_graph_repair(
                 deferred_scope, reason=reason, graph_checkpoint=graph_checkpoint
             ):
@@ -4255,7 +4269,6 @@ class EpistemicGraphIndex:
                     "_rebuild_after_release": 1,
                     "_durable_before_rebuild": 1,
                 }
-            self._mark_unavailable()
             # `queued` is what separates this from `fallback()`'s own deferral
             # below, which registers a whole-vault rebuild and reports
             # `deferred` all the same. Only an enqueue that actually succeeded
