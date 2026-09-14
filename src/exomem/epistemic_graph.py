@@ -110,11 +110,22 @@ class _DrainPublicationMoved(Exception):
 #:
 #: `"defer"` means the incremental pass could not *prove* its result, but the
 #: scope of the damage is known: the affected paths go on the durable graph
-#: queue and a drain repairs them. Every reason on this side is a race -- a
+#: queue and a drain repairs them. Most reasons on this side are a race -- a
 #: concurrent writer moved a durable token between two reads -- and a race is
 #: exactly what a retry budget cannot win here, because each whole-vault attempt
 #: widens the window that loses it. That feedback loop, not any single gate, is
 #: what made seven fixes inside it fail to converge.
+#:
+#: `resolver_snapshot_unavailable` is on that side without being a race: the
+#: process simply holds no resident resolver for this checkpoint, and a cold
+#: cache is not evidence about the graph. Everything needed to bound the damage
+#: is already proven when it fires -- the durable checkpoint matched, the
+#: acknowledgement was the predecessor, and the recall delta came back complete
+#: -- so the pass queues that delta and a later drain, with a resolver resident,
+#: re-runs it and widens to the topology-affected sources itself. Measured on
+#: the 0.83.1 deploy, where the old "rebuild" verdict here turned the first
+#: governed writes of a replacement worker into 164.8 s and 46.7 s whole-vault
+#: passes.
 #:
 #: `"rebuild"` means the scope is *unknown*, not merely unproven: the sidecar
 #: could not be read, or the delta that says what changed is itself incomplete,
@@ -134,12 +145,12 @@ _FALLBACK_DISPOSITIONS = {
     "topology_proof_moved": "defer",
     "incremental_marker_refused": "defer",
     "unreachable": "defer",
+    "resolver_snapshot_unavailable": "defer",
     "checkpoint_scope_is_not_paths": "rebuild",
     "graph_snapshot_unavailable": "rebuild",
     "recall_checkpoint_absent_or_registry_not_live": "rebuild",
     "recall_delta_incomplete": "rebuild",
     "stored_resolver_entries_unreadable": "rebuild",
-    "resolver_snapshot_unavailable": "rebuild",
     "topology_snapshot_unavailable": "rebuild",
     "stored_topology_unreadable": "rebuild",
     "stored_topology_fingerprint_mismatch": "rebuild",
@@ -4203,7 +4214,14 @@ class EpistemicGraphIndex:
             # may tell the dispatch layer the queue owns this repair; without
             # the distinction that layer reads an unregistered, unacknowledged
             # checkpoint as a missing rebuild and schedules the vault anyway.
-            return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
+            report = {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
+            if reason == "resolver_snapshot_unavailable":
+                # Dispatch has to tell this pending outcome from the others. A
+                # standalone caller is told pending here, as it is for a fenced
+                # predecessor, because the alternative is the whole-vault
+                # rebuild this disposition exists to remove.
+                report["resolver_cold"] = 1
+            return report
 
         def fallback(reason: str) -> dict[str, int]:
             # #576 F3. The single most-wanted number in the incident, and the
@@ -4330,6 +4348,18 @@ class EpistemicGraphIndex:
             checkpoint,
         )
         if resolver is None:
+            # Queue the delta, not just the caller's paths. This pass bails
+            # because it cannot compute which OTHER pages a topology change
+            # touched, and the delta -- proven complete above -- is the set
+            # whose stored resolver entries could have moved. The sidecar still
+            # holds those old entries, so a later drain re-runs this same pass
+            # for them with a resolver resident and widens to the affected
+            # sources itself. The repair is deferred, not dropped.
+            deferred_scope.update(
+                rel
+                for candidate in set(delta.changed | delta.deleted)
+                if (rel := _vault_rel(self.vault_root, Path(candidate))) is not None
+            )
             self._mark_unavailable()
             return fallback("resolver_snapshot_unavailable")
         topology_changed = any(
@@ -7516,6 +7546,16 @@ def upsert_after_write(
                     # this decision exists to remove.
                     return GraphDispatchResult(
                         "deferred", "graph_repair_unreadable_predecessor", required
+                    )
+                if report.get("resolver_cold") and report.get("queued"):
+                    # The cold-resolver door, with its own code for D2's reason:
+                    # the doctor and the recovery alarm must be able to tell a
+                    # process that never built a resolver from a fenced
+                    # predecessor and from a lineage gap. The queue is proven to
+                    # hold the complete delta, so this reports pending even for
+                    # a standalone caller.
+                    return GraphDispatchResult(
+                        "deferred", "graph_repair_cold_resolver", required
                     )
                 log.info(
                     "graph dispatch registered a whole-vault rebuild reason=%s "

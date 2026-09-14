@@ -402,13 +402,15 @@ _DECLARED_FALLBACK_DISPOSITIONS = {
     "topology_proof_moved": "defer",
     "incremental_marker_refused": "defer",
     "unreachable": "defer",
+    # Not a race: a cold process-local resolver cache. The delta is proven
+    # complete when it fires, so the queue owns the repair.
+    "resolver_snapshot_unavailable": "defer",
     # Unknown scope: the sidecar or the delta cannot be trusted to bound it.
     "checkpoint_scope_is_not_paths": "rebuild",
     "graph_snapshot_unavailable": "rebuild",
     "recall_checkpoint_absent_or_registry_not_live": "rebuild",
     "recall_delta_incomplete": "rebuild",
     "stored_resolver_entries_unreadable": "rebuild",
-    "resolver_snapshot_unavailable": "rebuild",
     "topology_snapshot_unavailable": "rebuild",
     "stored_topology_unreadable": "rebuild",
     "stored_topology_fingerprint_mismatch": "rebuild",

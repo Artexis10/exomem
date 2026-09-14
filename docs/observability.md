@@ -71,7 +71,7 @@ the durable queue and a drain will converge them, `GRAPH_SYNC_REBUILD_IN_PROGRES
 when a whole-vault pass is running. Both are healthy. Neither requires rereading
 the written note or running maintenance.
 
-Behind that terminal the dispatch chose one of two repairs, and the log says
+Behind that terminal the dispatch chose one of three repairs, and the log says
 which:
 
 - `graph dispatch routed an unreadable predecessor to incremental repair` — the
@@ -79,6 +79,14 @@ which:
   The write takes the incremental path, and the affected pages go to the durable
   queue if it cannot finish; the dispatch outcome is
   `graph_repair_unreadable_predecessor`. No whole-vault pass runs.
+- `graph incremental refresh fell back reason=resolver_snapshot_unavailable` —
+  this process holds no resident recall resolver for the checkpoint, which is a
+  cold cache rather than evidence about the graph. The recall delta was already
+  proven complete, so the pass queues it and a later drain re-runs the same
+  repair with a resolver resident; the dispatch outcome is
+  `graph_repair_cold_resolver`. No whole-vault pass runs. A run of these means
+  start-up never primed the resolver — check for the `graph snapshot adoption`
+  line in the warm-up.
 - `graph dispatch registered a whole-vault rebuild reason=…` — a proven verdict:
   `graph_sync_predecessor_mismatch` or `…_absent` (the sidecar's acknowledgement
   is genuinely not this checkpoint's predecessor) or `graph_sync_snapshot_unusable`

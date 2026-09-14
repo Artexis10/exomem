@@ -304,6 +304,15 @@ def _drain_repair_queue(root: Path, watcher: file_watcher.FileWatcher) -> int:
     return len(deferred_index.list_graph_paths(root))
 
 
+def _drain_graph_queue(root: Path) -> int:
+    """Drain the durable graph queue without a watcher to publish events first."""
+    for _ in range(12):
+        if not deferred_index.list_graph_paths(root):
+            return 0
+        index_sync.drain_graph_work(root, limit=64)
+    return len(deferred_index.list_graph_paths(root))
+
+
 @pytest.fixture
 def live_watcher(live_handoff_vault: Path) -> Iterator[file_watcher.FileWatcher]:
     """A watcher running for real: observer, dispatch loop and fan-out recovery.
@@ -626,6 +635,65 @@ def test_an_unreadable_predecessor_is_queued_repair_not_a_lineage_gap(
         f"expected the distinct pending code, got {[result.code for result in outcomes]}"
     )
     assert {result.outcome for result in outcomes} == {"deferred"}
+
+
+def test_a_cold_resolver_is_queued_repair_not_a_whole_vault_rebuild(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resolver cache miss is a cold cache, not an unbounded graph.
+
+    Measured on the 0.83.1 deploy: the replacement worker had never built a
+    recall resolver, so `recall_resolver_snapshot_at_checkpoint` missed on every
+    governed write. That bail-out's disposition was "rebuild", which enqueues
+    nothing, so dispatch saw `deferred` without `queued`, reported
+    `incremental_refresh_deferred_without_queue_coverage`, and registered a
+    whole-vault rebuild the write then waited on.
+
+    Everything the pass needs to bound the damage is already proven when this
+    fires: the durable checkpoint matched, the acknowledgement was the
+    predecessor, and the recall delta came back complete. What is missing is the
+    pre-delta topology needed to widen the set, and the queue is exactly the
+    mechanism for repair whose scope is known but whose proof is not.
+    """
+    root = handoff_vault
+    spy = _RebuildSpy(monkeypatch)
+    monkeypatch.setattr(
+        find_module,
+        "recall_resolver_snapshot_at_checkpoint",
+        lambda *_args, **_kwargs: None,
+        raising=True,
+    )
+
+    target = root / GENERATED / "generated-note-0007.md"
+    outcomes: list[epistemic_graph.GraphDispatchResult] = []
+    real_dispatch = epistemic_graph.upsert_after_write
+
+    def recorded(vault_root: Path, paths: list[Path], **kwargs: object):
+        result = real_dispatch(vault_root, paths, **kwargs)
+        outcomes.append(result)
+        return result
+
+    monkeypatch.setattr(epistemic_graph, "upsert_after_write", recorded, raising=True)
+
+    elapsed = _governed_write(root, target, "cold resolver")
+
+    assert spy.count == 0, (
+        "a cold resolver cache scheduled a whole-vault rebuild, which is the "
+        "164.8 s write the 0.83.1 deploy measured"
+    )
+    assert [result.code for result in outcomes] == ["graph_repair_cold_resolver"], (
+        f"expected the resolver's own pending code, got "
+        f"{[result.code for result in outcomes]}"
+    )
+    assert {result.outcome for result in outcomes} == {"deferred"}
+    assert deferred_index.list_graph_paths(root), (
+        "the deferral must leave the affected paths on the durable queue, or "
+        "the pending code is a claim nothing backs"
+    )
+    assert elapsed < ACK_BOUND_SECONDS, f"the write was not incremental: {elapsed:.2f}s"
+
+    monkeypatch.undo()
+    assert _drain_graph_queue(root) == 0, "the graph repair queue never drained"
 
 
 def test_an_unusable_snapshot_still_rebuilds(
