@@ -261,6 +261,38 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "embeddings.matrix_load",
         "embeddings.matrix_catch_up",
         "delivery.vocabulary_after_commit",
+        "derived.fanout",
+        "derived.terminal_persist",
+        "derived.deferred_index_store",
+        "index.path_partition",
+        "index.semantic_states",
+        "index.policy_revalidate",
+        "index.corpus_publish",
+        "index.semantic_purge",
+        "index.path_custody",
+        "index.self_write_registration",
+        "index.graph_epoch_handoff",
+        "advisory.best_cosine",
+        "advisory.overlap_groups",
+        # The write-stage collector's own names, emitted into the ledger
+        # unconditionally by `MutationTimings.emit_call_spans`. Recorded
+        # through a variable at that seam, so the source pin below finds
+        # them at the `mutation_timing_span` call sites that name each one.
+        "commit.boundary_acquire",
+        "commit.creation_lock",
+        "commit.embedding_prewarm",
+        "commit.locked_commit",
+        "commit.manifest",
+        "commit.resolver_prime",
+        "commit.revalidate",
+        "commit.stamp_check",
+        "preflight.contract_eval",
+        "preflight.corpus_context",
+        "preflight.page_states",
+        "preflight.read_guarded",
+        "preflight.registries",
+        "preflight.relation_review",
+        "preflight.validity_token",
     }
 )
 
