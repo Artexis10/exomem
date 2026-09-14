@@ -248,11 +248,7 @@ def _hit_parent_path(hit: Hit | SemanticUnitHit) -> str:
 def _selected_unit_refs(hit: Hit | SemanticUnitHit) -> list[str]:
     if isinstance(hit, SemanticUnitHit):
         return [hit.unit_ref]
-    return [
-        str(item["unit_ref"])
-        for item in (hit.matched_units or [])
-        if item.get("unit_ref")
-    ]
+    return [str(item["unit_ref"]) for item in (hit.matched_units or []) if item.get("unit_ref")]
 
 
 def _load_parent_snapshot(
@@ -358,9 +354,7 @@ def _pack_unit(
     tags = [_cap(tag, _MAX_UNIT_TAG_CHARS) for tag in unit.tags[:_MAX_UNIT_TAGS]]
     clipped_fields = int(len(unit.content.strip()) > max(0, unit_chars))
     if unit.context:
-        clipped_fields += int(
-            len(unit.context.strip()) > _MAX_UNIT_CONTEXT_CHARS
-        )
+        clipped_fields += int(len(unit.context.strip()) > _MAX_UNIT_CONTEXT_CHARS)
     clipped_fields += sum(
         len(str(tag).strip()) > _MAX_UNIT_TAG_CHARS for tag in unit.tags[:_MAX_UNIT_TAGS]
     )
@@ -379,9 +373,7 @@ def _pack_unit(
             "kind": unit.kind,
             "excerpt": _cap(unit.content, max(0, unit_chars)),
             "tags": tags,
-            "context": _cap(unit.context, _MAX_UNIT_CONTEXT_CHARS)
-            if unit.context
-            else None,
+            "context": _cap(unit.context, _MAX_UNIT_CONTEXT_CHARS) if unit.context else None,
             "source_anchor": unit.anchor,
             "source_span": {
                 "start_line": unit.span.start_line,
@@ -609,22 +601,35 @@ def _tension_pairs(
     embeddings_available = False
 
     if floor < ceiling:
+        # Proximity among the packed pages comes from the vectors the embedding
+        # pass already published for them, never from re-encoding their bodies:
+        # on a large vault that encode was most of a recall's wall time. A page
+        # whose rows are not yet exact (embedding deferred, or moved since) just
+        # contributes no pairs this time.
+        from . import embeddings as embeddings_module
+
+        chunked: list[tuple[str, list[str]]] = []
         for page in packed_pages:
-            cmap = corpus_aware._best_cosine_per_file(vault_root, title=page.title, body=page.body)
-            if cmap:
-                embeddings_available = True
-            self_canon = corpus_aware._canon(page.rel_path)
-            for fp, score in cmap.items():
-                canon = corpus_aware._canon(fp)
-                if canon == self_canon or canon not in by_canon:
-                    continue
-                if not (floor <= score < ceiling):
-                    continue
-                key = frozenset((self_canon, canon))
-                if key in asserted_keys:
-                    continue  # the authored edge owns this pair
-                if key not in pair_best or score > pair_best[key]:
-                    pair_best[key] = score
+            try:
+                chunks = embeddings_module._chunks_for_page(vault_root, page)
+            except Exception:  # noqa: BLE001 -- chunking is best-effort here
+                chunks = []
+            chunked.append((page.rel_path, chunks))
+        scores, covered = corpus_aware.pairwise_best_cosine_from_sidecar(vault_root, chunked)
+        embeddings_available = bool(covered)
+        for pair, score in scores.items():
+            first, second = tuple(pair)
+            canon_a = corpus_aware._canon(first)
+            canon_b = corpus_aware._canon(second)
+            if canon_a == canon_b or canon_a not in by_canon or canon_b not in by_canon:
+                continue
+            if not (floor <= score < ceiling):
+                continue
+            key = frozenset((canon_a, canon_b))
+            if key in asserted_keys:
+                continue  # the authored edge owns this pair
+            if key not in pair_best or score > pair_best[key]:
+                pair_best[key] = score
 
     proximity: list[dict] = []
     for key, score in pair_best.items():
@@ -758,9 +763,7 @@ def assemble_pack(
     plans: list[_UnitPackPlan] = []
     for page in packed_pages:
         document = semantic_states[page.rel_path].document
-        by_ref = {
-            unit.unit_ref: unit for unit in document.units if unit.unit_ref is not None
-        }
+        by_ref = {unit.unit_ref: unit for unit in document.units if unit.unit_ref is not None}
         selected: list[tuple[int, int, semantic_units.SemanticUnit]] = []
         unresolved = 0
         for hit_rank, unit_order, unit_ref in selected_by_path.get(page.rel_path, []):
@@ -783,9 +786,7 @@ def assemble_pack(
                 page=page,
                 parent=parent,
                 selected=selected,
-                fillers=[
-                    unit for unit in document.units if id(unit) not in selected_ids
-                ],
+                fillers=[unit for unit in document.units if id(unit) not in selected_ids],
                 dropped_provenance=dropped_provenance,
             )
         )
@@ -860,13 +861,9 @@ def assemble_pack(
         omitted = total_units - len(plan.packed_units)
         if omitted:
             reason = ", ".join(sorted(plan.omitted_reasons)) or "configured bounds"
-            truncation.append(
-                f"{plan.page.rel_path}: {omitted} semantic units omitted by {reason}"
-            )
+            truncation.append(f"{plan.page.rel_path}: {omitted} semantic units omitted by {reason}")
         selected_included = {
-            packed["unit_ref"]
-            for _unit, packed in plan.chosen_units
-            if packed["unit_ref"]
+            packed["unit_ref"] for _unit, packed in plan.chosen_units if packed["unit_ref"]
         }
         selected_omitted = sum(
             1

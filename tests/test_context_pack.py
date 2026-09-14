@@ -3,7 +3,7 @@
 Torch-free: builds its own tiny inter-linked vault per test (so it never perturbs
 the shared fixture vault), and exercises `context_pack.assemble_pack` directly. The
 embedding-dependent `tension` path is tested by monkeypatching
-`corpus_aware._best_cosine_per_file` with injected cosines — no model load.
+`corpus_aware.pairwise_best_cosine_from_sidecar` with injected cosines — no model load.
 """
 
 from __future__ import annotations
@@ -195,9 +195,7 @@ def cluster(tmp_path: Path) -> Path:
     _write(vault, NEW_P, NEW)
     _write(vault, UNIT_CONTEXT_P, UNIT_CONTEXT)
     find_module.clear_cache()
-    entries = [
-        (str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")
-    ]
+    entries = [(str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")]
     freshness.seed(vault, "kb", entries)
     freshness.seed(vault, "vault", entries)
     lexstore.ensure_fresh(vault)
@@ -205,6 +203,7 @@ def cluster(tmp_path: Path) -> Path:
 
 
 # ----------------------------- claims -----------------------------
+
 
 def test_claims_are_structural_lede_sections_outline(cluster: Path) -> None:
     pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)])
@@ -233,7 +232,10 @@ def test_claims_ignore_fenced_code(cluster: Path) -> None:
 
 
 def test_claim_lede_capped(cluster: Path) -> None:
-    pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P)], )
+    pack = context_pack.assemble_pack(
+        cluster,
+        [_hit(ALPHA_P)],
+    )
     # Force a tiny cap and confirm an ellipsis marks the truncation (not silent).
     pack_small = context_pack.assemble_pack(cluster, [_hit(ALPHA_P)], max_hits=1)
     # default claim chars is generous; explicitly cap via env-independent kwarg path:
@@ -247,6 +249,7 @@ def test_claim_lede_capped(cluster: Path) -> None:
 
 
 # -------------------------- neighbourhood --------------------------
+
 
 def test_neighbourhood_co_citation_order_and_exclusion(cluster: Path) -> None:
     pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)])
@@ -272,15 +275,14 @@ def test_neighbourhood_co_citation_order_and_exclusion(cluster: Path) -> None:
 
 
 def test_neighbourhood_cap_reports_truncation(cluster: Path) -> None:
-    pack = context_pack.assemble_pack(
-        cluster, [_hit(ALPHA_P), _hit(BETA_P)], max_neighbors=1
-    )
+    pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)], max_neighbors=1)
     assert len(pack["neighborhood"]) == 1
     assert pack["neighborhood"][0]["path"] == HUB_P
     assert any("neighborhood" in t for t in pack["truncation"])
 
 
 # ---------------------- contradictions / supersession ----------------------
+
 
 def test_supersession_edge_from_frontmatter(cluster: Path) -> None:
     pack = context_pack.assemble_pack(cluster, [_hit(OLD_P), _hit(NEW_P)])
@@ -300,15 +302,16 @@ def test_embeddings_off_degrades_gracefully(cluster: Path) -> None:
 
 
 def test_tension_pairs_only_in_band(cluster: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_bcpf(vault_root, *, title, body, k: int = 15):
-        if title.startswith("Alpha"):
-            # Beta in band [0.82,0.90); Charlie above (a near-dup, excluded).
-            return {BETA_P: 0.85, CHARLIE_P: 0.95}
-        if title.startswith("Beta"):
-            return {ALPHA_P: 0.85}
-        return {}
+    def fake_pairwise(vault_root, pages):
+        packed = {rel for rel, _chunks in pages}
+        assert packed == {ALPHA_P, BETA_P}
+        # Beta in band [0.82,0.90); Charlie above (a near-dup, excluded) and not packed.
+        return (
+            {frozenset((ALPHA_P, BETA_P)): 0.85, frozenset((ALPHA_P, CHARLIE_P)): 0.95},
+            {ALPHA_P, BETA_P},
+        )
 
-    monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", fake_bcpf)
+    monkeypatch.setattr(corpus_aware, "pairwise_best_cosine_from_sidecar", fake_pairwise)
     pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)])
 
     tension = pack["contradictions"]["tension"]
@@ -320,7 +323,45 @@ def test_tension_pairs_only_in_band(cluster: Path, monkeypatch: pytest.MonkeyPat
     assert "polarity" in pair["note"]
 
 
+def test_pack_tension_never_encodes_the_packed_pages(
+    cluster: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The proximity half reads stored vectors; a recall must not pay an encode.
+
+    Measured 2026-09-14 on the personal service: re-encoding every packed page's
+    body was 32 to 50 s of each `ask_memory`. Any route back into the encoder
+    from pack assembly is the regression this pins.
+    """
+    from exomem import embeddings
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("pack assembly reached the encoder")
+
+    monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", refuse)
+    monkeypatch.setattr(embeddings, "embed_texts", refuse)
+    monkeypatch.setattr(embeddings, "_embed_live_chunks", refuse)
+    monkeypatch.setattr(
+        corpus_aware,
+        "pairwise_best_cosine_from_sidecar",
+        lambda vault_root, pages: ({frozenset((ALPHA_P, BETA_P)): 0.85}, {ALPHA_P, BETA_P}),
+    )
+    pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)])
+    assert [t["cosine"] for t in pack["contradictions"]["tension"]] == [0.85]
+
+
+def test_pack_tension_reports_no_embeddings_when_no_packed_page_has_rows(
+    cluster: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        corpus_aware, "pairwise_best_cosine_from_sidecar", lambda vault_root, pages: ({}, set())
+    )
+    pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)])
+    assert pack["embeddings_available"] is False
+    assert pack["contradictions"]["tension"] == []
+
+
 # ------------------------------ bounds / determinism ------------------------------
+
 
 def test_packed_paths_bounded_by_max_hits(cluster: Path) -> None:
     hits = [_hit(ALPHA_P), _hit(BETA_P), _hit(HUB_P)]
@@ -331,9 +372,7 @@ def test_packed_paths_bounded_by_max_hits(cluster: Path) -> None:
 
 def test_deterministic_on_rerun(cluster: Path) -> None:
     hits = [_hit(ALPHA_P), _hit(BETA_P)]
-    assert context_pack.assemble_pack(cluster, hits) == context_pack.assemble_pack(
-        cluster, hits
-    )
+    assert context_pack.assemble_pack(cluster, hits) == context_pack.assemble_pack(cluster, hits)
 
 
 def test_empty_hits_yield_empty_pack(cluster: Path) -> None:
@@ -362,6 +401,7 @@ def test_missing_hit_file_is_reported_not_silent(cluster: Path) -> None:
 
 # ------------------------------ integration via op_find ------------------------------
 
+
 def test_op_find_pack_false_returns_bare_list(vault: Path) -> None:
     from exomem import commands
 
@@ -385,6 +425,7 @@ def test_op_find_pack_true_returns_hits_and_pack(vault: Path) -> None:
         "embeddings_available",
         "truncation",
     }
+
 
 def test_pack_without_graph_enrichment_preserves_shape(cluster: Path) -> None:
     pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)])
@@ -415,17 +456,13 @@ def test_pack_parses_each_readable_page_once_and_preserves_exact_json(
         parse_calls += 1
         return original_parse(*args, **kwargs)
 
-    monkeypatch.setattr(
-        context_pack.semantic_units, "parse_semantic_units", counted_parse
-    )
+    monkeypatch.setattr(context_pack.semantic_units, "parse_semantic_units", counted_parse)
 
     actual = context_pack.assemble_pack(cluster, hits)
     legacy_block_map = {}
     for rel_path in (ALPHA_P, BETA_P):
         page = find_module._CACHE.get(cluster / rel_path, cluster)
-        blocks = semantic_blocks.parse_semantic_blocks(
-            page.body, validate=False
-        ).blocks
+        blocks = semantic_blocks.parse_semantic_blocks(page.body, validate=False).blocks
         if blocks:
             legacy_block_map[rel_path] = [block.to_dict() for block in blocks]
     expected_legacy = {
@@ -526,14 +563,10 @@ def test_hierarchy_migration_pack_uses_current_non_overlapping_units_without_sou
 
     assert page.read_bytes() == source
     units = pack["semantic_units"][rel]["units"]
-    assert [(unit["form"], unit["kind"]) for unit in units] == [
-        ("rich", "finding")
-    ]
+    assert [(unit["form"], unit["kind"]) for unit in units] == [("rich", "finding")]
     assert "### Decision" in units[0]["excerpt"]
     assert "Compact-shaped body content" in units[0]["excerpt"]
-    assert [block["type"] for block in pack["semantic_blocks"][rel]] == [
-        "finding"
-    ]
+    assert [block["type"] for block in pack["semantic_blocks"][rel]] == ["finding"]
 
 
 def test_semantic_unit_caps_are_explicit_and_bound_legacy_projection(
@@ -548,10 +581,7 @@ def test_semantic_unit_caps_are_explicit_and_bound_legacy_projection(
 
     assert len(pack["semantic_units"][UNIT_CONTEXT_P]["units"]) == 1
     assert pack["semantic_blocks"] == {}
-    assert any(
-        "2 semantic units omitted" in item
-        for item in pack["truncation"]
-    )
+    assert any("2 semantic units omitted" in item for item in pack["truncation"])
 
 
 def test_semantic_unit_character_cap_is_hard_and_legacy_body_uses_same_excerpt(
@@ -610,9 +640,11 @@ def test_parent_grouping_precedes_hit_cap_and_stale_selection_is_explicit(
 def test_pack_wide_selected_units_precede_fillers_from_earlier_parents(
     cluster: Path,
 ) -> None:
-    beta_ref = semantic_index.build_parent_index_state(
-        cluster, cluster / BETA_P
-    ).document.units[0].unit_ref
+    beta_ref = (
+        semantic_index.build_parent_index_state(cluster, cluster / BETA_P)
+        .document.units[0]
+        .unit_ref
+    )
     assert beta_ref is not None
 
     pack = context_pack.assemble_pack(
@@ -623,10 +655,7 @@ def test_pack_wide_selected_units_precede_fillers_from_earlier_parents(
 
     assert set(pack["semantic_units"]) == {BETA_P}
     assert pack["semantic_units"][BETA_P]["units"][0]["unit_ref"] == beta_ref
-    assert not any(
-        "selected semantic unit(s) omitted" in item
-        for item in pack["truncation"]
-    )
+    assert not any("selected semantic unit(s) omitted" in item for item in pack["truncation"])
 
 
 def test_deleted_selected_unit_is_reported_when_parent_has_no_units(
@@ -639,8 +668,7 @@ def test_deleted_selected_unit_is_reported_when_parent_has_no_units(
 
     assert pack["semantic_units"] == {}
     assert any(
-        "1 selected semantic unit(s) stale or missing" in item
-        for item in pack["truncation"]
+        "1 selected semantic unit(s) stale or missing" in item for item in pack["truncation"]
     )
 
 
@@ -685,17 +713,13 @@ def test_deep_ask_memory_supports_unit_level_context(cluster: Path) -> None:
     )
 
     assert result["hits"][0]["result_type"] == "semantic_unit"
-    assert result["pack"]["semantic_units"][UNIT_CONTEXT_P]["units"][0][
-        "kind"
-    ] == "decision"
+    assert result["pack"]["semantic_units"][UNIT_CONTEXT_P]["units"][0]["kind"] == "decision"
 
 
 def test_graph_enriched_pack_includes_typed_neighborhood(cluster: Path) -> None:
     epistemic_graph.EpistemicGraphIndex(cluster).rebuild_all()
 
-    pack = context_pack.assemble_pack(
-        cluster, [_hit(ALPHA_P), _hit(BETA_P)], graph_enrich=True
-    )
+    pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)], graph_enrich=True)
 
     graph = pack["graph"]
     assert graph["available"] is True

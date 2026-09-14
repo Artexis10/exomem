@@ -32,6 +32,7 @@ import logging
 import math
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -91,9 +92,7 @@ def _contradiction_floor() -> float:
     try:
         return float(raw)
     except ValueError:
-        log.warning(
-            "invalid EXOMEM_CONTRADICTION_FLOOR=%r; using %s", raw, CONTRADICTION_FLOOR
-        )
+        log.warning("invalid EXOMEM_CONTRADICTION_FLOOR=%r; using %s", raw, CONTRADICTION_FLOOR)
         return CONTRADICTION_FLOOR
 
 
@@ -172,12 +171,9 @@ def parse_write_advisory_ref(value: str) -> str:
 
     raw = str(value or "").strip()
     if not raw.lower().startswith(_WRITE_ADVISORY_REF_PREFIX):
-        raise ValueError(
-            "INVALID_REVIEW_REFERENCE: expected "
-            f"{_WRITE_ADVISORY_REF_PREFIX}<id>"
-        )
+        raise ValueError(f"INVALID_REVIEW_REFERENCE: expected {_WRITE_ADVISORY_REF_PREFIX}<id>")
     return review_state.parse_review_ref(
-        f"{review_state.REVIEW_PREFIX}{raw[len(_WRITE_ADVISORY_REF_PREFIX):]}"
+        f"{review_state.REVIEW_PREFIX}{raw[len(_WRITE_ADVISORY_REF_PREFIX) :]}"
     )
 
 
@@ -212,9 +208,7 @@ def write_advisory_identity(
         raise ValueError(f"write advisory counterpart is unreadable: {candidate.path}")
     left_ref, right_ref = sorted((str(refs[self_rel]), str(refs[candidate_rel])))
     category = f"{_WRITE_ADVISORY_NAMESPACE}:{kind}"
-    signal_version = content_hash(
-        f"{category}\n{left_ref}\n{right_ref}\n{counterpart_signal}"
-    )[:16]
+    signal_version = content_hash(f"{category}\n{left_ref}\n{right_ref}\n{counterpart_signal}")[:16]
     review_id = review_state.item_id(f"{category}:{left_ref}|{right_ref}")
     fingerprint = review_state.fingerprint(
         target_ref=left_ref,
@@ -239,10 +233,7 @@ def _render_identified_write_advisory(
     prose = _render_write_advisory(kind, candidate)
     offer_clause = ""
     if quiet_offer:
-        offer_clause = (
-            " [quiet offer: ref="
-            f"{quiet_offer['ref']}; action=quiet; reason required]"
-        )
+        offer_clause = f" [quiet offer: ref={quiet_offer['ref']}; action=quiet; reason required]"
     budget = _WRITE_ADVISORY_WARNING_CHARS - len(suffix)
     prose_budget = budget - len(offer_clause)
     if len(prose) > prose_budget:
@@ -331,11 +322,7 @@ def emitted_write_advisory_groups(
     for kind, _candidates in groups:
         if kind not in _WRITE_ADVISORY_KINDS:
             raise ValueError(f"unknown write advisory kind: {kind}")
-    advisories = [
-        (kind, candidate)
-        for kind, candidates in groups
-        for candidate in candidates
-    ]
+    advisories = [(kind, candidate) for kind, candidates in groups for candidate in candidates]
     if not advisories:
         return []
 
@@ -427,9 +414,7 @@ def emitted_write_advisory_groups(
                 EmittedWriteAdvisory(
                     kind=kind,
                     candidate=candidate,
-                    warning=_render_identified_write_advisory(
-                        kind, candidate, identity, offer
-                    ),
+                    warning=_render_identified_write_advisory(kind, candidate, identity, offer),
                     identity=identity,
                     counterpart_rel_path=candidate_rel,
                 )
@@ -548,9 +533,7 @@ def triage_write_advisory(
         and expected_fingerprint is not None
         and not _WRITE_ADVISORY_FINGERPRINT_RE.fullmatch(expected_fingerprint)
     ):
-        raise ValueError(
-            "INVALID_REVIEW_FINGERPRINT: expected exactly 24 lowercase hex characters"
-        )
+        raise ValueError("INVALID_REVIEW_FINGERPRINT: expected exactly 24 lowercase hex characters")
     review_id = parse_write_advisory_ref(ref)
     store = review_state.ReviewStateStore(vault_root)
     payload = store.load()
@@ -587,7 +570,7 @@ def _canon(path: str) -> str:
     if p.lower().endswith(".md"):
         p = p[:-3]
     if p.startswith(kb_prefix()):
-        p = p[len(kb_prefix()):]
+        p = p[len(kb_prefix()) :]
     return p.lower()
 
 
@@ -688,9 +671,7 @@ def suggest_related(
 
     ranked = sorted(enumerate(eligible), key=_score, reverse=True)
     return [
-        RelatedSuggestion(
-            path=h.path, title=h.title, type=h.type, why=_why(h), excerpt=h.excerpt
-        )
+        RelatedSuggestion(path=h.path, title=h.title, type=h.type, why=_why(h), excerpt=h.excerpt)
         for _, h in ranked[:limit]
     ]
 
@@ -716,6 +697,7 @@ def _best_cosine_per_file(
     # and this runs inline on every add/note/edit and pack assembly. Skip the
     # sweep; {} is the same no-op contract used for torch-less deploys.
     from . import readiness
+
     if readiness.should_defer("embeddings"):
         return {}
     try:
@@ -747,9 +729,7 @@ def _best_cosine_per_file(
             }
             best_per_file: dict[str, float] = {}
             for v in vecs:
-                for fp, _cidx, _ctext, score in idx.search(
-                    v, k=k, allowed_paths=allowed_paths
-                ):
+                for fp, _cidx, _ctext, score in idx.search(v, k=k, allowed_paths=allowed_paths):
                     if fp not in best_per_file or score > best_per_file[fp]:
                         best_per_file[fp] = score
             return best_per_file
@@ -759,6 +739,78 @@ def _best_cosine_per_file(
     except Exception as e:  # noqa: BLE001 — best-effort
         log.debug("_best_cosine_per_file failed: %s", e)
         return {}
+
+
+def pairwise_best_cosine_from_sidecar(
+    vault_root: Path, pages: Iterable[tuple[str, list[str]]]
+) -> tuple[dict[frozenset[str], float], set[str]]:
+    """Best cosine between each pair of `pages`, from the sidecar's own rows -- no encode.
+
+    The context pack only ever needs proximity AMONG the pages it packed, and
+    every one of those pages was embedded when it was written. Re-encoding
+    their bodies to get the same vectors back was the whole cost of a recall
+    on a large vault (measured 2026-09-14: 32 to 50 s of `embeddings.encode`
+    over 110 to 174 chunks per `ask_memory`, on 4,281 pages). So this reads the
+    rows the embedding pass published and does one small pairwise product.
+
+    `pages` are `(rel_path, chunks)` with the exact chunking the index stores
+    (`embeddings._chunks_for_page`). Exactness is decided on stored chunk TEXT,
+    as `published_generation_vectors` does: a page whose rows do not match its
+    current chunks -- its embedding still deferred, or the page moved since --
+    contributes no pairs and is absent from the returned covered set, and is
+    never encoded here. Returns `({}, set())` when embeddings are disabled or
+    the sidecar is unavailable, the same no-op contract as the encoding sweep.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return {}, set()
+    wanted = {rel: list(chunks) for rel, chunks in pages if chunks}
+    if not wanted:
+        return {}, set()
+    try:
+        import numpy as np
+
+        from . import embeddings
+
+        # Same span as the encoding sweep on purpose (see
+        # `best_cosine_per_file_for_vectors`): `texts=0` is what says it
+        # encoded nothing, and `pages` how many packed pages had exact rows.
+        with call_spans.span("advisory.best_cosine", {}) as measured:
+            idx = embeddings.get_embedding_index(vault_root)
+            metadata, matrix = idx.all_vectors()
+            rows_by_page: dict[str, list[tuple[int, int]]] = {}
+            for row, (file_path, chunk_index) in enumerate(metadata):
+                if file_path in wanted:
+                    rows_by_page.setdefault(file_path, []).append((chunk_index, row))
+            texts = idx._texts_for(
+                [(fp, ci) for fp, rows in rows_by_page.items() for ci, _row in rows]
+            )
+            vectors: dict[str, np.ndarray] = {}
+            for file_path, rows in rows_by_page.items():
+                rows.sort()
+                chunks = wanted[file_path]
+                if [ci for ci, _row in rows] != list(range(len(chunks))):
+                    continue
+                if [texts.get((file_path, ci)) for ci, _row in rows] != chunks:
+                    continue
+                stacked = np.asarray([matrix[row] for _ci, row in rows], dtype=np.float32)
+                norms = np.linalg.norm(stacked, axis=1, keepdims=True)
+                vectors[file_path] = stacked / np.maximum(norms, 1e-12)
+            if measured is not None:
+                measured["texts"] = 0
+                measured["pages"] = len(vectors)
+                measured["vectors"] = sum(len(v) for v in vectors.values())
+            best: dict[frozenset[str], float] = {}
+            names = sorted(vectors)
+            for i, a in enumerate(names):
+                for b in names[i + 1 :]:
+                    best[frozenset((a, b))] = float((vectors[a] @ vectors[b].T).max())
+            return best, set(names)
+    except ImportError as e:
+        log.debug("pairwise_best_cosine_from_sidecar unavailable (%s)", e)
+        return {}, set()
+    except Exception as e:  # noqa: BLE001 -- best-effort, the pack degrades to no tension
+        log.debug("pairwise_best_cosine_from_sidecar failed: %s", e)
+        return {}, set()
 
 
 def best_cosine_per_file_for_vectors(
@@ -806,9 +858,7 @@ def best_cosine_per_file_for_vectors(
             self_canon = _canon(self_path) if self_path else None
             best_per_file: dict[str, float] = {}
             for v in rows:
-                for fp, _cidx, _ctext, score in idx.search(
-                    v, k=k, allowed_paths=allowed_paths
-                ):
+                for fp, _cidx, _ctext, score in idx.search(v, k=k, allowed_paths=allowed_paths):
                     if self_canon and _canon(fp) == self_canon:
                         continue
                     if fp not in best_per_file or score > best_per_file[fp]:
@@ -933,7 +983,8 @@ def detect_contradictions(
         log.warning(
             "EXOMEM_CONTRADICTION_FLOOR (%s) >= dup ceiling (%s); "
             "contradiction band disabled this call",
-            floor, ceiling,
+            floor,
+            ceiling,
         )
         return []
     best_per_file = (
