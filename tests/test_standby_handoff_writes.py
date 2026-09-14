@@ -65,6 +65,7 @@ from exomem import graph_sync, service_standby  # noqa: E402
 from exomem.epistemic_graph import EpistemicGraphIndex  # noqa: E402
 
 root = Path(sys.argv[1])
+watcher_boot_seed = len(sys.argv) > 2 and sys.argv[2] == "seed"
 generated = root / GENERATED
 
 passes = []
@@ -90,6 +91,32 @@ warm_passes = len(passes)
 
 # D8: the previous worker and its descendants have exited; take ownership.
 promotion = service_standby.promote(root, migrated=False)
+
+if watcher_boot_seed:
+    # The production shape this harness used to omit. A standby's activation is
+    # deferred, so no watcher runs while it warms and adopts; the watcher starts
+    # at `release()`, strictly AFTER promotion, and its boot pass seeds the
+    # recall registry per scope. A seed empties the retained history, so it
+    # lands directly under the adoption's floor -- and with `graph_handoff`
+    # carried forward, nothing re-adopts to put one back.
+    from exomem import find as find_module  # noqa: E402
+    from exomem import freshness  # noqa: E402
+    from exomem.vault import walk_vault_md  # noqa: E402
+
+    def _entries(scope):
+        if scope == "vault":
+            paths = walk_vault_md(root)
+        else:
+            kb = root / freshness.kb_dirname()
+            paths = find_module._walk_md(kb) if kb.is_dir() else ()
+        for path in paths:
+            try:
+                yield (str(path), freshness.stat_signature(path))
+            except OSError:
+                continue
+
+    for scope in freshness.SCOPES:
+        freshness.seed(root, scope, _entries(scope))
 
 acknowledgements = []
 per_write_rebuilds = []
@@ -117,8 +144,8 @@ print(
 '''
 
 
-def _run_standby(vault: Path, tmp_path: Path) -> dict:
-    script = tmp_path / "standby_child.py"
+def _run_standby(vault: Path, tmp_path: Path, arm: str = "noseed") -> dict:
+    script = tmp_path / f"standby_child_{arm}.py"
     script.write_text(
         _STANDBY_CHILD.format(tests_dir=str(Path(__file__).parent)), encoding="utf-8"
     )
@@ -127,7 +154,7 @@ def _run_standby(vault: Path, tmp_path: Path) -> dict:
         [str(Path(__file__).resolve().parents[1] / "src"), environment.get("PYTHONPATH", "")]
     ).rstrip(os.pathsep)
     completed = subprocess.run(
-        [sys.executable, str(script), str(vault)],
+        [sys.executable, str(script), str(vault), arm],
         capture_output=True,
         text=True,
         env=environment,
@@ -138,12 +165,23 @@ def _run_standby(vault: Path, tmp_path: Path) -> dict:
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
+@pytest.mark.parametrize("arm", ["noseed", "seed"])
 def test_a_promoted_standby_serves_its_first_ten_writes_incrementally(
-    handoff_vault: Path, tmp_path: Path
+    handoff_vault: Path, tmp_path: Path, arm: str
 ) -> None:
-    """The whole-vault pass a replacement used to pay is gone after promotion."""
+    """The whole-vault pass a replacement used to pay is gone after promotion.
+
+    The `seed` arm is the production shape, and this harness ran without it
+    long enough to hide a regression: a standby's activation is deferred, so
+    its adoption runs with no watcher, and the watcher's boot seed then lands
+    at `release()` -- after promotion -- emptying the retained history under
+    the adoption's floor. With `graph_handoff` carried forward nothing
+    re-adopts, so the first governed write fell back on
+    `recall_delta_incomplete` and rebuilt the whole vault: `[1, 0, 0, ...]` in
+    the production shape against `[0] * 10` here. Both arms now hold.
+    """
     _run_child(handoff_vault, tmp_path, ["outgoing"])
-    report = _run_standby(handoff_vault, tmp_path)
+    report = _run_standby(handoff_vault, tmp_path, arm)
 
     cutover = report["readiness"]
     assert cutover["components"]["graph_snapshot"] == "ready", cutover

@@ -1187,20 +1187,26 @@ def _seed_recall_history_floor(key: tuple[str, str], origin: int) -> None:
     `after` is `<= origin`. So the first delta from an adopted checkpoint comes
     back complete and either empty or exactly the paths changed since.
 
-    This is NOT a widening of `recall_delta_incomplete`, which must keep
-    answering genuine `DELTA_HISTORY_LIMIT` overflow with a rebuild. The floor
-    is an ordinary history entry: once `DELTA_HISTORY_LIMIT` further events have
-    trimmed it away, the origin is unbridgeable again and the guard says so.
+    Seeded ONLY into an empty history, and that restriction is load-bearing
+    rather than defensive. A non-empty history whose front sits above the origin
+    is not a cold start -- it is a window that OVERFLOWED, and the entries it is
+    missing are real edits that were trimmed off the front. `origin` is
+    `min(current, sampled_generation)`, so a proof walk long enough to see
+    `DELTA_HISTORY_LIMIT` events pulls the origin back BEHIND that hole, and a
+    floor written there would span it: the delta comes back `complete` with the
+    trimmed pages silently absent. Demonstrated with a page edited during the
+    proof and 258 further events after it. An empty history cannot hide a hole,
+    because there is nothing there to have lost.
+
+    So this is NOT a widening of `recall_delta_incomplete`, which keeps
+    answering genuine overflow with a rebuild: the overflow that happens AFTER
+    an adoption trims the floor away like any other entry, and the overflow that
+    happened INSIDE the proof window never gets a floor at all.
     """
     history = _recall_history.setdefault(key, [])
-    if history and history[0][0] <= origin:
-        # Real history already reaches at or below the origin; nothing to bridge.
+    if history:
         return
-    history.insert(0, (origin, origin, frozenset(), False))
-    # Deliberately not trimmed here. `del history[:overflow]` drops from the
-    # front, so trimming on insert would delete the entry just inserted and
-    # leave the bug in place. The next `_record_recall_event` trims normally,
-    # which is also the point at which losing the floor becomes correct.
+    history.append((origin, origin, frozenset(), False))
 
 
 def adopted_recall_origin(
@@ -1328,6 +1334,56 @@ def _project_recall_entries(
             return projected, identity
 
 
+def _reseed_recall_history_floors(
+    key: tuple[str, str], previous: list[tuple[int, int, frozenset[str], bool]]
+) -> None:
+    """Re-floor the adopted origins that outlive a seed.
+
+    Call under `_lock`, after the history has been emptied and before anything
+    can append to it.
+
+    `seed` empties the retained history but does NOT drop
+    `_adopted_recall_origins` -- only `invalidate` does that -- so an adopted
+    origin can outlive the only history that could reach it. Not hypothetical:
+    a standby's activation is deferred, so no watcher runs while it warms and
+    adopts; the watcher's boot seed lands at `release()`, AFTER promotion. With
+    `graph_handoff` carried forward nothing re-adopts, so without this the first
+    governed write after a promotion falls back on `recall_delta_incomplete` and
+    rebuilds the whole vault -- the pass adoption exists to remove, reintroduced
+    by the step meant to make the handoff cheap. Measured `[1, 0, 0, ...]`
+    against `[0] * 10`.
+
+    A floor is re-seeded only where claiming zero changes is exactly TRUE: the
+    pre-seed history must have reached at or below the origin (or that window
+    had already overflowed) and must hold no touched paths above it (or those
+    edits would be dropped on the floor). Where either fails the origin is
+    discarded along with the history that described it, the guard refuses, and a
+    rebuild runs. That is the behaviour before any of this, and it is the answer
+    that cannot lose a page.
+    """
+    adopted = _adopted_recall_origins.get(key)
+    if not adopted:
+        return
+    survivors: dict[RecallFreshnessCheckpoint, int] = {}
+    for checkpoint, origin in adopted.items():
+        if previous and previous[0][0] > origin:
+            continue
+        if any(after > origin and paths for _before, after, paths, _proof in previous):
+            continue
+        survivors[checkpoint] = origin
+    if not survivors:
+        _adopted_recall_origins.pop(key, None)
+        return
+    _adopted_recall_origins[key] = survivors
+    history = _recall_history.setdefault(key, [])
+    if history:
+        return
+    # One entry per distinct origin, oldest first, so the guard's `history[0][0]`
+    # is the lowest generation any surviving checkpoint may bridge from.
+    for origin in sorted(set(survivors.values())):
+        history.append((origin, origin, frozenset(), False))
+
+
 def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLike]]) -> None:
     """Install the full `(path_str, signature)` set for a scope and mark it live.
 
@@ -1361,7 +1417,12 @@ def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLik
             _recall_identities[key] = recall_identity
             _recall_publications.pop(key, None)
             _recall_live.add(key)
+            previous_recall_history = _recall_history.get(key, [])
             _recall_history[key] = []
+            # An adopted origin survives a seed even though the history that
+            # could reach it does not. Re-floor the ones a zero-path claim is
+            # true for; drop the rest.
+            _reseed_recall_history_floors(key, previous_recall_history)
     finally:
         _finish_replacement(key, replacement_lock, replacement_epoch)
 

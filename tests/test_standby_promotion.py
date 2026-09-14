@@ -135,7 +135,10 @@ def test_a_standby_takes_no_lease_and_starts_no_scheduler_until_promotion(
     assert activation.released is True
     assert service_standby.promoted() is True
     assert record["snapshot"] == "current"
-    assert record["reproved"] is True
+    # No migration ran, so promotion compared the checkpoint pair rather than
+    # re-running the source proof. The record says which happened.
+    assert record["revalidated"] is True
+    assert record["reproved"] is False
 
 
 def test_promotion_records_a_checkpoint_that_moved_under_the_standby(
@@ -152,7 +155,8 @@ def test_promotion_records_a_checkpoint_that_moved_under_the_standby(
     service_standby.prove_graph_snapshot(tmp_path)
     record = service_standby.promote(tmp_path, migrated=False)
     assert record["snapshot"] == "advanced"
-    assert record["reproved"] is True
+    assert record["revalidated"] is True
+    assert record["reproved"] is False
 
 
 def test_a_declared_migration_re_runs_the_whole_source_proof(
@@ -182,6 +186,9 @@ def test_a_declared_migration_re_runs_the_whole_source_proof(
     assert reproofs == ["reprove"]
     assert record["snapshot"] == "current"
     assert record["migrated"] is True
+    # The migrator ran, so this branch really did re-run the whole source proof.
+    assert record["reproved"] is True
+    assert record["revalidated"] is True
 
 
 def test_a_failed_reproof_promotes_anyway_and_records_the_rebuild(

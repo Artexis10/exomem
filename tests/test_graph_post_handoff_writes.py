@@ -2488,9 +2488,9 @@ def test_a_promoted_warm_repeats_neither_the_adoption_nor_the_corpus_build(
     full the warm its standby had already finished in the same process: a second
     `graph snapshot adoption adopted=True residue=0` at 10:23:03 after the
     standby's at 10:22:13, and a 9935.2 ms corpus build after the standby's
-    8516.1 ms one. Promotion re-proved the snapshot (`reproved: True, snapshot:
-    'current'`) 46.8 ms before that, so nothing about the second adoption could
-    have returned a different answer.
+    8516.1 ms one. Promotion re-validated the snapshot (`snapshot: 'current'`)
+    46.8 ms before that, so nothing about the second adoption could have
+    returned a different answer.
     """
     from exomem import service_standby, warmup
 

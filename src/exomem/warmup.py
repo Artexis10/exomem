@@ -459,6 +459,16 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         # enabled. Running it beside the detached repair owner makes the two
         # publications invalidate one another, so leave these disposable caches
         # cold until the admitted catalogue can serve their first request.
+        #
+        # A carried `lexical` keeps the mark it was given in
+        # `_carry_forward_standby_readiness`, and that is deliberate rather than
+        # an oversight of this branch. The standby marks `lexical` only after
+        # proving the catalogue current and warming these caches IN THIS
+        # PROCESS, so the caches are real memory that a later repair does not
+        # take away; what this branch declines is building more of them beside
+        # a repair owner, which is a publication concern, not a readiness one.
+        # Re-marking here would be wrong; un-marking would defer requests for
+        # caches this process already holds.
         log.info("optional recall cache warm-up skipped during catalog repair")
 
     def _model_step(name: str, fn) -> bool:

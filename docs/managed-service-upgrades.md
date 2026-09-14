@@ -263,7 +263,8 @@ match and the manifest is complete, the step is recorded as skipped:
 ```json
 {"handoff": {"standby": "ready",
              "migration": {"state": "skipped", "reason": "declared_none"},
-             "promotion": {"snapshot": "current", "reproved": true}}}
+             "promotion": {"snapshot": "current",
+                           "revalidated": true, "reproved": false}}}
 ```
 
 `handoff.unavailable_ms` is the window nobody was served in — pause to resume —
@@ -273,6 +274,13 @@ manifest state that was not complete) when it runs. `promotion.snapshot` is
 `advanced` when it moved, and `rebuild-after-promotion` when the re-proof failed
 — in that last case promotion still proceeds and the coalesced rebuild path owns
 the repair.
+
+`promotion.revalidated` says promotion re-checked the snapshot at all;
+`promotion.reproved` says it re-ran the whole source proof, which happens only
+when the migrator ran. Without a migration, promotion compares the checkpoint
+pair instead — a real re-validation against the one writer the sequence has not
+already excluded, and deliberately cheaper, because a full source proof would
+add seconds to the one window this whole sequence exists to shorten.
 
 ### The service environment file
 

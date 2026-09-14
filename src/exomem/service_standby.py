@@ -523,7 +523,17 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
         if not _standby:
             raise RuntimeError("only a standby worker can be promoted")
         proved = _proved_token
-    record: dict[str, Any] = {"ok": True, "migrated": bool(migrated), "reproved": False}
+    # `revalidated` says promotion re-checked the snapshot at all; `reproved`
+    # says it re-ran the whole SOURCE proof, which only the migrated branch
+    # does. The other branch compares the checkpoint pair -- a real
+    # re-validation, and deliberately cheaper, but not a proof, and calling it
+    # one overstated what the handoff record was attesting to.
+    record: dict[str, Any] = {
+        "ok": True,
+        "migrated": bool(migrated),
+        "revalidated": False,
+        "reproved": False,
+    }
     started = time.monotonic()
     adoption = _adoption
     if proved is None:
@@ -537,11 +547,13 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
             # The re-proof supersedes the warm's: `adoption_record()` must
             # report the residue this process actually owes.
             _adoption = adoption
+        record["revalidated"] = True
         record["reproved"] = True
         record["snapshot"] = "current" if adoption.adopted else "rebuild-after-promotion"
     else:
         current = snapshot_token(Path(vault_root))
-        record["reproved"] = True
+        # A checkpoint-pair comparison, not a source proof: see `record` above.
+        record["revalidated"] = True
         if current is None:
             record["snapshot"] = "rebuild-after-promotion"
         elif current != proved:
