@@ -224,9 +224,15 @@ def warm_graph_handoff(vault_root: Path) -> dict[str, float]:
     bailing on `resolver_snapshot_unavailable`.
 
     Ordering is load-bearing and pinned by test: this runs after the watcher's
-    registry seed and after the retrieval catalog is admitted, because
-    `adopt_recall_origin` refuses a cold scope and a seed replaces the registry
-    maps wholesale. Each step soft-fails like every other warm step.
+    registry seed -- a seed replaces the registry maps wholesale -- and BEFORE
+    the semantic corpus build that admits writers, because a write admitted
+    ahead of adoption has no lineage to advance. Each step soft-fails like
+    every other warm step.
+
+    `EXOMEM_DISABLE_WARMUP` is the one gate still allowed to skip it, and
+    deliberately: unlike `mode=normal` and `catalog_ready`, which are default
+    states this process reaches on its own, it is an explicit operator opt-out
+    from warming at all. It is not set on the personal service.
     """
     durations: dict[str, float] = {}
     if not warmup_enabled():
@@ -326,11 +332,21 @@ def warm_caches(
 
 
 def warm_all(vault_root: Path) -> dict[str, float]:
-    """Required catalog/corpus state, then optional caches and model preloads.
+    """Required catalog/graph/corpus state, then optional caches and model preloads.
 
     Order is the product contract (catalog-first): retrieval admission lands
-    first, then semantic write admission, before optional full-corpus caches
-    and models can extend the warm window.
+    first, then the graph handoff, then semantic write admission, before
+    optional full-corpus caches and models can extend the warm window.
+
+    The graph handoff runs *before* the semantic corpus, and that order is
+    load-bearing rather than tidy. Writers are admitted once the corpus is
+    built, and on the personal service that build is 30-36 s on 4209 pages --
+    so with adoption behind it, the first governed write of a replacement
+    worker dispatched with no delta origin, fell back on
+    `recall_delta_incomplete`, and registered the whole-vault rebuild adoption
+    exists to remove. The rebuild was then still in flight when adoption ran
+    and declined its proof against a sidecar being rewritten under it. Adoption
+    is sub-second to a few seconds; it belongs in the first seconds of the warm.
     Each stage soft-fails; a failed model preload leaves its component
     not-ready (never marked), so requests defer for the rest of the warm and
     then return to inline lazy-load semantics. Never raises.
@@ -354,6 +370,35 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             (time.perf_counter() - catalog_started) * 1000.0,
             1,
         )
+    try:
+        # Unconditional, and first. Adoption is what lets a replacement worker's
+        # first governed write stay incremental, so nothing that merely makes
+        # this process nicer may run ahead of it, and no gate that exists to
+        # protect a *cache* may skip it:
+        #
+        #   * not the resource mode -- `mode=normal` is the default and leaves
+        #     `preload_cpu_caches` False, which is how the 0.83.1 deploy skipped
+        #     adoption entirely;
+        #   * not the corpus build -- writers are admitted on `semantic_corpus`,
+        #     30-36 s on this vault, which is how 0.84.1 admitted a write into a
+        #     process with no delta origin;
+        #   * not `catalog_ready` -- the repair it defers to republishes the
+        #     *lexical* catalogue, while this step builds a process-local
+        #     resolver (`find.recall_resolver_snapshot`) and proves the graph
+        #     sidecar. Neither is the artifact the detached repair owner is
+        #     rewriting, so the collision that makes `warm_caches` wait does not
+        #     apply here. A proof taken against a moving projection declines and
+        #     says so; a proof never taken costs the next write a whole vault.
+        durations.update(warm_graph_handoff(vault_root))
+    finally:
+        # Marked on every exit, including the ones where nothing ran. The
+        # writers' gate waits on this component, and a component that can be
+        # skipped without being marked would hold every write until the whole
+        # warm -- model preloads included -- finished. "Settled" here means the
+        # delta origin is as good as this process will get it, which an
+        # adoption that declined or never ran satisfies as much as one that
+        # succeeded.
+        readiness.mark_ready("graph_handoff")
     semantic_started = time.perf_counter()
     try:
         from . import semantic_contract
@@ -368,11 +413,6 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             1,
         )
     if catalog_ready:
-        # Unconditional, and ahead of the optional caches: adoption is what lets
-        # a replacement worker's first governed write stay incremental, so the
-        # resource mode that skips CPU caches must not also skip it. Still
-        # inside `catalog_ready`, because adoption needs the admitted catalogue.
-        durations.update(warm_graph_handoff(vault_root))
         durations.update(
             warm_caches(
                 vault_root,
