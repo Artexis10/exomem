@@ -1150,10 +1150,57 @@ def adopt_recall_origin(
         if sampled_generation is not None:
             origin = min(origin, int(sampled_generation))
         adopted = _adopted_recall_origins.setdefault(key, {})
-        adopted[checkpoint] = min(adopted.get(checkpoint, origin), origin)
+        # `min` so a re-adoption can only lower an origin, never raise it: a
+        # promoted standby adopts the same checkpoint twice (once warming, once
+        # re-proving at promotion) and the second pass must not narrow the
+        # window the first one opened.
+        origin = min(adopted.get(checkpoint, origin), origin)
+        adopted[checkpoint] = origin
+        _seed_recall_history_floor(key, origin)
         for stale in list(adopted)[: max(0, len(adopted) - ADOPTED_RECALL_ORIGIN_LIMIT)]:
             adopted.pop(stale, None)
         return True
+
+
+def _seed_recall_history_floor(key: tuple[str, str], origin: int) -> None:
+    """Make an adopted origin reachable from this scope's delta history.
+
+    Call under `_lock`.
+
+    Naming an origin is only half of an adoption. `recall_delta_since` bridges a
+    checkpoint by replaying `_recall_history` from that origin forward, and it
+    refuses anything below the history's front (`origin < history[0][0]`). But
+    the history begins where THIS process's registry went live, and
+    `adopt_recall_origin` deliberately names an origin at or below that -- the
+    sampled generation, taken before the proof -- so the origin it just declared
+    usable fell off the front of the very history that has to serve it.
+
+    Measured on the 0.85.0 cutover: two clean adoptions (10:22:13 and 10:23:03,
+    both `adopted=True residue=0`), a watcher that admitted a coherent graph at
+    10:23:38, and then the first governed write at 10:24:49 falling back
+    `recall_delta_incomplete` with `external_pending=False` and registering a
+    whole-vault rebuild (generation 3075). The second write was incremental: a
+    cold origin wearing an overflow's clothes, self-healing one write too late.
+
+    The floor is a zero-path entry at `origin`. It satisfies the guard, and it
+    contributes nothing to any delta because the replay skips every entry whose
+    `after` is `<= origin`. So the first delta from an adopted checkpoint comes
+    back complete and either empty or exactly the paths changed since.
+
+    This is NOT a widening of `recall_delta_incomplete`, which must keep
+    answering genuine `DELTA_HISTORY_LIMIT` overflow with a rebuild. The floor
+    is an ordinary history entry: once `DELTA_HISTORY_LIMIT` further events have
+    trimmed it away, the origin is unbridgeable again and the guard says so.
+    """
+    history = _recall_history.setdefault(key, [])
+    if history and history[0][0] <= origin:
+        # Real history already reaches at or below the origin; nothing to bridge.
+        return
+    history.insert(0, (origin, origin, frozenset(), False))
+    # Deliberately not trimmed here. `del history[:overflow]` drops from the
+    # front, so trimming on insert would delete the entry just inserted and
+    # leave the bug in place. The next `_record_recall_event` trims normally,
+    # which is also the point at which losing the floor becomes correct.
 
 
 def adopted_recall_origin(
