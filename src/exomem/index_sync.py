@@ -75,7 +75,9 @@ _DEFERRAL_TELEMETRY_LOCK = threading.Lock()
 #: paths, `graph_repair_unreadable_predecessor` only on the branch that
 #: proved the same thing for a fenced-but-intact sidecar, and
 #: `graph_repair_cold_resolver` only on the branch that queued the complete
-#: recall delta because no resident resolver could widen it. The disabled codes
+#: recall delta because no resident resolver could widen it, and
+#: `graph_repair_external_pending` only on the branch that queued this write's
+#: own paths because a path-scoped unattributed event covered them. The disabled codes
 #: record nothing and are deliberately absent, so a stale queue entry naming the
 #: same path can never bless them.
 _GRAPH_COVERAGE_CODES = frozenset(
@@ -83,6 +85,7 @@ _GRAPH_COVERAGE_CODES = frozenset(
         "graph_repair_queued",
         "graph_repair_unreadable_predecessor",
         "graph_repair_cold_resolver",
+        "graph_repair_external_pending",
     }
 )
 

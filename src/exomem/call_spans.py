@@ -23,6 +23,7 @@ between them.
 from __future__ import annotations
 
 import functools
+import logging
 import threading
 import time
 from contextlib import contextmanager
@@ -34,6 +35,8 @@ from typing import Any
 MCP_CALL_TOKEN: ContextVar[str | None] = ContextVar(
     "exomem_mcp_call_token", default=None
 )
+
+log = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
 _SPANS: dict[str, dict[str, Any]] = {}
@@ -47,6 +50,27 @@ MAX_NAMES_PER_CALL = 64
 #: paths that never reach it, such as a direct test harness.
 MAX_CALLS = 256
 NAME_MAX_CHARS = 64
+
+
+def _evict_oldest_locked() -> None:
+    """Drop the oldest tracked call to stay under `MAX_CALLS`.
+
+    Logged, because this is the one way a live call's measurements disappear
+    without anyone asking: everything else is a pop by the middleware or a TTL
+    expiry. A diagnosis reading an empty `spans` list would otherwise be unable
+    to tell "this call was not instrumented" from "this call was evicted".
+    """
+    if not _SPANS:
+        return
+    token = min(_SPANS, key=lambda key: _SPANS[key]["at"])
+    dropped = _SPANS.pop(token, None)
+    if dropped is not None:
+        log.info(
+            "call span eviction dropped an in-flight entry tracked=%d names=%d age_s=%.1f",
+            len(_SPANS) + 1,
+            len(dropped.get("names", {})),
+            time.monotonic() - float(dropped["at"]),
+        )
 
 
 def _sweep_locked(now: float) -> None:
@@ -76,7 +100,7 @@ def record_span(name: str, elapsed_ms: float) -> None:
             entry = _SPANS.get(token)
             if entry is None:
                 if len(_SPANS) >= MAX_CALLS:
-                    _SPANS.pop(min(_SPANS, key=lambda key: _SPANS[key]["at"]), None)
+                    _evict_oldest_locked()
                 entry = {"at": now, "names": {}}
                 _SPANS[token] = entry
             names: dict[str, list[float]] = entry["names"]
@@ -151,7 +175,7 @@ def mark(name: str) -> None:
             entry = _SPANS.get(token)
             if entry is None:
                 if len(_SPANS) >= MAX_CALLS:
-                    _SPANS.pop(min(_SPANS, key=lambda key: _SPANS[key]["at"]), None)
+                    _evict_oldest_locked()
                 entry = {"at": now, "names": {}}
                 _SPANS[token] = entry
             marks: dict[str, float] = entry.setdefault("marks", {})

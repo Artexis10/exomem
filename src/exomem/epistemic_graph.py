@@ -4009,6 +4009,53 @@ class EpistemicGraphIndex:
         return affected, {}
 
     @call_spans.timed("graph.refresh_paths")
+    def _queue_graph_repair(
+        self,
+        scope: set[str],
+        *,
+        reason: str,
+        graph_checkpoint: graph_sync.GraphSyncCheckpoint | None,
+    ) -> bool:
+        """Put `scope` on the durable graph queue; False means it did not land.
+
+        The one seam every deferral that claims durable per-path coverage goes
+        through -- the incremental bail-outs, adoption residue, and the
+        external-pending fence -- so "the queue owns this repair" means the same
+        thing at each of them and cannot quietly stop meaning it at one.
+
+        False is the caller's signal to fall back to a whole-vault rebuild: work
+        that was neither queued nor rebuilt is lost, and losing it silently is
+        worse than paying the pass.
+        """
+        try:
+            receipts = deferred_index.add_graph_receipts(self.vault_root, sorted(scope))
+            queued_scope = {receipt.rel_path for receipt in receipts}
+            if queued_scope != scope:
+                # The path queue admits only canonical Knowledge Base Markdown.
+                # A vault-wide resolver change can include a supported recall
+                # path outside that root, and silently dropping it would make a
+                # later coalesced response false. Escalate incomplete path
+                # coverage to monotonic whole-vault debt that an already-running
+                # drain cannot clear.
+                graph_generation = int(
+                    graph_sync.status(self.vault_root).get("generation") or 0
+                )
+                checkpoint_generation = (
+                    int(graph_checkpoint.generation) if graph_checkpoint is not None else 0
+                )
+                deferred_index.advance_graph_full_rebuild(
+                    self.vault_root,
+                    after_generation=max(graph_generation, checkpoint_generation),
+                )
+        except Exception:  # noqa: BLE001 - a queue failure must not lose the rebuild
+            log.warning(
+                "graph deferral enqueue failed reason=%s; falling back to rebuild",
+                reason,
+                exc_info=True,
+            )
+            return False
+        return True
+
     def refresh_paths(
         self,
         paths: list[Path],
@@ -4052,19 +4099,50 @@ class EpistemicGraphIndex:
                 # path. Without it this deferral is the one bail-out that
                 # reaches a whole-vault rebuild while logging nothing at all --
                 # exactly the silence #576 was diagnosed through.
+                unscoped = freshness.external_pending_unscoped(self.vault_root)
                 log.info(
                     "graph incremental refresh deferred reason=external_event_covers_these_paths "
-                    "external_paths_pending=%d graph_checkpoint=%s",
+                    "external_paths_pending=%d unscoped=%s graph_checkpoint=%s",
                     len(freshness.external_pending_paths(self.vault_root)),
+                    unscoped,
                     graph_checkpoint.checkpoint_sha256 if graph_checkpoint is not None else None,
                 )
+                # The mark is correct and the fence stays, but it describes a
+                # *bounded, known* set -- this write's own paths -- which is the
+                # definition of work the durable queue owns. Returning a bare
+                # deferral made dispatch read it as a missing rebuild and
+                # schedule the vault: measured at seven whole-vault passes
+                # across six writes when every write's own path carried a mark.
+                #
+                # The watcher's own repair of that mark is deliberately NOT
+                # treated as the coverage. A dead or exhausted watcher would
+                # turn that assumption into silent debt; a receipt is durable
+                # and a drain converges it either way. `drain_paths` does not
+                # pass this fence, so convergence does not depend on the mark
+                # clearing first, and the refresh is idempotent if both land.
+                # Only a *scoped* mark. The watcher's fail-closed default marks
+                # with no scope at all when it cannot classify a fan-out
+                # incompleteness, and that is a statement that the affected set
+                # is unknown -- the one external-pending state a bounded queue
+                # cannot own, because no set of paths this write could enqueue
+                # would be the repair. That arm keeps the whole-vault pass, and
+                # `test_dispatch_names_the_gate_that_sent_a_write_to_a_whole_vault_rebuild`
+                # holds it there.
+                queued = not unscoped and self._queue_graph_repair(
+                    {
+                        rel
+                        for candidate in (*paths, *created_paths)
+                        if (rel := _vault_rel(self.vault_root, Path(candidate))) is not None
+                    },
+                    reason="external_event_covers_these_paths",
+                    graph_checkpoint=graph_checkpoint,
+                )
                 self._mark_unavailable()
-                return {
-                    "indexed_files": 0,
-                    "nodes": 0,
-                    "edges": 0,
-                    "deferred": 1,
-                }
+                report = {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
+                if queued:
+                    report["queued"] = 1
+                    report["external_pending"] = 1
+                return report
             report = self._refresh_paths_locked(
                 paths,
                 created_paths=created_paths,
@@ -4165,39 +4243,9 @@ class EpistemicGraphIndex:
             rebuild that then fails leaves durable work behind instead of
             nothing.
             """
-            try:
-                receipts = deferred_index.add_graph_receipts(
-                    self.vault_root, sorted(deferred_scope)
-                )
-                queued_scope = {receipt.rel_path for receipt in receipts}
-                if queued_scope != deferred_scope:
-                    # The path queue admits only canonical Knowledge Base
-                    # Markdown. A vault-wide resolver change can include a
-                    # supported recall path outside that root, and silently
-                    # dropping it would make a later coalesced response false.
-                    # Escalate incomplete path coverage to monotonic whole-vault
-                    # debt that an already-running drain cannot clear.
-                    graph_generation = int(
-                        graph_sync.status(self.vault_root).get("generation") or 0
-                    )
-                    checkpoint_generation = (
-                        int(graph_checkpoint.generation)
-                        if graph_checkpoint is not None
-                        else 0
-                    )
-                    deferred_index.advance_graph_full_rebuild(
-                        self.vault_root,
-                        after_generation=max(
-                            graph_generation,
-                            checkpoint_generation,
-                        ),
-                    )
-            except Exception:  # noqa: BLE001 - a queue failure must not lose the rebuild
-                log.warning(
-                    "graph deferral enqueue failed reason=%s; falling back to rebuild",
-                    reason,
-                    exc_info=True,
-                )
+            if not self._queue_graph_repair(
+                deferred_scope, reason=reason, graph_checkpoint=graph_checkpoint
+            ):
                 return None
             if graph_checkpoint is None:
                 return {
@@ -7546,6 +7594,16 @@ def upsert_after_write(
                     # this decision exists to remove.
                     return GraphDispatchResult(
                         "deferred", "graph_repair_unreadable_predecessor", required
+                    )
+                if report.get("external_pending") and report.get("queued"):
+                    # The fence door, with its own code for D2's reason: the
+                    # doctor and the recovery alarm must be able to tell a write
+                    # deferred by an unattributed event on its own paths from a
+                    # fenced predecessor, a cold resolver and a lineage gap. The
+                    # queue is proven to hold this write's paths, so this reports
+                    # pending even for a standalone caller.
+                    return GraphDispatchResult(
+                        "deferred", "graph_repair_external_pending", required
                     )
                 if report.get("resolver_cold") and report.get("queued"):
                     # The cold-resolver door, with its own code for D2's reason:

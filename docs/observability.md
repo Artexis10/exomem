@@ -71,7 +71,7 @@ the durable queue and a drain will converge them, `GRAPH_SYNC_REBUILD_IN_PROGRES
 when a whole-vault pass is running. Both are healthy. Neither requires rereading
 the written note or running maintenance.
 
-Behind that terminal the dispatch chose one of three repairs, and the log says
+Behind that terminal the dispatch chose one of four repairs, and the log says
 which:
 
 - `graph dispatch routed an unreadable predecessor to incremental repair` — the
@@ -87,6 +87,15 @@ which:
   `graph_repair_cold_resolver`. No whole-vault pass runs. A run of these means
   start-up never primed the resolver — check for the `graph snapshot adoption`
   line in the warm-up.
+- `graph incremental refresh deferred reason=external_event_covers_these_paths` —
+  an unattributed edit covers the very paths this write touched, so the write
+  cannot trust its own view of them. It defers, queues exactly those paths as
+  durable graph repair, and the dispatch outcome is
+  `graph_repair_external_pending`. No whole-vault pass runs, and the drain
+  converges the paths whether or not the watcher's own repair lands first. The
+  same line with `unscoped=True` is the watcher's fail-closed default, which
+  names no affected set at all; that one still rebuilds, and the rebuild line
+  below says so.
 - `graph dispatch registered a whole-vault rebuild reason=…` — a proven verdict:
   `graph_sync_predecessor_mismatch` or `…_absent` (the sidecar's acknowledgement
   is genuinely not this checkpoint's predecessor) or `graph_sync_snapshot_unusable`

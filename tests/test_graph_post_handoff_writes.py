@@ -408,14 +408,127 @@ def test_writes_after_a_worker_replacement_stay_incremental(
     # and a mark on the path being written is then correct. Each cycle the
     # watcher had not finished with buys one more, because a write dispatched
     # behind an unretired mark is fenced by design; that is a contended host,
-    # not the loop. Every write being fenced is the loop this change removed,
-    # and no tolerance reaches that.
+    # not the loop.
     assert fenced_writes <= 1 + unsettled, (
         f"{fenced_writes} of {LIVE_WRITE_COUNT} governed writes were fenced by "
         f"an unattributed event with {unsettled} watcher cycle(s) still in "
         f"flight: {rendered}"
     )
-    assert fenced_writes < LIVE_WRITE_COUNT, f"every governed write was fenced: {rendered}"
+    # The count above bounds a race; this is what makes being fenced harmless.
+    # A fence used to return a bare deferral, which dispatch read as a missing
+    # rebuild and answered with a whole-vault pass, so "every write fenced" and
+    # "the loop" were the same statement. They are not any more: a path-scoped
+    # fence queues its own paths (task 1.12), so what has to stay zero is a
+    # deferral the queue does not own -- true however many writes were fenced.
+    assert "incremental_refresh_deferred_without_queue_coverage" not in caplog.text, (
+        f"a governed write deferred without queue coverage: {rendered}"
+    )
+    _assert_incremental_latency(acknowledgements, bound=LIVE_ACK_BOUND_SECONDS)
+    assert _drain_repair_queue(root, live_watcher) == 0, "the graph repair queue never drained"
+
+
+def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
+    live_handoff_vault: Path,
+    live_watcher: file_watcher.FileWatcher,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The fence that covers a write's own paths owes the queue those paths.
+
+    Found by a stress probe on the cold-resolver change: with the resolver
+    forced to miss on every write, per-write rebuilds came back `[1, 0, 1, 0,
+    1, 0]`. Every write that reached `_refresh_paths_locked` deferred correctly
+    and queued; the three rebuilds entered through a different, older door. The
+    path-scoped external-pending fence sits *before* that function, returns
+    `{deferred: 1}` with no `queued`, and dispatch reads a deferral without
+    queue coverage as a missing rebuild and schedules the vault.
+
+    The mark is correct -- this process cannot trust its view of those paths --
+    but it describes a bounded, known set, which is the definition of work the
+    durable queue owns. The drain repairs it through `drain_paths`, which does
+    not pass this fence, so convergence does not depend on the watcher's own
+    repair landing first.
+
+    Process-wide whole-vault passes are deliberately not the oracle here, for
+    the reason the six-write test above gives: a running watcher may legitimately
+    run one of its own. What is asserted is what dispatch chose, which is what
+    the probe measured.
+
+    The graph drain daemon runs between writes here because it does in
+    production -- it fires within a second of the write that queued the debt.
+    It is load-bearing, and honestly so: a deferral publishes nothing, so until
+    the drain converges the queued paths the graph's acknowledgement stays one
+    generation behind and the NEXT write's predecessor probe reports a proven
+    gap. That is D2's own door, not this one. Measured on this shape: without a
+    drain between writes the fence door contributes zero rebuilds (it was
+    seven) and the predecessor door contributes six; with the drain, one, and
+    that one is `graph_sync_predecessor_present_at_genesis` on the first write
+    of a freshly built fixture.
+    """
+    root = live_handoff_vault
+    generated = root / GENERATED
+    caplog.set_level("INFO", logger="exomem.epistemic_graph")
+
+    outcomes: list[epistemic_graph.GraphDispatchResult] = []
+    real_dispatch = epistemic_graph.upsert_after_write
+
+    def recorded(vault_root: Path, paths: list[Path], **kwargs: object):
+        result = real_dispatch(vault_root, paths, **kwargs)
+        outcomes.append(result)
+        return result
+
+    monkeypatch.setattr(epistemic_graph, "upsert_after_write", recorded, raising=True)
+
+    acknowledgements: list[float] = []
+    queued_after_write: list[bool] = []
+    for i in range(LIVE_WRITE_COUNT):
+        target = generated / f"generated-note-{i:04d}.md"
+        # An unattributed edit to the path this write is about to touch, and
+        # deliberately NOT waited out: the mark has to still be up when the
+        # write dispatches, which is the shape the probe found.
+        _external_edit(live_watcher, target, f"external editor touch {i}")
+        assert freshness.external_pending_for(root, [target]), (
+            "the probe's premise is a mark on the write's own path at dispatch"
+        )
+        acknowledgements.append(_governed_write(root, target, f"governed {i}"))
+        queued_after_write.append(bool(deferred_index.list_graph_paths(root)))
+        # What the graph drain daemon does in production, on the same cadence.
+        index_sync.drain_graph_work(root, limit=64)
+
+    rendered = [round(seconds, 2) for seconds in acknowledgements]
+    fenced = caplog.text.count("reason=external_event_covers_these_paths")
+    assert fenced >= 1, (
+        "the probe's premise never held: no write dispatched under a mark on "
+        "its own paths, so this proves nothing"
+    )
+    uncovered = caplog.text.count("incremental_refresh_deferred_without_queue_coverage")
+    assert uncovered == 0, (
+        f"{uncovered} governed writes deferred without queue coverage and "
+        f"registered a whole-vault rebuild: {rendered}. The fence describes this "
+        "write's own paths, which the durable queue can own."
+    )
+    registered = [
+        line.split("reason=", 1)[1].split(" ", 1)[0]
+        for line in caplog.text.splitlines()
+        if "graph dispatch registered a whole-vault rebuild" in line
+    ]
+    assert set(registered) <= {"graph_sync_predecessor_present_at_genesis"}, (
+        "a fenced write registered a whole-vault rebuild for a reason other "
+        f"than a freshly built fixture's genesis: {registered}"
+    )
+    codes = [result.code for result in outcomes]
+    assert "graph_repair_external_pending" in codes, (
+        f"no fenced write reported the fence's own pending outcome: {codes}"
+    )
+    assert set(codes) <= {
+        "graph_repair_external_pending",
+        "graph_repair_queued",
+        "incremental_completed",
+    }, f"a fenced write reported something other than queued coverage: {codes}"
+    assert any(queued_after_write), (
+        "the fence must leave its own paths on the durable queue, or the "
+        "pending outcome is a claim nothing backs"
+    )
     _assert_incremental_latency(acknowledgements, bound=LIVE_ACK_BOUND_SECONDS)
     assert _drain_repair_queue(root, live_watcher) == 0, "the graph repair queue never drained"
 
