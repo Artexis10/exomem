@@ -7,8 +7,8 @@ kill a production provision at its final step.
 
 This renders each Job the provisioner creates, submits it as a server-side dry
 run, which persists nothing, and asserts the stored shape introduces no Job-spec
-field outside ``JOB_SPEC_SERVER_DEFAULTS`` -- the single list every proof
-tolerates -- and that each such field carries the value the proofs expect.
+field outside the defaults that Job's own proof tolerates, and that each such
+field carries the value the proof expects.
 
 It runs on the same disposable K3s the other exact-cluster tests use, so CI
 exercises it on every pull request rather than when someone remembers to.
@@ -35,6 +35,7 @@ from exomem_provisioner.governance_migration_job import (  # noqa: E402
     build_governance_migration_job,
 )
 from exomem_provisioner.governance_storage_init import (  # noqa: E402
+    STORAGE_INIT_JOB_SPEC_DEFAULTS,
     KubernetesGovernanceStorageInitAdapter,
 )
 from exomem_provisioner.job_execution import JOB_SPEC_SERVER_DEFAULTS  # noqa: E402
@@ -80,10 +81,11 @@ def _migration_body():
     return build_governance_migration_job(request, recovery_envelope=ENVELOPE)
 
 
+# Each builder paired with the server defaults its own proof tolerates.
 BODIES = {
-    "vault-fingerprint": _fingerprint_body,
-    "governance-storage-init": _storage_init_body,
-    "governance-migration": _migration_body,
+    "vault-fingerprint": (_fingerprint_body, JOB_SPEC_SERVER_DEFAULTS),
+    "governance-storage-init": (_storage_init_body, STORAGE_INIT_JOB_SPEC_DEFAULTS),
+    "governance-migration": (_migration_body, JOB_SPEC_SERVER_DEFAULTS),
 }
 
 
@@ -116,19 +118,20 @@ def cluster(request, tmp_path_factory):
 @pytest.mark.parametrize("job", sorted(BODIES))
 def test_server_defaulting_stays_inside_what_the_job_proofs_tolerate(cluster, job):
     # Builders that feed a typed client omit the type header the API server needs.
-    body = {"apiVersion": "batch/v1", "kind": "Job", **BODIES[job]()}
+    build, defaults = BODIES[job]
+    body = {"apiVersion": "batch/v1", "kind": "Job", **build()}
     stored = kubernetes.client.ApiClient().sanitize_for_serialization(
         cluster.create_namespaced_job(body["metadata"]["namespace"], body, dry_run="All")
     )
 
     rendered = set(body["spec"])
     # `selector` is server-generated from the controller UID and proven separately.
-    unexpected = set(stored["spec"]) - rendered - set(JOB_SPEC_SERVER_DEFAULTS) - {"selector"}
-    assert not unexpected, f"{job}: API server added Job-spec fields no proof tolerates"
+    unexpected = set(stored["spec"]) - rendered - set(defaults) - {"selector"}
+    assert not unexpected, f"{job}: API server added Job-spec fields its proof does not tolerate"
 
-    for field, tolerated in JOB_SPEC_SERVER_DEFAULTS.items():
+    for field, tolerated in defaults.items():
         if field in stored["spec"] and field not in rendered:
             assert stored["spec"][field] == tolerated, (
                 f"{job}: API server defaulted {field} to {stored['spec'][field]!r}, "
-                f"but the proofs only tolerate {tolerated!r}"
+                f"but its proof only tolerates {tolerated!r}"
             )
