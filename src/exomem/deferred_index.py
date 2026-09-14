@@ -543,6 +543,15 @@ def _connect_created_owned(
         conn.execute(
             "ALTER TABLE full_upserts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
         )
+    graph_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(graph_upserts)")
+    }
+    if "graph_generation" not in graph_columns:
+        # Deliberately nullable with no default: an existing row was queued
+        # before anything recorded which generation it owed, and inventing one
+        # would let a pre-upgrade receipt bless a lineage gap it knows nothing
+        # about. NULL reads back as "unknown", which never counts as coverage.
+        conn.execute("ALTER TABLE graph_upserts ADD COLUMN graph_generation INTEGER")
     _ensure_derived_batch_schema(conn)
     _ensure_vocabulary_provenance_schema(conn)
     if publish:
@@ -696,6 +705,11 @@ def claim_mixed_drain_queue(vault_root: Path) -> str:
 class DeferredReceipt:
     rel_path: str
     revision: int
+    #: The graph-sync generation this path was queued for, or None when it is
+    #: not known -- a row written before the column existed, or a caller with no
+    #: checkpoint to name. Unknown is never usable as coverage: a receipt that
+    #: cannot say which generation it owes cannot prove that generation queued.
+    graph_generation: int | None = None
 
 
 class EmbeddingFreshness(StrEnum):
@@ -821,7 +835,11 @@ def _add_full_receipts(
 
 
 def _add_plain_receipts(
-    vault_root: Path, rel_paths: list[str], *, table: str
+    vault_root: Path,
+    rel_paths: list[str],
+    *,
+    table: str,
+    generation: int | None = None,
 ) -> tuple[list[DeferredReceipt], int]:
     """Queue paths in an admission-free queue and return exact revisions.
 
@@ -843,28 +861,58 @@ def _add_plain_receipts(
     added = 0
     conn = _connect(vault_root, create=True)
     try:
+        columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+        tracks_generation = "graph_generation" in columns
         conn.execute("BEGIN IMMEDIATE")
         try:
             for rel in rels:
+                stored = "graph_generation" if tracks_generation else "NULL"
                 row = conn.execute(
-                    f"SELECT revision FROM {table} WHERE rel_path = ?", (rel,)
+                    f"SELECT revision, {stored} FROM {table} WHERE rel_path = ?", (rel,)
                 ).fetchone()
                 if row is None:
                     revision = 1
                     added += 1
-                    conn.execute(
-                        f"INSERT INTO {table}"
-                        "(rel_path, created_at, updated_at, revision) VALUES (?, ?, ?, ?)",
-                        (rel, now, now, revision),
-                    )
+                    recorded = generation if tracks_generation else None
+                    if tracks_generation:
+                        conn.execute(
+                            f"INSERT INTO {table}"
+                            "(rel_path, created_at, updated_at, revision, graph_generation) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (rel, now, now, revision, generation),
+                        )
+                    else:
+                        conn.execute(
+                            f"INSERT INTO {table}"
+                            "(rel_path, created_at, updated_at, revision) VALUES (?, ?, ?, ?)",
+                            (rel, now, now, revision),
+                        )
                 else:
                     revision = int(row[0]) + 1
-                    conn.execute(
-                        f"UPDATE {table} SET updated_at = ?, revision = ? "
-                        "WHERE rel_path = ?",
-                        (now, revision, rel),
+                    previous = None if row[1] is None else int(row[1])
+                    # The newest KNOWN generation wins, and an unknown enqueue
+                    # never erases one: the row still owes the repair it was
+                    # queued for, and forgetting that would refuse coverage the
+                    # queue genuinely holds. A stale generation can never rise
+                    # this way -- only a re-queue at a later one moves it.
+                    recorded = (
+                        previous
+                        if generation is None
+                        else max(generation, previous if previous is not None else generation)
                     )
-                receipts.append(DeferredReceipt(rel, revision))
+                    if tracks_generation:
+                        conn.execute(
+                            f"UPDATE {table} SET updated_at = ?, revision = ?, "
+                            "graph_generation = ? WHERE rel_path = ?",
+                            (now, revision, recorded, rel),
+                        )
+                    else:
+                        conn.execute(
+                            f"UPDATE {table} SET updated_at = ?, revision = ? "
+                            "WHERE rel_path = ?",
+                            (now, revision, rel),
+                        )
+                receipts.append(DeferredReceipt(rel, revision, recorded))
         except Exception:
             conn.rollback()
             raise
@@ -893,18 +941,31 @@ def _note_graph_debt() -> None:
         pass
 
 
-def add_graph(vault_root: Path, rel_paths: list[str]) -> int:
+def add_graph(
+    vault_root: Path, rel_paths: list[str], *, generation: int | None = None
+) -> int:
     """Durably queue pages whose epistemic-graph projection needs re-deriving."""
-    _receipts, added = _add_plain_receipts(vault_root, rel_paths, table="graph_upserts")
+    _receipts, added = _add_plain_receipts(
+        vault_root, rel_paths, table="graph_upserts", generation=generation
+    )
     if added:
         _note_graph_debt()
     return added
 
 
-def add_graph_receipts(vault_root: Path, rel_paths: list[str]) -> list[DeferredReceipt]:
-    """Queue graph work and return its exact transaction-local revisions."""
+def add_graph_receipts(
+    vault_root: Path, rel_paths: list[str], *, generation: int | None = None
+) -> list[DeferredReceipt]:
+    """Queue graph work and return its exact transaction-local revisions.
+
+    `generation` is the graph-sync generation this repair is owed for. It is
+    what lets a later predecessor probe prove a lineage gap is covered by
+    durable work rather than guess it from a path name, so a caller that knows
+    it must pass it; one that does not leaves the row unknown, and an unknown
+    row never counts as coverage.
+    """
     receipts, _added = _add_plain_receipts(
-        vault_root, rel_paths, table="graph_upserts"
+        vault_root, rel_paths, table="graph_upserts", generation=generation
     )
     if receipts:
         _note_graph_debt()
@@ -927,7 +988,7 @@ def enqueue_graph_checkpoint(vault_root: Path, checkpoint: Any) -> int:
         return 0
     rels = [rel for rel, _content_hash in checkpoint.paths]
     rels.extend(checkpoint.created_paths)
-    return add_graph(vault_root, rels)
+    return add_graph(vault_root, rels, generation=int(checkpoint.generation))
 
 
 def mark_graph_full_rebuild(vault_root: Path, *, generation: int) -> None:
@@ -1204,6 +1265,26 @@ def snapshot_graph(
     return _snapshot_plain(vault_root, table="graph_upserts", limit=limit, paths=paths)
 
 
+def graph_receipt_generations(vault_root: Path) -> tuple[frozenset[int], bool]:
+    """Which generations the queued graph receipts name, and whether any is unknown.
+
+    The durable artifact a predecessor probe reads to decide whether a lineage
+    gap is already owned by the queue. Two values because they are acted on
+    differently: a generation present in the set has its paths queued, and a
+    single unknown row means some queued repair cannot say what it owes -- which
+    is not evidence about any generation, so the probe refuses on it rather than
+    reasoning around it.
+    """
+    receipts = _snapshot_plain(vault_root, table="graph_upserts")
+    known = {
+        receipt.graph_generation
+        for receipt in receipts
+        if receipt.graph_generation is not None
+    }
+    unknown = any(receipt.graph_generation is None for receipt in receipts)
+    return frozenset(known), unknown
+
+
 def list_graph_paths(vault_root: Path, *, limit: int | None = None) -> list[str]:
     return [receipt.rel_path for receipt in snapshot_graph(vault_root, limit=limit)]
 
@@ -1251,8 +1332,11 @@ def _snapshot_plain(
             # that does not exist yet; the next writable open migrates it.
             return []
         revision = "revision" if "revision" in columns else "1 AS revision"
+        generation = (
+            "graph_generation" if "graph_generation" in columns else "NULL AS graph_generation"
+        )
         sql = (
-            f"SELECT rel_path, {revision} FROM {table} "
+            f"SELECT rel_path, {revision}, {generation} FROM {table} "
         )
         params: list[Any] = []
         if paths is not None:
@@ -1272,13 +1356,15 @@ def _snapshot_plain(
             sql += " LIMIT ?"
             params.append(max(0, limit))
         receipts = [
-            DeferredReceipt(str(row[0]), int(row[1]))
+            DeferredReceipt(
+                str(row[0]), int(row[1]), None if row[2] is None else int(row[2])
+            )
             for row in conn.execute(sql, tuple(params)).fetchall()
         ]
     finally:
         conn.close()
     valid = [
-        DeferredReceipt(rel, receipt.revision)
+        DeferredReceipt(rel, receipt.revision, receipt.graph_generation)
         for receipt in receipts
         if (rel := _safe_markdown_rel_path(receipt.rel_path)) is not None
     ]

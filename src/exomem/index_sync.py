@@ -817,9 +817,30 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
                 }
                 if graph_rels:
                     if graph_receipt_rels is None:
+                        # Only receipts queued at or after the generation this
+                        # deferral reports. A row naming the same path from an
+                        # earlier generation is repair that is already owed for
+                        # older bytes; blessing this batch with it would let a
+                        # stale queue entry launder a fresh deferral, and the
+                        # path would sit with nothing scheduled for what just
+                        # changed. An unknown generation cannot clear that bar
+                        # either: a receipt that cannot say what it owes proves
+                        # nothing about this checkpoint.
+                        # With no checkpoint there is no lineage to be stale
+                        # against, and every receipt is equally uninformative;
+                        # the older, weaker claim -- "these paths are queued" --
+                        # is still true and still the honest answer.
+                        required_generation = (
+                            int(checkpoint.generation) if checkpoint is not None else None
+                        )
                         graph_receipt_rels = {
                             receipt.rel_path
                             for receipt in deferred_index.snapshot_graph(vault_root)
+                            if required_generation is None
+                            or (
+                                receipt.graph_generation is not None
+                                and receipt.graph_generation >= required_generation
+                            )
                         }
                     if graph_rels <= graph_receipt_rels:
                         _note_deferral("covered_deferral_accepted")

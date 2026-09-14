@@ -2015,7 +2015,16 @@ class EpistemicGraphIndex:
         paths = [self.vault_root / rel for rel in sorted(residue)]
         if not paths:
             return True
-        if not _record_graph_repair_demand(self.vault_root, paths):
+        # The generation the adopted sidecar already acknowledges. A residue
+        # repairs paths *at* that generation; it does not fill a skipped step,
+        # so it can never by itself bless a gap above it -- which is right, and
+        # is why recording it accurately matters more than recording something.
+        acknowledged = graph_sync.acknowledged_checkpoint(self.vault_root)
+        if not _record_graph_repair_demand(
+            self.vault_root,
+            paths,
+            generation=int(acknowledged.generation) if acknowledged is not None else None,
+        ):
             return False
         # Reads must keep refusing until that repair lands.
         self.withdraw_availability()
@@ -4152,7 +4161,17 @@ class EpistemicGraphIndex:
         worse than paying the pass.
         """
         try:
-            receipts = deferred_index.add_graph_receipts(self.vault_root, sorted(scope))
+            receipts = deferred_index.add_graph_receipts(
+                self.vault_root,
+                sorted(scope),
+                # The generation this repair is owed for, so a later predecessor
+                # probe can prove the gap this deferral opens is covered by
+                # durable work. A caller with no checkpoint leaves it unknown,
+                # which is honest: it rebuilds after release and claims nothing.
+                generation=(
+                    int(graph_checkpoint.generation) if graph_checkpoint is not None else None
+                ),
+            )
             queued_scope = {receipt.rel_path for receipt in receipts}
             if queued_scope != scope:
                 # The path queue admits only canonical Knowledge Base Markdown.
@@ -7609,7 +7628,9 @@ def schedule_background_rebuild(
     return True
 
 
-def _record_graph_repair_demand(vault_root: Path, paths: Iterable[Path]) -> bool:
+def _record_graph_repair_demand(
+    vault_root: Path, paths: Iterable[Path], *, generation: int | None = None
+) -> bool:
     """Put the affected paths on the durable graph queue, proving full coverage.
 
     The same claim `_refresh_paths_locked.defer` makes: only an enqueue that
@@ -7628,7 +7649,9 @@ def _record_graph_repair_demand(vault_root: Path, paths: Iterable[Path]) -> bool
     if not scope:
         return False
     try:
-        receipts = deferred_index.add_graph_receipts(vault_root, scope)
+        receipts = deferred_index.add_graph_receipts(
+            vault_root, scope, generation=generation
+        )
     except Exception:  # noqa: BLE001 - a queue failure must not lose the repair
         log.warning("graph repair demand enqueue failed", exc_info=True)
         return False

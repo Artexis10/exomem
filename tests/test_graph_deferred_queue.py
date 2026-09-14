@@ -598,3 +598,134 @@ def test_a_queue_predating_the_graph_table_reads_as_empty(vault: Path) -> None:
     assert deferred_index.snapshot_graph(vault) == []
     assert deferred_index.list_graph_paths(vault) == []
     assert deferred_index.graph_status(vault)["count"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Receipt lineage (task 1.13a)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_receipt_records_the_generation_it_was_queued_for(tmp_path: Path) -> None:
+    """Coverage of a lineage gap is a claim about a generation, not a path name."""
+    receipts = deferred_index.add_graph_receipts(
+        tmp_path, ["Knowledge Base/Notes/a.md"], generation=7
+    )
+    assert [receipt.graph_generation for receipt in receipts] == [7]
+    assert [
+        receipt.graph_generation for receipt in deferred_index.snapshot_graph(tmp_path)
+    ] == [7]
+    assert deferred_index.graph_receipt_generations(tmp_path) == (frozenset({7}), False)
+
+
+def test_a_caller_with_no_checkpoint_leaves_the_generation_unknown(tmp_path: Path) -> None:
+    """Unknown is honest, and never usable as coverage."""
+    deferred_index.add_graph_receipts(tmp_path, ["Knowledge Base/Notes/a.md"])
+    known, unknown = deferred_index.graph_receipt_generations(tmp_path)
+    assert known == frozenset()
+    assert unknown is True
+
+
+def test_a_requeue_moves_the_generation_forward_and_never_backward(tmp_path: Path) -> None:
+    """The row owes the newest repair; an unknown re-queue does not erase what it owes."""
+    rel = "Knowledge Base/Notes/a.md"
+    deferred_index.add_graph_receipts(tmp_path, [rel], generation=4)
+    deferred_index.add_graph_receipts(tmp_path, [rel], generation=9)
+    assert deferred_index.graph_receipt_generations(tmp_path) == (frozenset({9}), False)
+
+    deferred_index.add_graph_receipts(tmp_path, [rel], generation=2)
+    assert deferred_index.graph_receipt_generations(tmp_path) == (frozenset({9}), False), (
+        "a later enqueue at an older generation must not walk the claim backwards"
+    )
+
+    deferred_index.add_graph_receipts(tmp_path, [rel])
+    assert deferred_index.graph_receipt_generations(tmp_path) == (frozenset({9}), False), (
+        "an enqueue that does not know its generation must not erase one that did"
+    )
+
+
+def test_a_pre_upgrade_receipt_row_survives_the_migration_as_unknown(
+    tmp_path: Path,
+) -> None:
+    """An existing queue upgrades in place, and none of it blesses anything.
+
+    Written against the exact pre-upgrade DDL rather than by dropping the
+    column, because the migration's contract is about the schema a shipped
+    store actually has.
+    """
+    store = deferred_index.store_path(tmp_path)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    legacy = sqlite3.connect(store)
+    try:
+        with legacy:
+            legacy.execute(
+                "CREATE TABLE IF NOT EXISTS graph_upserts ("
+                "rel_path TEXT PRIMARY KEY, created_at REAL NOT NULL, "
+                "updated_at REAL NOT NULL, revision INTEGER NOT NULL DEFAULT 1)"
+            )
+            legacy.execute(
+                "INSERT INTO graph_upserts(rel_path, created_at, updated_at, revision) "
+                "VALUES ('Knowledge Base/Notes/legacy.md', 1.0, 1.0, 3)"
+            )
+    finally:
+        legacy.close()
+
+    receipts = deferred_index.snapshot_graph(tmp_path)
+
+    assert [receipt.rel_path for receipt in receipts] == ["Knowledge Base/Notes/legacy.md"]
+    assert receipts[0].revision == 3, "the migration must not lose queued work"
+    assert receipts[0].graph_generation is None
+    assert deferred_index.graph_receipt_generations(tmp_path) == (frozenset(), True)
+
+
+def test_a_stale_receipt_does_not_bless_a_fresh_batch(vault: Path, monkeypatch) -> None:
+    """The staleness hole: an older generation's row naming the same path.
+
+    Repair owed for bytes that have since been overwritten is not repair for
+    what just changed, and blessing this batch with it leaves the new content
+    with nothing scheduled at all.
+    """
+    root = vault
+    rel = PAGE_A
+    target = root / rel
+    # A canonical write is what mints a graph checkpoint, and the generation it
+    # mints is the one a deferral on this batch would report.
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(target, _page("A", "A claims against [[queue-b]]."))],
+        vault_root=root,
+    )
+
+    checkpoint = graph_sync.read_checkpoint(root)
+    assert checkpoint is not None, "this shape needs a canonical graph checkpoint"
+    required = int(checkpoint.generation)
+
+    report = index_sync.IndexSyncReport(
+        operation="upsert",
+        requested_paths=(rel,),
+        eligible_paths=(rel,),
+        components=(
+            index_sync.IndexComponentOutcome("memory_refs", "completed", "ok"),
+            index_sync.IndexComponentOutcome("resolver", "completed", "ok"),
+            index_sync.IndexComponentOutcome("semantic_purge", "completed", "ok"),
+            index_sync.IndexComponentOutcome("lexstore", "completed", "ok"),
+            index_sync.IndexComponentOutcome(
+                "epistemic_graph", "deferred", "graph_repair_queued"
+            ),
+            index_sync.IndexComponentOutcome("embeddings", "completed", "ok"),
+        ),
+    )
+    monkeypatch.setattr(
+        graph_sync, "registered_checkpoint", lambda *_a, **_kw: None, raising=True
+    )
+
+    deferred_index._clear(root, table="graph_upserts", rel_paths=[rel])
+    deferred_index.add_graph_receipts(root, [rel], generation=required - 1)
+    index_sync.reset_deferral_telemetry()
+    assert index_sync.full_upsert_succeeded(root, [target], report) is False, (
+        "a receipt from an earlier generation blessed a fresh deferral"
+    )
+    assert index_sync.deferral_telemetry()["uncovered_deferral_escalated"] == 1
+
+    deferred_index.add_graph_receipts(root, [rel], generation=required)
+    index_sync.reset_deferral_telemetry()
+    assert index_sync.full_upsert_succeeded(root, [target], report) is True
+    assert index_sync.deferral_telemetry()["covered_deferral_accepted"] == 1
