@@ -185,8 +185,11 @@ class ConsumerDelta(NamedTuple):
 
 # Bounded retained event history per live scope. Past this many batched events
 # a checkpoint that predates the retained window can no longer be bridged and
-# `delta_since` reports `complete=False` rather than a partial suffix. Kept
-# module-level and test-adjustable; the trim below re-reads it on every append.
+# `delta_since` reports `complete=False` rather than a partial suffix. It bounds
+# retained ENTRIES, not the paths inside them: one entry can name a whole batch,
+# so this caps how far back a checkpoint may be bridged, never how much a single
+# delta can return. Kept module-level and test-adjustable; the trim below
+# re-reads it on every append.
 DELTA_HISTORY_LIMIT = 256
 
 _lock = threading.RLock()
@@ -1027,6 +1030,18 @@ def external_pending_paths(vault_root: Path) -> frozenset[str]:
     """The path-scoped external marks still unrepaired for one vault."""
     with _lock:
         return frozenset(_external_pending_paths.get(_canon(vault_root), {}))
+
+
+def external_pending_unscoped(vault_root: Path) -> bool:
+    """Whether an unrepaired mark names no scope at all.
+
+    The watcher's fail-closed default when it cannot classify a fan-out
+    incompleteness. It is a statement that the affected set is *unknown*, which
+    is the one external-pending state a bounded queue cannot own: a write fenced
+    by it has no set of paths it could enqueue that would be the repair.
+    """
+    with _lock:
+        return _canon(vault_root) in _external_pending_unscoped
 
 
 def external_pending_for(vault_root: Path, paths: Iterable[Path | str]) -> bool:

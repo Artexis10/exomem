@@ -75,7 +75,9 @@ _DEFERRAL_TELEMETRY_LOCK = threading.Lock()
 #: paths, `graph_repair_unreadable_predecessor` only on the branch that
 #: proved the same thing for a fenced-but-intact sidecar, and
 #: `graph_repair_cold_resolver` only on the branch that queued the complete
-#: recall delta because no resident resolver could widen it. The disabled codes
+#: recall delta because no resident resolver could widen it, and
+#: `graph_repair_external_pending` only on the branch that queued this write's
+#: own paths because a path-scoped unattributed event covered them. The disabled codes
 #: record nothing and are deliberately absent, so a stale queue entry naming the
 #: same path can never bless them.
 _GRAPH_COVERAGE_CODES = frozenset(
@@ -83,6 +85,7 @@ _GRAPH_COVERAGE_CODES = frozenset(
         "graph_repair_queued",
         "graph_repair_unreadable_predecessor",
         "graph_repair_cold_resolver",
+        "graph_repair_external_pending",
     }
 )
 
@@ -1007,10 +1010,17 @@ def _drain_graph_work(
     receipts = deferred_index.snapshot_graph(
         vault_root, limit=limit, paths=requested
     )
+    index = epistemic_graph.EpistemicGraphIndex(vault_root)
     if pending_generation is None and not receipts:
+        # An empty queue is where a withdrawn marker gets stranded: the routes
+        # that withdraw pair it with queued repair, and the drain republishes
+        # while repairing, so the LAST withdrawal -- the one that lands after
+        # the final drain -- has nothing left to earn it back. Proved before
+        # publishing, and a no-op on one metadata read whenever the marker is
+        # already there, which is the ordinary case.
+        _republish_graph_availability(index)
         return 0
 
-    index = epistemic_graph.EpistemicGraphIndex(vault_root)
     if pending_generation is not None:
         result = epistemic_graph.converge_full_graph_marker(vault_root)
         if result.outcome != "completed":
@@ -1051,6 +1061,8 @@ def _drain_graph_work(
         processed += deferred_index.clear_graph_receipts(vault_root, done)
     stalled = [receipt for receipt in receipts if receipt.rel_path not in covered]
     if not stalled:
+        if not deferred_index.snapshot_graph(vault_root, limit=1):
+            _republish_graph_availability(index)
         return processed
 
     for receipt in stalled:
@@ -1067,7 +1079,19 @@ def _drain_graph_work(
         else:
             log.warning("deferred graph receipt incomplete; work remains queued")
             deferred_index.rotate_graph_receipts(vault_root, [receipt])
+    if not deferred_index.snapshot_graph(vault_root, limit=1):
+        # This tick cleared the last receipt, so the same stranding applies to
+        # whatever withdrew while it ran.
+        _republish_graph_availability(index)
     return processed
+
+
+def _republish_graph_availability(index) -> None:
+    """Let the graph become readable again when the queue owes it nothing."""
+    try:
+        index.republish_availability_if_current()
+    except Exception:  # noqa: BLE001 - a read gate must never fail the drain
+        log.warning("graph availability republication failed", exc_info=True)
 
 
 def drain_graph_work(vault_root: Path, *, limit: int | None = None) -> int:

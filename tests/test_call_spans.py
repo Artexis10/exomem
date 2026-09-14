@@ -295,3 +295,21 @@ def test_every_declared_span_name_is_recorded_somewhere_in_the_source() -> None:
         and f'"{name.removeprefix("index.")}"' not in body
     )
     assert not missing, f"documented span names nothing records: {missing}"
+
+
+def test_eviction_warns_once_per_window_rather_than_per_drop(caplog) -> None:
+    """Losing a live call's measurements is a warning; saying so 200 times is noise."""
+    caplog.set_level("WARNING", logger="exomem.call_spans")
+    for index in range(call_spans.MAX_CALLS + 30):
+        handle = call_spans.MCP_CALL_TOKEN.set(f"evict-{index}")
+        try:
+            call_spans.record_span("phase", 1.0)
+        finally:
+            call_spans.MCP_CALL_TOKEN.reset(handle)
+
+    lines = [
+        record for record in caplog.records if "call span eviction dropped" in record.getMessage()
+    ]
+    assert lines, "an eviction that reports nothing is indistinguishable from no instrumentation"
+    assert len(lines) == 1, f"one line per window, not per drop: {len(lines)}"
+    assert lines[0].levelname == "WARNING"

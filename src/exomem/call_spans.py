@@ -23,6 +23,7 @@ between them.
 from __future__ import annotations
 
 import functools
+import logging
 import threading
 import time
 from contextlib import contextmanager
@@ -34,6 +35,8 @@ from typing import Any
 MCP_CALL_TOKEN: ContextVar[str | None] = ContextVar(
     "exomem_mcp_call_token", default=None
 )
+
+log = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
 _SPANS: dict[str, dict[str, Any]] = {}
@@ -47,6 +50,49 @@ MAX_NAMES_PER_CALL = 64
 #: paths that never reach it, such as a direct test harness.
 MAX_CALLS = 256
 NAME_MAX_CHARS = 64
+
+
+#: Eviction is a *loss* of measurement, so it warns rather than informs -- but a
+#: process that is evicting is evicting often, and one line per drop would bury
+#: the condition it reports. One line per window, carrying the count since the
+#: last one, says the same thing without becoming the noise.
+EVICTION_LOG_INTERVAL_SECONDS = 60.0
+_evictions_since_log = 0
+_last_eviction_log = 0.0
+
+
+def _evict_oldest_locked() -> None:
+    """Drop the oldest tracked call to stay under `MAX_CALLS`.
+
+    Reported, because this is the one way a live call's measurements disappear
+    without anyone asking: everything else is a pop by the middleware or a TTL
+    expiry. A diagnosis reading an empty `spans` list would otherwise be unable
+    to tell "this call was not instrumented" from "this call was evicted".
+
+    Called under `_LOCK`, which is what makes the counters below safe.
+    """
+    global _evictions_since_log, _last_eviction_log
+
+    if not _SPANS:
+        return
+    token = min(_SPANS, key=lambda key: _SPANS[key]["at"])
+    dropped = _SPANS.pop(token, None)
+    if dropped is None:
+        return
+    _evictions_since_log += 1
+    now = time.monotonic()
+    if now - _last_eviction_log < EVICTION_LOG_INTERVAL_SECONDS:
+        return
+    log.warning(
+        "call span eviction dropped %d in-flight entr%s tracked=%d names=%d age_s=%.1f",
+        _evictions_since_log,
+        "y" if _evictions_since_log == 1 else "ies",
+        len(_SPANS) + 1,
+        len(dropped.get("names", {})),
+        now - float(dropped["at"]),
+    )
+    _last_eviction_log = now
+    _evictions_since_log = 0
 
 
 def _sweep_locked(now: float) -> None:
@@ -76,7 +122,7 @@ def record_span(name: str, elapsed_ms: float) -> None:
             entry = _SPANS.get(token)
             if entry is None:
                 if len(_SPANS) >= MAX_CALLS:
-                    _SPANS.pop(min(_SPANS, key=lambda key: _SPANS[key]["at"]), None)
+                    _evict_oldest_locked()
                 entry = {"at": now, "names": {}}
                 _SPANS[token] = entry
             names: dict[str, list[float]] = entry["names"]
@@ -151,7 +197,7 @@ def mark(name: str) -> None:
             entry = _SPANS.get(token)
             if entry is None:
                 if len(_SPANS) >= MAX_CALLS:
-                    _SPANS.pop(min(_SPANS, key=lambda key: _SPANS[key]["at"]), None)
+                    _evict_oldest_locked()
                 entry = {"at": now, "names": {}}
                 _SPANS[token] = entry
             marks: dict[str, float] = entry.setdefault("marks", {})
@@ -208,5 +254,9 @@ def pop_call_spans(token: str | None) -> list[dict[str, Any]]:
 
 def reset() -> None:
     """Drop all in-flight measurements. For tests that assert on isolation."""
+    global _evictions_since_log, _last_eviction_log
+
     with _LOCK:
         _SPANS.clear()
+        _evictions_since_log = 0
+        _last_eviction_log = 0.0
