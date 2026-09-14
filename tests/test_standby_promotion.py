@@ -579,7 +579,6 @@ def _promote_from_a_complete_standby_warm(monkeypatch, tmp_path: Path):
     service_standby.register_activation(_Activation())
     service_standby.prove_graph_snapshot(tmp_path)
     service_standby.build_semantic_corpus(tmp_path)
-    readiness.mark_ready("semantic_corpus")
     return service_standby.promote(tmp_path, migrated=False)
 
 
@@ -634,7 +633,6 @@ def test_a_snapshot_that_moved_under_the_standby_carries_no_graph_handoff(
     service_standby.register_activation(_Activation())
     service_standby.prove_graph_snapshot(tmp_path)
     service_standby.build_semantic_corpus(tmp_path)
-    readiness.mark_ready("semantic_corpus")
     record = service_standby.promote(tmp_path, migrated=False)
     assert record["snapshot"] == verdict
     carried = service_standby.carried_warm_components()
@@ -642,6 +640,46 @@ def test_a_snapshot_that_moved_under_the_standby_carries_no_graph_handoff(
     # The corpus is still carried: a moved checkpoint says nothing about a
     # process-local, stat-captioned corpus context.
     assert "semantic_corpus" in carried
+
+
+def test_a_failed_corpus_build_still_lets_the_upgrade_happen(monkeypatch, tmp_path) -> None:
+    """A control that cannot fix anything must not block everything.
+
+    A corpus build that RAN and failed settles the component. The promoted
+    worker pays the same failing build whether it cut over or cold started, so
+    holding the standby -- and with it every release -- for a defect the
+    standby cannot fix would cost more than it prevents. What it must NOT do is
+    claim the work: a failed build is not carried, so the promoted worker's own
+    warm runs it.
+    """
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    _stub_corpus(monkeypatch, ok=False)
+    service_standby.enter_standby()
+    readiness.mark_ready("lexical")
+    service_standby.register_activation(_Activation())
+    service_standby.prove_graph_snapshot(tmp_path)
+    assert service_standby.build_semantic_corpus(tmp_path) is False
+
+    assert service_standby.readiness_payload()["cutover_ready"] is True
+    service_standby.promote(tmp_path, migrated=False)
+    assert "semantic_corpus" not in service_standby.carried_warm_components()
+
+
+def test_a_standby_that_never_reached_the_corpus_is_still_discarded(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The other half: unattempted is not settled, so the budget still bites."""
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    service_standby.enter_standby()
+    readiness.mark_ready("lexical")
+    service_standby.prove_graph_snapshot(tmp_path)
+    assert service_standby.readiness_payload()["cutover_ready"] is False
+    assert service_standby.waiting_component() == "semantic_corpus"
 
 
 def test_an_unpromoted_process_carries_nothing(monkeypatch, tmp_path: Path) -> None:

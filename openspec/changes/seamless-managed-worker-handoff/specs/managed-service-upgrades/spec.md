@@ -69,3 +69,7 @@ A promoted worker SHALL NOT repeat warm-up work its own standby completed and pr
 #### Scenario: A cold start carries nothing
 - **WHEN** a worker starts without having been a standby
 - **THEN** it carries no components and runs every warm-up step
+
+#### Scenario: A warm step failed rather than not running
+- **WHEN** a standby's semantic corpus build runs and fails
+- **THEN** the component is reported settled so the upgrade is not held, and it is not carried forward, so the promoted worker runs that step itself

@@ -54,6 +54,8 @@ _proved_token: str | None = None
 _adoption: Any = None
 _activation: Any = None
 _corpus_built = False
+#: Whether the corpus build RAN, however it ended. See `cutover_components`.
+_corpus_attempted = False
 
 
 def standby_requested() -> bool:
@@ -100,16 +102,25 @@ def cutover_components() -> dict[str, str]:
 
     with _lock:
         snapshot_ready = _proved_token is not None
-        corpus_ready = _corpus_built
+        corpus_settled = _corpus_attempted
     components: dict[str, str] = {}
     for component in CUTOVER_COMPONENTS:
         if component == "graph_snapshot":
             components[component] = "ready" if snapshot_ready else "waiting"
         elif component == "semantic_corpus":
+            # Settled, not built -- the same distinction `warm_all` draws when
+            # it marks `graph_handoff` on every exit. A build that RAN and
+            # failed is as good as this standby will get, and the promoted
+            # worker pays the same failing build whether it cut over or cold
+            # started; holding every release for a defect the standby cannot
+            # fix would cost more than it prevents. A build that never ran
+            # still leaves the component waiting, so a stalled standby is
+            # still discarded when its budget expires.
+            #
             # Read from this module rather than `readiness`, which
             # `finish_warm` does not clear but `begin_warm` would: the
             # supervisor polls this after the standby warm has finished.
-            components[component] = "ready" if corpus_ready else "waiting"
+            components[component] = "ready" if corpus_settled else "waiting"
         elif component == "embeddings":
             if _preload_allowed():
                 components[component] = "ready" if readiness.is_ready("embeddings") else "waiting"
@@ -321,9 +332,11 @@ def build_semantic_corpus(vault_root: Path) -> bool:
     census, so the first use after promotion reparses only the changed parents.
     What the gate needs is that nobody pays the COLD build, and that survives.
     """
-    global _corpus_built
-    from . import semantic_contract
+    global _corpus_built, _corpus_attempted
+    from . import readiness, semantic_contract
 
+    with _lock:
+        _corpus_attempted = True
     try:
         semantic_contract.build_corpus_context(Path(vault_root))
     except Exception:  # noqa: BLE001 - an unbuilt corpus is a waiting component
@@ -331,6 +344,7 @@ def build_semantic_corpus(vault_root: Path) -> bool:
         return False
     with _lock:
         _corpus_built = True
+    readiness.mark_ready("semantic_corpus")
     return True
 
 
@@ -346,9 +360,12 @@ def carried_warm_components() -> frozenset[str]:
 def _carried_at_promotion(record: dict[str, Any]) -> frozenset[str]:
     """Name the warm this promotion inherits rather than repeats.
 
-    Read from `readiness`, which still holds the standby warm's marks at this
-    point: `promote()` computes this BEFORE `release()`, and `release()` is what
-    eventually reaches `readiness.begin_warm()` and clears them.
+    `lexical` and `embeddings` are read from `readiness`, which still holds the
+    standby warm's marks at this point: `promote()` computes this BEFORE
+    `release()`, and `release()` is what eventually reaches
+    `readiness.begin_warm()` and clears them. The corpus is read from this
+    module's own record instead, for the same reason `cutover_components` does:
+    one fact, one place to read it.
 
     `graph_snapshot` is carried only on a `current` verdict. That is the one
     where promotion re-proved that the checkpoint the standby adopted is still
@@ -362,9 +379,12 @@ def _carried_at_promotion(record: dict[str, Any]) -> frozenset[str]:
 
     carried = {
         component
-        for component in ("lexical", "semantic_corpus", "embeddings")
+        for component in ("lexical", "embeddings")
         if readiness.is_ready(component)
     }
+    with _lock:
+        if _corpus_built:
+            carried.add("semantic_corpus")
     if record.get("snapshot") == "current":
         carried.add("graph_handoff")
     return frozenset(carried)
@@ -422,10 +442,8 @@ def warm(vault_root: Path) -> None:
         prove_graph_snapshot(vault_root)
         # After the graph step, for the same reason `warm_all` puts the handoff
         # first: adoption is what the first governed write depends on, and the
-        # corpus is what the gate that admits it waits for. Marked here so the
-        # cutover readiness block reports it like every other component.
-        if build_semantic_corpus(vault_root):
-            readiness.mark_ready("semantic_corpus")
+        # corpus is what the gate that admits it waits for.
+        build_semantic_corpus(vault_root)
         _preload_models()
     except Exception:  # noqa: BLE001 - a standby warm must never die loudly
         log.warning("standby warm-up crashed", exc_info=True)
@@ -562,7 +580,7 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
 def reset_for_tests() -> None:
     """Clear process-local standby state; intentionally public for tests."""
     global _standby, _promoted, _proved_token, _adoption, _activation
-    global _carried, _corpus_built
+    global _carried, _corpus_built, _corpus_attempted
     with _lock:
         _standby = False
         _promoted = False
@@ -570,4 +588,5 @@ def reset_for_tests() -> None:
         _adoption = None
         _carried = frozenset()
         _corpus_built = False
+        _corpus_attempted = False
         _activation = None
