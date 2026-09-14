@@ -327,16 +327,17 @@ def _rebuild_reasons_this_write(root: Path, caplog: pytest.LogCaptureFixture) ->
 
     A rebuild is admitted here only as the best-effort enqueue the canonical
     batch is allowed to lose ("a lost enqueue costs a reconcile; a refused
-    write costs the user their edit"), never as an unconditional allowlist on
-    `graph_sync_predecessor_mismatch` -- which is the door task 1.13 closed and
-    would let a regression producing one mismatch rebuild in six pass. So when
-    the probe declines, read back the durable artifact it declined on and
-    require the generations it named to really have no receipts.
+    write costs the user their edit"). `graph_sync_predecessor_mismatch` IS
+    still admitted -- it is the only reason a lost enqueue can produce -- but
+    never unconditionally, which is the door task 1.13 closed and which an open
+    allowlist would reopen for a regression producing one mismatch rebuild in
+    six. So when the probe declines, read back the durable record it declined
+    on and require the generations it named to have no debt recorded.
 
     Read after the write rather than during it, which is sound because absence
     is monotone across that window: the generations named are strictly older
-    than this checkpoint, nothing enqueues under an older generation than the
-    one it is owed for, and a drain only removes rows.
+    than this checkpoint, and nothing records debt for a generation older than
+    the one it is owed for.
     """
     reasons = [
         message.split("reason=", 1)[1].split(" ", 1)[0]
@@ -356,13 +357,13 @@ def _rebuild_reasons_this_write(root: Path, caplog: pytest.LogCaptureFixture) ->
             if token
         ]
         assert missing, f"the probe declined but named no missing generation: {message}"
-        known, _unknown = deferred_index.graph_receipt_generations(
-            root, generations=missing
+        recorded, _available = deferred_index.graph_debt_generations_recorded(
+            root, missing
         )
-        assert not (set(missing) & known), (
-            f"generations {sorted(set(missing) & known)} are queued as durable "
-            "repair, so the gap was covered and the rebuild is the regression "
-            f"task 1.13 closed, not a lost best-effort enqueue: {message}"
+        assert not (set(missing) & recorded), (
+            f"generations {sorted(set(missing) & recorded)} have their debt "
+            "durably recorded, so the gap was covered and the rebuild is the "
+            f"regression task 1.13 closed, not a lost enqueue: {message}"
         )
     return reasons
 
@@ -861,8 +862,8 @@ def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
     # write costs the user their edit"), so under load one generation can go
     # unqueued and its gap is then genuinely uncovered. That rebuild is
     # correct -- and `_rebuild_reasons_this_write` has already proved it was
-    # that, by reading back the generations the probe named and requiring them
-    # to have no receipts, rather than allowlisting the reason.
+    # that: the reason is admitted, but only after reading back the generations
+    # the probe named and finding no durable debt recorded for them.
     assert sum(per_write_rebuilds) <= 1, (
         f"whole-vault rebuilds registered per write: {per_write_rebuilds} for "
         f"reasons {registered}, acknowledgements {rendered}"
@@ -972,9 +973,9 @@ def test_writes_faster_than_the_drain_stay_incremental_on_a_covered_gap(
     # enqueue is best-effort by construction, so one lost enqueue in six writes
     # leaves one gap genuinely uncovered and one correct rebuild -- observed at
     # about one isolated run in three. `_rebuild_reasons_this_write` has
-    # already read the durable queue back and required the generations the
-    # probe named to have no receipts, so a rebuild admitted here is a proven
-    # lost enqueue rather than the divergence 1.13 closed.
+    # already read the durable record back and required the generations the
+    # probe named to have no debt recorded, so a rebuild admitted here is a
+    # proven lost enqueue rather than the divergence 1.13 closed.
     assert sum(per_write_rebuilds) <= 1, (
         f"whole-vault rebuilds registered per write: {per_write_rebuilds} for "
         f"reasons {registered}, acknowledgements {rendered}"
@@ -988,6 +989,7 @@ def test_writes_faster_than_the_drain_stay_incremental_on_a_covered_gap(
         f"it is about: {[result.code for result in outcomes]}"
     )
     codes = [result.code for result in outcomes]
+    covered_gap_writes = codes.count("graph_repair_covered_gap")
     assert set(codes) <= {
         "graph_repair_covered_gap",
         "graph_repair_external_pending",
@@ -996,17 +998,22 @@ def test_writes_faster_than_the_drain_stay_incremental_on_a_covered_gap(
     }, f"a write reported something other than queued coverage: {codes}"
     _assert_incremental_latency(acknowledgements, bound=LIVE_ACK_BOUND_SECONDS)
     assert _drain_repair_queue(root, live_watcher) == 0, "the graph repair queue never drained"
-    # The graph stays fenced here, and owes nothing else: six unattributed
-    # edits went unrepaired because nothing drained between the writes, and
-    # D1/D3 is that reads refuse while any external path is unrepaired. The
-    # republication proof defers to the watcher for exactly that reason rather
-    # than spending the corpus to reach a refusal it can already name. What
-    # this shape is about is the write path, and the marker's own recovery is
-    # pinned by `test_a_withdrawn_marker_is_republished_when_the_queue_drains_to_zero`
-    # and by the drain-between-writes test above, both of which settle first.
-    assert freshness.external_pending_paths(root), (
-        "no unattributed edit was left outstanding, so this is not the rate "
-        "shape it claims to be"
+    # The premise -- that the writes outran repair -- is asserted above, from
+    # this test's own evidence: nothing drains between the writes, and the
+    # covered-gap line only appears when a write dispatched with the
+    # acknowledgement genuinely behind its checkpoint. That is the rate shape,
+    # stated directly.
+    #
+    # It used to be asserted here instead, as "an unattributed edit is still
+    # outstanding at the end". That measured the WATCHER's catch-up, not this
+    # test's rate: the watcher is an independent actor, and under load it
+    # legitimately finishes retiring every mark before the loop ends -- which
+    # failed the run about two times in ten while the write path it is about
+    # behaved perfectly. A premise check that a third party can satisfy or
+    # break on timing is not a premise check.
+    assert covered_gap_writes >= 1, (
+        "no write took the covered-gap door, so this shape never reached the "
+        f"mechanism it is about: {[result.code for result in outcomes]}"
     )
 
 
@@ -1027,6 +1034,76 @@ def test_a_stale_receipt_does_not_bless_a_real_divergence(handoff_vault: Path) -
             root, [f"{GENERATED}/generated-note-{generation:04d}.md"], generation=generation
         )
     assert index._lineage_gap_is_receipt_covered(4, 8) is True
+
+
+def test_a_requeue_of_the_same_path_does_not_erase_an_older_generation(
+    handoff_vault: Path,
+) -> None:
+    """The defect that made the covered-gap proof depend on timing.
+
+    `graph_upserts` is keyed by rel_path and carries ONE generation column, and
+    a re-queue of the same path moves it forward (`max(new, old)`) -- correct
+    for a queue, because the row does still owe the newer repair, and fatal for
+    a ledger. Measured under load on the six-write batch-ingest shape: the
+    receipts held generations `{2, 3, 4, 5}` before a write and `{6}` after it,
+    because the running watcher re-queued those same paths at its own
+    checkpoint. The next write's predecessor probe then read a proven
+    divergence over generations whose repair was fully queued, and bought a
+    whole-vault rebuild -- about two writes in six, only under contention,
+    which is the exact batch-ingest condition task 1.13 exists for.
+
+    The proof now lives in its own append-only per-generation record, written
+    in the same durable step as the receipts. Nothing overwrites it.
+    """
+    root = handoff_vault
+    index = EpistemicGraphIndex(root)
+    deferred_index.clear_graph(root)
+    page = f"{GENERATED}/generated-note-0001.md"
+
+    for generation in (2, 3, 4):
+        deferred_index.add_graph_receipts(root, [page], generation=generation)
+
+    assert index._lineage_gap_is_receipt_covered(1, 5) is True, (
+        "the debt for generations 2, 3 and 4 was recorded, so the gap is covered"
+    )
+
+    # What the watcher does between two governed writes: the same path, queued
+    # again under a newer checkpoint. The receipts collapse onto it by design.
+    deferred_index.add_graph_receipts(root, [page], generation=9)
+    receipt_generations, _unknown = deferred_index.graph_receipt_generations(root)
+    assert receipt_generations == frozenset({9}), (
+        "the premise is that the receipts themselves keep only the newest "
+        f"generation per path: {sorted(receipt_generations)}"
+    )
+
+    assert index._lineage_gap_is_receipt_covered(1, 5) is True, (
+        "a re-queue of the same path erased the evidence that generations 2, 3 "
+        "and 4 were ever recorded, so a gap whose repair is queued reads as a "
+        "proven divergence and buys a whole-vault rebuild"
+    )
+    assert index._lineage_gap_is_receipt_covered(1, 7) is False, (
+        "generations 5 and 6 were never recorded, and nothing about a re-queue "
+        "at 9 says otherwise"
+    )
+
+
+def test_clearing_the_whole_graph_queue_drops_the_debt_record_with_it(
+    handoff_vault: Path,
+) -> None:
+    """A proof that outlived the queue it describes would bless an empty vault."""
+    root = handoff_vault
+    index = EpistemicGraphIndex(root)
+    deferred_index.clear_graph(root)
+    deferred_index.add_graph_receipts(
+        root, [f"{GENERATED}/generated-note-0002.md"], generation=3
+    )
+    assert index._lineage_gap_is_receipt_covered(2, 4) is True
+
+    deferred_index.clear_graph(root)
+
+    assert index._lineage_gap_is_receipt_covered(2, 4) is False, (
+        "the whole queue was discarded, so nothing is converging generation 3"
+    )
 
 
 def test_an_unknown_generation_receipt_does_not_bless_a_gap(handoff_vault: Path) -> None:
