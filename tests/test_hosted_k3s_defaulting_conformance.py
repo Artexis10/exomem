@@ -24,16 +24,21 @@ from pathlib import Path
 
 import pytest
 
-from exomem_provisioner.adapters import KubernetesVaultFingerprintAdapter
-from exomem_provisioner.governance_migration_job import (
+# Core CI shards run the runtime distribution without the separately packaged
+# provisioner. Skip the whole module rather than failing collection.
+pytest.importorskip("exomem_provisioner", reason="requires the provisioner package")
+kubernetes = pytest.importorskip("kubernetes", reason="requires the provisioner Kubernetes SDK")
+
+from exomem_provisioner.adapters import KubernetesVaultFingerprintAdapter  # noqa: E402
+from exomem_provisioner.governance_migration_job import (  # noqa: E402
     MigrationJobRequest,
     build_governance_migration_job,
 )
-from exomem_provisioner.governance_storage_init import KubernetesGovernanceStorageInitAdapter
-from exomem_provisioner.job_execution import JOB_SPEC_SERVER_DEFAULTS
-from exomem_provisioner.lifecycle import OpaqueProviderMetadata
-
-kubernetes = pytest.importorskip("kubernetes")
+from exomem_provisioner.governance_storage_init import (  # noqa: E402
+    KubernetesGovernanceStorageInitAdapter,
+)
+from exomem_provisioner.job_execution import JOB_SPEC_SERVER_DEFAULTS  # noqa: E402
+from exomem_provisioner.lifecycle import OpaqueProviderMetadata  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
 from test_hosted_k3s_admission import k3s as k3s  # noqa: E402,F401 - reuse the exact harness
