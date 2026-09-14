@@ -676,6 +676,13 @@ DERIVED_PHASES: frozenset[str] = frozenset(
         # to infer it by subtracting other spans would be approximating the one
         # measurement that must not be approximate.
         "derived.post_canonical",
+        # The two halves of `derived.canonical_to_committed` (task 1.15), and
+        # the durable-defer arm of the semantic dispatch. Constants like every
+        # name above, so the vocabulary stays closed and a phase name still
+        # cannot carry a path.
+        "derived.fanout",
+        "derived.terminal_persist",
+        "derived.deferred_index_store",
     }
 )
 

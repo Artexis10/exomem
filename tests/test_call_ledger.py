@@ -601,9 +601,12 @@ def test_derived_phase_vocabulary_is_closed_and_content_free() -> None:
         "derived.component_completion",
         "derived.component_dispatch",
         "derived.pending_visibility",
+        "derived.deferred_index_store",
+        "derived.fanout",
         "derived.post_canonical",
         "derived.receipt_prepare",
         "derived.receipt_proof",
+        "derived.terminal_persist",
     }
     for name in names:
         assert name.startswith("derived.")
